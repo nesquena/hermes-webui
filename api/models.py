@@ -42,7 +42,7 @@ from api.agent_sessions import (
     read_importable_agent_session_rows,
     read_session_lineage_metadata,
 )
-from api.process_event_utils import stamp_message_source
+from api.process_event_utils import build_active_turn_token, stamp_message_source
 
 logger = logging.getLogger(__name__)
 CLI_VISIBLE_SESSION_LIMIT = 20
@@ -910,6 +910,18 @@ def _append_recovered_pending_turn(session, *, timestamp: int | None = None) -> 
     pending_text = str(session.pending_user_message or '')
     if not pending_text:
         return None
+    active_turn_token = build_active_turn_token(
+        getattr(session, 'active_stream_id', None),
+        getattr(session, 'pending_started_at', None),
+    )
+    if active_turn_token:
+        for message in getattr(session, 'messages', None) or []:
+            if (
+                isinstance(message, dict)
+                and message.get('role') == 'user'
+                and message.get('_active_turn_token') == active_turn_token
+            ):
+                return message
     recovered_ts = int(time.time())
     if isinstance(timestamp, (int, float)) and timestamp > 0:
         recovered_ts = int(timestamp)
@@ -923,6 +935,12 @@ def _append_recovered_pending_turn(session, *, timestamp: int | None = None) -> 
     stamp_message_source(recovered, pending_source)
     if session.pending_attachments:
         recovered['attachments'] = list(session.pending_attachments)
+    from api.streaming import _assign_stable_message_ids
+    _assign_stable_message_ids(
+        [recovered],
+        getattr(session, "messages", None),
+        getattr(session, "context_messages", None),
+    )
     session.messages.append(recovered)
     _append_recovered_turn_to_context(session, recovered)
     # The new user turn is now committed to messages (#3831): advance the
@@ -3379,7 +3397,17 @@ def _apply_core_sync_or_error_marker(
         _recovered_ts = int(time.time())
         if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
             _recovered_ts = int(session.pending_started_at)
-        _already_checkpointed = _message_matches_pending_checkpoint(
+        _active_turn_token = build_active_turn_token(
+            _stream_id,
+            session.pending_started_at,
+        )
+        _token_checkpointed = bool(_active_turn_token) and any(
+            isinstance(message, dict)
+            and message.get('role') == 'user'
+            and message.get('_active_turn_token') == _active_turn_token
+            for message in session.messages
+        )
+        _already_checkpointed = _token_checkpointed or _message_matches_pending_checkpoint(
             session.messages[-1],
             session.pending_user_message,
             _recovered_ts,

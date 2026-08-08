@@ -1,11 +1,15 @@
 from collections import OrderedDict
 import base64
+import copy
 from email.message import Message
+from io import BytesIO
 import json
 from pathlib import Path
 import re
 import time
 import urllib.error
+
+import pytest
 
 import api.gateway_chat as gateway_chat
 import api.models as models
@@ -587,6 +591,133 @@ def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp
     assert payload_messages[-2]["content"] == "partial"
     assert payload_messages[-1]["_error"] is True
     assert "_turnDuration" not in payload_messages[-1]
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    ["success", "empty", "http", "runs-api", "stream-error", "outer-exception"],
+)
+def test_gateway_regeneration_reuses_retained_row_for_every_terminal_outcome(
+    outcome, tmp_path, monkeypatch
+):
+    from unittest.mock import MagicMock
+
+    import api.routes as routes
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr(
+        streaming,
+        "_load_webui_prefill_context",
+        lambda cfg: {
+            "status": "not_configured",
+            "source": "none",
+            "label": "",
+            "message_count": 0,
+            "messages": [],
+        },
+    )
+    monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: [])
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            if outcome == "success":
+                yield b'data: {"choices":[{"delta":{"content":"replacement"}}]}\n\n'
+            elif outcome == "stream-error":
+                yield b'data: {"error":"stream terminal failure"}\n\n'
+            yield b"data: [DONE]\n\n"
+
+    def fake_urlopen(req, timeout=0):
+        if outcome == "http":
+            raise urllib.error.HTTPError(
+                req.full_url,
+                502,
+                "Bad Gateway",
+                hdrs=Message(),
+                fp=BytesIO(b'{"error":"gateway unavailable"}'),
+            )
+        if outcome == "outer-exception":
+            raise RuntimeError("outer gateway failure")
+        return FakeResponse()
+
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(gateway_chat, "_gateway_use_runs_api_enabled", lambda *args, **kwargs: outcome == "runs-api")
+    monkeypatch.setattr(gateway_chat, "gateway_supports_approval", lambda *args, **kwargs: outcome == "runs-api")
+    if outcome == "runs-api":
+        monkeypatch.setattr(
+            gateway_chat,
+            "_run_gateway_runs_api_streaming",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("runs failure")),
+        )
+
+    session = new_session()
+    retained = {
+        "id": "gateway-retained-user",
+        "role": "user",
+        "content": "same prompt",
+        "timestamp": 123.625,
+        "attachments": [{"name": "shot.png", "mime": "image/png"}],
+        "_source": "webui",
+        "display_meta": {"lane": "gateway"},
+    }
+    session.messages = [copy.deepcopy(retained)]
+    session.context_messages = [copy.deepcopy(retained)]
+    session.save()
+    stream_id = f"gateway-regen-{outcome}"
+    routes._prepare_chat_start_session_for_stream(
+        session,
+        msg="browser text is not identity",
+        attachments=[],
+        workspace=str(tmp_path),
+        model="test-model",
+        model_provider=None,
+        stream_id=stream_id,
+        started_at=456.875,
+        regenerate_target={
+            "session_id": session.session_id,
+            "message_id": retained["id"],
+            "timestamp": retained["timestamp"],
+            "display_index": 0,
+            "display_keep_count": 1,
+        },
+    )
+    events = []
+    channel = MagicMock()
+    channel.put_nowait = lambda item: events.append(item)
+    STREAMS[stream_id] = channel
+
+    gateway_chat._run_gateway_chat_streaming(
+        session.session_id,
+        "same prompt",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        retained["attachments"],
+    )
+
+    saved = models.get_session(session.session_id)
+    users = [message for message in saved.messages if message.get("role") == "user"]
+    assert len(users) == 1
+    for key, value in retained.items():
+        assert users[0][key] == value
+    assistants = [message for message in saved.messages if message.get("role") == "assistant"]
+    assert len(assistants) == 1
+    assert bool(assistants[0].get("_error")) is (outcome != "success")
+    assert saved.active_stream_id is None
+    terminal_events = [item for item in events if item[0] in {"done", "apperror"}]
+    assert terminal_events
+    public_messages = terminal_events[-1][1]["session"]["messages"]
+    assert all("_active_turn_token" not in message for message in public_messages)
 
 
 def test_gateway_chat_worker_persists_reasoning_and_tool_state_on_terminal_error(tmp_path, monkeypatch):

@@ -18687,26 +18687,60 @@ async function regenerateResponse(btn) {
   const assistantIdx = parseInt(row.dataset.msgIdx, 10);
   const absoluteKeepCount = _oldestIdx + assistantIdx;
   const initialSid = S.session.session_id;
-  let lastUserText = '';
+  let selectedUserDisplayIdx = -1;
   for(let i = assistantIdx - 1; i >= 0; i--) {
     const m = S.messages[i];
-    if(m && m.role === 'user') { lastUserText = msgContent(m); break; }
+    if(m && m.role === 'user') {
+      selectedUserDisplayIdx = _oldestIdx + i;
+      break;
+    }
   }
-  if(!lastUserText) return;
+  if(selectedUserDisplayIdx < 0) return;
   if(typeof _ensureAllMessagesLoaded==='function'){
     await _ensureAllMessagesLoaded();
   }
   if(!S.session || S.session.session_id !== initialSid) return;
+  const selectedUser = S.messages[selectedUserDisplayIdx];
+  const selectedMessageId = selectedUser && (selectedUser.id ?? selectedUser.message_id);
+  const selectedTimestamp = selectedUser && selectedUser.timestamp;
+  if(!selectedUser
+     || selectedUser.role !== 'user'
+     || selectedMessageId === undefined
+     || selectedMessageId === null
+     || selectedMessageId === ''
+     || typeof selectedTimestamp !== 'number') {
+    setStatus(t('regen_stale_target'));
+    return;
+  }
+  const lastUserText = msgContent(selectedUser);
+  if(!lastUserText) return;
+  const regenerateTarget = {
+    session_id: initialSid,
+    message_id: selectedMessageId,
+    timestamp: selectedTimestamp,
+    display_index: selectedUserDisplayIdx,
+    display_keep_count: absoluteKeepCount
+  };
   try {
     await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
       session_id: initialSid,
-      keep_count: absoluteKeepCount
+      keep_count: absoluteKeepCount,
+      keep_count_space: 'display',
+      regenerate_target: regenerateTarget
     })});
+    // Revalidate: api() is an async boundary.
+    if(!S.session || S.session.session_id !== initialSid) return;
     S.messages = S.messages.slice(0, absoluteKeepCount);
     renderMessages();
     $('msg').value = lastUserText;
-    await send();
-  } catch(e) { setStatus(t('regen_failed') + e.message); }
+    await send({regenerateTarget});
+  } catch(e) {
+    let code='';
+    try{code=JSON.parse(e&&e.body||'{}').code||'';}catch(_){ }
+    if(code==='parent_only_target') setStatus(t('regen_parent_only_target'));
+    else if(code==='stale_regeneration_target') setStatus(t('regen_stale_target'));
+    else setStatus(t('regen_failed') + e.message);
+  }
 }
 
 // postProcessRenderedMessages() runs one frame AFTER the render + JS scroll

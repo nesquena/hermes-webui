@@ -1323,6 +1323,7 @@ async function send(){
   try{
   const options=arguments[0]||{};
   const literalSlash=!!(options&&options.literalSlash);
+  const _regenTarget = options.regenerateTarget || null;
   let text=$('msg').value.trim();
   if(!text&&!S.pendingFiles.length&&!_pendingSelections.length){_sendInProgress=false;_sendInProgressSid=null;return;}
   // Don't send while an inline message edit is active
@@ -1599,6 +1600,7 @@ async function send(){
   let uploaded=[];
   try{uploaded=await uploadPendingFiles({files:_submittedFiles, sessionId:activeSid, clearPending:false});}
   catch(e){if(!text){setComposerStatus(`Upload error: ${e.message}`);return;}}
+  if(_regenTarget&&(!S.session||S.session.session_id!==activeSid)) return;
   // Clear the uploading status now that upload is done — if we don't clear here
   // it stays visible for the entire duration of the agent stream, since
   // setComposerStatus('') is only called in setBusy(false), not setBusy(true).
@@ -1629,21 +1631,57 @@ async function send(){
           : '';
         msgText=`${_directive}${_forcedSkillBlock?`\n\n${_forcedSkillBlock}`:''}\n\n${msgText||''}`.trim();
       }
+      if(_regenTarget&&(!S.session||S.session.session_id!==activeSid)) return;
     }
   }
   if(!msgText){setComposerStatus('Nothing to send');return;}
+  if(_regenTarget&&(!S.session||S.session.session_id!==activeSid)) return;
   // Composer textarea + persisted draft were already captured and cleared
   // immediately after capture (above, salvage of #4750 + #5912 gate fix) to close
   // the re-entrant double-send race AND avoid clobbering a draft typed during the
   // upload window. _composerDraftClearPromise / _submittedDraftFilesForClear are
   // set there; nothing to re-declare here.
   const displayText=_slashDisplayTextOverride||text||(uploaded.length?`Uploaded: ${uploadedNames.join(', ')}`:'(file upload)');
-  const userMsg={role:'user',content:displayText,attachments:uploaded.length?uploadedNames:undefined,_ts:Date.now()/1000,_pending:true};
+  let userMsg={role:'user',content:displayText,attachments:uploaded.length?uploadedNames:undefined,_ts:Date.now()/1000,_pending:true};
   S.toolCalls=[];  // clear tool calls from previous turn
   clearLiveToolCards();  // clear any leftover live cards from last turn
   let optimisticMessages;
   try{
-    S.messages.push(userMsg);renderMessages();setBusy(true);
+    // #6611: reuse the captured user row at absoluteIdx instead of appending a second one.
+    const _localRegenIdx = _regenTarget
+      && typeof _regenTarget.display_index === 'number'
+      && S.session
+      && S.session.session_id === _regenTarget.session_id
+      ? _regenTarget.display_index - (typeof _oldestIdx !== 'undefined' ? _oldestIdx : 0)
+      : -1;
+    if(_localRegenIdx >= 0
+       && _localRegenIdx < S.messages.length
+       && S.messages[_localRegenIdx]
+       && S.messages[_localRegenIdx].role === 'user') {
+      const _prior = S.messages[_localRegenIdx];
+      const _priorId=_prior.id??_prior.message_id;
+      if(String(_priorId)!==String(_regenTarget.message_id)
+         || _prior.timestamp!==_regenTarget.timestamp) {
+        _sendInProgress = false; _sendInProgressSid = null;
+        setStatus(t('regen_stale_target'));
+        return;
+      }
+      userMsg = Object.assign({}, _prior, {_pending: true});
+      S.messages[_localRegenIdx] = userMsg;
+      // Force new array reference so _visWithIdxCache (identity-keyed) invalidates
+      // even though length is unchanged on in-place reuse (#6611).
+      S.messages = S.messages.slice();
+    } else if(_regenTarget) {
+      // Non-null identity did not resolve (session mismatch, out-of-range, or
+      // non-user row at the captured index): fail closed — do not append into the
+      // wrong session (#6611).
+      _sendInProgress = false; _sendInProgressSid = null;
+      setStatus(t('regen_stale_target'));
+      return;
+    } else {
+      S.messages.push(userMsg);
+    }
+    renderMessages();setBusy(true);
     if(S.session&&!S.session.pending_started_at) S.session.pending_started_at=Date.now()/1000;
     if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
     else appendThinking('',{pending:true});
@@ -1755,12 +1793,29 @@ async function send(){
       profile:S.activeProfile||S.session.profile||'default',
       explicit_model_pick:_explicitPick||undefined,
       attachments:uploaded.length?uploaded:undefined,
-      moa_config:_pendingMoaConfig?true:undefined
+      moa_config:_pendingMoaConfig?true:undefined,
+      regenerate_target:_regenTarget||undefined
     })});
+    if(_regenTarget&&(!S.session||S.session.session_id!==activeSid)) return;
     _pendingMoaConfig=null;
     postStartData = startData;
   }catch(e){
     const errMsg=String((e&&e.message)||'');
+    let errorCode='';
+    try{errorCode=JSON.parse(e&&e.body||'{}').code||'';}catch(_){ }
+    if(_regenTarget&&(errorCode==='stale_regeneration_target'||errorCode==='parent_only_target')){
+      delete INFLIGHT[activeSid];
+      if(typeof clearInflightState==='function') clearInflightState(activeSid);
+      stopApprovalPolling();stopClarifyPolling();
+      if(S.session&&S.session.session_id===activeSid){
+        const idx=_regenTarget.display_index-(typeof _oldestIdx!=='undefined'?_oldestIdx:0);
+        if(idx>=0&&idx<S.messages.length&&S.messages[idx]) delete S.messages[idx]._pending;
+        removeThinking();renderMessages();setBusy(false);setComposerStatus('');
+        setStatus(t(errorCode==='parent_only_target'?'regen_parent_only_target':'regen_stale_target'));
+      }
+      if(typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
+      return;
+    }
     // If /api/chat/start returns 404, the session was deleted server-side
     // (its sidecar is gone) while GET kept returning a CLI stub (#2782). Strip
     // the stale /session/<id> URL and clear localStorage so a reload does not

@@ -9047,6 +9047,217 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
     return sidecar_messages
 
 
+def _regeneration_display_messages(session) -> list:
+    """Build the same full display coordinate space served by GET /api/session."""
+    cli_meta = (
+        _lookup_cli_session_metadata(session.session_id)
+        if _session_requires_cli_metadata_lookup(session)
+        else {}
+    )
+    is_messaging_session = (
+        _is_messaging_session_record(session)
+        or _is_messaging_session_record(cli_meta)
+    )
+    if is_messaging_session:
+        return _merged_session_messages_for_display(
+            session,
+            get_cli_session_messages(session.session_id),
+        )
+    state_db_messages = get_state_db_session_messages(
+        session.session_id,
+        profile=getattr(session, "profile", None),
+        limit=_state_db_backstop_limit_for_display(session, None),
+    )
+    display_messages = merge_session_messages_append_only(
+        _webui_sidecar_lineage_messages_for_display(session),
+        state_db_messages,
+        truncation_watermark=getattr(session, "truncation_watermark", None),
+        truncation_boundary=getattr(session, "truncation_boundary", None),
+    )
+    return _merged_webui_lineage_messages_for_display(session, display_messages)
+
+
+class _RegenerationTargetConflict(ValueError):
+    """A browser regeneration claim no longer names the retained server row."""
+
+    def __init__(self, message: str, code: str = "stale_regeneration_target"):
+        super().__init__(message)
+        self.code = code
+
+
+def _display_keep_count_to_session_keep(
+    session,
+    display_keep_count: int,
+    regenerate_target=None,
+) -> int:
+    """Translate the GET /api/session display prefix into child-local storage."""
+    display_messages = _regeneration_display_messages(session)
+    if display_keep_count > len(display_messages):
+        raise _RegenerationTargetConflict(
+            "Regeneration target is no longer available in this session."
+        )
+    if regenerate_target is not None:
+        if not isinstance(regenerate_target, dict):
+            raise _RegenerationTargetConflict("Malformed regeneration target.")
+        if set(regenerate_target) != {
+            "session_id",
+            "message_id",
+            "timestamp",
+            "display_index",
+            "display_keep_count",
+        }:
+            raise _RegenerationTargetConflict("Malformed regeneration target.")
+        try:
+            target_index = int(regenerate_target.get("display_index"))
+            target_keep = int(regenerate_target.get("display_keep_count"))
+        except (TypeError, ValueError):
+            raise _RegenerationTargetConflict("Malformed regeneration target.") from None
+        if target_keep != display_keep_count or target_index < 0 or target_index >= display_keep_count:
+            raise _RegenerationTargetConflict("Malformed regeneration target.")
+        target_row = display_messages[target_index]
+        target_id = regenerate_target.get("message_id")
+        if (
+            str(regenerate_target.get("session_id") or "") != str(session.session_id)
+            or not isinstance(target_row, dict)
+            or target_row.get("role") != "user"
+            or str(target_row.get("id") or target_row.get("message_id") or "") != str(target_id)
+            or target_row.get("timestamp") != regenerate_target.get("timestamp")
+        ):
+            raise _RegenerationTargetConflict(
+                "Regeneration target is stale or no longer visible."
+            )
+        target_key = _session_message_merge_key(target_row)
+        if not any(
+            _session_message_merge_key(message) == target_key
+            for message in list(getattr(session, "messages", None) or [])
+        ):
+            raise _RegenerationTargetConflict(
+                "The selected turn belongs to an archived parent session.",
+                code="parent_only_target",
+            )
+
+    remaining = defaultdict(int)
+    for message in display_messages[:display_keep_count]:
+        remaining[_session_message_merge_key(message)] += 1
+
+    retained_child_indices = []
+    for idx, message in enumerate(list(getattr(session, "messages", None) or [])):
+        key = _session_message_merge_key(message)
+        if remaining[key] <= 0:
+            continue
+        remaining[key] -= 1
+        retained_child_indices.append(idx)
+
+    if not retained_child_indices:
+        raise _RegenerationTargetConflict(
+            "The selected turn belongs to an archived parent session.",
+            code="parent_only_target",
+        )
+    session_keep = retained_child_indices[-1] + 1
+    if retained_child_indices != list(range(session_keep)):
+        raise _RegenerationTargetConflict(
+            "Regeneration target could not be mapped to this session."
+        )
+    return session_keep
+
+
+def _public_session_messages(messages) -> list:
+    """Return response-layer rows without server-only active-turn ownership."""
+    public = []
+    for message in list(messages or []):
+        if not isinstance(message, dict):
+            public.append(message)
+            continue
+        if "_active_turn_token" not in message:
+            public.append(message)
+        else:
+            row = dict(message)
+            row.pop("_active_turn_token", None)
+            public.append(row)
+    return public
+
+
+def _regeneration_target_row(session, target) -> dict:
+    """Validate a retained user-row claim against current child and display state."""
+    if not isinstance(target, dict):
+        raise _RegenerationTargetConflict("Malformed regeneration target.")
+    required = {
+        "session_id",
+        "message_id",
+        "timestamp",
+        "display_index",
+        "display_keep_count",
+    }
+    if set(target) != required:
+        raise _RegenerationTargetConflict("Malformed regeneration target.")
+    if str(target.get("session_id") or "") != str(session.session_id):
+        raise _RegenerationTargetConflict(
+            "Regeneration target belongs to a different session."
+        )
+    message_id = target.get("message_id")
+    timestamp = target.get("timestamp")
+    if isinstance(message_id, bool) or message_id in (None, ""):
+        raise _RegenerationTargetConflict("Malformed regeneration target.")
+    if isinstance(timestamp, bool) or not isinstance(timestamp, (int, float)):
+        raise _RegenerationTargetConflict("Malformed regeneration target.")
+    try:
+        display_index = int(target.get("display_index"))
+        display_keep_count = int(target.get("display_keep_count"))
+    except (TypeError, ValueError):
+        raise _RegenerationTargetConflict("Malformed regeneration target.") from None
+    if display_index < 0 or display_keep_count <= display_index:
+        raise _RegenerationTargetConflict("Malformed regeneration target.")
+
+    matches = [
+        message
+        for message in list(getattr(session, "messages", None) or [])
+        if isinstance(message, dict)
+        and message.get("role") == "user"
+        and str(message.get("id") or message.get("message_id") or "") == str(message_id)
+        and message.get("timestamp") == timestamp
+    ]
+    if len(matches) != 1:
+        raise _RegenerationTargetConflict(
+            "Regeneration target is stale or no longer belongs to this session."
+        )
+    retained = matches[0]
+
+    display = _regeneration_display_messages(session)
+    if len(display) != display_keep_count or display_index >= len(display):
+        raise _RegenerationTargetConflict(
+            "Session changed while regeneration was being prepared."
+        )
+    displayed = display[display_index]
+    if (
+        not isinstance(displayed, dict)
+        or displayed.get("role") != "user"
+        or str(displayed.get("id") or displayed.get("message_id") or "") != str(message_id)
+        or displayed.get("timestamp") != timestamp
+    ):
+        raise _RegenerationTargetConflict(
+            "Regeneration target is stale or no longer visible."
+        )
+    return retained
+
+
+def _bind_regeneration_target(session, target, active_turn_token: str) -> dict:
+    """Bind the validated retained row to the server-minted active-turn token."""
+    retained = _regeneration_target_row(session, target)
+    retained["_active_turn_token"] = active_turn_token
+    retained_id = str(retained.get("id") or retained.get("message_id") or "")
+    retained_timestamp = retained.get("timestamp")
+    for message in list(getattr(session, "context_messages", None) or []):
+        if (
+            isinstance(message, dict)
+            and message.get("role") == "user"
+            and str(message.get("id") or message.get("message_id") or "") == retained_id
+            and message.get("timestamp") == retained_timestamp
+        ):
+            message["_active_turn_token"] = active_turn_token
+            break
+    return retained
+
+
 
 def _merged_webui_lineage_messages_for_display(session, messages=None) -> list:
     """Include immediate parent-only rows when a WebUI continuation sidecar is partial.
@@ -9798,6 +10009,7 @@ from api.streaming import (
     _run_agent_streaming,
     cancel_stream,
     _materialize_pending_user_turn_before_error,
+    _assign_stable_message_ids,
     generate_session_title_for_session,
     _compact_for_echo_compare,
     _strip_compact_echo_suffix,
@@ -13081,6 +13293,7 @@ def handle_get(handler, parsed) -> bool:
             ):
                 raw["is_cli_session"] = False
                 raw["read_only"] = True
+            raw["messages"] = _public_session_messages(raw.get("messages"))
             redact = redact_session_data(raw)
             _t5 = _time.monotonic()
             if _diag: _diag.stage("t5_after_redact")
@@ -13203,6 +13416,7 @@ def handle_get(handler, parsed) -> bool:
                 "messages": msgs,
                 "tool_calls": [],
             }
+            sess["messages"] = _public_session_messages(sess["messages"])
             attach_todo_state(sess, msgs)
             sess = _merge_cli_sidebar_metadata(sess, cli_meta)
             return j(handler, {"session": redact_session_data(sess)})
@@ -15261,7 +15475,25 @@ def handle_post(handler, parsed) -> bool:
         with _get_session_agent_lock(body["session_id"]):
             from api.session_ops import truncate_session_at_keep
 
-            old_msg_count, old_ctx_count = truncate_session_at_keep(s, keep)
+            keep_count_space = body.get("keep_count_space", "session")
+            if keep_count_space not in ("session", "display"):
+                return bad(handler, "keep_count_space must be 'session' or 'display'")
+            try:
+                if keep_count_space == "display":
+                    session_keep = _display_keep_count_to_session_keep(
+                        s,
+                        keep,
+                        body.get("regenerate_target"),
+                    )
+                else:
+                    session_keep = keep
+            except _RegenerationTargetConflict as exc:
+                return j(
+                    handler,
+                    {"error": str(exc), "code": exc.code},
+                    status=409,
+                )
+            old_msg_count, old_ctx_count = truncate_session_at_keep(s, session_keep)
             s.save()
             logger.info(
                 "truncate %s: messages %d→%d, context_messages %d→%d, watermark=%.2f",
@@ -15272,7 +15504,7 @@ def handle_post(handler, parsed) -> bool:
         from api.config import _evict_session_agent
         _evict_session_agent(body["session_id"])
         return j(
-            handler, {"ok": True, "session": s.compact() | {"messages": s.messages}}
+            handler, {"ok": True, "session": s.compact() | {"messages": _public_session_messages(s.messages)}}
         )
 
     if parsed.path == "/api/session/branch":
@@ -21099,6 +21331,11 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
         user_msg["timestamp"] = float(started_at)
     if attachments:
         user_msg["attachments"] = list(attachments)
+    _assign_stable_message_ids(
+        [user_msg],
+        existing,
+        getattr(s, "context_messages", None),
+    )
     s.messages.append(user_msg)
     # The new user turn is now committed to messages (#3831): advance the
     # truncation watermark to the new message's timestamp so that
@@ -21133,6 +21370,7 @@ def _prepare_chat_start_session_for_stream(
     stream_id: str,
     started_at: float | None = None,
     source: str = "webui",
+    regenerate_target=None,
 ):
     """Persist chat-start state according to webui.session_save_mode.
 
@@ -21143,6 +21381,20 @@ def _prepare_chat_start_session_for_stream(
     a normal session message. Empty sessions are never saved here because this
     helper only runs after a non-empty message is validated.
     """
+    pending_started_at = started_at if started_at is not None else time.time()
+    retained_user = None
+    if regenerate_target is not None:
+        from api.process_event_utils import build_active_turn_token
+
+        retained_user = _bind_regeneration_target(
+            s,
+            regenerate_target,
+            build_active_turn_token(stream_id, pending_started_at),
+        )
+        msg = str(retained_user.get("content") or "")
+        attachments = copy.deepcopy(retained_user.get("attachments") or [])
+        source = retained_user.get("_source") or "webui"
+
     s.workspace = workspace
     s.model = model
     s.model_provider = model_provider
@@ -21150,14 +21402,14 @@ def _prepare_chat_start_session_for_stream(
     s.post_compression_context_tokens_estimate = None
     s.pending_user_message = msg
     s.pending_attachments = attachments
-    s.pending_started_at = started_at if started_at is not None else time.time()
+    s.pending_started_at = pending_started_at
     s.pending_user_source = source
     current_title = getattr(s, "title", None)
     if _is_default_or_empty_session_title(current_title):
         provisional_title = _provisional_title_from_prompt(msg, current_title or "Untitled")
         if provisional_title and not _is_default_or_empty_session_title(provisional_title):
             s.title = provisional_title
-    if get_webui_session_save_mode() == "eager":
+    if get_webui_session_save_mode() == "eager" and retained_user is None:
         _checkpoint_user_message_for_eager_session_save(
             s,
             msg,
@@ -21166,6 +21418,12 @@ def _prepare_chat_start_session_for_stream(
             source=source,
         )
     s.save()
+    return {
+        "message": msg,
+        "attachments": attachments,
+        "source": source,
+        "retained_user": retained_user,
+    }
 
 
 def _is_hidden_empty_session(s) -> bool:
@@ -21319,6 +21577,7 @@ def _start_chat_stream_for_session(
     source: str = "webui",
     moa_config=None,
     external_runtime_owned: bool | None = None,
+    regenerate_target=None,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn."""
     if external_runtime_owned is None:
@@ -21390,16 +21649,28 @@ def _start_chat_stream_for_session(
                 stream_id = uuid.uuid4().hex
                 diag.stage("save_pending_state") if diag else None
                 was_hidden_empty_session = _is_hidden_empty_session(s)
-                _prepare_chat_start_session_for_stream(
-                    s,
-                    msg=msg,
-                    attachments=attachments,
-                    workspace=workspace,
-                    model=model,
-                    model_provider=model_provider,
-                    stream_id=stream_id,
-                    source=source,
-                )
+                try:
+                    prepared_turn = _prepare_chat_start_session_for_stream(
+                        s,
+                        msg=msg,
+                        attachments=attachments,
+                        workspace=workspace,
+                        model=model,
+                        model_provider=model_provider,
+                        stream_id=stream_id,
+                        source=source,
+                        regenerate_target=regenerate_target,
+                    )
+                except _RegenerationTargetConflict as exc:
+                    return {
+                        "error": str(exc),
+                        "code": exc.code,
+                        "_status": 409,
+                    }
+                if isinstance(prepared_turn, dict):
+                    msg = prepared_turn["message"]
+                    attachments = prepared_turn["attachments"]
+                    source = prepared_turn["source"]
                 break
         if needs_stale_cleanup:
             diag.stage("stale_stream_cleanup") if diag else None
@@ -21517,6 +21788,7 @@ def _chat_start_response_from_run_start(result):
         "effective_model",
         "effective_model_provider",
         "error",
+        "code",
         "active_stream_id",
         "_status",
     ):
@@ -21553,6 +21825,7 @@ def _start_run(
     diag=None,
     moa_config=None,
     gateway_chat_enabled: bool | None = None,
+    regenerate_target=None,
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
 
@@ -21581,6 +21854,12 @@ def _start_run(
     )
 
     if runtime_adapter_enabled() or runtime_adapter_runner_enabled():
+        if regenerate_target is not None and runtime_adapter_runner_enabled():
+            return {
+                "error": "Regeneration is not supported by the runner backend.",
+                "code": "stale_regeneration_target",
+                "_status": 409,
+            }
         def _legacy_start_run(request: StartRunRequest) -> dict:
             return _start_chat_stream_for_session(
                 s,
@@ -21594,6 +21873,7 @@ def _start_run(
                 source=request.source or source,
                 moa_config=moa_config,
                 external_runtime_owned=gateway_chat_enabled,
+                regenerate_target=regenerate_target,
             )
 
         def _legacy_adapter_factory():
@@ -21635,6 +21915,7 @@ def _start_run(
         source=source,
         moa_config=moa_config,
         external_runtime_owned=gateway_chat_enabled,
+        regenerate_target=regenerate_target,
     )
 
 
@@ -22452,6 +22733,7 @@ def _handle_chat_start(handler, body, diag=None):
             "route": "/api/chat/start",
             "diag": diag,
             "gateway_chat_enabled": gateway_chat_enabled,
+            "regenerate_target": body.get("regenerate_target"),
         }
         if not gateway_chat_enabled and moa_config is not None:
             start_run_kwargs["moa_config"] = moa_config

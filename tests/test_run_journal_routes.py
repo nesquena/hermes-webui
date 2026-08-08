@@ -78,6 +78,27 @@ def test_gateway_terminal_error_successful_save_is_marked_persisted(monkeypatch,
     assert payload["terminal_session_persisted_session_id"] == session.session_id
 
 
+def test_gateway_public_error_still_emits_public_payload_when_settlement_fails(monkeypatch):
+    import api.gateway_chat as gateway_chat
+
+    public_error = {"type": "gateway_error", "message": "provider unavailable"}
+    monkeypatch.setattr(
+        gateway_chat,
+        "_settle_gateway_terminal_error",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("session disappeared")),
+    )
+
+    assert gateway_chat._settle_gateway_public_error(
+        "missing-session",
+        "stream-id",
+        "workspace",
+        "model",
+        "provider",
+        "provider unavailable",
+        public_error,
+    ) == public_error
+
+
 def test_stream_status_exposes_replay_summary():
     status_pos = ROUTES_SRC.index('parsed.path == "/api/chat/stream/status"')
     block = ROUTES_SRC[status_pos : status_pos + 900]
