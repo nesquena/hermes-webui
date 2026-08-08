@@ -14445,10 +14445,8 @@ def handle_post(handler, parsed) -> bool:
         _profile_name = str(body.get("profile") or "").strip() or None
         if _profile_name is None:
             try:
-                from api.profiles import get_active_profile_name
-
-                _profile_name = str(get_active_profile_name() or "").strip() or None
-            except ImportError:
+                _profile_name = str(_get_active_profile_name() or "").strip() or None
+            except Exception:
                 _profile_name = None
         _session_profile_config = None
         try:
