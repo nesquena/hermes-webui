@@ -47,7 +47,11 @@ def test_quick_create_button_attaches_filter_align_and_request_path():
     helper = _extract_function(src, "_attachProjectQuickCreateButton")
     assert "project-chip-quick-create" in helper
     assert "_setActiveProjectFilter(project.project_id)" in helper
-    assert "newSession(false,{project_id:project.project_id})" in helper
+    # Bindings feature: the + button forwards the project's pinned context via
+    # Object.assign so an unbound project behaves exactly like the legacy
+    # `newSession(false,{project_id:...})` call.
+    assert "newSession(false,Object.assign({project_id:project.project_id},bindings))" in helper
+    assert "_projectBindingsForNewSession(project)" in helper
     assert "if(_newSessionInFlight)" in helper
     assert "_setActiveProjectFilter(previousProject)" in helper
     assert "btn.ondblclick" in helper
@@ -275,6 +279,20 @@ globalThis._newSessionInFlight = params.newSessionInFlightReject
   : (params.newSessionInFlight
       ? Promise.resolve(params.newSessionInFlight)
       : null);
+
+// The + button forwards the project's pinned bindings (workspace/model/
+// effort) alongside project_id. A bare {project_id} project yields no
+// bindings, matching the pre-bindings behavior.
+globalThis._projectBindingsForNewSession = (project) => {
+  const o = {};
+  if (project) {
+    if (project.workspace) o.workspace = project.workspace;
+    if (project.model) o.model = project.model;
+    if (project.model_provider) o.model_provider = project.model_provider;
+    if (project.reasoning_effort) o.reasoning_effort = project.reasoning_effort;
+  }
+  return o;
+};
 
 eval(extractFunction(sessionsSrc, '_attachProjectQuickCreateButton'));
 
