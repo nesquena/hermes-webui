@@ -44,7 +44,10 @@ def test_gateway_worker_records_turn_acceptance_before_external_request(monkeypa
         with STREAMS_LOCK:
             STREAMS.pop(stream_id, None)
 
-    assert len(events) == 1
+    assert [event[2]["event"] for event in events] == [
+        "worker_started",
+        "interrupted",
+    ]
     sid, stream, event = events[0]
     assert sid == session_id
     assert stream == stream_id
@@ -86,3 +89,76 @@ def test_gateway_worker_rejected_acceptance_never_reaches_external_execution(mon
 
     with STREAMS_LOCK:
         assert stream_id not in STREAMS
+
+
+def test_gateway_worker_records_completed_after_successful_writeback(monkeypatch):
+    from api import gateway_chat, streaming
+    from api.config import STREAMS, STREAMS_LOCK
+
+    stream_id = "gateway-journal-completed"
+    session_id = "gateway-journal-session"
+    queue = MagicMock()
+    journal_events = []
+    session = MagicMock()
+    session.active_stream_id = stream_id
+    session.workspace = "/tmp/workspace"
+    session.model = "test-model"
+    session.model_provider = None
+    session.profile = None
+    session.context_messages = []
+    session.messages = []
+    session.pending_user_message = None
+    session.pending_attachments = None
+    session.pending_started_at = None
+    session.pending_user_source = None
+    session.process_wakeup_pause = {}
+
+    sse_body = (
+        'data: {"choices":[{"delta":{"content":"Done"}}]}\n\n'
+        "data: [DONE]\n\n"
+    ).encode()
+
+    def fake_urlopen(_req, *, timeout=None):
+        response = MagicMock()
+        response.__iter__ = lambda current: iter(sse_body.split(b"\n"))
+        response.__enter__ = lambda current: current
+        response.__exit__ = lambda current, *_args: None
+        return response
+
+    with STREAMS_LOCK:
+        STREAMS[stream_id] = queue
+
+    monkeypatch.setattr(
+        gateway_chat,
+        "append_turn_journal_event_for_stream",
+        lambda sid, stream, event: journal_events.append((sid, stream, dict(event))) or event,
+    )
+    monkeypatch.setattr(gateway_chat, "get_session", lambda _sid: session)
+    monkeypatch.setattr(gateway_chat, "gateway_supports_approval", lambda *_args: False)
+    monkeypatch.setattr(gateway_chat, "gateway_approval_unavailable_reason", lambda *_args: None)
+    monkeypatch.setattr(gateway_chat, "_gateway_use_runs_api_enabled", lambda *_args: False)
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(gateway_chat, "_stream_writeback_is_current", lambda *_args: True)
+    monkeypatch.setattr(gateway_chat, "merge_session_messages_append_only", lambda *_args: [])
+    monkeypatch.setattr(
+        streaming,
+        "_session_payload_with_full_messages",
+        lambda *_args, **_kwargs: {"session_id": session_id, "messages": []},
+    )
+
+    try:
+        gateway_chat._run_gateway_chat_streaming(
+            session_id=session_id,
+            msg_text="wake up",
+            model="test-model",
+            workspace="/tmp/workspace",
+            stream_id=stream_id,
+        )
+    finally:
+        with STREAMS_LOCK:
+            STREAMS.pop(stream_id, None)
+
+    assert [event[2]["event"] for event in journal_events] == [
+        "worker_started",
+        "completed",
+    ]

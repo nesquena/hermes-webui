@@ -1387,6 +1387,32 @@ def _run_gateway_chat_streaming(
             "hint": "Check HERMES_WEBUI_GATEWAY_BASE_URL and Gateway API server health.",
         })
     finally:
+        try:
+            terminal_event = {
+                "event": "completed" if success_writeback_committed else "interrupted",
+                "created_at": time.time(),
+            }
+            if success_writeback_committed and s is not None:
+                terminal_event["assistant_message_index"] = next(
+                    (
+                        idx
+                        for idx in range(len(getattr(s, "messages", None) or []) - 1, -1, -1)
+                        if isinstance(s.messages[idx], dict)
+                        and s.messages[idx].get("role") == "assistant"
+                    ),
+                    None,
+                )
+            elif cancel_event.is_set():
+                terminal_event["reason"] = "cancelled"
+            else:
+                terminal_event["reason"] = "gateway_failed"
+            append_turn_journal_event_for_stream(
+                session_id,
+                stream_id,
+                terminal_event,
+            )
+        except Exception:
+            logger.debug("Failed to append gateway terminal turn journal event", exc_info=True)
         mapped_run_id = str(_STREAM_RUN_IDS.get(stream_id) or "").strip()
         if mapped_run_id:
             try:
