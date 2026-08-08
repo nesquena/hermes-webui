@@ -17608,7 +17608,9 @@ def _stream_runner_run_events(handler, run_id: str, cursor: str | None = None) -
     handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
     handler.send_header("Cache-Control", "no-cache")
     handler.send_header("X-Accel-Buffering", "no")
-    handler.send_header("Connection", "close")
+    # #3103: do NOT emit `Connection: close` on long-lived SSE streams.
+    # Letting the server close the socket naturally after the stream ends
+    # is sufficient.  The proxy (server.mjs) will set keep-alive.
     end_sse_headers(handler)
     cursor_value = cursor
     try:
@@ -17686,7 +17688,7 @@ def _handle_sse_stream(handler, parsed):
     handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
     handler.send_header("Cache-Control", "no-cache")
     handler.send_header("X-Accel-Buffering", "no")
-    handler.send_header("Connection", "close")
+    # #3103: do NOT emit `Connection: close` on long-lived SSE streams.
     end_sse_headers(handler)
     _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
     # Replay shares the drain loop's try/finally so every exit path unsubscribes.
@@ -18050,7 +18052,7 @@ def _handle_terminal_output(handler, parsed):
         handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
         handler.send_header("Cache-Control", "no-cache")
         handler.send_header("X-Accel-Buffering", "no")
-        handler.send_header("Connection", "close")
+        # #3103: do NOT emit `Connection: close` on long-lived SSE streams.
         end_sse_headers(handler)
         _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
         while True:
