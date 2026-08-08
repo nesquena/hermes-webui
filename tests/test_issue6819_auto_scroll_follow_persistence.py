@@ -37,6 +37,14 @@ def test_boot_has_profile_namespaced_mirror_helpers():
         "profile key must derive from the active profile"
     )
     assert "_AUTO_SCROLL_FOLLOW_KEY" in src, "storage key constant must exist"
+    # P1 (#6856 review): the profile key must come from the hermes_profile
+    # cookie (readable before S.activeProfile is initialized at boot), with
+    # S.activeProfile as fallback — otherwise a non-default profile's failed
+    # settings fetch would read the 'default' mirror entry.
+    assert "_PROFILE_COOKIE_NAME" in src and "hermes_profile" in src, (
+        "profile key must read the hermes_profile cookie (P1)"
+    )
+    assert "document.cookie" in src, "profile key must read document.cookie (P1)"
 
 
 def test_boot_success_path_persists_mirror():
@@ -104,25 +112,32 @@ const localStorage = {
   setItem(k,v){ store[k] = v; }
 };
 const window = {};
-const S = { activeProfile: 'default' };
+let _cookie = 'hermes_profile=maintainer; other=1';
+const document = { get cookie(){ return _cookie; } };
+const S = { activeProfile: 'default' };   // stale: boot has NOT resolved yet
 """ + block + r"""
+// 0. P1: cookie namespaces the key BEFORE S.activeProfile is initialized —
+//    a non-default profile's boot fallback must read ITS OWN mirror entry.
+if (_autoScrollFollowProfileKey() !== 'maintainer') throw new Error('P1: cookie must win over stale S.activeProfile');
 // 1. fresh user: default ON
 if (_readPersistedAutoScrollFollow() !== true) throw new Error('fresh default must be ON');
-// 2. user turns OFF -> persisted
+// 2. user turns OFF -> persisted (under maintainer, from cookie)
 if (_persistAutoScrollFollow(false) !== false) throw new Error('persist OFF failed');
 if (_readPersistedAutoScrollFollow() !== false) throw new Error('persisted OFF must be honored');
 // 3. profile-namespacing: switching profile keeps its own value
-S.activeProfile = 'maintainer';
-if (_readPersistedAutoScrollFollow() !== true) throw new Error('other profile must keep default ON');
-if (_persistAutoScrollFollow(true) !== true) throw new Error('persist ON failed');
+_cookie = '';
 S.activeProfile = 'default';
-if (_readPersistedAutoScrollFollow() !== false) throw new Error('default profile OFF must survive profile switch');
-S.activeProfile = 'maintainer';
-if (_readPersistedAutoScrollFollow() !== true) throw new Error('maintainer profile ON must survive switch back');
+if (_readPersistedAutoScrollFollow() !== true) throw new Error('default profile must keep default ON (no cookie, no entry)');
+if (_persistAutoScrollFollow(true) !== true) throw new Error('persist ON failed');
+_cookie = 'hermes_profile=maintainer; other=1';
+S.activeProfile = 'default';  // cookie still authoritative
+if (_readPersistedAutoScrollFollow() !== false) throw new Error('maintainer OFF must survive switch back');
+_cookie = '';
+if (_readPersistedAutoScrollFollow() !== true) throw new Error('no-cookie falls back to S.activeProfile/default');
 // 4. storage is one JSON map keyed by profile
 const parsed = JSON.parse(store['hermes-auto-scroll-follow']);
 if (JSON.stringify(Object.keys(parsed).sort()) !== JSON.stringify(['default','maintainer'])) throw new Error('keys mismatch: '+JSON.stringify(parsed));
-if (parsed['default'] !== 0 || parsed['maintainer'] !== 1) throw new Error('values mismatch: '+JSON.stringify(parsed));
+if (parsed['default'] !== 1 || parsed['maintainer'] !== 0) throw new Error('values mismatch: '+JSON.stringify(parsed));
 console.log('MIRROR-HELPERS-OK');
 """
     proc = subprocess.run(
