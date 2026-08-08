@@ -18,6 +18,21 @@ from pathlib import Path
 
 from api.config import STATE_DIR, get_config, load_settings
 
+# Cloudflare Access JWT authentication (optional)
+try:
+    from api.auth_cf_access import is_cf_access_configured, get_cf_access_identity
+except ImportError:
+    # Module unavailable -- still honour operator intent via env vars so
+    # partial/broken installs fail closed rather than disabling auth.
+    def is_cf_access_configured():
+        import os as _os
+        return bool(
+            _os.getenv('HERMES_WEBUI_CF_ACCESS_TEAM_DOMAIN', '').strip()
+            or _os.getenv('HERMES_WEBUI_CF_ACCESS_AUD', '').strip()
+        )
+    def get_cf_access_identity(handler):
+        return None
+
 logger = logging.getLogger(__name__)
 
 
@@ -567,6 +582,7 @@ def is_auth_enabled() -> bool:
         or are_passkeys_enabled()
         or is_oidc_auth_enabled()
         or is_trusted_auth_enabled()
+        or is_cf_access_configured()
     )
 
 
@@ -835,7 +851,7 @@ def session_bound_profile(cookie_value: str) -> str | None:
 
 
 def is_trusted_auth_enabled() -> bool:
-    return _trusted_auth_header_configured()
+    return _trusted_auth_header_configured() or is_cf_access_configured()
 
 
 def get_trusted_auth_logout_url() -> str | None:
@@ -889,6 +905,30 @@ def ensure_trusted_auth_session(handler) -> dict | None:
     info = get_session_info(cookie_value) if cookie_value and verify_session(cookie_value) else None
     if info and info.get('auth_type') != 'trusted':
         return _remember_trusted_auth_session(handler, info)
+    # Cloudflare Access JWT authentication
+    cf_identity = get_cf_access_identity(handler)
+    if cf_identity:
+        username = cf_identity.get("username")
+        if not username:
+            # No valid principal extracted — skip session creation, fall through
+            # to the normal trusted-auth check below.
+            pass
+        else:
+            bound_profile = None
+            if info and info.get('username') == username and info.get('bound_profile') == bound_profile:
+                _apply_trusted_session_profile(handler, bound_profile, cookie_value)
+                return _remember_trusted_auth_session(handler, info, cookie_value)
+            if info:
+                invalidate_session(cookie_value)
+            cookie_value = create_session(
+                auth_type='trusted',
+                username=username,
+                bound_profile=bound_profile,
+            )
+            _queue_pending_cookie(handler, _auth_cookie_header(cookie_value, handler))
+            _apply_trusted_session_profile(handler, bound_profile, cookie_value)
+            info = get_session_info(cookie_value)
+            return _remember_trusted_auth_session(handler, info, cookie_value)
     if not is_trusted_auth_enabled():
         if info:
             invalidate_session(cookie_value)
