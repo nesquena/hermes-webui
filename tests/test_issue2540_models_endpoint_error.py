@@ -1,5 +1,4 @@
 import urllib.error
-import urllib.request
 from email.message import Message
 
 from api import config
@@ -12,6 +11,7 @@ class _ConfigState:
         self.old_cache = config._available_models_cache
         self.old_cache_ts = config._available_models_cache_ts
         self.old_cache_fp = config._available_models_cache_source_fingerprint
+        self.old_cache_build_in_progress = config._cache_build_in_progress
         self.old_live_budget = config._LIVE_REBUILD_BUDGET_SECONDS
         config._cfg_mtime = 0.0
         config._available_models_cache = None
@@ -21,6 +21,7 @@ class _ConfigState:
         # provider-catalog budget fallback. Force the synchronous rebuild path
         # so slower Python 3.11 shards cannot fall onto the global 4s fallback
         # and mask the endpoint-specific error contract under test.
+        config._cache_build_in_progress = False
         config._LIVE_REBUILD_BUDGET_SECONDS = 0.0
         return self
 
@@ -30,6 +31,7 @@ class _ConfigState:
         config._available_models_cache = self.old_cache
         config._available_models_cache_ts = self.old_cache_ts
         config._available_models_cache_source_fingerprint = self.old_cache_fp
+        config._cache_build_in_progress = self.old_cache_build_in_progress
         config._LIVE_REBUILD_BUDGET_SECONDS = self.old_live_budget
         return False
 
@@ -50,29 +52,48 @@ def _configure_named_custom_provider(tmp_path, monkeypatch, *, model=None):
         "fallback_providers": [],
         "custom_providers": [entry],
     }
+    try:
+        config._cfg_mtime = config.Path(config._get_config_path()).stat().st_mtime
+    except Exception:
+        config._cfg_mtime = 0.0
+    config._cfg_path = config._get_config_path()
 
 
 def _groups_by_provider(data):
     return {group["provider_id"]: group for group in data["groups"]}
 
 
+def _get_available_models_for_endpoint_test():
+    data = config.get_available_models(force_refresh=True)
+    if "custom:broken-proxy" not in _groups_by_provider(data):
+        # Some preceding catalog tests can leave an out-of-band bounded rebuild
+        # publishing to the process-wide in-memory cache. Force one clean sync
+        # rebuild after clearing any late-published result so these endpoint
+        # error-shaping tests remain order-independent.
+        config.invalidate_models_cache()
+        data = config.get_available_models(force_refresh=True)
+    return data
+
+
 def test_named_custom_provider_models_endpoint_401_surfaces_error(monkeypatch, tmp_path):
-    def fake_urlopen(req, timeout=10):
+    def fake_models_endpoint(_url, _headers, *, timeout):
         raise urllib.error.HTTPError(
-            getattr(req, "full_url", "https://broken.example/v1/models"),
+            "https://broken.example/v1/models",
             401,
             "Unauthorized",
             hdrs=Message(),
             fp=None,
         )
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(config, "_credentialed_json_get_no_redirect", fake_models_endpoint)
 
     with _ConfigState():
         _configure_named_custom_provider(tmp_path, monkeypatch, model="broken/manual")
-        data = config.get_available_models()
+        data = _get_available_models_for_endpoint_test()
 
-    group = _groups_by_provider(data)["custom:broken-proxy"]
+    groups = _groups_by_provider(data)
+    assert "custom:broken-proxy" in groups, groups
+    group = groups["custom:broken-proxy"]
     error = group["models_endpoint_error"]
     assert error["kind"] == "auth"
     assert error["code"] == 401
@@ -82,14 +103,14 @@ def test_named_custom_provider_models_endpoint_401_surfaces_error(monkeypatch, t
 
 
 def test_named_custom_provider_models_endpoint_network_error_surfaces_empty_group(monkeypatch, tmp_path):
-    def fake_urlopen(req, timeout=10):
+    def fake_models_endpoint(_url, _headers, *, timeout):
         raise urllib.error.URLError("connection refused")
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(config, "_credentialed_json_get_no_redirect", fake_models_endpoint)
 
     with _ConfigState():
         _configure_named_custom_provider(tmp_path, monkeypatch)
-        data = config.get_available_models()
+        data = _get_available_models_for_endpoint_test()
 
     group = _groups_by_provider(data)["custom:broken-proxy"]
     assert group["models"] == []
@@ -99,20 +120,20 @@ def test_named_custom_provider_models_endpoint_network_error_surfaces_empty_grou
 
 
 def test_named_custom_provider_models_endpoint_5xx_preserves_status(monkeypatch, tmp_path):
-    def fake_urlopen(req, timeout=10):
+    def fake_models_endpoint(_url, _headers, *, timeout):
         raise urllib.error.HTTPError(
-            getattr(req, "full_url", "https://broken.example/v1/models"),
+            "https://broken.example/v1/models",
             502,
             "Bad Gateway",
             hdrs=Message(),
             fp=None,
         )
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(config, "_credentialed_json_get_no_redirect", fake_models_endpoint)
 
     with _ConfigState():
         _configure_named_custom_provider(tmp_path, monkeypatch, model="broken/manual")
-        data = config.get_available_models()
+        data = _get_available_models_for_endpoint_test()
 
     error = _groups_by_provider(data)["custom:broken-proxy"]["models_endpoint_error"]
     assert error["kind"] == "http"
@@ -122,22 +143,18 @@ def test_named_custom_provider_models_endpoint_5xx_preserves_status(monkeypatch,
 def test_named_custom_provider_models_endpoint_network_error_uses_short_timeout(monkeypatch, tmp_path):
     observed_timeouts = []
 
-    def fake_urlopen(req, timeout=10):
-        # Only record timeouts for the broken-proxy custom endpoint — unrelated
-        # background probes (Copilot token fetch, OpenRouter free-tier discovery, etc.)
-        # also call urlopen during get_available_models() and would otherwise pollute
-        # the assertion. The contract we're pinning: the broken-proxy /v1/models call
-        # uses CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS, not the urllib default 10.
-        full_url = getattr(req, "full_url", "")
-        if "broken.example" in str(full_url):
+    def fake_models_endpoint(url, _headers, *, timeout):
+        # The contract we're pinning: the broken-proxy /v1/models call uses
+        # CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS, not the urllib default 10.
+        if "broken.example" in str(url):
             observed_timeouts.append(timeout)
         raise urllib.error.URLError("timed out")
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(config, "_credentialed_json_get_no_redirect", fake_models_endpoint)
 
     with _ConfigState():
         _configure_named_custom_provider(tmp_path, monkeypatch)
-        data = config.get_available_models()
+        data = _get_available_models_for_endpoint_test()
 
     group = _groups_by_provider(data)["custom:broken-proxy"]
     assert group["models"] == []

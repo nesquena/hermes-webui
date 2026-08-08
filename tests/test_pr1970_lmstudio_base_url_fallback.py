@@ -202,20 +202,18 @@ def test_get_provider_base_url_treats_malformed_provider_entry_as_unconfigured()
 
 
 def test_lmstudio_fallback_works_when_hermes_cli_unavailable(tmp_path, monkeypatch):
-    """The lmstudio branch must populate models from the urlopen fallback even
+    """The lmstudio branch must populate models from the WebUI-owned fallback even
     when `from hermes_cli.models import provider_model_ids` raises ImportError.
 
     Pre-fix, the outer try/except in the lmstudio branch caught the ImportError
-    and silently aborted the whole branch, never running the urlopen fallback —
-    a CI-vs-local divergence where local environments with hermes_cli installed
+    and silently aborted the whole branch, never running the fallback — a
+    CI-vs-local divergence where local environments with hermes_cli installed
     worked, and CI (clean editable install) failed with empty model groups.
 
-    Caught in CI on stage-337; fix splits the hermes_cli try from the urlopen
-    fallback so each runs independently.
+    Caught in CI on stage-337; fix splits the hermes_cli try from the fallback
+    so each runs independently.
     """
-    import json as _json
     import socket as _socket
-    import urllib.request as _urlreq
 
     import api.config as config
 
@@ -254,19 +252,10 @@ providers:
         config.reload_config()
         config.invalidate_models_cache()
 
-        class _ModelsResponse:
-            def __enter__(self):
-                return self
+        def _models_json_get_no_redirect(_url, _headers, *, timeout):
+            return {"data": [{"id": "qwen3.6-35b-a3b@q6_k"}, {"id": "another-model"}]}
 
-            def __exit__(self, *args):
-                pass
-
-            def read(self):
-                return _json.dumps(
-                    {"data": [{"id": "qwen3.6-35b-a3b@q6_k"}, {"id": "another-model"}]}
-                ).encode()
-
-        monkeypatch.setattr(_urlreq, "urlopen", lambda *_a, **_kw: _ModelsResponse())
+        monkeypatch.setattr(config, "_credentialed_json_get_no_redirect", _models_json_get_no_redirect)
         monkeypatch.setattr(
             _socket,
             "getaddrinfo",
@@ -294,9 +283,7 @@ providers:
 
 def test_lmstudio_fallback_handles_malformed_providers_list(tmp_path, monkeypatch):
     """LM Studio fallback must ignore list-shaped providers instead of crashing."""
-    import json as _json
     import socket as _socket
-    import urllib.request as _urlreq
 
     blocked_modules = [name for name in list(sys.modules) if name == "hermes_cli" or name.startswith("hermes_cli.")]
     for name in blocked_modules:
@@ -330,19 +317,10 @@ providers:
         config.reload_config()
         config.invalidate_models_cache()
 
-        class _ModelsResponse:
-            def __enter__(self):
-                return self
+        def _models_json_get_no_redirect(_url, _headers, *, timeout):
+            return {"data": [{"id": "qwen3.6-35b-a3b@q6_k"}, {"id": "another-model"}]}
 
-            def __exit__(self, *args):
-                pass
-
-            def read(self):
-                return _json.dumps(
-                    {"data": [{"id": "qwen3.6-35b-a3b@q6_k"}, {"id": "another-model"}]}
-                ).encode()
-
-        monkeypatch.setattr(_urlreq, "urlopen", lambda *_a, **_kw: _ModelsResponse())
+        monkeypatch.setattr(config, "_credentialed_json_get_no_redirect", _models_json_get_no_redirect)
         monkeypatch.setattr(
             _socket,
             "getaddrinfo",
