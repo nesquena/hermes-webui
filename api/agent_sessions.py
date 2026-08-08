@@ -305,11 +305,13 @@ def is_cli_session_row_visible(row: dict) -> bool:
 def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
     """Return True when ``child`` is the next segment of the same conversation.
 
-    Compression rotates session ids automatically. A manual CLI close followed
-    by ``hermes -c`` also records a new child session; for sidebar projection it
-    should continue the same visible conversation rather than becoming a
-    separate child-session row. Plain parent/child links that started before the
-    parent's ended boundary remain child sessions.
+    Compression rotates session ids automatically. The replacement row may be
+    inserted just before the parent closure is committed, so a compression edge
+    is authoritative even when ``child.started_at < parent.ended_at``. A manual
+    CLI close followed by ``hermes -c`` also records a new child session; for
+    sidebar projection it should continue the same visible conversation when it
+    starts after the parent's ended boundary. Other overlapping parent/child
+    links remain child sessions.
 
     Do not collapse lineage across raw sources. A WebUI session that continues
     from a Telegram/CLI/etc. parent must remain visible as its own surface-owned
@@ -324,8 +326,15 @@ def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
     child_source = str(child.get('source') or '').strip().lower()
     if parent_source and child_source and parent_source != child_source:
         return False
-    if parent.get('end_reason') not in {'compression', 'cli_close'}:
+    end_reason = parent.get('end_reason')
+    if end_reason not in {'compression', 'cli_close'}:
         return False
+    if end_reason == 'compression':
+        # Hermes creates the replacement before it records the old segment's
+        # closure. That write ordering can overlap by a few milliseconds; the
+        # explicit compression marker, same-source edge and non-fork guard are
+        # the durable continuation contract.
+        return True
     ended_at = parent.get('ended_at')
     if ended_at is None:
         # Older state.db rows/tests may not have ended_at populated. Preserve

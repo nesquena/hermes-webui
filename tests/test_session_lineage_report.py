@@ -1,6 +1,5 @@
 """Read-only session lineage report endpoint tests."""
 
-import json
 import sqlite3
 import time
 from types import SimpleNamespace
@@ -85,6 +84,83 @@ def test_lineage_report_returns_bounded_read_only_tip_and_hidden_segments(tmp_pa
         assert report["manual_review"] is False
         assert "archive_candidates" not in report
         assert "delete_candidates" not in report
+    finally:
+        conn.close()
+
+
+def test_compression_persist_race_still_collapses_to_one_lineage(tmp_path):
+    """A child may be inserted just before its compression parent is closed."""
+    conn = _ensure_state_db(tmp_path / "state.db")
+    t0 = time.time() - 100
+    try:
+        _insert_state_row(
+            conn,
+            "compression_race_root",
+            started_at=t0,
+            ended_at=t0 + 5.020,
+            end_reason="compression",
+        )
+        _insert_state_row(
+            conn,
+            "compression_race_tip",
+            parent="compression_race_root",
+            started_at=t0 + 5.000,
+        )
+        _insert_message(conn, "compression_race_tip", timestamp=t0 + 6)
+
+        report = agent_sessions.read_session_lineage_report(
+            tmp_path / "state.db", "compression_race_tip"
+        )
+        rows = agent_sessions.read_importable_agent_session_rows(
+            tmp_path / "state.db", exclude_sources=()
+        )
+
+        assert report["lineage_key"] == "compression_race_root"
+        assert report["tip_session_id"] == "compression_race_tip"
+        assert [segment["session_id"] for segment in report["segments"]] == [
+            "compression_race_tip",
+            "compression_race_root",
+        ]
+        assert [row["id"] for row in rows] == ["compression_race_tip"]
+        assert rows[0]["_lineage_root_id"] == "compression_race_root"
+        assert rows[0]["_compression_segment_count"] == 2
+    finally:
+        conn.close()
+
+
+def test_cli_close_overlap_remains_a_child_session(tmp_path):
+    """Only automatic compression may overlap the parent's close timestamp."""
+    conn = _ensure_state_db(tmp_path / "state.db")
+    t0 = time.time() - 100
+    try:
+        _insert_state_row(
+            conn,
+            "cli_overlap_parent",
+            started_at=t0,
+            ended_at=t0 + 5.020,
+            end_reason="cli_close",
+        )
+        _insert_state_row(
+            conn,
+            "cli_overlap_child",
+            parent="cli_overlap_parent",
+            started_at=t0 + 5.000,
+        )
+
+        child_report = agent_sessions.read_session_lineage_report(
+            tmp_path / "state.db", "cli_overlap_child"
+        )
+        parent_report = agent_sessions.read_session_lineage_report(
+            tmp_path / "state.db", "cli_overlap_parent"
+        )
+
+        assert child_report["lineage_key"] == "cli_overlap_child"
+        assert [segment["session_id"] for segment in child_report["segments"]] == [
+            "cli_overlap_child"
+        ]
+        assert [child["session_id"] for child in parent_report["children"]] == [
+            "cli_overlap_child"
+        ]
     finally:
         conn.close()
 
