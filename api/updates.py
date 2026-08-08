@@ -46,6 +46,7 @@ _apply_lock = threading.Lock()   # prevents concurrent stash/pull/pop on same re
 CACHE_TTL = 1800  # 30 minutes
 _AGENT_GATEWAY_RESTART_RETRY_DELAY_S = 1.0
 _FORCE_DIRTY_PROBE_TIMEOUT = 5
+_UPDATE_CHECK_BUDGET_S = 45  # bounded overall budget for concurrent update checks (PR #6830)
 _GIT_DIAGNOSTIC_MAX_CHARS = 300
 _CREDENTIAL_IN_URL_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)([^/@\s'\"]+)@")
 _GITHUB_TOKEN_RE = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
@@ -1367,7 +1368,6 @@ def check_for_updates(force=False, *, include_agent=True, channel=None):
         # results if one check times out. (PR #6830)
         from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
-        _UPDATE_CHECK_BUDGET_S = 45  # bounded overall budget for both checks
         webui_info = None
         agent_info = None
 
@@ -1382,7 +1382,8 @@ def check_for_updates(force=False, *, include_agent=True, channel=None):
             # the Agent ignore its v* tags and fall back to origin/master.)
             return _check_repo(_AGENT_DIR, 'agent', DEFAULT_UPDATE_CHANNEL)
 
-        with ThreadPoolExecutor(max_workers=2) as executor:
+        executor = ThreadPoolExecutor(max_workers=2)
+        try:
             webui_future = executor.submit(_check_webui)
             agent_future = executor.submit(_check_agent) if include_agent else None
 
@@ -1390,6 +1391,7 @@ def check_for_updates(force=False, *, include_agent=True, channel=None):
             try:
                 webui_info = webui_future.result(timeout=_UPDATE_CHECK_BUDGET_S)
             except (FutureTimeoutError, Exception) as e:
+                webui_future.cancel()
                 logger.warning('WebUI update check failed or timed out: %s', e)
                 webui_info = {
                     'name': 'webui',
@@ -1402,6 +1404,7 @@ def check_for_updates(force=False, *, include_agent=True, channel=None):
                 try:
                     agent_info = agent_future.result(timeout=_UPDATE_CHECK_BUDGET_S)
                 except (FutureTimeoutError, Exception) as e:
+                    agent_future.cancel()
                     logger.warning('Agent update check failed or timed out: %s', e)
                     agent_info = {
                         'name': 'agent',
@@ -1411,6 +1414,10 @@ def check_for_updates(force=False, *, include_agent=True, channel=None):
                     }
             else:
                 agent_info = _ignored_agent_update_info()
+        finally:
+            # Don't wait for straggler threads — shutdown immediately so the
+            # caller's deadline isn't blown past the budget. (PR #6830, Greptile)
+            executor.shutdown(wait=False)
 
         with _cache_lock:
             _update_cache['webui'] = webui_info

@@ -1953,3 +1953,63 @@ def test_check_for_updates_timeout_returns_partial_result(tmp_path, monkeypatch)
     assert 'error' in result['agent'] or result['agent'].get('behind') is None
 
 
+def test_check_for_updates_does_not_wait_for_straggler_threads(tmp_path, monkeypatch):
+    """When a check hangs past the budget, the executor must not wait for it
+    on shutdown — it must return partial results within the caller's deadline.
+    (PR #6830, Greptile: executor shutdown defeats timeout)"""
+    import threading
+    import time
+
+    # Create fake git repos
+    webui_path = tmp_path / 'webui'
+    agent_path = tmp_path / 'agent'
+    webui_path.mkdir()
+    agent_path.mkdir()
+    (webui_path / '.git').mkdir()
+    (agent_path / '.git').mkdir()
+
+    # A straggler that blocks until we release it — simulating a git fetch
+    # that never returns.
+    straggler_block = threading.Event()
+    straggler_started = threading.Event()
+
+    def fake_check_repo(path, name, channel='stable'):
+        if name == 'webui':
+            straggler_started.set()
+            straggler_block.wait()  # hang forever (or until released)
+            return {'name': 'webui', 'behind': 0, 'current_sha': 'x', 'latest_sha': 'x'}
+        # Agent check returns immediately
+        return {'name': 'agent', 'behind': 0, 'current_sha': 'abc', 'latest_sha': 'abc'}
+
+    # Override the budget to something short so the test doesn't take 45s
+    monkeypatch.setattr(updates, '_check_repo', fake_check_repo)
+    monkeypatch.setattr(updates, 'REPO_ROOT', webui_path)
+    monkeypatch.setattr(updates, '_AGENT_DIR', agent_path)
+    monkeypatch.setattr(updates, '_UPDATE_CHECK_BUDGET_S', 1, raising=False)
+
+    # Reset cache
+    monkeypatch.setattr(updates, '_update_cache', {
+        'webui': None, 'agent': None, 'checked_at': 0,
+        'include_agent': True, 'channel': 'stable'
+    })
+
+    start = time.time()
+    result = updates.check_for_updates(force=True, include_agent=True, channel='stable')
+    elapsed = time.time() - start
+
+    # Release the straggler so the thread pool can clean up
+    straggler_block.set()
+
+    # Must return long before the straggler would have finished
+    assert elapsed < 5.0, f'took {elapsed:.1f}s — executor likely waited for straggler'
+
+    # Agent should have completed successfully
+    assert result['agent'] is not None
+    assert result['agent']['behind'] == 0
+
+    # WebUI should have a timeout error, not be stuck
+    assert result['webui'] is not None
+    assert result['webui'].get('behind') is None
+    assert 'error' in result['webui']
+
+
