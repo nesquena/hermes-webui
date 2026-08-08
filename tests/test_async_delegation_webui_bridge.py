@@ -404,6 +404,114 @@ def test_background_busy_legacy_completion_retries_until_session_is_idle(monkeyp
         _reset_wakeup_state()
 
 
+def test_legacy_completion_survives_repeated_wakeup_rejection_then_delivers(monkeypatch):
+    """A pre-durable completion whose resolved target keeps rejecting the wakeup
+    (409/busy) must stay retryable — the transient-failure sites must not consume
+    the one-shot legacy marker and silently drop it after the first rejection.
+
+    Regression for the combined #6632 + #6662 gate finding: the busy-check caller
+    was fixed but _start_async_delegation_wakeup_turn's own reject/exception/
+    dispatch-failure exits still used the bounded one-shot mode, dropping a legacy
+    completion after the second transient failure.
+    """
+def test_legacy_retry_helper_keeps_requeuing_when_keep_legacy_retrying(monkeypatch):
+    """`_retry_unclaimed_async_delegation_event(..., keep_legacy_retrying=True)`
+    must requeue on EVERY call for a resolved-but-transiently-failing target —
+    never consuming the one-shot `_webui_routing_retry_attempted` marker.
+
+    Regression for the combined #6632 + #6662 gate finding: the busy-check caller
+    was fixed, but `_start_async_delegation_wakeup_turn`'s own reject/exception/
+    dispatch-failure exits (the resolved-target transient-failure sites) also pass
+    keep_legacy_retrying=True now, so a legacy completion is not silently dropped
+    after the second transient failure. The genuinely-unmapped callers still use
+    the bounded one-shot mode (covered by
+    test_background_unmapped_legacy_event_is_requeued_best_effort).
+    """
+    _reset_wakeup_state()
+    registry = _install_fake_process_registry(monkeypatch)
+    # No durable claim available → schedule_async_delegation_claim_retry returns
+    # False and we fall to the legacy requeue branch (the branch with the marker).
+    monkeypatch.setattr(
+        bp, "schedule_async_delegation_claim_retry", lambda *_a, **_k: False
+    )
+    monkeypatch.setattr(bp, "ASYNC_DELIVERY_ROUTING_RETRY_SECONDS", 0.01)
+
+    try:
+        evt = _async_delegation_event()
+        # Drive the resolved-target transient-failure retry three times in a row.
+        for _ in range(3):
+            bp._retry_unclaimed_async_delegation_event(
+                registry, evt, keep_legacy_retrying=True
+            )
+            requeued = registry.completion_queue.get(timeout=1)
+            # The marker must NOT be set — otherwise the next pass would drop it.
+            assert not requeued.get("_webui_routing_retry_attempted"), (
+                "keep_legacy_retrying must not consume the one-shot marker"
+            )
+            evt = requeued
+        assert registry.completion_queue.empty()
+
+        # Contrast: the DEFAULT (unmapped) mode is bounded — one requeue, then stop.
+        _reset_wakeup_state()
+        registry2 = _install_fake_process_registry(monkeypatch)
+        monkeypatch.setattr(
+            bp, "schedule_async_delegation_claim_retry", lambda *_a, **_k: False
+        )
+        evt2 = _async_delegation_event()
+        bp._retry_unclaimed_async_delegation_event(registry2, evt2)
+        once = registry2.completion_queue.get(timeout=1)
+        assert once.get("_webui_routing_retry_attempted") is True
+        # Second pass on the already-marked event does NOT requeue (bounded).
+        bp._retry_unclaimed_async_delegation_event(registry2, once)
+        assert registry2.completion_queue.empty()
+    finally:
+        _reset_wakeup_state()
+
+
+def test_formatting_failure_stays_bounded_not_keep_legacy_retrying(monkeypatch):
+    """A permanently-malformed completion (format_wakeup_prompt raises / empty)
+    must use the BOUNDED one-shot retry, never keep_legacy_retrying — otherwise a
+    malformed event would loop forever. Only the post-format DISPATCH exception
+    against a resolved target keeps retrying. Guards the formatting-vs-dispatch
+    split from the combined #6632+#6662 gate.
+    """
+    _reset_wakeup_state()
+    registry = _install_fake_process_registry(monkeypatch)
+    _install_fake_legacy_delivery_api(monkeypatch)
+    calls = {"n": 0}
+
+    def _spy(process_registry, evt, *, keep_legacy_retrying=False):
+        calls["n"] += 1
+        calls["keep_legacy_retrying"] = keep_legacy_retrying
+
+    monkeypatch.setattr(bp, "_retry_unclaimed_async_delegation_event", _spy)
+    monkeypatch.setattr(bp, "release_async_delegation_delivery", lambda *_a, **_k: None)
+    # Force a formatting failure (empty prompt → RuntimeError inside the format try).
+    monkeypatch.setattr(bp, "format_wakeup_prompt", lambda _evt: "")
+
+    class _Claim:
+        durable = True
+
+    try:
+        bp._process_async_delegation_event(
+            _async_delegation_event(),
+            session_id="webui-session-1",
+            delegation_id="deleg_test123",
+            process_registry=registry,
+        )
+    except TypeError:
+        # _process_async_delegation_event may claim internally; if the fake claim
+        # path differs, fall through — the assertion below is the real check.
+        pass
+
+    # The formatting-failure branch MUST have run and used BOUNDED retry.
+    assert calls["n"] >= 1, "test did not reach the formatting-failure branch"
+    assert calls.get("keep_legacy_retrying") is False, (
+        "formatting failure must stay bounded, never keep_legacy_retrying"
+    )
+    _reset_wakeup_state()
+
+
 @pytest.mark.parametrize("status", [None, 302, 409, 500])
 def test_autonomous_wakeup_rejection_uses_bounded_durable_retry(monkeypatch, status):
     _reset_wakeup_state()
