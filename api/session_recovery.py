@@ -29,7 +29,6 @@ import argparse
 import json
 import logging
 import os
-import shutil
 import sqlite3
 import threading
 from contextlib import closing
@@ -46,7 +45,7 @@ logger = logging.getLogger(__name__)
 
 
 def _msg_count(p: Path) -> int:
-    """Return the number of messages in a session JSON file, or -1 on read/parse error.
+    """Return the effective message count, or -1 on read/parse error.
 
     Returns -1 for any non-session-shape file:
     - File can't be read (OSError)
@@ -63,7 +62,21 @@ def _msg_count(p: Path) -> int:
     if not isinstance(data, dict):
         return -1
     msgs = data.get('messages')
-    return len(msgs) if isinstance(msgs, list) else -1
+    if not isinstance(msgs, list):
+        return -1
+    # A shrink caused only by collapsing replayed empty ``incomplete`` rows is
+    # an intentional repair, not data loss.  Compare live and backup using the
+    # same narrow identity rule as Session.save() so startup recovery does not
+    # resurrect the amplification.  Unique backup messages still increase the
+    # effective count and remain recoverable.
+    try:
+        from api.models import _collapse_duplicate_incomplete_message_ids
+
+        msgs, _ = _collapse_duplicate_incomplete_message_ids(msgs)
+    except Exception:
+        logger.debug("Failed to compute effective recovery message count for %s", p, exc_info=True)
+        return -1
+    return len(msgs)
 
 
 def _rebuild_recovery_session_index(session_dir: Path) -> None:
@@ -351,13 +364,29 @@ def recover_session(session_path: Path) -> dict:
     if status["recommend"] != "restore":
         return {**status, "restored": False}
     bak_path = session_path.with_suffix('.json.bak')
-    # Stage the recovery via a tmp copy + atomic replace so a crash mid-restore
-    # cannot leave a half-written session.json.
+    # Stage the recovery via a tmp write + atomic replace so a crash
+    # mid-restore cannot leave a half-written session.json.
     tmp_path = session_path.with_suffix('.json.recover.tmp')
     try:
-        shutil.copyfile(bak_path, tmp_path)
+        # #6600: restore the SAME effective payload that _msg_count()
+        # evaluated — collapse replayed empty ``incomplete`` rows and
+        # recompute message_count from the collapsed list — so recovery never
+        # resurrects the duplicate amplification it just decided to repair.
+        bak_data = json.loads(bak_path.read_text(encoding='utf-8'))
+        if not isinstance(bak_data, dict):
+            raise ValueError("backup payload is not a session object")
+        from api.models import _collapse_duplicate_incomplete_message_ids
+
+        bak_messages = bak_data.get('messages')
+        if isinstance(bak_messages, list):
+            collapsed_messages, _ = _collapse_duplicate_incomplete_message_ids(bak_messages)
+            bak_data['messages'] = collapsed_messages
+            bak_data['message_count'] = len(collapsed_messages)
+        tmp_path.write_text(
+            json.dumps(bak_data, ensure_ascii=False, indent=2), encoding='utf-8'
+        )
         tmp_path.replace(session_path)
-    except OSError as exc:
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
         logger.warning("recover_session: copy failed for %s: %s", session_path, exc)
         try:
             tmp_path.unlink(missing_ok=True)
