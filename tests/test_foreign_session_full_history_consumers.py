@@ -32,6 +32,9 @@ def _maybe_extract(source: str, name: str, prefix: str = "function") -> str:
         return ""
 
 
+I18N_T_FN = _maybe_extract(I18N_JS, "t")
+
+
 TRANSCRIPT_FN = MESSAGES_JS[
     MESSAGES_JS.index("function transcript(") : MESSAGES_JS.index("let _composerAutoResizeRaf=0;")
 ]
@@ -40,6 +43,9 @@ ENSURE_ALL_FN = SESSIONS_JS[
 ]
 WORKSPACE_HELPERS = WORKSPACE_JS[
     WORKSPACE_JS.index("function _workspaceTodosTabIsActive(){") : WORKSPACE_JS.index("function _resetWorkspaceTodosRenderCache(){")
+]
+WORKSPACE_ARTIFACT_CACHE = WORKSPACE_JS[
+    WORKSPACE_JS.index("let _artifactsFullHistoryRequest = null;") : WORKSPACE_JS.index("const ARTIFACT_IGNORE_RE =")
 ]
 WORKSPACE_CONSUMER_BLOCK = WORKSPACE_JS[
     WORKSPACE_JS.index("function _normalizeArtifactPath(") : WORKSPACE_JS.index("async function _workspacePathExists(")
@@ -51,7 +57,7 @@ WORKSPACE_ARTIFACT_CONSTS = "\n".join(
     ]
 )
 DOWNLOAD_ASSIGN = BOOT_JS[
-    BOOT_JS.index("$('btnDownload').onclick=") : BOOT_JS.index("$('btnExportJSON').onclick=")
+    BOOT_JS.index("let _downloadTranscriptOperation = null;") : BOOT_JS.index("$('btnExportJSON').onclick=")
 ].strip()
 CMD_GOAL_SRC = _maybe_extract(COMMANDS_JS, "cmdGoal", "async function")
 CMD_HELP_SRC = _maybe_extract(COMMANDS_JS, "cmdHelp")
@@ -104,6 +110,7 @@ def _download_script(
     fail_load: bool = False,
     switch_session: bool = False,
     active_stream: bool = False,
+    generation_change: bool = False,
 ) -> str:
     boot_path = str(REPO / "static" / "boot.js")
     messages_path = str(REPO / "static" / "messages.js")
@@ -115,6 +122,8 @@ def _download_script(
             "S.session = { session_id: 'foreign-2', workspace: '/ws', model: 'model' }; "
             "return { session: { session_id: 'foreign-1', workspace: '/ws', model: 'model' }, messages: fullMessages, toolCalls: [] };"
         )
+    elif generation_change:
+        snapshot_body = "ensureCalls += 1; _messagesGeneration += 1; return { session: S.session, messages: fullMessages, toolCalls: [] };"
     else:
         snapshot_body = "ensureCalls += 1; return { session: S.session, messages: fullMessages, toolCalls: [] };"
     if fail_load:
@@ -202,13 +211,22 @@ const document = {{
     return anchor;
   }},
 }};
-const btns = {{ btnDownload: {{}}, btnExportJSON: {{}} }};
+const btns = {{
+  btnDownload: {{
+    disabled: false,
+    attributes: {{}},
+    setAttribute(name, value) {{ this.attributes[name] = String(value); }},
+    removeAttribute(name) {{ delete this.attributes[name]; }},
+  }},
+  btnExportJSON: {{}},
+}};
 function $(id) {{ return btns[id]; }}
 function t(key) {{ return translations[key] || key; }}
 function showToast(message, duration, kind) {{
   toasts.push({{ message, duration, kind: kind || null }});
 }}
 let _messagesTruncated = true;
+let _messagesGeneration = 1;
 const S = {{
   session: {{ session_id: 'foreign-1', workspace: '/ws', model: 'model' }},
   messages: [fullMessages[1]],
@@ -228,6 +246,8 @@ async function _ensureAllMessagesLoaded() {{ {legacy_body} }}
     downloadName,
     downloadedText,
     revokedHref,
+    disabled: btns.btnDownload.disabled,
+    ariaBusy: btns.btnDownload.attributes['aria-busy'] || null,
     sessionId: S.session && S.session.session_id,
     messageCount: S.messages.length,
     truncated: _messagesTruncated,
@@ -289,6 +309,8 @@ const fullMessages = [
 ];
 let ensureCalls = 0;
 let _messagesTruncated = true;
+let _messagesGeneration = 1;
+function _bumpMessagesGeneration() {{ _messagesGeneration += 1; return _messagesGeneration; }}
 let _workspacePanelActiveTab = {json.dumps(active_tab)};
 const rightPanel = {{ dataset: {{ activeTab: {json.dumps(active_tab)} }} }};
 const root = {{
@@ -334,6 +356,7 @@ async function _readFullSessionSnapshot() {{ ensureCalls += 1; {snapshot_body} }
 async function _ensureAllMessagesLoaded() {{ {legacy_body} }}
 {WORKSPACE_HELPERS}
 {WORKSPACE_ARTIFACT_CONSTS}
+{WORKSPACE_ARTIFACT_CACHE}
 {WORKSPACE_CONSUMER_BLOCK}
 (async () => {{
   const ret = renderSessionArtifacts();
@@ -349,6 +372,7 @@ async function _ensureAllMessagesLoaded() {{ {legacy_body} }}
     count: count.textContent,
     messageCount: S.messages.length,
     truncated: _messagesTruncated,
+    generation: _messagesGeneration,
   }}));
 }})().catch((err) => {{
   console.error(err && err.stack ? err.stack : String(err));
@@ -500,6 +524,190 @@ _oldestIdx = 99;
   console.error(err && err.stack ? err.stack : String(err));
   process.exit(1);
 }});
+"""
+
+
+def _download_double_invocation_script() -> str:
+    boot_path = str(REPO / "static" / "boot.js")
+    messages_path = str(REPO / "static" / "messages.js")
+    return f"""
+const fs = require('fs');
+const bootSrc = fs.readFileSync({json.dumps(boot_path)}, 'utf8');
+const messagesSrc = fs.readFileSync({json.dumps(messages_path)}, 'utf8');
+function extractFunction(source, name) {{
+  const start = source.indexOf(`function ${{name}}(`);
+  const brace = source.indexOf('{{', start);
+  let depth = 0;
+  for (let i = brace; i < source.length; i++) {{
+    if (source[i] === '{{') depth++;
+    else if (source[i] === '}}' && --depth === 0) return source.slice(start, i + 1);
+  }}
+  throw new Error(`unterminated ${{name}}`);
+}}
+const transcriptSrc = extractFunction(messagesSrc, 'transcript');
+const start = bootSrc.indexOf("$('btnDownload').onclick=");
+const end = bootSrc.indexOf("$('btnExportJSON').onclick=", start);
+const downloadAssign = bootSrc.slice(start, end).trim();
+const fullMessages = [
+  {{ role: 'user', content: 'older row' }},
+  {{ role: 'assistant', content: 'latest row' }},
+];
+let ensureCalls = 0;
+let pending = [];
+let clicked = 0;
+let downloadedText = null;
+let objectHref = null;
+let revokedHref = null;
+const toasts = [];
+class Blob {{ constructor(parts) {{ downloadedText = parts.join(''); }} }}
+const URL = {{
+  createObjectURL: () => {{ objectHref = 'blob:double'; return objectHref; }},
+  revokeObjectURL: (href) => {{ revokedHref = href; }},
+}};
+const document = {{
+  createElement: () => {{
+    const anchor = {{ click: () => {{ clicked += 1; }} }};
+    Object.defineProperty(anchor, 'href', {{ get: () => objectHref, set: (value) => {{ objectHref = value; }} }});
+    Object.defineProperty(anchor, 'download', {{ set: () => {{}} }});
+    return anchor;
+  }},
+}};
+const btns = {{
+  btnDownload: {{
+    disabled: false,
+    attributes: {{}},
+    setAttribute(name, value) {{ this.attributes[name] = String(value); }},
+    removeAttribute(name) {{ delete this.attributes[name]; }},
+  }},
+  btnExportJSON: {{}},
+}};
+function $(id) {{ return btns[id]; }}
+function t(key) {{
+  return {{
+    download_transcript_preparing_full: 'Preparing full transcript…',
+    download_transcript_busy_full: 'Wait for the current response to finish before downloading the full transcript.',
+    download_transcript_failed_full: 'Failed to load the full transcript.',
+    download_transcript_changed_full: 'The conversation changed while the full transcript was loading. Try again.',
+  }}[key] || key;
+}}
+function showToast(message, duration, kind) {{ toasts.push({{ message, duration, kind: kind || null }}); }}
+let _messagesTruncated = true;
+let _messagesGeneration = 1;
+const S = {{
+  session: {{ session_id: 'foreign-1', workspace: '/ws', model: 'model' }},
+  messages: [fullMessages[1]],
+  busy: false,
+  activeStreamId: null,
+}};
+async function _readFullSessionSnapshot() {{
+  ensureCalls += 1;
+  return await new Promise((resolve) => pending.push(resolve));
+}}
+async function _ensureAllMessagesLoaded() {{}}
+{TRANSCRIPT_FN}
+{DOWNLOAD_ASSIGN}
+(async () => {{
+  const first = btns.btnDownload.onclick();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const beforeSecond = {{ calls: ensureCalls, disabled: btns.btnDownload.disabled, ariaBusy: btns.btnDownload.attributes['aria-busy'] || null, pending: pending.length }};
+  const second = btns.btnDownload.onclick();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const duringSecond = {{ calls: ensureCalls, pending: pending.length, toasts: toasts.slice() }};
+  for (const resolve of pending.splice(0)) resolve({{ session: S.session, messages: fullMessages, toolCalls: [] }});
+  await Promise.all([first, second]);
+  console.log(JSON.stringify({{ beforeSecond, duringSecond, ensureCalls, pending: pending.length, clicked, downloadedText, revokedHref, disabled: btns.btnDownload.disabled, ariaBusy: btns.btnDownload.attributes['aria-busy'] || null, toasts }}));
+}})().catch((err) => {{ console.error(err.stack || String(err)); process.exit(1); }});
+"""
+
+
+def _artifact_reuse_script() -> str:
+    workspace_path = str(REPO / "static" / "workspace.js")
+    return f"""
+const fs = require('fs');
+const workspaceSrc = fs.readFileSync({json.dumps(workspace_path)}, 'utf8');
+const fullMessages = [
+  {{ role: 'assistant', tool_calls: [{{ function: {{ name: 'write_file', arguments: JSON.stringify({{ path: 'old/deep.txt' }}) }} }}] }},
+  {{ role: 'assistant', tool_calls: [{{ function: {{ name: 'write_file', arguments: JSON.stringify({{ path: 'new/live.txt' }}) }} }}] }},
+];
+let ensureCalls = 0;
+let pending = [];
+let _messagesGeneration = 1;
+let _messagesTruncated = true;
+let _workspacePanelActiveTab = 'artifacts';
+const rightPanel = {{ dataset: {{ activeTab: 'artifacts' }} }};
+const root = {{ innerHTML: '', isConnected: true, hidden: false }};
+const count = {{ textContent: '' }};
+const artifactsTab = {{ hidden: false }};
+const document = {{
+  querySelector: (selector) => selector === '.rightpanel' ? rightPanel : null,
+  getElementById: (id) => id === 'workspaceArtifactsTab' ? artifactsTab : id === 'workspaceArtifacts' ? root : null,
+}};
+function $(id) {{ return id === 'workspaceArtifacts' ? root : id === 'workspaceArtifactsCount' ? count : null; }}
+function esc(value) {{ return String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }}
+function t(key) {{ return key === 'workspace_artifact_source_session' ? 'session' : key === 'workspace_artifact_loading_full_history' ? 'Loading full history…' : key; }}
+const S = {{ session: {{ session_id: 'foreign-1', workspace: '/ws' }}, messages: [fullMessages[1]], toolCalls: [], busy: false, activeStreamId: null }};
+async function _readFullSessionSnapshot() {{ ensureCalls += 1; return await new Promise((resolve) => pending.push(resolve)); }}
+async function _ensureAllMessagesLoaded() {{}}
+{WORKSPACE_HELPERS}
+{WORKSPACE_ARTIFACT_CONSTS}
+{WORKSPACE_ARTIFACT_CACHE}
+{WORKSPACE_CONSUMER_BLOCK}
+(async () => {{
+  const first = renderSessionArtifacts();
+  const second = renderSessionArtifacts();
+  const samePendingPromise = first === second;
+  const beforeResolve = {{ ensureCalls, html: root.innerHTML, count: count.textContent }};
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  for (const resolve of pending.splice(0)) resolve({{ session: S.session, messages: fullMessages, toolCalls: [] }});
+  await first;
+  const afterFirst = {{ ensureCalls, html: root.innerHTML, count: count.textContent }};
+  const settled = renderSessionArtifacts();
+  const settledAgain = renderSessionArtifacts();
+  await settled;
+  console.log(JSON.stringify({{ samePendingPromise, beforeResolve, afterFirst, ensureCalls, sameSettledPromise: settled === settledAgain, finalHtml: root.innerHTML, finalCount: count.textContent }}));
+}})().catch((err) => {{ console.error(err.stack || String(err)); process.exit(1); }});
+"""
+
+
+def _artifact_stale_record_script() -> str:
+    workspace_path = str(REPO / "static" / "workspace.js")
+    return f"""
+const fs = require('fs');
+const workspaceSrc = fs.readFileSync({json.dumps(workspace_path)}, 'utf8');
+const currentMessages = [{{ role: 'assistant', tool_calls: [{{ function: {{ name: 'write_file', arguments: JSON.stringify({{ path: 'current/live.txt' }}) }} }}] }}];
+let ensureCalls = 0;
+let pending = [];
+let _messagesGeneration = 1;
+let _messagesTruncated = true;
+let _workspacePanelActiveTab = 'artifacts';
+const rightPanel = {{ dataset: {{ activeTab: 'artifacts' }} }};
+const root = {{ innerHTML: '', isConnected: true, hidden: false }};
+const count = {{ textContent: '' }};
+const artifactsTab = {{ hidden: false }};
+const document = {{ querySelector: (selector) => selector === '.rightpanel' ? rightPanel : null, getElementById: (id) => id === 'workspaceArtifactsTab' ? artifactsTab : id === 'workspaceArtifacts' ? root : null }};
+function $(id) {{ return id === 'workspaceArtifacts' ? root : id === 'workspaceArtifactsCount' ? count : null; }}
+function esc(value) {{ return String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }}
+function t(key) {{ return key === 'workspace_artifact_source_session' ? 'session' : key; }}
+const S = {{ session: {{ session_id: 'foreign-1', workspace: '/ws' }}, messages: currentMessages, toolCalls: [], busy: false, activeStreamId: null }};
+async function _readFullSessionSnapshot() {{ ensureCalls += 1; return await new Promise((resolve) => pending.push(resolve)); }}
+async function _ensureAllMessagesLoaded() {{}}
+{WORKSPACE_HELPERS}
+{WORKSPACE_ARTIFACT_CONSTS}
+{WORKSPACE_ARTIFACT_CACHE}
+{WORKSPACE_CONSUMER_BLOCK}
+(async () => {{
+  const oldRender = renderSessionArtifacts();
+  _messagesGeneration = 2;
+  const newRender = renderSessionArtifacts();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const oldResolve = pending.shift();
+  const newResolve = pending.shift();
+  newResolve({{ session: S.session, messages: [{{ role: 'assistant', tool_calls: [{{ function: {{ name: 'write_file', arguments: JSON.stringify({{ path: 'fresh/current.txt' }}) }} }}] }}], toolCalls: [] }});
+  await newRender;
+  oldResolve({{ session: S.session, messages: [{{ role: 'assistant', tool_calls: [{{ function: {{ name: 'write_file', arguments: JSON.stringify({{ path: 'stale/old.txt' }}) }} }}] }}], toolCalls: [] }});
+  await oldRender;
+  console.log(JSON.stringify({{ ensureCalls, html: root.innerHTML, count: count.textContent }}));
+}})().catch((err) => {{ console.error(err.stack || String(err)); process.exit(1); }});
 """
 
 
@@ -981,6 +1189,8 @@ def test_download_handler_uses_localized_feedback_and_full_history_gate():
 
     assert result["ensureCalls"] == 1
     assert result["clicked"] is True
+    assert result["disabled"] is False
+    assert result["ariaBusy"] is None
     assert result["downloadName"] == "hermes-foreign-1.md"
     assert "OLD_TRANSCRIPT_UNIQUE" in result["downloadedText"]
     assert result["truncated"] is True
@@ -1042,12 +1252,49 @@ def test_download_handler_emits_feedback_for_busy_changed_and_failed_states():
         },
     ]
 
+    changed_generation = _run_node(_download_script(generation_change=True))
+    assert changed_generation["ensureCalls"] == 1
+    assert changed_generation["clicked"] is False
+    assert changed_generation["downloadedText"] is None
+    assert changed_generation["toasts"] == [
+        {
+            "message": "Preparing full transcript…",
+            "duration": 2000,
+            "kind": None,
+        },
+        {
+            "message": "The conversation changed while the full transcript was loading. Try again.",
+            "duration": 3000,
+            "kind": "warning",
+        },
+    ]
 
-def test_artifacts_renderer_uses_placeholder_preserved_count_and_full_load():
+
+def test_download_handler_owns_one_pending_operation_and_cleans_busy_state():
+    result = _run_node(_download_double_invocation_script())
+
+    assert result["beforeSecond"] == {
+        "calls": 1,
+        "disabled": True,
+        "ariaBusy": "true",
+        "pending": 1,
+    }
+    assert result["duringSecond"]["calls"] == 1
+    assert result["duringSecond"]["pending"] == 1
+    assert result["duringSecond"]["toasts"][-1]["message"] == "Wait for the current response to finish before downloading the full transcript."
+    assert result["ensureCalls"] == 1
+    assert result["clicked"] == 1
+    assert result["pending"] == 0
+    assert result["disabled"] is False
+    assert result["ariaBusy"] is None
+
+
+def test_artifacts_renderer_preserves_partial_count_before_full_load():
     result = _run_node(_artifact_script(seed_existing_dom=True))
 
     assert result["ensureCalls"] == 1
-    assert "Loading full history…" in result["htmlBeforeAwait"]
+    assert "Loading full history…" not in result["htmlBeforeAwait"]
+    assert 'data-artifact-path="new/live.txt"' in result["htmlBeforeAwait"]
     assert result["countBeforeAwait"] == "1"
     assert result["count"] == "2"
     assert 'data-artifact-path="old/deep.txt"' in result["html"]
@@ -1060,7 +1307,8 @@ def test_artifacts_renderer_falls_back_to_partial_list_after_failure():
     result = _run_node(_artifact_script(fail_load=True, seed_existing_dom=True))
 
     assert result["ensureCalls"] == 1
-    assert "Loading full history…" in result["htmlBeforeAwait"]
+    assert "Loading full history…" not in result["htmlBeforeAwait"]
+    assert 'data-artifact-path="new/live.txt"' in result["htmlBeforeAwait"]
     assert result["countBeforeAwait"] == "1"
     assert result["count"] == "1"
     assert 'data-artifact-path="new/live.txt"' in result["html"]
@@ -1072,8 +1320,9 @@ def test_artifacts_renderer_keeps_placeholder_during_live_turn_on_truncated_sess
     result = _run_node(_artifact_script(active_stream=True, seed_existing_dom=True))
 
     assert result["ensureCalls"] == 0
-    assert "Loading full history…" in result["htmlBeforeAwait"]
-    assert "Loading full history…" in result["html"]
+    assert "Loading full history…" not in result["htmlBeforeAwait"]
+    assert "Loading full history…" not in result["html"]
+    assert 'data-artifact-path="new/live.txt"' in result["html"]
     assert result["countBeforeAwait"] == "1"
     assert result["count"] == "1"
     assert result["truncated"] is True
@@ -1098,12 +1347,32 @@ def test_artifacts_renderer_repaints_after_fulfilled_generation_abort():
     result = _run_node(_artifact_script(seed_existing_dom=True, generation_abort=True))
 
     assert result["ensureCalls"] == 1
-    assert "Loading full history…" in result["htmlBeforeAwait"]
+    assert "Loading full history…" not in result["htmlBeforeAwait"]
     assert result["countBeforeAwait"] == "1"
     assert result["count"] == "1"
     assert 'data-artifact-path="new/live.txt"' in result["html"]
     assert 'data-artifact-path="old/deep.txt"' not in result["html"]
     assert result["truncated"] is True
+
+
+def test_artifacts_renderer_deduplicates_pending_and_settled_same_generation_snapshot():
+    result = _run_node(_artifact_reuse_script())
+
+    assert result["samePendingPromise"] is True
+    assert result["beforeResolve"]["ensureCalls"] == 1
+    assert result["beforeResolve"]["count"] == "1"
+    assert result["afterFirst"]["count"] == "2"
+    assert result["ensureCalls"] == 1
+    assert result["sameSettledPromise"] is True
+    assert 'data-artifact-path="old/deep.txt"' in result["finalHtml"]
+
+
+def test_artifacts_renderer_rejects_stale_record_completion_by_identity():
+    result = _run_node(_artifact_stale_record_script())
+
+    assert result["ensureCalls"] == 2
+    assert 'data-artifact-path="fresh/current.txt"' in result["html"]
+    assert 'data-artifact-path="stale/old.txt"' not in result["html"]
 
 
 def test_ensure_all_messages_loaded_preserves_settled_turn_that_finished_mid_fetch():
@@ -1297,15 +1566,63 @@ def test_locale_blocks_cover_loading_and_download_feedback_keys():
     locale_count = I18N_JS.count("download_transcript:")
     assert locale_count == 15
 
-    for key in [
+    keys = [
         "workspace_artifact_loading_full_history:",
         "download_transcript_preparing_full:",
         "download_transcript_busy_full:",
         "download_transcript_failed_full:",
         "download_transcript_changed_full:",
-    ]:
-        assert I18N_JS.count(key) == locale_count, f"{key} must exist in every locale block"
+    ]
+    for key in keys:
+        assert I18N_JS.count(key) == 1, f"{key} must be owned by en only"
 
     assert "workspace_artifact_loading_full_history: 'Loading full history…'" in I18N_JS
     assert "download_transcript_preparing_full: 'Preparing full transcript…'" in I18N_JS
     assert "download_transcript_busy_full: 'Wait for the current response to finish before downloading the full transcript.'" in I18N_JS
+
+
+def test_locale_runtime_falls_back_to_english_for_missing_non_english_keys():
+    if "workspace_artifact_loading_full_history" not in I18N_JS:
+        pytest.skip("respec-only locale keys are absent on the base checkout")
+    assert "const val = _locale[key] ?? LOCALES.en[key];" in I18N_JS
+    script = f"""
+const source = {json.dumps(I18N_JS)};
+function extractFunction(source, name) {{
+  const start = source.indexOf(`function ${{name}}(`);
+  if (start < 0) throw new Error(`missing function ${{name}}`);
+  const brace = source.indexOf('{{', start);
+  let depth = 0;
+  for (let i = brace; i < source.length; i++) {{
+    if (source[i] === '{{') depth++;
+    else if (source[i] === '}}' && --depth === 0) return source.slice(start, i + 1);
+  }}
+  throw new Error(`unterminated ${{name}}`);
+}}
+const tSrc = extractFunction(source, 't');
+const keys = [
+  'download_transcript_preparing_full',
+  'download_transcript_busy_full',
+  'workspace_artifact_loading_full_history',
+];
+const english = {{}};
+for (const key of keys) {{
+  const match = source.match(new RegExp(key + "\\\\s*:\\\\s*'([^']*)'"));
+  if (!match) throw new Error('missing English source value for ' + key);
+  english[key] = match[1];
+}}
+const LOCALES = {{ en: english, es: {{}} }};
+let _locale = LOCALES.es;
+{I18N_T_FN}
+console.log(JSON.stringify({{
+  preparing: t('download_transcript_preparing_full'),
+  busy: t('download_transcript_busy_full'),
+  loading: t('workspace_artifact_loading_full_history'),
+  matchesEnglish: t('download_transcript_preparing_full') === english.download_transcript_preparing_full
+    && t('download_transcript_busy_full') === english.download_transcript_busy_full
+    && t('workspace_artifact_loading_full_history') === english.workspace_artifact_loading_full_history,
+  missingInSpanish: Object.prototype.hasOwnProperty.call(LOCALES.es, 'download_transcript_preparing_full'),
+}}));
+"""
+    result = _run_node(script)
+    assert result["matchesEnglish"] is True
+    assert result["missingInSpanish"] is False
