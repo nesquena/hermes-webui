@@ -1120,6 +1120,51 @@ def test_check_repo_branch_check_runs_for_post_tag_commits(tmp_path):
     assert info.get('release_based') is not True, (
         'post-tag HEAD should use branch check, not release-based check'
     )
+    # Branch-path payload carries the display-only tag context (latest_tag /
+    # current_tag) probed before the branch fallthrough.
+    assert info.get('latest_tag') == 'v2026.5.16', (
+        f"expected latest_tag=v2026.5.16 on branch path, got {info.get('latest_tag')!r}"
+    )
+    assert info.get('current_tag') == 'v2026.5.16', (
+        f"expected current_tag=v2026.5.16 on branch path, got {info.get('current_tag')!r}"
+    )
+
+
+def test_check_repo_branch_path_without_tags_omits_tag_fields(tmp_path):
+    """Branch-path fallthrough on a checkout with zero release tags must not
+    attach latest_tag/current_tag (no-tags install → no tag suffix shown)."""
+    (tmp_path / '.git').mkdir()
+
+    def fake_git(args, cwd, timeout=10):
+        if args == ['fetch', 'origin', '--tags', '--force']:
+            return '', True
+        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+            return '', True  # no release tags at all
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
+            return '', False
+        if args == ['describe', '--tags', '--always', '--match', 'v*']:
+            return '1d22b9c2d', True
+        if args == ['rev-parse', '--abbrev-ref', '@{upstream}']:
+            return '', False
+        if args == ['symbolic-ref', 'refs/remotes/origin/HEAD']:
+            return 'refs/remotes/origin/master', True
+        if args[:2] == ['rev-list', '--count']:
+            return '608', True
+        if args[0] == 'merge-base':
+            return 'abc1234' * 5, True
+        if args[:2] == ['rev-parse', '--short']:
+            return 'abc1234', True
+        if args == ['remote', 'get-url', 'origin']:
+            return 'https://github.com/nesquena/hermes-agent.git', True
+        return '', True
+
+    with patch.object(updates, '_run_git', side_effect=fake_git):
+        info = updates._check_repo(tmp_path, 'agent')
+
+    assert info is not None
+    assert info['behind'] == 608
+    assert 'latest_tag' not in info, 'no-tags checkout must not attach latest_tag'
+    assert 'current_tag' not in info, 'no-tags checkout must not attach current_tag'
 
 
 # ---------------------------------------------------------------------------
