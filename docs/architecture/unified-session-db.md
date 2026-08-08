@@ -96,3 +96,26 @@ This spike does not switch runtime WebUI call sites, migrate existing session
 files, expose a UI setting, alter CLI storage, change session import behavior, or
 remove any JSON sidecars. It is a contract and safety test bed for future
 migration work.
+
+## Incremental WebUI Persistence Layer
+
+`api.incremental_session_store.IncrementalSessionStore` is separate from the
+dormant cross-surface adapter above. It solves WebUI file-store scaling without
+changing CLI `SessionDB` ownership or enabling `experimental.unified_session_db`.
+
+The store uses `sessions/_sessions.sqlite3` as the authoritative incremental
+overlay:
+
+- session metadata and large transcript components use separate keyed tables;
+- compact sidebar rows use a keyed, ordered table capped at 1,000 rows per read;
+- each save runs in one `synchronous=FULL` SQLite transaction;
+- unchanged transcript components are skipped, so pending-state saves write
+  metadata and one compact row rather than the full transcript;
+- existing JSON sidecars and `_index.json` import lazily and remain readable;
+- new sessions receive one JSON compatibility snapshot, while later mirrors are
+  limited to bounded payloads (256 KiB).
+
+SQLite commits provide torn-write recovery. A changed legacy sidecar is imported
+again using its stat signature, preserving manual/import workflows during
+migration. Deleting a session removes both keyed session state and its compact
+row once no sidecar or in-memory owner remains.
