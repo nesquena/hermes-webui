@@ -338,10 +338,13 @@ class TestMarkdownListsWithLatex:
         assert "<li>next item</li>" in out
 
     def test_nested_indentation_stays_in_list(self, driver_path):
+        """Same-marker nesting builds a structural nested <ul> instead of a
+        styled sibling <li> — the margin-left convention was removed by the
+        single-pass mixed-marker parser (#6700)."""
         out = _render(driver_path, "- parent\n  - child")
         assert "<ul>" in out
-        assert "<li>parent</li>" in out
-        assert '<li style="margin-left:16px">child</li>' in out
+        assert "<li>parent<ul><li>child</li></ul></li>" in out
+        assert "margin-left:16px" not in out
 
     def test_display_math_line_stays_inside_list_item(self, driver_path):
         src = "- intro\n\n  $$x^2$$\n\n  continuation"
@@ -359,6 +362,77 @@ class TestMarkdownListsWithLatex:
         assert "<span class=\"katex-inline\" data-katex=\"inline\">x</span>" in out
         assert "<div class=\"katex-block\" data-katex=\"display\">y</div>" in out
         assert '<li value="3">tail</li>' in out
+
+
+class TestMixedNestedLists:
+    """#6700: mixed ul/ol nesting must build a valid structural hierarchy.
+
+    Regression for the old two-pass list renderer, where the ordered pass
+    re-parsed the <ul> HTML emitted by the unordered pass as Markdown. That
+    leaked escaped fragments like `&lt;/li&gt;&lt;li style=&quot;margin-left:
+    16px&quot;&gt;` into the chat and flattened the inverse (ol→ul) shape.
+    """
+
+    def test_ul_ol_ul_nested_then_top_level_return(self, driver_path):
+        src = (
+            "- normal item\n"
+            "  1. numbered child\n"
+            "  2. second numbered child\n"
+            "  - unordered child again\n"
+            "- next normal item"
+        )
+        out = _render(driver_path, src)
+        # No escaped renderer-generated fragments may leak into the output
+        assert "&lt;/li&gt;" not in out, out
+        assert "&lt;ul" not in out, out
+        assert "&lt;ol" not in out, out
+        assert "margin-left:16px" not in out, out
+        # Balanced containers
+        assert out.count("<ul>") == out.count("</ul>"), out
+        assert out.count("<ol>") == out.count("</ol>"), out
+        # Exact structural hierarchy: ul > li > (ol, ul) > li
+        assert (
+            '<ul><li>normal item'
+            '<ol><li value="1">numbered child</li>'
+            '<li value="2">second numbered child</li></ol>'
+            '<ul><li>unordered child again</li></ul></li>'
+            '<li>next normal item</li></ul>'
+        ) in out, out
+
+    def test_ol_ul_nested_keeps_bullets(self, driver_path):
+        src = "1. first step\n   - detail A\n   - detail B\n2. second step"
+        out = _render(driver_path, src)
+        assert "&lt;/li&gt;" not in out, out
+        assert "&lt;ul" not in out, out
+        assert "&lt;ol" not in out, out
+        assert out.count("<ol>") == out.count("</ol>"), out
+        assert out.count("<ul>") == out.count("</ul>"), out
+        assert (
+            '<ol><li value="1">first step'
+            '<ul><li>detail A</li><li>detail B</li></ul></li>'
+            '<li value="2">second step</li></ol>'
+        ) in out, out
+
+    def test_top_level_marker_switch_starts_sibling_list(self, driver_path):
+        out = _render(driver_path, "- bullet\n1. numbered")
+        assert (
+            '<ul><li>bullet</li></ul><ol><li value="1">numbered</li></ol>'
+        ) in out, out
+        assert "&lt;/li&gt;" not in out, out
+
+    def test_ordered_item_with_task_marker_keeps_literal_prefix(self, driver_path):
+        """Task-list rendering applies only to unordered items: an ordered
+        item whose text starts with [x]/[ ] must keep its literal prefix
+        (e.g. '1. [x] shipped') instead of being silently converted to a
+        ✅/☐ task icon (review fix for #6700: openItem() dropped `ordered`
+        from the item constructor, so every item looked unordered)."""
+        out = _render(driver_path, "1. [x] shipped\n2. [ ] pending")
+        assert 'class="task-done"' not in out, out
+        assert 'class="task-todo"' not in out, out
+        assert "✅" not in out, out
+        assert "☐" not in out, out
+        assert '<ol><li value="1">[x] shipped</li>' in out, out
+        assert '<li value="2">[ ] pending</li>' in out, out
 
 
 # ─────────────────────────────────────────────────────────────────────────────
