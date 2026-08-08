@@ -4445,6 +4445,44 @@ function _renderSystemHealthPanel() {
     </section>`;
 }
 
+// ── Persistent MobaXterm-style resource status bar (#693) ──
+// Always-visible footer strip (CPU/RAM/Disk/Net) mirroring the Insights panel
+// but living at the bottom of the app shell so it shows during normal use.
+const _RSB_ICON_CPU = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="13" height="13"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg>';
+const _RSB_ICON_RAM = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="13" height="13"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="6" x2="3" y2="18"/><line x1="21" y1="6" x2="21" y2="18"/><line x1="3" y1="18" x2="21" y2="18"/><rect x="7" y="9" width="3" height="6" rx="1"/><rect x="12" y="9" width="3" height="6" rx="1"/><rect x="17" y="9" width="3" height="6" rx="1"/></svg>';
+const _RSB_ICON_DISK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="13" height="13"><line x1="22" y1="12" x2="2" y2="12"/><path d="M5.45 5.11 9.43 2h5.14l3.98 3.11a4 4 0 0 1 1.48 3.09v9.6a2 2 0 0 1-2 2H5.97a2 2 0 0 1-2-2v-9.6a4 4 0 0 1 1.48-3.09z"/><line x1="12" y1="6" x2="12" y2="18"/></svg>';
+const _RSB_ICON_NET = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="13" height="13"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>';
+function _renderResourceStatusBar() {
+  return `
+    <footer class="resource-status-bar" id="resourceStatusBar" role="status" aria-label="Live host resource usage" hidden>
+      <span class="rsb-item" data-rsb-metric="cpu">
+        <span class="rsb-icon" aria-hidden="true">${_RSB_ICON_CPU}</span>
+        <span class="rsb-label">CPU</span>
+        <span class="rsb-value" data-rsb-value>—</span>
+        <span class="rsb-bar" aria-hidden="true"><span class="rsb-bar-fill"></span></span>
+      </span>
+      <span class="rsb-item" data-rsb-metric="memory">
+        <span class="rsb-icon" aria-hidden="true">${_RSB_ICON_RAM}</span>
+        <span class="rsb-label">RAM</span>
+        <span class="rsb-value" data-rsb-value>—</span>
+        <span class="rsb-bar" aria-hidden="true"><span class="rsb-bar-fill"></span></span>
+      </span>
+      <span class="rsb-item" data-rsb-metric="disk">
+        <span class="rsb-icon" aria-hidden="true">${_RSB_ICON_DISK}</span>
+        <span class="rsb-label">Disk</span>
+        <span class="rsb-value" data-rsb-value>—</span>
+        <span class="rsb-bar" aria-hidden="true"><span class="rsb-bar-fill"></span></span>
+      </span>
+      <span class="rsb-item rsb-net" data-rsb-metric="network">
+        <span class="rsb-icon" aria-hidden="true">${_RSB_ICON_NET}</span>
+        <span class="rsb-label">Net</span>
+        <span class="rsb-value" data-rsb-value>—</span>
+      </span>
+      <span class="rsb-spacer" aria-hidden="true"></span>
+      <span class="rsb-status" id="resourceBarStatus"><span class="rsb-dot"></span>…</span>
+    </footer>`;
+}
+
 function _renderLlmWikiStatus(d) {
   const status = d || {status:'error'};
   const isReady = status.available && status.status === 'ready';
@@ -8949,6 +8987,16 @@ async function loadSettingsPanel(){
         document.documentElement.dataset.workspacePanel=open?'open':'closed';
         if(open&&_workspacePanelMode==='closed') openWorkspacePanel('browse');
         else if(!open&&_workspacePanelMode!=='closed') toggleWorkspacePanel(false);
+      };
+    }
+    // Resource status bar toggle (localStorage-backed, #693)
+    const rsbCb=$('settingsResourceBar');
+    if(rsbCb){
+      rsbCb.checked=localStorage.getItem('hermes-webui-resource-bar')!=='off';
+      rsbCb.onchange=function(){
+        const on=this.checked;
+        try{ localStorage.setItem('hermes-webui-resource-bar', on?'on':'off'); }catch(_){ }
+        if(typeof _applyResourceStatusBarVisibility==='function') _applyResourceStatusBarVisibility();
       };
     }
     const endlessScrollCb=$('settingsSessionEndlessScroll');

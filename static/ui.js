@@ -9442,6 +9442,10 @@ function setSystemHealthUnavailable(message){
   ['cpu','memory','disk'].forEach(name=>_updateSystemHealthMetric(name,null));
 }
 function renderSystemHealth(payload){
+  // The persistent resource status bar MUST update on every poll, even when the
+  // Insights side-panel (and thus #systemHealthPanel) is closed. Update it first,
+  // before the Insights-only early return below.
+  _updateResourceStatusBar(payload);
   const panel=$('systemHealthPanel');
   const status=$('systemHealthStatus');
   if(!panel) return;
@@ -9465,10 +9469,104 @@ async function pollSystemHealth(){
     setSystemHealthUnavailable('Unavailable');
   }
 }
+function _resourceBarEnabled(){
+  try{ return localStorage.getItem('hermes-webui-resource-bar')!=='off'; }catch(_){ return true; }
+}
 function _systemHealthPanelIsVisible(){
-  return document.visibilityState === 'visible' &&
-    !!document.querySelector('main.main.showing-insights') &&
+  // Always poll when the persistent MobaXterm-style resource bar is mounted,
+  // even if the Insights side-panel is closed.
+  if(document.visibilityState !== 'visible') return false;
+  if($('resourceStatusBar') && _resourceBarEnabled()) return true;
+  return !!document.querySelector('main.main.showing-insights') &&
     !!$('systemHealthPanel');
+}
+
+// ── Persistent resource status bar (#693) ──
+function _formatBytesPerSec(bytesPerSec){
+  const b=Math.max(0,Number(bytesPerSec)||0);
+  const units=['B/s','KB/s','MB/s','GB/s','TB/s'];
+  let v=b, i=0;
+  while(v>=1024 && i<units.length-1){ v/=1024; i++; }
+  return `${v<10 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
+}
+
+// Local formatting helpers (no external deps; the prior version referenced
+// helpers that didn't exist on this fork, which made updates throw and left
+// the bar frozen on its '—' placeholders).
+function _rsbFmtPercent(metric){
+  if(!metric||typeof metric.percent!=='number'||isNaN(metric.percent)) return null;
+  return Math.round(metric.percent)+'%';
+}
+function _rsbFmtBytes(bytes){
+  if(bytes===null||bytes===undefined||isNaN(bytes)) return '—';
+  const b=Number(bytes);
+  if(b<1024) return b+' B';
+  const units=['KB','MB','GB','TB','PB'];
+  let v=b/1024, i=0;
+  while(v>=1024&&i<units.length-1){ v/=1024; i++; }
+  return (v>=100?v.toFixed(0):v.toFixed(1))+' '+units[i];
+}
+function _updateResourceStatusBar(payload){
+  const bar=$('resourceStatusBar');
+  if(!bar) return;
+  if(!payload||payload.available===false){
+    bar.classList.add('unavailable');
+    const st=$('resourceBarStatus');
+    if(st) st.innerHTML='<span class="rsb-dot"></span>Unavailable';
+    ['cpu','memory','disk'].forEach(name=>{
+      const item=bar.querySelector(`[data-rsb-metric="${name}"] [data-rsb-value]`);
+      if(item) item.textContent='—';
+      const fill=bar.querySelector(`[data-rsb-meta="${name}"] .rsb-bar-fill`)||bar.querySelector(`[data-rsb-metric="${name}"] .rsb-bar-fill`);
+      if(fill) fill.style.width='0%';
+    });
+    const net=bar.querySelector('[data-rsb-metric="network"] [data-rsb-value]');
+    if(net) net.textContent='—';
+    return;
+  }
+  bar.classList.remove('unavailable');
+  const setItem=(name,text,percent,title)=>{
+    const item=bar.querySelector(`[data-rsb-metric="${name}"] [data-rsb-value]`);
+    if(item) item.textContent=text;
+    const fill=bar.querySelector(`[data-rsb-metric="${name}"] .rsb-bar-fill`);
+    if(fill) fill.style.width=`${Math.max(0,Math.min(100,percent||0))}%`;
+    if(title){ const lbl=bar.querySelector(`[data-rsb-metric="${name}"] .rsb-label`); if(lbl) lbl.title=title; }
+  };
+  setItem('cpu', _rsbFmtPercent(payload.cpu)||'—', payload.cpu&&payload.cpu.percent||0);
+  const mem=payload.memory||{};
+  setItem('memory', _rsbFmtPercent(mem)||'—', mem.percent||0, `${_rsbFmtBytes(mem.used_bytes)} / ${_rsbFmtBytes(mem.total_bytes)}`);
+  const disk=payload.disk||{};
+  const diskFree=(disk.total_bytes&&disk.used_bytes!=null)?_rsbFmtBytes(disk.total_bytes-disk.used_bytes):'—';
+  setItem('disk', _rsbFmtPercent(disk)||'—', disk.percent||0, `${_rsbFmtBytes(disk.used_bytes)} used · ${diskFree} free`);
+  const net=payload.network||{};
+  const netItem=bar.querySelector('[data-rsb-metric="network"] [data-rsb-value]');
+  if(netItem) netItem.textContent=`↓ ${_rsbFmtBytes(net.rx_bytes_per_s)}/s  ↑ ${_rsbFmtBytes(net.tx_bytes_per_s)}/s`;
+  const st=$('resourceBarStatus');
+  if(st) st.innerHTML=`<span class="rsb-dot"></span>${payload.status==='partial'?'Partial':'Live'}`;
+}
+
+function _mountResourceStatusBar(){
+  if($('resourceStatusBar')) return;
+  if(typeof _renderResourceStatusBar!=='function') return;
+  if(!_resourceBarEnabled()) return;
+  const wrap=document.createElement('div');
+  wrap.innerHTML=_renderResourceStatusBar().trim();
+  const el=wrap.firstElementChild;
+  if(el){
+    el.hidden=false;
+    document.body.appendChild(el);
+  }
+}
+// Live show/hide for the resource bar toggle (#693).
+function _applyResourceStatusBarVisibility(){
+  if(_resourceBarEnabled()){
+    if(!$('resourceStatusBar')) _mountResourceStatusBar();
+    const bar=$('resourceStatusBar');
+    if(bar){ bar.hidden=false; bar.style.display=''; }
+  } else {
+    const bar=$('resourceStatusBar');
+    if(bar){ bar.hidden=true; bar.style.display='none'; }
+  }
+  if(typeof _syncSystemHealthMonitorVisibility==='function') _syncSystemHealthMonitorVisibility();
 }
 function startSystemHealthMonitor(){
   if(!_systemHealthPanelIsVisible()) return;
@@ -9486,6 +9584,17 @@ function _syncSystemHealthMonitorVisibility(){
 document.addEventListener('visibilitychange',_syncSystemHealthMonitorVisibility);
 if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',startSystemHealthMonitor);
 else startSystemHealthMonitor();
+// Mount the always-visible MobaXterm-style resource bar (#693) and begin polling.
+// panels.js (which defines _renderResourceStatusBar) is also a defer script and runs
+// AFTER ui.js. Under defer, readyState is 'interactive' while ui.js executes, so a
+// synchronous mount would bail on the typeof guard. Always wait for DOMContentLoaded,
+// which fires only after every defer script has been parsed.
+function _bootResourceStatusBar(){ _mountResourceStatusBar(); _syncSystemHealthMonitorVisibility(); }
+if(document.readyState==='loading'||document.readyState==='interactive'){
+  document.addEventListener('DOMContentLoaded',_bootResourceStatusBar);
+} else {
+  _bootResourceStatusBar();
+}
 
 // ── Hermes agent/gateway heartbeat alert (#716) ──
 const AGENT_HEALTH_INTERVAL_MS=30000;
