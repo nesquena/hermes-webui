@@ -100,6 +100,7 @@ def _function_source_balanced(source: str, name: str) -> str:
 OWNER_SOURCE = _function_source(MESSAGES, "_setActivePaneIdleIfOwner")
 SEND_SOURCE = _function_source(MESSAGES, "send")
 ATTACH_SOURCE = _function_source(MESSAGES, "attachLiveStream")
+RETARGET_SOURCE = _function_source(MESSAGES, "_retargetLiveStreamTransportAuthority")
 LOAD_SOURCE = _function_source(Path("static/sessions.js").read_text(encoding="utf-8"), "loadSession")
 NEW_SESSION_SOURCE = _function_source(Path("static/sessions.js").read_text(encoding="utf-8"), "newSession")
 PROFILE_SOURCE = _function_source(Path("static/panels.js").read_text(encoding="utf-8"), "switchToProfile")
@@ -496,9 +497,10 @@ const attachFactory = new Function('scope', `with(scope){
   let LIVE_STREAM_ATTACH_GENERATION = 0;
   function _releaseLiveStreamTransportAuthority(sid, generation) {
     const owner = LIVE_STREAM_ATTACH_OWNERS[sid];
-    if (owner && owner.generation === generation) delete LIVE_STREAM_ATTACH_OWNERS[sid];
+    if (owner && owner.generation === generation) owner.state = 'released';
   }
   window._liveStreamAttachOwners = LIVE_STREAM_ATTACH_OWNERS;
+  window._liveStreamTransportRelease = _releaseLiveStreamTransportAuthority;
   window._liveStreamTransportAuthority = new Proxy({}, { get(_, sid) { const owner = LIVE_STREAM_ATTACH_OWNERS[sid]; return owner && owner.state === 'published' ? { streamId: owner.streamId, generation: owner.generation } : undefined; } });
   window._liveStreamTransportSourceGeneration = { get(source) { for (const sid of Object.keys(LIVE_STREAM_ATTACH_OWNERS)) { const owner = LIVE_STREAM_ATTACH_OWNERS[sid]; if (owner && owner.source === source && owner.state === 'published') return owner.generation; } return undefined; }, set(source, generation) { for (const sid of Object.keys(LIVE_STREAM_ATTACH_OWNERS)) { const owner = LIVE_STREAM_ATTACH_OWNERS[sid]; if (owner && owner.source === source) owner.generation = generation; } return this; } };
   return (${attachSource});
@@ -531,7 +533,7 @@ ATTACH_ATTEMPT_RACE_HARNESS = r"""
 const attachSource = Buffer.from('${ATTACH_B64}', 'base64').toString();
 const runtimeSource = Buffer.from('${RUNTIME_B64}', 'base64').toString();
 const scenario = JSON.parse(Buffer.from('${SCENARIO_B64}', 'base64').toString());
-const state = { sources: [], completionEvents: [], ownerSettlements: [], unhandled: [], starts: 0, aborts: 0 };
+const state = { sources: [], completionEvents: [], ownerSettlements: [], teardownCalls: [], renderMessages: 0, journalCursors: 0, unhandled: [], starts: 0, aborts: 0 };
 const pending = [];
 const documentListeners = Object.create(null);
 const windowListeners = Object.create(null);
@@ -578,9 +580,18 @@ const scope = {
   api, setTimeout, clearTimeout, requestAnimationFrame: callback => setTimeout(callback, 0), cancelAnimationFrame: clearTimeout,
   URL, encodeURIComponent, console, _desktopBackgroundedForNotifications: false, _sendInProgress: false, _sendInProgressSid: null,
   setBusy: value => { S.busy = value; }, setComposerStatus: noOp, setStatus: noOp, _isActiveSession: () => true, _isSessionCurrentPane: sid => currentPaneSid === sid,
+  closeLiveStream: (sid, streamId, source) => {
+    const live = windowObj._liveStreamRegistry && windowObj._liveStreamRegistry[sid];
+    if (!live || (streamId && live.streamId !== streamId) || (source && live.source !== source)) return;
+    if (live.source && live.source.readyState !== 2) live.source.close();
+    delete windowObj._liveStreamRegistry[sid];
+    state.teardownCalls.push(sid);
+  },
+  $: noOp,
+  _rememberRunJournalCursor: () => { state.journalCursors += 1; },
   showLiveRunStatus: noOp, hideLiveRunStatus: noOp, _clearLiveRunStatusTimer: noOp, snapshotLiveTurnHtmlForSession: noOp,
   _resumeSessionStreamAfterLiveChat: noOp, _suspendSessionStreamForLiveChat: noOp, saveInflightState: noOp, renderSessionList: noOp,
-  renderMessages: noOp, clearInflight: noOp, clearInflightState: noOp, resetTurnWorkspaceMutations: noOp, _resetStreamScrollFollow: noOp,
+  renderMessages: () => { state.renderMessages += 1; }, clearInflight: noOp, clearInflightState: noOp, resetTurnWorkspaceMutations: noOp, _resetStreamScrollFollow: noOp,
   appendThinking: noOp, ensureLiveWorklogShell: noOp, updateSendBtn: noOp, startApprovalPolling: noOp, startClarifyPolling: noOp,
   _fetchYoloState: noOp, _clearLiveRunStatusTimer: noOp, _voiceLeaseRetargetOwner: noOp,
 };
@@ -596,9 +607,10 @@ const attachFactory = new Function('scope', `with(scope){
   let LIVE_STREAM_ATTACH_GENERATION = 0;
   function _releaseLiveStreamTransportAuthority(sid, generation) {
     const owner = LIVE_STREAM_ATTACH_OWNERS[sid];
-    if (owner && owner.generation === generation) delete LIVE_STREAM_ATTACH_OWNERS[sid];
+    if (owner && owner.generation === generation) owner.state = 'released';
   }
   window._liveStreamAttachOwners = LIVE_STREAM_ATTACH_OWNERS;
+  window._liveStreamTransportRelease = _releaseLiveStreamTransportAuthority;
   window._liveStreamTransportAuthority = new Proxy({}, { get(_, sid) { const owner = LIVE_STREAM_ATTACH_OWNERS[sid]; return owner && owner.state === 'published' ? { streamId: owner.streamId, generation: owner.generation } : undefined; } });
   window._liveStreamTransportSourceGeneration = { get(source) { for (const sid of Object.keys(LIVE_STREAM_ATTACH_OWNERS)) { const owner = LIVE_STREAM_ATTACH_OWNERS[sid]; if (owner && owner.source === source && owner.state === 'published') return owner.generation; } return undefined; }, set(source, generation) { for (const sid of Object.keys(LIVE_STREAM_ATTACH_OWNERS)) { const owner = LIVE_STREAM_ATTACH_OWNERS[sid]; if (owner && owner.source === source) owner.generation = generation; } return this; } };
   window._liveStreamRegistry = LIVE_STREAMS;
@@ -664,12 +676,64 @@ const flush = () => new Promise(resolve => setTimeout(resolve, 0));
     windowObj._liveStreamRegistry.s1 = { streamId: 'stream-1', source: replacement, generation: 2 };
     oldSource.emit('apperror', { data: JSON.stringify({ session_id: 's1', type: 'error', message: 'failure' }) });
     await flush(); await flush();
+  } else if (scenario.kind === 'release-fallback') {
+    attach('s1', 'stream-1');
+    await flush();
+    state.sources[0].emit('stream_end', {});
+    await flush();
+    for(let i=0;i<4&&pending.length===0;i++) await flush();
+    if(pending[0]) pending[0].resolve({});
+    for(let i=0;i<8;i++) await flush();
+  } else if (scenario.kind === 'done-fade-replacement') {
+    attach('s1', 'stream-1');
+    await flush();
+    const first = state.sources[0];
+    first.emit('done', { data: JSON.stringify({ status: 'completed', session: { session_id: 's1', messages: [] } }) });
+    await flush();
+    first.emit('stream_end', {});
+    S.activeStreamId = 'stream-1';
+    S.session.active_stream_id = 'stream-1';
+    attach('s1', 'stream-1');
+    await flush();
+    await new Promise(resolve => setTimeout(resolve, 350));
+  } else if (scenario.kind === 'recovery-control-replacement') {
+    attach('s1', 'stream-1');
+    await flush();
+    const first = state.sources[0];
+    first.emit('apperror', { data: JSON.stringify({ session_id: 's1', type: 'interrupted', recovery_control: true, message: 'restore' }) });
+    S.activeStreamId = 'stream-1';
+    S.session.active_stream_id = 'stream-1';
+    attach('s1', 'stream-1');
+    await flush(); await flush();
+  } else if (scenario.kind === 'cancel-replacement') {
+    attach('s1', 'stream-1');
+    await flush();
+    const first = state.sources[0];
+    first.emit('cancel', { data: JSON.stringify({ session_id: 's1' }) });
+    S.activeStreamId = 'stream-1';
+    S.session.active_stream_id = 'stream-1';
+    attach('s1', 'stream-1');
+    await flush();
+    if (pending[0]) pending[0].resolve({ session: { session_id: 's1', messages: [{ role: 'assistant', content: 'stale' }] } });
+    await flush(); await flush();
+  } else if (scenario.kind === 'journal-replacement') {
+    attach('s1', 'stream-1');
+    await flush();
+    const first = state.sources[0];
+    const staleJournal = first.handlers.warning[first.handlers.warning.length - 1];
+    first.emit('cancel', { data: JSON.stringify({ session_id: 's1' }) });
+    state.journalCursors = 0;
+    S.activeStreamId = 'stream-1';
+    S.session.active_stream_id = 'stream-1';
+    attach('s1', 'stream-1');
+    await flush();
+    staleJournal({ data: '{}' });
   } else {
     attach('s1', 'stream-1');
     await flush();
     const first = state.sources[0];
     first.emit('error', {});
-    await new Promise(resolve => setTimeout(resolve, 1600));
+    await new Promise(resolve => setTimeout(resolve, 2000));
     first.readyState = 2;
     attach('s1', 'stream-1', [], { reconnecting: true });
     await flush();
@@ -692,6 +756,9 @@ const flush = () => new Promise(resolve => setTimeout(resolve, 0));
     registryIsReplacement: registry && registry.source === replacementSource,
     replacementClosed: replacementSource && replacementSource.closed,
   });
+  if (scenario.kind === 'release-fallback') result.teardownCalls = state.teardownCalls;
+  if (scenario.kind === 'recovery-control-replacement' || scenario.kind === 'cancel-replacement') result.renderMessages = state.renderMessages;
+  if (scenario.kind === 'journal-replacement') result.journalCursors = state.journalCursors;
   console.log(JSON.stringify(result));
 })().catch(error => { console.error(error.stack || error); process.exitCode = 1; });
 """
@@ -719,6 +786,30 @@ def _run_attach_mutation(fragment: str, replacement: str, scenario: dict) -> dic
     assert fragment in ATTACH_SOURCE
     mutated = ATTACH_SOURCE.replace(fragment, replacement, 1)
     return _run_attach_attempt_race_from_source(mutated, scenario)
+
+
+def _run_retarget_collision() -> dict:
+    source = base64.b64encode(RETARGET_SOURCE.encode()).decode()
+    script = f"""
+const retargetSource = Buffer.from('{source}', 'base64').toString();
+const LIVE_STREAM_ATTACH_OWNERS = Object.create(null);
+const LIVE_STREAMS = Object.create(null);
+const sourceA = {{ id: 'a' }};
+const sourceB = {{ id: 'b' }};
+const ownerA = {{ sid: 's1', streamId: 'stream-1', source: sourceA, generation: 1, state: 'published' }};
+const ownerB = {{ sid: 's2', streamId: 'stream-2', source: sourceB, generation: 2, state: 'published' }};
+LIVE_STREAM_ATTACH_OWNERS.s1 = ownerA;
+LIVE_STREAM_ATTACH_OWNERS.s2 = ownerB;
+LIVE_STREAMS.s1 = {{ streamId: 'stream-1', source: sourceA, generation: 1 }};
+LIVE_STREAMS.s2 = {{ streamId: 'stream-2', source: sourceB, generation: 2 }};
+eval(retargetSource);
+const result = _retargetLiveStreamTransportAuthority('s1', 's2', 'stream-1', 1);
+console.log(JSON.stringify({{ result, from: LIVE_STREAM_ATTACH_OWNERS.s1 === ownerA, to: LIVE_STREAM_ATTACH_OWNERS.s2 === ownerB, live: LIVE_STREAMS.s2.source === sourceB }}));
+"""
+    result = subprocess.run([NODE], input=script, capture_output=True, text=True)
+    if result.returncode:
+        raise AssertionError(result.stderr)
+    return json.loads(result.stdout)
 
 
 def _run_session_transition(source: str, setup: str, call: str) -> dict:
@@ -980,7 +1071,7 @@ def test_attach_owner_predicate_terms_are_load_bearing():
         ),
         (
             "source-generation",
-            "return owner.state==='published'&&owner.source===source&&owner.generation===_transportGeneration\n        &&LIVE_STREAMS[activeSid]&&LIVE_STREAMS[activeSid].source===source;",
+            "return owner.state==='published'&&owner.source===source&&owner.generation===_transportGeneration\n        &&(!LIVE_STREAMS[activeSid]||LIVE_STREAMS[activeSid].source===source);",
             "return true;",
             {"kind": "source-loss"},
         ),
@@ -1002,6 +1093,68 @@ def test_null_server_stream_mirror_does_not_block_browser_self_heal():
     assert result["sources"] == 1
     assert result["completionEvents"] == 1
     assert result["sessionActiveStreamId"] is None
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_terminal_release_keeps_live_registry_available_for_source_teardown():
+    result = _run_attach_attempt_race({"kind": "release-fallback"})
+    print(f"RELEASE_FALLBACK {result}")
+    assert result["sources"] == 1
+    assert result["closed"] == [True]
+    assert result.get("registrySource") is None
+    assert result["teardownCalls"] == ["s1"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_delayed_done_cannot_settle_after_stream_end_and_same_stream_replacement():
+    delayed_done_source = ATTACH_SOURCE.replace(
+        "if(_shouldUseLiveProseFade()&&assistantBody){",
+        "if(true){",
+        1,
+    ).replace(
+        "_drainStreamFadeBeforeDone(_finishDone);",
+        "setTimeout(_finishDone, 150);",
+        1,
+    )
+    result = _run_attach_attempt_race_from_source(delayed_done_source, {"kind": "done-fade-replacement"})
+    print(f"DONE_FADE_REPLACEMENT {result}")
+    assert result["sources"] == 2
+    assert result["closed"] == [True, False]
+    assert result["completionEvents"] == 0
+    assert result["ownerRecord"] == {"streamId": "stream-1", "generation": 2, "state": "published"}
+    assert result["registrySource"] == 1
+    assert result["activeStreamId"] == "stream-1"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_recovery_control_snapshot_cannot_render_after_same_stream_replacement():
+    result = _run_attach_attempt_race({"kind": "recovery-control-replacement"})
+    print(f"RECOVERY_CONTROL_REPLACEMENT {result}")
+    assert result["sources"] == 2
+    assert result["closed"] == [True, False]
+    assert result["renderMessages"] == 0
+    assert result["ownerRecord"] == {"streamId": "stream-1", "generation": 2, "state": "published"}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_cancel_snapshot_cannot_render_after_same_stream_replacement():
+    result = _run_attach_attempt_race({"kind": "cancel-replacement"})
+    print(f"CANCEL_REPLACEMENT {result}")
+    assert result["sources"] == 2
+    assert result["closed"] == [True, False]
+    assert result["renderMessages"] == 0
+    assert result["ownerRecord"] == {"streamId": "stream-1", "generation": 2, "state": "published"}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_stale_terminal_journal_callback_cannot_advance_replacement_cursor():
+    result = _run_attach_attempt_race({"kind": "journal-replacement"})
+    assert result["journalCursors"] == 0
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_terminal_retarget_rejects_destination_owner_collision():
+    assert _run_retarget_collision() == {"result": False, "from": True, "to": True, "live": True}
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
