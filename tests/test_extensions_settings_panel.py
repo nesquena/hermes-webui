@@ -87,12 +87,13 @@ def test_switch_settings_section_supports_extensions_lazy_load():
 
 
 def test_settings_search_knows_extensions_pane():
+    scan_block = _function_block("_scanSettingsPanes", extra=2600)
     build_block = _function_block("_buildSettingsIndex", extra=2600)
     filter_block = _function_block("filterSettings", extra=1700)
     resolve_block = _function_block("_resolveSettingsField", extra=1400)
 
     assert "loadExtensionsPanel()" in build_block
-    assert "settingsPaneExtensions: 'extensions'" in build_block
+    assert "settingsPaneExtensions: 'extensions'" in scan_block
     assert "extensions: t('settings_tab_extensions') || 'Extensions'" in filter_block
     assert "extensions: 'settingsPaneExtensions'" in resolve_block
 
