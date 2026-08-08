@@ -146,11 +146,21 @@ function _isComposerDraftRestoreSuppressed(sid, text, files) {
   return false;
 }
 
+function _profileNameIsRoot(name){
+  return typeof _cronProfileNameIsRootAlias==='function'
+    ? _cronProfileNameIsRootAlias(name)
+    : name==='default';
+}
+
+function _profileNamesEquivalent(first,second){
+  const firstName=(typeof first==='string'&&first.trim())?first.trim():'default';
+  const secondName=(typeof second==='string'&&second.trim())?second.trim():'default';
+  if(firstName===secondName) return true;
+  return _profileNameIsRoot(firstName)&&_profileNameIsRoot(secondName);
+}
+
 function _profileMatchesActiveProfile(profile, activeProfile){
-  const eventName = (typeof profile === 'string' && profile.trim()) ? profile.trim() : 'default';
-  const activeName = (typeof activeProfile === 'string' && activeProfile.trim()) ? activeProfile.trim() : 'default';
-  if(eventName === activeName) return true;
-  return eventName === 'default' && !!S.activeProfileIsDefault;
+  return _profileNamesEquivalent(profile,activeProfile);
 }
 
 function _sessionEventProfilesMatch(eventProfile, activeProfile){
@@ -620,6 +630,9 @@ function _cronProfileNameIsRootAlias(name) {
     const entry = _profilesCache.profiles.find((p) => p && p.name === name);
     if (entry && entry.is_default) return true;
   }
+  if (typeof S !== 'undefined' && S && S.activeProfileIsDefault
+    && typeof S.activeProfile === 'string'
+    && S.activeProfile.trim() === name) return true;
   return false;
 }
 
@@ -7295,6 +7308,7 @@ function _sessionVirtualSpacer(height, where){
 }
 
 function _scheduleSessionVirtualizedRender(){
+  if(window._sidebarGroupByProject) return;
   _sessionListLastScrollAt=Date.now();
   // While a profile-switch skeleton is up, ignore virtual-scroll events: the
   // cached rows are the PREVIOUS profile's, and repainting them here would
@@ -7545,6 +7559,121 @@ function _attachProjectQuickCreateButton(chip, project){
   chip.appendChild(btn);
 }
 
+
+function _buildSessionSidebarGroups(orderedSessions,groupByProject,projects,now){
+  const pinned=orderedSessions.filter(s=>s.pinned);
+  const unpinned=orderedSessions.filter(s=>!s.pinned);
+  const groups=[];
+  if(pinned.length) groups.push({label:'\u2605 Pinned',items:pinned,isPinned:true});
+  if(groupByProject){
+    const unassignedLabel=typeof t==='function'?t('sidebar_group_unassigned'):'Unassigned';
+    const byProject=new Map();
+    for(const s of unpinned){
+      const key=s.project_id||null;
+      if(!byProject.has(key)) byProject.set(key,[]);
+      byProject.get(key).push(s);
+    }
+    const emitted=new Set();
+    for(const project of (projects||[])){
+      const items=byProject.get(project.project_id);
+      if(!items||!items.length) continue;
+      groups.push({label:project.name||project.project_id,items,projectId:project.project_id,dropProjectId:project.project_id,project,collapseKey:'project:'+project.project_id});
+      emitted.add(project.project_id);
+    }
+    for(const [projectId,items] of byProject){
+      if(projectId&&emitted.has(projectId)) continue;
+      if(projectId) groups.push({label:projectId,items,projectId,dropProjectId:projectId,project:{project_id:projectId},collapseKey:'project:'+projectId});
+    }
+    const unassigned=byProject.get(null);
+    if(unassigned&&unassigned.length) groups.push({label:unassignedLabel,items:unassigned,dropProjectId:null,collapseKey:'unassigned'});
+    return groups;
+  }
+  let curLabel=null,curItems=[];
+  for(const s of unpinned){
+    const ts=_sessionSortTimestampMs(s);
+    const label=_sessionTimeBucketLabel(ts, now);
+    if(label!==curLabel){
+      if(curItems.length) groups.push({label:curLabel,items:curItems});
+      curLabel=label;curItems=[s];
+    }else curItems.push(s);
+  }
+  if(curItems.length) groups.push({label:curLabel,items:curItems});
+  return groups;
+}
+
+function _groupedProjectProfileHides(sessionProfile,projectProfile){
+  if(!sessionProfile||!projectProfile) return false;
+  return !_profileNamesEquivalent(sessionProfile,projectProfile);
+}
+
+const SESSION_PROJECT_DRAG_MIME='application/x-hermes-webui-session-id';
+const SESSION_PROJECT_DRAG_TEXT_PREFIX='hermes-webui-session:';
+let _activeSidebarProjectDragSessionId=null;
+
+function _setSessionProjectDragData(dt,sessionId){
+  if(!dt||!sessionId) return;
+  _activeSidebarProjectDragSessionId=sessionId;
+  try{dt.setData(SESSION_PROJECT_DRAG_MIME,sessionId);}catch(_){}
+  try{dt.setData('text/plain',SESSION_PROJECT_DRAG_TEXT_PREFIX+sessionId);}catch(_){}
+}
+
+function _clearSessionProjectDragData(){
+  _activeSidebarProjectDragSessionId=null;
+}
+function _bindSessionProjectDragCleanup(){
+  if(typeof window==='undefined'||window._sessionProjectDragCleanupBound) return;
+  window._sessionProjectDragCleanupBound=true;
+  window.addEventListener('dragend',_clearSessionProjectDragData,true);
+  window.addEventListener('drop',()=>setTimeout(_clearSessionProjectDragData,0),true);
+  window.addEventListener('pagehide',_clearSessionProjectDragData);
+  window.addEventListener('blur',_clearSessionProjectDragData);
+}
+_bindSessionProjectDragCleanup();
+
+function _sessionProjectDragSid(dt){
+  if(!dt) return '';
+  const custom=dt.getData&&dt.getData(SESSION_PROJECT_DRAG_MIME)||'';
+  if(custom) return custom===_activeSidebarProjectDragSessionId?custom:'';
+  const plain=dt.getData&&dt.getData('text/plain')||'';
+  const fallback=SESSION_PROJECT_DRAG_TEXT_PREFIX+(_activeSidebarProjectDragSessionId||'');
+  return plain&&plain===fallback?_activeSidebarProjectDragSessionId||'':'';
+}
+
+function _isSessionProjectMoveDrag(dt,validatePayload=true){
+  if(!dt) return false;
+  const types=Array.isArray(dt.types)?dt.types:Array.from(dt.types||[]);
+  if(types.includes(SESSION_PROJECT_DRAG_MIME)){
+    const custom=dt.getData&&dt.getData(SESSION_PROJECT_DRAG_MIME)||'';
+    return Boolean(_activeSidebarProjectDragSessionId&&(!validatePayload||custom===_activeSidebarProjectDragSessionId));
+  }
+  const plain=dt.getData&&dt.getData('text/plain')||'';
+  return Boolean(_activeSidebarProjectDragSessionId&&types.includes('text/plain')&&(!validatePayload||plain===SESSION_PROJECT_DRAG_TEXT_PREFIX+_activeSidebarProjectDragSessionId));
+}
+
+async function _handleGroupedProjectDrop(e,targetProject,targetLabel){
+  e.preventDefault();
+  const sid=_sessionProjectDragSid(e.dataTransfer);
+  const session=(_allSessions||[]).find(item=>item&&item.session_id===sid);
+  const targetProjectId=targetProject&&targetProject.project_id||null;
+  if(!session||session.project_id===targetProjectId) return false;
+  if(targetProject&&_groupedProjectProfileHides(session.profile,targetProject.profile)) return false;
+  return _moveSessionToProject(session,targetProjectId,targetLabel);
+}
+
+function _bindGroupedProjectDropTarget(hdr,targetProject,targetLabel){
+  hdr.addEventListener('dragover',(e)=>{
+    if(_isSessionProjectMoveDrag(e.dataTransfer,false)){
+      e.preventDefault();
+      e.dataTransfer.dropEffect='move';
+      hdr.classList.add('drag-over');
+    }
+  });
+  hdr.addEventListener('dragleave',()=>hdr.classList.remove('drag-over'));
+  hdr.addEventListener('drop',async(e)=>{
+    hdr.classList.remove('drag-over');
+    await _handleGroupedProjectDrop(e,targetProject,targetLabel);
+  });
+}
 
 function renderSessionListFromCache(){
   // #4671: while a profile-switch skeleton is up, bail — _allSessions still holds the
@@ -7801,31 +7930,18 @@ function renderSessionListFromCache(){
     list.appendChild(empty);
   }
   const orderedSessions=[...sessions].sort(_sessionSidebarSortCompare);
-  // Separate pinned from unpinned
-  const pinned=orderedSessions.filter(s=>s.pinned);
-  const unpinned=orderedSessions.filter(s=>!s.pinned);
   // Date grouping: Pinned / Today / Yesterday / This week / Last week / Older
   const now=_serverNowMs();
   // Collapse state persisted in localStorage
   let _groupCollapsed={};
   try{_groupCollapsed=JSON.parse(localStorage.getItem('hermes-date-groups-collapsed')||'{}');}catch(e){}
   const _saveCollapsed=()=>{try{localStorage.setItem('hermes-date-groups-collapsed',JSON.stringify(_groupCollapsed));}catch(e){}};
-  // Group sessions by date
-  const groups=[];
-  let curLabel=null,curItems=[];
-  if(pinned.length) groups.push({label:'\u2605 Pinned',items:pinned,isPinned:true});
-  for(const s of unpinned){
-    const ts=_sessionSortTimestampMs(s);
-    const label=_sessionTimeBucketLabel(ts, now);
-    if(label!==curLabel){
-      if(curItems.length) groups.push({label:curLabel,items:curItems});
-      curLabel=label;curItems=[s];
-    } else { curItems.push(s); }
-  }
-  if(curItems.length) groups.push({label:curLabel,items:curItems});
+  const groups=_buildSessionSidebarGroups(orderedSessions,!!window._sidebarGroupByProject,_allProjects,now);
+  const groupedMode=!!window._sidebarGroupByProject;
   const flatSessionRows=[];
   for(const g of groups){
-    if(_groupCollapsed[g.label]) continue;
+    const groupKey=g.collapseKey||g.label;
+    if(_groupCollapsed[groupKey]) continue;
     for(const s of g.items){ flatSessionRows.push({group:g,session:s}); }
   }
   _sessionVisibleSidebarIds=flatSessionRows.map(row=>row.session&&row.session.session_id).filter(Boolean);
@@ -7846,27 +7962,34 @@ function renderSessionListFromCache(){
     list.dataset.sessionVirtualActiveAnchor!==activeSidForSidebar||
     list.dataset.sessionVirtualFilter!==q
   );
-  const virtualWindowBeforeActiveAnchor=_sessionVirtualWindow({
-    total:flatSessionRows.length,
-    scrollTop:listScrollTopBeforeRender,
-    viewportHeight:list.clientHeight||520,
-    itemHeight:SESSION_VIRTUAL_ROW_HEIGHT,
-    buffer:SESSION_VIRTUAL_BUFFER_ROWS,
-    threshold:SESSION_VIRTUAL_THRESHOLD_ROWS,
-    activeIndex:-1,
-  });
+  const virtualWindowBeforeActiveAnchor=groupedMode
+    ? {start:0,end:flatSessionRows.length}
+    : _sessionVirtualWindow({
+      total:flatSessionRows.length,
+      scrollTop:listScrollTopBeforeRender,
+      viewportHeight:list.clientHeight||520,
+      itemHeight:SESSION_VIRTUAL_ROW_HEIGHT,
+      buffer:SESSION_VIRTUAL_BUFFER_ROWS,
+      threshold:SESSION_VIRTUAL_THRESHOLD_ROWS,
+      activeIndex:-1,
+    });
   const activeWasAlreadyVisible=activeIndex>=virtualWindowBeforeActiveAnchor.start&&activeIndex<virtualWindowBeforeActiveAnchor.end;
-  const shouldMoveSidebarToActive=shouldAnchorActive&&!activeWasAlreadyVisible;
-  let virtualWindow=_sessionVirtualWindow({
-    total:flatSessionRows.length,
-    scrollTop:listScrollTopBeforeRender,
-    viewportHeight:list.clientHeight||520,
-    itemHeight:SESSION_VIRTUAL_ROW_HEIGHT,
-    buffer:SESSION_VIRTUAL_BUFFER_ROWS,
-    threshold:SESSION_VIRTUAL_THRESHOLD_ROWS,
-    activeIndex:shouldMoveSidebarToActive?activeIndex:-1,
-  });
+  const shouldMoveSidebarToActive=groupedMode
+    ? !!shouldAnchorActive
+    : shouldAnchorActive&&!activeWasAlreadyVisible;
+  let virtualWindow=groupedMode
+    ? {virtualized:false,start:0,end:flatSessionRows.length,topPad:0,bottomPad:0,itemHeight:SESSION_VIRTUAL_ROW_HEIGHT,total:flatSessionRows.length}
+    : _sessionVirtualWindow({
+      total:flatSessionRows.length,
+      scrollTop:listScrollTopBeforeRender,
+      viewportHeight:list.clientHeight||520,
+      itemHeight:SESSION_VIRTUAL_ROW_HEIGHT,
+      buffer:SESSION_VIRTUAL_BUFFER_ROWS,
+      threshold:SESSION_VIRTUAL_THRESHOLD_ROWS,
+      activeIndex:shouldMoveSidebarToActive?activeIndex:-1,
+    });
   let virtualAnchorScrollTop=null;
+  let groupedActiveNeedsGeometry=groupedMode&&shouldMoveSidebarToActive;
   if(shouldMoveSidebarToActive&&virtualWindow.virtualized){
     list.dataset.sessionVirtualActiveAnchor=activeSidForSidebar;
     virtualAnchorScrollTop=virtualWindow.topPad;
@@ -7879,15 +8002,18 @@ function renderSessionListFromCache(){
   list.dataset.sessionVirtualFilter=q;
   list.dataset.sessionVirtualStart=String(virtualWindow.start);
   list.dataset.sessionVirtualEnd=String(virtualWindow.end);
-  // Render groups with collapsible headers. Large sidebars render only the
-  // current session-row window plus top/bottom spacers inside each group body;
-  // headers remain real DOM so pin/archive/date grouping and clicks survive.
+  // Grouped mode renders the complete header-and-row projection so browser geometry
+  // remains authoritative; flat mode retains its fixed-height row virtualizer.
   let globalSessionRowIndex=0;
   for(const g of groups){
     const wrapper=document.createElement('div');
-    wrapper.className='session-date-group';
+    wrapper.className='session-date-group'+(g.projectId?' project-session-group':'');
     const hdr=document.createElement('div');
-    hdr.className='session-date-header'+(g.isPinned?' pinned':'');
+    hdr.className='session-date-header'+(g.isPinned?' pinned':'')+(Object.prototype.hasOwnProperty.call(g,'dropProjectId')?' project-session-header':'');
+    if(window._sidebarGroupByProject&&Object.prototype.hasOwnProperty.call(g,'dropProjectId')){
+      hdr.dataset.projectId=g.dropProjectId||'';
+      _bindGroupedProjectDropTarget(hdr,g.project||null,g.label);
+    }
     const caret=document.createElement('span');
     caret.className='session-date-caret';
     caret.textContent='\u25BE'; // down when expanded; rotated right when collapsed
@@ -7896,13 +8022,14 @@ function renderSessionListFromCache(){
     hdr.appendChild(caret);hdr.appendChild(label);
     const body=document.createElement('div');
     body.className='session-date-body';
-    const isGroupCollapsed=Boolean(_groupCollapsed[g.label]);
+    const groupKey=g.collapseKey||g.label;
+    const isGroupCollapsed=Boolean(_groupCollapsed[groupKey]);
     if(isGroupCollapsed){body.style.display='none';caret.classList.add('collapsed');}
     hdr.onclick=()=>{
       const isCollapsed=body.style.display==='none';
       body.style.display=isCollapsed?'':'none';
       caret.classList.toggle('collapsed',!isCollapsed);
-      _groupCollapsed[g.label]=!isCollapsed;
+      _groupCollapsed[groupKey]=!isCollapsed;
       _saveCollapsed();
       renderSessionListFromCache();
     };
@@ -7921,6 +8048,14 @@ function renderSessionListFromCache(){
     if(groupBottomPad>0){ body.appendChild(_sessionVirtualSpacer(groupBottomPad,'after')); }
     wrapper.appendChild(body);
     list.appendChild(wrapper);
+  }
+  if(groupedActiveNeedsGeometry){
+    const activeEl=list.querySelector('.session-item.active');
+    if(activeEl){
+      const listRect=list.getBoundingClientRect();
+      const activeRect=activeEl.getBoundingClientRect();
+      virtualAnchorScrollTop=Math.max(0,list.scrollTop+activeRect.top-listRect.top-(list.clientHeight-activeRect.height)/2);
+    }
   }
   if(virtualAnchorScrollTop!==null){
     list.scrollTop=virtualAnchorScrollTop;
@@ -8024,8 +8159,45 @@ function renderSessionListFromCache(){
     }
     const sessionText=document.createElement('div');
     sessionText.className='session-text';
+    const _groupedFinePointer=window._sidebarGroupByProject&&window.matchMedia&&window.matchMedia('(pointer: fine)').matches;
     const titleRow=document.createElement('div');
     titleRow.className='session-title-row';
+    if(_groupedFinePointer&&!readOnly){
+      titleRow.classList.add('session-title-row-draggable');
+      titleRow.draggable=true;
+      const isGroupedDragControl=(target)=>{
+        const dragTarget=target&&target.nodeType===1?target:target&&target.parentElement;
+        return !!(dragTarget&&dragTarget.closest('button,input,label,.session-tag,.session-lineage-count,.session-child-count,.session-child-sessions,[contenteditable=""],[contenteditable="true"]'));
+      };
+      let groupedDragPointerOriginInteractive=false;
+      titleRow.addEventListener('pointerdown',(e)=>{
+        groupedDragPointerOriginInteractive=isGroupedDragControl(e.target);
+      },true);
+      titleRow.addEventListener('pointerup',()=>{groupedDragPointerOriginInteractive=false;},true);
+      titleRow.addEventListener('pointercancel',()=>{groupedDragPointerOriginInteractive=false;},true);
+      titleRow.addEventListener('dragstart',(e)=>{
+        if(groupedDragPointerOriginInteractive||isGroupedDragControl(e.target)){
+          e.preventDefault();
+          groupedDragPointerOriginInteractive=false;
+          return;
+        }
+        groupedDragPointerOriginInteractive=false;
+        e.stopPropagation();
+        if(!e.dataTransfer) return;
+        e.dataTransfer.effectAllowed='move';
+        _setSessionProjectDragData(e.dataTransfer,s.session_id);
+        el.classList.add('dragging');
+      });
+      titleRow.addEventListener('dragend',()=>{
+        _clearSessionProjectDragData();
+        el.classList.remove('dragging');
+      });
+      const dragHandle=document.createElement('span');
+      dragHandle.className='session-project-drag-handle';
+      dragHandle.textContent='⋮⋮';
+      dragHandle.title=typeof t==='function'?t('sidebar_group_drag_to_project'):'Drag to move to a project';
+      titleRow.appendChild(dragHandle);
+    }
     if(s.pinned&&!isPinnedGroup){
       const pinInd=document.createElement('span');
       pinInd.className='session-pin-indicator';
@@ -8582,7 +8754,8 @@ function renderSessionListFromCache(){
       _openSessionActionMenu(s, actions||el);
     };
 
-    if(!readOnly){
+    const _hasCoarsePointer=window.matchMedia&&window.matchMedia('(any-pointer: coarse)').matches;
+    if(!readOnly&&(!_groupedFinePointer||_hasCoarsePointer)){
       el.append(
         _makeSessionSwipeAffordance('right',s.archived?'undo':'archive',s.archived?'Restore':t('session_batch_archive')),
         _makeSessionSwipeAffordance('left','trash-2',t('session_batch_delete')),
@@ -9073,6 +9246,20 @@ async function deleteSession(sid, beforeDelete=null){
 
 const PROJECT_COLORS=['#7cb9ff','#f5c542','#e94560','#50c878','#c084fc','#fb923c','#67e8f9','#f472b6'];
 
+async function _moveSessionToProject(session,projectId,projectLabel){
+  try{
+    await api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:session.session_id,project_id:projectId||null})});
+    const idx=_allSessions.findIndex(item=>item&&item.session_id===session.session_id);
+    if(idx>=0) _allSessions[idx].project_id=projectId||null;
+    renderSessionListFromCache();
+    showToast(projectId?'Moved to '+(projectLabel||'project'):'Removed from project');
+    return true;
+  }catch(e){
+    showToast((projectId?'Move failed: ':'Unassign failed: ')+(e.message||e));
+    return false;
+  }
+}
+
 function _showProjectPicker(session, anchorEl){
   // Close any existing picker
   document.querySelectorAll('.project-picker').forEach(p=>p.remove());
@@ -9085,19 +9272,7 @@ function _showProjectPicker(session, anchorEl){
   none.onclick=async()=>{
     picker.remove();
     document.removeEventListener('click',close);
-    try {
-      await api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:session.session_id,project_id:null})});
-      // Sidebar rows are shallow copies of _allSessions entries (see
-      // _attachChildSessionsToSidebarRows), so mutating `session` only updates
-      // the discarded copy. Write into the authoritative cache so the next
-      // renderSessionListFromCache() reflects the move. (#2551)
-      const idx=_allSessions.findIndex(s=>s&&s.session_id===session.session_id);
-      if(idx>=0) _allSessions[idx].project_id=null;
-      renderSessionListFromCache();
-      showToast('Removed from project');
-    } catch(e) {
-      showToast('Unassign failed: '+(e.message||e));
-    }
+    await _moveSessionToProject(session,null);
   };
   picker.appendChild(none);
   // Project options — only show projects matching the session's profile.
@@ -9109,12 +9284,7 @@ function _showProjectPicker(session, anchorEl){
   // is the 'default' alias; let the server's allowlist be authoritative for the
   // default/renamed-root case.
   const sessionProfile = session ? (session.profile || undefined) : undefined;
-  const _profileHidesProject = (projProfile) => {
-    if(!sessionProfile || !projProfile) return false;
-    if(projProfile === sessionProfile) return false;
-    if(projProfile === 'default' || sessionProfile === 'default') return false;
-    return true;
-  };
+  const _profileHidesProject = (projProfile) => _groupedProjectProfileHides(sessionProfile,projProfile);
   for(const p of _allProjects){
     if (_profileHidesProject(p.profile)) continue;
     const item=document.createElement('div');
@@ -9131,14 +9301,7 @@ function _showProjectPicker(session, anchorEl){
     item.onclick=async()=>{
       picker.remove();
       document.removeEventListener('click',close);
-      try{
-        await api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:session.session_id,project_id:p.project_id})});
-        // See #2551 — write to _allSessions, not the shallow sidebar copy.
-        const idx=_allSessions.findIndex(s=>s&&s.session_id===session.session_id);
-        if(idx>=0) _allSessions[idx].project_id=p.project_id;
-        renderSessionListFromCache();
-        showToast('Moved to '+p.name);
-      }catch(e){showToast('Move failed: '+(e.message||e));}
+      await _moveSessionToProject(session,p.project_id,p.name);
     };
     picker.appendChild(item);
   }

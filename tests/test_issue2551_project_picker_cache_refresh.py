@@ -32,37 +32,30 @@ def _show_project_picker_body() -> str:
 PICKER_BODY = _show_project_picker_body()
 
 
+def _move_session_to_project_body() -> str:
+    start = SESSIONS_SRC.find("async function _moveSessionToProject(")
+    assert start != -1, "_moveSessionToProject not found in sessions.js"
+    end = SESSIONS_SRC.find("function _showProjectPicker(", start)
+    assert end != -1, "_showProjectPicker sentinel not found after move helper"
+    return SESSIONS_SRC[start:end]
+
+
+MOVE_HELPER_BODY = _move_session_to_project_body()
+
+
 def test_no_project_branch_writes_to_allSessions_cache():
-    """The 'No project' callback must update `_allSessions[idx].project_id`
-    after the /api/session/move call so the re-render reflects the move."""
-    none_idx = PICKER_BODY.find("'Removed from project'")
-    assert none_idx != -1, "'Removed from project' branch not located"
-    # Look back over the callback body
-    window = PICKER_BODY[max(0, none_idx - 600): none_idx]
-    assert "_allSessions.findIndex" in window, (
-        "No-project branch must locate the session in _allSessions so the "
-        "cache reflects the move (issue #2551)."
-    )
-    assert "_allSessions[idx].project_id=null" in window, (
-        "No-project branch must write project_id=null into _allSessions, "
-        "not just the shallow sidebar copy (issue #2551)."
-    )
+    """The shared move helper must write null to the authoritative cache."""
+    assert "_allSessions.findIndex" in MOVE_HELPER_BODY
+    assert "_allSessions[idx].project_id=projectId||null" in MOVE_HELPER_BODY
+    assert "Removed from project" in MOVE_HELPER_BODY
 
 
 def test_existing_project_branch_writes_to_allSessions_cache():
-    """The existing-project callback must update `_allSessions[idx].project_id`
-    after the /api/session/move call so the re-render reflects the move."""
-    moved_idx = PICKER_BODY.find("'Moved to '+p.name")
-    assert moved_idx != -1, "'Moved to '+p.name branch not located"
-    window = PICKER_BODY[max(0, moved_idx - 600): moved_idx]
-    assert "_allSessions.findIndex" in window, (
-        "Existing-project branch must locate the session in _allSessions so "
-        "the cache reflects the move (issue #2551)."
-    )
-    assert "_allSessions[idx].project_id=p.project_id" in window, (
-        "Existing-project branch must write project_id=p.project_id into "
-        "_allSessions, not just the shallow sidebar copy (issue #2551)."
-    )
+    """Both picker branches must delegate to the shared move helper."""
+    assert "await _moveSessionToProject(session,null)" in PICKER_BODY
+    assert "await _moveSessionToProject(session,p.project_id,p.name)" in PICKER_BODY
+    assert "await api('/api/session/move'" in MOVE_HELPER_BODY
+    assert "renderSessionListFromCache();" in MOVE_HELPER_BODY
 
 
 def test_picker_callbacks_do_not_rely_on_shallow_copy_mutation():
@@ -70,19 +63,11 @@ def test_picker_callbacks_do_not_rely_on_shallow_copy_mutation():
     updating the authoritative cache. The previous bug looked like
     `session.project_id=null; renderSessionListFromCache();` with no cache
     write between, which is what produced the stale render."""
-    # Both branches end with renderSessionListFromCache(). Count how many
-    # times the buggy bare mutation precedes a cache render with no
-    # _allSessions write in between.
+    # The picker delegates the cache write and render to the shared helper.
     buggy_no_project = "session.project_id=null;\n    renderSessionListFromCache();"
     buggy_existing = "session.project_id=p.project_id;\n      renderSessionListFromCache();"
-    assert buggy_no_project not in PICKER_BODY, (
-        "No-project branch still mutates only the shallow copy before "
-        "re-render — restore the _allSessions write (issue #2551)."
-    )
-    assert buggy_existing not in PICKER_BODY, (
-        "Existing-project branch still mutates only the shallow copy before "
-        "re-render — restore the _allSessions write (issue #2551)."
-    )
+    assert buggy_no_project not in PICKER_BODY
+    assert buggy_existing not in PICKER_BODY
 
 
 def test_cache_write_makes_render_observe_new_project_id():

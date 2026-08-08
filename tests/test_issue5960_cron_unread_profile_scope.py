@@ -157,6 +157,8 @@ def test_profile_switch_clears_persisted_old_profile_cron_markers_only():
             _extract_function(SESSIONS_JS, "_cronCompletionUnreadMetaForSession"),
             _extract_function(SESSIONS_JS, "_resolveCronCompletionMarkerOrigin"),
             _extract_function(SESSIONS_JS, "_cronMarkerProfileMatchesActive"),
+            _extract_function(SESSIONS_JS, "_profileNameIsRoot"),
+            _extract_function(SESSIONS_JS, "_profileNamesEquivalent"),
             _extract_function(SESSIONS_JS, "_profileMatchesActiveProfile"),
             _extract_function(
                 SESSIONS_JS, "_clearCronSessionCompletionUnreadForInactiveProfiles"
@@ -302,6 +304,10 @@ def test_session_list_path_tags_cron_markers_with_source_and_profile():
     meta_fn = _extract_function(SESSIONS_JS, "_cronCompletionUnreadMetaForSession")
     source_key = _extract_function(SESSIONS_JS, "_sourceKeyForSession")
     match_fn = _extract_function(SESSIONS_JS, "_cronMarkerProfileMatchesActive")
+    profile_name_is_root = _extract_function(SESSIONS_JS, "_profileNameIsRoot")
+    profile_names_equivalent = _extract_function(
+        SESSIONS_JS, "_profileNamesEquivalent"
+    )
     profile_match = _extract_function(SESSIONS_JS, "_profileMatchesActiveProfile")
     script = f"""
 const markCalls=[];
@@ -326,6 +332,8 @@ function _markSessionCompletionUnread(sid, count, meta){{
 {source_key}
 {is_cron}
 {meta_fn}
+{profile_name_is_root}
+{profile_names_equivalent}
 {profile_match}
 {match_fn}
 {mark_poll}
@@ -376,6 +384,9 @@ def test_legacy_untagged_cron_marker_cleared_via_sidebar_metadata():
             _extract_function(SESSIONS_JS, "_cronCompletionUnreadMetaForSession"),
             _extract_function(SESSIONS_JS, "_resolveCronCompletionMarkerOrigin"),
             _extract_function(SESSIONS_JS, "_cronMarkerProfileMatchesActive"),
+            _extract_function(SESSIONS_JS, "_cronProfileNameIsRootAlias"),
+            _extract_function(SESSIONS_JS, "_profileNameIsRoot"),
+            _extract_function(SESSIONS_JS, "_profileNamesEquivalent"),
             _extract_function(SESSIONS_JS, "_profileMatchesActiveProfile"),
             _extract_function(SESSIONS_JS, "_getSessionCompletionUnread"),
             _extract_function(SESSIONS_JS, "_saveSessionCompletionUnread"),
@@ -439,6 +450,9 @@ def test_root_alias_keeps_current_profile_cron_marker():
             _extract_function(SESSIONS_JS, "_cronCompletionUnreadMetaForSession"),
             _extract_function(SESSIONS_JS, "_resolveCronCompletionMarkerOrigin"),
             _extract_function(SESSIONS_JS, "_cronMarkerProfileMatchesActive"),
+            _extract_function(SESSIONS_JS, "_cronProfileNameIsRootAlias"),
+            _extract_function(SESSIONS_JS, "_profileNameIsRoot"),
+            _extract_function(SESSIONS_JS, "_profileNamesEquivalent"),
             _extract_function(SESSIONS_JS, "_profileMatchesActiveProfile"),
             _extract_function(SESSIONS_JS, "_getSessionCompletionUnread"),
             _extract_function(SESSIONS_JS, "_saveSessionCompletionUnread"),
@@ -501,6 +515,8 @@ def test_switch_to_literal_default_clears_other_profile_cron_markers():
             _extract_function(SESSIONS_JS, "_resolveCronCompletionMarkerOrigin"),
             _extract_function(SESSIONS_JS, "_cronProfileNameIsRootAlias"),
             _extract_function(SESSIONS_JS, "_cronMarkerProfileMatchesActive"),
+            _extract_function(SESSIONS_JS, "_profileNameIsRoot"),
+            _extract_function(SESSIONS_JS, "_profileNamesEquivalent"),
             _extract_function(SESSIONS_JS, "_profileMatchesActiveProfile"),
             _extract_function(SESSIONS_JS, "_getSessionCompletionUnread"),
             _extract_function(SESSIONS_JS, "_saveSessionCompletionUnread"),
@@ -581,6 +597,8 @@ def test_switch_to_literal_default_without_roster_fails_closed_on_unknown_names(
             _extract_function(SESSIONS_JS, "_resolveCronCompletionMarkerOrigin"),
             _extract_function(SESSIONS_JS, "_cronProfileNameIsRootAlias"),
             _extract_function(SESSIONS_JS, "_cronMarkerProfileMatchesActive"),
+            _extract_function(SESSIONS_JS, "_profileNameIsRoot"),
+            _extract_function(SESSIONS_JS, "_profileNamesEquivalent"),
             _extract_function(SESSIONS_JS, "_profileMatchesActiveProfile"),
             _extract_function(SESSIONS_JS, "_getSessionCompletionUnread"),
             _extract_function(SESSIONS_JS, "_saveSessionCompletionUnread"),
@@ -641,6 +659,8 @@ def test_stale_pre_switch_session_list_does_not_recreate_cron_markers():
             _extract_function(sessions_js, "_cronCompletionUnreadMetaForSession"),
             _extract_function(sessions_js, "_resolveCronCompletionMarkerOrigin"),
             _extract_function(sessions_js, "_cronMarkerProfileMatchesActive"),
+            _extract_function(sessions_js, "_profileNameIsRoot"),
+            _extract_function(sessions_js, "_profileNamesEquivalent"),
             _extract_function(sessions_js, "_profileMatchesActiveProfile"),
             _extract_function(sessions_js, "_getSessionCompletionUnread"),
             _extract_function(sessions_js, "_saveSessionCompletionUnread"),
@@ -769,6 +789,8 @@ def test_fresh_session_list_still_marks_when_unread_gen_matches():
             _extract_function(sessions_js, "_sourceKeyForSession"),
             _extract_function(sessions_js, "_cronCompletionUnreadMetaForSession"),
             _extract_function(sessions_js, "_cronMarkerProfileMatchesActive"),
+            _extract_function(sessions_js, "_profileNameIsRoot"),
+            _extract_function(sessions_js, "_profileNamesEquivalent"),
             _extract_function(sessions_js, "_profileMatchesActiveProfile"),
             _extract_function(sessions_js, "_getSessionCompletionUnread"),
             _extract_function(sessions_js, "_saveSessionCompletionUnread"),

@@ -5,8 +5,12 @@ These tests verify the static assets expose the reusable confirm/input modal
 and that browser-native confirm/prompt calls are no longer used in the Web UI.
 """
 
+import json
 import pathlib
 import re
+import shutil
+import subprocess
+import tempfile
 
 
 REPO = pathlib.Path(__file__).parent.parent
@@ -89,12 +93,114 @@ def test_acknowledgement_save_failure_uses_i18n_toast():
 
 def test_save_settings_password_change_preflights_current_password_before_api():
     src = read("static/panels.js")
-    match = re.search(r"async function saveSettings\([^)]*\)\{(.*?)\n\}", src, re.DOTALL)
-    assert match, "saveSettings() not found"
-    body = match.group(1)
-    assert "currentPwField=$('settingsCurrentPassword')" in body
-    assert "showToast(t('current_password_required'))" in body
-    assert body.index("showToast(t('current_password_required'))") < body.index("api('/api/settings'")
+    node = shutil.which("node")
+    assert node, "node is required for the behavioral preflight test"
+    harness = r'''
+const fs = require('fs');
+const source = fs.readFileSync(process.argv[2], 'utf8');
+const start = source.indexOf('async function saveSettings(');
+const brace = source.indexOf('{', start);
+let depth = 0;
+let end = brace;
+for (; end < source.length; end += 1) {
+  if (source[end] === '{') depth += 1;
+  if (source[end] === '}') { depth -= 1; if (!depth) { end += 1; break; } }
+}
+const fields = {};
+for (const id of [
+  'settingsModel','settingsSendKey','settingsShowTokenUsage','settingsShowQuotaChip',
+  'settingsShowConversationOutline','settingsShowTps','settingsFadeTextEffect','settingsShowCliSessions',
+  'settingsShowClaudeCodeSessions','settingsShowCronSessions','settingsShowWebhookSessions',
+  'settingsShowPreviousMessagingSessions','settingsPinnedSessionsLimit','settingsPassword','settingsTheme',
+  'settingsSkin','settingsFontSize','settingsLanguage','settingsSidebarDensity','settingsDefaultMessageMode',
+  'settingsShowBusyPlaceholderHint','settingsCurrentPassword'
+]) fields[id] = {value:'', checked:false};
+fields.settingsPinnedSessionsLimit.value = '3';
+fields.settingsPassword.value = 'new-secret';
+fields.settingsTheme.value = 'dark'; fields.settingsSkin.value = 'default';
+fields.settingsFontSize.value = 'default'; fields.settingsLanguage.value = 'en';
+fields.settingsSidebarDensity.value = 'compact'; fields.settingsDefaultMessageMode.value = 'steer';
+fields.settingsCurrentPassword.focus = () => { fields.settingsCurrentPassword.focused = true; };
+const $ = (id) => fields[id] || {value:'', checked:false, dataset:{}};
+const localStorage = {getItem:() => null};
+const window = {};
+const t = (key) => key;
+const toasts = [];
+let apiWrites = 0;
+let barrierWrites = 0;
+const showToast = (message) => { toasts.push(message); };
+const api = () => { apiWrites += 1; throw new Error('api write seam was called'); };
+const _captureModelDropdownSelection = () => ({model:'', model_provider:null});
+const _speechPreferencesPayloadFromUi = () => ({});
+const _structuredCodeViewFromUi = () => ({});
+const _composerControlVisibilityPayload = () => ({});
+const _getComposerControlOrder = () => [];
+const _writeSettingsWithAppearanceBarrier = () => { barrierWrites += 1; throw new Error('barrier write seam was called'); };
+let _settingsHermesDefaultModelOnOpen = '';
+let _settingsHermesDefaultModelProviderOnOpen = null;
+let _settingsPasswordAuthEnabled = true;
+// Late-exit stub bindings: inert stand-ins for helpers only the success path calls,
+// added so the explicit-binding factory can pass every free identifier it names.
+const _applySavedSettingsUi = () => {};
+const _updateCurrentPasswordVisibility = () => {};
+const _renderSettingsAuthStatus = () => {};
+const _updateAuthWarningBadge = () => {};
+const _updateAuthDisabledWarning = () => {};
+let _settingsDirty = false;
+const _resetSettingsPanelState = () => {};
+let _pendingSettingsTargetPanel = null;
+const _hideSettingsPanel = () => {};
+// Extraction technique: the Function constructor loads the repo-static saveSettings
+// body sliced from static/panels.js and binds the harness mocks explicitly. The
+// source is same-PR production code with no user input path, so this is behavioral
+// extraction proof, not dynamic code execution of untrusted text.
+const makeSaveSettings = new Function(
+  '$','_captureModelDropdownSelection','_settingsHermesDefaultModelOnOpen',
+  '_settingsHermesDefaultModelProviderOnOpen','localStorage',
+  '_speechPreferencesPayloadFromUi','_structuredCodeViewFromUi',
+  '_composerControlVisibilityPayload','_getComposerControlOrder','window',
+  '_settingsPasswordAuthEnabled','showToast','t',
+  'api','_writeSettingsWithAppearanceBarrier','_applySavedSettingsUi',
+  '_updateCurrentPasswordVisibility','_renderSettingsAuthStatus',
+  '_updateAuthWarningBadge','_updateAuthDisabledWarning','_settingsDirty',
+  '_resetSettingsPanelState','_pendingSettingsTargetPanel','_hideSettingsPanel',
+  source.slice(start, end) + '; return saveSettings;'
+);
+const saveSettings = makeSaveSettings(
+  $, _captureModelDropdownSelection, _settingsHermesDefaultModelOnOpen,
+  _settingsHermesDefaultModelProviderOnOpen, localStorage,
+  _speechPreferencesPayloadFromUi, _structuredCodeViewFromUi,
+  _composerControlVisibilityPayload, _getComposerControlOrder, window,
+  _settingsPasswordAuthEnabled, showToast, t,
+  api, _writeSettingsWithAppearanceBarrier, _applySavedSettingsUi,
+  _updateCurrentPasswordVisibility, _renderSettingsAuthStatus,
+  _updateAuthWarningBadge, _updateAuthDisabledWarning, _settingsDirty,
+  _resetSettingsPanelState, _pendingSettingsTargetPanel, _hideSettingsPanel
+);
+saveSettings(false).then(() => process.stdout.write(JSON.stringify({
+  focused:!!fields.settingsCurrentPassword.focused,
+  toasts,
+  apiWrites,
+  barrierWrites,
+})));
+'''
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".js", delete=False) as source_file:
+        source_file.write(src)
+        source_path = source_file.name
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".cjs", delete=False) as harness_file:
+        harness_file.write(harness)
+        harness_path = harness_file.name
+    try:
+        result = subprocess.run([node, harness_path, source_path], capture_output=True, text=True, check=True)
+    finally:
+        pathlib.Path(source_path).unlink(missing_ok=True)
+        pathlib.Path(harness_path).unlink(missing_ok=True)
+    assert json.loads(result.stdout) == {
+        "focused": True,
+        "toasts": ["current_password_required"],
+        "apiWrites": 0,
+        "barrierWrites": 0,
+    }
 
 
 def test_disable_auth_typed_confirm_locales_show_literal_phrase():

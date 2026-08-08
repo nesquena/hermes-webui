@@ -313,13 +313,43 @@ def test_session_events_refresh_timer_merges_pending_force_and_active_options():
 
 def test_session_event_profile_filter_tolerates_default_root_aliases():
     assert "function _profileMatchesActiveProfile(profile, activeProfile)" in SESSIONS_JS
-    assert "return eventName === 'default' && !!S.activeProfileIsDefault;" in SESSIONS_JS
     assert "function _sessionEventProfilesMatch(eventProfile, activeProfile)" in SESSIONS_JS
     assert "if (!_profileMatchesActiveProfile(sessionProfile, activeProfile)) return false;" in SESSIONS_JS
     assert "activeProfileIsDefault:true" in UI_JS
     assert "const activeProfileState = await _resolveActiveProfileBootstrapState();" in BOOT_JS
     assert "S.activeProfileIsDefault = activeProfileState.isDefault;" in BOOT_JS
     assert "S.activeProfileIsDefault = !!data.is_default;" in PANELS_JS
+
+    root_alias = _function_body(SESSIONS_JS, "_cronProfileNameIsRootAlias")
+    profile_root = _function_body(SESSIONS_JS, "_profileNameIsRoot")
+    equivalent = _function_body(SESSIONS_JS, "_profileNamesEquivalent")
+    script = textwrap.dedent(
+        f"""
+        let S = {{activeProfileIsDefault:true, activeProfile:'renamed-root'}};
+        let _profilesCache = {{profiles:[]}};
+        {root_alias}
+        {profile_root}
+        {equivalent}
+        const cold = {{
+          defaultToRenamed: _profileNamesEquivalent('default','renamed-root'),
+          renamedToDefault: _profileNamesEquivalent('renamed-root','default'),
+          unrelated: _profileNamesEquivalent('default','work'),
+        }};
+        S = {{activeProfileIsDefault:false, activeProfile:'work'}};
+        _profilesCache = {{profiles:[{{name:'renamed-root',is_default:true}}]}};
+        const warm = {{
+          defaultToRenamed: _profileNamesEquivalent('default','renamed-root'),
+          renamedToDefault: _profileNamesEquivalent('renamed-root','default'),
+          exact: _profileNamesEquivalent('work','work'),
+          unrelated: _profileNamesEquivalent('default','work'),
+        }};
+        process.stdout.write(JSON.stringify({{cold,warm}}));
+        """
+    )
+    assert _run_node(script) == {
+        "cold": {"defaultToRenamed": True, "renamedToDefault": True, "unrelated": False},
+        "warm": {"defaultToRenamed": True, "renamedToDefault": True, "exact": True, "unrelated": False},
+    }
 
 
 def test_session_list_render_signature_serializes_full_rows_not_a_narrow_allowlist():
