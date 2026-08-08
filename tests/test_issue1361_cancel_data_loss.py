@@ -779,3 +779,213 @@ def test_stale_stream_recovery_stamps_turn_id_and_fails_safe_on_mismatch():
         [{"name": "visible-state.png"}],
         pending_turn_id="stream_6407_other",
     ) is False
+
+
+# ── §F: #6407 — maintainer test plan (turn-id pipeline regressions) ──
+
+def test_deferred_success_merge_stamps_turn_id_on_committed_user_row():
+    """Test-plan item 1: the deferred start path must persist pending_turn_id
+    AND the successful merge must stamp the SAME _turn_id on the committed
+    user row before pending state is cleared — so the recovery matcher
+    recognizes the exact turn and a stale recovery can never claim a newer
+    turn with identical text."""
+    from api.streaming import _materialize_active_turn_user
+
+    identity = {
+        "token": "tok_6407_deferred",
+        "text": "please restart the WebUI",
+        "timestamp": 1778098700.0,
+        "source": "webui",
+        "attachments": [],
+        "current_turn_user_idx": 0,
+        "turn_id": "stream_6407_deferred",
+    }
+    merged = _materialize_active_turn_user(identity, "please restart the WebUI", "webui")
+
+    assert merged["role"] == "user"
+    assert merged["_turn_id"] == "stream_6407_deferred"
+    assert merged["timestamp"] == 1778098700.0
+    assert merged["_active_turn_token"] == "tok_6407_deferred"
+    # The committed row is now an exact checkpoint for this turn...
+    assert models._message_matches_pending_checkpoint(
+        merged, "please restart the WebUI", 1778098700, None, [],
+        pending_turn_id="stream_6407_deferred",
+    ) is True
+    # ...and is rejected for a DIFFERENT turn (same text/timestamp).
+    assert models._message_matches_pending_checkpoint(
+        merged, "please restart the WebUI", 1778098700, None, [],
+        pending_turn_id="stream_6407_other",
+    ) is False
+    # Legacy identity without turn_id: the merge must not stamp anything
+    # (migration rows keep the fingerprint-only contract).
+    legacy = _materialize_active_turn_user(
+        {"text": "legacy prompt", "timestamp": 100}, "legacy prompt", "webui",
+    )
+    assert legacy.get("_turn_id") is None
+
+
+def test_cancel_stream_synthesized_user_turn_stamps_same_turn_id():
+    """Test-plan item 2: cancel_stream()'s synthesized user turn (preserving
+    the typed prompt before pending state is cleared) must carry the SAME
+    _turn_id as the pending checkpoint, so a later stale recovery of this
+    cancelled turn can never claim a NEWER turn with the same prompt text."""
+    sid = "test_6407_cancel_synth"
+    stream_id = "stream_6407_cancel_synth"
+    _make_session(
+        session_id=sid,
+        pending_msg="please restart the WebUI",
+        messages=[{"role": "assistant", "content": "previous answer"}],
+    )
+    s = models.SESSIONS[sid]
+    s.pending_started_at = 1778098700.0
+    s.pending_turn_id = "stream_6407_cancel_synth"
+    _setup_cancel_state(sid, stream_id)
+    config.STREAM_PARTIAL_TEXT[stream_id] = "partial text before cancel"
+
+    cancel_stream(stream_id)
+
+    user_rows = [m for m in s.messages if m.get("role") == "user"]
+    assert len(user_rows) == 1
+    assert user_rows[0]["content"] == "please restart the WebUI"
+    assert user_rows[0]["_turn_id"] == "stream_6407_cancel_synth"
+    assert user_rows[0]["timestamp"] == 1778098700
+    # Pending identity is cleared only AFTER the row was committed.
+    assert s.pending_turn_id is None
+    assert s.pending_user_message is None
+
+
+def test_same_prompt_two_turns_stale_recovery_cannot_claim_new_row():
+    """Test-plan item 3: when the user sends the SAME prompt text twice, the
+    per-turn _turn_id must keep the two turns distinct — a stale recovery of
+    the FIRST turn must not match (and thereby suppress) the SECOND turn's
+    un-answered row, and _current_turn_has_final_assistant must classify the
+    second turn as NOT final even though the first has a committed answer."""
+    turn_a = {
+        "role": "user", "content": "please restart the WebUI",
+        "timestamp": 100, "_turn_id": "turn_6407_a",
+    }
+    turn_b = {
+        "role": "user", "content": "please restart the WebUI",
+        "timestamp": 200, "_turn_id": "turn_6407_b",
+    }
+    messages = [
+        turn_a,
+        {"role": "assistant", "content": "first answer", "timestamp": 101},
+        turn_b,
+    ]
+    # Row B is an exact checkpoint for turn B, not for turn A.
+    assert models._message_matches_pending_checkpoint(
+        turn_b, "please restart the WebUI", 200, None, [],
+        pending_turn_id="turn_6407_b",
+    ) is True
+    assert models._message_matches_pending_checkpoint(
+        turn_b, "please restart the WebUI", 200, None, [],
+        pending_turn_id="turn_6407_a",
+    ) is False
+    # Stale recovery of turn A must NOT claim row B (identical text).
+    assert models._message_matches_pending_checkpoint(
+        turn_b, "please restart the WebUI", 100, None, [],
+        pending_turn_id="turn_6407_a",
+    ) is False
+    # Turn B has no committed answer yet → not final, even though turn A was.
+    assert models._current_turn_has_final_assistant(
+        messages, "please restart the WebUI",
+        pending_started_at=200, pending_turn_id="turn_6407_b",
+    ) is False
+    # Turn A itself is final.
+    assert models._current_turn_has_final_assistant(
+        messages, "please restart the WebUI",
+        pending_started_at=100, pending_turn_id="turn_6407_a",
+    ) is True
+
+
+def test_legacy_rows_without_turn_id_use_migration_fingerprint():
+    """Test-plan item 4: rows persisted before the _turn_id field existed
+    must still match via the migration fingerprint (text + timestamp +
+    source + attachments) — the turn-id gate only applies when BOTH sides
+    carry a _turn_id."""
+    legacy = {"role": "user", "content": "please restart the WebUI", "timestamp": 100}
+    # No _turn_id on the row, pending side carries one → fingerprint match.
+    assert models._message_matches_pending_checkpoint(
+        legacy, "please restart the WebUI", 100, None, [],
+        pending_turn_id="stream_6407_legacy",
+    ) is True
+    # No _turn_id on either side → fingerprint match.
+    assert models._message_matches_pending_checkpoint(
+        legacy, "please restart the WebUI", 100, None, [],
+        pending_turn_id=None,
+    ) is True
+    # Fingerprint mismatch still fails (legacy rows are not text-only).
+    assert models._message_matches_pending_checkpoint(
+        legacy, "please restart the WebUI", 999, None, [],
+        pending_turn_id="stream_6407_legacy",
+    ) is False
+    # Row WITH _turn_id but pending side without (reverse migration) → fallback.
+    stamped = {"role": "user", "content": "please restart the WebUI",
+               "timestamp": 100, "_turn_id": "turn_6407_a"}
+    assert models._message_matches_pending_checkpoint(
+        stamped, "please restart the WebUI", 100, None, [],
+        pending_turn_id=None,
+    ) is True
+
+
+def test_pending_turn_id_survives_save_load_and_terminal_paths_clear_it():
+    """Test-plan item 5: pending_turn_id is persisted on save/load, and every
+    terminal path (cancel, error materializer, stale cleanup, cancelled-turn
+    persistence) clears it after committing the user row."""
+    sid = "test_6407_persist"
+    s = _make_session(
+        session_id=sid,
+        pending_msg="please restart the WebUI",
+        messages=[{"role": "assistant", "content": "previous answer"}],
+    )
+    s.pending_started_at = 1778098700.0
+    s.pending_turn_id = "stream_6407_persist"
+    s.save()
+
+    # Save → load round-trip preserves the field.
+    models.SESSIONS.pop(sid, None)
+    reloaded = models.Session.load(sid)
+    assert reloaded.pending_turn_id == "stream_6407_persist"
+    models.SESSIONS[sid] = s
+
+    # Terminal path 1: error materializer caller (_persist_cancelled_turn).
+    from api.streaming import _persist_cancelled_turn
+    _persist_cancelled_turn(s)
+    assert s.pending_turn_id is None
+    assert s.pending_user_message is None
+    user_rows = [m for m in s.messages if m.get("role") == "user"]
+    assert user_rows[-1]["_turn_id"] == "stream_6407_persist"
+
+    # Terminal path 2: cancel_stream.
+    sid2 = "test_6407_persist_cancel"
+    stream_id2 = "stream_6407_persist_cancel"
+    _make_session(
+        session_id=sid2,
+        pending_msg="please restart the WebUI",
+        messages=[{"role": "assistant", "content": "previous answer"}],
+    )
+    s2 = models.SESSIONS[sid2]
+    s2.pending_started_at = 1778098700.0
+    s2.pending_turn_id = "stream_6407_persist_cancel"
+    _setup_cancel_state(sid2, stream_id2)
+    cancel_stream(stream_id2)
+    assert s2.pending_turn_id is None
+    assert s2.messages[-1].get("role") == "assistant"  # cancel marker
+
+    # Terminal path 3: stale-stream cleanup (_clear_stale_stream_state).
+    from api.routes import _clear_stale_stream_state
+    sid3 = "test_6407_persist_stale"
+    s3 = _make_session(
+        session_id=sid3,
+        pending_msg="please restart the WebUI",
+        messages=[{"role": "assistant", "content": "previous answer"}],
+    )
+    s3.pending_started_at = 1778098700.0
+    s3.pending_turn_id = "stream_6407_persist_stale"
+    s3.active_stream_id = "stream_6407_persist_stale"
+    cleared = _clear_stale_stream_state(s3)
+    assert cleared is True
+    assert s3.pending_turn_id is None
+    user_rows3 = [m for m in s3.messages if m.get("role") == "user"]
+    assert user_rows3[-1]["_turn_id"] == "stream_6407_persist_stale"

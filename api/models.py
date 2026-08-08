@@ -967,6 +967,7 @@ def _current_turn_has_final_assistant(
     pending_started_at=None,
     pending_source=None,
     pending_attachments=None,
+    pending_turn_id=None,
 ) -> bool:
     """Return True when the pending user turn already has a committed
     non-partial, non-error assistant response in the transcript.
@@ -977,7 +978,11 @@ def _current_turn_has_final_assistant(
 
     To distinguish a genuine re-send of the same prompt text from a stale
     pending reference to an already-answered turn, this checks both text
-    match *and* checkpoint identity (timestamp, source, attachments).
+    match *and* checkpoint identity. Per-turn identity is primary
+    (#6407): when both the pending state and the checkpoint row carry a
+    `_turn_id`, exact-ID equality is required (fingerprint is the
+    migration fallback for rows that predate the field, handled by
+    `_message_matches_pending_checkpoint`).
 
     The WHOLE bounded turn is classified, not just the first assistant row:
     scanning starts at the checkpoint-matched user row and continues through
@@ -1017,6 +1022,7 @@ def _current_turn_has_final_assistant(
             _recovered_ts,
             pending_source,
             pending_attachments,
+            pending_turn_id=pending_turn_id,
         ):
             matched_user_idx = i
             break
@@ -2735,6 +2741,7 @@ def _pending_recovery_turn_start(session) -> int | None:
             session.pending_started_at,
             session.pending_user_source,
             session.pending_attachments,
+            pending_turn_id=getattr(session, 'pending_turn_id', None) or session.active_stream_id,
         ) or _message_matches_pending_text(message, pending_text):
             return idx
     return None
@@ -3481,12 +3488,14 @@ def _apply_core_sync_or_error_marker(
         pending_started_at=session.pending_started_at,
         pending_source=session.pending_user_source,
         pending_attachments=session.pending_attachments,
+        pending_turn_id=getattr(session, 'pending_turn_id', None) or _stream_id,
     ):
         session.active_stream_id = None
         session.pending_user_message = None
         session.pending_attachments = []
         session.pending_started_at = None
         session.pending_user_source = None
+        session.pending_turn_id = None
         session.save(touch_updated_at=touch_updated_at)
         logger.info(
             "Session %s: pending turn already has final assistant answer, "
@@ -3511,7 +3520,18 @@ def _apply_core_sync_or_error_marker(
             session.pending_attachments,
             pending_turn_id=getattr(session, 'pending_turn_id', None) or stream_id_for_recheck or session.active_stream_id,
         )
-        _tail_user_already_checkpointed = _already_checkpointed
+        _tail_user_already_checkpointed = _already_checkpointed or (
+            # Migration-era fallback (#6378): legacy eager-checkpoint rows
+            # predate the _turn_id field and may lack fingerprint
+            # timestamps; a text-only tail match is the only identity they
+            # carry. Gated on the tail row carrying NO _turn_id so an exact
+            # turn-id mismatch is never overridden by text (#6407).
+            isinstance(session.messages[-1], dict)
+            and not session.messages[-1].get('_turn_id')
+            and _message_matches_pending_text(
+                session.messages[-1], session.pending_user_message,
+            )
+        )
         _stream_id = stream_id_for_recheck or session.active_stream_id
         _pending_started_at = session.pending_started_at
         if _run_journal_terminal_state(session, _stream_id) == 'completed':
@@ -3605,7 +3625,19 @@ def _apply_core_sync_or_error_marker(
                 session.pending_attachments,
                 pending_turn_id=getattr(session, 'pending_turn_id', None) or stream_id_for_recheck or session.active_stream_id,
             )
-            _tail_user_already_checkpointed = _already_checkpointed
+            _tail_user_already_checkpointed = _already_checkpointed or (
+                # Migration-era fallback (#6378): legacy eager-checkpoint
+                # rows predate the _turn_id field and may lack fingerprint
+                # timestamps; a text-only tail match is the only identity
+                # they carry. Gated on the tail row carrying NO _turn_id so
+                # an exact turn-id mismatch is never overridden by text
+                # (#6407).
+                isinstance(session.messages[-1], dict)
+                and not session.messages[-1].get('_turn_id')
+                and _message_matches_pending_text(
+                    session.messages[-1], session.pending_user_message,
+                )
+            )
             if (
                 _pending_text
                 and not _tail_user_already_checkpointed

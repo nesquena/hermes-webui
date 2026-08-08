@@ -1608,6 +1608,13 @@ def _materialize_active_turn_user(identity, msg_text, source):
             message['timestamp'] = identity['timestamp']
         if identity.get('attachments'):
             message['attachments'] = copy.deepcopy(identity['attachments'])
+        _turn_id = str(identity.get('turn_id') or '').strip()
+        if _turn_id:
+            # Per-turn identity (#6407): the deferred success merge must stamp
+            # the SAME _turn_id the pending checkpoint uses, so the recovery
+            # matcher recognizes this exact turn (and a stale recovery can
+            # never claim a newer turn with identical text).
+            message['_turn_id'] = _turn_id
         stamp_message_source(
             message,
             identity.get('source') or source or 'webui',
@@ -11957,6 +11964,15 @@ def cancel_stream(stream_id: str) -> bool:
                             stamp_message_source(_user_turn, _pending_source)
                             if _pending_atts:
                                 _user_turn['attachments'] = _pending_atts
+                            # Per-turn identity (#6407): stamp the SAME _turn_id
+                            # the pending checkpoint carries so a stale recovery
+                            # of this cancelled turn can never claim a NEWER
+                            # turn that happens to reuse the same prompt text.
+                            _cancel_turn_id = (
+                                getattr(_cs, 'pending_turn_id', None) or stream_id
+                            )
+                            if _cancel_turn_id:
+                                _user_turn['_turn_id'] = _cancel_turn_id
                             _msgs_for_recovery.append(_user_turn)
                 except Exception:
                     logger.debug(
