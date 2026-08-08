@@ -249,6 +249,45 @@ def test_start_uses_nohup_so_daemon_survives_launcher_exit():
     assert 'exec nohup "${python_exe}"' in ctl_text
 
 
+def test_restart_expected_pid_refuses_to_stop_a_successor_pid(tmp_path):
+    """A delayed browser restart must never act on a PID-file successor."""
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    _seed_ctl_repo(repo_root)
+    pid_file = tmp_path / ".hermes" / "webui.pid"
+    pid_file.parent.mkdir(parents=True)
+    pid_file.write_text("999999\n", encoding="utf-8")
+
+    result = run_ctl(tmp_path, "restart", "--expected-pid", "4242", repo_root=repo_root)
+
+    assert result.returncode != 0
+    assert pid_file.read_text(encoding="utf-8") == "999999\n"
+
+
+def test_restart_without_expected_pid_preserves_documented_operator_workflow(tmp_path):
+    fake_python = tmp_path / "fake-python"
+    fake_log = tmp_path / "fake-python.log"
+    write_fake_python(fake_python)
+    env = {
+        "HERMES_WEBUI_PYTHON": str(fake_python),
+        "FAKE_PYTHON_LOG": str(fake_log),
+        "HERMES_WEBUI_PORT": "19071",
+        "HERMES_WEBUI_CTL_ALLOW_LAUNCHD_CONFLICT": "1",
+        "HERMES_WEBUI_CTL_ALLOW_SYSTEMD_CONFLICT": "1",
+        "HERMES_WEBUI_CTL_ALLOW_PORT_CONFLICT": "1",
+    }
+    start = run_ctl(tmp_path, "start", env=env)
+    assert start.returncode == 0, start.stderr + start.stdout
+    pid_file = tmp_path / ".hermes" / "webui.pid"
+    first_pid = wait_for_pid_file(pid_file)
+    try:
+        restarted = run_ctl(tmp_path, "restart", env=env)
+        assert restarted.returncode == 0, restarted.stderr + restarted.stdout
+        assert wait_for_pid_file(pid_file) != first_pid
+    finally:
+        run_ctl(tmp_path, "stop", env=env)
+
+
 def test_start_can_ignore_repo_dotenv_for_authoritative_test_env(tmp_path):
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
