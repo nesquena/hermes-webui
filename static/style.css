@@ -26,6 +26,7 @@
     --border-subtle:rgba(0,0,0,.08);--border-muted:rgba(0,0,0,.12);
     font-family:var(--font-ui);font-size:14px;line-height:1.6;
   }
+  button,input,select,textarea{font-family:var(--font-ui);}
   /* ── Font size modifiers ── */
   /* ── Font size preference: scale key UI text elements ── */
   /* Default is 14px (no attribute needed). Small=12px, Large=16px, Extra Large=18px. */
@@ -2415,7 +2416,7 @@
   .msg-body th{background:rgba(255,255,255,.07);padding:6px 10px;text-align:left;font-weight:600;border:1px solid var(--border2);}
   .msg-body td{padding:5px 10px;border:1px solid rgba(255,255,255,.06);}
   .msg-body tr:nth-child(even){background:rgba(255,255,255,.03);}
-  .markdown-table-filter{display:block;width:min(260px,100%);margin:8px 0 4px;padding:5px 8px;border:1px solid var(--border2);border-radius:6px;background:var(--input-bg);color:var(--text);font:inherit;font-size:12px;}
+  .markdown-table-filter{display:block;width:min(260px,100%);margin:8px 0 4px;padding:5px 8px;border:1px solid var(--border2);border-radius:6px;background:var(--input-bg);color:var(--text);font:inherit;font-family:var(--font-ui);font-size:12px;}
   .markdown-table-filter:focus{outline:1px solid var(--accent);outline-offset:1px;}
   .markdown-table-sort{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;min-height:20px;padding:0;border:0;background:transparent;color:inherit;font:inherit;font-weight:inherit;text-align:left;cursor:pointer;}
   .markdown-table-sort:focus-visible{outline:1px solid var(--accent);outline-offset:2px;}
