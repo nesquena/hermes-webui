@@ -412,6 +412,155 @@ def handle_upload_extract(handler):
         return j(handler, {'error': 'Archive extraction failed'}, status=500)
 
 
+def _normalize_transcribe_language(raw):
+    """Normalize a UI language hint to an ISO-639-1 primary subtag.
+
+    Accepts BCP-47 tags from the browser locale (e.g. ``"de-DE"`` → ``"de"``)
+    as ``str`` or ``bytes``. Returns ``""`` for empty/invalid input so callers
+    fall back to auto-detect.
+    """
+    if raw is None:
+        return ""
+    if isinstance(raw, bytes):
+        try:
+            raw = raw.decode("utf-8", "ignore")
+        except Exception:
+            return ""
+    text = str(raw).strip()
+    if not text:
+        return ""
+    primary = text.replace("_", "-").split("-", 1)[0].lower()
+    # ISO-639-1 is two letters; anything else is passed through only if it
+    # looks like a bare language code, else dropped to auto-detect.
+    if primary.isalpha() and 2 <= len(primary) <= 3:
+        return primary
+    return ""
+
+
+def _configured_stt_mime_types():
+    """Return the parsed stt.mime_types allowlist (lowercased tokens) or []
+    when unset/unreadable — empty means accept anything."""
+    try:
+        from api.config import get_config
+        stt = (get_config() or {}).get('stt', {})
+        raw = str((stt.get('mime_types') if isinstance(stt, dict) else '') or '').strip()
+    except Exception:
+        return []
+    if not raw:
+        return []
+    import re as _re
+    return [t.strip().lower() for t in _re.split(r'[,;]', raw) if t.strip()]
+
+
+def _sniff_audio_mime(data):
+    """Best-effort container detection from the leading bytes — content-based,
+    so it can't be fooled by a renamed extension. Returns a canonical MIME or
+    '' when unrecognised. Covers the formats a browser MediaRecorder / Dictate
+    upload realistically produces plus common uploads."""
+    if not data:
+        return ''
+    b = bytes(data[:16])
+    if b[:4] == b'OggS':
+        return 'audio/ogg'
+    if b[:4] == b'RIFF' and b[8:12] == b'WAVE':
+        return 'audio/wav'
+    if b[:4] == b'\x1aE\xdf\xa3':  # EBML → WebM/Matroska
+        return 'audio/webm'
+    if b[:4] == b'fLaC':
+        return 'audio/flac'
+    if b[:3] == b'ID3' or (len(b) >= 2 and b[0] == 0xFF and (b[1] & 0xE0) == 0xE0):
+        return 'audio/mpeg'
+    if b[4:8] == b'ftyp':
+        return 'audio/mp4'
+    # Containers below are not what a browser MediaRecorder emits, but they are
+    # perfectly ordinary uploads. They matter because identification is now
+    # content-ONLY: before, an unrecognised container still resolved through
+    # mimetypes.guess_type(filename), so a real .aiff or .wma passed a matching
+    # allowlist. Dropping the filename fallback without teaching the sniffer
+    # these would have turned a security fix into a rejection of valid audio.
+    if b[:4] == b'FORM' and b[8:12] in (b'AIFF', b'AIFC'):
+        return 'audio/aiff'
+    if b[:4] == b'.snd':
+        return 'audio/basic'
+    if b[:4] == b'\x30\x26\xb2\x75':  # ASF/WMA GUID
+        return 'audio/x-ms-wma'
+    if b[:5] == b'#!AMR':
+        return 'audio/amr'
+    if b[:4] == b'caff':
+        return 'audio/x-caf'
+    if b[:2] == b'\x0b\x77':  # AC-3 sync word
+        return 'audio/ac3'
+    if b[:4] == b'MThd':
+        return 'audio/midi'
+    return ''
+
+
+def _stt_mime_rejection(files, safe_name):
+    """Enforce the stt.mime_types allowlist. Returns an error string to reject
+    with (HTTP 415) or None to accept. An empty allowlist accepts anything.
+
+    Determination is CONTENT-based and content-ONLY: the upload's leading bytes
+    are sniffed for the real container. When an allowlist is configured, bytes
+    that cannot be positively identified are REJECTED — the filename is never
+    consulted, whatever its suffix.
+
+    ``safe_name`` is therefore deliberately unused in the decision. It used to
+    supply a ``mimetypes.guess_type()`` fallback for unrecognised bytes, which
+    made the allowlist advisory in exactly the case that matters: arbitrary
+    non-audio content named ``payload.webm`` claimed ``audio/webm`` and walked
+    straight through an ``audio/webm`` allowlist. Identification has to come
+    from the thing the attacker does not control for free.
+
+    An operator who wants everything through simply leaves ``stt.mime_types``
+    unset, or lists ``*/*``."""
+    allow = _configured_stt_mime_types()
+    if not allow:
+        return None
+    file_bytes = b''
+    entry = files.get('file') if isinstance(files, dict) else None
+    if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+        file_bytes = entry[1] or b''
+    ctype = _sniff_audio_mime(file_bytes)
+    if not ctype:
+        if '*/*' in allow:
+            return None
+        return ('Could not determine the audio type of this upload from its '
+                'contents; the server only accepts %s' % ', '.join(allow))
+    top = ctype.split('/', 1)[0]
+    for tok in allow:
+        if tok == ctype or tok == top + '/*' or tok == '*/*':
+            return None
+    return 'Audio type "%s" is not in the allowed types (%s)' % (ctype, ', '.join(allow))
+
+
+def _agent_profile_scope(purpose):
+    """Bind an Agent voice helper call to the profile that issued the request.
+
+    Shared by the STT routes here and by ``api.voice_config``'s TTS capability
+    probe — one definition so the two cannot drift apart on which scope they
+    enter.
+
+    ``transcribe_audio`` and the capability probe resolve their provider,
+    ``config.yaml`` and credentials through the agent's ambient helpers, which
+    read process env and ``get_hermes_home()``. A WebUI request carries its
+    profile in a cookie that ``server.py`` turns into a thread-local — without
+    entering the profile scope here, a named profile's Dictate would transcribe
+    through the ROOT profile's provider, using the root profile's API key and
+    self-hosted endpoint. Mirrors ``/api/models/live``.
+
+    Returns a context manager; a no-op one when profiles are unavailable, so an
+    embedded/stand-alone WebUI keeps working.
+    """
+    try:
+        from api.profiles import profile_env_for_active_request
+
+        return profile_env_for_active_request(purpose)
+    except Exception:
+        from contextlib import nullcontext
+
+        return nullcontext()
+
+
 def handle_transcribe(handler):
     import traceback as _tb
     temp_path = None
@@ -427,6 +576,13 @@ def handle_transcribe(handler):
         if not filename:
             return j(handler, {'error': 'No filename in upload'}, status=400)
         safe_name = _sanitize_upload_name(filename)
+        # Optional operator-configured MIME allowlist (stt.mime_types, e.g.
+        # "audio/webm,audio/ogg"). Enforced here so the setting is real rather
+        # than advisory; empty/absent = accept anything. Matches on the upload's
+        # declared content-type, with a suffix fallback, and supports "audio/*".
+        _mime_reject = _stt_mime_rejection(files, safe_name)
+        if _mime_reject is not None:
+            return j(handler, {'error': _mime_reject}, status=415)
         suffix = Path(safe_name).suffix or '.webm'
         with tempfile.NamedTemporaryFile(prefix='webui-stt-', suffix=suffix, delete=False) as tmp:
             temp_path = tmp.name
@@ -435,11 +591,40 @@ def handle_transcribe(handler):
             from tools.transcription_tools import transcribe_audio
         except ImportError:
             return j(handler, {'error': 'Speech-to-text is unavailable on this server'}, status=503)
-        result = transcribe_audio(temp_path)
+        # Optional language hint from the UI locale (e.g. "de", "en-US"); the
+        # provider decides whether/how to use it. Empty/absent = auto-detect.
+        # Feature-detect the kwarg via the signature — older transcription_tools
+        # degrade gracefully to auto-detect. (Not except TypeError: that would
+        # swallow genuine TypeErrors from provider code and transcribe twice.)
+        language = _normalize_transcribe_language(fields.get('language'))
+        if language:
+            import inspect
+            try:
+                if 'language' not in inspect.signature(transcribe_audio).parameters:
+                    language = ''
+            except (TypeError, ValueError):
+                language = ''
+        with _agent_profile_scope('/api/transcribe'):
+            result = transcribe_audio(temp_path, language=language) if language \
+                else transcribe_audio(temp_path)
         if not result.get('success'):
-            msg = str(result.get('error') or 'Transcription failed')
-            status = 503 if 'unavailable' in msg.lower() or 'not configured' in msg.lower() else 400
-            return j(handler, {'error': msg}, status=status)
+            raw_msg = str(result.get('error') or 'Transcription failed')
+            low = raw_msg.lower()
+            status = 503 if 'unavailable' in low or 'not configured' in low else 400
+            # The provider error can embed server temp paths / ffmpeg build
+            # details (subprocess stderr). Log the full text server-side but
+            # return a category to the client instead of leaking filesystem
+            # internals. Known-safe categories keep useful UX.
+            print('[webui] transcribe provider error: ' + raw_msg, flush=True)
+            if 'unavailable' in low or 'not configured' in low:
+                client_msg = 'Speech-to-text is not available on this server'
+            elif 'timeout' in low or 'timed out' in low:
+                client_msg = 'Transcription timed out'
+            elif 'connection' in low:
+                client_msg = 'Could not reach the transcription server'
+            else:
+                client_msg = 'Could not transcribe the audio (unsupported or corrupt file)'
+            return j(handler, {'error': client_msg}, status=status)
         transcript = str(result.get('transcript') or '').strip()
         return j(handler, {'ok': True, 'transcript': transcript})
     except ValueError as e:
@@ -576,12 +761,20 @@ def _stt_provider_capability_from_module(stt):
 
 
 def _stt_provider_capability():
-    """Return (available, provider) for a cheap server-side STT capability probe."""
+    """Return (available, provider) for a cheap server-side STT capability probe.
+
+    Runs inside the request profile's scope for the same reason
+    ``handle_transcribe`` does: the probe reads ``stt.*`` from config.yaml and
+    tests provider credentials, so on a named profile it must not answer with
+    the root profile's provider (which the browser would then use to decide
+    whether to route voice mode at the server at all).
+    """
     try:
         import tools.transcription_tools as stt
     except ImportError:
         return False, "none"
-    return _stt_provider_capability_from_module(stt)
+    with _agent_profile_scope('/api/transcribe/capability'):
+        return _stt_provider_capability_from_module(stt)
 
 
 def handle_transcribe_capability(handler):

@@ -6115,7 +6115,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(isActiveSession) _queueDrainSid=activeSid;
         renderSessionList();
         _setActivePaneIdleIfOwner();
-        playNotificationSound();
+        playNotificationSound(completedSid);
         // #4416: notify if the tab was hidden at ANY point during this stream
         // (not just at done-receive time, which a throttled background-tab SSE
         // delivers late — after the user returns and document.hidden is false).
@@ -8647,8 +8647,18 @@ function _completionNotificationPreviewText(lastAssistantMessage, options){
   return normalized.length>100?`${normalized.slice(0,100)}…`:normalized;
 }
 
-function playNotificationSound(){
+function playNotificationSound(completedSessionId){
   if(!window._soundEnabled) return;
+  // In hands-free voice mode the spoken TTS reply IS the completion signal —
+  // the chime would play right before every answer ("beep, then the reply").
+  // Suppress it ONLY for the turn voice mode itself sent: a global "voice mode
+  // is on" check also silenced the completion of every OTHER session, so a
+  // background task the user was waiting on finished without a sound while
+  // they were talking to a different chat.
+  try{
+    if(completedSessionId && typeof window._voiceModeOwnsCompletion==='function'
+        && window._voiceModeOwnsCompletion(completedSessionId)) return;
+  }catch(_){}
   try{
     const ctx=new (window.AudioContext||window.webkitAudioContext)();
     const osc=ctx.createOscillator();

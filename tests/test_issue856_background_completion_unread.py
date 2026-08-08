@@ -96,7 +96,7 @@ def test_done_event_updates_sidebar_cache_immediately_after_completion_marker():
         cleanup_idx = done_block.find("delete INFLIGHT[activeSid];")
     cache_idx = done_block.find("_markSessionCompletedInList(completedSession, activeSid);")
     refresh_idx = done_block.find("renderSessionList();", cache_idx)
-    sound_idx = done_block.find("playNotificationSound();", cache_idx)
+    sound_idx = done_block.find("playNotificationSound(", cache_idx)
 
     assert "function _markSessionCompletedInList(" in SESSIONS_JS
     assert marker_idx != -1, "done handler must write the completion-unread marker first"

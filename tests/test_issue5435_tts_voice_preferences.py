@@ -20,6 +20,7 @@ SPEECH_DEFAULTS = {
     "tts_voice": "",
     "tts_rate": 1.0,
     "tts_pitch": 1.0,
+    "tts_split": "punctuation",
     "voice_mode_button": False,
     "voice_continuous": False,
     "voice_silence_ms": 1800,

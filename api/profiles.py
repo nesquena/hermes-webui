@@ -21,6 +21,7 @@ from typing import Optional
 
 import yaml
 
+from api.operator_env import OPERATOR_ONLY_ENV_KEYS
 from api.paths import _atomic_write_text
 from api.session_events import publish_session_list_changed
 
@@ -194,11 +195,14 @@ def _unwrap_profile_home_to_base(home: Path) -> Path:
     return home
 
 
-# Env keys a pinned profile's .env may NOT override via _reload_dotenv() — these
-# are operator/deployment-level postures, not per-profile toggles. Letting a
-# profile .env set HERMES_WEBUI_ISOLATED_PROFILE=0 would let a contained user
-# escape isolation (#4589).
-_PROTECTED_ENV_KEYS = frozenset({'HERMES_WEBUI_ISOLATED_PROFILE'})
+# Env keys a pinned profile's dotenv file may NOT override via
+# _reload_dotenv() — these are operator/deployment-level postures, not
+# per-profile toggles. Letting a profile set HERMES_WEBUI_ISOLATED_PROFILE=0
+# would let a contained user escape isolation (#4589); the voice/TTS controls
+# in the same set would let one turn on server-config writes and widen the SSRF
+# guard to hosts of its choosing. The authoritative set — and the immutable
+# startup values these paths fall back to — live in api/operator_env.py.
+_PROTECTED_ENV_KEYS = OPERATOR_ONLY_ENV_KEYS
 
 
 def _isolated_profile_opt_in() -> bool:
@@ -931,9 +935,11 @@ _BLOCKED_RUNTIME_ENV_KEYS = {
     'PYTHONPATH',
     'VIRTUAL_ENV',
     'LD_LIBRARY_PATH',
-    # #4589: operator/deployment isolation posture — never overridable by a
-    # profile's own env on any runtime/gateway-parity path.
-    'HERMES_WEBUI_ISOLATED_PROFILE',
+    # #4589: operator/deployment posture — never overridable by a profile's own
+    # env on any runtime/gateway-parity path. Beyond isolation this covers the
+    # voice-config write gate and the TTS LAN allowlist, which would otherwise
+    # let a profile grant itself operator authority.
+    *OPERATOR_ONLY_ENV_KEYS,
 }
 
 
