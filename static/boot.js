@@ -1337,15 +1337,40 @@ const _DEFAULT_MESSAGE_MODES=['queue','interrupt','steer'];
 const _LEGACY_DEFAULT_MESSAGE_MODE_KEY='hermes-busy-input-mode';
 const _DEFAULT_MESSAGE_MODE_KEY='hermes-default-message-mode';
 // ── Auto-follow eager mirror (#6819) ────────────────────────────────────────
-// The Auto-follow new content toggle must survive a transient settings-fetch
-// failure at boot. The settings-fetch failure path used to hardcode
-// `window._autoScrollFollow=true`, silently clobbering an explicit OFF for the
-// whole session (post-turn scroll yanks until the next refresh). Mirror the
-// resolved value into localStorage, PROFILE-NAMESPACED (one JSON map keyed by
-// profile name) so switching profiles never leaks one profile's preference
-// into another. The fallback reads the mirror instead of hardcoding ON.
+// PERSISTENCE CONTRACT (client-side mirror of the Auto-follow new content
+// setting, `auto_scroll_follow`):
+//
+// * Why: the boot settings-fetch-failure path used to hardcode
+//   `window._autoScrollFollow=true`, silently clobbering an explicit OFF for
+//   the whole session (post-turn scroll yanks until the next refresh).
+// * Storage: one localStorage JSON map under `_AUTO_SCROLL_FOLLOW_KEY`,
+//   PROFILE-NAMESPACED — `{ "<profile>": 0|1 }`. Values are written ONLY when
+//   a settings response (or the boot settings path) actually resolves the
+//   setting for the CURRENT profile; the fallback path never writes.
+// * Profile key resolution order (must be stable across the whole boot):
+//   1. `hermes_profile` cookie — set per-client by `/api/profile/switch`
+//      (api/helpers.py PROFILE_COOKIE_NAME), available synchronously at page
+//      load, BEFORE boot resolves S.activeProfile (which happens later in the
+//      async boot IIFE). This is what keeps a non-default profile's failed
+//      settings fetch from reading the `default` mirror entry.
+//   2. `S.activeProfile` — fallback for the default profile (no cookie set).
+//   3. `'default'` — final fallback; matches the server's default profile.
+// * Read semantics: `_readPersistedAutoScrollFollow()` returns the mirror
+//   entry for the CURRENT profile if present, else `true` (the config.py
+//   default). The boot fallback reads it; fresh users (no mirror) get ON.
+// * Upgrade: there is no legacy global key; the mirror is created on first
+//   settings resolve, so older sessions simply default to ON until the next
+//   settings round-trip writes their profile entry.
 const _AUTO_SCROLL_FOLLOW_KEY='hermes-auto-scroll-follow';
+const _PROFILE_COOKIE_NAME='hermes_profile';
 function _autoScrollFollowProfileKey(){
+  // Cookie first: it is the per-client profile identity and is readable
+  // before S.activeProfile is initialized (boot resolves it later, after the
+  // settings fetch — see P1 review on #6856).
+  try{
+    const m=document.cookie.match(new RegExp('(?:^|;\\s*)'+_PROFILE_COOKIE_NAME+'=([^;]*)'));
+    if(m&&m[1]) return decodeURIComponent(m[1]);
+  }catch(_){}
   return (typeof S!=='undefined'&&S&&S.activeProfile)||'default';
 }
 function _persistAutoScrollFollow(enabled){
