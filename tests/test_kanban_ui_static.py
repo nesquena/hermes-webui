@@ -1338,3 +1338,177 @@ def test_kanban_unassigned_lane_in_sidebar_meta():
     meta_body = meta_match.group(1)
     # Must emit unassigned label when task.assignee is falsy.
     assert "t('kanban_unassigned')" in meta_body
+
+
+def test_kanban_card_exposes_execution_model_override():
+    """A task with a model_override must surface the model on the board card
+    and in the task meta, so the executing model is visible at a glance."""
+    # _kanbanTaskMeta appends a 🧠 chip carrying the override (provider wins the
+    # label when both are set, since it disambiguates the backend).
+    meta_match = re.search(
+        r"function _kanbanTaskMeta\(task\)\{(.*?)\n\}",
+        PANELS,
+        re.DOTALL,
+    )
+    assert meta_match, "_kanbanTaskMeta() not found"
+    meta_body = meta_match.group(1)
+    assert "task.model_override" in meta_body
+    assert "task.provider_override || task.model_override" in meta_body
+    assert "🧠" in meta_body
+
+    # _kanbanCard renders a .kanban-badge.model chip in the card top line when
+    # an override is set, and omits it when there is none.
+    card_match = re.search(
+        r"function _kanbanCard\(task, status\)\{(.*?)\n\}",
+        PANELS,
+        re.DOTALL,
+    )
+    assert card_match, "_kanbanCard() not found"
+    card_body = card_match.group(1)
+    assert "kanban-badge model" in card_body
+    assert "task.model_override ?" in card_body or "task.model_override\n" in card_body
+
+    # Detail panel shows an explicit Model row (override or 'profile default').
+    detail_match = re.search(
+        r"function _kanbanRenderTaskDetail\(data\)\{(.*?)\n\}",
+        PANELS,
+        re.DOTALL,
+    )
+    assert detail_match, "_kanbanRenderTaskDetail() not found"
+    detail_body = detail_match.group(1)
+    assert "kanban-detail-model" in detail_body
+    assert "kanban_no_model_override" in detail_body
+
+    # i18n keys exist (English block) so the labels/tooltips resolve.
+    assert "kanban_model:" in I18N
+    assert "kanban_provider:" in I18N
+    assert "kanban_no_model_override:" in I18N
+    assert "kanban_card_model_hint:" in I18N
+
+
+def test_kanban_model_badge_static_render_e2e():
+    """Execute _kanbanCard() with override present/absent to prove the badge is
+    genuinely emitted into the returned HTML, not just referenced in source."""
+    import json
+    import subprocess
+
+    fn_source = extract_function(PANELS, "_kanbanCard")
+    script = (
+        "const fnSource = " + json.dumps(fn_source) + ";\n"
+        "const out = {};\n"
+        "new Function('out', fnSource + '; out.fn = _kanbanCard;')(out);\n"
+        "const t = () => '';\n"
+        "const esc = (s) => String(s == null ? '' : s)"
+                "  .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')\n"
+                "  .replace(/\\\"/g,'&quot;').replace(/'/g,'&#39;');\n"
+                "const _kanbanTaskAge = () => '';\n"
+                "const _kanbanTaskBody = (task) => task.body || task.description || task.prompt || '';\n"
+                "const _kanbanCardStalenessClass = () => '';\n"
+                "const _kanbanTaskTitle = (task) => task.title || task.id || '';\n"
+                "const _kanbanCardQuickActions = () => '';\n"
+                "const taskWith = { id:'t1', model_override:'gpt-5.6-sol', provider_override:'openai' };\n"
+        "const withModel = out.fn(taskWith, 'ready');\n"
+        "const without = out.fn({ id:'t2' }, 'todo');\n"
+        "out.withModel = withModel;\n"
+        "out.without = without;\n"
+        "out.hasBadge = /kanban-badge model/.test(withModel) && /🧠 gpt-5.6-sol/.test(withModel);\n"
+        "out.noBadge = !/kanban-badge model/.test(without);\n"
+        "console.log(JSON.stringify(out));\n"
+    )
+    result = subprocess.run(
+        ["node", "-e", script],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, f"node -e failed: {result.stderr}"
+    payload = json.loads(result.stdout)
+    assert payload["hasBadge"] is True, "model_override must render a model badge on the card"
+    assert payload["noBadge"] is True, "card without model_override must not render a model badge"
+
+
+def test_kanban_editor_modal_has_model_and_provider_fields():
+    """Create/edit task modal must expose a Model selector backed by the shared
+    /api/models catalog via the same searchable renderModelDropdown() picker the
+    composer + settings use (not free-text, not a bare native select), and the
+    submit handler must route the chosen model + provider to the API so users can
+    configure the card's executing model from the WebUI."""
+    # The model field is a chip trigger + hidden full-catalog <select> + dropdown
+    # shell (the renderModelDropdown pattern). No separate provider text field.
+    assert 'id="kanbanTaskModalModelChip"' in INDEX
+    assert 'id="kanbanTaskModalModel"' in INDEX
+    assert 'id="kanbanTaskModalModelDropdown"' in INDEX
+    assert 'class="model-dropdown settings-model-dropdown"' in INDEX
+    assert 'id="kanbanTaskModalProvider"' not in INDEX
+
+    # Labels / placeholder-free hint wired for i18n.
+    assert 'data-i18n="kanban_model"' in INDEX
+    assert 'data-i18n="kanban_model_hint"' in INDEX
+
+    # The populator reuses the same /api/models catalog + provider grouping +
+    # overflow the composer picker uses (data-extraModels feeds "Show more"),
+    # and restores a task's PERSISTED provider on edit so an unrelated edit
+    # doesn't rewrite or strip the saved provider pin.
+    populate_match = re.search(
+        r"function _kanbanPopulateModelSelect\(currentValue, currentProvider\)\{(.*?)\n\}",
+        PANELS, re.DOTALL,
+    )
+    assert populate_match, "_kanbanPopulateModelSelect(currentValue, currentProvider) not found"
+    populate_body = populate_match.group(1)
+    assert "api/models" in populate_body
+    assert "optgroup" in populate_body
+    assert "dataset.provider" in populate_body
+    assert "dataset.extraModels" in populate_body  # full list: overflow/"Show more"
+    assert "kanban_no_model_override" in populate_body
+    assert "currentProvider" in populate_body  # edit preserves persisted provider
+    assert "dataset.provider = currentProvider ? String(currentProvider) : ''" in populate_body
+
+    # A stale in-flight /api/models populate must not clobber a newer modal's
+    # selection (openKanbanCreate fires un-awaited; openKanbanEdit awaits both on
+    # the same select). A sequence token drops late responses.
+    assert "_kanbanModelPopulateSeq" in PANELS
+    populate_tok_src = extract_function(PANELS, "_kanbanPopulateModelSelect")
+    assert "++_kanbanModelPopulateSeq" in populate_tok_src
+    assert "seq !== _kanbanModelPopulateSeq" in populate_tok_src
+
+    # A selection made while /api/models is still loading (create modal shows
+    # immediately, populate fires un-awaited, custom model-ID works without the
+    # catalog) must survive the load completing — the tail must not restore the
+    # captured default over a live user selection.
+    assert "if (sel.value) {" in populate_tok_src
+    assert "_kanbanSyncModelChip();" in populate_tok_src
+
+    # openKanbanEdit passes the persisted provider so the override pair survives
+    # an unrelated edit unchanged.
+    edit_src = extract_function(PANELS, "openKanbanEdit")
+    assert "_kanbanPopulateModelSelect(task.model_override || '', task.provider_override || '')" in edit_src
+
+    # The picker drives the shared renderModelDropdown() component with kanban ids.
+    assert "function _kanbanOpenModelDropdown" in PANELS
+    dropdown_src = extract_function(PANELS, "_kanbanOpenModelDropdown")
+    assert "renderModelDropdown({" in dropdown_src
+    assert "dropdownId: 'kanbanTaskModalModelDropdown'" in dropdown_src
+    assert "selectId: 'kanbanTaskModalModel'" in dropdown_src
+
+    # submitKanbanTaskModal reads the model select + its data-provider and sends
+    # both back as model_override/provider_override (create + edit).
+    submit_match = re.search(
+        r"function submitKanbanTaskModal\(\)\{(.*?)\n\}",
+        PANELS, re.DOTALL,
+    )
+    assert submit_match, "submitKanbanTaskModal() not found"
+    submit_body = submit_match.group(1)
+    assert "kanbanTaskModalModel" in submit_body
+    assert "selectedOptions[0]" in submit_body
+    assert "payload.model_override" in submit_body
+    assert "payload.provider_override" in submit_body
+
+    # Wiring mounts the chip so it can open the picker.
+    assert "_kanbanMountModelChip" in PANELS
+    assert "accessKey" not in PANELS  # sanity: unused
+
+    # New i18n keys exist (English block) for labels/hints.
+    for key in ("kanban_model", "kanban_model_hint", "kanban_no_model_override"):
+        assert f"{key}:" in I18N
+    # The free-text-era keys must be gone.
+    for key in ("kanban_provider_placeholder", "kanban_provider_hint",
+                "kanban_provider_requires_model", "kanban_model_placeholder"):
+        assert f"{key}:" not in I18N

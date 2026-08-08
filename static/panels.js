@@ -2088,6 +2088,10 @@ function _kanbanTaskMeta(task){
   if (task.priority !== undefined && task.priority !== null) bits.push('P' + task.priority);
   if (task.comment_count) bits.push('💬 ' + task.comment_count);
   if (task.link_counts && task.link_counts.children) bits.push('↳ ' + task.link_counts.children);
+  if (task.model_override) {
+    const label = task.provider_override || task.model_override;
+    bits.push(`🧠 ${label}`);
+  }
   return bits;
 }
 
@@ -2548,8 +2552,11 @@ function _kanbanCard(task, status){
   const stale = _kanbanCardStalenessClass(task);
   const body = _kanbanTaskBody(task);
   const assignee = task.assignee ? `<span class="kanban-card-assignee">@${esc(task.assignee)}</span>` : `<span class="kanban-card-unassigned">${esc(t('kanban_unassigned'))}</span>`;
+  const toplineModel = task.model_override
+    ? `<span class="kanban-badge model" title="${esc(t('kanban_card_model_hint', task.model_override))}">🧠 ${esc(task.model_override)}</span>`
+    : '';
   return `<article class="kanban-card ${esc(stale)}" data-kanban-task-id="${esc(task.id)}" draggable="true" ondragstart="dragKanbanTask(event, '${esc(task.id)}')" ondragend="finishKanbanDrag(event)" onclick="return openKanbanCard(event, '${esc(task.id)}')" tabindex="0" role="button" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();loadKanbanTask('${esc(task.id)}')}">
-    <div class="kanban-card-topline"><span class="kanban-card-id">${esc(task.id || '')}</span>${priority ? `<span class="kanban-badge priority">P${priority}</span>` : ''}${task.tenant ? `<span class="kanban-badge tenant">${esc(task.tenant)}</span>` : ''}</div>
+    <div class="kanban-card-topline"><span class="kanban-card-id">${esc(task.id || '')}</span>${priority ? `<span class="kanban-badge priority">P${priority}</span>` : ''}${task.tenant ? `<span class="kanban-badge tenant">${esc(task.tenant)}</span>` : ''}${toplineModel}</div>
     <div class="kanban-card-title">${esc(_kanbanTaskTitle(task))}</div>
     ${body ? `<div class="kanban-card-body">${_kanbanRenderMarkdown(body)}</div>` : ''}
     <div class="kanban-card-meta">${assignee}${comments ? `<span class="kanban-card-metric">💬 ${comments}</span>` : ''}${linkTotal ? `<span class="kanban-card-metric">↔ ${linkTotal}</span>` : ''}${age ? `<span class="kanban-card-age">${esc(age)}</span>` : ''}</div>
@@ -3205,6 +3212,185 @@ async function _kanbanLoadProfileNames(){
   }
 }
 
+// Kanban modal model picker. Reuses the SAME searchable model selector the
+// composer + settings use: scan heredoc-style full catalog population feeding
+// renderModelDropdown() (search, provider groups, overflow "Show more", custom
+// ID input). Zero free-text duplication.
+let _kanbanModelChipBound = false;
+// Sequence token so a stale in-flight /api/models populate never overwrites a
+// newer modal's selection (openKanbanCreate fires un-awaited while openKanbanEdit
+// awaits — both target the same hidden select). A late response from an older
+// invocation is dropped instead of clobbering the current one.
+let _kanbanModelPopulateSeq = 0;
+
+function _kanbanSyncModelChip(){
+  const sel = document.getElementById('kanbanTaskModalModel');
+  const chip = document.getElementById('kanbanTaskModalModelChip');
+  if (!chip) return;
+  const val = sel && sel.value ? String(sel.value) : '';
+  if (!val) {
+    chip.textContent = t('kanban_no_model_override') || 'Profile default';
+    chip.title = t('kanban_no_model_override') || 'Profile default';
+    return;
+  }
+  const opt = sel.selectedOptions && sel.selectedOptions[0];
+  const label = (opt && opt.textContent) || (typeof getModelLabel === 'function' ? getModelLabel(val) : val);
+  chip.textContent = label;
+  chip.title = val;
+}
+
+function _kanbanSelectModelFromDropdown(value, preferredProviderId){
+  const sel = document.getElementById('kanbanTaskModalModel');
+  if (!sel) { _kanbanCloseModelDropdown(); return; }
+  const provider = String(preferredProviderId || '').trim() || null;
+  if (typeof _ensureModelOptionInDropdown === 'function') {
+    _ensureModelOptionInDropdown(value, sel, provider);
+  } else {
+    sel.value = value;
+  }
+  _kanbanSyncModelChip();
+  _kanbanCloseModelDropdown();
+}
+
+function _kanbanCloseModelDropdown(){
+  const dd = document.getElementById('kanbanTaskModalModelDropdown');
+  const chip = document.getElementById('kanbanTaskModalModelChip');
+  if (dd) dd.classList.remove('open');
+  if (chip) {
+    chip.classList.remove('active');
+    chip.setAttribute('aria-expanded', 'false');
+  }
+}
+
+function _kanbanOpenModelDropdown(){
+  const dd = document.getElementById('kanbanTaskModalModelDropdown');
+  const sel = document.getElementById('kanbanTaskModalModel');
+  const chip = document.getElementById('kanbanTaskModalModelChip');
+  if (!dd || !sel) return;
+  if (dd.classList.contains('open')) { _kanbanCloseModelDropdown(); return; }
+  renderModelDropdown({
+    dropdownId: 'kanbanTaskModalModelDropdown',
+    selectId: 'kanbanTaskModalModel',
+    forceOpenKey: 'kanbanTaskModalModel',
+    closeDropdown: _kanbanCloseModelDropdown,
+    selectModel: _kanbanSelectModelFromDropdown,
+    scopeNoteText: t('kanban_model_hint') || 'Used for how this card executes; leave Profile default for the assigned profile.',
+    autoFocusSearch: true,  // renderModelDropdown() already focuses the search input
+  });
+  dd.classList.add('open');
+  if (chip) {
+    chip.classList.add('active');
+    chip.setAttribute('aria-expanded', 'true');
+  }
+}
+
+async function _kanbanPopulateModelSelect(currentValue, currentProvider){
+  // Same /api/models catalog + provider grouping + overflow the composer uses,
+  // written into the kanban modal's hidden <select> so renderModelDropdown() can
+  // drive search, provider groups, "Show more" overflow, and the custom-ID input.
+  // currentProvider (edit mode) restores the task's PERSISTED provider so an
+  // unrelated edit doesn't rewrite or strip the saved provider pin.
+  const seq = ++_kanbanModelPopulateSeq;
+  const sel = document.getElementById('kanbanTaskModalModel');
+  if (!sel) return;
+  // Leading "Profile default" (no override) -> clears the override on submit.
+  sel.innerHTML = '';
+  const emptyOption = document.createElement('option');
+  emptyOption.value = '';
+  emptyOption.textContent = t('kanban_no_model_override') || 'Profile default';
+  sel.appendChild(emptyOption);
+  try {
+    const res = await fetch(new URL('api/models', document.baseURI || location.href), {credentials: 'include'});
+    if (!res.ok) { if (seq === _kanbanModelPopulateSeq) _kanbanSyncModelChip(); return; }
+    const data = await res.json();
+    // A stale response from an earlier modal invocation must not clobber the
+    // selection a newer one just restored. Drop it without touching the select.
+    if (seq !== _kanbanModelPopulateSeq) { _kanbanSyncModelChip(); return; }
+    const groups = Array.isArray(data && data.groups) ? data.groups : [];
+    for (const g of groups) {
+      const models = Array.isArray(g.models) ? g.models : [];
+      const overflow = Array.isArray(g.extra_models) ? g.extra_models : [];
+      if (!models.length && !overflow.length) continue;
+      const og = document.createElement('optgroup');
+      og.label = g.provider || g.provider_id || 'Configured';
+      if (g.provider_id) og.dataset.provider = g.provider_id;
+      // Overflow tail — renderModelDropdown's "Show more" + search read this.
+      if (overflow.length) {
+        try { og.dataset.extraModels = JSON.stringify(overflow); } catch (_e) {}
+      }
+      for (const m of models) {
+        if (!m || !m.id) continue;
+        const opt = document.createElement('option');
+        opt.value = String(m.id);
+        opt.textContent = (typeof getModelLabel === 'function' ? getModelLabel(m.id) : (m.label || m.id));
+        if (g.provider_id) opt.dataset.provider = g.provider_id;
+        og.appendChild(opt);
+      }
+      sel.appendChild(og);
+    }
+  } catch (_e) {
+    // Catalog unavailable — leave just the "Profile default" option.
+  }
+  // A user can select a model (e.g. via the Custom model-ID input, which works
+  // without the catalog) while /api/models is still in flight — the create modal
+  // is shown immediately and the populate fires un-awaited. After the load
+  // resolves, don't clobber that live selection back to the captured default;
+  // only apply the restore when the user hasn't picked something mid-flight.
+  if (sel.value) {
+    // Preserve the user's in-flight choice; just resync the chip label.
+    _kanbanSyncModelChip();
+    return;
+  }
+  // Restore current override (edit mode). Preserve the MODEL and the PERSISTED
+  // PROVIDER: an unrelated edit must not rewrite the provider (catalog-derived)
+  // or strip it to null (out-of-catalog fallback). Only a deliberate picker
+  // selection changes provider.
+  sel.value = currentValue || '';
+  const currentModel = currentValue ? String(currentValue) : '';
+  if (currentModel) {
+    const found = Array.from(sel.options).find(o => String(o.value) === currentModel);
+    if (found) {
+      // Catalog model — overwrite the catalog-derived provider with the PERSISTED
+      // one so a save of an unrelated edit neither re-pins a provider (when the
+      // task had none) nor rewrites it to a catalog default (when it differed).
+      found.dataset.provider = currentProvider ? String(currentProvider) : '';
+    } else {
+      // Out-of-catalog / imported model — synthesize an option that carries the
+      // persisted provider (fall back to catalog provider if none recorded).
+      const keep = document.createElement('option');
+      keep.value = currentModel;
+      keep.textContent = currentModel;
+      keep.dataset.provider = currentProvider ? String(currentProvider) : '';
+      sel.appendChild(keep);
+      sel.value = currentModel;
+    }
+  }
+  _kanbanSyncModelChip();
+}
+
+function _kanbanMountModelChip(){
+  const chip = document.getElementById('kanbanTaskModalModelChip');
+  if (!chip || _kanbanModelChipBound) return;
+  _kanbanModelChipBound = true;
+  chip.addEventListener('click', function(e){
+    e.preventDefault();
+    e.stopPropagation();
+    _kanbanOpenModelDropdown();
+  });
+  chip.addEventListener('keydown', function(e){
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      e.stopPropagation();
+      _kanbanOpenModelDropdown();
+    }
+  });
+  // Close the picker on outside click while the modal is open.
+  document.addEventListener('click', function(e){
+    const wrap = chip.closest('.kanban-model-picker-wrap');
+    if (wrap && !wrap.contains(e.target)) _kanbanCloseModelDropdown();
+  });
+}
+
 async function _kanbanPopulateAssigneeSelect(currentValue){
   const sel = document.getElementById('kanbanTaskModalAssignee');
   if (!sel) return;
@@ -3268,6 +3454,10 @@ function openKanbanCreate(){
   _kanbanResetTaskModalFields({status: 'ready'});
   _kanbanSetTaskModalStatusHint(null);
   _kanbanSetTaskModalLabels('create');
+  _kanbanPopulateModelSelect('').then(() => {
+    _kanbanSyncModelChip();
+  });
+  _kanbanMountModelChip();
   _kanbanPopulateAssigneeSelect('').then(() => {
     // After the dropdown is populated, default-select the first profile (not
     // the "Unassigned" fallthrough).  This is the right hint: most users want
@@ -3328,7 +3518,14 @@ async function openKanbanEdit(taskId){
     status: initialDisplayedStatus,
     tenant: task.tenant || '',
     priority: typeof task.priority === 'number' ? task.priority : 0,
+    model_override: task.model_override || '',
   });
+  // Populate the model dropdown (from /api/models, same catalog + grouping as
+  // the composer picker) AFTER reset so the option exists when we select the
+  // current value below. Pass the PERSISTED provider so an unrelated edit
+  // preserves the saved provider pin on the model.
+  await _kanbanPopulateModelSelect(task.model_override || '', task.provider_override || '');
+  _kanbanMountModelChip();
   // Populate the assignee select AFTER reset so the option exists when we
   // call sel.value = currentAssignee.
   await _kanbanPopulateAssigneeSelect(task.assignee || '');
@@ -3373,6 +3570,7 @@ function _kanbanResetTaskModalFields(values){
   set('kanbanTaskModalPriority', v.priority != null ? v.priority : 0);
   set('kanbanTaskModalSkills', Array.isArray(v.skills) ? v.skills.join(', ') : (v.skills || ''));
   set('kanbanTaskModalMaxRuntimeSeconds', v.max_runtime_seconds != null ? v.max_runtime_seconds : '');
+  set('kanbanTaskModalModel', v.model_override || '');
   set('kanbanTaskModalParents', '');
   const errEl = document.getElementById('kanbanTaskModalError');
   if (errEl) { errEl.textContent = ''; delete errEl.dataset.warningShown; }
@@ -3536,6 +3734,7 @@ async function submitKanbanTaskModal(){
   const skillsEl = document.getElementById('kanbanTaskModalSkills');
   const maxRuntimeEl = document.getElementById('kanbanTaskModalMaxRuntimeSeconds');
   const parentsEl = document.getElementById('kanbanTaskModalParents');
+  const modelEl = document.getElementById('kanbanTaskModalModel');
   const errEl = document.getElementById('kanbanTaskModalError');
   const submitBtn = document.getElementById('kanbanTaskModalSubmit');
   const title = titleEl ? titleEl.value.trim() : '';
@@ -3567,6 +3766,13 @@ async function submitKanbanTaskModal(){
   const skillsRaw = skillsEl ? skillsEl.value.trim() : '';
   const maxRuntimeRaw = maxRuntimeEl ? maxRuntimeEl.value.trim() : '';
   const parentsRaw = parentsEl ? parentsEl.value.trim() : '';
+  // Model chosen from the shared /api/models catalog dropdown; provider is
+  // carried on the option (data-provider) so the model always resolves against
+  // the right backend. Empty value = "Profile default" (no override, clears).
+  const modelRaw = modelEl ? modelEl.value.trim() : '';
+  const providerRaw = (modelEl && modelEl.selectedOptions && modelEl.selectedOptions[0])
+    ? String(modelEl.selectedOptions[0].dataset && modelEl.selectedOptions[0].dataset.provider || '').trim()
+    : '';
   if (isEdit) {
     payload.body = bodyVal;
     payload.assignee = assigneeVal || null;
@@ -3580,6 +3786,10 @@ async function submitKanbanTaskModal(){
     }
     const n = parseInt(priorityRaw, 10);
     payload.priority = Number.isNaN(n) ? 0 : n;
+    // Send model fields on edit even when empty so users can clear an override
+    // back to the profile default (backend normalises empty → clear both).
+    payload.model_override = modelRaw || null;
+    payload.provider_override = providerRaw || null;
     // Note: workspace_kind and workspace_path are not sent on edit because
     // the backend _patch_task does not handle them (they are dropped).
   } else {
@@ -3606,6 +3816,8 @@ async function submitKanbanTaskModal(){
       payload.max_runtime_seconds = Number(maxRuntimeRaw);
     }
     if (parentsRaw) payload.parents = [parentsRaw];
+    if (modelRaw) payload.model_override = modelRaw;
+    if (providerRaw) payload.provider_override = providerRaw;
   }
   // Soft warning: a Ready task with the explicit "Unassigned" option will sit
   // forever because the dispatcher skips unassigned rows (kanban_db.py:3567).
@@ -3737,6 +3949,9 @@ function _kanbanRenderTaskDetail(data){
     </div>
     <div class="kanban-task-preview-body">${_kanbanRenderMarkdown(body)}</div>
     ${meta.length ? `<div class="kanban-meta">${esc(meta.join(' · '))}</div>` : ''}
+    <div class="kanban-detail-model">${task.model_override
+      ? `${esc(t('kanban_model'))}: <strong>${esc(task.model_override)}</strong>${task.provider_override ? ` (${esc(t('kanban_provider'))}: ${esc(task.provider_override)})` : ''}`
+      : `${esc(t('kanban_model'))}: ${esc(t('kanban_no_model_override'))}`}</div>
     <div class="kanban-status-actions">${statusButtons}</div>
     <div class="kanban-detail-grid">
       ${_kanbanDetailSection('kanban-detail-comments', String(t('kanban_comments_count')).replace('{0}', comments.length), comments.map(_kanbanCommentHtml).join(''), 'kanban_no_comments')}
