@@ -52,7 +52,7 @@ from api.helpers import redact_session_data, _redact_text
 from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
 from api.compression_recovery import stamp_compression_exhausted_recovery
 from api.metering import meter
-from api.run_journal import RunJournalWriter, append_run_event
+from api.run_journal import RunJournalWriter
 from api.todo_state import attach_todo_state, emit_todo_state
 from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
@@ -11560,13 +11560,8 @@ def _run_agent_streaming(
 # ============================================================
 
 
-def _publish_accepted_steer_event(session_id: str, stream_id: str, text: str) -> None:
-    """Journal and broadcast one accepted mid-run steer delivery.
-
-    ``agent.steer()`` mutates the active runtime, but its pending value is not a
-    replay surface. Persist the accepted delivery in the run journal first, then
-    broadcast that same event identity to connected or reconnecting clients.
-    """
+def _accept_and_publish_steer_event(agent, session_id: str, stream_id: str, text: str):
+    """Accept and journal one steer before a terminal event can win the run."""
     created_at = time.time()
     payload = {
         "session_id": str(session_id),
@@ -11575,28 +11570,29 @@ def _publish_accepted_steer_event(session_id: str, stream_id: str, text: str) ->
         "status": "delivered",
         "created_at": created_at,
     }
-    try:
-        journaled = append_run_event(
-            str(session_id),
-            str(stream_id),
-            "steer_delivered",
-            payload,
-            reject_after_terminal=True,
-        )
-    except Exception:
+    writer = RunJournalWriter(str(session_id), str(stream_id))
+    accepted, journaled, reason, error = writer.accept_and_append_if_nonterminal(
+        "steer_delivered",
+        payload,
+        lambda: agent.steer(text),
+    )
+    if reason == "terminal":
+        return False, "stream_dead"
+    if reason == "journal_malformed":
+        return False, "steer_error"
+    if error is not None:
         logger.warning(
             "Failed to persist accepted steer for session=%s stream=%s",
             session_id,
             stream_id,
-            exc_info=True,
+            exc_info=(type(error), error, error.__traceback__),
         )
-        return
+        return accepted, None
+    if not accepted or not isinstance(journaled, dict):
+        return False, None
 
-    if not isinstance(journaled, dict):
-        return
     event_id = journaled.get("event_id")
-    if isinstance(journaled, dict):
-        payload["created_at"] = journaled.get("created_at", created_at)
+    payload["created_at"] = journaled.get("created_at", created_at)
     with STREAMS_LOCK:
         stream = STREAMS.get(str(stream_id))
     if event_id:
@@ -11607,7 +11603,7 @@ def _publish_accepted_steer_event(session_id: str, stream_id: str, text: str) ->
             except Exception:
                 logger.debug("Failed to note steer event id %s", event_id, exc_info=True)
     if stream is None or not callable(getattr(stream, "put_nowait", None)):
-        return
+        return True, None
     try:
         item = (
             ("steer_delivered", payload, event_id)
@@ -11622,6 +11618,7 @@ def _publish_accepted_steer_event(session_id: str, stream_id: str, text: str) ->
             stream_id,
             exc_info=True,
         )
+    return True, None
 
 
 def _handle_chat_steer(handler, body: dict) -> bool:
@@ -11730,15 +11727,18 @@ def _handle_chat_steer(handler, body: dict) -> bool:
                            "stream_id": None})
 
     try:
-        accepted = bool(agent.steer(text))
+        accepted, fallback = _accept_and_publish_steer_event(
+            agent,
+            sid,
+            active_stream_id,
+            text,
+        )
     except Exception as exc:
         logger.debug("agent.steer() raised for session=%s: %s", sid, exc)
         return j(handler, {"accepted": False, "fallback": "steer_error",
                            "stream_id": active_stream_id})
 
-    if accepted:
-        _publish_accepted_steer_event(sid, active_stream_id, text)
-    return j(handler, {"accepted": accepted, "fallback": None,
+    return j(handler, {"accepted": accepted, "fallback": fallback,
                        "stream_id": active_stream_id})
 
 

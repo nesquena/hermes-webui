@@ -73,11 +73,20 @@ def test_accepted_steer_uses_one_journal_identity_for_live_broadcast(
         "session_id": sid,
         "created_at": 123.0,
     }
+    captured = {}
+
+    def accept_and_append(_writer, event_name, payload, accept):
+        captured["event_name"] = event_name
+        captured["payload"] = payload
+        assert accept() is True
+        return True, journal_event, None, None
+
     with patch.object(streaming, "get_session", return_value=session), patch.object(
-        streaming,
-        "append_run_event",
-        return_value=journal_event,
-    ) as append_event:
+        streaming.RunJournalWriter,
+        "accept_and_append_if_nonterminal",
+        autospec=True,
+        side_effect=accept_and_append,
+    ) as transaction:
         handler = _handler()
         streaming._handle_chat_steer(
             handler,
@@ -85,11 +94,10 @@ def test_accepted_steer_uses_one_journal_identity_for_live_broadcast(
         )
 
     agent.steer.assert_called_once_with("keep this steer")
-    append_event.assert_called_once()
-    call = append_event.call_args
-    assert call.args[:3] == (sid, stream_id, "steer_delivered")
-    assert call.args[3]["text"] == "keep this steer"
-    assert call.args[3]["status"] == "delivered"
+    transaction.assert_called_once()
+    assert captured["event_name"] == "steer_delivered"
+    assert captured["payload"]["text"] == "keep this steer"
+    assert captured["payload"]["status"] == "delivered"
 
     subscriber, snapshot = stream.subscribe_with_snapshot()
     event_name, payload, event_id = subscriber.get_nowait()
@@ -121,15 +129,24 @@ def test_rejected_steer_does_not_create_a_delivery_event(isolated_steer_state):
     with STREAMS_LOCK:
         streams[stream_id] = stream
 
+    def reject(_writer, _event_name, _payload, accept):
+        assert accept() is False
+        return False, None, "rejected", None
+
     with patch.object(
         streaming,
         "get_session",
         return_value=MagicMock(active_stream_id=stream_id),
-    ), patch.object(streaming, "append_run_event") as append_event:
+    ), patch.object(
+        streaming.RunJournalWriter,
+        "accept_and_append_if_nonterminal",
+        autospec=True,
+        side_effect=reject,
+    ) as transaction:
         handler = _handler()
         streaming._handle_chat_steer(handler, {"session_id": sid, "text": "no"})
 
-    append_event.assert_not_called()
+    transaction.assert_called_once()
     subscriber, snapshot = stream.subscribe_with_snapshot()
     assert subscriber.empty()
     assert snapshot["offline_buffered_events"] == 0
@@ -153,14 +170,21 @@ def test_journal_failure_does_not_turn_runtime_acceptance_into_http_failure(
     with STREAMS_LOCK:
         streams[stream_id] = stream
 
+    persistence_error = OSError("disk unavailable")
+
+    def fail_after_accept(_writer, _event_name, _payload, accept):
+        assert accept() is True
+        return True, None, "persistence_error", persistence_error
+
     with patch.object(
         streaming,
         "get_session",
         return_value=MagicMock(active_stream_id=stream_id),
     ), patch.object(
-        streaming,
-        "append_run_event",
-        side_effect=OSError("disk unavailable"),
+        streaming.RunJournalWriter,
+        "accept_and_append_if_nonterminal",
+        autospec=True,
+        side_effect=fail_after_accept,
     ):
         handler = _handler()
         streaming._handle_chat_steer(handler, {"session_id": sid, "text": "accepted"})
@@ -188,33 +212,29 @@ def test_terminal_journal_wins_race_without_late_delivery_event(
     stream_id = "steer_terminal_race_run"
     stream = create_stream_channel()
 
-    class FinishingAgent:
-        def steer(self, _text):
-            run_journal.append_run_event(
-                sid,
-                stream_id,
-                "done",
-                {"session": {}},
-                session_dir=tmp_path,
-            )
-            return True
+    agent = MagicMock()
+    agent.steer.return_value = True
+    run_journal.append_run_event(
+        sid,
+        stream_id,
+        "done",
+        {"session": {}},
+        session_dir=tmp_path,
+    )
 
     with SESSION_AGENT_CACHE_LOCK:
-        cache[sid] = (FinishingAgent(), "sig")
+        cache[sid] = (agent, "sig")
     with STREAMS_LOCK:
         streams[stream_id] = stream
 
-    def append_in_test_dir(session_id, run_id, event_name, payload, **kwargs):
-        return run_journal.append_run_event(
+    def test_writer(session_id, run_id):
+        return run_journal.RunJournalWriter(
             session_id,
             run_id,
-            event_name,
-            payload,
             session_dir=tmp_path,
-            **kwargs,
         )
 
-    monkeypatch.setattr(streaming, "append_run_event", append_in_test_dir)
+    monkeypatch.setattr(streaming, "RunJournalWriter", test_writer)
     with patch.object(
         streaming,
         "get_session",
@@ -228,4 +248,9 @@ def test_terminal_journal_wins_race_without_late_delivery_event(
     subscriber, snapshot = stream.subscribe_with_snapshot()
     assert subscriber.empty()
     assert snapshot["offline_buffered_events"] == 0
-    assert _response(handler)["accepted"] is True
+    agent.steer.assert_not_called()
+    assert _response(handler) == {
+        "accepted": False,
+        "fallback": "stream_dead",
+        "stream_id": stream_id,
+    }

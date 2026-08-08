@@ -119,25 +119,72 @@ def test_explicit_seq_keeps_cache_from_reissuing(tmp_path):
     assert nxt["seq"] == 6
 
 
-def test_conditional_append_rejects_events_after_terminal(tmp_path):
-    terminal = run_journal.append_run_event(
+def test_accept_transaction_does_not_call_runtime_after_terminal(tmp_path):
+    run_journal.append_run_event(
         "sess_terminal", "run_terminal", "done", {"session": {}}, session_dir=tmp_path
     )
-    rejected = run_journal.append_run_event(
-        "sess_terminal",
-        "run_terminal",
+    writer = run_journal.RunJournalWriter(
+        "sess_terminal", "run_terminal", session_dir=tmp_path
+    )
+    called = []
+
+    accepted, event, reason, error = writer.accept_and_append_if_nonterminal(
         "steer_delivered",
         {"text": "too late"},
-        session_dir=tmp_path,
-        reject_after_terminal=True,
+        lambda: called.append(True) or True,
     )
 
-    assert terminal is not None
-    assert rejected is None
+    assert (accepted, event, reason, error) == (False, None, "terminal", None)
+    assert called == []
     journal = run_journal.read_run_events(
         "sess_terminal", "run_terminal", session_dir=tmp_path
     )
-    assert [event["event"] for event in journal["events"]] == ["done"]
+    assert [item["event"] for item in journal["events"]] == ["done"]
+
+
+def test_accept_transaction_orders_delivery_before_concurrent_terminal(tmp_path):
+    writer = run_journal.RunJournalWriter(
+        "sess_accept", "run_accept", session_dir=tmp_path
+    )
+    terminal_started = threading.Event()
+    terminal_finished = threading.Event()
+
+    def append_terminal():
+        terminal_started.set()
+        run_journal.append_run_event(
+            "sess_accept",
+            "run_accept",
+            "done",
+            {"session": {}},
+            session_dir=tmp_path,
+        )
+        terminal_finished.set()
+
+    def accept():
+        thread = threading.Thread(target=append_terminal)
+        thread.start()
+        assert terminal_started.wait(timeout=10)
+        assert not terminal_finished.wait(timeout=0.1), "terminal bypassed transaction lock"
+        return True
+
+    accepted, event, reason, error = writer.accept_and_append_if_nonterminal(
+        "steer_delivered",
+        {"text": "in time"},
+        accept,
+    )
+    assert accepted is True
+    assert event is not None
+    assert reason is None
+    assert error is None
+    assert terminal_finished.wait(timeout=10)
+
+    journal = run_journal.read_run_events(
+        "sess_accept", "run_accept", session_dir=tmp_path
+    )
+    assert [item["event"] for item in journal["events"]] == [
+        "steer_delivered",
+        "done",
+    ]
 
 
 def test_delete_evicts_seq_cache_so_recreated_run_restarts(tmp_path):

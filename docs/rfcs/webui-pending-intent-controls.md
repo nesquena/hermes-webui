@@ -371,12 +371,14 @@ payload records `session_id`, `stream_id`, `text`, `status: delivered`, and
 `created_at`. It remains presentation/replay metadata and must not be appended
 as a normal next-turn user message or treated as proof of application.
 
-The terminal check and conditional append occur under the run journal's same
-per-path lock. If a terminal event wins that race, WebUI does not append a late
-`steer_delivered` row after the terminal boundary; the existing leftover-Steer
-path remains responsible for preserving unconsumed text. If journal persistence
-fails after runtime acceptance, WebUI logs the durability failure and does not
-broadcast a non-replayable delivery event.
+The terminal check, runtime acceptance call, and delivery append occur under the
+run journal's same per-path lock. If a terminal event wins that lock, WebUI does
+not call `agent.steer()` and returns the existing `stream_dead` recovery signal,
+so the browser restores the user's draft instead of claiming delivery. If Steer
+wins the lock, acceptance and `steer_delivered` persistence finish before a
+terminal writer can append. If journal persistence fails after runtime
+acceptance, WebUI logs the durability failure and does not broadcast a
+non-replayable delivery event.
 
 ## Implementation Slices
 
