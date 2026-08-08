@@ -8873,6 +8873,351 @@ def _sidecar_file_exceeds_threshold(session_id, threshold_bytes) -> bool:
         return False
 
 
+def _scan_json_string(text, i):
+    """Return ``(decoded_string, index_after_closing_quote)`` for the JSON
+    string starting at ``text[i]`` (which must be ``\"``), or ``(None, -1)``
+    when the string is unterminated."""
+    n = len(text)
+    i += 1  # past the opening quote
+    chars = []
+    escaped = False
+    while i < n:
+        c = text[i]
+        if escaped:
+            chars.append(c)
+            escaped = False
+        elif c == '\\':
+            escaped = True
+        elif c == '"':
+            return ''.join(chars), i + 1
+        else:
+            chars.append(c)
+        i += 1
+    return None, -1
+
+
+def _scan_json_container_end(text, open_idx):
+    """Return the index of the ``]``/``}`` that closes the container opened at
+    ``text[open_idx]`` (``[`` or ``{``), string/escape-aware, or ``None`` when
+    the container is unbalanced."""
+    n = len(text)
+    i = open_idx + 1
+    depth = 1
+    while i < n:
+        ch = text[i]
+        if ch == '"':
+            _, end = _scan_json_string(text, i)
+            if end < 0:
+                return None
+            i = end
+        elif ch in '[{':
+            depth += 1
+            i += 1
+        elif ch in ']}':
+            depth -= 1
+            i += 1
+            if depth == 0:
+                return i - 1
+        else:
+            i += 1
+    return None
+
+
+def _scan_sidecar_root_messages_array(text):
+    """Locate the unique depth-1 ``messages`` array of the root JSON object.
+
+    Returns ``(array_open_idx, array_close_idx)`` where ``array_close_idx`` is
+    the index of the ``]`` that closes the array, or ``None`` when the file
+    does not contain exactly one depth-1 ``messages`` array whose value is an
+    array and whose root object is the sole top-level value.
+
+    The scan is depth- and string/escape-aware: a ``messages`` key nested
+    inside a value object (e.g. a tool output or ``composer_draft``) is
+    ignored, while a second depth-1 ``messages`` key, a non-array value, or
+    trailing content after the root object disqualifies the fast path.
+    """
+    n = len(text)
+    i = 0
+    while i < n and text[i] in ' \t\r\n':
+        i += 1
+    if i >= n or text[i] != '{':
+        return None
+    i += 1  # enter the root object (keys inside it live at depth 1)
+    depth = 1
+    found = None
+    while i < n:
+        ch = text[i]
+        if ch == '"':
+            key, end = _scan_json_string(text, i)
+            if key is None:
+                return None
+            i = end
+            j = i
+            while j < n and text[j] in ' \t\r\n':
+                j += 1
+            if j < n and text[j] == ':' and depth == 1:
+                if key == 'messages':
+                    k = j + 1
+                    while k < n and text[k] in ' \t\r\n':
+                        k += 1
+                    if k >= n or text[k] != '[':
+                        return None
+                    close = _scan_json_container_end(text, k)
+                    if close is None:
+                        return None
+                    if found is not None:
+                        # Duplicate depth-1 messages key — ambiguous.
+                        return None
+                    found = (k, close)
+                    i = close + 1
+                    continue
+                # Non-messages depth-1 key — the main loop consumes its value.
+                i = j + 1
+                continue
+            # A string in value position — keep scanning after it.
+            continue
+        elif ch == '{':
+            depth += 1
+            i += 1
+        elif ch == '}':
+            depth -= 1
+            i += 1
+            if depth == 0:
+                break
+        elif ch == '[':
+            depth += 1
+            i += 1
+        elif ch == ']':
+            depth -= 1
+            i += 1
+        else:
+            i += 1
+    if found is None:
+        return None
+    # The root object must close exactly at the end of the file (plus
+    # whitespace); anything after it means the file is not a single JSON
+    # object and the trailing-field parse cannot be trusted.
+    while i < n and text[i] in ' \t\r\n':
+        i += 1
+    if i != n:
+        return None
+    return found
+
+
+def _parse_sidecar_post_messages_fields(text, array_close_idx):
+    """Parse the root-object fields serialized after the ``messages`` array.
+
+    Returns a dict of trailing top-level fields (``tool_calls``,
+    ``anchor_activity_scenes``, extra runtime fields, ...), or ``None`` when
+    the tail cannot be parsed as a clean suffix of the root object — the
+    caller must then fall back to the authoritative full load. Never fails
+    open to an empty mapping.
+    """
+    tail = text[array_close_idx + 1:].strip()
+    if not tail.endswith('}'):
+        return None
+    inner = tail[:-1]
+    if not inner:
+        return {}
+    if not inner.lstrip().startswith(','):
+        return None
+    try:
+        parsed = json.loads('{"_dummy": null' + inner + '}')
+    except Exception:
+        return None
+    parsed.pop('_dummy', None)
+    if 'messages' in parsed:
+        # A second depth-1 messages key after the array — ambiguous.
+        return None
+    return parsed
+
+
+def _message_is_todo_write(msg) -> bool:
+    """Mirror ``derive_todo_state``'s per-message detector: a ``role='tool'``
+    message whose string content parses to a valid todo snapshot."""
+    if not isinstance(msg, dict) or msg.get('role') != 'tool':
+        return False
+    content = msg.get('content')
+    if not isinstance(content, str) or '"todos"' not in content:
+        return False
+    from api.todo_state import parse_todo_tool_result
+    try:
+        return parse_todo_tool_result(content) is not None
+    except Exception:
+        return False
+
+
+def _read_bounded_fast_path_messages(session_id, msg_limit, _metadata_total=0):
+    """Read the tail of the sidecar messages array without full deserialisation (#6241).
+
+    When a large sidecar qualifies for the bounded fast-path, this reads the
+    file as text (fast I/O), locates the ``messages`` array with a depth- and
+    string/escape-aware root-object scan, scans it once to count all messages,
+    and extracts only the trailing message objects needed to satisfy
+    ``msg_limit``. This avoids ``json.loads()`` on the full multi-megabyte
+    file, which can take tens of seconds for sidecars with 1000+ messages and
+    large tool outputs.
+
+    Returns ONE shape on every exit::
+
+        (messages_list, total, base_offset, post_fields)
+
+    - ``messages_list`` — the bounded tail as parsed message dicts, with
+      adjacent duplicate partials collapsed exactly like ``Session.load``;
+      ``None`` when extraction is infeasible and the caller MUST fall back to
+      the authoritative full-load path.
+    - ``total`` — canonical absolute message count in the collapsed
+      transcript coordinate space (the scanned surviving count — the same
+      count the authoritative load reports as ``len(merged_messages)``).
+    - ``base_offset`` — the absolute index of ``messages_list[0]`` in the full
+      collapsed transcript coordinate space (the same space
+      ``_message_window_for_display`` offsets and session-level
+      ``tool_calls[*].assistant_msg_idx`` live in).
+    - ``post_fields`` — trailing root-object fields serialized after the
+      ``messages`` array (``tool_calls``, ``anchor_activity_scenes``, extras);
+      ``None`` on failure.
+
+    Any extraction ambiguity (corrupt prefix, parse error, missing/duplicate
+    depth-1 array, unparseable tail, a todo write outside the served window)
+    returns ``(None, 0, 0, None)`` so the caller falls through to the
+    authoritative ``Session.load()`` path.
+    """
+    from api.config import SESSION_DIR
+    from api.models import _partial_message_signature
+
+    if not is_safe_session_id(session_id):
+        return None, 0, 0, None
+    p = SESSION_DIR / f'{session_id}.json'
+    try:
+        text = p.read_text(encoding='utf-8')
+    except Exception:
+        return None, 0, 0, None
+
+    located = _scan_sidecar_root_messages_array(text)
+    if located is None:
+        return None, 0, 0, None
+    arr_open, arr_close = located
+
+    post_fields = _parse_sidecar_post_messages_fields(text, arr_close)
+    if post_fields is None:
+        return None, 0, 0, None
+
+    try:
+        target = max(1, int(msg_limit)) * 2 if msg_limit else 200
+    except (TypeError, ValueError):
+        return None, 0, 0, None
+
+    # Sliding window of raw (start, end) slices of the SURVIVING messages.
+    window = deque(maxlen=target)
+    surviving_count = 0
+    last_todo_surviving_idx = None
+    prev_partial_sig = None
+    depth = 0
+    obj_start = None
+    i = arr_open + 1
+    while i <= arr_close:
+        ch = text[i]
+        if obj_start is None:
+            if ch in ' \t\n\r,':
+                i += 1
+                continue
+            if ch == ']':
+                break
+            if ch == '{':
+                obj_start = i
+                depth = 1
+                i += 1
+                continue
+            # Unexpected character inside the messages array — bail out.
+            return None, 0, 0, None
+        elif ch == '{':
+            depth += 1
+            i += 1
+        elif ch == '}':
+            depth -= 1
+            i += 1
+            if depth == 0:
+                # End of a top-level message object.
+                raw = text[obj_start:i]
+                # ── duplicate-partial collapse parity with Session.load ──
+                # Only parse a message when its raw slice hints at a partial
+                # marker or a todo write; identical adjacent partials are
+                # dropped exactly like _collapse_adjacent_duplicate_partials
+                # so the window and its absolute base stay in the collapsed
+                # coordinate space (a partial run can never straddle the
+                # window boundary because its duplicates never survive).
+                inspected = None
+                is_partial_hint = '"_partial": true' in raw
+                todo_hint = (
+                    '"role": "tool"' in raw
+                    and '"todos"' in raw.replace('\\"', '"')
+                )
+                if is_partial_hint or todo_hint:
+                    try:
+                        inspected = json.loads(raw)
+                    except Exception:
+                        return None, 0, 0, None
+                    if is_partial_hint and inspected.get('_partial'):
+                        sig = _partial_message_signature(inspected)
+                        if prev_partial_sig == sig:
+                            # Collapsed duplicate — does not survive.
+                            obj_start = None
+                            continue
+                        prev_partial_sig = sig
+                    else:
+                        prev_partial_sig = None
+                else:
+                    prev_partial_sig = None
+                if todo_hint and inspected is not None and _message_is_todo_write(inspected):
+                    last_todo_surviving_idx = surviving_count
+                window.append((obj_start, i))
+                surviving_count += 1
+                obj_start = None
+        elif ch == '"':
+            # String — skip it (handle backslash escapes).
+            i += 1
+            while i < len(text):
+                if text[i] == '\\':
+                    i += 2  # skip escaped char
+                elif text[i] == '"':
+                    i += 1
+                    break
+                else:
+                    i += 1
+        else:
+            i += 1
+
+    if i != arr_close:
+        # The array did not close cleanly at the located bracket.
+        return None, 0, 0, None
+    if not window:
+        return None, 0, 0, None
+
+    base_offset = surviving_count - len(window)
+    if last_todo_surviving_idx is not None and last_todo_surviving_idx < base_offset:
+        # The most recent todo write predates the tail window; deriving
+        # todo_state from the tail would diverge from the full-transcript
+        # path, so force the authoritative load (#6317 re-gate).
+        return None, 0, 0, None
+
+    messages_list = []
+    for start, end in window:
+        try:
+            messages_list.append(json.loads(text[start:end]))
+        except Exception:
+            return None, 0, 0, None
+
+    # The canonical display-path total is the scanned surviving count: the
+    # slow path reports ``len(merged_messages)`` for bounded loads, which is
+    # the collapsed transcript length, not the metadata prefix count (the
+    # prefix count can lag external appends or predate duplicate-partial
+    # collapse). ``_metadata_total`` is retained for call-site compatibility
+    # but is NOT preferred, so cursor/count semantics stay at parity with the
+    # authoritative full-load path (#6317 re-gate).
+    total = surviving_count
+    return messages_list, int(total), int(base_offset), post_fields
+
+
 def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before=None):
     """Return (timestamp floor, sidecar messages) for bounded state.db tail reads.
 
@@ -12769,40 +13114,125 @@ def handle_get(handler, parsed) -> bool:
                 return bad(handler, "Session not found", 404)
             original_stream_id = getattr(s, "active_stream_id", None)
             _clear_stale_stream_state(s)
-            cli_meta = _lookup_cli_session_metadata(sid) if _session_requires_cli_metadata_lookup(s) else {}
-            is_messaging_session = _is_messaging_session_record(s) or _is_messaging_session_record(cli_meta)
             cli_messages = []
             state_db_messages = []
             metadata_summary = None
             limited_sidecar_messages = None
             state_db_since_timestamp = None
+            # ── #6241 bounded fast-path ──────────────────────────────────
+            # When get_session() returned a metadata-only stub for a large
+            # sidecar, populate a bounded message window directly from the
+            # file without full json.loads(), then skip the expensive
+            # lineage-stitch / merge / window path.  Any failure falls
+            # through to the authoritative full-load path.
+            _bounded_fast_path = getattr(s, '_bounded_fast_path', False)
+            _fast_base_offset = 0
+            _fast_total = 0
+            if _bounded_fast_path and load_messages and msg_limit is not None and msg_before is None:
+                _fast_result = _read_bounded_fast_path_messages(sid, msg_limit, _metadata_total=getattr(s, '_metadata_message_count', 0))
+                _fast_msgs, _fast_total, _fast_base, _fast_post_fields = _fast_result
+                if _fast_msgs is not None:
+                    s.messages = _fast_msgs
+                    s._metadata_message_count = _fast_total
+                    limited_sidecar_messages = list(_fast_msgs)
+                    # Apply post-messages top-level fields (tool_calls,
+                    # anchor_activity_scenes, todo state, etc.) that were
+                    # serialised after the messages array in the sidecar
+                    # JSON and are missing from the metadata-only stub.
+                    for _k, _v in _fast_post_fields.items():
+                        setattr(s, _k, _v)
+                    _fast_base_offset = int(_fast_base or 0)
+                    # Disable the normal windowing — the tail is already
+                    # bounded; the caller only needs a lightweight state.db
+                    # merge for any rows newer than the sidecar.
+                    _bounded_fast_path_active = True
+                else:
+                    # Extraction failed — reload s authoritatively so the
+                    # normal path doesn't operate on the metadata-only stub
+                    # with an empty messages list.  Use _skip_bounded_fast_path
+                    # to prevent re-entering the same large-sidecar gate.
+                    try:
+                        s = get_session(sid, metadata_only=False, _skip_bounded_fast_path=True)
+                    except KeyError:
+                        if _diag: _diag.finish()
+                        return bad(handler, "Session not found", 404)
+                    _bounded_fast_path = False
+                    _bounded_fast_path_active = False
+            elif _bounded_fast_path and load_messages and msg_limit is not None and msg_before is not None:
+                # msg_before paging on a fast-path stub (#6317 gate RED
+                # blocker 1).  The older-page request cannot be served
+                # from the tail window because it needs the full message
+                # coordinate space for correct cursor continuity.  Reload
+                # authoritatively so the normal merge + window path
+                # operates on the full transcript.
+                try:
+                    s = get_session(sid, metadata_only=False, _skip_bounded_fast_path=True)
+                except KeyError:
+                    if _diag: _diag.finish()
+                    return bad(handler, "Session not found", 404)
+                _bounded_fast_path = False
+                _bounded_fast_path_active = False
+            elif _bounded_fast_path and load_messages and not msg_limit:
+                # Full transcript requested on a fast-path stub — reload
+                # authoritatively so the merge path has every message.
+                try:
+                    s = get_session(sid, metadata_only=False, _skip_bounded_fast_path=True)
+                except KeyError:
+                    if _diag: _diag.finish()
+                    return bad(handler, "Session not found", 404)
+                _bounded_fast_path = False
+                _bounded_fast_path_active = False
+            else:
+                _bounded_fast_path_active = False
+            # ── end #6241 fast-path ──────────────────────────────────────
+            if _bounded_fast_path_active:
+                # Fast-path: we already have a bounded message tail from
+                # the sidecar.  Perform proper cli_meta lookup and session
+                # classification so lineage, messaging state, and
+                # post-messages fields (tool_calls, anchor_activity_scenes,
+                # todo) are preserved (#6317 gate RED blocker 3 — no
+                # longer hardcodes is_messaging_session=False, cli_meta={}).
+                cli_meta = _lookup_cli_session_metadata(sid) if _session_requires_cli_metadata_lookup(s) else {}
+                is_messaging_session = _is_messaging_session_record(s) or _is_messaging_session_record(cli_meta)
+                # Load only very recent state.db rows for the merge.
+                _db_kwargs = {"profile": _session_profile}
+                _backstop = _state_db_backstop_limit_for_display(s, msg_before)
+                if _backstop is not None:
+                    _db_kwargs["limit"] = _backstop
+                state_db_messages = get_state_db_session_messages(
+                    sid, **_db_kwargs,
+                )
+            else:
+                cli_meta = _lookup_cli_session_metadata(sid) if _session_requires_cli_metadata_lookup(s) else {}
+                is_messaging_session = _is_messaging_session_record(s) or _is_messaging_session_record(cli_meta)
             if is_messaging_session:
                 cli_messages = get_cli_session_messages(sid)
             elif load_messages:
-                if msg_limit is not None:
-                    (
-                        state_db_since_timestamp,
-                        limited_sidecar_messages,
-                    ) = _state_db_since_timestamp_for_limited_display(
-                        s,
-                        msg_limit,
-                        msg_before=msg_before,
+                if not _bounded_fast_path_active:
+                    if msg_limit is not None:
+                        (
+                            state_db_since_timestamp,
+                            limited_sidecar_messages,
+                        ) = _state_db_since_timestamp_for_limited_display(
+                            s,
+                            msg_limit,
+                            msg_before=msg_before,
+                        )
+                    _state_db_reader_kwargs = {"profile": _session_profile}
+                    if state_db_since_timestamp is not None:
+                        _state_db_reader_kwargs["since_timestamp"] = state_db_since_timestamp
+                    # Apply the display-path row backstop ONLY on provably-safe
+                    # reads where no truncation_boundary prefix is required for the
+                    # merge — see _state_db_backstop_limit_for_display. Compressed
+                    # sessions and msg_before paging need their full prefix rows for
+                    # correct reconciliation, so those stay uncapped.
+                    _backstop = _state_db_backstop_limit_for_display(s, msg_before)
+                    if _backstop is not None:
+                        _state_db_reader_kwargs["limit"] = _backstop
+                    state_db_messages = get_state_db_session_messages(
+                        sid,
+                        **_state_db_reader_kwargs,
                     )
-                _state_db_reader_kwargs = {"profile": _session_profile}
-                if state_db_since_timestamp is not None:
-                    _state_db_reader_kwargs["since_timestamp"] = state_db_since_timestamp
-                # Apply the display-path row backstop ONLY on provably-safe
-                # reads where no truncation_boundary prefix is required for the
-                # merge — see _state_db_backstop_limit_for_display. Compressed
-                # sessions and msg_before paging need their full prefix rows for
-                # correct reconciliation, so those stay uncapped.
-                _backstop = _state_db_backstop_limit_for_display(s, msg_before)
-                if _backstop is not None:
-                    _state_db_reader_kwargs["limit"] = _backstop
-                state_db_messages = get_state_db_session_messages(
-                    sid,
-                    **_state_db_reader_kwargs,
-                )
             elif not is_messaging_session:
                 # Metadata-only callers still need the same append-only
                 # reconciliation contract as full loads so stale/replayed
@@ -12884,6 +13314,18 @@ def handle_get(handler, parsed) -> bool:
                     msg_before=msg_before,
                     expand_renderable=expand_renderable,
                 )
+                if _bounded_fast_path_active:
+                    # The fast-path window starts at the scanner's canonical
+                    # absolute base; rebase the display offset and report the
+                    # canonical absolute total so cursor/count semantics match
+                    # the full-load path (#6317 re-gate). The total is the
+                    # sidecar's full count plus any state.db rows the
+                    # reconciliation merge appended beyond the sidecar tail
+                    # (the same coordinate space the slow path's
+                    # ``len(_all_msgs)`` count lives in).
+                    _messages_offset = _fast_base_offset + _messages_offset
+                    _newer_merged_rows = max(0, len(_all_msgs) - len(limited_sidecar_messages))
+                    _summary_message_count = _fast_total + _newer_merged_rows
                 if msg_limit is not None:
                     _truncated_msgs = _messages_for_limited_payload(_truncated_msgs)
                 _truncated_msgs = _hydrate_anchor_activity_scenes(
