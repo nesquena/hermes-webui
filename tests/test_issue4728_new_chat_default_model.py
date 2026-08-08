@@ -29,6 +29,22 @@ function extractNewSession(src) {
   throw new Error('newSession body not closed');
 }
 
+function extractFunction(src, name) {
+  const start = src.indexOf('function ' + name + '(');
+  if (start < 0) throw new Error(name + ' not found');
+  let depth = 0;
+  let bodyStart = src.indexOf('{', src.indexOf(')', start));
+  for (let i = bodyStart; i < src.length; i++) {
+    const ch = src[i];
+    if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) return src.slice(start, i + 1);
+    }
+  }
+  throw new Error(name + ' body not closed');
+}
+
 const src = fs.readFileSync(process.argv[2], 'utf8');
 const args = JSON.parse(process.argv[3]);
 const modelSelect = {
@@ -79,6 +95,7 @@ globalThis.history = { replaceState() {} };
 globalThis.$ = $;
 globalThis.NO_PROJECT_FILTER = '__NO_PROJECT_FILTER__';
 globalThis._activeProject = '';
+globalThis._allProjects = [];
 globalThis._sessionSourceFilter = 'webui';
 globalThis._newSessionInFlight = null;
 globalThis._messagesTruncated = false;
@@ -156,6 +173,7 @@ globalThis.api = async (url, opts) => {
   };
 };
 
+eval(extractFunction(src, '_resolveProjectForNewSession'));
 eval(extractNewSession(src));
 
 (async () => {
