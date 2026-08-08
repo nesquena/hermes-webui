@@ -47,6 +47,7 @@ MESSAGING_SOURCES = {
     'slack',
     'telegram',
     'weixin',
+    'matrix',
 }
 
 CLI_MIN_UNTITLED_MESSAGE_COUNT = 6
@@ -68,6 +69,7 @@ SOURCE_LABELS = {
     'webhook': 'Webhook',
     'webui': 'WebUI',
     'weixin': 'Weixin',
+    'matrix': 'Matrix',
 }
 
 

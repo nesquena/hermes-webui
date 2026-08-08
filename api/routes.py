@@ -2869,6 +2869,7 @@ from api.config import (
     get_config_for_profile_home,
     _cfg_lock,
     PENDING_BG_TASK_COMPLETIONS,
+    _parse_provider_qualified_model_id,
 )
 from api import config as api_config
 from api.helpers import (
@@ -3755,6 +3756,85 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "activity_rows": anchor_activity_rows,
         },
     }
+
+
+def _runtime_journal_snapshot_for_session_payload(snapshot: dict | None) -> dict | None:
+    """Return the non-mutating, display-equivalent transport form of a live snapshot.
+
+    The canonical recovery snapshot intentionally keeps fallback representations.
+    Sending all of them duplicates each tool result in top-level ``tool_calls``
+    and row ``text``, ``tool``, and ``payload`` fields. Keep one authoritative
+    display source for each value at the HTTP boundary; the durable journal and
+    the canonical in-process snapshot remain unchanged.
+    """
+    if not isinstance(snapshot, dict):
+        return snapshot
+
+    projected = dict(snapshot)
+    # The frontend reconstructs this single live assistant row from the
+    # authoritative last_* strings when messages is empty. Preserve the row's
+    # timestamp separately so the synthesized message keeps stable identity.
+    live_messages = [
+        message
+        for message in (projected.get("messages") or [])
+        if isinstance(message, dict) and message.get("role") == "assistant"
+    ]
+    if live_messages:
+        last_message_ts = live_messages[-1].get("_ts")
+        if last_message_ts is not None:
+            projected["last_message_ts"] = last_message_ts
+    if projected.get("last_assistant_text") or projected.get("last_reasoning_text"):
+        projected["messages"] = []
+
+    scene = projected.get("anchor_activity_scene")
+    compact_calls = []
+    for raw_call in projected.get("tool_calls") or []:
+        if not isinstance(raw_call, dict):
+            continue
+        call = dict(raw_call)
+        if call.get("preview") == call.get("snippet"):
+            call.pop("preview", None)
+        compact_calls.append(call)
+    # Retain the compact top-level list as the degraded-render fallback. The
+    # Anchor scene is normally authoritative, but session reattach deliberately
+    # falls back to INFLIGHT.toolCalls when scene rendering is unavailable.
+    projected["tool_calls"] = compact_calls
+
+    if not isinstance(scene, dict):
+        return projected
+    compact_scene = dict(scene)
+    compact_rows = []
+    row_keys = (
+        "row_id", "local_id", "kind", "role", "source_event_type", "status",
+        "created_at", "group", "text", "thinking", "tool_call_id", "tool",
+    )
+    for raw_row in scene.get("activity_rows") or []:
+        if not isinstance(raw_row, dict):
+            continue
+        row = {
+            key: raw_row[key]
+            for key in row_keys
+            if key in raw_row and raw_row[key] not in (None, "")
+        }
+        if str(raw_row.get("role") or "") == "tool":
+            tool = raw_row.get("tool") if isinstance(raw_row.get("tool"), dict) else {}
+            compact_tool = dict(tool)
+            if compact_tool.get("preview") == compact_tool.get("snippet"):
+                compact_tool.pop("preview", None)
+            if compact_tool.get("tid") == compact_tool.get("id"):
+                compact_tool.pop("tid", None)
+            row["tool"] = compact_tool
+            # Tool cards consume args/snippet from row.tool. row.payload and
+            # row.text are byte-for-byte fallbacks of those same values.
+            row.pop("text", None)
+        else:
+            thinking = row.get("thinking")
+            if isinstance(thinking, dict) and thinking.get("text") == row.get("text"):
+                row.pop("thinking", None)
+        compact_rows.append(row)
+    compact_scene["activity_rows"] = compact_rows
+    projected["anchor_activity_scene"] = compact_scene
+    return projected
 
 
 def _ensure_full_session_before_mutation(sid: str, session):
@@ -6394,20 +6474,42 @@ def _repair_foreign_session_model_provider(
 
 
 def _clean_session_model_provider(value: str | None) -> str | None:
+    """Normalize a stored/requested provider value to a bare provider ID.
+
+    An ``@``-prefixed value is a provider-qualified *model* hint, so the
+    provider is resolved with the shared
+    ``config._parse_provider_qualified_model_id()`` grammar rather than a
+    positional colon split — that keeps multi-segment custom provider IDs
+    (``custom:<slug>``, ``custom:<host>:<port>``) whole while still dropping a
+    trailing model segment (#6722). Values without the ``@`` marker are already
+    plain provider IDs, whose colons belong to the ID itself, so they are
+    preserved verbatim.
+    """
     provider = str(value or "").strip().lower()
     if not provider or provider == "default":
         return None
     if provider.startswith("@"):
-        provider = provider[1:]
+        parsed = _parse_provider_qualified_model_id(provider)
+        provider = parsed[1].strip() if parsed else provider[1:]
     return provider or None
 
 
 def _split_provider_qualified_model(model: str) -> tuple[str, str | None]:
+    """Split an ``@provider:model`` hint into ``(bare_model, provider)``.
+
+    Delegates the grammar to ``config._parse_provider_qualified_model_id()``,
+    the shared parser that already knows how to keep a multi-segment custom
+    provider ID (``custom:<slug>``, ``custom:<host>:<port>``) intact while
+    still letting the model segment carry its own colons for tags such as
+    ``:free``. Keeping one parser here means every caller in this module and
+    the gateway request path resolve the same provider/model pair (#6722).
+    """
     model = str(model or "").strip()
-    if model.startswith("@") and ":" in model:
-        provider_hint, bare_model = model[1:].rsplit(":", 1)
+    parsed = _parse_provider_qualified_model_id(model)
+    if parsed:
+        bare_model, provider_hint = parsed
         provider = _clean_session_model_provider(provider_hint)
-        bare = bare_model.strip()
+        bare = str(bare_model or "").strip()
         if provider and bare:
             return bare, provider
     return model, None
@@ -12911,7 +13013,7 @@ def handle_get(handler, parsed) -> bool:
                         journal,
                         active=journal_active,
                     )
-                    if journal_active:
+                    if journal_active and (not load_messages or msg_limit is None):
                         try:
                             snapshot = _run_journal_live_snapshot(original_stream_id, handler=handler)
                         except Exception:
@@ -12922,7 +13024,7 @@ def handle_get(handler, parsed) -> bool:
                             )
                             snapshot = None
                         if snapshot:
-                            raw["runtime_journal_snapshot"] = snapshot
+                            raw["runtime_journal_snapshot"] = _runtime_journal_snapshot_for_session_payload(snapshot)
                             raw["pending_attachments"] = getattr(s, "pending_attachments", []) or []
             # Cold-load: derive the latest settled todo snapshot from the full
             # merged transcript, not the truncated display window. This keeps
@@ -15218,11 +15320,44 @@ def handle_post(handler, parsed) -> bool:
         cli_meta = _lookup_cli_session_metadata(source.session_id) if _session_requires_cli_metadata_lookup(source) else {}
         is_messaging_session = _is_messaging_session_record(source) or _is_messaging_session_record(cli_meta)
         cli_messages = get_cli_session_messages(source.session_id) if is_messaging_session else []
-        source_messages = (
-            _merged_session_messages_for_display(source, cli_messages)
-            if is_messaging_session and cli_messages
-            else list(source.messages or [])
-        )
+        if is_messaging_session:
+            if cli_messages:
+                source_messages = _merged_session_messages_for_display(source, cli_messages)
+            else:
+                # Match GET /api/session: a messaging session with no CLI
+                # transcript does not fall back to state.db rows.
+                source_messages = merge_session_messages_append_only(
+                    _webui_sidecar_lineage_messages_for_display(source),
+                    [],
+                    truncation_watermark=getattr(source, "truncation_watermark", None),
+                    truncation_boundary=getattr(source, "truncation_boundary", None),
+                )
+                source_messages = _merged_webui_lineage_messages_for_display(source, source_messages)
+        else:
+            # Match GET /api/session's full-transcript display path exactly:
+            # sidecar lineage stitched across compression snapshots, merged
+            # append-only with state.db rows, then parent-row backfill for
+            # partial continuations. The frontend's keep_count is an index
+            # into THAT merged list; slicing the raw sidecar instead landed
+            # the cut too early whenever the merged view deduplicates rows
+            # (replayed sidecar/state.db doubles, filtered prefixes), so the
+            # fork stopped mid tool-run and dropped the final conclusion.
+            _state_db_reader_kwargs = {
+                "profile": getattr(source, "profile", None) or None,
+            }
+            _backstop = _state_db_backstop_limit_for_display(source, None)
+            if _backstop is not None:
+                _state_db_reader_kwargs["limit"] = _backstop
+            source_messages = merge_session_messages_append_only(
+                _webui_sidecar_lineage_messages_for_display(source),
+                get_state_db_session_messages(
+                    source.session_id,
+                    **_state_db_reader_kwargs,
+                ),
+                truncation_watermark=getattr(source, "truncation_watermark", None),
+                truncation_boundary=getattr(source, "truncation_boundary", None),
+            )
+            source_messages = _merged_webui_lineage_messages_for_display(source, source_messages)
         if keep_count is not None:
             forked_messages = source_messages[:keep_count]
         else:
@@ -20652,17 +20787,28 @@ def _handle_memory_read(handler, parsed=None):
     except ImportError:
         home = Path.home() / ".hermes"
         mem_dir = home / "memories"
-    mem_file = mem_dir / "MEMORY.md"
-    user_file = mem_dir / "USER.md"
+
+    # Respect memory_enabled and user_profile_enabled config flags (#6406)
+    # Use get_config_snapshot() for per-profile isolation — get_config() returns
+    # the process-global mutable _cfg_cache which races across profiles.
+    # The flags are nested under cfg["memory"] in Hermes Agent's schema.
+    cfg = get_config_snapshot()
+    mem = cfg.get("memory") if isinstance(cfg, dict) else None
+    mem_cfg = mem if isinstance(mem, dict) else {}
+    memory_enabled = _webui_truthy(mem_cfg.get("memory_enabled", True))
+    user_profile_enabled = _webui_truthy(mem_cfg.get("user_profile_enabled", True))
+
+    mem_file = mem_dir / "MEMORY.md" if memory_enabled else None
+    user_file = mem_dir / "USER.md" if user_profile_enabled else None
     soul_file = home / "SOUL.md"
     memory = (
         mem_file.read_text(encoding="utf-8", errors="replace")
-        if mem_file.exists()
+        if mem_file and mem_file.exists()
         else ""
     )
     user = (
         user_file.read_text(encoding="utf-8", errors="replace")
-        if user_file.exists()
+        if user_file and user_file.exists()
         else ""
     )
     soul = (
@@ -20678,18 +20824,18 @@ def _handle_memory_read(handler, parsed=None):
             "user": _redact_text(user),
             "soul": _redact_text(soul),
             "project_context": _redact_text(project_context["content"]),
-            "memory_path": str(mem_file),
-            "user_path": str(user_file),
+            "memory_path": str(mem_file) if mem_file else "",
+            "user_path": str(user_file) if user_file else "",
             "soul_path": str(soul_file),
             "project_context_path": project_context["path"],
             "project_context_name": project_context.get("name", ""),
             "project_context_workspace": project_context["workspace"],
-            "memory_mtime": mem_file.stat().st_mtime if mem_file.exists() else None,
-            "user_mtime": user_file.stat().st_mtime if user_file.exists() else None,
+            "memory_mtime": mem_file.stat().st_mtime if mem_file and mem_file.exists() else None,
+            "user_mtime": user_file.stat().st_mtime if user_file and user_file.exists() else None,
             "soul_mtime": soul_file.stat().st_mtime if soul_file.exists() else None,
             "project_context_mtime": project_context["mtime"],
             "project_context_shadowed": project_context["shadowed"],
-            "external_notes_enabled": _external_notes_sources_enabled(),
+            "external_notes_enabled": _external_notes_sources_enabled(cfg),
         },
     )
 
@@ -25747,6 +25893,22 @@ def _handle_memory_write(handler, body):
         require(body, "section", "content")
     except ValueError as e:
         return bad(handler, str(e))
+    section = body["section"]
+
+    # Respect memory_enabled and user_profile_enabled config flags (#6406)
+    # Use get_config_snapshot() for per-profile isolation — get_config() returns
+    # the process-global mutable _cfg_cache which races across profiles.
+    # The flags are nested under cfg["memory"] in Hermes Agent's schema.
+    cfg = get_config_snapshot()
+    mem = cfg.get("memory") if isinstance(cfg, dict) else None
+    mem_cfg = mem if isinstance(mem, dict) else {}
+    if section == "memory":
+        if not _webui_truthy(mem_cfg.get("memory_enabled", True)):
+            return bad(handler, "Memory is disabled by configuration (memory_enabled: false)", 403)
+    elif section == "user":
+        if not _webui_truthy(mem_cfg.get("user_profile_enabled", True)):
+            return bad(handler, "User profile is disabled by configuration (user_profile_enabled: false)", 403)
+
     try:
         from api.profiles import get_active_hermes_home
 
@@ -25756,7 +25918,6 @@ def _handle_memory_write(handler, body):
         home = Path.home() / ".hermes"
         mem_dir = home / "memories"
     mem_dir.mkdir(parents=True, exist_ok=True)
-    section = body["section"]
     if section == "memory":
         target = mem_dir / "MEMORY.md"
     elif section == "user":

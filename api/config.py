@@ -9493,9 +9493,30 @@ def load_settings() -> dict:
         # Honor a stored True only when that marker is present.
         if not bool(stored.get("virtualize_transcript_optin")):
             settings["virtualize_transcript"] = False
+    # Fall back to the DEFAULTS, not to None, when nothing is stored.
+    #
+    # `_read_raw_settings_file()` returns {} for a MISSING settings.json, and {}
+    # is a dict — so the `isinstance(stored, dict)` arms were always taken,
+    # `stored.get("theme")` was None, and `_normalize_appearance(None, None)`
+    # fell through to its unknown-theme branch and returned ("dark", "default").
+    # `_SETTINGS_DEFAULTS["theme"]` / `["skin"]` were therefore unreachable for
+    # the one case they exist to serve: a user with no settings file yet.
+    #
+    # This is invisible on stock defaults, because dark/default is exactly what
+    # the fallback produces — the two paths agree. It only surfaces once the
+    # defaults are changed, at which point the dict silently does nothing.
+    #
+    # Gate on the PAIR, not per field. A per-field `or settings.get(...)` looks
+    # equivalent and is not: with a stored legacy theme and no skin, `slate`
+    # normalises to ("dark", "slate"), but per-field fallback injects the
+    # default skin and yields ("dark", "default") — silently destroying the
+    # legacy migration. Same distinction the boot script draws in #6808.
+    _has_stored_appearance = isinstance(stored, dict) and (
+        "theme" in stored or "skin" in stored
+    )
     settings["theme"], settings["skin"] = _normalize_appearance(
-        stored.get("theme") if isinstance(stored, dict) else settings.get("theme"),
-        stored.get("skin") if isinstance(stored, dict) else settings.get("skin"),
+        stored.get("theme") if _has_stored_appearance else settings.get("theme"),
+        stored.get("skin") if _has_stored_appearance else settings.get("skin"),
     )
     settings["default_model"] = get_effective_default_model()
     try:

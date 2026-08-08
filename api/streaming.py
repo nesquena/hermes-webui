@@ -9414,8 +9414,16 @@ def _run_agent_streaming(
             # Prepend workspace context so the agent always knows which directory
             # to use for file operations, regardless of session age or AGENTS.md defaults.
             workspace_ctx = _workspace_context_prefix(str(s.workspace))
+            # #6672: interpolate the session-CREATION workspace (immutable), never
+            # the live s.workspace, into the system prompt. s.workspace changes on
+            # every mid-session workspace switch in the WebUI header; mutating the
+            # system prompt would rewrite msg[0] and invalidate the LLM prefix
+            # cache (APC/Radix Tree) for the whole 50k+ token transcript. Active
+            # switches still reach the model via the [Workspace::v1: ...] tag on
+            # the current user turn (workspace_ctx above), which lives in msg[-1].
+            _session_workspace_frozen = getattr(s, 'created_workspace', None) or str(s.workspace)
             workspace_system_msg = (
-                f"Active workspace at session start: {s.workspace}\n"
+                f"Active workspace at session start: {_session_workspace_frozen}\n"
                 "Every user message is prefixed with [Workspace::v1: /absolute/path] indicating the "
                 "workspace the user has selected in the web UI at the time they sent that message. "
                 "This tag is the single authoritative source of the active workspace and updates "
@@ -9453,7 +9461,10 @@ def _run_agent_streaming(
                     'source': 'webui',
                     'session_id': session_id,
                     'profile': getattr(s, 'profile', None),
-                    'workspace': s.workspace,
+                    # #6672: frozen session-creation workspace — see
+                    # workspace_system_msg above. Live workspace switches stay out
+                    # of msg[0] so LLM prefix caches are not invalidated.
+                    'workspace': _session_workspace_frozen,
                 },
                 config_data=_cfg,
             )

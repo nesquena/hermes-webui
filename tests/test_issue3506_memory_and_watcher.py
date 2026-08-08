@@ -282,6 +282,169 @@ def test_cheap_fingerprint_detects_same_count_message_rewrite(tmp_path):
     )
 
 
+def test_cheap_fingerprint_message_aggregate_does_not_read_role_payload(
+    tmp_path, monkeypatch
+):
+    """The five-second fingerprint must stay on the covering session/timestamp
+    index. Reading ``role`` forces a table lookup for every message row and made
+    a 10 GB state.db fingerprint take tens of seconds even while WebUI was idle.
+    Role-only changes are deliberately handled by the bounded periodic full
+    projection, so this query can stay on the existing covering index.
+    """
+    gw = importlib.import_module("api.gateway_watcher")
+    db, conn = _make_db(tmp_path)
+    conn.execute(
+        "CREATE INDEX idx_messages_session ON messages(session_id, timestamp)"
+    )
+    conn.commit()
+    _add_session(conn, "s1", "telegram", mc=3)
+    statements = []
+    real_open = gw.open_state_db_readonly
+
+    def traced_open(path):
+        traced = real_open(path)
+        traced.set_trace_callback(statements.append)
+        return traced
+
+    monkeypatch.setattr(gw, "open_state_db_readonly", traced_open)
+
+    assert gw._cheap_change_fingerprint(db) is not None
+    aggregate = next(
+        statement
+        for statement in statements
+        if "LEFT JOIN messages" in statement
+    )
+    assert "m.role" not in aggregate.lower()
+    assert "COUNT(m.id)" in aggregate
+    assert "MAX(m.timestamp)" in aggregate
+    plan = conn.execute("EXPLAIN QUERY PLAN " + aggregate).fetchall()
+    assert any(
+        "COVERING INDEX idx_messages_session" in str(row[3]) for row in plan
+    ), plan
+
+
+def test_periodic_projection_recovers_role_only_sidebar_visibility_change(tmp_path):
+    """Role-only mutations must not remain invisible forever."""
+    gw = importlib.import_module("api.gateway_watcher")
+    db, conn = _make_db(tmp_path)
+    _add_session(conn, "cli1", "cli", mc=1, title="Untitled")
+    conn.execute(
+        "CREATE INDEX idx_messages_session ON messages(session_id, timestamp)"
+    )
+    conn.commit()
+
+    watcher = gw.GatewayWatcher(state_db_path=db)
+    subscriber = watcher.subscribe()
+    assert watcher._poll_once(now=1.0) is True
+    initial = subscriber.get_nowait()
+    assert [row["session_id"] for row in initial["sessions"]] == ["cli1"]
+    initial_fingerprint = watcher._last_cheap_fp
+
+    conn.execute("UPDATE messages SET role = 'assistant' WHERE session_id = 'cli1'")
+    conn.commit()
+    assert gw._cheap_change_fingerprint(db) == initial_fingerprint
+
+    before_deadline = 1.0 + watcher.PROJECTION_PARITY_INTERVAL - 1.0
+    assert watcher._poll_once(now=before_deadline) is False
+    assert subscriber.empty()
+
+    at_deadline = 1.0 + watcher.PROJECTION_PARITY_INTERVAL
+    assert watcher._poll_once(now=at_deadline) is True
+    event = subscriber.get_nowait()
+    assert event["sessions"] == []
+    assert subscriber.empty()
+
+
+def test_initial_missing_db_does_not_publish_an_empty_snapshot(tmp_path):
+    gw = importlib.import_module("api.gateway_watcher")
+    watcher = gw.GatewayWatcher(state_db_path=tmp_path / "missing.db")
+    subscriber = watcher.subscribe()
+
+    assert watcher._poll_once(now=1.0) is False
+    assert subscriber.empty()
+    assert watcher._last_full_projection_at is None
+
+
+def test_initial_projection_failure_does_not_publish_empty_and_retries(
+    tmp_path, monkeypatch
+):
+    gw = importlib.import_module("api.gateway_watcher")
+    db, conn = _make_db(tmp_path)
+    conn.close()
+    attempts = []
+
+    def fail_once_then_project_empty(*args, **kwargs):
+        attempts.append(True)
+        if len(attempts) == 1:
+            raise sqlite3.OperationalError("projection failed")
+        return []
+
+    monkeypatch.setattr(
+        gw, "read_importable_agent_session_rows", fail_once_then_project_empty
+    )
+    watcher = gw.GatewayWatcher(state_db_path=db)
+    subscriber = watcher.subscribe()
+
+    assert watcher._poll_once(now=1.0) is False
+    assert attempts == [True]
+    assert subscriber.empty()
+    assert watcher._last_sessions == []
+    assert watcher._last_hash == ""
+    assert watcher._last_cheap_fp == ""
+    assert watcher._last_full_projection_at is None
+
+    assert watcher._poll_once(now=2.0) is True
+    assert attempts == [True, True]
+    assert subscriber.get_nowait()["sessions"] == []
+    assert watcher._last_full_projection_at == 2.0
+
+
+def test_projection_failure_preserves_populated_state_and_parity_retry(
+    tmp_path, monkeypatch
+):
+    gw = importlib.import_module("api.gateway_watcher")
+    db, conn = _make_db(tmp_path)
+    _add_session(conn, "tg1", "telegram", mc=2)
+
+    watcher = gw.GatewayWatcher(state_db_path=db)
+    subscriber = watcher.subscribe()
+    assert watcher._poll_once(now=1.0) is True
+    initial_event = subscriber.get_nowait()
+    assert [row["session_id"] for row in initial_event["sessions"]] == ["tg1"]
+    initial_sessions = watcher._last_sessions
+    initial_hash = watcher._last_hash
+    initial_fingerprint = watcher._last_cheap_fp
+    real_projection = gw.read_importable_agent_session_rows
+    attempts = []
+
+    def fail_once_then_project(*args, **kwargs):
+        attempts.append(True)
+        if len(attempts) == 1:
+            raise sqlite3.OperationalError("projection failed")
+        return real_projection(*args, **kwargs)
+
+    monkeypatch.setattr(
+        gw, "read_importable_agent_session_rows", fail_once_then_project
+    )
+    at_deadline = 1.0 + watcher.PROJECTION_PARITY_INTERVAL
+
+    assert watcher._poll_once(now=at_deadline) is False
+    assert attempts == [True]
+    assert subscriber.empty()
+    assert watcher._last_sessions is initial_sessions
+    assert watcher._last_hash == initial_hash
+    assert watcher._last_cheap_fp == initial_fingerprint
+    assert watcher._last_full_projection_at == 1.0
+
+    assert watcher._poll_once(now=at_deadline + 1.0) is True
+    assert attempts == [True, True]
+    assert subscriber.empty()
+    assert watcher._last_sessions is initial_sessions
+    assert watcher._last_hash == initial_hash
+    assert watcher._last_cheap_fp == initial_fingerprint
+    assert watcher._last_full_projection_at == at_deadline + 1.0
+
+
 def test_cheap_fingerprint_detects_lineage_only_change(tmp_path):
     """Lineage/visibility fields the projection uses for collapse (parent_session_id,
     end_reason, ended_at) must be part of the fingerprint."""
@@ -363,39 +526,27 @@ def test_poll_loop_skips_projection_when_unchanged(tmp_path, monkeypatch):
     db, conn = _make_db(tmp_path)
     _add_session(conn, "tg1", "telegram", mc=2)
 
-    monkeypatch.setattr(gw, "_get_state_db_path", lambda: db)
+    projected = []
 
-    calls = {"n": 0}
-    real = gw._get_agent_sessions_from_db
+    def fake_projection(_path):
+        projected.append(True)
+        return [{"session_id": "tg1"}]
 
-    def counting(db_path=None):
-        calls["n"] += 1
-        return real(db_path)
+    monkeypatch.setattr(gw, "_get_agent_sessions_from_db", fake_projection)
+    w = gw.GatewayWatcher(state_db_path=db)
 
-    monkeypatch.setattr(gw, "_get_agent_sessions_from_db", counting)
+    assert w._poll_once(now=1.0) is True
+    assert projected == [True]
 
-    w = gw.GatewayWatcher()
-
-    # Run the change-detection body directly (one iteration) without the thread.
-    def one_iteration():
-        db_path = w._state_db_path
-        cheap_fp = gw._cheap_change_fingerprint(db_path) if db_path.exists() else ''
-        if cheap_fp is not None and cheap_fp == w._last_cheap_fp:
-            return
-        sessions = gw._get_agent_sessions_from_db(db_path)
-        if cheap_fp is not None:
-            w._last_cheap_fp = cheap_fp
-        _ = gw._snapshot_hash(sessions)
-
-    one_iteration()  # first poll: must read
-    assert calls["n"] == 1
-    one_iteration()  # unchanged: must skip
-    one_iteration()  # still unchanged: must skip
-    assert calls["n"] == 1, "expensive projection must not run while state is unchanged"
+    # Mutate only an excluded WebUI row: irrelevant churn must not trigger another
+    # expensive projection before the parity deadline.
+    _add_session(conn, "webui2", "webui", mc=99, title="WebUI run 2")
+    assert w._poll_once(now=2.0) is False
+    assert projected == [True]
 
     _add_session(conn, "tg1", "telegram", mc=3)  # a real change
-    one_iteration()
-    assert calls["n"] == 2, "expensive projection must run again after a real change"
+    assert w._poll_once(now=3.0) is True
+    assert projected == [True, True]
 
 
 def test_lru_eviction_skips_active_runs():
