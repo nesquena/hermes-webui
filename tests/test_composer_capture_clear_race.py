@@ -149,11 +149,9 @@ def _run_reentrant_guard_in_node(composer_value: str):
         function showToast(){}
 
         // Run the REAL guard block verbatim.
-        (function () {
+        (async function () {
           %(guard)s
-        })();
-
-        console.log(JSON.stringify({ queued, composerAfter: state.input.value }));
+        })().then(() => console.log(JSON.stringify({ queued, composerAfter: state.input.value })));
         """
     ) % {
         "composer_value": json.dumps(composer_value),
@@ -186,3 +184,94 @@ def test_reentrant_send_would_double_submit_if_composer_not_cleared():
     )
     assert out["queued"][0]["payload"]["text"] == "hello world"
     assert out["queued"][0]["sid"] == "sid-1"
+
+
+def _run_reentrant_queue_clear_case(stage_new_content: bool):
+    """Run the real accepted-queue guard and clear helper with a selection."""
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        pytest.skip("node not available")
+
+    composer_helper = _function_body(MESSAGES_JS, "_composerTextWithPendingSelections")
+    clear_helper = _function_body(MESSAGES_JS, "_clearComposerAfterQueuedSelectionSend")
+    guard = _extract_reentrancy_guard()
+    harness = textwrap.dedent(
+        """
+        const input = {value: 'captured prompt'};
+        const acceptedFile = {name: 'accepted.txt'};
+        const newFile = {name: 'new.txt'};
+        let _pendingSelections = [{id: 'ctx-1', name: 'Context 1', text: 'selected lines'}];
+        const S = {session: {session_id: 'sid'}, pendingFiles: [acceptedFile]};
+        const queued = [];
+        const draftClears = [];
+        let pendingSelectionClears = 0;
+        let release;
+        function $(id) { return id === 'msg' ? input : null; }
+        global.document = {getElementById: () => input};
+        function _formatSelectedTextReplyQuote(text) { return String(text); }
+        function _composerTextWithPendingSelections() {%(composer_helper)s}
+        function _clearPendingSelections() {
+          pendingSelectionClears += 1;
+          _pendingSelections = [];
+        }
+        function _clearComposerDraft(sid, text, files) {
+          draftClears.push({sid, text, files});
+        }
+        function renderTray() {}
+        function autoResize() {}
+        function _clearComposerAfterQueuedSelectionSend(sid, expectedText, filesSnapshot) {%(clear_helper)s}
+        function _chatPayloadModelState() { return {model: 'm', model_provider: 'p'}; }
+        function queueSessionMessage(sid, payload) {
+          queued.push({sid, payload});
+          return new Promise(resolve => { release = () => resolve({accepted: true}); });
+        }
+        function showToast() {}
+        let _sendInProgress = true;
+        let _sendInProgressSid = 'sid';
+
+        (async function () {
+          const waiting = (async function () {%(guard)s})();
+          await Promise.resolve();
+          if (%(stage_new_content)s) {
+            input.value = 'new draft';
+            S.pendingFiles.push(newFile);
+          }
+          release();
+          await waiting;
+          console.log(JSON.stringify({
+            queuedText: queued[0].payload.text,
+            queuedFiles: queued[0].payload.files.map(file => file.name),
+            input: input.value,
+            files: S.pendingFiles.map(file => file.name),
+            draftClears,
+            pendingSelectionClears,
+          }));
+        })().catch(error => { console.error(error); process.exit(1); });
+        """
+    ) % {
+        "composer_helper": composer_helper,
+        "clear_helper": clear_helper,
+        "guard": guard,
+        "stage_new_content": "true" if stage_new_content else "false",
+    }
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
+    return json.loads(proc.stdout.strip())
+
+
+def test_reentrant_accepted_queue_clears_captured_selection_once_and_preserves_new_input():
+    """Accepted re-entrant queue content clears once without clobbering a newer draft."""
+    accepted = _run_reentrant_queue_clear_case(False)
+    assert accepted["queuedText"] == "captured prompt\n\n**Context 1:**\nselected lines"
+    assert accepted["queuedFiles"] == ["accepted.txt"]
+    assert accepted["input"] == ""
+    assert accepted["files"] == []
+    assert accepted["pendingSelectionClears"] == 1
+    assert accepted["draftClears"] == [
+        {"sid": "sid", "text": "captured prompt", "files": [{"name": "accepted.txt"}]}
+    ]
+
+    raced = _run_reentrant_queue_clear_case(True)
+    assert raced["queuedFiles"] == ["accepted.txt"]
+    assert raced["input"] == "new draft"
+    assert raced["files"] == ["new.txt"]

@@ -123,25 +123,28 @@ class TestSlashCommandHandlers:
 # ── send() busy branch ───────────────────────────────────────────────────
 
     def test_slash_commands_clear_pending_files(self):
-        """Queue/interrupt clear S.pendingFiles after enqueuing; steer failure
+        """Queue/interrupt clear delivered files after durable acceptance; steer failure
         preserves staged files so the user can choose the next explicit action.
 
-        cmdQueue and cmdInterrupt call queueSessionMessage themselves and clear
-        S.pendingFiles directly. cmdSteer delegates to _trySteer. _trySteer no
+        cmdQueue and cmdInterrupt await queueSessionMessage before clearing.
+        cmdSteer delegates to _trySteer. _trySteer no
         longer clears files on failure because it no longer falls back to
         cancel-and-queue behavior.
         """
-        # cmdQueue and cmdInterrupt clear pendingFiles directly
+        # cmdQueue and cmdInterrupt clear only the accepted snapshot.
         for fn_name in ("cmdQueue", "cmdInterrupt"):
             idx = COMMANDS_JS.find(f"function {fn_name}(")
             assert idx >= 0, f"{fn_name} not found"
-            body = COMMANDS_JS[idx:idx + 800]
-            assert "S.pendingFiles=[]" in body, (
-                f"{fn_name} must clear S.pendingFiles after queueSessionMessage"
+            body = COMMANDS_JS[idx:idx + 1200]
+            assert "await queueSessionMessage" in body, (
+                f"{fn_name} must await durable queue acceptance"
             )
-            assert "renderTray()" in body, (
-                f"{fn_name} must call renderTray() after clearing pendingFiles"
+            assert "_clearAcceptedQueueCommandDraft" in body, (
+                f"{fn_name} must clear the accepted draft/files only after acceptance"
             )
+        helper_idx = COMMANDS_JS.find("function _clearAcceptedQueueCommandDraft(")
+        helper_body = COMMANDS_JS[helper_idx:COMMANDS_JS.find("/**", helper_idx + 10)]
+        assert "renderTray()" in helper_body
         # cmdSteer delegates to _trySteer; the helper clears files only on
         # accepted steer, and (post-#5459-gate) removes ONLY the delivered files
         # by identity so files staged during the upload await are preserved. The
@@ -357,7 +360,7 @@ class TestSendBusyBranchDispatch:
         guard = MESSAGES_JS[guard_start:guard_end]
         assert "if(_text && _targetSid)" in guard
         assert "S.pendingFiles.length" not in guard
-        assert "files:[...S.pendingFiles]" in guard
+        assert "files:_filesSnapshot" in guard
 
     def test_steer_upload_is_cached_and_delivered_files_removed_by_identity(self):
         """#5459 gate fixes: (1) a failed-steer RETRY reuses the cached upload

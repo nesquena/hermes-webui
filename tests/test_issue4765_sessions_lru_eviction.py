@@ -209,6 +209,24 @@ def test_active_streaming_session_never_evicted(isolated_session_env):
     assert SESSIONS[active.session_id].active_stream_id == "live-stream-xyz"
 
 
+def test_nonempty_durable_queue_never_evicted_even_from_sidecar_stub(isolated_session_env):
+    from api import config as _cfg
+    from api.config import SESSIONS
+    from api.models import Session, _session_is_evictable
+
+    _cfg.SESSIONS_MAX = 1
+    queued = _make_persisted_session(700)
+    queued.queue = [{"id": "retained", "text": "must run", "files": []}]
+    queued.save()
+    metadata_only = Session.load_metadata_only(queued.session_id)
+
+    assert metadata_only.queue == queued.queue
+    assert _session_is_evictable(metadata_only) is False
+    _insert(metadata_only)
+    _insert(_make_persisted_session(701))
+    assert queued.session_id in SESSIONS
+
+
 def test_unsaved_session_never_evicted(isolated_session_env):
     """A session with unsaved messages (not yet on disk) is never evicted (#4765)."""
     from api import config as _cfg

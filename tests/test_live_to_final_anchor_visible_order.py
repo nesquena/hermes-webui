@@ -3,6 +3,7 @@
 import json
 import shutil
 import subprocess
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -473,23 +474,152 @@ def test_live_processed_anchor_timer_falls_back_after_real_started_at():
 
 def test_server_started_turn_also_creates_processed_anchor_before_stop_button_refresh():
     listener = _event_listener_body(MESSAGES_JS, "server_turn_started")
+    reconcile = _function_body(MESSAGES_JS, "_reconcileServerTurnStarted")
+    attach = _function_body(MESSAGES_JS, "_attachServerInitiatedStream")
 
-    pending_idx = listener.index("S.session.pending_started_at = d.pending_started_at")
-    ensure_idx = listener.index("if (typeof ensureLiveWorklogShell === 'function') ensureLiveWorklogShell();")
-    stop_idx = listener.index("if (typeof updateSendBtn === 'function') updateSendBtn();")
-    assert pending_idx < ensure_idx < stop_idx
+    pending_idx = reconcile.index("S.session.pending_started_at=data.pending_started_at")
+    merge_idx = reconcile.index("_mergePendingSessionMessage(S.session,S.messages)")
+    render_idx = reconcile.index("if((merged||reordered)&&typeof renderMessages==='function') renderMessages();")
+    ensure_idx = attach.index("if (typeof ensureLiveWorklogShell === 'function') ensureLiveWorklogShell();")
+    stop_idx = attach.index("if (typeof updateSendBtn === 'function') updateSendBtn();")
+    assert pending_idx < merge_idx < render_idx
+    assert ensure_idx < stop_idx
+    assert "_reconcileServerTurnStarted(sid,d);" in listener
+    assert "_attachServerInitiatedStream(sid, streamId, recovered);" in listener
 
-    assert "else if (!S.session.pending_started_at) S.session.pending_started_at = Date.now()/1000;" in listener
-    assert "if (typeof appendThinking === 'function') appendThinking();" in listener
+
+def test_direct_start_creates_live_shell_before_reconciling_retained_queue():
+    send = _function_body(MESSAGES_JS, "send")
+    post_start = send.split("if(S.session&&typeof startData.pending_started_at==='number')", 1)[1]
+    post_start = post_start.split("if(typeof updateSendBtn==='function')", 1)[0]
+
+    ensure_idx = post_start.index("if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();")
+    reconcile_idx = post_start.index("_reconcileServerTurnStarted(activeSid,startData);")
+    assert ensure_idx < reconcile_idx
 
 
-def test_server_started_turn_payload_carries_pending_started_at():
+def test_server_started_turn_payload_carries_pending_started_at(monkeypatch):
     recovery = ROUTES_PY.split("source\": \"subscribe_recovery\"", 1)[0].rsplit("try:", 1)[-1]
     assert "recover_session = get_session(sid, metadata_only=True)" in recovery
-    assert "pending_started_at = getattr(recover_session, \"pending_started_at\", None)" in recovery
-    assert '"pending_started_at": pending_started_at' in ROUTES_PY
-    assert '"pending_started_at": getattr(session, "pending_started_at", None)' not in ROUTES_PY
-    assert '"pending_started_at": (resp or {}).get("pending_started_at")' in ROUTES_PY
+    assert "_server_turn_started_payload(" in recovery
+    assert '"pending_started_at": response.get(' in ROUTES_PY
+
+    from api import background_process, routes
+
+    emitted = []
+
+    class _Channel:
+        def emit(self, event, payload):
+            emitted.append((event, payload))
+
+    monkeypatch.setattr(background_process, "get_session_channel", lambda _sid: _Channel())
+    routes._fanout_server_turn_started(
+        "sid-1",
+        {"_status": 200, "stream_id": "stream-1", "pending_started_at": 123.5},
+        source="webui_queue",
+    )
+
+    assert emitted == [
+        (
+            "server_turn_started",
+            {
+                "session_id": "sid-1",
+                "stream_id": "stream-1",
+                "pending_started_at": 123.5,
+                "source": "webui_queue",
+            },
+        )
+    ]
+
+
+def test_server_started_payload_carries_claimed_item_and_authoritative_queue(monkeypatch):
+    from api import background_process, routes
+
+    emitted = []
+
+    class _Channel:
+        def emit(self, event, payload):
+            emitted.append((event, payload))
+
+    monkeypatch.setattr(background_process, "get_session_channel", lambda _sid: _Channel())
+    routes._fanout_server_turn_started(
+        "sid-queue-event",
+        {
+            "_status": 200,
+            "stream_id": "stream-queue-event",
+            "pending_started_at": 123.5,
+            "queue_item_id": "claimed",
+            "queue_item": {
+                "id": "claimed",
+                "text": "raw display",
+                "display_text": "raw display",
+                "files": [{"name": "note.txt"}],
+            },
+            "queue": [{"id": "later", "text": "later"}],
+        },
+        source="webui_queue",
+    )
+
+    assert emitted == [
+        (
+            "server_turn_started",
+            {
+                "session_id": "sid-queue-event",
+                "stream_id": "stream-queue-event",
+                "pending_started_at": 123.5,
+                "source": "webui_queue",
+                "queue_item_id": "claimed",
+                "queue_item": {
+                    "id": "claimed",
+                    "text": "raw display",
+                    "display_text": "raw display",
+                    "files": [{"name": "note.txt"}],
+                },
+                "display_text": "raw display",
+                "attachments": [{"name": "note.txt"}],
+                "queue": [{"id": "later", "text": "later"}],
+            },
+        )
+    ]
+
+
+def test_subscribe_recovery_payload_reuses_persisted_claim_and_queue():
+    from api import routes
+
+    payload = routes._server_turn_started_payload(
+        "sid-recovery",
+        {"stream_id": "stream-recovery"},
+        source="subscribe_recovery",
+        session=SimpleNamespace(
+            pending_started_at=44.5,
+            pending_queue_item={
+                "id": "claimed",
+                "text": "raw recovery text",
+                "display_text": "raw recovery text",
+                "files": [{"name": "recovery.txt"}],
+            },
+            queue=[{"id": "remaining", "text": "later"}],
+        ),
+        recovered=True,
+    )
+
+    assert payload == {
+        "session_id": "sid-recovery",
+        "stream_id": "stream-recovery",
+        "pending_started_at": 44.5,
+        "source": "subscribe_recovery",
+        "queue_item_id": "claimed",
+        "queue_item": {
+            "id": "claimed",
+            "text": "raw recovery text",
+            "display_text": "raw recovery text",
+            "files": [{"name": "recovery.txt"}],
+        },
+        "display_text": "raw recovery text",
+        "attachments": [{"name": "recovery.txt"}],
+        "queue": [{"id": "remaining", "text": "later"}],
+        "recovered": True,
+    }
 
 
 def test_live_processed_anchor_is_deduped_across_restore_paths():

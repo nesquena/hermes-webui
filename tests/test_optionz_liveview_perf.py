@@ -384,7 +384,7 @@ def test_session_sse_handler_wires_on_subscribe_recovery():
     handler_ix = src.index("def _handle_session_sse_stream")
     handler_src = src[handler_ix:handler_ix + 9000]
     assert "active_stream_id_for_session" in handler_src
-    assert '"recovered": True' in handler_src
+    assert "recovered=True" in handler_src
     assert "server_turn_started" in handler_src
     # Recovery CALL must come AFTER the channel subscription so a frame emitted
     # between subscribe and recovery is still caught by the queue (no lost-frame
@@ -407,8 +407,10 @@ def test_frontend_recovered_frame_uses_reconnecting_attach():
     h_src = js[h_ix:h_ix + 1600]
     assert "d.recovered" in h_src
     assert "reconnecting" in h_src
-    # Still reuses the single renderer — no second hand-rolled stream.
-    assert "attachLiveStream" in h_src
+    # Still reuses the single renderer through the shared attach helper.
+    assert "_attachServerInitiatedStream" in h_src
+    helper_ix = js.index("function _attachServerInitiatedStream")
+    assert "attachLiveStream" in js[helper_ix:helper_ix + 4000]
 
 
 # ---------------------------------------------------------------------------
