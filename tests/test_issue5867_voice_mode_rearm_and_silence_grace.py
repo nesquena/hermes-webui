@@ -481,6 +481,8 @@ const runtimeSource = Buffer.from('${RUNTIME_B64}', 'base64').toString();
 const scenario = JSON.parse(Buffer.from('${SCENARIO_B64}', 'base64').toString());
 const state = { sources: [], completionEvents: [], ownerSettlements: [], unhandled: [], starts: 0, aborts: 0 };
 const pending = [];
+const documentListeners = Object.create(null);
+const windowListeners = Object.create(null);
 function SpeechRecognition() {
   const instance = { onresult: null, onend: null, onerror: null, start() { state.starts += 1; }, abort() { state.aborts += 1; } };
   return instance;
@@ -493,10 +495,16 @@ class FakeEventSource {
   emit(name, event) { for (const handler of this.handlers[name] || []) handler(event); }
 }
 const noOp = () => {};
-const windowObj = { SpeechRecognition };
+const windowObj = {
+  SpeechRecognition,
+  addEventListener(name, handler) { (windowListeners[name] ||= []).push(handler); },
+  removeEventListener(name, handler) { windowListeners[name] = (windowListeners[name] || []).filter(item => item !== handler); },
+};
 const documentObj = {
   hidden: false, visibilityState: 'visible', baseURI: 'http://localhost/', wasDiscarded: false,
-  addEventListener() {}, removeEventListener() {}, hasFocus() { return true; }, querySelector() { return null; },
+  addEventListener(name, handler) { (documentListeners[name] ||= []).push(handler); },
+  removeEventListener(name, handler) { documentListeners[name] = (documentListeners[name] || []).filter(item => item !== handler); },
+  hasFocus() { return true; }, querySelector() { return null; },
   querySelectorAll() { return []; }, getElementById() { return null; },
   createElement() { return { style: {}, dataset: {}, classList: { add() {}, remove() {} } }; },
 };
@@ -547,6 +555,7 @@ const flush = () => new Promise(resolve => setTimeout(resolve, 0));
 (async () => {
   voiceApi.activate(); voiceApi.start();
   S.activeStreamId = 'stream-1'; S.session.active_stream_id = 'stream-1'; S.busy = true;
+  let replacementSource = null;
   if (scenario.kind === 'rejected') {
     attach('s1', 'stream-1', [], { reconnecting: true });
     await flush();
@@ -555,6 +564,23 @@ const flush = () => new Promise(resolve => setTimeout(resolve, 0));
     pending[1].resolve({ active: true });
     await flush(); await flush();
     pending[0].reject(Error('stale status rejected'));
+    await flush(); await flush();
+  } else if (scenario.kind === 'deferred-recovery') {
+    attach('s1', 'stream-1');
+    await flush();
+    const first = state.sources[0];
+    documentObj.hidden = true; documentObj.visibilityState = 'hidden';
+    first.emit('error', {});
+    documentObj.hidden = false; documentObj.visibilityState = 'visible';
+    for (const handler of documentListeners.visibilitychange || []) handler();
+    await flush();
+    replacementSource = { readyState: 1, closed: false, closeCount: 0, close() { this.closed = true; this.closeCount += 1; this.readyState = 2; } };
+    windowObj._liveStreamRegistry.s1 = { streamId: 'stream-B', source: replacementSource, generation: 2 };
+    windowObj._liveStreamTransportAuthority.s1 = { streamId: 'stream-B', generation: 2 };
+    windowObj._liveStreamTransportSourceGeneration.set(replacementSource, 2);
+    S.activeStreamId = 'stream-B'; S.session.active_stream_id = 'stream-B';
+    voiceApi.adopt('s1', 'stream-B');
+    pending[0].resolve({ active: true });
     await flush(); await flush();
   } else {
     attach('s1', 'stream-1');
@@ -571,13 +597,19 @@ const flush = () => new Promise(resolve => setTimeout(resolve, 0));
   }
   const registry = windowObj._liveStreamRegistry.s1;
   const authority = windowObj._liveStreamTransportAuthority.s1;
-  console.log(JSON.stringify({
+  const result = {
     sources: state.sources.length, closed: state.sources.map(source => source.closed), closeCounts: state.sources.map(source => source.closeCount),
     registrySource: registry && state.sources.indexOf(registry.source), authority: authority && { streamId: authority.streamId, generation: authority.generation },
     ownerSettlements: state.ownerSettlements.length, completionEvents: state.completionEvents.length, owner: voiceApi.lease().owner,
     state: voiceApi.state(), activeStreamId: S.activeStreamId, sessionActiveStreamId: S.session.active_stream_id, busy: S.busy,
     pending: pending.length, unhandled: state.unhandled,
-  }));
+  };
+  if (scenario.kind === 'deferred-recovery') Object.assign(result, {
+    registryStream: registry && registry.streamId,
+    registryIsReplacement: registry && registry.source === replacementSource,
+    replacementClosed: replacementSource && replacementSource.closed,
+  });
+  console.log(JSON.stringify(result));
 })().catch(error => { console.error(error.stack || error); process.exitCode = 1; });
 """
 
@@ -825,6 +857,30 @@ def test_source_error_recovery_attempt_a_cannot_replace_newer_attempt_b(status):
         "busy": True,
         "pending": 2,
         "unhandled": [],
+    }
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_deferred_recovery_a_cannot_resurrect_after_pane_stream_owner_changes_to_b():
+    result = _run_attach_attempt_race({"kind": "deferred-recovery"})
+    assert result == {
+        "sources": 1,
+        "closed": [True],
+        "closeCounts": [1],
+        "registrySource": -1,
+        "authority": {"streamId": "stream-B", "generation": 2},
+        "ownerSettlements": 0,
+        "completionEvents": 0,
+        "owner": {"sid": "s1", "streamId": "stream-B"},
+        "state": "thinking",
+        "activeStreamId": "stream-B",
+        "sessionActiveStreamId": "stream-B",
+        "busy": True,
+        "pending": 1,
+        "unhandled": [],
+        "registryStream": "stream-B",
+        "registryIsReplacement": True,
+        "replacementClosed": False,
     }
 
 

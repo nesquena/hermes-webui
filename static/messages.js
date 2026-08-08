@@ -2243,6 +2243,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(S.activeStreamId!==streamId) return false;
     return _ownsCurrentTransport(source);
   }
+  function _ownsCurrentAttachPane(){
+    return _isCurrentAttachAttempt()&&_isSessionCurrentPane(activeSid)
+      &&S.activeStreamId===streamId
+      &&S.session&&S.session.session_id===activeSid
+      &&S.session.active_stream_id===streamId;
+  }
+  function _ownsDeferredRecoveryOwner(source){
+    return _ownsCurrentAttachPane()&&_ownsCurrentTransport(source);
+  }
   function _bailOutOfTerminalEventsFromStaleStream(source){
     if(_ownsActiveStreamOrBackground(source)) return false;
     // This stale stream no longer owns the session — schedule cleanup of ITS own
@@ -2642,27 +2651,28 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   function _reattachOrRestoreAfterDeferredStreamError(source){
-    if(_terminalStateReached||_streamFinalized||!_isCurrentAttachAttempt()) return;
-    if((S.session&&S.session.session_id)!==activeSid) return;
+    if(_terminalStateReached||_streamFinalized||!_ownsDeferredRecoveryOwner(source)) return;
     (async()=>{
+      let st=null;
       try{
         if(streamId){
-          const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
-          if(!_isCurrentAttachAttempt()) return;
-          if(st.active){
-            if(!_isCurrentAttachAttempt()) return;
-            setComposerStatus('Reconnected');
-            _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
-            return;
-          }
+          st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
         }
       }catch(_){
-        if(_deferStreamErrorIfOffline()||_pageHiddenForStreamError()) return;
       }
-      if(!_isCurrentAttachAttempt()) return;
-      if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;
-      if(!_isCurrentAttachAttempt()) return;
+      if(!_ownsDeferredRecoveryOwner(source)) return;
       if(_deferStreamErrorIfOffline()||_pageHiddenForStreamError()) return;
+      if(!_ownsDeferredRecoveryOwner(source)) return;
+      if(st&&st.active){
+        setComposerStatus('Reconnected');
+        if(!_ownsDeferredRecoveryOwner(source)) return;
+        _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
+        return;
+      }
+      if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;
+      if(!_ownsDeferredRecoveryOwner(source)) return;
+      if(_deferStreamErrorIfOffline()||_pageHiddenForStreamError()) return;
+      if(!_ownsDeferredRecoveryOwner(source)) return;
       _flushReasoningToAnchor();
       _scheduleAnchorRegistryCleanup(120000);
       _handleStreamError(source);
@@ -7015,12 +7025,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){
         st=null;
       }
-      if(!_isCurrentAttachAttempt()) return;
-      if(!_isSessionCurrentPane(activeSid)
-        ||S.activeStreamId!==streamId
-        ||!S.session
-        ||S.session.session_id!==activeSid
-        ||S.session.active_stream_id!==streamId) return;
+      if(!_ownsCurrentAttachPane()) return;
       if(st&&!st.active&&st.replay_available){
         replayOnly=true;
       }else if(st&&!st.active){
