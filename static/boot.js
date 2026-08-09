@@ -1680,8 +1680,12 @@ window.renderTranscript=function(container, messages, opts){
 
   function _voiceLeaseSubmit(lease){
     if(!_voiceLeaseCurrent(lease)||lease.submitted) return;
-    const text=String(lease.finalText||'').trim();
+    const finalText=String(lease.finalText||'').trim();
+    const interimText=String(lease.interimText||'').trim();
+    const text=[finalText,interimText].filter(Boolean).join(' ').trim();
     if(!text){_scheduleVoiceRestart(lease,300);return;}
+    lease.finalText=text;
+    lease.interimText='';
     lease.submitted=true;
     _clearVoiceLeaseTimers(lease);
     _releaseVoiceRecognition(lease);

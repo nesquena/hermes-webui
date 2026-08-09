@@ -198,7 +198,18 @@ api.activate(); api.prepare(); api.bind('stream-1', 's1');
 api.complete('s1', 'stream-1', oldSource, 1, { success: false });
 const staleSourceState = api.state();
 api.complete('s1', 'stream-1', replacementSource, 2, { success: false });
-console.log(JSON.stringify({ before, afterRestart, duplicateStart, afterSend, settled, duplicate, stale, wrongOwner, beforeValidOwnerState, finalState: api.state(), staleSourceState, aborts: state.aborts, ownerEvents: terminalOwnerEvents, transportEvents: ownerEvents }));
+const finalState = api.state();
+api.activate();
+api.start();
+const continuedFirst = api.first();
+continuedFirst.onresult({ resultIndex: 0, results: [{ 0: { transcript: 'hello' }, isFinal: true }] });
+continuedFirst.onend();
+advance(0);
+const continuedReplacement = api.first();
+continuedReplacement.onresult({ resultIndex: 0, results: [{ 0: { transcript: 'continued' }, isFinal: false }] });
+advance(1000);
+const continuedSpeech = { submitted: api.lease().submitted, finalText: api.lease().finalText, interimText: api.lease().interimText, sends: state.sends };
+console.log(JSON.stringify({ before, afterRestart, duplicateStart, afterSend, settled, duplicate, stale, wrongOwner, beforeValidOwnerState, finalState, staleSourceState, continuedSpeech, aborts: state.aborts, ownerEvents: terminalOwnerEvents, transportEvents: ownerEvents }));
 """
 
 
@@ -938,6 +949,17 @@ def test_voice_lease_composes_endpoint_restart_and_exact_terminal_settlement():
     assert result["settled"] is True
     assert result["finalState"] == "listening"
     assert result["duplicateStart"] == {"starts": 1, "recognizerChanged": False, "aborts": 0}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_voice_lease_submits_interim_text_from_replacement_recognizer():
+    result = _run_runtime()
+    assert result["continuedSpeech"] == {
+        "submitted": True,
+        "finalText": "hello continued",
+        "interimText": "",
+        "sends": 2,
+    }
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
