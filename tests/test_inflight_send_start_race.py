@@ -166,8 +166,9 @@ def test_send_rechecks_pane_owner_after_chat_start_before_stream_mutation():
     body = _function_body(MESSAGES_JS, "send")
     chat_start_idx = body.index("const startData=await api('/api/chat/start'")
     catch_idx = body.index("}catch(e){", chat_start_idx)
-    catch_guard_idx = body.index("if(!_slashOwnerIsCurrent(activeSid)) return;", catch_idx)
-    success_guard_idx = body.index("if(!_slashOwnerIsCurrent(activeSid)) return;", catch_guard_idx + 1)
+    owner_guard = "_slashOwnerIsCurrent(activeSid)"
+    catch_guard_idx = body.index(owner_guard, catch_idx)
+    success_guard_idx = body.index(owner_guard, catch_guard_idx + 1)
     stream_state_idx = body.index("S.activeStreamId = streamId;", chat_start_idx)
     assert catch_guard_idx < body.index("const errMsg=", catch_idx)
     assert success_guard_idx < stream_state_idx

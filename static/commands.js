@@ -982,7 +982,7 @@ async function resumeManualCompressionForSession(sid){
       ? _captureTranscriptReplacement()
       : {sessionId:sid,generation:typeof _messagesGeneration==='number'?_messagesGeneration:0,used:false};
     const done=await _pollManualCompressionResult(sid);
-    if(!S.session||S.session.session_id!==sid||!_transcriptReplacementIsCurrent(pollTicket)) return;
+    if(!ownerStateIsCurrent()||!_transcriptReplacementIsCurrent(pollTicket)) return;
     const applied=await _applyManualCompressionResult(done, status.focus_topic||'', visibleCount, status.focus_topic?`/compress ${status.focus_topic}`:'/compress', pollTicket);
     if(applied!==false) operation.uiFinalized=true;
     if(pollTicket.committedGeneration!==undefined) ownerGeneration=pollTicket.committedGeneration;
@@ -1087,7 +1087,7 @@ async function _runManualCompression(focusTopic){
       throw err;
     }
     const data=(started&&started.status==='done')?started:await _pollManualCompressionResult(sid);
-    if(!S.session||S.session.session_id!==sid||!_transcriptReplacementIsCurrent(runTicket)) return;
+    if(!ownerStateIsCurrent()||!_transcriptReplacementIsCurrent(runTicket)) return;
     const applied=await _applyManualCompressionResult(data, focusTopic, visibleCount, commandText, runTicket);
     if(applied!==false) operation.uiFinalized=true;
     if(runTicket.committedGeneration!==undefined) ownerGeneration=runTicket.committedGeneration;
