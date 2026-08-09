@@ -2050,46 +2050,54 @@ def _assert_valid_oversized_boundary_accepted(tmp_path, *, record_size_multiple,
     )
 
     # The tail reader must keep the valid oversized done (seq=2), NOT reject it
-    # via budget starvation. The boundary summary is recovered (seq=2 present).
+    # via budget starvation. The boundary summary is recovered, and the trailing
+    # records (when present) follow it. Assert the EXACT ordered tail sequence:
+    # a reordered tail ([3, 2, 4]), a duplicate boundary summary, or an unexpected
+    # extra row must all fail this — not merely "seq 2 is present somewhere".
     tail_events, _ = _read_jsonl_tail(path, max_bytes=cap, max_rows=None)
     tail_seqs = [e.get("seq") for e in tail_events]
-    # When trailing records exist, the tail window keeps them after the boundary
-    # recovery prepends the straddling seq=2 summary. Without trailing, only the
-    # boundary summary (seq=2) is present in the tail.
-    assert 2 in tail_seqs, (
-        f"the tail reader REJECTED the valid oversized terminal done (seq=2 not "
-        f"in tail_seqs={tail_seqs}); a valid record near {record_size_multiple}x cap "
-        f"was starved by the lookup+prefix meter and failed-closed (#6139 r13)"
+    expected_tail_seqs = [2, 3, 4] if with_trailing else [2]
+    assert tail_seqs == expected_tail_seqs, (
+        f"the tail sequence diverged from the expected order/contents: "
+        f"tail_seqs={tail_seqs} (expected {expected_tail_seqs}). If seq=2 is "
+        f"absent the valid {record_size_multiple}x cap terminal was rejected via "
+        f"budget starvation (#6139 r13); if the order/contents differ the boundary "
+        f"recovery or trailing-window handling regressed."
     )
-    # Exact full/tail parity on the discriminating fields.
+    # Exact full/tail parity on the discriminating fields. The full required
+    # summary tuple (last_seq, terminal, terminal_state) must match across the
+    # direct tail summary, latest_run_summary, AND find_run_summary — a regression
+    # in any one reader's projection (e.g. last_seq dropping, terminal flipping)
+    # must not be masked by the others.
+    expected_last_seq = 4 if with_trailing else 2
+    expected_tuple = (expected_last_seq, True, "tool_limit_reached")
+
+    def _summary_tuple(s):
+        return (int(s.get("last_seq") or 0), bool(s.get("terminal")), s.get("terminal_state"))
+
     tail_summary = _summary_from_events_ref("s1", "r1", tail_events)
-    assert tail_summary["terminal_state"] == "tool_limit_reached", (
-        f"the tail reader reported terminal_state={tail_summary['terminal_state']!r} "
-        f"(expected 'tool_limit_reached'); a valid {record_size_multiple}x cap "
-        f"terminal record was rejected via budget starvation (#6139 r13)"
+    assert _summary_tuple(tail_summary) == expected_tuple, (
+        f"direct tail summary {_summary_tuple(tail_summary)} != expected "
+        f"{expected_tuple}; a valid {record_size_multiple}x cap terminal record "
+        f"was rejected via budget starvation (#6139 r13)"
     )
-    assert tail_summary["terminal"] is True, (
-        f"the tail reader reported terminal={tail_summary['terminal']} (expected True)"
-    )
-    assert tail_summary["last_seq"] == full_summary["last_seq"], (
-        f"last_seq mismatch: tail={tail_summary['last_seq']} full={full_summary['last_seq']}"
+    assert _summary_tuple(full_summary) == expected_tuple, (
+        f"baseline: full reader summary {_summary_tuple(full_summary)} != expected "
+        f"{expected_tuple}"
     )
 
-    # Production summary readers must agree.
+    # Production summary readers must report the same tuple.
     summary = latest_run_summary("s1", "r1", session_dir=tmp_path)
-    assert summary["terminal_state"] == "tool_limit_reached", (
-        f"latest_run_summary reported terminal_state={summary['terminal_state']!r} "
-        f"(expected 'tool_limit_reached'); a valid {record_size_multiple}x cap "
-        f"terminal record was rejected on the summary path (#6139 r13)"
-    )
-    assert summary["terminal"] is True, (
-        f"latest_run_summary marked terminal={summary['terminal']} (expected True)"
+    assert _summary_tuple(summary) == expected_tuple, (
+        f"latest_run_summary {_summary_tuple(summary)} != expected {expected_tuple}; "
+        f"a valid {record_size_multiple}x cap terminal record was rejected on the "
+        f"summary path, or last_seq/terminal regressed (#6139 r13)"
     )
     found = find_run_summary("r1", session_dir=tmp_path)
     assert found is not None, "find_run_summary must locate the run"
-    assert found["terminal_state"] == "tool_limit_reached", (
-        f"find_run_summary reported terminal_state={found['terminal_state']!r} "
-        f"(expected 'tool_limit_reached') (#6139 r13)"
+    assert _summary_tuple(found) == expected_tuple, (
+        f"find_run_summary {_summary_tuple(found)} != expected {expected_tuple}; "
+        f"last_seq/terminal/terminal_state regressed on the find path (#6139 r13)"
     )
 
 
