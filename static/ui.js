@@ -15964,13 +15964,13 @@ function renderMessages(options){
   const _settlementHandoffValid=_settlementHandoffMatchesOwner(_settlementHandoff,sid);
   _liveTurnSettlementHandoff=null;
   _consumeSettlementHandoff(_settlementHandoff);
-  const msgCount=S.messages.length;
-  if(_loadingSessionId===sid&&msgCount===0&&inner) return;
-  if(sid!==_messageRenderWindowSid) _resetMessageRenderWindow(sid);
   if(!S.busy&&Array.isArray(S.messages)&&typeof _hydrateIdLinkedHistoricalToolScenes==='function'){
     const activityMode=typeof chatActivityMode==='function'?chatActivityMode():'compact_worklog';
     _hydrateIdLinkedHistoricalToolScenes(S.messages,{sessionId:sid,mode:activityMode});
   }
+  const msgCount=S.messages.length;
+  if(_loadingSessionId===sid&&msgCount===0&&inner) return;
+  if(sid!==_messageRenderWindowSid) _resetMessageRenderWindow(sid);
   // During session switch, S.messages is intentionally cleared while the full
   // message fetch is still in flight. Other async updates can still call
   // renderMessages() in this window. Keep the existing loading placeholder.
