@@ -19342,6 +19342,9 @@ function autoResizeTextarea(ta) {
 async function submitEdit(msgIdx, newText) {
   if(!S.session || S.busy) return;
   const initialSid = S.session.session_id;
+  const editOwnerIsCurrent=()=>typeof _isSessionCurrentPane==='function'
+    ? _isSessionCurrentPane(initialSid)
+    : !!(S.session&&S.session.session_id===initialSid);
   const absoluteKeepCount = _oldestIdx + msgIdx;
   // #5924: capture the deliberate-pick signal up front (pre-network), scoped to
   // initialSid — a non-default session model (vs profile default), which is
@@ -19351,7 +19354,7 @@ async function submitEdit(msgIdx, newText) {
   if(typeof _ensureAllMessagesLoaded==='function'){
     await _ensureAllMessagesLoaded();
   }
-  if(!S.session || S.session.session_id !== initialSid) return;
+  if(!editOwnerIsCurrent()) return;
   const editTicket=typeof _captureTranscriptReplacement==='function'
     ? _captureTranscriptReplacement()
     : null;
@@ -19363,7 +19366,7 @@ async function submitEdit(msgIdx, newText) {
     // #5924 SILENT-race guard: a session switch during the truncate await must not
     // let this recovery apply session A's intent (truncate/re-arm/send) to the
     // newly-visible session.
-    if(!S.session || S.session.session_id !== initialSid) return;
+    if(!editOwnerIsCurrent()) return;
     const committed=typeof _commitTranscriptReplacement==='function'
       && _commitTranscriptReplacement(editTicket, () => {
         S.messages = S.messages.slice(0, absoluteKeepCount);
@@ -19374,7 +19377,7 @@ async function submitEdit(msgIdx, newText) {
       });
     if(!committed)return;
     await send();
-  } catch(e) { setStatus(t('edit_failed') + e.message); }
+  } catch(e) { if(editOwnerIsCurrent()) setStatus(t('edit_failed') + e.message); }
 }
 
 async function regenerateResponse(btn) {
@@ -19383,11 +19386,13 @@ async function regenerateResponse(btn) {
   if(!row)return;
   const clickedAbsoluteIndex=_oldestIdx+parseInt(row.dataset.msgIdx,10);
   const initialSid = S.session.session_id;
+  const regenerateOwnerIsCurrent=()=>typeof _isSessionCurrentPane==='function'
+    ? _isSessionCurrentPane(initialSid)
+    : !!(S.session&&S.session.session_id===initialSid);
   if(typeof _ensureAllMessagesLoaded==='function'){
     await _ensureAllMessagesLoaded();
   }
-  if(!S.session || S.session.session_id !== initialSid) return;
-<<<<<<< HEAD
+  if(!regenerateOwnerIsCurrent()) return;
   if(!S.session.regeneration_revision){ setStatus(t('regen_failed')); return; }
   let latestAssistantIndex=-1;
   for(let i=S.messages.length-1;i>=0;i--){
@@ -19397,27 +19402,10 @@ async function regenerateResponse(btn) {
     setStatus(t('regen_failed'));
     return;
   }
+  if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
   try {
     await startRegeneration(initialSid, S.session.regeneration_revision);
-=======
-  const regenerateTicket=typeof _captureTranscriptReplacement==='function'
-    ? _captureTranscriptReplacement()
-    : null;
-  try {
-    await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
-      session_id: initialSid,
-      keep_count: absoluteKeepCount
-    })});
-    const committed=typeof _commitTranscriptReplacement==='function'
-      && _commitTranscriptReplacement(regenerateTicket, () => {
-        S.messages = S.messages.slice(0, absoluteKeepCount);
-        renderMessages();
-        $('msg').value = lastUserText;
-      });
-    if(!committed)return;
-    await send();
->>>>>>> ab0ffa0dd (fix(session): isolate full-history reads from active transcript ownership (#6491))
-  } catch(e) { setStatus(t('regen_failed') + e.message); }
+  } catch(e) { if(regenerateOwnerIsCurrent()) setStatus(t('regen_failed') + e.message); }
 }
 
 // postProcessRenderedMessages() runs one frame AFTER the render + JS scroll

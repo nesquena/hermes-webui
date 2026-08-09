@@ -120,7 +120,9 @@ function _jumpToMessage(rawIdx) {
     : api('/api/session?session_id=' + encodeURIComponent(sid) + '&messages=1&resolve_model=0');
   loadSnapshot.then(function(data) {
       if (!data || !data.session) return;
-      if (!S.session || S.session.session_id !== sid) return;  // session switched
+      if (typeof _isSessionCurrentPane==='function'
+        ? !_isSessionCurrentPane(sid)
+        : (!S.session || S.session.session_id !== sid)) return;
       const committed=typeof _commitTranscriptReplacement==='function'
         && _commitTranscriptReplacement(ticket, () => {
           S.messages = data.messages || data.session.messages || []; // populate S
@@ -129,7 +131,9 @@ function _jumpToMessage(rawIdx) {
         });
       if(!committed)return;
       window.setTimeout(function() {
-        if (!S.session || S.session.session_id !== sid) return;
+        if (typeof _isSessionCurrentPane==='function'
+          ? !_isSessionCurrentPane(sid)
+          : (!S.session || S.session.session_id !== sid)) return;
         const r = document.getElementById('msg-user-' + rawIdx);
         if (r) { r.scrollIntoView({ block: 'center', behavior: 'smooth' }); _flashRow(r); }
       }, 120);
