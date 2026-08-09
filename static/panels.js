@@ -4795,9 +4795,12 @@ let _clearConversationOperation = null;
 async function clearConversation() {
   if(!S.session) return;
   const clearSid=S.session.session_id;
+  const _clearOwnerIsCurrent=()=>typeof _isSessionCurrentPane==='function'
+    ? _isSessionCurrentPane(clearSid)
+    : !!(S.session&&S.session.session_id===clearSid);
   const _clrMsg=await showConfirmDialog({title:t('clear_conversation_title'),message:t('clear_conversation_message'),confirmLabel:t('clear'),danger:true,focusCancel:true});
   if(!_clrMsg) return;
-  if(!S.session||S.session.session_id!==clearSid)return;
+  if(!_clearOwnerIsCurrent())return;
   if(_clearConversationOperation)return;
   const clearTicket=typeof _captureTranscriptReplacement==='function'
     ? _captureTranscriptReplacement()
@@ -4809,7 +4812,7 @@ async function clearConversation() {
   try {
     const data = await api('/api/session/clear', {method:'POST',
       body: JSON.stringify({session_id: clearSid})});
-    if(!S.session||S.session.session_id!==clearSid)return;
+    if(!_clearOwnerIsCurrent())return;
     const committed=typeof _commitTranscriptReplacement==='function'
       && _commitTranscriptReplacement(clearTicket, () => {
         S.session = data.session;
@@ -4826,7 +4829,10 @@ async function clearConversation() {
       return;
     }
     showToast(t('conversation_cleared'));
-  } catch(e) { setStatus(t('clear_failed') + e.message); }
+  } catch(e) {
+    if(!_clearOwnerIsCurrent())return;
+    setStatus(t('clear_failed') + e.message);
+  }
   finally {
     if(_clearConversationOperation===operation){
       _clearConversationOperation=null;

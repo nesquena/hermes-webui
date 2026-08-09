@@ -376,7 +376,9 @@ async function _ensureAllMessagesLoaded() {{ {legacy_body} }}
 """
 
 
-def _ensure_all_messages_loaded_script(*, goal_turn_during_fetch: bool = False) -> str:
+def _ensure_all_messages_loaded_script(
+    *, goal_turn_during_fetch: bool = False, goal_pane_loading_during_response: bool = False
+) -> str:
     sessions_path = str(REPO / "static" / "sessions.js")
     commands_path = str(REPO / "static" / "commands.js")
     return f"""
@@ -408,6 +410,8 @@ let _messagesTruncated = true;
 let _loadingSessionId = null;
 let bumpCalls = 0;
 let syncCalls = 0;
+let goalMessagesAfterResponse = null;
+let goalBusyAfterResponse = null;
 const originalMessages = [{{ role: 'assistant', content: 'tail latest', _transient: true }}];
 const fullMessages = [
   {{ role: 'user', content: 'older' }},
@@ -445,7 +449,9 @@ async function newSession() {{
   S.session = {{ session_id: 'foreign-1', message_count: 1, workspace: '/ws', model: 'goal-model' }};
   return S.session.session_id;
 }}
-function _isSessionCurrentPane(sid) {{ return !!S.session && S.session.session_id === sid; }}
+function _isSessionCurrentPane(sid) {{
+  return !!S.session && S.session.session_id === sid && (!_loadingSessionId || _loadingSessionId === sid);
+}}
 {ENSURE_OWNER_SRC or BASE_OWNER_FALLBACK_SRC}
 function markInflight() {{}}
 function saveInflightState() {{}}
@@ -490,12 +496,16 @@ _oldestIdx = 99;
     await Promise.resolve();
     const goalClaimedBeforeResponse = bumpCalls > 0;
     if (typeof resolveGoal !== 'function') throw new Error('goal request was not started');
+    if ({str(goal_pane_loading_during_response).lower()}) _loadingSessionId = 'other-session';
     resolveGoal({{
       message: 'Goal status',
       stream_id: 'goal-1',
       pending_started_at: 123,
     }});
     await goalPromise;
+    goalMessagesAfterResponse = S.messages.map((message) => ({{ role: message.role, content: message.content }}));
+    goalBusyAfterResponse = S.busy;
+    if ({str(goal_pane_loading_during_response).lower()}) _loadingSessionId = null;
     if (goalClaimedBeforeResponse) throw new Error('goal claimed transcript generation before its response');
   }}
   if (typeof resolveFullLoad !== 'function') throw new Error('full-history load was not requested');
@@ -515,6 +525,8 @@ _oldestIdx = 99;
     activeStreamId: S.activeStreamId,
     bumpCalls,
     syncCalls,
+    goalMessagesAfterResponse,
+    goalBusyAfterResponse,
     oldestIdx: _oldestIdx,
     count: S.session && S.session.message_count,
   }}));
@@ -977,6 +989,7 @@ function _bumpMessagesGeneration() {{ _messagesGeneration += 1; return _messages
 {CURRENT_SRC}
 {COMMIT_SRC}
 let _clearConversationOperation = null;
+let _loadingSessionId = null;
 {CLEAR_SERIAL_SRC}
 {CLEAR_SRC}
 const S = {{
@@ -1513,6 +1526,7 @@ function _bumpMessagesGeneration() {{ _messagesGeneration += 1; return _messages
 {CURRENT_SRC}
 {COMMIT_SRC}
 let _clearConversationOperation = null;
+let _loadingSessionId = null;
 {CLEAR_SERIAL_SRC}
 {CLEAR_SRC}
 const S = {{
@@ -1531,6 +1545,9 @@ function setStatus(message) {{ toasts.push(String(message)); }}
 function syncTopbar() {{}}
 function renderMessages() {{}}
 function showConfirmDialog() {{ return new Promise(resolve => {{ resolveConfirm = resolve; }}); }}
+function _isSessionCurrentPane(sid) {{
+  return !!S.session && S.session.session_id === sid && (!_loadingSessionId || _loadingSessionId === sid);
+}}
 async function loadSession() {{ reconcileCalls += 1; }}
 async function api(url) {{
   if (String(url) === '/api/session/clear') return await new Promise(resolve => {{ resolveClear = resolve; }});
@@ -1562,6 +1579,10 @@ function _commitTranscriptReplacement(ticket, commit) {{
     S.session = {{ session_id: 'other-session', messages: [{{ role: 'assistant', content: 'other pane' }}] }};
     S.messages = [{{ role: 'assistant', content: 'other pane' }}];
     S.toolCalls = [{{ id: 'other-tool' }}];
+  }}
+  if ({json.dumps(race_stage)} === 'loading') {{
+    _loadingSessionId = 'other-session';
+    S.toolCalls = [{{ id: 'same-tool' }}];
   }}
   resolveClear({{ session: {{ session_id: 'same-session', messages: [] }} }});
   await clearPromise;
@@ -1791,8 +1812,31 @@ def test_ensure_all_messages_loaded_preserves_settled_turn_that_finished_mid_fet
     assert result["activeStreamId"] is None
     assert result["bumpCalls"] >= 1
     assert result["syncCalls"] == 0
+    assert result["goalMessagesAfterResponse"] == [
+        {"role": "user", "content": "NEW TURN"},
+        {"role": "assistant", "content": "NEW ANSWER"},
+    ]
+    assert result["goalBusyAfterResponse"] is False
     assert result["oldestIdx"] == 99
     assert result["count"] == 2
+
+
+def test_goal_command_rejects_result_during_newer_pane_load():
+    result = _run_node(
+        _ensure_all_messages_loaded_script(
+            goal_turn_during_fetch=True, goal_pane_loading_during_response=True
+        )
+    )
+
+    assert result["goalMessagesAfterResponse"] == [
+        {"role": "assistant", "content": "tail latest"}
+    ]
+    assert result["goalBusyAfterResponse"] is False
+    assert result["messages"] == [
+        {"role": "user", "content": "older"},
+        {"role": "assistant", "content": "tail latest"},
+    ]
+    assert result["toolCalls"] == [{"id": "old-tc"}]
 
 
 def test_ensure_all_messages_loaded_still_hydrates_when_generation_is_stable():
@@ -2010,7 +2054,7 @@ def test_compression_operation_preserves_newer_stream_busy_state():
     assert result["composerStatus"] == "streaming"
 
 
-@pytest.mark.parametrize("race_stage", ["confirm", "post"])
+@pytest.mark.parametrize("race_stage", ["confirm", "post", "loading", "switched"])
 def test_clear_conversation_keeps_server_and_local_settlement_visible(race_stage):
     result = _run_node(_clear_conversation_race_script(race_stage))
 
@@ -2018,13 +2062,24 @@ def test_clear_conversation_keeps_server_and_local_settlement_visible(race_stage
         assert result["messages"] == []
         assert "conversation_cleared" in result["toasts"]
         assert result["reconcileCalls"] == 0
-    else:
+    elif race_stage == "post":
         assert result["messages"] == [
             {"role": "assistant", "content": "old"},
             {"role": "user", "content": "newer writer"},
         ]
         assert any("changed" in toast.lower() for toast in result["toasts"])
         assert result["reconcileCalls"] == 1
+    elif race_stage == "loading":
+        assert result["sessionId"] == "same-session"
+        assert result["messages"] == [{"role": "assistant", "content": "old"}]
+        assert result["toolCalls"] == [{"id": "same-tool"}]
+        assert result["toasts"] == []
+        assert result["reconcileCalls"] == 0
+    else:
+        assert result["sessionId"] == "other-session"
+        assert result["messages"] == [{"role": "assistant", "content": "other pane"}]
+        assert result["toolCalls"] == [{"id": "other-tool"}]
+        assert result["reconcileCalls"] == 0
 
 
 def test_same_session_refresh_and_compression_reject_older_replacements():
