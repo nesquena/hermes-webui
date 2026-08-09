@@ -359,6 +359,19 @@ console.log(JSON.stringify({{activeRunClass,childOnlyClass}}));
     assert "streaming" in result["activeRunClass"]
     assert "streaming" not in result["childOnlyClass"]
 
+    state_line = next(
+        line for line in SESSIONS_JS.splitlines()
+        if "session-attention-indicator session-state-indicator" in line
+    )
+    state_expression = state_line.split("=", 1)[1].rstrip(";")
+    state_source = f"""
+const isStreaming=false; const isRingStreaming=true; const hasUnread=false;
+const attentionDotClass='';
+const activeRunState={state_expression};
+console.log(JSON.stringify({{activeRunState}}));
+"""
+    assert "is-streaming" in _run_node_script(state_source)["activeRunState"]
+
 
 def test_active_run_elapsed_label_advances_when_pill_is_visible_with_monotonic_delta():
     monotonic = _extract_function(UI_JS, "_activeRunMonotonicSeconds")
