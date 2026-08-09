@@ -1460,7 +1460,7 @@ def test_settlement_handoff_is_one_shot_and_renderer_owned():
     render = _extract("renderMessages", UI_JS)
     assert "const _settlementHandoff=_liveTurnSettlementHandoff;" in render
     assert "_liveTurnSettlementHandoff=null;" in render
-    assert "const _settlementHandoffValid=_settlementHandoffMatchesOwner(_settlementHandoff,sid);" in render
+    assert "const _settlementHandoffValid=typeof _settlementHandoffMatchesOwner==='function'&&" in render
     assert "if(sid&&(INFLIGHT[sid]||_settlementHandoffValid))" in render
     assert "_settlementHandoffValid&&inner&&inner.querySelector('[data-anchor-settled-scene-owner=\"1\"]')" in render
     handoff_block=render[render.find("let _preservedLiveTurn"):render.find("let _preservedLiveTurn")+1800]

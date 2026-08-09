@@ -15960,10 +15960,13 @@ function renderMessages(options){
   const scrollSnapshot=(preserveScroll||_messageUserUnpinned)?_captureMessageScrollSnapshot():null;
   const inner=$('msgInner');
   const sid=S.session?S.session.session_id:null;
-  const _settlementHandoff=_liveTurnSettlementHandoff;
-  const _settlementHandoffValid=_settlementHandoffMatchesOwner(_settlementHandoff,sid);
-  _liveTurnSettlementHandoff=null;
-  _consumeSettlementHandoff(_settlementHandoff);
+  const _settlementHandoff=typeof _liveTurnSettlementHandoff==='undefined'
+    ? null
+    : _liveTurnSettlementHandoff;
+  const _settlementHandoffValid=typeof _settlementHandoffMatchesOwner==='function'&&
+    _settlementHandoffMatchesOwner(_settlementHandoff,sid);
+  if(typeof _liveTurnSettlementHandoff!=='undefined') _liveTurnSettlementHandoff=null;
+  if(typeof _consumeSettlementHandoff==='function') _consumeSettlementHandoff(_settlementHandoff);
   if(!S.busy&&Array.isArray(S.messages)&&typeof _hydrateIdLinkedHistoricalToolScenes==='function'){
     const activityMode=typeof chatActivityMode==='function'?chatActivityMode():'compact_worklog';
     _hydrateIdLinkedHistoricalToolScenes(S.messages,{sessionId:sid,mode:activityMode});
