@@ -52,6 +52,10 @@ CLI_VISIBLE_SESSION_LIMIT = 20
 # sidebar window (#3172).
 CRON_PROJECT_CHIP_LIMIT = 200
 WEBHOOK_PROJECT_CHIP_LIMIT = 200
+# Kanban worker runs are internal/background like cron+webhook; keep the same
+# higher project-chip cap so project-assigned kanban rows stay addressable when
+# the toggle is on, without letting them dominate the default sidebar window.
+KANBAN_PROJECT_CHIP_LIMIT = 200
 _CLI_SESSIONS_CACHE_TTL_SECONDS = 5.0
 # While a turn is actively streaming, hold the CLI/cron projection longer than
 # one poll interval (mirrors the route-level #4808 hold-down). The frontend
@@ -5062,7 +5066,7 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
         s.save()
     return s
 
-def _hide_from_default_sidebar(session: dict, *, show_cron: bool = False, show_webhook: bool = False) -> bool:
+def _hide_from_default_sidebar(session: dict, *, show_cron: bool = False, show_webhook: bool = False, show_kanban: bool = False) -> bool:
     """Return True for internal/background sessions hidden from the default list."""
     sid = str(session.get('session_id') or '')
     source = (
@@ -5074,6 +5078,8 @@ def _hide_from_default_sidebar(session: dict, *, show_cron: bool = False, show_w
     if not show_cron and (source == 'cron' or sid.startswith('cron_')):
         return True
     if not show_webhook and source == 'webhook':
+        return True
+    if not show_kanban and source == 'kanban':
         return True
     if bool(session.get('pre_compression_snapshot')):
         return not bool(session.get('_show_pre_compression_snapshot'))
@@ -5128,7 +5134,7 @@ def _is_intentionally_background_sidebar_session(session: dict) -> bool:
         or session.get('raw_source')
         or session.get('session_source')
     )
-    return source in {'cron', 'webhook'} or sid.startswith('cron_')
+    return source in {'cron', 'webhook', 'kanban'} or sid.startswith('cron_')
 
 
 def _include_project_hidden_background_sidebar_sessions(
@@ -7629,6 +7635,7 @@ def _load_cli_sessions_uncached(
         limit=visible_session_limit if visible_session_limit is not None else (
             CRON_PROJECT_CHIP_LIMIT if source_filter == 'cron'
             else WEBHOOK_PROJECT_CHIP_LIMIT if source_filter == 'webhook'
+            else KANBAN_PROJECT_CHIP_LIMIT if source_filter == 'kanban'
             else CLI_VISIBLE_SESSION_LIMIT
         ),
         log=logger,

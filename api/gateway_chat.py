@@ -25,6 +25,7 @@ from api.config import (
     STREAM_REASONING_TEXT,
     _get_session_agent_lock,
     _parse_provider_qualified_model_id,
+    clear_session_writeback_owner_if_owned,
     coerce_reasoning_effort_for_model,
     gateway_approval_unavailable_reason,
     gateway_supports_approval,
@@ -497,6 +498,7 @@ def _run_gateway_runs_api_streaming(
     base_url, api_key, prefill_messages, body_extras,
     *, put_gateway_event, cancel_event,
     attachments=None, cfg=None, session=None,
+    active_provider: str = "",
 ):
     """Submit via POST /v1/runs and relay SSE events including approval."""
     try:
@@ -514,7 +516,7 @@ def _run_gateway_runs_api_streaming(
             try:
                 from api.streaming import _build_native_multimodal_message
 
-                message_content = _build_native_multimodal_message("", str(msg_text or ""), attachments, str(workspace), cfg=cfg)
+                message_content = _build_native_multimodal_message("", str(msg_text or ""), attachments, str(workspace), cfg=cfg, active_provider=active_provider, active_model=(model or ""), requested_provider=active_provider)
             except Exception:
                 logger.debug("Failed to build runs-API multimodal attachment payload", exc_info=True)
                 message_content = str(msg_text or "")
@@ -848,6 +850,10 @@ def _run_gateway_chat_streaming(
         # Cancelled before the worker started; release the owner entry the route
         # layer registered so STREAM_SESSION_OWNERS does not leak (no teardown finally runs).
         unregister_stream_owner(stream_id)
+        # Also release the writeback-owner entry the route layer registered, so
+        # SESSION_WRITEBACK_OWNERS does not leak on this pre-start cancellation
+        # path (the teardown finally below never runs when we early-return here).
+        clear_session_writeback_owner_if_owned(session_id, stream_id)
         return
     register_active_run(
         stream_id,
@@ -985,6 +991,7 @@ def _run_gateway_chat_streaming(
                     attachments=attachments,
                     cfg=cfg,
                     session=s,
+                    active_provider=(model_provider or ""),
                 )
             except Exception as exc:
                 error_payload = _settle_gateway_terminal_error(
@@ -1036,7 +1043,7 @@ def _run_gateway_chat_streaming(
                 try:
                     from api.streaming import _build_native_multimodal_message
 
-                    message_content = _build_native_multimodal_message("", str(msg_text or ""), attachments, str(workspace), cfg=cfg)
+                    message_content = _build_native_multimodal_message("", str(msg_text or ""), attachments, str(workspace), cfg=cfg, active_provider=(model_provider or ""), active_model=(model or ""), requested_provider=(model_provider or ""))
                 except Exception:
                     logger.debug("Failed to build gateway multimodal attachment payload", exc_info=True)
                     message_content = str(msg_text or "")
@@ -1394,3 +1401,8 @@ def _run_gateway_chat_streaming(
         _clear_gateway_run_starting(stream_id)
         unregister_stream_owner(stream_id)
         unregister_active_run(stream_id)
+        # Release the writeback-owner entry the route layer registered for this
+        # Gateway run so SESSION_WRITEBACK_OWNERS does not grow unbounded across
+        # the process lifetime (compare-and-clear: only clears if still owned by
+        # this stream, mirroring the local streaming teardown).
+        clear_session_writeback_owner_if_owned(session_id, stream_id)

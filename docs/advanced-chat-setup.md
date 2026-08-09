@@ -49,6 +49,33 @@ every new browser turn. The browser only receives a compact status event
 (`source`, `label`, message count, compaction metadata, and redacted errors),
 never the prefill message bodies.
 
+## Session title generation
+
+Hermes WebUI derives a provisional session title from the first user message
+and, after the first response, may call an LLM to generate a better title
+(and periodically refresh it for long sessions).
+
+Automatic title-generation LLM calls honor the active Hermes profile's
+`auxiliary.title_generation.enabled` setting (default: `true`):
+
+```yaml
+auxiliary:
+  title_generation:
+    enabled: false
+```
+
+When disabled:
+
+- the provisional first-message title stays in place and is never replaced
+  or overwritten by an automatic LLM call or local fallback;
+- the periodic adaptive refresh is skipped;
+- the explicit "regenerate title" action returns a
+  `title_generation_disabled` response instead of calling a title model.
+
+The WebUI's `auto_title_refresh_every` setting remains a separate control for
+periodic refreshes of already-generated titles; it does not re-enable
+automatic generation when the auxiliary flag is off.
+
 ## Gateway-backed browser chat
 
 By default, browser chat runs through WebUI's in-process legacy runtime. Advanced
