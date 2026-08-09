@@ -2119,7 +2119,14 @@ $('btnDownload').onclick=async()=>{
     }
     const operation={
       sessionId:sid,
-      generation:typeof _messagesGeneration==='number'?_messagesGeneration:null,
+      ticket:typeof _captureTranscriptReplacement==='function'
+        ? _captureTranscriptReplacement()
+        : {
+            sessionId:sid,
+            generation:typeof _messagesGeneration==='number'?_messagesGeneration:null,
+            loadGeneration:typeof _loadSessionGeneration==='number'?_loadSessionGeneration:null,
+            used:false,
+          },
       button:$('btnDownload'),
     };
     _downloadTranscriptOperation=operation;
@@ -2139,8 +2146,17 @@ $('btnDownload').onclick=async()=>{
       }
       const snapshot=await _readFullSessionSnapshot(sid);
       if(!snapshot||!snapshot.session) throw new Error('full transcript snapshot unavailable');
-      if(!S.session||S.session.session_id!==operation.sessionId
-         ||(operation.generation!==null&&_messagesGeneration!==operation.generation)){
+      const paneCurrent=typeof _isSessionCurrentPane==='function'
+        ? _isSessionCurrentPane(operation.sessionId)
+        : !!(S.session&&S.session.session_id===operation.sessionId
+          &&(typeof _loadingSessionId==='undefined'||!_loadingSessionId||_loadingSessionId===operation.sessionId));
+      const ticketCurrent=typeof _transcriptReplacementIsCurrent==='function'
+        ? _transcriptReplacementIsCurrent(operation.ticket)
+        : !!(operation.ticket&&S.session&&S.session.session_id===operation.ticket.sessionId
+          &&(operation.ticket.generation===null||_messagesGeneration===operation.ticket.generation)
+          &&(operation.ticket.loadGeneration===null||typeof _loadSessionGeneration!=='number'
+            ||_loadSessionGeneration===operation.ticket.loadGeneration));
+      if(!paneCurrent||!ticketCurrent){
         if(typeof showToast==='function'){
           showToast((typeof t==='function'&&t('download_transcript_changed_full'))||'The conversation changed while the full transcript was loading. Try again.',3000,'warning');
         }

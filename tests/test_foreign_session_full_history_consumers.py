@@ -617,6 +617,99 @@ async function _ensureAllMessagesLoaded() {{}}
 """
 
 
+def _download_deferred_navigation_script(*, same_session: bool) -> str:
+    loading_sid = "foreign-1" if same_session else "foreign-2"
+    return f"""
+const fullMessages = [
+  {{ role: 'user', content: 'older row' }},
+  {{ role: 'assistant', content: 'latest row' }},
+];
+let pending = [];
+let blobCount = 0;
+let objectUrlCount = 0;
+let clickCount = 0;
+let revokeCount = 0;
+let downloadName = null;
+let downloadedText = null;
+const toasts = [];
+class Blob {{
+  constructor(parts) {{ blobCount += 1; downloadedText = parts.join(''); }}
+}}
+const URL = {{
+  createObjectURL: () => {{ objectUrlCount += 1; return 'blob:deferred'; }},
+  revokeObjectURL: () => {{ revokeCount += 1; }},
+}};
+const document = {{
+  createElement: () => {{
+    const anchor = {{ click: () => {{ clickCount += 1; }} }};
+    Object.defineProperty(anchor, 'href', {{ set() {{}}, get: () => 'blob:deferred' }});
+    Object.defineProperty(anchor, 'download', {{ set: (value) => {{ downloadName = value; }} }});
+    return anchor;
+  }},
+}};
+const btns = {{
+  btnDownload: {{
+    disabled: false,
+    attributes: {{}},
+    setAttribute(name, value) {{ this.attributes[name] = String(value); }},
+    removeAttribute(name) {{ delete this.attributes[name]; }},
+  }},
+  btnExportJSON: {{}},
+}};
+function $(id) {{ return btns[id]; }}
+function t(key) {{
+  return {{
+    download_transcript_preparing_full: 'Preparing full transcript…',
+    download_transcript_changed_full: 'The conversation changed while the full transcript was loading. Try again.',
+  }}[key] || key;
+}}
+function showToast(message, duration, kind) {{ toasts.push({{ message, duration, kind: kind || null }}); }}
+let _messagesTruncated = true;
+let _messagesGeneration = 1;
+let _loadSessionGeneration = 1;
+let _loadingSessionId = null;
+function _isSessionCurrentPane(sid) {{
+  return !!(S.session && S.session.session_id === sid
+    && (!_loadingSessionId || _loadingSessionId === sid));
+}}
+const S = {{
+  session: {{ session_id: 'foreign-1', workspace: '/ws', model: 'model' }},
+  messages: [fullMessages[1]],
+  busy: false,
+  activeStreamId: null,
+}};
+async function _readFullSessionSnapshot() {{
+  return await new Promise((resolve) => pending.push(resolve));
+}}
+async function _ensureAllMessagesLoaded() {{}}
+{CAPTURE_SRC}
+{CURRENT_SRC}
+{TRANSCRIPT_FN}
+{DOWNLOAD_ASSIGN}
+(async () => {{
+  const operationPromise = btns.btnDownload.onclick();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (pending.length !== 1) throw new Error('snapshot was not pending');
+  _loadSessionGeneration += 1;
+  _loadingSessionId = '{loading_sid}';
+  pending.shift()({{ session: {{ session_id: 'foreign-1', workspace: '/ws', model: 'model' }}, messages: fullMessages, toolCalls: [] }});
+  await operationPromise;
+  console.log(JSON.stringify({{
+    blobCount,
+    objectUrlCount,
+    clickCount,
+    revokeCount,
+    downloadName,
+    downloadedText,
+    toasts,
+    operation: _downloadTranscriptOperation,
+    disabled: btns.btnDownload.disabled,
+    ariaBusy: btns.btnDownload.attributes['aria-busy'] || null,
+  }}));
+}})().catch((err) => {{ console.error(err.stack || String(err)); process.exit(1); }});
+"""
+
+
 def _artifact_reuse_script() -> str:
     workspace_path = str(REPO / "static" / "workspace.js")
     return f"""
@@ -1866,6 +1959,29 @@ def test_download_handler_owns_one_pending_operation_and_cleans_busy_state():
     assert result["ariaBusy"] is None
 
 
+@pytest.mark.parametrize("same_session", [False, True], ids=["foreign-pane", "same-pane-load-generation"])
+def test_download_handler_rejects_deferred_snapshot_after_pending_navigation(same_session):
+    result = _run_node(_download_deferred_navigation_script(same_session=same_session))
+
+    assert result["blobCount"] == 0
+    assert result["objectUrlCount"] == 0
+    assert result["clickCount"] == 0
+    assert result["revokeCount"] == 0
+    assert result["downloadName"] is None
+    assert result["downloadedText"] is None
+    assert result["toasts"] == [
+        {"message": "Preparing full transcript…", "duration": 2000, "kind": None},
+        {
+            "message": "The conversation changed while the full transcript was loading. Try again.",
+            "duration": 3000,
+            "kind": "warning",
+        },
+    ]
+    assert result["operation"] is None
+    assert result["disabled"] is False
+    assert result["ariaBusy"] is None
+
+
 def test_artifacts_renderer_preserves_partial_count_before_full_load():
     result = _run_node(_artifact_script(seed_existing_dom=True))
 
@@ -2350,6 +2466,11 @@ def test_messages_generation_wiring_covers_full_load_live_turn_claims_and_same_s
     assert "_manualCompressionOperation" in COMMANDS_JS
     assert "_clearConversationOperation" in PANELS_JS
     assert "_readFullSessionSnapshot(sid)" in BOOT_JS
+    assert "ticket:typeof _captureTranscriptReplacement==='function'" in DOWNLOAD_ASSIGN
+    assert "_transcriptReplacementIsCurrent(operation.ticket)" in DOWNLOAD_ASSIGN
+    assert "_isSessionCurrentPane(operation.sessionId)" in DOWNLOAD_ASSIGN
+    assert "download_transcript_changed_full" in DOWNLOAD_ASSIGN
+    assert "_commitTranscriptReplacement" not in DOWNLOAD_ASSIGN
     assert "_renderNow(snapshot.messages, snapshot.toolCalls);" in WORKSPACE_JS
     assert "_commitTranscriptReplacement(clearTicket, () =>" in PANELS_JS
 
