@@ -891,11 +891,11 @@ def _read_jsonl_tail(
         boundary_summary: dict | None = None
         if size > read_bytes:
             seek_pos = size - read_bytes
-            # Boundary lookup + prefix extraction + validity proof share ONE meter
-            # (#6139 r10 item 1). Sized at 2x the tail window: the boundary record
-            # (the terminal `done` with the full transcript) is legitimately ~cap
-            # bytes, and the single-pass validity proof charges the record length
-            # once, so 2x cap covers a valid record plus a small margin.
+            # Boundary START lookup + 8 KiB prefix extraction share ONE meter sized
+            # at 2x the tail window (#6139 r10 item 1): the backward lookup scans
+            # the bytes before the window up to the record start, and prefix
+            # extraction reads _BOUNDARY_SUMMARY_PREFIX_BYTES, so 2x cap bounds
+            # both for a single straddling record.
             boundary_budget = _ReadBudget(2 * read_bytes_cap)
             record_start = _find_record_start_before(fh, size, seek_pos, budget=boundary_budget)
             # record_start is where the straddling record begins. Extract its summary
@@ -904,10 +904,6 @@ def _read_jsonl_tail(
             # grammatically-valid JSON record. Brace balance is NOT JSON validity
             # (#6139 r10 item 2): a brace-balanced record with a trailing comma or a
             # malformed nested value must NOT be fabricated into a terminal event.
-            # Prove whole-record validity before trusting the fabricated prefix; if
-            # validity cannot be established within the budget, fail closed and
-            # recover the older valid event. Stale-but-nonterminal is recoverable;
-            # falsely-terminal is not.
             boundary_summary = _extract_boundary_record_summary(fh, record_start, budget=boundary_budget)
             # A boundary record is REJECTED (must not be trusted as terminal, and
             # the preceding valid event must be recovered instead) on EITHER path:
@@ -925,7 +921,23 @@ def _read_jsonl_tail(
             # reader (#6139 r12).
             boundary_rejected = True
             if boundary_summary is not None:
-                if _record_is_valid_complete(fh, size, record_start, budget=boundary_budget):
+                # The whole-record validity proof gets its OWN meter, separate from
+                # the lookup+prefix meter (#6139 r13): the proof must read the FULL
+                # record to confirm JSON validity + terminator, and a valid record
+                # near _VALIDITY_PROOF_MAX_BYTES (2x cap) is a documented case
+                # (streaming.py journals the terminal `done` with the full
+                # transcript as its payload). Sharing the lookup+prefix meter let
+                # the backward lookup + 8 KiB prefix consume enough of the 2x cap
+                # allowance that a valid ~1.75x cap record could not be read in
+                # full → the proof failed closed → a VALID terminal record was
+                # rejected → wrong terminal_state (full reader
+                # `tool_limit_reached` → tail `running`/`completed`). The proof
+                # meter is sized at _VALIDITY_PROOF_MAX_BYTES so EVERY record the
+                # gate can possibly accept can pay for its own complete validation;
+                # the incremental chunked read means a small record still costs
+                # only one chunk, so the constant-in-file-size property holds.
+                validity_budget = _ReadBudget(_VALIDITY_PROOF_MAX_BYTES)
+                if _record_is_valid_complete(fh, size, record_start, budget=validity_budget):
                     boundary_rejected = False  # valid + complete: trust the prefix
                 else:
                     boundary_summary = None  # extracted-but-invalid: fail-closed

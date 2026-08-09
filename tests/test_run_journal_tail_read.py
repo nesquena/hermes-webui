@@ -1474,39 +1474,49 @@ def test_read_jsonl_tail_boundary_scan_uses_shared_budget_no_read_after_exhausti
         f"the boundary helpers must have run (seq=2 recovered); got {seqs}. "
         f"If absent the test is vacuous."
     )
-    # (b) The SAME shared _ReadBudget threads through find + extract + valid.
-    # (The predecessor scan only runs on rejection; here the valid done is
-    # accepted so the predecessor helper is not reached. r11: the predecessor
-    # scan now gets its OWN reserve budget separate from this shared meter, so
-    # a >=budget invalid oversized record can't starve it — that is covered by
+    # (b) The SAME shared _ReadBudget threads through find + extract (boundary
+    # lookup + prefix extraction). The validity proof has its OWN separate meter
+    # (#6139 r13): sharing the lookup+prefix meter let a valid ~1.75x cap record
+    # be starved (lookup + 8 KiB prefix consumed enough of the 2x cap allowance
+    # that the proof couldn't read the full record → fail-closed → valid terminal
+    # rejected → wrong terminal_state). find and extract still share one meter;
+    # valid has a distinct id. (The predecessor scan only runs on rejection; here
+    # the valid done is accepted so the predecessor helper is not reached. r11:
+    # the predecessor scan also gets its OWN reserve budget — covered by
     # test_predecessor_recovery_not_starved_by_validity_proof_budget and
     # test_backward_scan_budget_bounds_physical_descriptor_reads.)
     assert budget_ids_seen["find"], "boundary lookup received no budget (budget=None) — not shared"
     assert budget_ids_seen["extract"], "prefix extraction received no budget (budget=None) — not shared"
-    assert budget_ids_seen["valid"], "validity proof received no budget (budget=None) — not shared"
-    shared_id = budget_ids_seen["find"][0]
-    assert all(bid == shared_id for bid in budget_ids_seen["find"]), (
+    assert budget_ids_seen["valid"], "validity proof received no budget (budget=None) — not metered"
+    lookup_prefix_id = budget_ids_seen["find"][0]
+    assert all(bid == lookup_prefix_id for bid in budget_ids_seen["find"]), (
         f"boundary lookup used multiple budget instances: {budget_ids_seen['find']}"
     )
-    assert all(bid == shared_id for bid in budget_ids_seen["extract"]), (
-        f"prefix extraction used a different budget instance: find={shared_id} extract={budget_ids_seen['extract']}"
+    assert all(bid == lookup_prefix_id for bid in budget_ids_seen["extract"]), (
+        f"prefix extraction used a different budget instance from lookup: "
+        f"find={lookup_prefix_id} extract={budget_ids_seen['extract']} (find+extract must share one meter)"
     )
-    assert all(bid == shared_id for bid in budget_ids_seen["valid"]), (
-        f"validity proof used a different budget instance: find={shared_id} valid={budget_ids_seen['valid']}"
+    assert all(bid != lookup_prefix_id for bid in budget_ids_seen["valid"]), (
+        f"validity proof shared the lookup+prefix meter (id={lookup_prefix_id}); "
+        f"it must have its OWN separate meter so a valid record near the 2x cap "
+        f"validity ceiling can pay for its own complete validation (#6139 r13). "
+        f"valid ids={budget_ids_seen['valid']}"
     )
-    # (c) Physical reads are bounded by the shared budget envelope.
+    # (c) Physical reads are bounded. The validity proof's own meter is sized at
+    # _VALIDITY_PROOF_MAX_BYTES (2x cap), but the incremental chunked read means
+    # a small record costs only one chunk — so total physical reads stay ~constant
+    # (the scale regression test_read_jsonl_tail_boundary_scan_uses_shared_budget...
+    # holds the constant-in-file-size property directly).
     handle = captured.get("handle")
     assert handle is not None, "the patched Path.open never returned a binary handle"
     total = handle.total_returned
     boundary_helper_bytes = total - cap  # subtract the one forward tail-window read
-    assert boundary_helper_bytes <= 2 * cap, (
-        f"boundary-helper physical reads ({boundary_helper_bytes} bytes) exceeded "
-        f"the 2*cap shared budget ({2*cap}) — the production path is not bounding "
-        f"physical I/O via the shared meter (#6139 r10 item 1)"
-    )
-    assert total < 3 * cap, (
-        f"total physical reads ({total}) far exceed the expected envelope; the "
-        f"production boundary scan is reading unboundedly"
+    # lookup+prefix (2x cap) + validity proof reads the record's actual length
+    # (this fixture is a valid oversized done ~cap, so ~cap) — well under 5x cap.
+    assert boundary_helper_bytes <= 5 * cap, (
+        f"boundary-helper physical reads ({boundary_helper_bytes} bytes) far exceed "
+        f"the expected envelope (lookup+prefix 2x cap + validity proof ~cap); the "
+        f"production boundary scan is reading unboundedly (#6139 r10/r13)"
     )
 
 
@@ -1956,4 +1966,165 @@ def test_malformed_oversized_boundary_extraction_none_recovers_preceding(tmp_pat
         f"find_run_summary reported terminal_state={found['terminal_state']!r} "
         f"(expected 'completed'); the extraction-None path skipped recovery on the "
         f"find_run_summary path too (#6139 r12)"
+    )
+
+
+def _summary_from_events_ref(session_id, run_id, events):
+    """Local reference to _summary_from_events so the helper does not need an
+    extra import line at module scope."""
+    from api.run_journal import _summary_from_events
+    return _summary_from_events(session_id, run_id, events)
+
+
+def _assert_valid_oversized_boundary_accepted(tmp_path, *, record_size_multiple, with_trailing):
+    """Shared body for the r13 valid-oversized-boundary regressions: a VALID
+    terminal ``done`` record sized at ``record_size_multiple`` x cap (above cap,
+    near the _VALIDITY_PROOF_MAX_BYTES 2x ceiling) must be ACCEPTED by the tail
+    reader, not rejected by budget starvation. The production order
+    ``done(tool_limit_reached) -> metering -> stream_end`` and the final-row case
+    are both covered (``with_trailing`` selects trailing metering/stream_end).
+
+    Under the r12 design the validity proof shared the lookup+prefix 2x cap
+    meter: the backward lookup + 8 KiB prefix consumed enough of the allowance
+    that a valid ~1.75x cap record could not be read in full -> fail-closed ->
+    valid terminal rejected -> wrong terminal_state (full reader
+    tool_limit_reached -> tail running/completed). The r13 fix gives the validity
+    proof its own _VALIDITY_PROOF_MAX_BYTES meter. This asserts exact full/tail
+    parity for ordered seqs, last_seq, terminal, and the discriminating
+    tool_limit_reached state through _read_jsonl_tail, latest_run_summary, AND
+    find_run_summary."""
+    from api.run_journal import (
+        _SESSION_REPLAY_MAX_BYTES,
+        _read_jsonl,
+        _read_jsonl_tail,
+        find_run_summary,
+        latest_run_summary,
+    )
+
+    cap = _SESSION_REPLAY_MAX_BYTES
+    # Build a valid oversized done at the target multiple of cap, with a
+    # discriminating tool_limit_reached terminal_state.
+    target_size = int(record_size_multiple * cap)
+    framing_overhead = 120  # the JSON keys + payload key framing around the big string
+    big_payload = "Z" * max(0, target_size - framing_overhead)
+    valid_done = (
+        '{"seq":2,"event":"done","terminal":true,'
+        '"terminal_state":"tool_limit_reached","payload":{"t":"' + big_payload + '"}}\n'
+    )
+    head_token = '{"seq":1,"event":"token","payload":{"t":"head"}}\n'
+    trailing = ""
+    expected_seqs_full = [1, 2]
+    if with_trailing:
+        metering = '{"seq":3,"event":"metering","payload":{"tokens":10}}\n'
+        stream_end = '{"seq":4,"event":"stream_end","payload":{}}\n'
+        trailing = metering + stream_end
+        expected_seqs_full = [1, 2, 3, 4]
+
+    path = tmp_path / "_run_journal" / "s1" / "r1.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as fh:
+        fh.write(head_token.encode("utf-8"))
+        fh.write(valid_done.encode("utf-8"))
+        fh.write(trailing.encode("utf-8"))
+    size = path.stat().st_size
+    assert size > cap, "sanity: the journal must exceed the tail window"
+    # The done record must straddle the tail window (start before size-cap).
+    done_start = len(head_token)
+    done_end = done_start + len(valid_done)
+    window_start = size - cap
+    assert done_start < window_start < done_end, (
+        f"fixture setup: the done record [{done_start},{done_end}) must straddle "
+        f"the tail window start {window_start} (size={size}, cap={cap})"
+    )
+
+    # Ground truth: the full reader sees the tool_limit_reached done.
+    full_events, _ = _read_jsonl(path)
+    full_seqs = [e.get("seq") for e in full_events]
+    assert full_seqs == expected_seqs_full, (
+        f"baseline: full reader seqs {full_seqs} (expected {expected_seqs_full})"
+    )
+    full_summary = _summary_from_events_ref("s1", "r1", full_events)
+    assert full_summary["terminal_state"] == "tool_limit_reached", (
+        f"baseline: full reader terminal_state={full_summary['terminal_state']!r} "
+        f"(expected 'tool_limit_reached')"
+    )
+
+    # The tail reader must keep the valid oversized done (seq=2), NOT reject it
+    # via budget starvation. The boundary summary is recovered (seq=2 present).
+    tail_events, _ = _read_jsonl_tail(path, max_bytes=cap, max_rows=None)
+    tail_seqs = [e.get("seq") for e in tail_events]
+    # When trailing records exist, the tail window keeps them after the boundary
+    # recovery prepends the straddling seq=2 summary. Without trailing, only the
+    # boundary summary (seq=2) is present in the tail.
+    assert 2 in tail_seqs, (
+        f"the tail reader REJECTED the valid oversized terminal done (seq=2 not "
+        f"in tail_seqs={tail_seqs}); a valid record near {record_size_multiple}x cap "
+        f"was starved by the lookup+prefix meter and failed-closed (#6139 r13)"
+    )
+    # Exact full/tail parity on the discriminating fields.
+    tail_summary = _summary_from_events_ref("s1", "r1", tail_events)
+    assert tail_summary["terminal_state"] == "tool_limit_reached", (
+        f"the tail reader reported terminal_state={tail_summary['terminal_state']!r} "
+        f"(expected 'tool_limit_reached'); a valid {record_size_multiple}x cap "
+        f"terminal record was rejected via budget starvation (#6139 r13)"
+    )
+    assert tail_summary["terminal"] is True, (
+        f"the tail reader reported terminal={tail_summary['terminal']} (expected True)"
+    )
+    assert tail_summary["last_seq"] == full_summary["last_seq"], (
+        f"last_seq mismatch: tail={tail_summary['last_seq']} full={full_summary['last_seq']}"
+    )
+
+    # Production summary readers must agree.
+    summary = latest_run_summary("s1", "r1", session_dir=tmp_path)
+    assert summary["terminal_state"] == "tool_limit_reached", (
+        f"latest_run_summary reported terminal_state={summary['terminal_state']!r} "
+        f"(expected 'tool_limit_reached'); a valid {record_size_multiple}x cap "
+        f"terminal record was rejected on the summary path (#6139 r13)"
+    )
+    assert summary["terminal"] is True, (
+        f"latest_run_summary marked terminal={summary['terminal']} (expected True)"
+    )
+    found = find_run_summary("r1", session_dir=tmp_path)
+    assert found is not None, "find_run_summary must locate the run"
+    assert found["terminal_state"] == "tool_limit_reached", (
+        f"find_run_summary reported terminal_state={found['terminal_state']!r} "
+        f"(expected 'tool_limit_reached') (#6139 r13)"
+    )
+
+
+def test_valid_oversized_boundary_175x_cap_as_final_row(tmp_path):
+    """Regression (reviewer round 13): a VALID terminal ``done`` at ~1.75x cap
+    as the FINAL row of the journal must be accepted (not starved) by the tail
+    reader. Full/tail parity on seqs, last_seq, terminal, tool_limit_reached."""
+    _assert_valid_oversized_boundary_accepted(
+        tmp_path, record_size_multiple=1.75, with_trailing=False
+    )
+
+
+def test_valid_oversized_boundary_175x_cap_before_metering_stream_end(tmp_path):
+    """Regression (reviewer round 13): a VALID terminal ``done`` at ~1.75x cap
+    followed by the production order ``metering`` -> ``stream_end`` must be
+    accepted by the tail reader. This is the exact scenario the reviewer
+    reproduced (full reader tool_limit_reached -> tail running under r12)."""
+    _assert_valid_oversized_boundary_accepted(
+        tmp_path, record_size_multiple=1.75, with_trailing=True
+    )
+
+
+def test_valid_oversized_boundary_near_2x_cap_as_final_row(tmp_path):
+    """Regression (reviewer round 13): a VALID terminal ``done`` near the 2x cap
+    validity ceiling (_VALIDITY_PROOF_MAX_BYTES) as the final row must be
+    accepted. Near the ceiling is the hardest case for a starved shared meter."""
+    _assert_valid_oversized_boundary_accepted(
+        tmp_path, record_size_multiple=1.95, with_trailing=False
+    )
+
+
+def test_valid_oversized_boundary_near_2x_cap_before_metering_stream_end(tmp_path):
+    """Regression (reviewer round 13): a VALID terminal ``done`` near the 2x cap
+    validity ceiling followed by ``metering`` -> ``stream_end`` must be
+    accepted."""
+    _assert_valid_oversized_boundary_accepted(
+        tmp_path, record_size_multiple=1.95, with_trailing=True
     )
