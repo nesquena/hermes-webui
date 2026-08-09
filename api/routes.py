@@ -21073,8 +21073,18 @@ def _start_chat_stream_for_session(
     source: str = "webui",
     moa_config=None,
     external_runtime_owned: bool | None = None,
+    owner_token: dict | None = None,
 ):
-    """Persist pending state, register an SSE channel, and start an agent turn."""
+    """Persist pending state, register an SSE channel, and start an agent turn.
+
+    ``owner_token`` is the #6327 immutable owner token built under the
+    canonical current owner's AGENT lock by ``start_session_turn()``.  When
+    supplied, the canonical owner is re-verified under the per-session lock
+    BEFORE any pending-state mutation: a replaced/compressed/rotated owner
+    yields a retryable 409 instead of mutating or starting a stale session.
+    Callers that resolve their session synchronously (browser chat-start)
+    pass no token and are unaffected.
+    """
     if external_runtime_owned is None:
         external_runtime_owned = webui_gateway_chat_enabled(get_config())
     backend_is_gateway = bool(external_runtime_owned)
@@ -21121,6 +21131,28 @@ def _start_chat_stream_for_session(
     diag.stage("session_lock_wait") if diag else None
     while True:
         with session_lock:
+            # #6327 validation-to-start fence: when an immutable owner token
+            # was supplied, re-verify the canonical current owner under this
+            # lock BEFORE touching any pending state.  The out-of-AGENT
+            # credential revalidation may have waited while the session was
+            # replaced (same SID), compressed (SID rotation / lock migration),
+            # or had its profile/home/credential generation move; applying to
+            # or starting a run on the stale owner would corrupt the wrong
+            # session (or an archived pre-compression snapshot).  On movement
+            # the caller retries the whole flow outside AGENT (bounded).
+            if owner_token is not None:
+                _fence_error = _validate_start_owner_fence(owner_token, session_lock)
+                if _fence_error is not None:
+                    diag.stage("owner_fence") if diag else None
+                    return {
+                        "error": "session owner changed during revalidation",
+                        "owner_fence": _fence_error,
+                        "retryable": True,
+                        "session_id": str(
+                            getattr(owner_token.get("owner"), "session_id", None) or s.session_id
+                        ),
+                        "_status": 409,
+                    }
             locked_stream_id = getattr(s, "active_stream_id", None)
             if locked_stream_id:
                 if _active_stream_blocks_chat_start(s, locked_stream_id):
@@ -21293,6 +21325,7 @@ def _start_run(
     diag=None,
     moa_config=None,
     gateway_chat_enabled: bool | None = None,
+    owner_token: dict | None = None,
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
 
@@ -21334,6 +21367,7 @@ def _start_run(
                 source=request.source or source,
                 moa_config=moa_config,
                 external_runtime_owned=gateway_chat_enabled,
+                owner_token=owner_token,
             )
 
         def _legacy_adapter_factory():
@@ -21375,6 +21409,7 @@ def _start_run(
         source=source,
         moa_config=moa_config,
         external_runtime_owned=gateway_chat_enabled,
+        owner_token=owner_token,
     )
 
 
@@ -21394,6 +21429,28 @@ def _process_wakeup_revalidation_provider(model, provider) -> str:
     return str(candidate or "").strip()
 
 
+def _wakeup_owner_profile(session_or_token) -> str:
+    """Read the profile field from a Session object or an immutable owner token."""
+    if isinstance(session_or_token, dict):
+        return str(session_or_token.get("profile") or "").strip()
+    return str(getattr(session_or_token, "profile", "") or "").strip()
+
+
+def _process_wakeup_profile_home(session) -> str:
+    """Resolve the canonical hermes home path for a session's profile.
+
+    Read-only (no process state mutated, no PROCESS ownership acquired) so it
+    is safe to compute inside the per-session AGENT lock — it is part of the
+    #6327 immutable owner token.
+    """
+    try:
+        from api.profiles import get_hermes_home_for_profile
+
+        return str(get_hermes_home_for_profile(getattr(session, "profile", None)))
+    except Exception:
+        return ""
+
+
 def _process_wakeup_provider_has_recovery_credential(
     session,
     *,
@@ -21407,7 +21464,7 @@ def _process_wakeup_provider_has_recovery_credential(
     ).strip()
     if not provider_id:
         return False
-    profile_name = str(getattr(session, "profile", "") or "").strip()
+    profile_name = _wakeup_owner_profile(session)
     if profile_name and not _is_root_profile(profile_name):
         with profile_scope_for_detached_worker(
             profile_name,
@@ -21429,6 +21486,433 @@ def _refresh_process_wakeup_pause_credential_fingerprint(session) -> bool:
     return True
 
 
+def _resolve_live_session_owner(session_id, *, preferred=None):
+    """Resolve the canonical LIVE session owner for a wakeup request.
+
+    #6327: the production compression path mutates the live ``Session``
+    object in place (``session_id`` rotation), migrates ``SESSIONS[old]`` →
+    ``SESSIONS[new]``, preserves the old SID as an archived
+    ``pre_compression_snapshot`` sidecar, and aliases the per-session AGENT
+    lock entry to the new SID.  A wakeup that resolved an owner before (or
+    while) that happened must follow the live owner, never the archived
+    snapshot.
+
+      - ``preferred`` is the object resolved earlier (possibly rotated in
+        place by compression).  When it is still the canonical cache owner of
+        its live sid, it IS the live continuation — use it.
+      - Otherwise resolve ``session_id``.  If it now resolves to an archived
+        pre-compression snapshot, follow to the newest live continuation
+        (bounded + profile-matched) or fail (the caller requeues and the
+        snapshot is never mutated).
+
+    Returns ``(owner, live_sid)`` or ``(None, None)``.  Never acquires AGENT
+    or PROCESS; the caller takes the canonical lock for ``live_sid``.
+    """
+    if preferred is not None:
+        live_sid = str(getattr(preferred, "session_id", "") or "")
+        if live_sid:
+            with LOCK:
+                cached = SESSIONS.get(live_sid)
+            if cached is preferred and not getattr(
+                preferred, "pre_compression_snapshot", False
+            ):
+                return preferred, live_sid
+    try:
+        s = get_session(session_id)
+    except KeyError:
+        return None, None
+    if s is None:
+        return None, None
+    live_sid = str(getattr(s, "session_id", "") or "") or str(session_id)
+    if getattr(s, "pre_compression_snapshot", False):
+        # The requested SID is an archived pre-compression snapshot: resolve
+        # its live continuation atomically (bounded + profile-matched) or
+        # fail/requeue.  Never clear/suppress/save/start on the snapshot.
+        try:
+            continuation_sid = _pre_compression_continuation_session_id(s)
+        except Exception:
+            continuation_sid = None
+        if not continuation_sid:
+            return None, None
+        try:
+            s = get_session(continuation_sid)
+        except KeyError:
+            return None, None
+        if s is None or getattr(s, "pre_compression_snapshot", False):
+            return None, None  # defensive: a continuation must be live
+        live_sid = str(getattr(s, "session_id", "") or "") or str(continuation_sid)
+    return s, live_sid
+
+
+def _process_wakeup_owner_token_mismatch(token, owner) -> str | None:
+    """Return a reason string when the live owner no longer matches ``token``.
+
+    Called while holding the canonical AGENT lock for ``owner``'s live sid.
+    ``token`` was snapshotted under the same lock earlier; every mutable
+    field the out-of-AGENT revalidation (and the validation-to-start fence)
+    depends on is compared exactly.  ``None`` means the token still matches.
+    """
+    if owner is not token.get("owner"):
+        return "owner_replaced"
+    if str(getattr(owner, "session_id", "") or "") != str(token.get("session_id") or ""):
+        return "session_id_rotated"
+    if getattr(owner, "pre_compression_snapshot", False):
+        return "session_archived"
+    if str(getattr(owner, "profile", "") or "") != str(token.get("profile") or ""):
+        return "profile_changed"
+    if _process_wakeup_profile_home(owner) != token.get("profile_home"):
+        return "profile_home_changed"
+    live_pause = getattr(owner, "process_wakeup_pause", None)
+    live_pause_state = dict(live_pause) if isinstance(live_pause, dict) else None
+    if live_pause_state != token.get("pause_state"):
+        return "pause_state_changed"
+    try:
+        live_fingerprint = process_wakeup_credential_state_fingerprint(owner)
+    except Exception:
+        # Transient fingerprint-read failure: don't fail the apply on it; the
+        # paused-state comparison above still guards the revalidation result.
+        return None
+    if live_fingerprint != token.get("credential_state_fingerprint"):
+        return "credential_state_changed"
+    return None
+
+
+def _build_immutable_session_owner_token(
+    session_id,
+    *,
+    model,
+    provider,
+    preferred=None,
+    classification: str = "credential_pool_empty",
+):
+    """Resolve the canonical LIVE owner and snapshot an immutable owner token.
+
+    #6327 required shape, step 1: under the canonical current owner's AGENT
+    lock, snapshot an immutable token containing the requested/current SID,
+    exact owner identity, profile + home generation, the resolved
+    route/model/provider lane, pause version/state, and the credential-state
+    generation/fingerprint.  Step 2 (the PROCESS-owning credential lookup)
+    runs OUTSIDE this lock; step 3 re-acquires it and applies only when every
+    token field still matches.
+
+    Never acquires PROCESS.  Returns ``(token, live_owner)`` or
+    ``(None, None)`` when the session is gone / only archived.
+    """
+    live_owner = preferred
+    for _ in range(4):  # bounded re-resolution across concurrent rotation
+        live_owner, live_sid = _resolve_live_session_owner(
+            session_id, preferred=live_owner
+        )
+        if live_owner is None:
+            return None, None
+        lock = _get_session_agent_lock(live_sid)
+        with lock:
+            # Canonicality under the lock: compression migrates lock entries
+            # while holding them, so the entry must still map the owner's
+            # live sid to the lock we just acquired.
+            with SESSION_AGENT_LOCKS_LOCK:
+                canonical = SESSION_AGENT_LOCKS.get(live_owner.session_id)
+            if canonical is not lock:
+                continue  # lock migrated underneath us — re-resolve
+            if getattr(live_owner, "pre_compression_snapshot", False):
+                continue  # archived mid-resolution — re-resolve (follows continuation)
+            pause = getattr(live_owner, "process_wakeup_pause", None)
+            pause_state = dict(pause) if isinstance(pause, dict) else None
+            pause_matches = bool(
+                pause_state
+                and process_wakeup_pause_matches(
+                    live_owner,
+                    model=model,
+                    provider=provider,
+                    classification=classification,
+                )
+            )
+            try:
+                credential_fingerprint = process_wakeup_credential_state_fingerprint(
+                    live_owner
+                )
+            except Exception:
+                credential_fingerprint = ""
+            token = {
+                "requested_sid": str(session_id),
+                "session_id": str(getattr(live_owner, "session_id", "") or ""),
+                "owner": live_owner,
+                "profile": str(getattr(live_owner, "profile", "") or ""),
+                "profile_home": _process_wakeup_profile_home(live_owner),
+                "model": model,
+                "provider": provider,
+                "pause_state": pause_state,
+                "pause_matches": pause_matches,
+                "credential_state_fingerprint": credential_fingerprint,
+            }
+            return token, live_owner
+    return None, None
+
+
+def _save_session_quietly(session, session_id):
+    try:
+        session.save(touch_updated_at=False)
+    except Exception:
+        logger.debug(
+            "failed to persist process_wakeup state for session %s",
+            session_id,
+            exc_info=True,
+        )
+
+
+def _apply_process_wakeup_revalidation_once(
+    token, revalidation, *, model, provider, retry_on_stale: bool = True
+):
+    """Acquire the canonical current owner's lock, verify the token, apply.
+
+    #6327 required shape, step 3: re-acquire the canonical current owner's
+    AGENT lock and apply the out-of-lock revalidation answer ONLY when every
+    token field still matches; on replacement/SID rotation/profile-home/
+    pause/credential-generation movement, retry outside AGENT (the caller
+    bounds the budget).  Never acquires PROCESS while AGENT is held.
+
+    Returns:
+      ``{"retry": True, "session": <owner>, "reason": ...}`` — owner moved;
+        the caller rebuilds the token and re-runs the revalidation outside
+        AGENT (bounded), or falls back to the suppression pass.
+      ``{"retry": False, "session": <owner>, "paused_response": dict|None,
+        "error": dict|None}`` — applied.  ``paused_response`` is the 409
+        suppressed-wakeup payload when the pause could not be recovered.
+    """
+    owner = token.get("owner")
+    if owner is None:
+        return {
+            "retry": False,
+            "session": None,
+            "paused_response": None,
+            "error": {"error": "Session not found", "_status": 404},
+        }
+    for _ in range(4):
+        live_sid = str(getattr(owner, "session_id", "") or "")
+        if not live_sid:
+            return {"retry": True, "session": owner, "reason": "owner_sid_empty"}
+        lock = _get_session_agent_lock(live_sid)
+        with lock:
+            with SESSION_AGENT_LOCKS_LOCK:
+                canonical = SESSION_AGENT_LOCKS.get(owner.session_id)
+            if canonical is not lock:
+                return {"retry": True, "session": owner, "reason": "lock_migrated"}
+            # Canonical-owner identity: the live sid must resolve (through the
+            # cache or the disk-freshness resolver) to the tokenized object.
+            # A replaced object under the same SID, an evicted owner, or an
+            # archived pre-compression snapshot all fail this check.
+            try:
+                resolved = get_session(live_sid)
+            except KeyError:
+                resolved = None
+            if resolved is None or resolved is not owner:
+                return {"retry": True, "session": owner, "reason": "owner_replaced"}
+            mismatch = _process_wakeup_owner_token_mismatch(token, owner)
+            if mismatch:
+                return {"retry": True, "session": owner, "reason": mismatch}
+            if clear_process_wakeup_pause_if_model_changed(
+                owner, model=model, provider=provider
+            ):
+                _save_session_quietly(owner, token.get("session_id"))
+            if process_wakeup_pause_matches(
+                owner,
+                model=model,
+                provider=provider,
+                classification="credential_pool_empty",
+            ):
+                _revalidation_applies = bool(
+                    revalidation is not None
+                    and revalidation.get("token_session_id") == token.get("session_id")
+                )
+                if _revalidation_applies:
+                    _credential_state_changed = False
+                    try:
+                        _credential_state_changed = (
+                            process_wakeup_pause_credential_state_changed(owner)
+                        )
+                    except Exception:
+                        logger.debug(
+                            "failed to compare process_wakeup credential state for session %s",
+                            token.get("session_id"),
+                            exc_info=True,
+                        )
+                    if bool(revalidation.get("recovered")):
+                        _recovery_reason = (
+                            "credential_state_changed"
+                            if _credential_state_changed
+                            else "credential_recovered"
+                        )
+                        if clear_process_wakeup_pause(owner, reason=_recovery_reason):
+                            _save_session_quietly(owner, token.get("session_id"))
+                    elif _credential_state_changed:
+                        if _refresh_process_wakeup_pause_credential_fingerprint(owner):
+                            _save_session_quietly(owner, token.get("session_id"))
+                elif retry_on_stale:
+                    # The live pause matched but the revalidation result is
+                    # missing/stale (preflight failed, or the pause appeared
+                    # after the preflight): drop AGENT and retry outside it.
+                    return {"retry": True, "session": owner, "reason": "revalidation_stale"}
+                # else: retries exhausted / no result — treat the pause as
+                # not recovered (suppressed below).
+            paused = suppress_process_wakeup_for_provider_pause(
+                owner,
+                model=model,
+                provider=provider,
+                classification="credential_pool_empty",
+            )
+            if paused is not None:
+                try:
+                    PENDING_BG_TASK_COMPLETIONS.discard(owner.session_id)
+                except Exception:
+                    logger.debug(
+                        "failed to discard pending bg-task marker for paused wakeup %s",
+                        token.get("session_id"),
+                        exc_info=True,
+                    )
+                _save_session_quietly(owner, token.get("session_id"))
+                return {
+                    "retry": False,
+                    "session": owner,
+                    "paused_response": {
+                        "error": PROCESS_WAKEUP_PAUSE_ERROR,
+                        "message": (
+                            "Automatic process wakeups are paused for this session because "
+                            "the provider credential pool is unavailable."
+                        ),
+                        "process_wakeup_pause": paused,
+                        "_status": 409,
+                    },
+                    "error": None,
+                }
+            return {
+                "retry": False,
+                "session": owner,
+                "paused_response": None,
+                "error": None,
+            }
+    return {"retry": True, "session": owner, "reason": "owner_churn"}
+
+
+def _suppress_process_wakeup_once(token, *, model, provider, session_id):
+    """Final bounded fallback: suppress the wakeup on the CURRENT live owner.
+
+    Used when the out-of-AGENT revalidation budget is exhausted: never start
+    or mutate a stale owner.  Resolves the live owner (following rotation),
+    suppresses when the pause still matches (409 requeue), and returns the
+    live owner + a fresh token so a subsequently started run is never
+    fenced-stale.
+    """
+    owner = token.get("owner")
+    if owner is None:
+        return {
+            "session": None,
+            "token": token,
+            "paused_response": {
+                "error": PROCESS_WAKEUP_PAUSE_ERROR,
+                "message": "Automatic process wakeups are paused for this session because the provider credential pool is unavailable.",
+                "process_wakeup_pause": {},
+                "_status": 409,
+            },
+            "error": {"error": "Session not found", "_status": 404},
+        }
+    for _ in range(4):
+        live_sid = str(getattr(owner, "session_id", "") or "")
+        if not live_sid:
+            return {"session": owner, "token": token, "paused_response": None, "error": None}
+        lock = _get_session_agent_lock(live_sid)
+        with lock:
+            with SESSION_AGENT_LOCKS_LOCK:
+                canonical = SESSION_AGENT_LOCKS.get(owner.session_id)
+            if canonical is not lock:
+                continue
+            try:
+                resolved = get_session(live_sid)
+            except KeyError:
+                resolved = None
+            if resolved is None or resolved is not owner:
+                fresh, _fresh_sid = _resolve_live_session_owner(session_id, preferred=owner)
+                if fresh is None:
+                    return {
+                        "session": owner,
+                        "token": token,
+                        "paused_response": None,
+                        "error": {"error": "Session not found", "_status": 404},
+                    }
+                owner = fresh
+                continue
+            if clear_process_wakeup_pause_if_model_changed(
+                owner, model=model, provider=provider
+            ):
+                _save_session_quietly(owner, session_id)
+            paused = suppress_process_wakeup_for_provider_pause(
+                owner,
+                model=model,
+                provider=provider,
+                classification="credential_pool_empty",
+            )
+            if paused is not None:
+                try:
+                    PENDING_BG_TASK_COMPLETIONS.discard(owner.session_id)
+                except Exception:
+                    logger.debug(
+                        "failed to discard pending bg-task marker for paused wakeup %s",
+                        session_id,
+                        exc_info=True,
+                    )
+                _save_session_quietly(owner, session_id)
+                return {
+                    "session": owner,
+                    "token": token,
+                    "paused_response": {
+                        "error": PROCESS_WAKEUP_PAUSE_ERROR,
+                        "message": (
+                            "Automatic process wakeups are paused for this session because "
+                            "the provider credential pool is unavailable."
+                        ),
+                        "process_wakeup_pause": paused,
+                        "_status": 409,
+                    },
+                    "error": None,
+                }
+            return {"session": owner, "token": token, "paused_response": None, "error": None}
+    return {"session": owner, "token": token, "paused_response": None, "error": None}
+
+
+def _validate_start_owner_fence(owner_token, held_lock) -> str | None:
+    """Return an error string when the canonical owner moved, else None.
+
+    #6327 required shape, step 5 (validation-to-start fence): called from
+    ``_start_chat_stream_for_session`` while holding ``held_lock`` (the
+    per-session AGENT lock selected from the owner's mutable SID).  Verifies
+    the lock entry still maps the owner's live sid to the held lock, the
+    canonical cache still owns the exact tokenized object, and every token
+    field still matches — so the pending-state mutation and stream start only
+    ever target the session the out-of-AGENT revalidation authorized.  No
+    PROCESS acquisition.
+    """
+    if not isinstance(owner_token, dict):
+        return None
+    owner = owner_token.get("owner")
+    if owner is None:
+        return "missing_owner"
+    live_sid = str(getattr(owner, "session_id", "") or "")
+    if not live_sid:
+        return "empty_sid"
+    if live_sid != str(owner_token.get("session_id") or ""):
+        return "session_id_rotated"
+    with SESSION_AGENT_LOCKS_LOCK:
+        canonical_lock = SESSION_AGENT_LOCKS.get(live_sid)
+    if canonical_lock is not held_lock:
+        return "lock_migrated"
+    try:
+        resolved = get_session(live_sid)
+    except KeyError:
+        resolved = None
+    if resolved is None or resolved is not owner:
+        return "owner_replaced"
+    return _process_wakeup_owner_token_mismatch(owner_token, owner)
+
+
 # #6327: bounded retries for the out-of-AGENT credential revalidation loop in
 # start_session_turn().  Each retry re-runs the revalidation OUTSIDE the
 # per-session agent lock after the live pause/provider/fingerprint state moved
@@ -21438,7 +21922,7 @@ def _refresh_process_wakeup_pause_credential_fingerprint(session) -> bool:
 _PROCESS_WAKEUP_REVALIDATION_MAX_RETRIES = 3
 
 
-def _revalidate_process_wakeup_credential_outside_agent_lock(session, *, model, provider):
+def _revalidate_process_wakeup_credential_outside_agent_lock(token, *, model, provider):
     """Revalidate paused wakeup credential availability OUTSIDE the agent lock.
 
     #6327: the named-profile branch of this revalidation enters
@@ -21451,31 +21935,29 @@ def _revalidate_process_wakeup_credential_outside_agent_lock(session, *, model, 
         streaming:      PROCESS -> waits AGENT
         process wakeup: AGENT   -> waits PROCESS
 
-    Callers run this BEFORE acquiring AGENT and re-check the live
-    pause/provider/fingerprint state under AGENT before applying the result
-    (retrying here when the state moved).  Returns the pause snapshot the
-    revalidation targeted plus the recovery outcome; the snapshot is what the
-    caller compares against the live pause under AGENT.
+    The result is bound to the IMMUTABLE owner ``token`` snapshotted under
+    the canonical owner's AGENT lock (see
+    ``_build_immutable_session_owner_token``): the caller re-acquires the
+    canonical lock and applies the answer only when every token field still
+    matches, retrying outside AGENT (bounded) otherwise.  Returns the
+    ``token_session_id`` the revalidation targeted plus the recovery outcome.
     """
-    _pause = getattr(session, "process_wakeup_pause", None)
-    _pause_state = dict(_pause) if isinstance(_pause, dict) else None
-    _revalidation_provider = _process_wakeup_revalidation_provider(model, provider)
     _credential_recovered = False
     try:
         _credential_recovered = _process_wakeup_provider_has_recovery_credential(
-            session,
+            token,
             model=model,
             provider=provider,
-            provider_id=_revalidation_provider,
+            provider_id=_process_wakeup_revalidation_provider(model, provider),
         )
     except Exception:
         logger.debug(
             "failed to revalidate process_wakeup credential availability for session %s",
-            getattr(session, "session_id", "?"),
+            token.get("session_id", "?"),
             exc_info=True,
         )
     return {
-        "pause_state": _pause_state,
+        "token_session_id": token.get("session_id"),
         "recovered": bool(_credential_recovered),
     }
 
@@ -21552,37 +22034,43 @@ def start_session_turn(
         profile_config=_pp_cfg,
         prefer_cached_catalog=True,
     )
-    _paused_wakeup_response = None
-    # ── #6327: move credential revalidation OUT of the per-session agent lock ──
+    # ── #6327: immutable owner token fences the out-of-AGENT revalidation ──
     # For a named profile, _process_wakeup_provider_has_recovery_credential()
     # enters profile_scope_for_detached_worker(), which holds
-    # _PROCESS_ENV_OWNERSHIP_LOCK for its full body.  Streaming now owns
-    # PROCESS for the entire turn (unconditional) and waits for AGENT at
+    # _PROCESS_ENV_OWNERSHIP_LOCK (PROCESS) for its full body.  Streaming now
+    # owns PROCESS for the entire turn (unconditional) and waits for AGENT at
     # writeback, so revalidating while holding AGENT is a reachable AB/BA
     # cycle:
     #
     #     streaming:      PROCESS -> waits AGENT
     #     process wakeup: AGENT   -> waits PROCESS
     #
-    # Revalidate BEFORE acquiring AGENT, then acquire AGENT, re-read the live
-    # pause/provider/fingerprint state and apply the result only when it still
-    # matches the state the revalidation targeted.  When the state moved
-    # underneath us (or the pause appeared after the preflight), drop AGENT
-    # and retry the revalidation outside it (bounded).
+    # The revalidation therefore runs OUTSIDE AGENT.  Because its result is
+    # applied later, it is bound to an IMMUTABLE owner token snapshotted under
+    # the canonical current owner's AGENT lock: requested/current SID, exact
+    # owner identity, profile + home generation, the resolved model/provider
+    # lane, pause version/state, and the credential-state fingerprint.  After
+    # the unlocked lookup the canonical owner's lock is re-acquired and the
+    # answer applied ONLY when every token field still matches; on
+    # replacement / SID rotation / profile-home / pause / credential-state
+    # movement the loop retries outside AGENT within the bounded budget.  The
+    # validation-to-start gap is fenced by passing the token into
+    # _start_run() -> _start_chat_stream_for_session(), which re-verifies the
+    # canonical owner before any pending-state mutation.
+    _paused_wakeup_response = None
+    _wakeup_token, _live_owner = _build_immutable_session_owner_token(
+        session_id, model=model, provider=model_provider, preferred=s,
+    )
+    if _wakeup_token is None:
+        return {"error": "Session not found", "_status": 404}
     _credential_revalidation = None
-    if turn_source == "process_wakeup":
+    if _wakeup_token.get("pause_matches"):
         try:
-            if process_wakeup_pause_matches(
-                s,
+            _credential_revalidation = _revalidate_process_wakeup_credential_outside_agent_lock(
+                _wakeup_token,
                 model=model,
                 provider=model_provider,
-                classification='credential_pool_empty',
-            ):
-                _credential_revalidation = _revalidate_process_wakeup_credential_outside_agent_lock(
-                    s,
-                    model=model,
-                    provider=model_provider,
-                )
+            )
         except Exception:
             logger.debug(
                 "failed to preflight process_wakeup credential revalidation for session %s",
@@ -21592,139 +22080,109 @@ def start_session_turn(
             _credential_revalidation = None
     _revalidation_retries = 0
     while True:
-        _retry_revalidation = False
-        with _get_session_agent_lock(s.session_id):
-            try:
-                s = get_session(session_id)
-            except KeyError:
-                return {"error": "Session not found", "_status": 404}
-            if clear_process_wakeup_pause_if_model_changed(
-                s,
-                model=model,
-                provider=model_provider,
-            ):
-                try:
-                    s.save(touch_updated_at=False)
-                except Exception:
-                    logger.debug(
-                        "failed to persist process_wakeup pause reset for session %s",
-                        session_id,
-                        exc_info=True,
-                    )
-            if turn_source == "process_wakeup":
-                _credential_state_changed = False
-                try:
-                    _credential_state_changed = process_wakeup_pause_credential_state_changed(s)
-                except Exception:
-                    logger.debug(
-                        "failed to compare process_wakeup credential state for session %s",
-                        session_id,
-                        exc_info=True,
-                    )
-                if process_wakeup_pause_matches(
-                    s,
-                    model=model,
-                    provider=model_provider,
-                    classification='credential_pool_empty',
-                ):
-                    _live_pause_state = (
-                        dict(s.process_wakeup_pause)
-                        if isinstance(s.process_wakeup_pause, dict)
-                        else None
-                    )
-                    _revalidation_applies = (
-                        _credential_revalidation is not None
-                        and _credential_revalidation["pause_state"] == _live_pause_state
-                    )
-                    if _revalidation_applies:
-                        _credential_recovered = bool(_credential_revalidation["recovered"])
-                        if _credential_recovered:
-                            _recovery_reason = (
-                                'credential_state_changed'
-                                if _credential_state_changed
-                                else 'credential_recovered'
-                            )
-                            if clear_process_wakeup_pause(s, reason=_recovery_reason):
-                                try:
-                                    s.save(touch_updated_at=False)
-                                except Exception:
-                                    logger.debug(
-                                        "failed to persist process_wakeup credential recovery reset for session %s",
-                                        session_id,
-                                        exc_info=True,
-                                    )
-                        elif _credential_state_changed:
-                            if _refresh_process_wakeup_pause_credential_fingerprint(s):
-                                try:
-                                    s.save(touch_updated_at=False)
-                                except Exception:
-                                    logger.debug(
-                                        "failed to persist process_wakeup credential-state fingerprint refresh for session %s",
-                                        session_id,
-                                        exc_info=True,
-                                    )
-                    elif _revalidation_retries < _PROCESS_WAKEUP_REVALIDATION_MAX_RETRIES:
-                        # The live pause/lane/fingerprint moved while we
-                        # revalidated outside AGENT (or the pause appeared
-                        # after the preflight): drop AGENT, re-run the
-                        # revalidation outside it, then re-enter and re-check.
-                        _retry_revalidation = True
-                    # else: retries exhausted / no result — treat the pause as
-                    # not recovered; the next drain cycle revalidates.
-            if not _retry_revalidation:
-                _paused_wakeup = suppress_process_wakeup_for_provider_pause(
-                    s,
-                    model=model,
-                    provider=model_provider,
-                    classification='credential_pool_empty',
-                )
-                if _paused_wakeup is not None:
-                    try:
-                        PENDING_BG_TASK_COMPLETIONS.discard(s.session_id)
-                    except Exception:
-                        logger.debug(
-                            "failed to discard pending bg-task marker for paused wakeup %s",
-                            session_id,
-                            exc_info=True,
-                        )
-                    try:
-                        s.save(touch_updated_at=False)
-                    except Exception:
-                        logger.debug(
-                            "failed to persist process_wakeup suppression for session %s",
-                            session_id,
-                            exc_info=True,
-                        )
-                    _paused_wakeup_response = {
-                        "error": PROCESS_WAKEUP_PAUSE_ERROR,
-                        "message": (
-                            "Automatic process wakeups are paused for this session because "
-                            "the provider credential pool is unavailable."
-                        ),
-                        "process_wakeup_pause": _paused_wakeup,
-                        "_status": 409,
-                    }
-        if not _retry_revalidation:
-            break
-        _revalidation_retries += 1
-        _credential_revalidation = _revalidate_process_wakeup_credential_outside_agent_lock(
-            s,
+        _apply = _apply_process_wakeup_revalidation_once(
+            _wakeup_token,
+            _credential_revalidation,
             model=model,
             provider=model_provider,
+            retry_on_stale=(turn_source == "process_wakeup"),
         )
+        if _apply.get("error") is not None:
+            return _apply["error"]
+        _live_owner = _apply["session"]
+        if _apply.get("retry"):
+            if _revalidation_retries >= _PROCESS_WAKEUP_REVALIDATION_MAX_RETRIES:
+                # Budget exhausted: never start or mutate a stale owner.
+                # Rebuild on the CURRENT live owner and suppress once so the
+                # next drain cycle revalidates; with no live pause the fresh
+                # token lets the run start (or the fence requeue) cleanly.
+                _wakeup_token, _live_owner = _build_immutable_session_owner_token(
+                    session_id, model=model, provider=model_provider, preferred=_live_owner,
+                )
+                if _wakeup_token is None:
+                    return {"error": "Session not found", "_status": 404}
+                _final = _suppress_process_wakeup_once(
+                    _wakeup_token, model=model, provider=model_provider, session_id=session_id,
+                )
+                if _final.get("error") is not None:
+                    return _final["error"]
+                if _final.get("paused_response") is not None:
+                    return _final["paused_response"]
+                _wakeup_token, _live_owner = _final["token"], _final["session"]
+            else:
+                _revalidation_retries += 1
+                _wakeup_token, _live_owner = _build_immutable_session_owner_token(
+                    session_id, model=model, provider=model_provider, preferred=_live_owner,
+                )
+                if _wakeup_token is None:
+                    return {"error": "Session not found", "_status": 404}
+                _credential_revalidation = None
+                if _wakeup_token.get("pause_matches"):
+                    try:
+                        _credential_revalidation = (
+                            _revalidate_process_wakeup_credential_outside_agent_lock(
+                                _wakeup_token,
+                                model=model,
+                                provider=model_provider,
+                            )
+                        )
+                    except Exception:
+                        logger.debug(
+                            "failed to re-run process_wakeup credential revalidation for session %s",
+                            session_id,
+                            exc_info=True,
+                        )
+                        _credential_revalidation = None
+                continue
+        else:
+            _paused_wakeup_response = _apply.get("paused_response")
+            if _paused_wakeup_response is not None:
+                return _paused_wakeup_response
+        resp = _start_run(
+            _live_owner,
+            msg=msg,
+            attachments=[],
+            workspace=workspace,
+            model=model,
+            model_provider=model_provider,
+            normalized_model=normalized_model,
+            source=turn_source,
+            route="start_session_turn",
+            owner_token=_wakeup_token,
+        )
+        if isinstance(resp, dict) and resp.get("retryable"):
+            # #6327 validation-to-start fence fired: the canonical owner moved
+            # between the pause apply and run acceptance.  Rebuild the token on
+            # the current owner and retry the whole flow outside AGENT
+            # (bounded); on budget exhaustion surface the fence 409 so the
+            # drain requeues.
+            if _revalidation_retries >= _PROCESS_WAKEUP_REVALIDATION_MAX_RETRIES:
+                return resp
+            _revalidation_retries += 1
+            _wakeup_token, _live_owner = _build_immutable_session_owner_token(
+                session_id, model=model, provider=model_provider, preferred=_live_owner,
+            )
+            if _wakeup_token is None:
+                return {"error": "Session not found", "_status": 404}
+            _credential_revalidation = None
+            if _wakeup_token.get("pause_matches"):
+                try:
+                    _credential_revalidation = _revalidate_process_wakeup_credential_outside_agent_lock(
+                        _wakeup_token,
+                        model=model,
+                        provider=model_provider,
+                    )
+                except Exception:
+                    logger.debug(
+                        "failed to re-run process_wakeup credential revalidation for session %s",
+                        session_id,
+                        exc_info=True,
+                    )
+                    _credential_revalidation = None
+            continue
+        break
     if _paused_wakeup_response is not None:
         return _paused_wakeup_response
-    resp = _start_run(
-        s,
-        msg=msg,
-        attachments=[],
-        workspace=workspace,
-        model=model,
-        model_provider=model_provider,
-        normalized_model=normalized_model,
-        source=turn_source,
-        route="start_session_turn",
-    )
 
     # ── Defect B: live-view of server-initiated turns ──────────────────────
     # Option Z starts this turn server-side, so NO browser EventSource is
