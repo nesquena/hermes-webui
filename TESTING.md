@@ -13,6 +13,30 @@
 >
 > Local regression focus: verify that a previously closed workspace panel stays visually closed from first paint through boot completion on desktop refresh; there should be no brief open-then-close flash.
 
+## Durable `/goal` continuation gate
+
+Automatic goal turns are owned by the server, not by an open browser tab. Run the
+focused deterministic matrix with an isolated WebUI state directory:
+
+```bash
+./scripts/test.sh -q \
+  tests/test_goal_server_continuation.py \
+  tests/test_goal_server_continuation_multiprocess.py \
+  tests/test_goal_server_continuation_callsite.py \
+  tests/test_stage326_pending_goal_continuation_race.py \
+  tests/test_goal_command_webui.py \
+  tests/test_issue5121_provider_auth_terminal_error.py
+```
+
+The gate proves atomic persistence and permissions, cross-process transaction exclusion,
+fork-safe owner identity, duplicate-judge idempotency, competing-claim exclusion,
+inactive-goal refusal, restart recovery with a current prompt, bounded empty response
+retries, and fail-closed behavior after any token/reasoning/tool activity.
+The callsite tests additionally pin persistence-before-SSE ordering, browser
+observation-only behavior, worker lifecycle, and both local and Gateway streaming
+backends. A manual/live check should close or reload the browser after a `continue`
+verdict and confirm that the next turn still starts and settles in the same session.
+
 ---
 
 ## Static JS runtime lint (brick-class regression guard)
