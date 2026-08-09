@@ -9148,10 +9148,8 @@ def suppress_active_run_visibility(stream_id: str, parent_session_id: str | None
 
 
 def _clear_suppressed_active_run(stream_id: str) -> None:
+    """Drop a helper-run suppression while ``ACTIVE_RUNS_LOCK`` is held."""
     _SUPPRESSED_ACTIVE_RUNS.pop(str(stream_id), None)
-
-
-_active_run_session_snapshot = active_run_session_snapshot
 
 
 def _publish_active_run_membership_changes(changed: set[str]) -> None:
@@ -9165,7 +9163,7 @@ def _publish_active_run_membership_changes(changed: set[str]) -> None:
                 session_id=session_id,
             )
     except Exception:
-        logger.debug("Failed to publish active-run membership change", exc_info=True)
+        logger.warning("Failed to publish active-run membership change", exc_info=True)
 
 
 def register_active_run(stream_id: str, **metadata) -> None:

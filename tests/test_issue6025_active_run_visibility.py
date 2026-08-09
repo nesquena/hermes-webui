@@ -270,6 +270,7 @@ def test_active_run_visibility_uses_canonical_session_matrix():
 
 
 def test_active_run_visibility_routes_only_through_canonical_sessions():
+    # Split forbidden names so this source-level guard cannot match its own literals.
     forbidden = (
         "/api/activity/" + "active-runs",
         "_active_run_" + "visibility_snapshot",
