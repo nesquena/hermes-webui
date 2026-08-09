@@ -2700,14 +2700,15 @@ async function loadSession(sid){
       _rearmActiveSessionStream();
       return;
     }
-    _prepareRunningLiveTail(S.messages,inflightMessages);
-    // Always drop the completed assistant when recovering from an INFLIGHT
-    // snapshot.  If the live assistant has no text yet, the completed
-    // assistant is the authoritative response, but keeping it in the base
-    // prevents _hasCurrentTailUserDuplicate from matching the optimistic
-    // user message — causing a duplicate user row.  Dropping it lets the
-    // live assistant (even if empty) take over the current-turn slot.
-    S.messages=_dropCurrentTurnAssistantMessages(S.messages);
+    const liveTailPrepared=_prepareRunningLiveTail(S.messages,inflightMessages);
+    // Drop the completed assistant only once its content has been preserved
+    // into a live row (drop-and-replace, never drop-then-maybe-empty).  If
+    // the live assistant has no text yet, the completed assistant is still
+    // the authoritative response and must not be removed — dropping it
+    // would lose the settled answer before any live row can take over.
+    if(liveTailPrepared){
+      S.messages=_dropCurrentTurnAssistantMessages(S.messages);
+    }
     S.messages=_mergeInflightTailMessages(S.messages,inflightMessages);
     S.toolCalls=(INFLIGHT[sid].toolCalls||[]);
     if(_mergePendingSessionMessage(S.session,S.messages)&&inflightMessages===(INFLIGHT[sid].messages||[])){
@@ -3893,7 +3894,14 @@ function _sameTranscriptMessage(a,b){
   }
   const aTs=(a.timestamp||a._ts||0), bTs=(b.timestamp||b._ts||0);
   if(aTs && bTs && role==='user'){
-    return aTs === bTs;
+    // Timestamp equality alone can over-match two genuinely different user
+    // messages submitted within the same millisecond. Require normalized
+    // user-text equality IN ADDITION to the timestamp match.
+    if(aTs !== bTs) return false;
+    const sameText=_messageComparableText(a)===_messageComparableText(b);
+    if(sameText) return true;
+    return _normalizeUserTranscriptText(_messageComparableText(a))===
+      _normalizeUserTranscriptText(_messageComparableText(b));
   }
   const aText=_messageComparableText(a);
   const bText=_messageComparableText(b);

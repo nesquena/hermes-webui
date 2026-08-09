@@ -2028,3 +2028,192 @@ def test_message_js_syncs_user_msg_ts_to_server_stamp():
         if "userMsg._ts" in window and "startData.pending_started_at" in window:
             return
     raise AssertionError("userMsg._ts not synced to startData.pending_started_at near assignment")
+
+
+def test_load_session_keeps_completed_assistant_when_live_tail_not_prepared():
+    """Review finding #1 (data-loss): the completed assistant must NOT be
+    dropped when the live tail has no preserved content yet.
+
+    Regression for #6649 round 4: loadSession previously dropped the
+    settled assistant unconditionally. If the live assistant has no text,
+    the completed assistant is the authoritative response — removing it
+    loses the answer before any live row can take over (drop-then-maybe-empty).
+    The drop must be guarded by _prepareRunningLiveTail returning true.
+    """
+    src = SESSIONS_JS
+    # The recovery path must call _prepareRunningLiveTail and capture its result
+    assert "_prepareRunningLiveTail(S.messages,inflightMessages)" in src
+    # The drop must be conditional on the prepared live tail
+    drop_call = "S.messages=_dropCurrentTurnAssistantMessages(S.messages);"
+    assert drop_call in src
+    drop_pos = src.find(drop_call)
+    # The drop must be inside an if that checks liveTailPrepared
+    assert "const liveTailPrepared=_prepareRunningLiveTail" in src
+    prepared_pos = src.find("const liveTailPrepared=_prepareRunningLiveTail")
+    assert prepared_pos < drop_pos
+    # Between the prepare and the drop there must be an if guard on liveTailPrepared
+    between = src[prepared_pos:drop_pos]
+    assert "if(liveTailPrepared)" in between, (
+        "drop must be guarded by liveTailPrepared (drop-and-replace, never drop-then-maybe-empty)"
+    )
+
+    # Behavioural check: _prepareRunningLiveTail returns false when neither
+    # the live assistant nor the persisted current-turn assistant has text —
+    # the completed assistant row is then the only settled record and must
+    # survive (never drop-then-maybe-empty).
+    assert NODE, "node not on PATH"
+    start = SESSIONS_JS.find("function _messageComparableText")
+    end = SESSIONS_JS.find("// Load older messages", start)
+    assert start != -1 and end != -1
+    helper_src = SESSIONS_JS[start:end]
+    script = f"""
+const assert = require('assert');
+{helper_src}
+// Live assistant with no text AND no persisted current-turn text ->
+// _prepareRunningLiveTail must return false (nothing preserved anywhere)
+let base = [
+  {{role:'user', content:'hello'}},
+  {{role:'assistant', content:'authoritative answer'}},
+];
+let inflightEmptyLive = [
+  {{role:'user', content:'hello'}},
+  {{role:'assistant', _live:true, content:''}},
+];
+let prepared = _prepareRunningLiveTail(base, inflightEmptyLive);
+// The empty live row is backfilled from the persisted current-turn text,
+// so the content IS preserved into the live row -> drop is safe.
+assert.strictEqual(prepared, true,
+  'Persisted current-turn text must be backfilled into the empty live row');
+if(prepared){{
+  base = _dropCurrentTurnAssistantMessages(base);
+}}
+let assistants = base.filter(m => m.role === 'assistant');
+assert.strictEqual(assistants.length, 0,
+  'Drop is safe once the live row holds the preserved content');
+
+// True data-loss shape: no live text AND no persisted current-turn text.
+// The settled assistant row is the only record and must NOT be dropped.
+let baseEmpty = [
+  {{role:'user', content:'hello'}},
+  {{role:'assistant', content:''}},
+];
+let inflightNone = [
+  {{role:'user', content:'hello'}},
+  {{role:'assistant', _live:true, content:''}},
+];
+let preparedNone = _prepareRunningLiveTail(baseEmpty, inflightNone);
+assert.strictEqual(preparedNone, false,
+  'Nothing preserved -> live tail is NOT prepared');
+if(preparedNone){{
+  baseEmpty = _dropCurrentTurnAssistantMessages(baseEmpty);
+}}
+let assistantsNone = baseEmpty.filter(m => m.role === 'assistant');
+assert.strictEqual(assistantsNone.length, 1,
+  'Settled assistant must survive when live tail is not prepared');
+
+// Positive control: live assistant WITH text -> prepared -> drop is safe
+let base2 = [
+  {{role:'user', content:'hello'}},
+  {{role:'assistant', content:'old answer'}},
+];
+let inflightLive = [
+  {{role:'user', content:'hello'}},
+  {{role:'assistant', _live:true, content:'new live answer'}},
+];
+let prepared2 = _prepareRunningLiveTail(base2, inflightLive);
+assert.strictEqual(prepared2, true,
+  'Live assistant with text must be prepared');
+if(prepared2){{
+  base2 = _dropCurrentTurnAssistantMessages(base2);
+}}
+let assistants2 = base2.filter(m => m.role === 'assistant');
+assert.strictEqual(assistants2.length, 0,
+  'Completed assistant may be dropped only when live content is prepared');
+"""
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
+def test_gateway_user_msg_timestamp_uses_pending_started_at():
+    """Review finding #2 (gateway timestamp parity): the persisted Gateway
+    user row must be stamped with the turn's pending_started_at, not a
+    fresh time.time() — otherwise the optimistic↔persisted timestamp match
+    fails on Gateway sessions.
+    """
+    src = (REPO_ROOT / "api" / "gateway_chat.py").read_text(encoding="utf-8")
+    # The user row construction must read the captured turn stamp
+    assert "turn_started_at = getattr(s, \"pending_started_at\", None)" in src
+    assert "user_msg = {\"role\": \"user\", \"content\": str(msg_text or \"\"), \"timestamp\": turn_started_at}" in src
+    # Fallback to now only when the turn stamp is absent
+    assert "if not isinstance(turn_started_at, (int, float)):" in src
+    fallback_pos = src.find("if not isinstance(turn_started_at, (int, float)):")
+    assert "turn_started_at = now" in src[fallback_pos:fallback_pos + 120]
+    # The user row's timestamp must not be a fresh now in the primary path
+    user_msg_pos = src.find("user_msg = {\"role\": \"user\"")
+    around = src[user_msg_pos - 400:user_msg_pos + 200]
+    assert "timestamp\": turn_started_at" in around
+    assert 'timestamp": now}' not in around, (
+        "user row must use turn_started_at, not a fresh now"
+    )
+
+
+def test_same_transcript_message_requires_text_match_on_equal_timestamp():
+    """Review finding #3 (timestamp-only over-match): two genuinely different
+    user messages submitted in the same millisecond must NOT dedup on
+    timestamp equality alone. Normalized user-text equality is required IN
+    ADDITION to timestamp equality.
+    """
+    assert NODE, "node not on PATH"
+    start = SESSIONS_JS.find("function _messageComparableText")
+    end = SESSIONS_JS.find("// Load older messages", start)
+    assert start != -1 and end != -1
+    helper_src = SESSIONS_JS[start:end]
+    script = f"""
+const assert = require('assert');
+{helper_src}
+// Same timestamp, DIFFERENT text -> must NOT match (review finding #3)
+let a = {{role:'user', content:'hello', timestamp:1000.0}};
+let b = {{role:'user', content:'world', timestamp:1000.0}};
+assert.strictEqual(_sameTranscriptMessage(a, b), false,
+  'Same-millisecond different messages must not dedup');
+
+// Same timestamp, SAME text -> still matches (normalized user text equal)
+let c = {{role:'user', content:'  Hello  ', timestamp:1000.0}};
+let d = {{role:'user', content:'Hello', timestamp:1000.0}};
+assert.strictEqual(_sameTranscriptMessage(c, d), true,
+  'Same timestamp + normalized-equal text should match');
+
+// Different timestamps -> never matches on the strict branch
+let e = {{role:'user', content:'hello', timestamp:1000.0}};
+let f = {{role:'user', content:'hello', timestamp:1000.5}};
+assert.strictEqual(_sameTranscriptMessage(e, f), false,
+  'Different timestamps must not match on strict branch');
+"""
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
+def test_message_js_ts_sync_moved_before_throwing_post_start_ui():
+    """Review finding #4 (_ts sync swallowed): the userMsg._ts sync must run
+    BEFORE any optional/throwing post-start UI operation (e.g. the guarded
+    localStorage.setItem inside _runOptionalPostStartUiStep). If a later
+    step throws, the sync must not be skipped.
+    """
+    src = MESSAGES_JS
+    # The sync block must appear before the _runOptionalPostStartUiStep call
+    sync_marker = "if(startData && typeof startData.pending_started_at==='number'){"
+    assert sync_marker in src
+    sync_pos = src.find(sync_marker)
+    ui_pos = src.find("_runOptionalPostStartUiStep('post-start ui/bookkeeping'")
+    assert ui_pos != -1
+    assert sync_pos < ui_pos, (
+        "userMsg._ts sync must run BEFORE _runOptionalPostStartUiStep"
+    )
+    # The sync block must set userMsg._ts
+    window = src[sync_pos:ui_pos]
+    assert "userMsg._ts=startData.pending_started_at" in window
+    # The old in-step sync block must be gone (no duplicate late assignment)
+    late = src[ui_pos:ui_pos + 2000]
+    assert "userMsg._ts" not in late, (
+        "userMsg._ts must not be assigned again inside the guarded UI step"
+    )
