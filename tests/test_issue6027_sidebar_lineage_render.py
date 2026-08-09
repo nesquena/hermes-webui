@@ -683,6 +683,49 @@ global._clearHandoffStorageForSession = (sid, row, context) => calls.push({sid, 
     }
 
 
+def test_completion_cache_reconciliation_updates_only_matching_scoped_row():
+    result = _run_node(_harness("""
+eval(extractFunc('_markSessionCompletedInList'));
+global._allSessions = [
+  {session_id:'same', profile_scope:'profile-a', project_id:'project-a', message_count:1,
+    is_streaming:true},
+  {session_id:'same', profile_scope:'profile-b', project_id:'project-b', message_count:9,
+    is_streaming:true},
+];
+global._sidebarReferenceSessions = [];
+global.S = {session:global._allSessions[0]};
+global._sessionStreamingById = new Map();
+global._sessionListSnapshotById = new Map();
+global._sessionListSourceById = new Map();
+global._forgetObservedStreamingSession = () => {};
+global._rememberSessionListSource = () => {};
+global.renderSessionListFromCache = () => {};
+const context = _createSidebarRuntimeContext(global._allSessions, []);
+const rowA = global._allSessions[0];
+const rowB = global._allSessions[1];
+_markSessionCompletedInList({session_id:'same', profile_scope:'profile-a', project_id:'project-a', message_count:2}, 'same', context);
+const keyA = context.key(rowA, 'same');
+const keyB = context.key(rowB, 'same');
+console.log(JSON.stringify({
+  rows:global._allSessions.map(row=>({scope:row.profile_scope,count:row.message_count,streaming:row.is_streaming})),
+  activeStreaming:global._sessionStreamingById.get(keyA),
+  foreignStreaming:global._sessionStreamingById.get(keyB) ?? null,
+  activeSnapshot:global._sessionListSnapshotById.get(keyA).message_count,
+  foreignSnapshot:global._sessionListSnapshotById.has(keyB),
+}));
+"""))
+    assert result == {
+        "rows": [
+            {"scope": "profile-a", "count": 2, "streaming": False},
+            {"scope": "profile-b", "count": 9, "streaming": True},
+        ],
+        "activeStreaming": False,
+        "foreignStreaming": None,
+        "activeSnapshot": 2,
+        "foreignSnapshot": False,
+    }
+
+
 def test_compression_parent_lookup_stays_within_profile_scope():
     result = _run_node(_harness("""
 const parentA = {session_id:'parent', profile_scope:'A', project_id:'projA',

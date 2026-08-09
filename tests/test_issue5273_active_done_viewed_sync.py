@@ -54,7 +54,7 @@ def _done_handler_body() -> str:
 
 def _has_pre_list_view_sync() -> bool:
     body = _done_handler_body()
-    list_call = "_markSessionCompletedInList(completedSession, activeSid);"
+    list_call = "_markSessionCompletedInList(completedSession, activeSid, _completionOperationContext);"
     viewed_call = "_markSessionViewed(completedSid,"
     assert list_call in body, "done handler must update the cached sidebar row"
     assert viewed_call in body, "done handler must sync viewed state for active sessions"
@@ -127,6 +127,7 @@ def _run_done_compaction_harness(
         function renderSessionListFromCache(){{}}
         function _forgetObservedStreamingSession(){{}}
         function _rememberSessionListSource(){{}}
+        const operationContext=null;
         {helpers}
         _setSessionViewedCount('active-after-compact', 3);
         const activeSid='active-before-compact';
@@ -145,17 +146,17 @@ def _run_done_compaction_harness(
         if ({str(include_message_count).lower()}) completedSession.message_count = 4;
 {completed_message_count_assignment}
         if ({str(is_session_viewed).lower()} && {json.dumps(has_pre_list_sync)}) {{
-          _markSessionViewed(completedSid, completedMessageCount);
+          _markSessionViewed(completedSid, completedMessageCount, completedSession, operationContext);
         }}
         if (!{str(is_session_viewed).lower()}) {{
-          _markSessionCompletionUnread(completedSid, completedMessageCount);
+          _markSessionCompletionUnread(completedSid, completedMessageCount, null, completedSession, operationContext);
         }}
-        _markSessionCompletedInList(completedSession, activeSid);
+        _markSessionCompletedInList(completedSession, activeSid, operationContext);
         const cacheRow=_allSessions.find(s=>s&&s.session_id===completedSid);
         const unreadAfterCacheUpdate=_hasUnreadForSession(cacheRow);
         const viewedCountAfterCacheUpdate=_getSessionViewedCounts()[completedSid] ?? null;
         if ({str(is_session_viewed).lower()}) {{
-          _markSessionViewed(completedSid, completedMessageCount);
+          _markSessionViewed(completedSid, completedMessageCount, completedSession, operationContext);
         }}
         console.log(JSON.stringify({{
           hasPreListSync:{json.dumps(has_pre_list_sync)},

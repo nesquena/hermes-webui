@@ -68,15 +68,15 @@ def test_background_done_sets_marker_when_session_not_actively_viewed():
     assert "const completedSid=completedSession.session_id||activeSid;" in done_block
     assert "const completedMessageCount=completedSession.message_count != null" in done_block
     assert "if(!isSessionViewed && typeof _markSessionCompletionUnread==='function')" in done_block
-    assert "_markSessionCompletionUnread(completedSid, completedMessageCount, null, completedSession, _messageOperationContext);" in done_block
+    assert "_markSessionCompletionUnread(completedSid, completedMessageCount, null, completedSession, _completionOperationContext);" in done_block
 
 
 def test_background_done_uses_rotated_session_id_for_completion_unread():
     done_block = _done_block()
 
     completed_sid_idx = done_block.find("const completedSid=completedSession.session_id||activeSid;")
-    marker_idx = done_block.find("_markSessionCompletionUnread(completedSid, completedMessageCount, null, completedSession, _messageOperationContext);")
-    viewed_idx = done_block.find("_markSessionViewed(completedSid, completedMessageCount, completedSession, _messageOperationContext);")
+    marker_idx = done_block.find("_markSessionCompletionUnread(completedSid, completedMessageCount, null, completedSession, _completionOperationContext);")
+    viewed_idx = done_block.find("_markSessionViewed(completedSid, completedMessageCount, completedSession, _completionOperationContext);")
 
     assert completed_sid_idx != -1, "done handler must derive the final post-compression session id"
     assert marker_idx != -1, "background completion marker must be stored on the final session id"
@@ -94,7 +94,7 @@ def test_done_event_updates_sidebar_cache_immediately_after_completion_marker():
     cleanup_idx = done_block.find("_clearOwnerInflightState();")
     if cleanup_idx == -1:
         cleanup_idx = done_block.find("delete INFLIGHT[activeSid];")
-    cache_idx = done_block.find("_markSessionCompletedInList(completedSession, activeSid);")
+    cache_idx = done_block.find("_markSessionCompletedInList(completedSession, activeSid, _completionOperationContext);")
     refresh_idx = done_block.find("renderSessionList();", cache_idx)
     sound_idx = done_block.find("playNotificationSound();", cache_idx)
 
@@ -496,7 +496,7 @@ def test_restore_settled_background_stream_marks_completion_unread():
     assert "const isSessionViewed=_isSessionActivelyViewed(activeSid);" in restore_block
     assert "const completedSid=session.session_id||activeSid;" in restore_block
     assert "if(!isSessionViewed && typeof _markSessionCompletionUnread==='function')" in restore_block
-    assert "_markSessionCompletionUnread(completedSid, session.message_count, null, session, _messageOperationContext);" in restore_block
+    assert "_markSessionCompletionUnread(completedSid, session.message_count, null, session, _completionOperationContext);" in restore_block
     assert "if(isSessionViewed) _markSessionViewed(completedSid" in restore_block, (
         "restore-settled fallback must not mark a hidden/background completion read"
     )

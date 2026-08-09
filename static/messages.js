@@ -6034,6 +6034,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const isSessionViewed=_isSessionActivelyViewed(activeSid);
         const completedSession=d.session||{session_id:activeSid};
         const completedSid=completedSession.session_id||activeSid;
+        const _completionOperationContext=_messageRuntimeContextForRow(completedSession);
         const completedMessageCount=completedSession.message_count != null
           ? completedSession.message_count
           : (
@@ -6046,12 +6047,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               )
           );
         if(!isSessionViewed && typeof _markSessionCompletionUnread==='function'){
-          _markSessionCompletionUnread(completedSid, completedMessageCount, null, completedSession, _messageOperationContext);
+          _markSessionCompletionUnread(completedSid, completedMessageCount, null, completedSession, _completionOperationContext);
         }
-        if(isSessionViewed) _markSessionViewed(completedSid, completedMessageCount, completedSession, _messageOperationContext);
+        if(isSessionViewed) _markSessionViewed(completedSid, completedMessageCount, completedSession, _completionOperationContext);
         _clearOwnerInflightState();
         if(typeof _markSessionCompletedInList==='function'){
-          _markSessionCompletedInList(completedSession, activeSid);
+          _markSessionCompletedInList(completedSession, activeSid, _completionOperationContext);
         }
         _clearApprovalForOwner();
         _clearClarifyForOwner('terminal');
@@ -6206,7 +6207,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           // No-reply guard (#373): if agent returned nothing, show inline error
           if(!S.messages.some(m=>m.role==='assistant'&&String(m.content||'').trim())&&!assistantText){removeThinking();S.messages.push({role:'assistant',content:'**No response received.** Check your API key and model selection.'});}
           if(_markerOnlyAssistantError&&typeof showToast==='function') showToast('No response received after context compression. Please retry.',5000,'error');
-          if(isSessionViewed) _markSessionViewed(completedSid, completedMessageCount, d.session, _messageOperationContext);
+          if(isSessionViewed) _markSessionViewed(completedSid, completedMessageCount, d.session, _completionOperationContext);
           // Cooldown: prevent refreshActiveSessionIfExternallyUpdated from
           // force-reloading immediately after "done" — the event already
           // delivered the final messages and tool calls.
@@ -6875,8 +6876,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _clearClarifyForOwner('terminal');
       const isSessionViewed=_isSessionActivelyViewed(activeSid);
       const completedSid=session.session_id||activeSid;
+      const _completionOperationContext=_messageRuntimeContextForRow(session);
       if(!isSessionViewed && typeof _markSessionCompletionUnread==='function'){
-        _markSessionCompletionUnread(completedSid, session.message_count, null, session, _messageOperationContext);
+        _markSessionCompletionUnread(completedSid, session.message_count, null, session, _completionOperationContext);
       }
       const isActiveSession=_isSessionCurrentPane(activeSid);
       if(isActiveSession){
@@ -6931,7 +6933,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(hasMessageToolMetadata) S._settledLiveToolMetadata=S.toolCalls.map(tc=>({...tc,done:true}));
           S.toolCalls=[];
         }
-        if(isSessionViewed) _markSessionViewed(completedSid, session.message_count ?? S.messages.length, session, _messageOperationContext);
+        if(isSessionViewed) _markSessionViewed(completedSid, session.message_count ?? S.messages.length, session, _completionOperationContext);
         // Expand render window so the settled render doesn't hide Activity.
         if(typeof _messageRenderableMessageCount==='function'&&typeof _messageRenderWindowSize!=='undefined'){
           _messageRenderWindowSize=Math.max(typeof _currentMessageRenderWindowSize==='function'?_currentMessageRenderWindowSize():50, _messageRenderableMessageCount());
