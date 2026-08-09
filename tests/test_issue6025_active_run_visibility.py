@@ -264,6 +264,18 @@ def test_active_run_visibility_uses_canonical_session_matrix():
         assert "active_run" in by_id["direct"]
         assert "active_run" not in by_id["archived"]
         assert "active_run" not in by_id["idle"]
+        stale_rows = cache._session_list_cache_overlay_runtime_rows([
+            {
+                "session_id": "direct",
+                "archived": False,
+                "active_run": {"started_at": 1},
+                "active_stream_id": "old",
+                "has_pending_user_message": True,
+                "pending_started_at": 2,
+                "is_streaming": True,
+            },
+        ], source_authoritative=False)
+        assert stale_rows == [{"session_id": "direct", "archived": False}]
     finally:
         with config.ACTIVE_RUNS_LOCK:
             config.ACTIVE_RUNS.clear()
@@ -305,6 +317,26 @@ console.log(JSON.stringify({{effective:_isSessionEffectivelyStreaming(active),ri
     assert _run_node_script(source) == {"effective": False, "ring": True}
 
 
+def test_ring_only_active_run_does_not_start_shared_session_list_poll():
+    start = SESSIONS_JS.index("  const isStreaming = _allSessions.some")
+    end = SESSIONS_JS.index("  ensureSessionTimeRefreshPoll();", start)
+    poll_decision = SESSIONS_JS[start:end]
+    source = f"""
+let _allSessions=[{{active_run:{{started_at:10}},is_streaming:false}}];
+let started=0; let stopped=0;
+function startStreamingPoll(){{started++;}}
+function stopStreamingPoll(){{stopped++;}}
+function ensureSessionTimeRefreshPoll(){{}}
+function ensureActiveSessionExternalRefreshPoll(){{}}
+function ensureSessionEventsSSE(){{}}
+function _isSessionEffectivelyStreaming(row){{return !!row.is_streaming;}}
+function _isSessionRingStreaming(row){{return !!row.active_run||!!row.is_streaming;}}
+{poll_decision}
+console.log(JSON.stringify({{started,stopped}}));
+"""
+    assert _run_node_script(source) == {"started": 0, "stopped": 1}
+
+
 def test_active_run_elapsed_label_advances_when_pill_is_visible_with_monotonic_delta():
     monotonic = _extract_function(UI_JS, "_activeRunMonotonicSeconds")
     elapsed = _extract_function(UI_JS, "_activeRunElapsedSeconds")
@@ -325,57 +357,97 @@ console.log(JSON.stringify({{first,second,skewedRefresh}}));
 
 def test_delayed_profile_response_cannot_repaint_activity_after_real_switch():
     invalidate = _extract_function(SESSIONS_JS, "_invalidateSessionListRenders")
-    current = _extract_function(SESSIONS_JS, "_sessionListGenerationIsCurrent")
-    apply_if_current = _extract_function(SESSIONS_JS, "_applySessionListPayloadIfCurrent")
+    merge_options = _extract_function(SESSIONS_JS, "_mergeRenderSessionListOptions")
+    load_payload = _extract_function(SESSIONS_JS, "_loadSidebarSessionListPayload")
+    run_refresh = _extract_function(SESSIONS_JS, "_runRenderSessionListRefresh")
+    drain = _extract_function(SESSIONS_JS, "_drainRenderSessionListQueue")
+    render = _extract_function(SESSIONS_JS, "renderSessionList")
     switch_profile = _extract_function(SESSIONS_JS, "_switchProfileForSessionLoad")
     source = f"""
-let _renderSessionListGen=7; let cleared=0; let applied=0;
-let _pendingSessionListPayload=null; let _renderSessionListQueuedRequest=null; let _sessionListLoadError=null;
-let _profileSwitchListEmbargo=false; let S={{activeProfile:'profile-a'}};
+let _renderSessionListGen=0; let cleared=0; let applied=[]; let sessionsCalls=0;
+let _pendingSessionListPayload=null; let _renderSessionListQueuedRequest=null; let _renderSessionListInFlight=null;
+let _sessionListLoadError=null; let _profileSwitchListEmbargo=false; let _sessionListHasLoadedOnce=true;
+let _isSessionListUserInteracting=()=>false;
+let _showAllProfiles=false; let _allSessions=[]; let _allProjects=[];
+let S={{activeProfile:'profile-a'}};
+const pendingA={{}}; const pendingB={{}};
+let resolveA,resolveB;
+pendingA.promise=new Promise(resolve=>resolveA=resolve);
+pendingB.promise=new Promise(resolve=>resolveB=resolve);
 globalThis.window={{_renderActiveRunProjection:rows=>{{if(!rows.length)cleared++;}}}};
+function $(id){{return {{value:''}};}}
 function showSessionListSkeleton(){{}}
 function _setProfileSwitchListEmbargo(value){{_profileSwitchListEmbargo=!!value;}}
 function _resetCronUnreadForProfileSwitch(){{}}
 function _clearPersistedModelState(){{}}
 function startGatewaySSE(){{}}
 function syncTopbar(){{}}
-function renderSessionList(){{return Promise.resolve();}}
-function api(){{return Promise.resolve({{active:'profile-b'}});}}
-function _applySessionListPayload(){{applied++;}}
+function _sessionListQueryString(){{return '';}}
+function _requestedSessionSidebarSource(){{return null;}}
+function _sessionListExcludeHiddenEnabled(){{return false;}}
+function _showSessionListLoadError(){{}}
+function _applySessionListPayload(sessData){{applied.push(sessData.active_profile);}}
+function _mergeRenderSessionListOptionsFallback(prev,next){{return Object.assign({{}},prev||{{}},next||{{}});}}
+function api(path){{
+  if(path==='/api/profile/switch') return Promise.resolve({{active:'profile-b'}});
+  if(path.startsWith('/api/projects')) return Promise.resolve({{projects:[]}});
+  sessionsCalls++;
+  return sessionsCalls===1 ? pendingA.promise : pendingB.promise;
+}}
 {invalidate}
-{current}
-{apply_if_current}
+{merge_options}
+{load_payload}
+{run_refresh}
+{drain}
+{render}
 {switch_profile}
 (async()=>{{
-  const stale=_renderSessionListGen;
-  await _switchProfileForSessionLoad('profile-b');
-  const staleApplied=_applySessionListPayloadIfCurrent(stale,{{}},{{}},{{}});
-  const currentApplied=_applySessionListPayloadIfCurrent(_renderSessionListGen,{{}},{{}},{{}});
-  console.log(JSON.stringify({{staleRejected:!_sessionListGenerationIsCurrent(stale),currentAccepted:_sessionListGenerationIsCurrent(_renderSessionListGen),cleared,staleApplied,currentApplied,applied,profile:S.activeProfile}}));
+  const first=renderSessionList();
+  await Promise.resolve();
+  const switching=_switchProfileForSessionLoad('profile-b');
+  await Promise.resolve();
+  const before={{cleared,applied:[...applied],sessionsCalls}};
+  resolveA({{active_profile:'profile-a',sessions:[]}});
+  for(let i=0;i<8;i++) await Promise.resolve();
+  const afterA={{cleared,applied:[...applied],sessionsCalls}};
+  resolveB({{active_profile:'profile-b',sessions:[]}});
+  await switching; await first;
+  console.log(JSON.stringify({{before,afterA,applied,profile:S.activeProfile}}));
 }})();
 """
     assert _run_node_script(source) == {
-        "staleRejected": True,
-        "currentAccepted": True,
-        "cleared": 1,
-        "staleApplied": False,
-        "currentApplied": True,
-        "applied": 1,
+        "before": {"cleared": 1, "applied": [], "sessionsCalls": 1},
+        "afterA": {"cleared": 1, "applied": [], "sessionsCalls": 2},
+        "applied": ["profile-b"],
         "profile": "profile-b",
     }
 
 
 def test_failed_session_list_refresh_clears_volatile_active_run_projection():
     clear_cached = _extract_function(SESSIONS_JS, "_clearCachedActiveRunProjection")
+    load_payload = _extract_function(SESSIONS_JS, "_loadSidebarSessionListPayload")
     refresh = _extract_function(SESSIONS_JS, "_runRenderSessionListRefresh")
     assert "_clearCachedActiveRunProjection();" in refresh
     source = f"""
 let _allSessions=[{{session_id:'s1',active_run:{{started_at:10}}}},{{session_id:'s2'}}];
 let cleared=0;
+let _sessionListHasLoadedOnce=true; let _sessionListLoadError=null;
+let _renderSessionListGen=1; let _profileSwitchListEmbargo=false;
+let _allSessionsScope={{profile:'profile-a',allProfiles:false,sidebarSource:null,excludeHidden:false}};
+let S={{activeProfile:'profile-a'}}; let _showAllProfiles=false;
+function $(id){{return {{value:''}};}}
+function _sessionListQueryString(){{return '';}}
+function _requestedSessionSidebarSource(){{return null;}}
+function _sessionListExcludeHiddenEnabled(){{return false;}}
+function _showSessionListLoadError(){{}}
+function _clearSessionSourceTabCounts(){{}}
+function renderSessionListFromCache(){{}}
+function api(path){{if(path.startsWith('/api/projects'))return Promise.resolve({{projects:[]}});return Promise.reject(new Error('refresh failed'));}}
 globalThis.window={{_renderActiveRunProjection:rows=>{{if(!rows.length)cleared++;}}}};
 {clear_cached}
-_clearCachedActiveRunProjection();
-console.log(JSON.stringify({{sessions:_allSessions,cleared}}));
+{load_payload}
+{refresh}
+(async()=>{{await _runRenderSessionListRefresh({{}},1);console.log(JSON.stringify({{sessions:_allSessions,cleared}}));}})();
 """
     assert _run_node_script(source) == {
         "sessions": [{"session_id": "s1"}, {"session_id": "s2"}],

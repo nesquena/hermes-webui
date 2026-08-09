@@ -26,7 +26,7 @@ def test_sidebar_payload_reads_redaction_setting_once(monkeypatch):
         "cli_count": 0,
     }
     # Pass rows straight through — avoid runtime-overlay noise from the cache layer.
-    monkeypatch.setattr(routes, "_session_list_cache_overlay_runtime_rows", lambda rows: rows)
+    monkeypatch.setattr(routes, "_session_list_cache_overlay_runtime_rows", lambda rows, **kwargs: rows)
 
     routes._session_list_payload_to_response(payload)
 
@@ -39,7 +39,7 @@ def test_sidebar_payload_still_redacts_titles(monkeypatch):
     like a credential is still redacted when api_redact_enabled is True."""
     monkeypatch.setattr("api.config.load_settings", lambda: {"api_redact_enabled": True})
     monkeypatch.setattr("api.helpers.load_settings", lambda: {"api_redact_enabled": True}, raising=False)
-    monkeypatch.setattr(routes, "_session_list_cache_overlay_runtime_rows", lambda rows: rows)
+    monkeypatch.setattr(routes, "_session_list_cache_overlay_runtime_rows", lambda rows, **kwargs: rows)
 
     secret = "sk-ant-api03-" + ("A" * 40)
     payload = {"sessions": [{"session_id": "s1", "title": f"key {secret}"}], "cli_count": 0}
@@ -59,7 +59,7 @@ def test_sidebar_payload_no_redaction_when_disabled(monkeypatch):
 
     monkeypatch.setattr("api.config.load_settings", _load)
     monkeypatch.setattr("api.helpers.load_settings", _load, raising=False)
-    monkeypatch.setattr(routes, "_session_list_cache_overlay_runtime_rows", lambda rows: rows)
+    monkeypatch.setattr(routes, "_session_list_cache_overlay_runtime_rows", lambda rows, **kwargs: rows)
 
     payload = {"sessions": [{"session_id": "s1", "title": "plain title"}], "cli_count": 0}
     resp = routes._session_list_payload_to_response(payload)
@@ -74,7 +74,7 @@ def test_sidebar_payload_redacts_display_and_parent_titles(monkeypatch):
     the sidebar even though only `title` was redacted before."""
     monkeypatch.setattr("api.config.load_settings", lambda: {"api_redact_enabled": True})
     monkeypatch.setattr("api.helpers.load_settings", lambda: {"api_redact_enabled": True}, raising=False)
-    monkeypatch.setattr(routes, "_session_list_cache_overlay_runtime_rows", lambda rows: rows)
+    monkeypatch.setattr(routes, "_session_list_cache_overlay_runtime_rows", lambda rows, **kwargs: rows)
 
     secret = "sk-" + ("A" * 44)
     payload = {"sessions": [{

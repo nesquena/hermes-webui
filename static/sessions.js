@@ -5506,7 +5506,7 @@ function _applySessionListPayload(sessData, projData, opts){
   const hasRingStreaming = _allSessions.some(s => typeof _isSessionRingStreaming==='function'
     ? _isSessionRingStreaming(s)
     : _isSessionEffectivelyStreaming(s));
-  if (isStreaming || hasRingStreaming) {
+  if (isStreaming) {
     startStreamingPoll();
   } else {
     stopStreamingPoll();

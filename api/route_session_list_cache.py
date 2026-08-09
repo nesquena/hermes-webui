@@ -520,7 +520,7 @@ def _session_list_cache_overlay_runtime_rows(
         item["cron_running"] = _session_list_row_cron_running(
             sid, item, cron_job_prefixes
         )
-        if sid in active_runs and not item.get("archived"):
+        if source_authoritative and sid in active_runs and not item.get("archived"):
             started_at = active_runs[sid]["started_at"]
             item["active_run"] = {
                 "started_at": started_at,

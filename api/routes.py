@@ -2591,9 +2591,37 @@ def _build_session_list_cache_payload(
     }
 
 
-def _session_list_payload_to_response(payload: dict) -> dict:
+class _SessionListCacheResult(dict):
+    """Internal cache result carrying whether rows may receive runtime claims."""
+
+    def __init__(self, payload: dict, *, source_authoritative: bool):
+        super().__init__(payload)
+        self.source_authoritative = bool(source_authoritative)
+
+
+def _session_list_cache_result(payload: dict, *, source_authoritative: bool):
+    if isinstance(payload, _SessionListCacheResult):
+        return payload
+    return _SessionListCacheResult(
+        payload,
+        source_authoritative=source_authoritative,
+    )
+
+
+def _session_list_payload_to_response(
+    payload: dict,
+    *,
+    source_authoritative: bool | None = None,
+) -> dict:
+    if source_authoritative is None:
+        source_authoritative = bool(
+            getattr(payload, "source_authoritative", True)
+        )
     safe_merged = []
-    runtime_rows = _session_list_cache_overlay_runtime_rows(payload.get("sessions", []) or [])
+    runtime_rows = _session_list_cache_overlay_runtime_rows(
+        payload.get("sessions", []) or [],
+        source_authoritative=source_authoritative,
+    )
     # Read the redaction setting ONCE for the whole response and thread it through
     # every row, instead of letting each row's _redact_text() re-read settings.json
     # from disk (per title). The _sidebar_session_response_item -> _redact_text(_enabled=...)
@@ -2691,7 +2719,7 @@ def _get_cached_session_list_payload(
     key: tuple,
     builder,
     diag=None,
-) -> dict:
+) -> _SessionListCacheResult:
     if diag is not None:
         try:
             diag.stage("session_list_cache_lookup")
@@ -2705,7 +2733,7 @@ def _get_cached_session_list_payload(
                 diag.stage("session_list_cache_hit")
             except Exception:
                 pass
-        return cached
+        return _session_list_cache_result(cached, source_authoritative=True)
 
     stale = cached  # now actually a stale payload when one exists, else None
     stale_reason = _session_list_cache_stale_reason(key) if stale is not None else None
@@ -2753,7 +2781,10 @@ def _get_cached_session_list_payload(
                 diag.stage("session_list_cache_stale_return")
             except Exception:
                 pass
-        return stale
+        return _session_list_cache_result(
+            stale,
+            source_authoritative=stale_reason != "source",
+        )
 
     event, is_owner = _session_list_cache_claim_rebuild(key)
     if is_owner:
@@ -2774,7 +2805,10 @@ def _get_cached_session_list_payload(
                             diag.stage("session_list_cache_stored")
                         except Exception:
                             pass
-                    return payload
+                    return _session_list_cache_result(
+                        payload,
+                        source_authoritative=True,
+                    )
                 rebuild_attempts += 1
                 if diag is not None:
                     try:
@@ -2782,7 +2816,10 @@ def _get_cached_session_list_payload(
                     except Exception:
                         pass
                 if rebuild_attempts >= 3:
-                    return payload
+                    return _session_list_cache_result(
+                        payload,
+                        source_authoritative=False,
+                    )
         finally:
             _session_list_cache_done(key, event)
 
@@ -2808,7 +2845,7 @@ def _get_cached_session_list_payload(
                 diag.stage("session_list_cache_wait_hit")
             except Exception:
                 pass
-        return latest
+        return _session_list_cache_result(latest, source_authoritative=True)
 
     if stale is not None:
         if diag is not None:
@@ -2816,7 +2853,7 @@ def _get_cached_session_list_payload(
                 diag.stage("session_list_cache_wait_stale_fallback")
             except Exception:
                 pass
-        return stale
+        return _session_list_cache_result(stale, source_authoritative=False)
 
     # Safety path if the owner died before storing anything.
     if diag is not None:
@@ -2826,9 +2863,15 @@ def _get_cached_session_list_payload(
             pass
     invalidation_stamp = _session_list_cache_invalidation_stamp(key)
     payload = builder()
-    if _session_list_cache_invalidation_stamp(key) == invalidation_stamp:
+    source_authoritative = (
+        _session_list_cache_invalidation_stamp(key) == invalidation_stamp
+    )
+    if source_authoritative:
         _session_list_cache_set(key, payload)
-    return payload
+    return _session_list_cache_result(
+        payload,
+        source_authoritative=source_authoritative,
+    )
 
 from api.config import (
     STATE_DIR,
@@ -13410,7 +13453,11 @@ def handle_get(handler, parsed) -> bool:
                 diag=diag,
             )
             diag.stage("response_write")
-            return j(handler, _session_list_payload_to_response(payload), pretty=False)
+            return j(
+                handler,
+                _session_list_payload_to_response(payload),
+                pretty=False,
+            )
         finally:
             diag.finish()
 
