@@ -1282,11 +1282,11 @@ async function cmdUse(args){
       S.messages.push({role:'assistant', content:`Next turn: skill \`${match.name}\` will be forced.`});
       renderMessages();
     }
-    showToast(`Skill \`${match.name}\` will be used for next turn.`);
+    if(isCurrentSession()) showToast(`Skill \`${match.name}\` will be used for next turn.`);
   }catch(e){
     resolve(null);
     if(_forcedSkillDirectivePending===pending)_forcedSkillDirectivePending = null;
-    showToast('Failed to load skills: '+e.message);
+    if(isCurrentSession()) showToast('Failed to load skills: '+e.message);
   }
 }
 
@@ -1306,7 +1306,7 @@ async function cmdPersonality(args){
       if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
       S.messages.push({role:'assistant',content:t('available_personalities')+'\n\n'+list+t('personality_switch_hint')});
       renderMessages();
-    }catch(e){showToast(t('personalities_load_failed'));}
+    }catch(e){if(_commandOwnerIsCurrent(ownerSid))showToast(t('personalities_load_failed'));}
     return;
   }
   const name=args.trim();
@@ -1315,7 +1315,7 @@ async function cmdPersonality(args){
       await api('/api/personality/set',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,name:''})});
       if(!_commandOwnerIsCurrent(ownerSid))return;
       showToast(t('personality_cleared'));
-    }catch(e){showToast(t('failed_colon')+e.message);}
+    }catch(e){if(_commandOwnerIsCurrent(ownerSid))showToast(t('failed_colon')+e.message);}
     return;
   }
   try{
@@ -1325,7 +1325,7 @@ async function cmdPersonality(args){
     S.messages.push({role:'assistant',content:t('personality_set')+`**${name}**`});
     renderMessages();
     showToast(t('personality_set')+name);
-  }catch(e){showToast(t('failed_colon')+e.message);}
+  }catch(e){if(_commandOwnerIsCurrent(ownerSid))showToast(t('failed_colon')+e.message);}
 }
 
 async function cmdStop(){
@@ -1896,12 +1896,13 @@ async function cmdBtw(args){
   const activeSid=S.session.session_id;
   try{
     const r=await api('/api/btw',{method:'POST',body:JSON.stringify({session_id:activeSid,question})});
+    if(!_commandOwnerIsCurrent(activeSid))return;
     if(r&&r.error){showToast(r.error);return;}
     // Connect to the ephemeral SSE stream
     const streamId=r.stream_id;
     const parentSid=r.parent_session_id;
     if(typeof attachBtwStream==='function') attachBtwStream(parentSid,streamId,question);
-  }catch(e){showToast(t('btw_failed')+e.message);}
+  }catch(e){if(_commandOwnerIsCurrent(activeSid))showToast(t('btw_failed')+e.message);}
 }
 async function cmdBackground(args){
   if(!S.session){showToast(t('no_active_session'));return;}
@@ -1911,11 +1912,12 @@ async function cmdBackground(args){
   const activeSid=S.session.session_id;
   try{
     const r=await api('/api/background',{method:'POST',body:JSON.stringify({session_id:activeSid,prompt})});
+    if(!_commandOwnerIsCurrent(activeSid))return;
     if(r&&r.error){showToast(r.error);return;}
     // Show background badge and start polling
     if(typeof showBackgroundBadge==='function') showBackgroundBadge(r.task_id);
     if(typeof startBackgroundPolling==='function') startBackgroundPolling(activeSid,r.task_id,prompt);
-  }catch(e){showToast(t('bg_failed')+e.message);}
+  }catch(e){if(_commandOwnerIsCurrent(activeSid))showToast(t('bg_failed')+e.message);}
 }
 function _formatStatusTimestamp(value){
   if(value===undefined||value===null||value==='') return t('status_unknown');
@@ -2085,21 +2087,24 @@ async function cmdBranch(args){
     ? _isBranchableReadOnlySession(S.session)
     : false;
   if(readOnlySession&&!branchableReadOnlySession){showToast('Read-only sessions cannot be forked.',3000);return;}
+  const ownerSid=S.session.session_id;
   const customTitle=(args||'').trim()||null;
   try{
     const data=await api('/api/session/branch',{
       method:'POST',
       body:JSON.stringify({
-        session_id:S.session.session_id,
+        session_id:ownerSid,
         title:customTitle||undefined,
       }),
     });
-    if(data&&data.session_id){
+    if(data&&data.session_id&&_commandOwnerIsCurrent(ownerSid)){
       await loadSession(data.session_id);
+      if(!_commandOwnerIsCurrent(data.session_id))return;
       if(typeof renderSessionList==='function') await renderSessionList();
+      if(!_commandOwnerIsCurrent(data.session_id))return;
       showToast(t('branch_forked'));
     }
-  }catch(e){showToast(t('branch_failed')+e.message);}
+  }catch(e){if(_commandOwnerIsCurrent(ownerSid))showToast(t('branch_failed')+e.message);}
 }
 
 // ── Fork from a specific message point ──
@@ -2143,7 +2148,7 @@ async function forkFromMessage(msgIdx){
   if(!S.busy && typeof _ensureAllMessagesLoaded==='function'){
     await _ensureAllMessagesLoaded();
   }
-  if(!S.session || S.session.session_id !== initialSid) return;
+  if(!_commandOwnerIsCurrent(initialSid)) return;
   try{
     const data=await api('/api/session/branch',{
       method:'POST',
@@ -2152,13 +2157,16 @@ async function forkFromMessage(msgIdx){
         keep_count:absoluteKeepCount,
       }),
     });
-    if(data&&data.session_id){
+    if(data&&data.session_id&&_commandOwnerIsCurrent(initialSid)){
       await loadSession(data.session_id);
+      if(!_commandOwnerIsCurrent(data.session_id))return;
       if(typeof _ensureAllMessagesLoaded==='function') await _ensureAllMessagesLoaded();
+      if(!_commandOwnerIsCurrent(data.session_id))return;
       if(typeof renderSessionList==='function') await renderSessionList();
+      if(!_commandOwnerIsCurrent(data.session_id))return;
       showToast(t('branch_forked'));
     }
-  }catch(e){showToast(t('branch_failed')+e.message);}
+  }catch(e){if(_commandOwnerIsCurrent(initialSid))showToast(t('branch_failed')+e.message);}
 }
 
 let _skillCommandCache=[];

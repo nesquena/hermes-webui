@@ -8999,10 +8999,21 @@ function attachBtwStream(parentSid, streamId, question){
   let answer='';
   let btwRow=null;
   let _streamDone=false;
+  const _btwOwnerIsCurrent=()=>typeof _isSessionCurrentPane==='function'
+    ? _isSessionCurrentPane(parentSid)
+    : !!(S.session&&S.session.session_id===parentSid);
+  const _closeStaleBtwStream=()=>{
+    if(_streamDone) return false;
+    if(_btwOwnerIsCurrent()) return true;
+    _streamDone=true;
+    src.close();
+    return false;
+  };
   function _ensureBtwRow(){
-    if(btwRow&&btwRow.isConnected) return;
+    if(!_closeStaleBtwStream()) return false;
+    if(btwRow&&btwRow.isConnected) return true;
     const inner=$('msgInner');
-    if(!inner) return;
+    if(!inner) return false;
     btwRow=document.createElement('div');
     btwRow.className='msg-row msg-row-btw';
     btwRow.dataset.role='assistant';
@@ -9021,10 +9032,12 @@ function attachBtwStream(parentSid, streamId, question){
     btwRow.appendChild(ansEl);
     inner.appendChild(btwRow);
     btwRow.scrollIntoView({behavior:'smooth',block:'end'});
+    return true;
   }
   src.addEventListener('token',e=>{
+    if(!_closeStaleBtwStream()) return;
     try{answer+=JSON.parse(e.data).text||'';}catch(_){}
-    _ensureBtwRow();
+    if(!_ensureBtwRow()) return;
     const ansEl=btwRow&&btwRow.querySelector('.msg-btw-answer');
     if(ansEl) ansEl.innerHTML=renderMd(answer);
   });
@@ -9035,16 +9048,18 @@ function attachBtwStream(parentSid, streamId, question){
       const d=JSON.parse(e.data);
       if(d.answer&&!answer) answer=d.answer;
     }catch(_){}
-    if(S.session&&S.session.session_id===parentSid) _ensureBtwRow();
+    if(!_btwOwnerIsCurrent()) return;
+    _ensureBtwRow();
     if(btwRow&&btwRow.isConnected){
       const ansEl=btwRow.querySelector('.msg-btw-answer');
       if(ansEl) ansEl.innerHTML=renderMd(answer||t('btw_no_answer'));
     }
-    showToast(t('btw_done'));
+    if(_btwOwnerIsCurrent()) showToast(t('btw_done'));
   });
   src.addEventListener('apperror',e=>{
     _streamDone=true;
     src.close();
+    if(!_btwOwnerIsCurrent()) return;
     try{
       const d=JSON.parse(e.data);
       showToast(t('btw_failed')+(d.message||''));
@@ -9052,7 +9067,7 @@ function attachBtwStream(parentSid, streamId, question){
     if(btwRow&&btwRow.isConnected) btwRow.remove();
   });
   src.addEventListener('stream_end',()=>{_streamDone=true;src.close();});
-  src.onerror=()=>{src.close();if(!_streamDone&&btwRow&&btwRow.isConnected) btwRow.remove();};
+  src.onerror=()=>{src.close();if(!_streamDone&&_btwOwnerIsCurrent()&&btwRow&&btwRow.isConnected) btwRow.remove();};
 }
 
 // ── /background task tracking ────────────────────────────────────────────────

@@ -3150,6 +3150,9 @@ async function _ensureMessagesLoaded(sid, opts) {
   const _loadGeneration = Number.isFinite(opts.loadGeneration) ? Number(opts.loadGeneration) : null;
   const _ownsLoad = () => _loadingSessionId === sid && (_loadGeneration === null || _loadSessionGeneration === _loadGeneration);
   if (!_ownsLoad()) return;
+  const replacementTicket=typeof _captureTranscriptReplacement==='function'
+    ? _captureTranscriptReplacement()
+    : null;
   // Already have messages? (e.g. from INFLIGHT restore path, already set)
   if (!opts.force && S.messages && S.messages.length > 0 && S.messages[0] && S.messages[0].role) {
     _clearSameSessionForceReloadHint(sid);
@@ -3182,6 +3185,8 @@ async function _ensureMessagesLoaded(sid, opts) {
   if (!_ownsLoad()) return;
   // Guard: api() may have redirected (401) and returned undefined.
   if (!data || !data.session) return;
+  if(typeof _transcriptReplacementIsCurrent==='function'&&replacementTicket
+     && !_transcriptReplacementIsCurrent(replacementTicket)) return;
   _messagesTruncated = !!data.session._messages_truncated;
   _oldestIdx = data.session._messages_offset || 0;
   _msgLimitMax = data.session._msg_limit_max || _MSG_LIMIT_MAX;
@@ -3212,8 +3217,13 @@ async function _ensureMessagesLoaded(sid, opts) {
     _pendingCarryForwardSnapshot = null;
   }
   if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();
-  _bumpMessagesGeneration();
-  S.messages = msgs;
+  const commitMessages=()=>{ S.messages = msgs; };
+  if(typeof _commitTranscriptReplacement==='function'&&replacementTicket){
+    if(!_commitTranscriptReplacement(replacementTicket,commitMessages)) return;
+  }else{
+    _bumpMessagesGeneration();
+    commitMessages();
+  }
   // Expand render window to cover all loaded messages so the next
   // renderMessages() doesn't hide most of them behind a tiny window.
   if(typeof _messageRenderableMessageCount==='function'&&typeof _currentMessageRenderWindowSize==='function'){
@@ -3683,6 +3693,7 @@ function _captureTranscriptReplacement() {
   return {
     sessionId: S.session && S.session.session_id || null,
     generation: _messagesGeneration,
+    loadGeneration: typeof _loadSessionGeneration==='number' ? _loadSessionGeneration : null,
     used: false,
   };
 }
@@ -3691,7 +3702,9 @@ function _transcriptReplacementIsCurrent(ticket) {
     ticket &&
     S.session &&
     S.session.session_id === ticket.sessionId &&
-    _messagesGeneration === ticket.generation
+    _messagesGeneration === ticket.generation &&
+    (ticket.loadGeneration===undefined || ticket.loadGeneration===null
+      || ticket.loadGeneration===_loadSessionGeneration)
   );
 }
 function _commitTranscriptReplacement(ticket, commit) {

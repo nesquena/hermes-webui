@@ -19,6 +19,7 @@ BOOT_JS = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
 COMMANDS_JS = (REPO / "static" / "commands.js").read_text(encoding="utf-8")
 I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
 MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
+OUTLINE_JS = (REPO / "static" / "outline.js").read_text(encoding="utf-8")
 PANELS_JS = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
 SESSIONS_JS = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
 UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
@@ -65,6 +66,7 @@ DOWNLOAD_ASSIGN = BOOT_JS[
 CMD_GOAL_SRC = _maybe_extract(COMMANDS_JS, "cmdGoal", "async function")
 CMD_HELP_SRC = _maybe_extract(COMMANDS_JS, "cmdHelp")
 SEND_SRC = _maybe_extract(MESSAGES_JS, "send", "async function")
+BTW_SRC = _maybe_extract(MESSAGES_JS, "attachBtwStream")
 SLASH_START = SEND_SRC.index("  // Slash command intercept")
 SLASH_END = SEND_SRC.index("    if(_parsedCmd&&!_cmd){", SLASH_START)
 SLASH_BLOCK = SEND_SRC[SLASH_START:SLASH_END].replace(
@@ -2329,12 +2331,21 @@ def test_messages_generation_wiring_covers_full_load_live_turn_claims_and_same_s
     assert "const messagesInput = arguments.length > 0 ? arguments[0] : null;" in WORKSPACE_JS
     assert "const requestGeneration=typeof _messagesGeneration==='number'" in MESSAGES_JS
     assert "ticket.committedGeneration = _messagesGeneration;" in SESSIONS_JS
+    assert "loadGeneration: typeof _loadSessionGeneration==='number'" in SESSIONS_JS
+    assert "ticket.loadGeneration===_loadSessionGeneration" in SESSIONS_JS
+    assert "if(typeof _transcriptReplacementIsCurrent==='function'&&replacementTicket" in SESSIONS_JS
     assert "ticket.committedGeneration!==undefined" in COMMANDS_JS
     assert "const _ensureSlashOwner=async()=>" in MESSAGES_JS
     assert "if(!_slashOwnerIsCurrent(_metadataSid))return;" in MESSAGES_JS
     assert "const _metadataSid=await _ensureSlashOwner();" in MESSAGES_JS
     assert "const _compressionLive=LIVE_STREAMS[activeSid];" in MESSAGES_JS
     assert "_compressionLive.source!==source" in MESSAGES_JS
+    assert "const _btwOwnerIsCurrent=()=>typeof _isSessionCurrentPane==='function'" in BTW_SRC
+    assert "if(!_btwOwnerIsCurrent()) return;" in BTW_SRC
+    assert "const ownerSid=S.session.session_id;" in _maybe_extract(COMMANDS_JS, "cmdBranch", "async function")
+    assert "if(data&&data.session_id&&_commandOwnerIsCurrent(ownerSid))" in _maybe_extract(COMMANDS_JS, "cmdBranch", "async function")
+    assert "if(!_commandOwnerIsCurrent(initialSid)) return;" in _maybe_extract(COMMANDS_JS, "forkFromMessage", "async function")
+    assert "_isSessionCurrentPane" in OUTLINE_JS
     assert "clearCompressionUi(activeSid)" in MESSAGES_JS
     assert "_manualCompressionOperation" in COMMANDS_JS
     assert "_clearConversationOperation" in PANELS_JS
