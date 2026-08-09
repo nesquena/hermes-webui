@@ -8630,8 +8630,12 @@ function renderSessionListFromCache(){
     // the generic running/unread state tooltip, so it wins. Fall back to the state
     // tooltip only when there is no attention title AND the state tooltip is
     // non-empty — never blank an otherwise-meaningful tooltip.
-    const _stateTip=_sessionStateTooltip({isStreaming:ownRingStreaming,hasUnread});
+    const _stateTip=_sessionStateTooltip({isStreaming,hasUnread});
+    const _ringStateTip=ownRingStreaming===isStreaming
+      ? _stateTip
+      : _sessionStateTooltip({isStreaming:ownRingStreaming,hasUnread});
     if(attention&&attention.title) state.title=attention.title;
+    else if(_ringStateTip) state.title=_ringStateTip;
     else if(_stateTip) state.title=_stateTip;
     el.appendChild(state);
     // Single trigger button that opens a shared dropdown menu
