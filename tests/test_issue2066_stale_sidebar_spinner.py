@@ -42,7 +42,7 @@ def test_cache_render_purges_stale_non_streaming_inflight_entries():
     assert "!s.is_streaming" in purge_block
     assert "delete INFLIGHT[sid];" in purge_block
     assert "clearInflightState(sid);" in purge_block
-    assert "_purgeStaleInflightEntries();" in render_block
+    assert "_purgeStaleInflightEntries(runtimeContext);" in render_block
 
 
 def test_stale_inflight_purge_executes_without_undeclared_session_map():

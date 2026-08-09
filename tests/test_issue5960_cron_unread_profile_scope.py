@@ -706,6 +706,10 @@ function _pruneLineageReportCacheToVisibleSessions(){{}}
 function _requestedSessionSidebarSource(){{ return 'webui'; }}
 function _sessionListExcludeHiddenEnabled(){{ return false; }}
 function _buildSidebarLineageIndex(){{ return {{}}; }}
+function _createSidebarRuntimeContext(rows, refs){{
+  const index=_buildSidebarLineageIndex(rows, refs);
+  return {{index, key:(rowOrSid, sidOverride=null)=>String(sidOverride || (rowOrSid && rowOrSid.session_id) || rowOrSid || '')}};
+}}
 function _sidebarRuntimeIdentityKey(rowOrSid, sidOverride=null){{
   return String(sidOverride || (rowOrSid && rowOrSid.session_id) || rowOrSid || '');
 }}
@@ -832,6 +836,10 @@ function _pruneLineageReportCacheToVisibleSessions(){{}}
 function _requestedSessionSidebarSource(){{ return 'webui'; }}
 function _sessionListExcludeHiddenEnabled(){{ return false; }}
 function _buildSidebarLineageIndex(){{ return {{}}; }}
+function _createSidebarRuntimeContext(rows, refs){{
+  const index=_buildSidebarLineageIndex(rows, refs);
+  return {{index, key:(rowOrSid, sidOverride=null)=>String(sidOverride || (rowOrSid && rowOrSid.session_id) || rowOrSid || '')}};
+}}
 function _sidebarRuntimeIdentityKey(rowOrSid, sidOverride=null){{
   return String(sidOverride || (rowOrSid && rowOrSid.session_id) || rowOrSid || '');
 }}
