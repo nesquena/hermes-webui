@@ -221,3 +221,52 @@ def test_panels_load_wiring():
     assert "show_kanban_sessions" in src, (
         "load wiring for show_kanban_sessions must appear in static/panels.js"
     )
+
+
+# --- #6780 gate-fix regressions: cron/webhook parity for kanban ---
+
+def test_kanban_source_filter_overrides_default_hide():
+    """An explicit kanban source_filter is a deliberate request to view kanban
+    rows, so _dedupe_cli_sidebar_sessions_for_api must reveal them even though
+    show_kanban_sessions is False (mirrors cron/webhook source-filter behavior)."""
+    from api.routes import _dedupe_cli_sidebar_sessions_for_api
+
+    kanban_row = {"session_id": "kb1", "source": "kanban", "message_count": 3}
+    # Default (no filter): kanban is hidden.
+    hidden = _dedupe_cli_sidebar_sessions_for_api(
+        [dict(kanban_row)], set(), show_kanban_sessions=False, source_filter=None
+    )
+    assert not any(s["session_id"] == "kb1" for s in hidden), (
+        "kanban row must be hidden by default with no source_filter"
+    )
+    # Explicit kanban filter: revealed despite show_kanban_sessions=False.
+    revealed = _dedupe_cli_sidebar_sessions_for_api(
+        [dict(kanban_row)], set(), show_kanban_sessions=False, source_filter="kanban"
+    )
+    assert any(s["session_id"] == "kb1" for s in revealed), (
+        "explicit kanban source_filter must override the default hide"
+    )
+
+
+def test_kanban_filtered_view_capped_at_chip_limit():
+    """A filtered kanban-only view (source_filter=='kanban') is bounded by a
+    dedicated KANBAN_PROJECT_CHIP_LIMIT, mirroring cron/webhook. (Kanban is NOT
+    added to the general exclude_sources — the original PR intentionally lets
+    kanban load on the source_filter=None path so the toggle-on case works; the
+    hide is applied by _hide_from_default_sidebar only when the toggle is off.)"""
+    src = _read("api/models.py")
+    assert "KANBAN_PROJECT_CHIP_LIMIT if source_filter == 'kanban'" in src, (
+        "a bounded kanban-only project-chip limit must exist for the filtered view"
+    )
+    assert '("cron", "webhook") if source_filter is None' in src, (
+        "kanban must NOT be excluded from the general query (would break toggle-on)"
+    )
+
+
+def test_kanban_source_filter_passed_to_dedupe():
+    src = _read("api/routes.py")
+    assert "source_filter=source_filter," in src, (
+        "source_filter must be forwarded to _dedupe_cli_sidebar_sessions_for_api "
+        "so an explicit kanban filter can override the hide"
+    )
+
