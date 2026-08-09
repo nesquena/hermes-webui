@@ -576,6 +576,32 @@ def test_session_list_runtime_overlay_fail_closed_and_preserves_authoritative_ro
     assert authoritative["is_streaming"] is True
 
 
+def test_session_list_response_propagates_non_authoritative_cache_result(
+    monkeypatch,
+):
+    from api import route_session_list_cache as cache
+
+    monkeypatch.setattr(routes, "load_settings", lambda: {"api_redact_enabled": False})
+    monkeypatch.setattr(
+        routes,
+        "_sidebar_session_response_item",
+        lambda row, *, redact_enabled=None: dict(row),
+    )
+    monkeypatch.setattr(
+        cache,
+        "active_run_session_snapshot",
+        lambda: {"sid": {"started_at": 10}},
+    )
+    result = routes._SessionListCacheResult(
+        {"sessions": [{"session_id": "sid", "archived": False}]},
+        source_authoritative=False,
+    )
+
+    response = routes._session_list_payload_to_response(result)
+
+    assert response["sessions"] == [{"session_id": "sid", "archived": False}]
+
+
 def test_session_list_cache_source_stamp_tracks_state_db_wal(tmp_path, monkeypatch):
     state_db = tmp_path / "state.db"
     state_db.write_text("db", encoding="utf-8")

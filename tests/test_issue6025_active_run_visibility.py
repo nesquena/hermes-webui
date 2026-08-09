@@ -337,6 +337,26 @@ console.log(JSON.stringify({{started,stopped}}));
     assert _run_node_script(source) == {"started": 0, "stopped": 1}
 
 
+def test_active_run_sidebar_ring_class_uses_own_ring_without_child_bubbling():
+    class_line = next(
+        line for line in SESSIONS_JS.splitlines() if "el.className='session-item'" in line
+    )
+    expression = class_line.split("=", 1)[1].rstrip(";")
+    source = f"""
+const S={{session:null}};
+const s={{archived:false}};
+const isActive=false; const hasUnread=false; const attention=null; const attentionClass='';
+let ownStreaming=false; let ownRingStreaming=true;
+const activeRunClass={expression};
+ownRingStreaming=false;
+const childOnlyClass={expression};
+console.log(JSON.stringify({{activeRunClass,childOnlyClass}}));
+"""
+    result = _run_node_script(source)
+    assert "streaming" in result["activeRunClass"]
+    assert "streaming" not in result["childOnlyClass"]
+
+
 def test_active_run_elapsed_label_advances_when_pill_is_visible_with_monotonic_delta():
     monotonic = _extract_function(UI_JS, "_activeRunMonotonicSeconds")
     elapsed = _extract_function(UI_JS, "_activeRunElapsedSeconds")
