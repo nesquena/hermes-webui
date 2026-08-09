@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -90,20 +91,25 @@ def _safe_request_post_data(request_or_route_request) -> str:
 
 
 def _mutate_ui_source(source: str, mutation: str) -> str:
-    replacements = {
-        "drop-valid-handoff-preserve": (
-            "_preservedLiveTurn=_lt;",
-            "/* issue6504 mutation: valid handoff preservation removed */",
-        ),
-        "drop-canonical-scene-suppression": (
-            "if(_settlementHandoffValid&&inner&&inner.querySelector('[data-anchor-settled-scene-owner=\"1\"]')){\n      _preservedLiveTurn=null;",
-            "if(_settlementHandoffValid&&inner&&inner.querySelector('[data-anchor-settled-scene-owner=\"1\"]')){\n      /* issue6504 mutation: canonical-scene suppression removed */",
-        ),
-    }
-    try:
-        needle, replacement = replacements[mutation]
-    except KeyError as error:
-        raise ValueError(f"Unsupported LIFECYCLE_UI_MUTATION {mutation!r}") from error
+    if mutation == "drop-valid-handoff-preserve":
+        needle = "_preservedLiveTurn=_lt;"
+        replacement = "/* issue6504 mutation: valid handoff preservation removed */"
+    elif mutation == "drop-canonical-scene-suppression":
+        prefix = "if(_settlementHandoffValid&&inner&&inner.querySelector('[data-anchor-settled-scene-owner=\"1\"]')){"
+        candidates = [
+            (prefix + newline + "      _preservedLiveTurn=null;", newline)
+            for newline in ("\n", "\r\n")
+        ]
+        matches = [(candidate, newline) for candidate, newline in candidates if source.count(candidate) == 1]
+        if len(matches) != 1:
+            raise AssertionError(
+                f"issue6504 mutation {mutation!r} expected one source token, found "
+                f"{sum(source.count(candidate) for candidate, _ in candidates)}"
+            )
+        needle, newline = matches[0]
+        replacement = prefix + newline + "      /* issue6504 mutation: canonical-scene suppression removed */"
+    else:
+        raise ValueError(f"Unsupported LIFECYCLE_UI_MUTATION {mutation!r}")
     count = source.count(needle)
     if count != 1:
         raise AssertionError(
@@ -463,16 +469,18 @@ class DeterministicGateway:
 
 def _capture_page_errors(page):
     errors = []
-    benign = ("favicon", "manifest.json", "serviceworker", "sw.js")
+    known_resource_suffixes = ("/favicon.ico", "/manifest.json", "/service-worker.js", "/sw.js")
 
     def on_console(message):
         if message.type != "error":
             return
         text = message.text
-        if TEST_BITE == "issue6504-settlement-dom-oracle" and "status of 404" in text.lower():
+        location = (message.location or {}).get("url", "").lower()
+        if "status of 404" in text.lower() and any(
+            location.endswith(suffix) for suffix in known_resource_suffixes
+        ):
             return
-        if not any(needle in text.lower() for needle in benign):
-            errors.append(("console", text))
+        errors.append(("console", text))
 
     page.on("console", on_console)
     page.on("pageerror", lambda error: errors.append(("pageerror", str(error))))
@@ -846,6 +854,7 @@ def main() -> int:
     exit_code = 1
     playwright = None
     browser = None
+    mutation_context = None
     page = None
     errors = []
     anchor_scene_requests = []
@@ -917,6 +926,18 @@ def main() -> int:
 
             page.route("**/api/session/anchor-scene", _route_anchor_scene)
         errors = _capture_page_errors(page)
+        if UI_MUTATION:
+            with urllib.request.urlopen(base_url + "/", timeout=15) as index_response:
+                index_html = index_response.read().decode("utf-8")
+            ui_match = re.search(r'src="([^"]*static/ui\.js[^"]*)"', index_html)
+            if not ui_match:
+                raise AssertionError("versioned static/ui.js script was not present in the served page")
+            ui_url = base_url + "/" + ui_match.group(1).lstrip("/")
+            with urllib.request.urlopen(ui_url, timeout=15) as ui_response:
+                served_ui_source = ui_response.read().decode("utf-8")
+            mutated_ui_source = _mutate_ui_source(served_ui_source, UI_MUTATION)
+            mutated_ui_path = artifact_dir / f"issue6504-{UI_MUTATION}.js"
+            mutated_ui_path.write_text(mutated_ui_source, encoding="utf-8")
         page.goto("/", wait_until="domcontentloaded")
         page.wait_for_selector("#msg", state="visible", timeout=15000)
         if TEST_BITE == "issue6504-settlement-dom-oracle":
@@ -930,34 +951,48 @@ def main() -> int:
                   window.__issue6504DoneDispatches = 0;
                   if (typeof original === 'function') {
                     window.armLiveTurnSettlementHandoff = function(value) {
-                      window.__issue6504Arms.push(value || null);
-                      return original.apply(this, arguments);
+                      const result = original.apply(this, arguments);
+                      const armed = window._liveTurnSettlementArmedOwnerKeys &&
+                        window._liveTurnSettlementArmedOwnerKeys[value && value.sessionId];
+                      window.__issue6504Arms.push({
+                        key: value || null,
+                        armedOwner: armed ? {
+                          sessionId: armed.sessionId, streamId: armed.streamId,
+                          ownerToken: armed.ownerToken, transportGeneration: armed.transportGeneration,
+                        } : null,
+                      });
+                      return result;
                     };
                   }
                   const originalAddEventListener = EventSource.prototype.addEventListener;
+                  const captureDoneRuntime = () => {
+                    const sid = typeof S !== 'undefined' && S.session && S.session.session_id;
+                    const live = sid && typeof LIVE_STREAMS !== 'undefined' && LIVE_STREAMS[sid];
+                    window.__issue6504DoneRuntime.push({
+                      activeStreamId: typeof S !== 'undefined' && S.activeStreamId,
+                      sessionId: sid,
+                      live: live ? {
+                        streamId: live.streamId, ownerToken: live.ownerToken,
+                        transportGeneration: live.transportGeneration,
+                        source: Boolean(live.source),
+                      } : null,
+                      inflight: Boolean(sid && typeof INFLIGHT !== 'undefined' && INFLIGHT[sid]),
+                      ownerKeys: typeof _liveTurnSettlementOwnerKeys !== 'undefined' ? _liveTurnSettlementOwnerKeys : null,
+                    });
+                  };
                   EventSource.prototype.addEventListener = function(name, listener, options) {
                     if (name === 'done') {
-                      window.__issue6504DoneListeners.push({source:this, listener, options});
-                      return originalAddEventListener.call(this, name, listener, options);
+                      const observed = function(...args) {
+                        window.__issue6504StreamEvents.push(name);
+                        if (window.__issue6504ManualDoneDispatch) captureDoneRuntime();
+                        return listener.apply(this, args);
+                      };
+                      window.__issue6504DoneListeners.push({source:this, listener:observed, options});
+                      return originalAddEventListener.call(this, name, observed, options);
                     }
                     if (name === 'stream_end') {
                       const observed = function(...args) {
                         window.__issue6504StreamEvents.push(name);
-                        if (name === 'done') {
-                          const sid = window.S && window.S.session && window.S.session.session_id;
-                          const live = sid && window.LIVE_STREAMS && window.LIVE_STREAMS[sid];
-                          window.__issue6504DoneRuntime.push({
-                            activeStreamId: window.S && window.S.activeStreamId,
-                            sessionId: sid,
-                            live: live ? {
-                              streamId: live.streamId, ownerToken: live.ownerToken,
-                              transportGeneration: live.transportGeneration,
-                              source: Boolean(live.source),
-                            } : null,
-                            inflight: Boolean(sid && window.INFLIGHT && window.INFLIGHT[sid]),
-                            ownerKeys: window._liveTurnSettlementOwnerKeys || null,
-                          });
-                        }
                         return listener.apply(this, args);
                       };
                       return originalAddEventListener.call(this, name, observed, options);
@@ -1057,7 +1092,7 @@ def main() -> int:
         if TEST_BITE == "issue6504-settlement-dom-oracle":
             page.evaluate(
                 """() => {
-                  const state = {renders: [], arms: [], calls: [], checkpoints: [], renderTrace: [], active: true};
+                  const state = {renders: [], arms: [], calls: [], checkpoints: [], mutations: [], renderTrace: [], active: true};
                   const sid = () => window.S && window.S.session && window.S.session.session_id;
                   const key = value => value ? {
                     sessionId: value.sessionId, streamId: value.streamId,
@@ -1079,30 +1114,53 @@ def main() -> int:
                   state.begin = () => {
                     state.liveNode = document.getElementById('liveAssistantTurn');
                     state.renders = [];
-                    state.calls = []; state.checkpoints = []; state.renderTrace = [];
+                    state.calls = []; state.checkpoints = []; state.mutations = []; state.renderTrace = [];
                     const transcript = document.getElementById('msgInner');
-                    state.observer = new MutationObserver(() => snapshot('mutation'));
+                    state.observer = new MutationObserver(records => {
+                      for (const record of records) {
+                        state.mutations.push({
+                          type: record.type,
+                          target: record.target && record.target.id || null,
+                          added: Array.from(record.addedNodes).map(node => node.id || node.nodeName),
+                          addedLive: Array.from(record.addedNodes).some(node => node === state.liveNode),
+                          removed: Array.from(record.removedNodes).map(node => ({
+                            id: node.id || null,
+                            owner: Boolean(node.querySelector && node.querySelector('[data-anchor-settled-scene-owner="1"]')),
+                          })),
+                          removedLive: Array.from(record.removedNodes).some(node => node === state.liveNode),
+                        });
+                      }
+                      snapshot('mutation');
+                    });
                     state.observer.observe(transcript, {childList: true, subtree: true});
                     const frame = () => state.active && requestAnimationFrame(() => setTimeout(() => { snapshot('frame'); frame(); }, 0));
                     frame(); snapshot('armed-before-terminal');
                   };
                   state.stop = () => { state.active = false; state.observer.disconnect();
-                    state.arms = (window.__issue6504Arms || []).map(key); snapshot('stopped'); return {
+                    state.arms = (window.__issue6504Arms || []).map(observation => observation.key); snapshot('stopped'); return {
                     renders: state.renders.slice(), arms: state.arms.slice(), calls: state.calls.slice(),
-                    checkpoints: state.checkpoints.slice(), renderTrace: state.renderTrace.slice(),
+                    checkpoints: state.checkpoints.slice(), mutations: state.mutations.slice(), renderTrace: state.renderTrace.slice(),
                     streamEvents: (window.__issue6504StreamEvents || []).slice(),
                     doneRuntime: (window.__issue6504DoneRuntime || []).slice(),
-                    doneDispatches: window.__issue6504DoneDispatches || 0}; };
+                    doneDispatches: window.__issue6504DoneDispatches || 0,
+                    armObservations: (window.__issue6504Arms || []).slice()}; };
                   const wrap = (name, render) => {
                     const original = window[name]; if (typeof original !== 'function') return;
                     window[name] = function(...args) {
                       state.calls.push({name, args: args.map(value => value && typeof value === 'object' ? {sid:value.sid, forceHidden:value.forceHidden} : value)});
                       if (!render) return original.apply(this, args);
+                      const renderState = phase => ({
+                        phase,
+                        inflight: Boolean(sid() && window.INFLIGHT && window.INFLIGHT[sid()]),
+                        activeStreamId: window.S && window.S.activeStreamId || null,
+                        owner: key(window._liveTurnSettlementOwnerKeys && window._liveTurnSettlementOwnerKeys[sid()]),
+                        armedOwner: key(window._liveTurnSettlementArmedOwnerKeys && window._liveTurnSettlementArmedOwnerKeys[sid()]),
+                      });
                       snapshot('render-entry');
-                      state.renderTrace.push({phase:'entry', handoff:key(window._liveTurnSettlementHandoff)});
+                      state.renderTrace.push(renderState('entry'));
                       const result = original.apply(this, args);
                       snapshot('render-exit');
-                      state.renderTrace.push({phase:'exit', handoff:key(window._liveTurnSettlementHandoff)});
+                      state.renderTrace.push(renderState('exit'));
                       state.renders.push({inflight:Boolean(sid() && window.INFLIGHT && window.INFLIGHT[sid()]),
                         activeStreamId:window.S && window.S.activeStreamId || null,
                         handoff:key(window._liveTurnSettlementHandoff),
@@ -1169,11 +1227,12 @@ def main() -> int:
                       })};
                       const target = window.__issue6504DoneListeners[0];
                       window.__issue6504DoneDispatches += 1;
-                      target.listener.call(target.source, event);
+                      window.__issue6504ManualDoneDispatch = true;
+                      try { target.listener.call(target.source, event); }
+                      finally { window.__issue6504ManualDoneDispatch = false; }
                     }""",
                     FINAL_TEXT,
                 )
-                print("ISSUE6504 DONE DISPATCHED", flush=True)
             else:
                 gateway.release_terminal.set()
             try:
@@ -1189,7 +1248,6 @@ def main() -> int:
                 ) from error
             if TEST_BITE == "issue6504-settlement-dom-oracle":
                 gateway.release_terminal.set()
-                print("ISSUE6504 SETTLED", flush=True)
         else:
             gateway.release_terminal.set()
             page.wait_for_function(
@@ -1206,9 +1264,30 @@ def main() -> int:
             oracle = page.evaluate("window.__issue6504DomOracle.stop()")
             assert len(oracle["arms"]) == 1, oracle
             assert oracle["doneDispatches"] == 1, oracle
+            assert oracle["streamEvents"].count("done") >= 1, oracle
+            assert oracle["streamEvents"].count("stream_end") >= 1, oracle
+            assert any(mutation.get("removedLive") for mutation in oracle["mutations"]), oracle
             call_names = [call["name"] for call in oracle["calls"]]
             assert call_names.count("playNotificationSound") == 1, oracle
             assert call_names.count("sendBrowserNotification") == 1, oracle
+            assert call_names.count("_markSessionViewed") >= 1, oracle
+            assert len(oracle["doneRuntime"]) == 1, oracle
+            arm = oracle["arms"][0]
+            assert len(oracle["armObservations"]) == 1, oracle
+            assert oracle["armObservations"][0]["armedOwner"] == arm, oracle
+            done_runtime = oracle["doneRuntime"][0]
+            assert arm["sessionId"] == done_runtime["sessionId"], oracle
+            assert arm["streamId"] == done_runtime["activeStreamId"], oracle
+            assert isinstance(arm["ownerToken"], int) and isinstance(arm["transportGeneration"], int), oracle
+            assert done_runtime["inflight"] and done_runtime["live"], oracle
+            assert done_runtime["live"]["streamId"] == arm["streamId"], oracle
+            assert done_runtime["live"]["ownerToken"] == arm["ownerToken"], oracle
+            assert done_runtime["live"]["transportGeneration"] == arm["transportGeneration"], oracle
+            render_entries = [trace for trace in oracle["renderTrace"] if trace["phase"] == "entry"]
+            render_exits = [trace for trace in oracle["renderTrace"] if trace["phase"] == "exit"]
+            assert render_entries and len(render_entries) == len(render_exits), oracle
+            assert all(not trace["inflight"] and not trace["activeStreamId"] for trace in oracle["renderTrace"]), oracle
+            assert all(trace["armedOwner"] is None for trace in render_exits), oracle
             settled_state = page.evaluate(
                 """() => ({
                   inflight: Boolean(S.session && INFLIGHT[S.session.session_id]),
@@ -1221,8 +1300,27 @@ def main() -> int:
             assert not settled_state["inflight"] and not settled_state["activeStreamId"], settled_state
             for checkpoint in oracle["checkpoints"]:
                 assert checkpoint["liveConnected"] or checkpoint["settledAnswer"], checkpoint
-            renderer_cases = page.evaluate(
-                """mutation => {
+            renderer_page = page
+            if UI_MUTATION:
+                mutation_context = browser.new_context(base_url=base_url)
+                renderer_page = mutation_context.new_page()
+
+                def _route_mutated_ui(route):
+                    route.fulfill(path=str(mutated_ui_path))
+
+                renderer_page.route("**/static/ui.js*", _route_mutated_ui)
+                session_url = page.url
+                if "/session/" not in session_url:
+                    session_url = f"{base_url}/session/{session_id}"
+                renderer_page.goto(session_url, wait_until="domcontentloaded")
+                renderer_page.wait_for_selector("#msgInner", state="attached", timeout=15000)
+                renderer_page.wait_for_function(
+                    "sid => typeof S !== 'undefined' && S.session && S.session.session_id === sid",
+                    arg=session_id,
+                    timeout=15000,
+                )
+            renderer_cases = renderer_page.evaluate(
+                """() => {
                   const sid = S.session.session_id;
                   const key = value => value ? {
                     sessionId: value.sessionId, streamId: value.streamId,
@@ -1248,20 +1346,6 @@ def main() -> int:
                   };
                   inner.querySelectorAll('[data-anchor-settled-scene-owner="1"]').forEach(node => node.closest('.assistant-turn')?.remove() || node.remove());
                   const publish = key => { window._liveTurnSettlementOwnerKeys = {[sid]:key}; window._liveTurnSettlementArmedOwnerKeys = {}; window._liveTurnSettlementHandoff = null; delete INFLIGHT[sid]; S.activeStreamId = null; S.busy = false; };
-                  const realRenderMessages = window.renderMessages;
-                  if (mutation) {
-                    window.renderMessages = function(...args) {
-                      if (mutation === 'drop-valid-handoff-preserve') {
-                        const liveTurn = document.getElementById('liveAssistantTurn');
-                        if (liveTurn) liveTurn.remove();
-                      }
-                      const result = realRenderMessages.apply(this, args);
-                      if (mutation === 'drop-canonical-scene-suppression') {
-                        inner.querySelectorAll('[data-anchor-settled-scene-owner="1"]').forEach(node => node.closest('.assistant-turn')?.remove() || node.remove());
-                      }
-                      return result;
-                    };
-                  }
                   S.messages = [{role:'assistant', content:'settled plain answer'}]; publish(owner); cacheClear();
                   const exact = live(); armLiveTurnSettlementHandoff(owner);
                   renderMessages();
@@ -1281,7 +1365,6 @@ def main() -> int:
                     canonical:document.querySelectorAll('[data-anchor-settled-scene-owner="1"]').length,
                     live:Boolean(document.getElementById('liveAssistantTurn'))};
                 }""",
-                UI_MUTATION,
             )
             mutation_marker = f"ISSUE6504 MUTATION FAIL {UI_MUTATION}" if UI_MUTATION else ""
             if UI_MUTATION == "drop-valid-handoff-preserve":
@@ -1487,9 +1570,27 @@ def main() -> int:
             print("OK  hard reload: transcript-backed Anchor scene preserves settled parity")
 
         assert gateway.request_body and gateway.request_body.get("input") == PROMPT, gateway.request_body
-        if errors:
-            raise AssertionError(f"unexpected browser errors: {errors!r}")
+        unexpected_errors = errors
+        if TEST_BITE == "issue6504-settlement-dom-oracle":
+            anchor_404 = any(
+                event.get("type") == "response"
+                and event.get("status") == 404
+                for event in anchor_scene_requests
+            )
+            expected_anchor_error = (
+                "Failed to load resource: the server responded with a status of 404 (Not Found)"
+            )
+            if anchor_404:
+                unexpected_errors = [
+                    error for error in errors
+                    if error != ("console", expected_anchor_error)
+                ]
+        if unexpected_errors:
+            raise AssertionError(f"unexpected browser errors: {unexpected_errors!r}")
         context.close()
+        if mutation_context is not None:
+            mutation_context.close()
+            mutation_context = None
         browser.close()
         browser = None
         print("\nCONVERSATION LIFECYCLE GATE PASSED")
@@ -1521,6 +1622,8 @@ def main() -> int:
         return 1
     finally:
         gateway.close()
+        if mutation_context is not None:
+            mutation_context.close()
         if browser is not None:
             browser.close()
         if playwright is not None:

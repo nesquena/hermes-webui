@@ -87,7 +87,7 @@ jobs:
           LIFECYCLE_ARTIFACT_DIR: lifecycle-artifacts
           LIFECYCLE_SCENARIO: normal
           LIFECYCLE_TEST_BITE: issue6504-settlement-dom-oracle
-        run: python -m pytest tests/test_issue6504_stream_settle_flash.py -k test_issue6504_dom_oracle --no-header --no-summary -q
+        run: python -m pytest tests/test_issue6504_stream_settle_flash.py -k 'test_issue6504_dom_oracle and not test_issue6504_dom_oracle_mutation_fails' --no-header --no-summary -q
 
       - name: Run issue 6504 DOM oracle mutations
         if: matrix.scenario == 'normal'

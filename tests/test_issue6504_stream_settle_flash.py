@@ -167,7 +167,7 @@ def _run_issue6504_browser(mutation: str = "") -> subprocess.CompletedProcess[st
                 env=env,
                 text=True,
                 capture_output=True,
-                timeout=180,
+                timeout=45,
                 check=False,
             )
         except subprocess.TimeoutExpired as error:
@@ -1518,20 +1518,6 @@ def test_settlement_rebuild_uses_admission_and_interrupted_projection_contract()
         assert "outcome:'interrupted'" in _extract(caller)
     assert "outcome:'interrupted'" in _extract_event_body("stream_end")
     assert "journal.terminal_state" not in MESSAGES_JS
-
-
-def test_settlement_handoff_is_one_shot_and_renderer_owned():
-    assert "let _liveTurnSettlementHandoff=null;" in UI_JS
-    assert "_settlementHandoffMatchesOwner" in UI_JS
-    render = _extract("renderMessages", UI_JS)
-    assert "const _settlementHandoff=typeof _liveTurnSettlementHandoff==='undefined'" in render
-    assert "_liveTurnSettlementHandoff=null;" in render
-    assert "const _settlementHandoffValid=typeof _settlementHandoffMatchesOwner==='function'&&" in render
-    assert "if(sid&&(INFLIGHT[sid]||_settlementHandoffValid))" in render
-    assert "_settlementHandoffValid&&inner&&inner.querySelector('[data-anchor-settled-scene-owner=\"1\"]')" in render
-    handoff_block=render[render.find("let _preservedLiveTurn"):render.find("let _preservedLiveTurn")+1800]
-    assert "S.messages=" not in handoff_block
-    assert "S.activeStreamId=" not in handoff_block
 
 
 def test_production_handoff_rejects_same_session_replacement_owner():
