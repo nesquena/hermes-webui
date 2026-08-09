@@ -3830,6 +3830,20 @@ def _get_aux_title_config() -> dict:
         return {}
 
 
+def _aux_title_generation_enabled() -> bool:
+    """Return whether automatic title generation is enabled (default: enabled).
+
+    Mirrors Hermes Agent's ``auxiliary.title_generation.enabled`` contract
+    (default true). Accepts boolean and string forms so YAML booleans and
+    stringified values parse identically.
+    """
+    tg = _get_aux_title_config()
+    val = tg.get('enabled', True)
+    if isinstance(val, str):
+        return val.strip().lower() not in ('false', '0', 'no', 'off')
+    return bool(val)
+
+
 def _aux_title_configured() -> bool:
     """Return True when any auxiliary title_generation config field is meaningfully set."""
     tg = _get_aux_title_config()
@@ -4355,6 +4369,9 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
         from api import profiles as profiles_api
 
         with profiles_api.profile_env_for_background_worker(s, "background title", logger_override=logger):
+            if not _aux_title_generation_enabled():
+                _put_title_status(put_event, session_id, 'skipped', 'title_generation_disabled', current)
+                return
             aux_title_configured = _aux_title_configured()
             if agent and not aux_title_configured:
                 next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
@@ -4444,6 +4461,9 @@ def _run_background_title_refresh(session_id: str, user_text: str, assistant_tex
         from api import profiles as profiles_api
 
         with profiles_api.profile_env_for_background_worker(s, "background title", logger_override=logger):
+            if not _aux_title_generation_enabled():
+                _put_title_status(put_event, session_id, 'refresh_skipped', 'title_generation_disabled', effective)
+                return
             aux_title_configured = _aux_title_configured()
             if agent and not aux_title_configured:
                 next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
@@ -4505,6 +4525,8 @@ def generate_session_title_for_session(session, *, prefer_latest: bool = False, 
     from api import profiles as profiles_api
 
     with profiles_api.profile_env_for_background_worker(session, "manual title regeneration", logger_override=logger):
+        if not _aux_title_generation_enabled():
+            return None, 'title_generation_disabled', ''
         next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent)
     if next_title:
         return next_title, llm_status, raw_preview
