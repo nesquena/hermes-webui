@@ -268,6 +268,12 @@ eval(extractFunc('_isOptimisticFirstTurnSessionRow'));
 eval(extractFunc('_shouldKeepLocalOnlyOptimisticSessionRow'));
 eval(extractFunc('_dropStaleOptimisticSessionRow'));
 eval(extractFunc('_rememberSessionListSource'));
+eval(extractFunc('_getSessionObservedStreaming'));
+eval(extractFunc('_saveSessionObservedStreaming'));
+eval(extractFunc('_rememberObservedStreamingSession'));
+eval(extractFunc('_getSessionCompletionUnread'));
+eval(extractFunc('_saveSessionCompletionUnread'));
+eval(extractFunc('_markSessionCompletionUnread'));
 eval(extractFunc('_mergeOptimisticFirstTurnSessions'));
 eval(extractFunc('_reconcileActiveSessionIdleStateFromList'));
 eval(extractFunc('_markPollingCompletionUnreadTransitions'));
@@ -312,15 +318,15 @@ global.INFLIGHT = {local:{lastAssistantText:'local'}};
 global._isCliSession = () => false;
 global._isSessionActivelyViewedForList = () => false;
 global._forgetObservedStreamingSession = () => {};
-global._rememberObservedStreamingSession = () => {};
-global._getSessionObservedStreaming = () => global._sessionObservedStreaming;
-global._markSessionCompletionUnread = () => {};
 global.hideApprovalCard = () => {};
 global.hideLiveRunStatus = () => {};
 global.clearLiveToolCards = () => {};
 global.updateSendBtn = () => {};
 global._scheduleActiveSessionIdleReload = () => {};
 global._sendInProgress = false;
+global.localStorage = {getItem:()=>null, setItem:()=>{}};
+let _sessionObservedStreaming = {};
+let _sessionCompletionUnread = {};
 global._lineageReportCache = new Map();
 global._lineageReportInflight = new Map();
 let mergeContext = null;
@@ -369,6 +375,23 @@ for (let i = 0; i < 2400; i++) incomingRows.push({
   session_id:'bulk-'+i, profile_scope:i % 2 ? 'profile-a' : 'profile-b',
   project_id:'project-'+(i % 7), message_count:1,
 });
+global._allSessions.push({session_id:'completion', profile_scope:'profile-a',
+  project_id:'project-a', message_count:0, is_streaming:true});
+const completionRow = {session_id:'completion', profile_scope:'profile-a',
+  project_id:'project-a', message_count:1};
+const seedContext = _createSidebarRuntimeContext([
+  ...incomingRows,
+  {session_id:'local', profile_scope:'profile-a', project_id:'project-a', message_count:2},
+  {session_id:'same', profile_scope:'profile-a', project_id:'project-a', message_count:3},
+  {session_id:'same', profile_scope:'profile-b', project_id:'project-b', message_count:4},
+  {session_id:'cron-running', profile_scope:'profile-a', project_id:null, cron_running:true, is_streaming:true},
+  completionRow,
+  ...global._allSessions,
+], global._sidebarReferenceSessions);
+_sessionObservedStreaming[seedContext.key(completionRow, 'completion')] = {
+  message_count:0, last_message_at:1, observed_at:1,
+};
+buildCount = 0;
 _applySessionListPayload({
   active_profile:'profile-a',
   sessions:[...incomingRows,
@@ -376,11 +399,14 @@ _applySessionListPayload({
     {session_id:'same', profile_scope:'profile-a', project_id:'project-a', message_count:3},
     {session_id:'same', profile_scope:'profile-b', project_id:'project-b', message_count:4},
     {session_id:'cron-running', profile_scope:'profile-a', project_id:null, cron_running:true, is_streaming:true},
+    completionRow,
   ],
   sidebar_reference_sessions:[{session_id:'archived-parent', profile_scope:'profile-a', project_id:'project-a', archived:true}],
 }, {projects:[]});
 const context = pruneCalls[0].context;
 const localKey = context.key(global.S.session, 'local');
+const cronKey = context.key({session_id:'cron-running', profile_scope:'profile-a', project_id:null}, 'cron-running');
+const completionKey = context.key(completionRow, 'completion');
 const staleKey = context.key({session_id:'stale', profile_scope:'profile-a', project_id:'stale'}, 'stale');
 global._lineageReportCache.set(localKey, {segments:[1]});
 global._lineageReportCache.set(staleKey, {segments:[1]});
@@ -392,6 +418,8 @@ console.log(JSON.stringify({buildCount, pruneCalls:pruneCalls.length,
   rowCounts:[mergeRows.length,reconcileRows.length,pollRows.length],
   mergeEffects:Boolean(global._sessionStreamingById.has(localKey)),
   pollEffects:Boolean(global._sessionListSnapshotById.has(localKey)),
+  observedEffects:Boolean(Object.prototype.hasOwnProperty.call(_sessionObservedStreaming, cronKey)),
+  completionEffects:Boolean(Object.prototype.hasOwnProperty.call(_sessionCompletionUnread, completionKey)),
   cachePruned:!global._lineageReportCache.has(staleKey),
   sameKeys:context.key(context.rows.find(row => row.session_id === 'same'), 'same') !==
     context.key(context.rows.find(row => row.session_id === 'same' && row.profile_scope === 'profile-b'), 'same'),
@@ -404,9 +432,11 @@ console.log(JSON.stringify({buildCount, pruneCalls:pruneCalls.length,
         "mergeUsesContext": True,
         "reconcileUsesContext": True,
         "pollUsesContext": True,
-        "rowCounts": [2404, 2404, 2404],
+        "rowCounts": [2405, 2405, 2405],
         "mergeEffects": True,
         "pollEffects": True,
+        "observedEffects": True,
+        "completionEffects": True,
         "cachePruned": True,
         "sameKeys": True,
         "sameIndex": True,
@@ -487,6 +517,65 @@ console.log(JSON.stringify({
     assert result["keys"] == [result["activeKey"]]
     assert result["activeKey"] != result["cachedKey"]
     assert result["value"] == 7
+
+
+def test_batch_delete_cleanup_preserves_duplicate_scoped_rows():
+    result = _run_node(_harness("""
+const store = {};
+global.localStorage = {
+  getItem:key => Object.prototype.hasOwnProperty.call(store,key) ? store[key] : null,
+  setItem:(key,value) => { store[key] = String(value); },
+};
+let _sessionViewedCounts = null;
+let _sessionCompletionUnread = null;
+let _sessionObservedStreaming = null;
+const SESSION_VIEWED_COUNTS_KEY = 'session-viewed-counts';
+const SESSION_COMPLETION_UNREAD_KEY = 'session-completion-unread';
+const SESSION_OBSERVED_STREAMING_KEY = 'session-observed-streaming';
+eval(extractFunc('_getSessionViewedCounts'));
+eval(extractFunc('_saveSessionViewedCounts'));
+eval(extractFunc('_setSessionViewedCount'));
+eval(extractFunc('_getSessionCompletionUnread'));
+eval(extractFunc('_saveSessionCompletionUnread'));
+eval(extractFunc('_markSessionCompletionUnread'));
+eval(extractFunc('_getSessionObservedStreaming'));
+eval(extractFunc('_saveSessionObservedStreaming'));
+eval(extractFunc('_rememberObservedStreamingSession'));
+eval(extractFunc('_clearSessionViewedCount'));
+eval(extractFunc('_clearSessionCompletionUnread'));
+eval(extractFunc('_forgetObservedStreamingSession'));
+eval(extractFunc('_clearHandoffStorageForSession'));
+const rowA = {session_id:'same', profile_scope:'profile-a', project_id:'project-a', message_count:2};
+const rowB = {session_id:'same', profile_scope:'profile-b', project_id:'project-b', message_count:3};
+global._allSessions = [rowA, rowB];
+global._sidebarReferenceSessions = [];
+const context = _createSidebarRuntimeContext(global._allSessions, []);
+_setSessionViewedCount('same', 1, rowA, context);
+_setSessionViewedCount('same', 2, rowB, context);
+_markSessionCompletionUnread('same', 3, null, rowA, context);
+_markSessionCompletionUnread('same', 4, null, rowB, context);
+_rememberObservedStreamingSession(rowA, context);
+_rememberObservedStreamingSession(rowB, context);
+_clearHandoffStorageForSession('same', rowA, context);
+const keyA = context.key(rowA, 'same');
+const keyB = context.key(rowB, 'same');
+console.log(JSON.stringify({
+  viewedA:Object.prototype.hasOwnProperty.call(_getSessionViewedCounts(), keyA),
+  viewedB:Object.prototype.hasOwnProperty.call(_getSessionViewedCounts(), keyB),
+  unreadA:Object.prototype.hasOwnProperty.call(_getSessionCompletionUnread(), keyA),
+  unreadB:Object.prototype.hasOwnProperty.call(_getSessionCompletionUnread(), keyB),
+  observedA:Object.prototype.hasOwnProperty.call(_getSessionObservedStreaming(), keyA),
+  observedB:Object.prototype.hasOwnProperty.call(_getSessionObservedStreaming(), keyB),
+}));
+"""))
+    assert result == {
+        "viewedA": False,
+        "viewedB": True,
+        "unreadA": False,
+        "unreadB": True,
+        "observedA": False,
+        "observedB": True,
+    }
 
 
 def test_compression_parent_lookup_stays_within_profile_scope():

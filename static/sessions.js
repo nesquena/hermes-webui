@@ -4772,7 +4772,14 @@ function _renderBatchActionBar(){
       }));
       const retainedCount=_worktreeResponseCount(results);
       const cleanupFailedCount=results.filter(result=>result.response&&result.response.state_db_cleanup_failed).length;
-      ids.forEach(_clearHandoffStorageForSession);
+      const batchRows=ids.map(sid=>sessionsById.get(sid)||null).filter(Boolean);
+      const operationContext=_createSidebarRuntimeContext(
+        [...(Array.isArray(_allSessions)?_allSessions:[]),...batchRows],
+        typeof _sidebarReferenceSessions!=='undefined'?_sidebarReferenceSessions:[]);
+      ids.forEach(sid=>_clearHandoffStorageForSession(
+        sid,
+        sessionsById.get(sid)||null,
+        operationContext));
       if(S.session&&ids.includes(S.session.session_id)){
         S.session=null;S.messages=[];S.entries=[];localStorage.removeItem('hermes-webui-session');
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
