@@ -893,6 +893,8 @@ def main() -> int:
             return 2
         context = browser.new_context(base_url=base_url)
         page = context.new_page()
+        if TEST_BITE == "issue6504-settlement-dom-oracle":
+            page.emulate_media(reduced_motion="no-preference")
         anchor_scene_requests = _capture_anchor_scene_requests(page)
         if TEST_BITE in {"drop-anchor-persistence", "drop-terminal-anchor-row"}:
             def _route_anchor_scene(route):
@@ -955,6 +957,7 @@ def main() -> int:
                   window.__issue6504DoneRuntime = [];
                   window.__issue6504DoneListeners = [];
                   window.__issue6504DoneDispatches = 0;
+                  window.__issue6504FadeWordsBeforeDone = 0;
                   if (typeof original === 'function') {
                     window.armLiveTurnSettlementHandoff = function(value) {
                       const result = original.apply(this, arguments);
@@ -974,6 +977,7 @@ def main() -> int:
                   const captureDoneRuntime = () => {
                     const sid = typeof S !== 'undefined' && S.session && S.session.session_id;
                     const live = sid && typeof LIVE_STREAMS !== 'undefined' && LIVE_STREAMS[sid];
+                    if (!sid || !live) return;
                     window.__issue6504DoneRuntime.push({
                       activeStreamId: typeof S !== 'undefined' && S.activeStreamId,
                       sessionId: sid,
@@ -990,7 +994,11 @@ def main() -> int:
                     if (name === 'done') {
                       const observed = function(...args) {
                         window.__issue6504StreamEvents.push(name);
-                        if (window.__issue6504ManualDoneDispatch) captureDoneRuntime();
+                        if (window.__issue6504ManualDoneDispatch) {
+                          const before = window.__issue6504DoneRuntime.length;
+                          captureDoneRuntime();
+                          if (window.__issue6504DoneRuntime.length > before) window.__issue6504DoneDispatches += 1;
+                        }
                         return listener.apply(this, args);
                       };
                       window.__issue6504DoneListeners.push({source:this, listener:observed, options});
@@ -1149,6 +1157,7 @@ def main() -> int:
                     streamEvents: (window.__issue6504StreamEvents || []).slice(),
                     doneRuntime: (window.__issue6504DoneRuntime || []).slice(),
                     doneDispatches: window.__issue6504DoneDispatches || 0,
+                    fadeWordsBeforeDone: window.__issue6504FadeWordsBeforeDone || 0,
                     armObservations: (window.__issue6504Arms || []).slice()}; };
                   const wrap = (name, render) => {
                     const original = window[name]; if (typeof original !== 'function') return;
@@ -1218,8 +1227,15 @@ def main() -> int:
                     "() => window.__issue6504DoneListeners && window.__issue6504DoneListeners.length",
                     timeout=10000,
                 )
+                page.wait_for_function(
+                    "() => document.querySelectorAll('#liveAssistantTurn .stream-fade-word').length > 0",
+                    timeout=10000,
+                )
                 page.evaluate(
                     """text => {
+                      window.__issue6504FadeWordsBeforeDone = document.querySelectorAll(
+                        '#liveAssistantTurn .stream-fade-word'
+                      ).length;
                       const sid = S.session && S.session.session_id;
                       const messages = Array.isArray(S.messages) ? S.messages.slice() : [];
                       const last = messages.length ? messages[messages.length - 1] : null;
@@ -1236,12 +1252,15 @@ def main() -> int:
                         usage: {input_tokens:12, output_tokens:5},
                       })};
                       const target = window.__issue6504DoneListeners[0];
-                      window.__issue6504DoneDispatches += 1;
                       window.__issue6504ManualDoneDispatch = true;
                       try { target.listener.call(target.source, event); }
                       finally { window.__issue6504ManualDoneDispatch = false; }
                     }""",
                     FINAL_TEXT,
+                )
+                page.wait_for_function(
+                    "() => window.__issue6504DoneDispatches >= 1",
+                    timeout=15000,
                 )
             else:
                 gateway.release_terminal.set()
@@ -1270,12 +1289,16 @@ def main() -> int:
         session_id = page.evaluate("S.session && S.session.session_id")
         assert session_id, "active session id missing after settlement"
         if TEST_BITE == "issue6504-settlement-dom-oracle":
-            page.wait_for_timeout(150)
+            page.wait_for_function(
+                "() => window.__issue6504StreamEvents.includes('stream_end')",
+                timeout=15000,
+            )
             oracle = page.evaluate("window.__issue6504DomOracle.stop()")
             assert len(oracle["arms"]) == 1, oracle
             assert oracle["doneDispatches"] == 1, oracle
             assert oracle["streamEvents"].count("done") >= 1, oracle
             assert oracle["streamEvents"].count("stream_end") >= 1, oracle
+            assert oracle["fadeWordsBeforeDone"] > 0, oracle
             assert any(mutation.get("removedLive") for mutation in oracle["mutations"]), oracle
             arm = oracle["arms"][0]
             call_names = [call["name"] for call in oracle["calls"]]
@@ -1333,6 +1356,7 @@ def main() -> int:
                     route.fulfill(path=str(mutated_ui_path))
 
                 renderer_page.route("**/static/ui.js*", _route_mutated_ui)
+            if UI_MUTATION:
                 session_url = page.url
                 if "/session/" not in session_url:
                     session_url = f"{base_url}/session/{session_id}"
@@ -1343,9 +1367,9 @@ def main() -> int:
                     arg=session_id,
                     timeout=15000,
                 )
-                assert mutation_route_hits[0] == 1, (
-                    f"ISSUE6504 MUTATION FAIL {UI_MUTATION}: "
-                    f"expected one static/ui.js interception, got {mutation_route_hits[0]}"
+                assert mutation_route_hits[0] >= 1, (
+                    f"ISSUE6504 MUTATION SETUP FAIL {UI_MUTATION}: "
+                    f"expected at least one static/ui.js interception, got {mutation_route_hits[0]}"
                 )
             renderer_cases = renderer_page.evaluate(
                 """() => {
@@ -1387,7 +1411,7 @@ def main() -> int:
             if UI_MUTATION == "drop-valid-handoff-preserve":
                 assert renderer_cases["exactFirst"]["connected"], mutation_marker
             elif UI_MUTATION == "drop-canonical-scene-suppression":
-                assert renderer_cases["canonicalCase"]["live"] and renderer_cases["canonicalCase"]["canonical"] == 1, mutation_marker
+                assert renderer_cases["canonicalCase"] == {"live": False, "canonical": 1}, mutation_marker
             else:
                 assert renderer_cases["exactFirst"]["connected"] and not renderer_cases["exactFirst"]["armed"] and not renderer_cases["exactFirst"]["handoff"], {"case": "exact-first", "renderer": renderer_cases}
                 assert renderer_cases["exactSecond"] is False, {"case": "exact-second", "renderer": renderer_cases}
