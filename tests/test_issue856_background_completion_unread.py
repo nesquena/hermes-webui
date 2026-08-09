@@ -68,15 +68,15 @@ def test_background_done_sets_marker_when_session_not_actively_viewed():
     assert "const completedSid=completedSession.session_id||activeSid;" in done_block
     assert "const completedMessageCount=completedSession.message_count != null" in done_block
     assert "if(!isSessionViewed && typeof _markSessionCompletionUnread==='function')" in done_block
-    assert "_markSessionCompletionUnread(completedSid, completedMessageCount);" in done_block
+    assert "_markSessionCompletionUnread(completedSid, completedMessageCount, null, completedSession, _messageOperationContext);" in done_block
 
 
 def test_background_done_uses_rotated_session_id_for_completion_unread():
     done_block = _done_block()
 
     completed_sid_idx = done_block.find("const completedSid=completedSession.session_id||activeSid;")
-    marker_idx = done_block.find("_markSessionCompletionUnread(completedSid, completedMessageCount);")
-    viewed_idx = done_block.find("_markSessionViewed(completedSid, completedMessageCount);")
+    marker_idx = done_block.find("_markSessionCompletionUnread(completedSid, completedMessageCount, null, completedSession, _messageOperationContext);")
+    viewed_idx = done_block.find("_markSessionViewed(completedSid, completedMessageCount, completedSession, _messageOperationContext);")
 
     assert completed_sid_idx != -1, "done handler must derive the final post-compression session id"
     assert marker_idx != -1, "background completion marker must be stored on the final session id"
@@ -496,7 +496,7 @@ def test_restore_settled_background_stream_marks_completion_unread():
     assert "const isSessionViewed=_isSessionActivelyViewed(activeSid);" in restore_block
     assert "const completedSid=session.session_id||activeSid;" in restore_block
     assert "if(!isSessionViewed && typeof _markSessionCompletionUnread==='function')" in restore_block
-    assert "_markSessionCompletionUnread(completedSid, session.message_count);" in restore_block
+    assert "_markSessionCompletionUnread(completedSid, session.message_count, null, session, _messageOperationContext);" in restore_block
     assert "if(isSessionViewed) _markSessionViewed(completedSid" in restore_block, (
         "restore-settled fallback must not mark a hidden/background completion read"
     )
@@ -508,8 +508,8 @@ def test_focus_visibility_return_marks_active_session_viewed_and_clears_marker()
     return_block = MESSAGES_JS[return_idx:MESSAGES_JS.find("async function send()", return_idx)]
 
     assert "if(!_isDocumentVisibleAndFocused() || !S.session || !S.session.session_id) return;" in return_block
-    assert "_markSessionViewed(S.session.session_id" in return_block
-    assert "_clearSessionCompletionUnread(S.session.session_id)" in return_block, (
+    assert "_markSessionViewed(activeRow.session_id" in return_block
+    assert "_clearSessionCompletionUnread(activeRow.session_id, activeRow, operationContext)" in return_block, (
         "returning to a visible/focused tab must clear the explicit unread marker "
         "for the active session the user is now viewing"
     )

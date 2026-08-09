@@ -29,8 +29,10 @@ def _run_node(body: str):
 
 def _harness(body: str) -> str:
     js = (ROOT / "static/sessions.js").read_text(encoding="utf-8")
+    messages_js = (ROOT / "static/messages.js").read_text(encoding="utf-8")
     return f"""
 const src = {js!r};
+const messagesSrc = {messages_js!r};
 function extractFunc(name) {{
   const start = src.search(new RegExp('function\\\\s+' + name + '\\\\s*\\\\('));
   if (start < 0) throw new Error(name + ' not found');
@@ -41,6 +43,17 @@ function extractFunc(name) {{
     i++;
   }}
   return src.slice(start, i);
+}}
+function extractMessageFunc(name) {{
+  const start = messagesSrc.search(new RegExp('function\\\\s+' + name + '\\\\s*\\\\('));
+  if (start < 0) throw new Error(name + ' not found');
+  let i = messagesSrc.indexOf('{{', start), depth = 1; i++;
+  while (depth && i < messagesSrc.length) {{
+    if (messagesSrc[i] === '{{') depth++;
+    else if (messagesSrc[i] === '}}') depth--;
+    i++;
+  }}
+  return messagesSrc.slice(start, i);
 }}
 eval(extractFunc('_sessionProfileScope'));
 eval(extractFunc('_sidebarLineageSourceBucket'));
@@ -575,6 +588,98 @@ console.log(JSON.stringify({
         "unreadB": True,
         "observedA": False,
         "observedB": True,
+    }
+
+
+def test_messages_viewed_lifecycle_keeps_duplicate_ids_scoped():
+    result = _run_node(_harness("""
+const store = {};
+global.localStorage = {
+  getItem:key => Object.prototype.hasOwnProperty.call(store,key) ? store[key] : null,
+  setItem:(key,value) => { store[key] = String(value); },
+};
+let _sessionViewedCounts = null;
+let _sessionCompletionUnread = null;
+const SESSION_VIEWED_COUNTS_KEY = 'session-viewed-counts';
+const SESSION_COMPLETION_UNREAD_KEY = 'session-completion-unread';
+eval(extractFunc('_getSessionViewedCounts'));
+eval(extractFunc('_saveSessionViewedCounts'));
+eval(extractFunc('_getSessionCompletionUnread'));
+eval(extractFunc('_saveSessionCompletionUnread'));
+eval(extractFunc('_clearSessionCompletionUnread'));
+eval(extractFunc('_setSessionViewedCount'));
+eval(extractMessageFunc('_messageRuntimeContextForRow'));
+eval(extractMessageFunc('_markSessionViewed'));
+const rowA = {session_id:'same', profile_scope:'profile-a', project_id:'project-a'};
+const rowB = {session_id:'same', profile_scope:'profile-b', project_id:'project-b'};
+global._allSessions = [rowA, rowB];
+global._sidebarReferenceSessions = [];
+global.S = {session:rowA};
+const context = _createSidebarRuntimeContext(global._allSessions, []);
+_markSessionViewed('same', 5, rowA, context);
+_markSessionViewed('same', 7, rowB, context);
+const keyA = context.key(rowA, 'same');
+const keyB = context.key(rowB, 'same');
+console.log(JSON.stringify({
+  values:[_getSessionViewedCounts()[keyA], _getSessionViewedCounts()[keyB]],
+  keys:Object.keys(_getSessionViewedCounts()),
+}));
+"""))
+    assert result["values"] == [5, 7]
+    assert len(result["keys"]) == 2
+
+
+def test_production_batch_delete_handler_passes_scoped_row_and_context():
+    result = _run_node(_harness("""
+eval(extractFunc('_renderBatchActionBar'));
+const makeNode = () => ({
+  children:[], style:{}, appendChild(child){this.children.push(child); return child;},
+  classList:{add(){}, remove(){}, toggle(){}}, setAttribute(){},
+});
+const bar = makeNode();
+global.document = {
+  createElement:() => makeNode(),
+  querySelector:() => null,
+  querySelectorAll:() => [],
+};
+global.$ = id => id === 'batchActionBar' ? bar : makeNode();
+global._selectedSessions = new Set(['same']);
+const rowA = {session_id:'same', profile_scope:'profile-a', project_id:'project-a'};
+const rowB = {session_id:'same', profile_scope:'profile-b', project_id:'project-b'};
+global._allSessions = [rowA, rowB];
+global._sidebarReferenceSessions = [];
+global._sessionSnapshotById = sid => sid === 'same' ? rowA : null;
+global._worktreeSessionCount = () => 0;
+global._worktreeResponseCount = () => 0;
+global.t = () => 'x';
+global.showConfirmDialog = async () => true;
+global.api = async () => ({});
+global.S = {session:null};
+global.localStorage = {removeItem(){}};
+global.exitSessionSelectMode = () => {};
+global.renderSessionList = async () => {};
+global.showToast = () => {};
+const calls = [];
+global._clearHandoffStorageForSession = (sid, row, context) => calls.push({sid, row, context});
+(async()=>{
+  _renderBatchActionBar();
+  await bar.children[3].onclick();
+  const context = calls[0].context;
+  console.log(JSON.stringify({
+    calls:calls.length,
+    sid:calls[0].sid,
+    rowIsA:calls[0].row === rowA,
+    sharedIndex:Boolean(context && context.index),
+    scopedKeys:context.key(rowA, 'same') !== context.key(rowB, 'same'),
+  }));
+})();
+"""))
+    assert result == {
+        "calls": 1,
+        "sid": "same",
+        "rowIsA": True,
+        "sharedIndex": True,
+        "scopedKeys": True,
     }
 
 
