@@ -45,6 +45,8 @@ def test_deleted_sessions_prune_all_session_tracking_maps():
     assert "_clearSessionViewedCount(sid, row, runtimeContext)" in clear_block
     assert "_clearSessionCompletionUnread(sid, row, runtimeContext)" in clear_block
     assert "_forgetObservedStreamingSession(row||sid, runtimeContext)" in clear_block
+    delete_block = _function_block(SESSIONS_SRC, "deleteSession", window=1800)
+    assert "_clearHandoffStorageForSession(sid, session, operationContext)" in delete_block
 
 
 def test_session_viewed_count_prune_is_best_effort_and_persists_when_changed():

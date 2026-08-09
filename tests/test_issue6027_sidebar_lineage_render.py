@@ -259,8 +259,21 @@ const instrumentedIndex = extractFunc('_buildSidebarLineageIndex').replace(
   '{', '{ buildCount++;', 1);
 eval(instrumentedIndex);
 eval(extractFunc('_createSidebarRuntimeContext'));
-eval(extractFunc('_pruneLineageReportCacheToVisibleSessions'));
 eval(extractFunc('_applySessionListPayload'));
+eval(extractFunc('_isSessionLocallyStreaming'));
+eval(extractFunc('_isSessionEffectivelyStreaming'));
+eval(extractFunc('_hasPendingUserMessageSignal'));
+eval(extractFunc('_isServerIdleSessionRow'));
+eval(extractFunc('_isOptimisticFirstTurnSessionRow'));
+eval(extractFunc('_shouldKeepLocalOnlyOptimisticSessionRow'));
+eval(extractFunc('_dropStaleOptimisticSessionRow'));
+eval(extractFunc('_rememberSessionListSource'));
+eval(extractFunc('_mergeOptimisticFirstTurnSessions'));
+eval(extractFunc('_reconcileActiveSessionIdleStateFromList'));
+eval(extractFunc('_markPollingCompletionUnreadTransitions'));
+eval(extractFunc('_lineageReportCacheKey'));
+eval(extractFunc('_collapseSessionLineageForSidebar'));
+eval(extractFunc('_pruneLineageReportCacheToVisibleSessions'));
 global.window = {_showCliSessions:false};
 global._allSessions = [{session_id:'local', profile_scope:'profile-a', project_id:'project-a',
   is_streaming:true, message_count:1, pending_user_message:'local turn'}];
@@ -293,7 +306,23 @@ global._sessionStreamingById = new Map();
 global._sessionListSnapshotById = new Map();
 global._sessionListSourceById = new Map();
 global._sessionObservedStreaming = {};
-global.S = {activeProfile:'profile-a', session:null};
+global.S = {activeProfile:'profile-a', session:{session_id:'local', profile_scope:'profile-a',
+  project_id:'project-a', message_count:1, is_streaming:true, pending_user_message:'local turn'}};
+global.INFLIGHT = {local:{lastAssistantText:'local'}};
+global._isCliSession = () => false;
+global._isSessionActivelyViewedForList = () => false;
+global._forgetObservedStreamingSession = () => {};
+global._rememberObservedStreamingSession = () => {};
+global._getSessionObservedStreaming = () => global._sessionObservedStreaming;
+global._markSessionCompletionUnread = () => {};
+global.hideApprovalCard = () => {};
+global.hideLiveRunStatus = () => {};
+global.clearLiveToolCards = () => {};
+global.updateSendBtn = () => {};
+global._scheduleActiveSessionIdleReload = () => {};
+global._sendInProgress = false;
+global._lineageReportCache = new Map();
+global._lineageReportInflight = new Map();
 let mergeContext = null;
 let mergeRows = null;
 let reconcileContext = null;
@@ -301,24 +330,29 @@ let reconcileRows = null;
 let pollContext = null;
 let pollRows = null;
 let pruneCalls = [];
+const realPrune = _pruneLineageReportCacheToVisibleSessions;
 global._pruneLineageReportCacheToVisibleSessions = (rows,index,context) => {
   pruneCalls.push({rows,index,context});
+  return realPrune(rows,index,context);
 };
+const realReconcile = _reconcileActiveSessionIdleStateFromList;
 global._reconcileActiveSessionIdleStateFromList = (rows, context) => {
-  reconcileRows = rows; reconcileContext = context; return false;
+  reconcileRows = rows; reconcileContext = context; return realReconcile(rows, context);
 };
+const realMerge = _mergeOptimisticFirstTurnSessions;
 global._mergeOptimisticFirstTurnSessions = (rows, context) => {
-  mergeRows = rows; mergeContext = context; return rows;
+  mergeRows = rows; mergeContext = context; return realMerge(rows, context);
 };
 global._syncSessionAttentionSoundState = () => {};
 global._recordSessionProfileCount = () => {};
+const realPoll = _markPollingCompletionUnreadTransitions;
 global._markPollingCompletionUnreadTransitions = (rows, context) => {
   pollRows = rows; pollContext = context;
   if (rows.some(row => row.session_id === 'cron-running' && row.cron_running !== true)) {
     throw new Error('cron_running signal was changed before polling completion handling');
   }
+  return realPoll(rows, context);
 };
-global._isSessionEffectivelyStreaming = row => Boolean(row && (row.is_streaming || row.cron_running));
 global.startStreamingPoll = () => {};
 global.stopStreamingPoll = () => {};
 global.ensureSessionTimeRefreshPoll = () => {};
@@ -338,7 +372,7 @@ for (let i = 0; i < 2400; i++) incomingRows.push({
 _applySessionListPayload({
   active_profile:'profile-a',
   sessions:[...incomingRows,
-    {session_id:'incoming-a', profile_scope:'profile-a', project_id:'project-a', message_count:2},
+    {session_id:'local', profile_scope:'profile-a', project_id:'project-a', message_count:2},
     {session_id:'same', profile_scope:'profile-a', project_id:'project-a', message_count:3},
     {session_id:'same', profile_scope:'profile-b', project_id:'project-b', message_count:4},
     {session_id:'cron-running', profile_scope:'profile-a', project_id:null, cron_running:true, is_streaming:true},
@@ -346,11 +380,19 @@ _applySessionListPayload({
   sidebar_reference_sessions:[{session_id:'archived-parent', profile_scope:'profile-a', project_id:'project-a', archived:true}],
 }, {projects:[]});
 const context = pruneCalls[0].context;
+const localKey = context.key(global.S.session, 'local');
+const staleKey = context.key({session_id:'stale', profile_scope:'profile-a', project_id:'stale'}, 'stale');
+global._lineageReportCache.set(localKey, {segments:[1]});
+global._lineageReportCache.set(staleKey, {segments:[1]});
+realPrune(mergeRows, context.index, context);
 console.log(JSON.stringify({buildCount, pruneCalls:pruneCalls.length,
   mergeUsesContext:mergeContext === pruneCalls[0].context,
   reconcileUsesContext:reconcileContext === pruneCalls[0].context,
   pollUsesContext:pollContext === pruneCalls[0].context,
   rowCounts:[mergeRows.length,reconcileRows.length,pollRows.length],
+  mergeEffects:Boolean(global._sessionStreamingById.has(localKey)),
+  pollEffects:Boolean(global._sessionListSnapshotById.has(localKey)),
+  cachePruned:!global._lineageReportCache.has(staleKey),
   sameKeys:context.key(context.rows.find(row => row.session_id === 'same'), 'same') !==
     context.key(context.rows.find(row => row.session_id === 'same' && row.profile_scope === 'profile-b'), 'same'),
   sameIndex:pruneCalls[0].index === context.index,
@@ -363,6 +405,9 @@ console.log(JSON.stringify({buildCount, pruneCalls:pruneCalls.length,
         "reconcileUsesContext": True,
         "pollUsesContext": True,
         "rowCounts": [2404, 2404, 2404],
+        "mergeEffects": True,
+        "pollEffects": True,
+        "cachePruned": True,
         "sameKeys": True,
         "sameIndex": True,
         "cronSource": True,
@@ -406,6 +451,42 @@ console.log(JSON.stringify({
     assert len(result["viewed"]) == 2
     assert len(result["unread"]) == 2
     assert result["values"] == [3, 4]
+
+
+def test_acknowledge_visit_scopes_active_row_missing_from_sidebar_cache():
+    result = _run_node(_harness("""
+const store = {};
+global.localStorage = {
+  getItem:key => Object.prototype.hasOwnProperty.call(store,key) ? store[key] : null,
+  setItem:(key,value) => { store[key] = String(value); },
+};
+let _sessionViewedCounts = null;
+const SESSION_VIEWED_COUNTS_KEY = 'session-viewed-counts';
+eval(extractFunc('_getSessionViewedCounts'));
+eval(extractFunc('_saveSessionViewedCounts'));
+global._clearSessionCompletionUnread = () => {};
+global._syncSessionListSnapshotOnVisit = () => {};
+global.renderSessionListFromCache = () => {};
+eval(extractFunc('_setSessionViewedCount'));
+eval(extractFunc('_acknowledgeSessionVisit'));
+const activeRow = {session_id:'same', profile_scope:'profile-a', project_id:'project-a'};
+const cachedRow = {session_id:'same', profile_scope:'profile-b', project_id:'project-b'};
+global._allSessions = [cachedRow];
+global._sidebarReferenceSessions = [];
+global.S = {session:activeRow};
+_acknowledgeSessionVisit('same', 7, 11);
+const expectedContext = _createSidebarRuntimeContext([cachedRow, activeRow], []);
+const counts = _getSessionViewedCounts();
+console.log(JSON.stringify({
+  keys:Object.keys(counts),
+  activeKey:expectedContext.key(activeRow, 'same'),
+  cachedKey:expectedContext.key(cachedRow, 'same'),
+  value:counts[expectedContext.key(activeRow, 'same')],
+}));
+"""))
+    assert result["keys"] == [result["activeKey"]]
+    assert result["activeKey"] != result["cachedKey"]
+    assert result["value"] == 7
 
 
 def test_compression_parent_lookup_stays_within_profile_scope():

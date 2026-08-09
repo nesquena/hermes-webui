@@ -1136,12 +1136,13 @@ function _syncSessionListSnapshotOnVisit(sid, messageCount, lastMessageAt, runti
 // aggregated unread state (own + children) authoritatively, so a lineage
 // PARENT keeps its own / other children's unread dot instead of being stripped
 // by ad-hoc DOM surgery (Greptile concern (b) on #4946).
-function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0) {
+function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0, row = null, runtimeContext=null) {
   if (!sid) return;
-  const operationContext=typeof _createSidebarRuntimeContext==='function'?_createSidebarRuntimeContext(
-    Array.isArray(_allSessions)?_allSessions:[],
-    typeof _sidebarReferenceSessions!=='undefined'?_sidebarReferenceSessions:[]):null;
-  _setSessionViewedCount(sid, messageCount, null, operationContext);
+  const activeRow=row || (typeof S!=='undefined'&&S&&S.session&&S.session.session_id===sid?S.session:null);
+  const operationContext=runtimeContext||(typeof _createSidebarRuntimeContext==='function'?_createSidebarRuntimeContext(
+    [...(Array.isArray(_allSessions)?_allSessions:[]),...(activeRow?[activeRow]:[])],
+    typeof _sidebarReferenceSessions!=='undefined'?_sidebarReferenceSessions:[]):null);
+  _setSessionViewedCount(sid, messageCount, activeRow, operationContext);
   _syncSessionListSnapshotOnVisit(sid, messageCount, lastMessageAt, operationContext);
   if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
 }
@@ -1149,12 +1150,12 @@ function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0) {
 // Does the session currently carry any unread state that a visit should clear?
 // Used by the same-session no-op guard so re-selecting the already-open session
 // still clears a stale dot before short-circuiting.
-function _sessionVisitHasUnreadState(sid) {
+function _sessionVisitHasUnreadState(sid, row = null, runtimeContext=null) {
   if (!sid) return false;
-  const activeRow=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id===sid)?S.session:null;
-  const operationContext=typeof _createSidebarRuntimeContext==='function'?_createSidebarRuntimeContext(
+  const activeRow=row || ((typeof S!=='undefined'&&S&&S.session&&S.session.session_id===sid)?S.session:null);
+  const operationContext=runtimeContext||(typeof _createSidebarRuntimeContext==='function'?_createSidebarRuntimeContext(
     [...(Array.isArray(_allSessions)?_allSessions:[]),...(activeRow?[activeRow]:[])],
-    typeof _sidebarReferenceSessions!=='undefined'?_sidebarReferenceSessions:[]):null;
+    typeof _sidebarReferenceSessions!=='undefined'?_sidebarReferenceSessions:[]):null);
   if (_hasSessionCompletionUnread(sid, activeRow, operationContext)) return true;
   if (!activeRow) return false;
   return _hasUnreadForSession(activeRow, operationContext);
@@ -2155,11 +2156,12 @@ async function loadSession(sid){
     // Re-selecting the already-open session is a no-op for transcript/scroll, but
     // it is still a *visit*: clear a stale sidebar unread dot (e.g. one a
     // background completion left on the open, unfocused pane) before returning.
-    if(_sessionVisitHasUnreadState(sid)){
+    if(_sessionVisitHasUnreadState(sid,S.session)){
       _acknowledgeSessionVisit(
         sid,
         Number(S.session.message_count || 0),
-        Number(S.session.last_message_at || S.session.updated_at || 0)
+        Number(S.session.last_message_at || S.session.updated_at || 0),
+        S.session
       );
     }
     return;
@@ -2480,7 +2482,8 @@ async function loadSession(sid){
   _acknowledgeSessionVisit(
     S.session.session_id,
     Number(data.session.message_count || 0),
-    Number(data.session.last_message_at || data.session.updated_at || 0)
+    Number(data.session.last_message_at || data.session.updated_at || 0),
+    S.session
   );
   try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
   _setActiveSessionUrl(S.session.session_id);
@@ -2818,7 +2821,8 @@ async function loadSession(sid){
     _acknowledgeSessionVisit(
       sid,
       Number(S.session.message_count || 0),
-      Number(S.session.last_message_at || S.session.updated_at || 0)
+      Number(S.session.last_message_at || S.session.updated_at || 0),
+      S.session
     );
   }
 

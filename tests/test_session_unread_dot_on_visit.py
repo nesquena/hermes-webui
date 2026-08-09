@@ -50,16 +50,16 @@ def _function_block(name: str, next_marker: str) -> str:
 # ── Structural anchors ──────────────────────────────────────────────────────
 
 def test_visit_ack_helpers_exist():
-    assert "function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0)" in SESSIONS_JS
+    assert "function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0, row = null, runtimeContext=null)" in SESSIONS_JS
     assert "function _syncSessionListSnapshotOnVisit(sid, messageCount, lastMessageAt, runtimeContext=null)" in SESSIONS_JS
-    assert "function _sessionVisitHasUnreadState(sid)" in SESSIONS_JS
+    assert "function _sessionVisitHasUnreadState(sid, row = null, runtimeContext=null)" in SESSIONS_JS
 
 
 def test_acknowledge_visit_syncs_viewed_snapshot_and_repaints():
     body = _function_block("_acknowledgeSessionVisit", "function _sessionVisitHasUnreadState")
     # Clears viewed count (which clears the stale completion-unread marker, #3020),
     # syncs the polling snapshot, and repaints the sidebar from cache.
-    assert "_setSessionViewedCount(sid, messageCount, null, operationContext);" in body
+    assert "_setSessionViewedCount(sid, messageCount, activeRow, operationContext);" in body
     assert "_syncSessionListSnapshotOnVisit(sid, messageCount, lastMessageAt, operationContext);" in body
     assert "renderSessionListFromCache" in body
 
@@ -98,7 +98,7 @@ def test_post_load_reack_is_guarded_by_active_view():
 def test_same_session_reselect_clears_stale_unread():
     block = _load_session_block()
     guard = block.find("if(currentSid===sid && !forceReload && (!_loadingSessionId || _loadingSessionId===sid)){")
-    unread_check = block.find("_sessionVisitHasUnreadState(sid)", guard)
+    unread_check = block.find("_sessionVisitHasUnreadState(sid,S.session)", guard)
     acknowledge = block.find("_acknowledgeSessionVisit(", unread_check)
     ret = block.find("return;", acknowledge)
 
