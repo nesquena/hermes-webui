@@ -488,6 +488,27 @@ class TestGatewayHealthBaseUrl:
             'GATEWAY_HEALTH_URL': '  http://gw.invalid:8642  ',
         }) == 'http://gw.invalid:8642'
 
+    @pytest.mark.parametrize('var,next_var', [
+        ('GATEWAY_HEALTH_URL', 'HERMES_GATEWAY_HEALTH_URL'),
+        ('HERMES_GATEWAY_HEALTH_URL', 'HERMES_API_URL'),
+        ('HERMES_API_URL', 'HERMES_WEBUI_GATEWAY_BASE_URL'),
+    ])
+    def test_whitespace_only_var_falls_through_to_next_url(self, var, next_var):
+        """A whitespace-only value is unset for precedence purposes, so a
+        lower-priority valid URL must still win (re-gate #6156)."""
+        assert self._resolve({
+            var: '   ',
+            next_var: 'http://fallback.invalid:8642',
+        }) == 'http://fallback.invalid:8642'
+
+    def test_all_whitespace_only_values_fall_back_to_docker_default(self):
+        assert self._resolve({
+            'GATEWAY_HEALTH_URL': '   ',
+            'HERMES_GATEWAY_HEALTH_URL': '\t\n ',
+            'HERMES_API_URL': '   ',
+            'HERMES_WEBUI_GATEWAY_BASE_URL': ' \t ',
+        }) == 'http://hermes-agent:8642'
+
     @pytest.mark.parametrize('var', [
         'GATEWAY_HEALTH_URL',
         'HERMES_GATEWAY_HEALTH_URL',
