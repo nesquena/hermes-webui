@@ -17,6 +17,7 @@ import os
 import sys
 import types
 import urllib.error
+from urllib.parse import urlparse
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
@@ -44,6 +45,23 @@ class _FakeResponse:
         return self._payload
 
 
+class _RouteHandler:
+    """Minimal handler for route-level JSON endpoint tests."""
+
+    command = "GET"
+    headers = {}
+
+    def __init__(self, path: str):
+        from unittest.mock import MagicMock
+
+        self.path = path
+        self.wfile = MagicMock()
+        self.send_response = MagicMock()
+        self.send_header = MagicMock()
+        self.end_headers = MagicMock()
+        self._pending_set_cookies = []
+
+
 def _with_config(model=None, providers=None):
     old_cfg = dict(config.cfg)
     old_mtime = config._cfg_mtime
@@ -62,6 +80,44 @@ def _restore_config(old_cfg, old_mtime):
     config.cfg.clear()
     config.cfg.update(old_cfg)
     config._cfg_mtime = old_mtime
+
+
+def test_cost_history_route_uses_active_profile_readonly_env(monkeypatch, tmp_path):
+    """GET /api/provider/cost-history must read the request-active profile env."""
+    from api import routes
+
+    base = tmp_path / ".hermes"
+    work_home = base / "profiles" / "work"
+    work_home.mkdir(parents=True)
+    (work_home / ".env").write_text("OPENROUTER_API_KEY=from-work-profile\n", encoding="utf-8")
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setenv("HERMES_HOME", str(base))
+    monkeypatch.setenv("OPENROUTER_API_KEY", "from-process-default")
+
+    seen = {}
+
+    def fake_cost_history(provider_id, days):
+        seen["provider"] = provider_id
+        seen["days"] = days
+        seen["env_key"] = config._thread_local_env_value("OPENROUTER_API_KEY")
+        return {"ok": True, "provider": provider_id, "days": days}
+
+    monkeypatch.setattr(routes, "get_provider_cost_history", fake_cost_history)
+    handler = _RouteHandler("/api/provider/cost-history?provider=openrouter&days=9")
+    profiles.set_request_profile("work")
+    try:
+        handled = routes.handle_get(handler, urlparse(handler.path))
+    finally:
+        profiles.clear_request_profile()
+
+    assert handled is None
+    handler.send_response.assert_called_once_with(200)
+    assert seen == {
+        "provider": "openrouter",
+        "days": 9,
+        "env_key": "from-work-profile",
+    }
+    assert os.environ["OPENROUTER_API_KEY"] == "from-process-default"
 
 
 # ── Happy path: snapshot append + delta response ──────────────────────────────

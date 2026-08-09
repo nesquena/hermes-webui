@@ -7,7 +7,7 @@ def test_keyless_named_custom_provider_uses_placeholder_and_generic_custom(monke
     monkeypatch.setattr(
         streaming,
         "resolve_custom_provider_connection",
-        lambda provider: (None, "http://gpu.local:8000/v1"),
+        lambda provider, **kwargs: (None, "http://gpu.local:8000/v1"),
     )
 
     provider, api_key, base_url = streaming._resolve_custom_provider_runtime_overrides(
@@ -25,7 +25,7 @@ def test_named_custom_provider_preserves_configured_key(monkeypatch):
     monkeypatch.setattr(
         streaming,
         "resolve_custom_provider_connection",
-        lambda provider: ("real-key", "http://gpu.local:8000/v1"),
+        lambda provider, **kwargs: ("real-key", "http://gpu.local:8000/v1"),
     )
 
     provider, api_key, base_url = streaming._resolve_custom_provider_runtime_overrides(
@@ -43,7 +43,7 @@ def test_named_custom_provider_keeps_existing_runtime_base_url(monkeypatch):
     monkeypatch.setattr(
         streaming,
         "resolve_custom_provider_connection",
-        lambda provider: (None, "http://config.example/v1"),
+        lambda provider, **kwargs: (None, "http://config.example/v1"),
     )
 
     provider, api_key, base_url = streaming._resolve_custom_provider_runtime_overrides(
@@ -60,7 +60,7 @@ def test_non_custom_provider_is_unchanged(monkeypatch):
 
     called = False
 
-    def _unexpected(provider):
+    def _unexpected(provider, **kwargs):
         nonlocal called
         called = True
         return (None, None)
@@ -86,19 +86,18 @@ def test_custom_provider_env_name_is_posix_safe():
 def test_resolve_custom_provider_connection_prefers_sanitized_env(monkeypatch):
     import api.config as config
 
-    monkeypatch.setattr(
-        config,
-        "get_config",
-        lambda: {
-            "custom_providers": [
-                {"name": "gpu.local-8000", "base_url": "http://gpu.local:8000/v1"},
-            ],
-        },
-    )
+    cfg = {
+        "custom_providers": [
+            {"name": "gpu.local-8000", "base_url": "http://gpu.local:8000/v1"},
+        ],
+    }
     monkeypatch.setenv("CUSTOM_GPU_LOCAL_8000_API_KEY", "sanitized-key")
     monkeypatch.setenv("CUSTOM:GPU.LOCAL-8000_API_KEY", "legacy-key")
 
-    api_key, base_url = config.resolve_custom_provider_connection("custom:gpu.local-8000")
+    api_key, base_url = config.resolve_custom_provider_connection(
+        "custom:gpu.local-8000",
+        config_data=cfg,
+    )
 
     assert api_key == "sanitized-key"
     assert base_url == "http://gpu.local:8000/v1"
@@ -109,20 +108,19 @@ def test_resolve_custom_provider_connection_falls_back_to_legacy_env(monkeypatch
     import api.config as config
 
     config._LEGACY_CUSTOM_API_KEY_ENV_WARNED.clear()
-    monkeypatch.setattr(
-        config,
-        "get_config",
-        lambda: {
-            "custom_providers": [
-                {"name": "gpu.local-8000", "base_url": "http://gpu.local:8000/v1"},
-            ],
-        },
-    )
+    cfg = {
+        "custom_providers": [
+            {"name": "gpu.local-8000", "base_url": "http://gpu.local:8000/v1"},
+        ],
+    }
     monkeypatch.delenv("CUSTOM_GPU_LOCAL_8000_API_KEY", raising=False)
     monkeypatch.setenv("CUSTOM:GPU.LOCAL-8000_API_KEY", "legacy-key")
 
     with caplog.at_level(logging.WARNING, logger="api.config"):
-        api_key, _base_url = config.resolve_custom_provider_connection("custom:gpu.local-8000")
+        api_key, _base_url = config.resolve_custom_provider_connection(
+            "custom:gpu.local-8000",
+            config_data=cfg,
+        )
 
     assert api_key == "legacy-key"
     assert "CUSTOM_GPU_LOCAL_8000_API_KEY" in caplog.text

@@ -209,7 +209,7 @@ class TestLiveModelsCustomProviderFallback:
         import api.routes as r
 
         r._clear_live_models_cache()
-        monkeypatch.setattr(c, "get_config", lambda: cfg)
+        monkeypatch.setattr(c, "get_config_snapshot", lambda: cfg)
         monkeypatch.setattr(c, "_resolve_provider_alias", lambda p: p)
         monkeypatch.setattr(r, "j", lambda _handler, payload, **_kw: payload)
         TestLiveModelsCustomProviderFallback._install_provider_model_ids(monkeypatch, lambda _p: [])
@@ -501,7 +501,7 @@ class TestLiveModelsCustomProviderFallback:
         import api.routes as r
 
         monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-        monkeypatch.setattr(c, "get_config", lambda: cfg)
+        monkeypatch.setattr(c, "get_config_snapshot", lambda: cfg)
         monkeypatch.setattr(r, "j", lambda _handler, payload, **_kw: payload)
         self._install_provider_model_ids(monkeypatch, lambda _p: [])
 
