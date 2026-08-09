@@ -1460,7 +1460,8 @@ def test_settlement_handoff_is_one_shot_and_renderer_owned():
     render = _extract("renderMessages", UI_JS)
     assert "const _settlementHandoff=_liveTurnSettlementHandoff;" in render
     assert "_liveTurnSettlementHandoff=null;" in render
-    assert "if(sid&&(INFLIGHT[sid]||_settlementHandoffMatchesOwner(_settlementHandoff,sid)))" in render
+    assert "const _settlementHandoffValid=_settlementHandoffMatchesOwner(_settlementHandoff,sid);" in render
+    assert "if(sid&&(INFLIGHT[sid]||_settlementHandoffValid))" in render
     handoff_block=render[render.find("let _preservedLiveTurn"):render.find("let _preservedLiveTurn")+1800]
     assert "S.messages=" not in handoff_block
     assert "S.activeStreamId=" not in handoff_block
@@ -1526,6 +1527,157 @@ def test_production_interrupted_projection_keeps_repeated_prefix_turns_distinct(
     assert result["count"]==2
     assert result["current"]["content"]=="same answer"
     assert result["current"]["_interrupted"] is True
+
+
+def test_production_composed_settlement_projection_marker_and_handoff():
+    current_owner=_extract("_currentLiveOwnerEntry")
+    current_owner_active=_extract("_currentLiveOwnerActive")
+    owns_stream=_extract("_ownsActiveStreamOrBackground")
+    admit=_extract("_admitSemanticSettlement")
+    admitted=_extract("_settlementAdmitted")
+    arm=_extract("_armSettledLiveTurnHandoff")
+    project=_extract("_projectInterruptedAssistantPrefix")
+    marker=_extract("_ensureSingleTerminalStreamErrorMarker")
+    marker_predicate=_extract("_isTerminalStreamErrorMarkerMessage")
+    ui_arm=_extract("armLiveTurnSettlementHandoff", UI_JS)
+    ui_match=_extract("_settlementHandoffMatchesOwner", UI_JS)
+    script=textwrap.dedent(
+        """
+        let activeSid='sid';
+        let streamId='stream';
+        let _liveOwnerToken=1;
+        let _closureRetired=false;
+        let _settlementAdmission=null;
+        let _interruptedPrefixProjected=false;
+        let _liveTurnSettlementHandoff=null;
+        let assistantText='same answer';
+        let liveReasoningText='';
+        globalThis.S={session:{session_id:'sid'},activeStreamId:'stream',messages:[
+          {role:'assistant',content:'same answer',_ts:1}
+        ]};
+        globalThis.LIVE_STREAMS={sid:{streamId:'stream',source:{},ownerToken:1,transportGeneration:2}};
+        globalThis.INFLIGHT={sid:{toolCalls:[]}};
+        globalThis._isActiveSession=()=>true;
+        globalThis._isSessionCurrentPane=()=>true;
+        globalThis.window={
+          _liveTurnSettlementOwnerKeys:{sid:{sessionId:'sid',streamId:'stream',ownerToken:1,transportGeneration:2}}
+        };
+        """
+        + current_owner
+        + """
+        """
+        + current_owner_active
+        + """
+        """
+        + owns_stream
+        + """
+        """
+        + admit
+        + """
+        """
+        + admitted
+        + """
+        """
+        + ui_arm
+        + """
+        """
+        + arm
+        + """
+        """
+        + ui_match
+        + """
+        """
+        + project
+        + """
+        """
+        + marker_predicate
+        + """
+        """
+        + marker
+        + """
+        window.armLiveTurnSettlementHandoff=armLiveTurnSettlementHandoff;
+        _admitSemanticSettlement('done',2);
+        _armSettledLiveTurnHandoff(2);
+        const admittedKey=_liveTurnSettlementHandoff;
+        const handoffAccepted=_settlementHandoffMatchesOwner(admittedKey,'sid');
+        _settlementAdmission=null;
+        _interruptedPrefixProjected=false;
+        _projectInterruptedAssistantPrefix();
+        _ensureSingleTerminalStreamErrorMarker(S.messages);
+        console.log(JSON.stringify({
+          admittedKey,
+          handoffAccepted,
+          messages:S.messages,
+          completionNotifications:0,
+          markerPresent:S.messages.some(_isTerminalStreamErrorMarkerMessage)
+        }));
+        """
+    )
+    proc=_run_node_script(script)
+    assert proc.returncode==0, proc.stderr
+    result=json.loads(proc.stdout)
+    assert result["admittedKey"]=={
+        "sessionId":"sid","streamId":"stream","ownerToken":1,"transportGeneration":2
+    }
+    assert result["handoffAccepted"] is True
+    assert result["completionNotifications"]==0
+    assert result["markerPresent"] is True
+    assert result["messages"][1]["_interrupted"] is True
+
+
+def test_production_owner_key_cleanup_preserves_armed_handoff_then_rejects_replacement():
+    owner_key=_extract("_settlementOwnerKey")
+    same_owner_key=_extract("_sameSettlementOwnerKey")
+    publish_owner_key=_extract("_publishSettlementOwnerKey")
+    clear_owner_key=_extract("_clearSettlementOwnerKey")
+    ui_match=_extract("_settlementHandoffMatchesOwner", UI_JS)
+    script=textwrap.dedent(
+        """
+        let activeSid='sid';
+        let streamId='stream-old';
+        let _liveOwnerToken=1;
+        globalThis.window={
+          _liveTurnSettlementOwnerKeys:{sid:{sessionId:'sid',streamId:'stream-old',ownerToken:1,transportGeneration:2}},
+          _liveTurnSettlementArmedOwnerKeys:{sid:{sessionId:'sid',streamId:'stream-old',ownerToken:1,transportGeneration:2}}
+        };
+        """
+        + owner_key
+        + """
+        """
+        + same_owner_key
+        + """
+        """
+        + publish_owner_key
+        + """
+        """
+        + clear_owner_key
+        + """
+        """
+        + ui_match
+        + """
+        const oldHandoff=window._liveTurnSettlementArmedOwnerKeys.sid;
+        _clearSettlementOwnerKey();
+        const preservedForArmed=!!window._liveTurnSettlementOwnerKeys.sid;
+        _liveOwnerToken=2;
+        streamId='stream-new';
+        _publishSettlementOwnerKey(3);
+        const rejectedAfterReplacement=!_settlementHandoffMatchesOwner(oldHandoff,'sid');
+        _clearSettlementOwnerKey();
+        console.log(JSON.stringify({
+          preservedForArmed,
+          rejectedAfterReplacement,
+          boundedAfterReplacement:Object.keys(window._liveTurnSettlementOwnerKeys).length===0
+        }));
+        """
+    )
+    proc=_run_node_script(script)
+    assert proc.returncode==0, proc.stderr
+    result=json.loads(proc.stdout)
+    assert result=={
+        "preservedForArmed":True,
+        "rejectedAfterReplacement":True,
+        "boundedAfterReplacement":True,
+    }
 
 
 def test_long_tail_recovery_does_not_reattach_stale_stream_over_replacement_owner():
@@ -2360,6 +2512,14 @@ def test_stream_end_during_done_fade_keeps_completion_lease_alive_until_settle()
     current_event_owner = _extract("_currentLiveEventSourceOwnsStream")
     current_transport_generation = _extract("_captureCurrentLiveTransportGeneration")
     owner = _extract("_ownsActiveStreamOrBackground")
+    next_generation = _extract("_nextLiveTransportGeneration")
+    admit = _extract("_admitSemanticSettlement")
+    admitted = _extract("_settlementAdmitted")
+    arm = _extract("_armSettledLiveTurnHandoff")
+    owner_key = _extract("_settlementOwnerKey")
+    same_owner_key = _extract("_sameSettlementOwnerKey")
+    publish_owner_key = _extract("_publishSettlementOwnerKey")
+    clear_owner_key = _extract("_clearSettlementOwnerKey")
     retire_live_closure = _extract("_retireLiveClosure")
     close_source = _extract("_closeSource")
     done_body = _extract_event_body("done")
@@ -2375,6 +2535,7 @@ def test_stream_end_during_done_fade_keeps_completion_lease_alive_until_settle()
         let _persistTimer = null;
         let _streamEndRecoveryLease = null;
         let _acceptedCompletionLease = null;
+        let _settlementAdmission = null;
         let _liveTransportGenerationSeq = 1;
         let delayedFinish = null;
         let retainOwnerCloseCalls = 0;
@@ -2459,7 +2620,14 @@ def test_stream_end_during_done_fade_keeps_completion_lease_alive_until_settle()
         globalThis.renderSessionList = () => { sessionListCalls += 1; };
         globalThis._setActivePaneIdleIfOwner = () => { idleCalls += 1; };
         globalThis._isActiveSession = () => true;
-        globalThis.window = { removeEventListener: () => {} };
+        let handoffKey = null;
+        globalThis.window = {
+          removeEventListener: () => {},
+          armLiveTurnSettlementHandoff: (key) => { handoffKey = key; },
+          _liveTurnSettlementOwnerKeys: {
+            'sid-1': { sessionId: 'sid-1', streamId: 'stream-1', ownerToken: 1, transportGeneration: 1 }
+          },
+        };
         globalThis.snapshotLiveTurnHtmlForSession = () => {};
         globalThis._clearLiveRunStatusTimer = () => {};
         globalThis.hideLiveRunStatus = () => {};
@@ -2474,6 +2642,27 @@ def test_stream_end_during_done_fade_keeps_completion_lease_alive_until_settle()
           _liveTransportGenerationSeq += 1;
           return _liveTransportGenerationSeq;
         };
+        """
+        + owner_key
+        + """
+        """
+        + same_owner_key
+        + """
+        """
+        + publish_owner_key
+        + """
+        """
+        + clear_owner_key
+        + """
+        """
+        + admit
+        + """
+        """
+        + admitted
+        + """
+        """
+        + arm
+        + """
         """
         + current_owner
         + """
@@ -2533,6 +2722,7 @@ def test_stream_end_during_done_fade_keeps_completion_lease_alive_until_settle()
           activeStreamId: S.activeStreamId,
           sessionListCalls,
           idleCalls,
+          handoffKey,
         }));
         """
     )
@@ -2547,6 +2737,12 @@ def test_stream_end_during_done_fade_keeps_completion_lease_alive_until_settle()
     assert result["activeStreamId"] is None
     assert result["sessionListCalls"] == 1
     assert result["idleCalls"] == 1
+    assert result["handoffKey"] == {
+        "sessionId": "sid-1",
+        "streamId": "stream-1",
+        "ownerToken": 1,
+        "transportGeneration": 2,
+    }
 
 
 def test_error_during_done_fade_keeps_completion_lease_alive_until_settle():

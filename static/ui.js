@@ -15924,13 +15924,29 @@ function _processWakeupCardHtml(info, rawText, extras){
 }
 
 let _liveTurnSettlementHandoff=null;
-function armLiveTurnSettlementHandoff(key){_liveTurnSettlementHandoff=key||null;}
+function armLiveTurnSettlementHandoff(key){
+  _liveTurnSettlementHandoff=key||null;
+  if(!key||typeof window==='undefined') return;
+  const _armedKeys=window._liveTurnSettlementArmedOwnerKeys||(window._liveTurnSettlementArmedOwnerKeys={});
+  _armedKeys[key.sessionId]=key;
+}
 function _settlementHandoffMatchesOwner(handoff,sid){
   if(!handoff||handoff.sessionId!==sid||typeof window==='undefined') return false;
   const owners=window._liveTurnSettlementOwnerKeys;
   const owner=owners&&owners[sid];
   return !!(owner&&owner.sessionId===handoff.sessionId&&owner.streamId===handoff.streamId&&
     owner.ownerToken===handoff.ownerToken&&owner.transportGeneration===handoff.transportGeneration);
+}
+function _settlementHandoffKeysEqual(a,b){
+  return !!(a&&b&&a.sessionId===b.sessionId&&a.streamId===b.streamId&&
+    a.ownerToken===b.ownerToken&&a.transportGeneration===b.transportGeneration);
+}
+function _consumeSettlementHandoff(handoff){
+  if(!handoff||typeof window==='undefined') return;
+  const _armedKeys=window._liveTurnSettlementArmedOwnerKeys;
+  const _ownerKeys=window._liveTurnSettlementOwnerKeys;
+  if(_armedKeys&&_settlementHandoffKeysEqual(_armedKeys[handoff.sessionId],handoff)) delete _armedKeys[handoff.sessionId];
+  if(_ownerKeys&&_settlementHandoffKeysEqual(_ownerKeys[handoff.sessionId],handoff)) delete _ownerKeys[handoff.sessionId];
 }
 if(typeof window!=='undefined') window.armLiveTurnSettlementHandoff=armLiveTurnSettlementHandoff;
 
@@ -15945,17 +15961,19 @@ function renderMessages(options){
   const inner=$('msgInner');
   const sid=S.session?S.session.session_id:null;
   const _settlementHandoff=_liveTurnSettlementHandoff;
+  const _settlementHandoffValid=_settlementHandoffMatchesOwner(_settlementHandoff,sid);
   _liveTurnSettlementHandoff=null;
+  _consumeSettlementHandoff(_settlementHandoff);
+  const msgCount=S.messages.length;
+  if(_loadingSessionId===sid&&msgCount===0&&inner) return;
+  if(sid!==_messageRenderWindowSid) _resetMessageRenderWindow(sid);
   if(!S.busy&&Array.isArray(S.messages)&&typeof _hydrateIdLinkedHistoricalToolScenes==='function'){
     const activityMode=typeof chatActivityMode==='function'?chatActivityMode():'compact_worklog';
     _hydrateIdLinkedHistoricalToolScenes(S.messages,{sessionId:sid,mode:activityMode});
   }
-  const msgCount=S.messages.length;
   // During session switch, S.messages is intentionally cleared while the full
   // message fetch is still in flight. Other async updates can still call
   // renderMessages() in this window. Keep the existing loading placeholder.
-  if(_loadingSessionId===sid&&msgCount===0&&inner) return;
-  if(sid!==_messageRenderWindowSid) _resetMessageRenderWindow(sid);
   let cachedRenderSignature=null;
   const hasTransientTranscriptUi=!!(
     (window._compressionUi&&(!window._compressionUi.sessionId||window._compressionUi.sessionId===sid)) ||
@@ -16023,7 +16041,7 @@ function renderMessages(options){
   // connected and the streamed text visible. Only for the streaming session's own
   // live turn; never affects settled transcripts.
   let _preservedLiveTurn=null;
-  if(sid&&(INFLIGHT[sid]||_settlementHandoffMatchesOwner(_settlementHandoff,sid))){
+  if(sid&&(INFLIGHT[sid]||_settlementHandoffValid)){
     const _lt=document.getElementById('liveAssistantTurn');
     if(_lt&&(!_lt.dataset||!_lt.dataset.sessionId||_lt.dataset.sessionId===sid)){
       // Blank-turn fix (对话消失): only preserve the live turn across the DOM

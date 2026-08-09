@@ -2084,10 +2084,31 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _liveTransportGenerationSeq=1;
   LIVE_STREAMS[activeSid]={streamId,source:null,ownerToken:_liveOwnerToken};
   LIVE_STREAMS[activeSid].transportGeneration=_liveTransportGenerationSeq;
-  if(typeof window!=='undefined'){
-    const _ownerKeys=window._liveTurnSettlementOwnerKeys||(window._liveTurnSettlementOwnerKeys={});
-    _ownerKeys[activeSid]={sessionId:activeSid,streamId,ownerToken:_liveOwnerToken,transportGeneration:_liveTransportGenerationSeq};
+  function _settlementOwnerKey(generation){
+    return {sessionId:activeSid,streamId,ownerToken:_liveOwnerToken,transportGeneration:generation};
   }
+  function _sameSettlementOwnerKey(a,b){
+    return !!(a&&b&&a.sessionId===b.sessionId&&a.streamId===b.streamId&&
+      a.ownerToken===b.ownerToken&&a.transportGeneration===b.transportGeneration);
+  }
+  function _publishSettlementOwnerKey(generation){
+    if(typeof window==='undefined') return;
+    const _ownerKeys=window._liveTurnSettlementOwnerKeys||(window._liveTurnSettlementOwnerKeys={});
+    const _armedKeys=window._liveTurnSettlementArmedOwnerKeys;
+    const _armedKey=_armedKeys&&_armedKeys[activeSid];
+    if(_armedKey&&(_armedKey.ownerToken!==_liveOwnerToken||_armedKey.streamId!==streamId)) delete _armedKeys[activeSid];
+    _ownerKeys[activeSid]=_settlementOwnerKey(generation);
+  }
+  function _clearSettlementOwnerKey(){
+    if(typeof window==='undefined') return;
+    const _ownerKeys=window._liveTurnSettlementOwnerKeys;
+    const _currentKey=_ownerKeys&&_ownerKeys[activeSid];
+    if(!_currentKey||_currentKey.ownerToken!==_liveOwnerToken||_currentKey.streamId!==streamId) return;
+    const _armedKeys=window._liveTurnSettlementArmedOwnerKeys;
+    if(_armedKeys&&_sameSettlementOwnerKey(_armedKeys[activeSid],_currentKey)) return;
+    delete _ownerKeys[activeSid];
+  }
+  _publishSettlementOwnerKey(_liveTransportGenerationSeq);
   if(!reconnecting&&typeof resetTurnWorkspaceMutations==='function') resetTurnWorkspaceMutations();
   if(!reconnecting&&typeof _resetStreamScrollFollow==='function') _resetStreamScrollFollow();
   // Phase D: restore bottom run status after closeLiveStream(); that helper
@@ -2409,7 +2430,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       return;
     }
     _closureRetired=true;
-    _settlementAdmission=null;
+    if(typeof _settlementAdmission!=='undefined') _settlementAdmission=null;
+    if(typeof _clearSettlementOwnerKey==='function') _clearSettlementOwnerKey();
     if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
     _cancelThrottledSnapshotTimer();
     _clearStreamEndRecovery(transportGeneration);
@@ -2455,7 +2477,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const nextTransportGeneration=typeof _nextLiveTransportGeneration==='function'
         ? _nextLiveTransportGeneration()
         : (currentLiveTransportGeneration+1);
+      if(typeof _settlementAdmission!=='undefined'&&_settlementAdmission&&_settlementAdmission.ownerToken===_liveOwnerToken&&
+        _settlementAdmission.sessionId===activeSid&&_settlementAdmission.streamId===streamId&&
+        _settlementAdmission.generation===currentLiveTransportGeneration){
+        _settlementAdmission.generation=nextTransportGeneration;
+      }
       LIVE_STREAMS[activeSid]={...live,source:null,transportGeneration:nextTransportGeneration};
+      if(typeof _publishSettlementOwnerKey==='function') _publishSettlementOwnerKey(nextTransportGeneration);
       return;
     }
     _retireLiveClosure(source, requiredTransportGeneration);
@@ -5872,11 +5900,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       ? _nextLiveTransportGeneration()
       : ((typeof existingLive.transportGeneration==='number' ? existingLive.transportGeneration : 1)+1);
     LIVE_STREAMS[activeSid]={...existingLive,streamId,source:candidate,transportGeneration};
-    if(typeof window!=='undefined'){
-      const _ownerKeys=window._liveTurnSettlementOwnerKeys||(window._liveTurnSettlementOwnerKeys={});
-      _ownerKeys[activeSid]={sessionId:activeSid,streamId,ownerToken:_liveOwnerToken,transportGeneration};
-    }
-    _settlementAdmission=null;
+    if(typeof _publishSettlementOwnerKey==='function') _publishSettlementOwnerKey(transportGeneration);
+    if(typeof _settlementAdmission!=='undefined') _settlementAdmission=null;
     const source=candidate;
 
     // Note on #631 Bug B: the original PR description stated the server
@@ -6360,7 +6385,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           _markSessionCompletionUnread(completedSid, completedMessageCount);
         }
         if(isSessionViewed) _markSessionViewed(completedSid, completedMessageCount);
-        if(typeof _armSettledLiveTurnHandoff==='function') _armSettledLiveTurnHandoff(transportGeneration);
+        const settledTransportGeneration=_captureCurrentLiveTransportGeneration();
+        if(settledTransportGeneration!=null&&typeof _armSettledLiveTurnHandoff==='function'){
+          _armSettledLiveTurnHandoff(settledTransportGeneration);
+        }
         _clearOwnerInflightState();
         if(typeof _markSessionCompletedInList==='function'){
           _markSessionCompletedInList(completedSession, activeSid);
@@ -6372,7 +6400,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           : (typeof _isMessagePaneNearBottom==='function'&&_isMessagePaneNearBottom(1200)));
         const _settledStreamId=isActiveSession?(S.activeStreamId||(d&&d.stream_id)||''):'';
         if(completionLease.closePending){
-          const settledTransportGeneration=_captureCurrentLiveTransportGeneration();
           if(settledTransportGeneration!=null){
             _closeSource(null,{transportGeneration:settledTransportGeneration});
           }
