@@ -17472,6 +17472,14 @@ function renderMessages(options){
   // streaming.
   if(_preservedLiveTurn){
     const _rebuilt=document.getElementById('liveAssistantTurn');
+    // A settled Anchor scene is canonical; preserving the pre-settlement live
+    // shell here would hide its worklog rows from the lifecycle renderer.
+    if(_settlementHandoffValid&&_rebuilt&&_rebuilt.querySelector('[data-anchor-scene-owner="1"]')){
+      _preservedLiveTurn=null;
+    }
+  }
+  if(_preservedLiveTurn){
+    const _rebuilt=document.getElementById('liveAssistantTurn');
     // Pick the PARSER-OWNED live segment, not just the first one. On reconnect /
     // post-tool activity boundaries a live turn can carry MULTIPLE
     // [data-live-assistant="1"] segments, and the smd parser writes into the
