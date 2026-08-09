@@ -63,7 +63,7 @@ jobs:
       - name: Install browser gate dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt playwright
+          pip install -r requirements.txt playwright pytest
           python -m playwright install --with-deps chromium
 
       - name: Run conversation lifecycle gate

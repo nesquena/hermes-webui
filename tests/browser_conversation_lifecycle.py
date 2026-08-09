@@ -1287,6 +1287,9 @@ def main() -> int:
             assert all(call["args"] and call["args"][0] == arm["sessionId"] for call in viewed_calls), oracle
             notification = next(call for call in oracle["calls"] if call["name"] == "sendBrowserNotification")
             assert notification["args"][:2] == ["Response complete", FINAL_TEXT], oracle
+            assert len(notification["args"]) == 3, oracle
+            assert notification["args"][2]["sid"] == arm["sessionId"], oracle
+            assert notification["args"][2]["forceHidden"] is False, oracle
             assert len(oracle["doneRuntime"]) == 1, oracle
             assert len(oracle["armObservations"]) == 1, oracle
             assert oracle["armObservations"][0]["armedOwner"] == arm, oracle
@@ -1303,6 +1306,7 @@ def main() -> int:
             assert render_entries and len(render_entries) == len(render_exits), oracle
             assert render_entries[0]["handoff"] == arm, oracle
             assert all(not trace["inflight"] and not trace["activeStreamId"] for trace in oracle["renderTrace"]), oracle
+            assert all(trace["handoff"] is None for trace in render_exits), oracle
             assert all(trace["armedOwner"] is None for trace in render_exits), oracle
             settled_state = page.evaluate(
                 """() => ({
@@ -1322,8 +1326,10 @@ def main() -> int:
                 mutation_context = browser.new_context(base_url=base_url)
                 renderer_page = mutation_context.new_page()
                 renderer_page_errors = _capture_page_errors(renderer_page)
+                mutation_route_hits = [0]
 
                 def _route_mutated_ui(route):
+                    mutation_route_hits[0] += 1
                     route.fulfill(path=str(mutated_ui_path))
 
                 renderer_page.route("**/static/ui.js*", _route_mutated_ui)
@@ -1336,6 +1342,10 @@ def main() -> int:
                     "sid => typeof S !== 'undefined' && S.session && S.session.session_id === sid",
                     arg=session_id,
                     timeout=15000,
+                )
+                assert mutation_route_hits[0] == 1, (
+                    f"ISSUE6504 MUTATION FAIL {UI_MUTATION}: "
+                    f"expected one static/ui.js interception, got {mutation_route_hits[0]}"
                 )
             renderer_cases = renderer_page.evaluate(
                 """() => {

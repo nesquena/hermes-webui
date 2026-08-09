@@ -142,6 +142,25 @@ def _run_node_script(script: str) -> subprocess.CompletedProcess[str]:
         script_path.unlink(missing_ok=True)
 
 
+def _terminate_browser_process_tree(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            capture_output=True,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    else:
+        process.kill()
+    try:
+        process.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
 def _run_issue6504_browser(mutation: str = "") -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env.update({
@@ -154,23 +173,27 @@ def _run_issue6504_browser(mutation: str = "") -> subprocess.CompletedProcess[st
         env.pop("LIFECYCLE_UI_MUTATION", None)
     with tempfile.TemporaryDirectory(prefix="issue6504-browser-", ignore_cleanup_errors=True) as artifact_dir:
         env["LIFECYCLE_ARTIFACT_DIR"] = artifact_dir
+        command = [sys.executable, str(REPO / "tests" / "browser_conversation_lifecycle.py")]
+        process = subprocess.Popen(
+            command,
+            cwd=REPO,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
         try:
-            result = subprocess.run(
-                [sys.executable, str(REPO / "tests" / "browser_conversation_lifecycle.py")],
-                cwd=REPO,
-                env=env,
-                text=True,
-                capture_output=True,
-                timeout=180,
-                check=False,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
+            stdout, stderr = process.communicate(timeout=180)
+            result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
         except subprocess.TimeoutExpired as error:
+            _terminate_browser_process_tree(process)
+            stdout, stderr = process.communicate()
             result = subprocess.CompletedProcess(
-                error.cmd,
+                command,
                 124,
-                stdout=error.stdout or "",
-                stderr=error.stderr or "browser bite timed out",
+                stdout=stdout or error.stdout or "",
+                stderr=stderr or error.stderr or "browser bite timed out",
             )
     output = result.stdout + result.stderr
     if result.returncode == 2 and "SETUP FAIL:" in output:
@@ -3735,6 +3758,8 @@ def test_same_stream_replacement_transfers_anchor_cleanup_lease():
         console.log(JSON.stringify({ retained, cleaned }));
         """
     )
+    if NODE is None:
+        pytest.skip("node not on PATH")
     proc = subprocess.run(
         [NODE, "-e", script],
         text=True,
@@ -3959,6 +3984,8 @@ def test_warning_clear_timer_does_not_clear_replacement_owner_status():
         }));
         """
     )
+    if NODE is None:
+        pytest.skip("node not on PATH")
     proc = subprocess.run(
         [NODE, "-e", script],
         text=True,
