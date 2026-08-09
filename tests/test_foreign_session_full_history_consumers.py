@@ -891,6 +891,64 @@ run().catch(err => {{ console.error(err.stack || String(err)); process.exit(1); 
 """
 
 
+def _compression_post_poll_owner_script() -> str:
+    return f"""
+let _messagesGeneration = 0;
+function _bumpMessagesGeneration() {{ _messagesGeneration += 1; return _messagesGeneration; }}
+{CAPTURE_SRC}
+{CURRENT_SRC}
+{COMMIT_SRC}
+{COMPRESSION_OPERATION_SRC}
+const S = {{
+  session: {{ session_id: 'same-session', workspace: '/ws', messages: [] }},
+  messages: [{{ role: 'assistant', content: 'before' }}],
+  toolCalls: [],
+  busy: false,
+  activeStreamId: null,
+}};
+let _loadingSessionId = null;
+let resolvePreflight = null;
+let resolvePoll = null;
+const lockCalls = [];
+function _isSessionCurrentPane(sid) {{
+  return !!S.session && S.session.session_id === sid && (!_loadingSessionId || _loadingSessionId === sid);
+}}
+function _setCompressionSessionLock(sid, ownerSid) {{ lockCalls.push({{ sid, ownerSid }}); }}
+function setBusy(value) {{ S.busy = value; }}
+function setComposerStatus() {{}}
+function setCompressionUi() {{}}
+function clearCompressionUi() {{}}
+function renderMessages() {{}}
+function clearLiveToolCards() {{}}
+function showToast() {{}}
+function t(key) {{ return key; }}
+function _manualCompressionVisibleMessages() {{ return S.messages.slice(); }}
+function _compressionAnchorMessageKey() {{ return null; }}
+function _applyManualCompressionResult() {{ throw new Error('stale result should not reach apply'); }}
+function _pollManualCompressionResult() {{
+  return new Promise(resolve => {{ resolvePoll = resolve; }});
+}}
+async function api(url) {{
+  if (String(url).startsWith('/api/session?')) return await new Promise(resolve => {{ resolvePreflight = resolve; }});
+  if (url === '/api/session/compress/start') return {{ status: 'running' }};
+  throw new Error('unexpected API request: ' + url);
+}}
+{COMPRESSION_SRC}
+(async () => {{
+  const compressionPromise = _runManualCompression('');
+  for (let i = 0; i < 20 && !resolvePreflight; i++) await new Promise(resolve => setTimeout(resolve, 0));
+  if (!resolvePreflight) throw new Error('preflight did not start');
+  resolvePreflight({{ session: {{ session_id: 'same-session', workspace: '/ws', messages: [], tool_calls: [] }} }});
+  for (let i = 0; i < 20 && !resolvePoll; i++) await new Promise(resolve => setTimeout(resolve, 0));
+  if (!resolvePoll) throw new Error('compression poll did not start');
+  _loadingSessionId = 'other-session';
+  resolvePoll({{ status: 'done', session: {{ session_id: 'same-session', messages: [{{ role: 'assistant', content: 'stale result' }}] }} }});
+  await compressionPromise;
+  console.log(JSON.stringify({{ messages: S.messages.map(message => message.content), lockCalls }}));
+}})().catch(err => {{ console.error(err.stack || String(err)); process.exit(1); }});
+"""
+
+
 def _async_slash_owner_script(
     command: str,
     *,
@@ -2014,6 +2072,9 @@ def test_blank_page_slash_rejects_owner_after_delayed_sidebar_render():
 
 
 def test_new_session_owner_guard_rejects_late_creation_install():
+    guard = "_newSessionOwnerResponseIsCurrent(data,!!(options&&options._captureOwner))"
+    assert guard in SESSIONS_JS
+    assert SESSIONS_JS.index(guard) < SESSIONS_JS.index("S.session=data.session")
     result = _run_node(_creation_await_owner_script())
 
     assert result == {
@@ -2222,6 +2283,13 @@ def test_refresh_and_compression_reject_results_during_newer_pane_load():
 
     assert result["refreshMessages"] == ["before", "newer row"]
     assert result["compressionMessages"] == ["before compression", "newer compression row"]
+
+
+def test_compression_does_not_clear_replacement_pane_lock_after_stale_poll():
+    result = _run_node(_compression_post_poll_owner_script())
+
+    assert result["messages"] == []
+    assert result["lockCalls"][-1] == {"sid": None, "ownerSid": "same-session"}
 
 
 def test_messages_generation_wiring_covers_full_load_live_turn_claims_and_same_session_replacements():

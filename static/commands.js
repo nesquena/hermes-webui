@@ -924,7 +924,7 @@ async function _applyManualCompressionResult(data, focusTopic, visibleCount, com
   }
   if(typeof setComposerStatus==='function') setComposerStatus('');
   renderMessages();
-  if(typeof _setCompressionSessionLock==='function') _setCompressionSessionLock(null);
+  if(typeof _setCompressionSessionLock==='function') _setCompressionSessionLock(null,ownerSid);
 }
 
 let _manualCompressionOperation = null;
@@ -943,7 +943,7 @@ function _settleManualCompressionOperation(operation){
     : !!(S.session&&S.session.session_id===operation.sid);
   const newerStream=!!(sameSession&&(S.activeStreamId||S.session.active_stream_id));
   if(sameSession&&!operation.uiFinalized&&typeof clearCompressionUi==='function') clearCompressionUi();
-  if(typeof _setCompressionSessionLock==='function') _setCompressionSessionLock(null);
+  if(typeof _setCompressionSessionLock==='function') _setCompressionSessionLock(null,operation.sid);
   if(sameSession&&!newerStream){
     if(typeof setBusy==='function') setBusy(false);
     if(typeof setComposerStatus==='function') setComposerStatus('');
@@ -1055,7 +1055,7 @@ async function _runManualCompression(focusTopic){
     }catch(preflightErr){
       if(!ownerStateIsCurrent()) return;
       if(typeof clearCompressionUi==='function') clearCompressionUi();
-      if(typeof _setCompressionSessionLock==='function') _setCompressionSessionLock(null);
+      if(typeof _setCompressionSessionLock==='function') _setCompressionSessionLock(null,sid);
       if(typeof setBusy==='function') setBusy(false);
       if(typeof setComposerStatus==='function') setComposerStatus('');
       renderMessages();
@@ -1114,7 +1114,7 @@ async function _runManualCompression(focusTopic){
       });
       operation.uiFinalized=true;
     }
-    if(typeof _setCompressionSessionLock==='function') _setCompressionSessionLock(null);
+    if(typeof _setCompressionSessionLock==='function') _setCompressionSessionLock(null,ownerSid);
     if(typeof setBusy==='function') setBusy(false);
     if(typeof setComposerStatus==='function') setComposerStatus('');
     renderMessages();
