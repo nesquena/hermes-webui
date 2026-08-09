@@ -9599,7 +9599,7 @@ async function refreshSession() {
   if (!S.session) return;
   try {
     const data = await api(`/api/session?session_id=${encodeURIComponent(S.session.session_id)}`);
-    setWorkspaceSearchSession(data.session);
+    if(typeof setWorkspaceSearchSession==='function') setWorkspaceSearchSession(data.session);
     S.messages = data.session.messages || [];
     _messagesTruncated = !!data.session._messages_truncated;
     _oldestIdx = data.session._messages_offset || 0;
