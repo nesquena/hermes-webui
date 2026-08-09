@@ -1329,7 +1329,10 @@ async function cmdStop(){
 
 async function cmdGoal(args){
   const activeSid=await _ensureSessionOwner();
-  if(!activeSid||!S.session||S.session.session_id!==activeSid){showToast(t('no_active_session'));return;}
+  const _goalOwnerIsCurrent=()=>typeof _isSessionCurrentPane==='function'
+    ? _isSessionCurrentPane(activeSid)
+    : !!(S.session&&S.session.session_id===activeSid);
+  if(!activeSid||!_goalOwnerIsCurrent()){showToast(t('no_active_session'));return;}
   try{
     // #6703: re-assert the explicit-pick marker on /api/goal the same way
     // /api/chat/start does. Without it the server's model resolver treats a
@@ -1366,7 +1369,7 @@ async function cmdGoal(args){
       explicit_model_pick:_explicitPick,
       profile:S.activeProfile||S.session.profile||'default',
     })});
-    if(!S.session||S.session.session_id!==activeSid)return;
+    if(!_goalOwnerIsCurrent())return;
     const msg = (() => {
       const raw = String((r && r.message) || '').trim();
       const key = String((r && r.message_key) || '').trim();
@@ -1398,7 +1401,7 @@ async function cmdGoal(args){
         _clearPendingSessionModel(activeSid);
       }
     }
-    if(!S.session||S.session.session_id!==activeSid)return;
+    if(!_goalOwnerIsCurrent())return;
     S.toolCalls=[];
     if(typeof clearLiveToolCards==='function')clearLiveToolCards();
     appendThinking();setBusy(true);
@@ -1419,7 +1422,7 @@ async function cmdGoal(args){
     attachLiveStream(activeSid,r.stream_id,[]);
     if(typeof renderSessionList==='function')void renderSessionList();
   }catch(e){
-    if(!S.session||S.session.session_id!==activeSid)return;
+    if(!_goalOwnerIsCurrent())return;
     const err=String((e&&e.message)||e||'Goal command failed');
     if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
     S.messages.push({role:'assistant',content:`**Goal command failed:** ${err}`,_ts:Date.now()/1000,_error:true});
