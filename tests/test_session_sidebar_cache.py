@@ -355,6 +355,46 @@ def test_session_list_cache_unknown_stale_reason_does_not_authorize_stale(
     assert result.source_authoritative is True
 
 
+def test_session_list_cache_source_change_during_stale_return_fails_closed(
+    monkeypatch,
+):
+    routes._session_list_cache_clear()
+    monkeypatch.setattr(routes, "_session_list_cache_source_stamp", lambda _key: ("stable",))
+    stale_reasons = iter(("age", "source"))
+    monkeypatch.setattr(
+        routes,
+        "_session_list_cache_stale_reason",
+        lambda _key: next(stale_reasons),
+    )
+
+    key = routes._session_list_cache_key(
+        active_profile="default",
+        all_profiles=False,
+        show_cli_sessions=False,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+    )
+    stale = _session_cache_payload("stale")
+    stale["sessions"][0]["active_run"] = {"started_at": 1}
+    routes._session_list_cache_set(key, stale)
+    with routes._SESSIONS_CACHE_LOCK:
+        ts, stamp, payload = routes._SESSIONS_CACHE[key]
+        routes._SESSIONS_CACHE[key] = (
+            ts - routes._SESSIONS_CACHE_TTL_SECONDS - 1.0,
+            stamp,
+            payload,
+        )
+
+    result = routes._get_cached_session_list_payload(
+        key=key,
+        builder=lambda: _session_cache_payload("fresh"),
+    )
+
+    assert result == stale
+    assert result.source_authoritative is False
+    assert "active_run" not in routes._session_list_payload_to_response(result)["sessions"][0]
+
+
 def test_session_list_cache_stale_background_rebuild_failure_releases_owner(monkeypatch):
     routes._session_list_cache_clear()
     monkeypatch.setattr(routes, "_session_list_cache_source_stamp", lambda _key: ("stable",))

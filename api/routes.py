@@ -2781,9 +2781,13 @@ def _get_cached_session_list_payload(
                 diag.stage("session_list_cache_stale_return")
             except Exception:
                 pass
+        source_authoritative = (
+            stale_reason == "age"
+            and _session_list_cache_stale_reason(key) == "age"
+        )
         return _session_list_cache_result(
             stale,
-            source_authoritative=stale_reason != "source",
+            source_authoritative=source_authoritative,
         )
 
     event, is_owner = _session_list_cache_claim_rebuild(key)

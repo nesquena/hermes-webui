@@ -365,12 +365,16 @@ console.log(JSON.stringify({{activeRunClass,childOnlyClass}}));
     )
     state_expression = state_line.split("=", 1)[1].rstrip(";")
     state_source = f"""
-const isStreaming=false; const isRingStreaming=true; const hasUnread=false;
+const isStreaming=false; let ownRingStreaming=true; const hasUnread=false;
 const attentionDotClass='';
 const activeRunState={state_expression};
-console.log(JSON.stringify({{activeRunState}}));
+ownRingStreaming=false;
+const childOnlyState={state_expression};
+console.log(JSON.stringify({{activeRunState,childOnlyState}}));
 """
-    assert "is-streaming" in _run_node_script(state_source)["activeRunState"]
+    state_result = _run_node_script(state_source)
+    assert "is-streaming" in state_result["activeRunState"]
+    assert "is-streaming" not in state_result["childOnlyState"]
 
 
 def test_active_run_elapsed_label_advances_when_pill_is_visible_with_monotonic_delta():
