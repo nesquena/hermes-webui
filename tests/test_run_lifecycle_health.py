@@ -76,6 +76,23 @@ def test_active_run_session_snapshot_is_bounded_sanitized_and_deduped():
             config.ACTIVE_RUNS.clear()
 
 
+def test_active_run_snapshot_excludes_ephemeral_and_suppressed_helper_sessions():
+    from api import config
+
+    with config.ACTIVE_RUNS_LOCK:
+        config.ACTIVE_RUNS.clear()
+    config.register_active_run("ephemeral", session_id="btw-session", ephemeral=True, started_at=10)
+    config.suppress_active_run_visibility("background", "parent-session")
+    config.register_active_run("background", session_id="bg-session", started_at=11)
+    try:
+        assert config.active_run_session_snapshot() == {}
+    finally:
+        config.unregister_active_run("ephemeral")
+        config.unregister_active_run("background")
+        with config.ACTIVE_RUNS_LOCK:
+            config.ACTIVE_RUNS.clear()
+
+
 def test_session_list_runtime_overlay_adds_active_run_only_to_accepted_rows():
     from api import config, route_session_list_cache as cache
 

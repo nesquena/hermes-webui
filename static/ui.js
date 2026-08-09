@@ -20882,6 +20882,19 @@ function _activeRunDurationLabel(seconds){
   const minutes=Math.floor(total/60);
   return minutes?`${minutes}m ${total%60}s`:`${total}s`;
 }
+function _stopActiveRunElapsedRefresh(){
+  if(_activeRunElapsedTimer){clearTimeout(_activeRunElapsedTimer);_activeRunElapsedTimer=null;}
+}
+function _scheduleActiveRunElapsedRefresh(){
+  if(_activeRunElapsedTimer)return;
+  _activeRunElapsedTimer=setTimeout(()=>{
+    _activeRunElapsedTimer=null;
+    const host=$('activeRunVisibility');
+    if(host&&!host.hidden&&typeof _renderActiveRunProjection==='function'&&typeof _allSessions!=='undefined'){
+      _renderActiveRunProjection(_allSessions);
+    }
+  },1000);
+}
 function _hideActiveRunTray(opts={}){
   const pill=$('activeRunPill'); const tray=$('activeRunTray');
   if(!pill||!tray||tray.hidden)return false;
@@ -20900,8 +20913,17 @@ function _renderActiveRunProjection(rows){
   const host=$('activeRunVisibility'), pill=$('activeRunPill'), tray=$('activeRunTray');
   if(!host||!pill||!tray||typeof window._activeRunRowsForProjection!=='function')return;
   const active=window._activeRunRowsForProjection(rows);
-  host.hidden=!active.length;
-  if(!active.length){_hideActiveRunTray();return;}
+  if(!active.length){
+    host.hidden=true;
+    pill.textContent='';
+    tray.hidden=true;
+    pill.setAttribute('aria-expanded','false');
+    Array.from(tray.children||[]).forEach(node=>node.remove());
+    _activeRunElapsedAnchors.clear();
+    _stopActiveRunElapsedRefresh();
+    return;
+  }
+  host.hidden=false;
   pill.textContent=typeof t==='function'?t('active_run_visibility_label',active.length,_activeRunDurationLabel(Math.min(...active.map(_activeRunElapsedSeconds)))):`${active.length} active`;
   const existing=new Map(Array.from(tray.children||[]).map(node=>[node.dataset.sessionId,node]));
   const keep=new Set();
@@ -20909,7 +20931,7 @@ function _renderActiveRunProjection(rows){
     const sid=String(row.session_id||''); if(!sid)continue;
     let node=existing.get(sid);
     if(!node){
-      node=document.createElement('div'); node.className='active-run-row'; node.dataset.sessionId=sid;
+      node=document.createElement('div'); node.className='active-run-row'; node.dataset.sessionId=sid; node.setAttribute('role','listitem');
       const button=document.createElement('button'); button.type='button';
       const age=document.createElement('span'); age.className='active-run-age';
       node.append(button,age); tray.appendChild(node);
@@ -20922,6 +20944,7 @@ function _renderActiveRunProjection(rows){
     keep.add(sid);
   }
   Array.from(tray.children||[]).forEach(node=>{if(!keep.has(node.dataset.sessionId)){_activeRunElapsedAnchors.delete(node.dataset.sessionId);node.remove();}});
+  _scheduleActiveRunElapsedRefresh();
 }
 if(typeof window!=='undefined')window._renderActiveRunProjection=_renderActiveRunProjection;
 document.addEventListener('DOMContentLoaded',()=>{
@@ -20930,5 +20953,4 @@ document.addEventListener('DOMContentLoaded',()=>{
   pill.addEventListener('click',()=>{if(!tray.children.length)return;tray.hidden=!tray.hidden;pill.setAttribute('aria-expanded',String(!tray.hidden));});
   document.addEventListener('click',event=>{const host=$('activeRunVisibility');if(host&&!host.hidden&&!host.contains(event.target))_hideActiveRunTray();});
   document.addEventListener('keydown',_handleActiveRunEscape);
-  _activeRunElapsedTimer=setInterval(()=>{const host=$('activeRunVisibility');if(host&&!host.hidden&&typeof _renderActiveRunProjection==='function'&&typeof _allSessions!=='undefined')_renderActiveRunProjection(_allSessions);},1000);
 });

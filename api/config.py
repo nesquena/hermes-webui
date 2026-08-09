@@ -9080,17 +9080,22 @@ SESSION_CHANNEL_SUBSCRIBER_GRACE_SECS: int = 60  # subscribers-empty grace
 # still unwinding, blocked in a provider call, or waiting for delegated work.
 ACTIVE_RUNS: dict = {}
 ACTIVE_RUNS_LOCK = threading.Lock()
+_SUPPRESSED_ACTIVE_RUNS: dict[str, str] = {}
 LAST_RUN_FINISHED_AT: float | None = None
 SERVER_START_TIME = time.time()
 
 
-def active_run_session_snapshot() -> dict[str, dict[str, float]]:
-    """Return the bounded, presentation-safe active session projection."""
-    snapshot: dict[str, dict[str, float]] = {}
-    with ACTIVE_RUNS_LOCK:
-        entries = list((ACTIVE_RUNS or {}).values())
-    for entry in entries:
+def _active_run_projection_locked() -> dict[str, float]:
+    """Return visible session starts while ``ACTIVE_RUNS_LOCK`` is held."""
+    projection: dict[str, float] = {}
+    for stream_id, entry in (ACTIVE_RUNS or {}).items():
         if not isinstance(entry, dict):
+            continue
+        if (
+            entry.get("ephemeral")
+            or entry.get("active_run_visible") is False
+            or str(stream_id) in _SUPPRESSED_ACTIVE_RUNS
+        ):
             continue
         session_id = str(entry.get("session_id") or "").strip()
         if not session_id:
@@ -9101,10 +9106,49 @@ def active_run_session_snapshot() -> dict[str, dict[str, float]]:
             continue
         if not math.isfinite(started_at) or started_at <= 0:
             continue
-        current = snapshot.get(session_id)
-        if current is None or started_at < current["started_at"]:
-            snapshot[session_id] = {"started_at": started_at}
-    return snapshot
+        current = projection.get(session_id)
+        if current is None or started_at < current:
+            projection[session_id] = started_at
+    return projection
+
+
+def active_run_session_snapshot() -> dict[str, dict[str, float]]:
+    """Return the bounded, presentation-safe active session projection."""
+    with ACTIVE_RUNS_LOCK:
+        projection = _active_run_projection_locked()
+    return {
+        session_id: {"started_at": started_at}
+        for session_id, started_at in projection.items()
+    }
+
+
+def _active_run_changed_sessions(before: dict[str, float], after: dict[str, float]) -> set[str]:
+    changed = set(before) ^ set(after)
+    changed.update(
+        session_id
+        for session_id in set(before) & set(after)
+        if before[session_id] != after[session_id]
+    )
+    return changed
+
+
+def suppress_active_run_visibility(stream_id: str, parent_session_id: str | None = None) -> None:
+    """Keep helper-session workers out of the parent activity projection."""
+    if not stream_id:
+        return
+    changed: set[str] = set()
+    with ACTIVE_RUNS_LOCK:
+        before = _active_run_projection_locked()
+        _SUPPRESSED_ACTIVE_RUNS[str(stream_id)] = str(parent_session_id or "")
+        entry = ACTIVE_RUNS.get(stream_id)
+        if isinstance(entry, dict):
+            entry["active_run_visible"] = False
+        changed = _active_run_changed_sessions(before, _active_run_projection_locked())
+    _publish_active_run_membership_changes(changed)
+
+
+def _clear_suppressed_active_run(stream_id: str) -> None:
+    _SUPPRESSED_ACTIVE_RUNS.pop(str(stream_id), None)
 
 
 _active_run_session_snapshot = active_run_session_snapshot
@@ -9135,18 +9179,11 @@ def register_active_run(stream_id: str, **metadata) -> None:
     entry.setdefault("phase", "running")
     changed: set[str] = set()
     with ACTIVE_RUNS_LOCK:
-        before_ids = {
-            str(item.get("session_id") or "").strip()
-            for item in ACTIVE_RUNS.values()
-            if isinstance(item, dict) and str(item.get("session_id") or "").strip()
-        }
+        before = _active_run_projection_locked()
+        if str(stream_id) in _SUPPRESSED_ACTIVE_RUNS:
+            entry["active_run_visible"] = False
         ACTIVE_RUNS[stream_id] = entry
-        after_ids = {
-            str(item.get("session_id") or "").strip()
-            for item in ACTIVE_RUNS.values()
-            if isinstance(item, dict) and str(item.get("session_id") or "").strip()
-        }
-        changed = before_ids ^ after_ids
+        changed = _active_run_changed_sessions(before, _active_run_projection_locked())
     _publish_active_run_membership_changes(changed)
 
 
@@ -9156,20 +9193,13 @@ def update_active_run(stream_id: str, **metadata) -> None:
         return
     changed: set[str] = set()
     with ACTIVE_RUNS_LOCK:
-        before_ids = {
-            str(item.get("session_id") or "").strip()
-            for item in ACTIVE_RUNS.values()
-            if isinstance(item, dict) and str(item.get("session_id") or "").strip()
-        }
+        before = _active_run_projection_locked()
         entry = ACTIVE_RUNS.get(stream_id)
         if entry is not None:
             entry.update(metadata)
-            after_ids = {
-                str(item.get("session_id") or "").strip()
-                for item in ACTIVE_RUNS.values()
-                if isinstance(item, dict) and str(item.get("session_id") or "").strip()
-            }
-            changed = before_ids ^ after_ids
+            if str(stream_id) in _SUPPRESSED_ACTIVE_RUNS:
+                entry["active_run_visible"] = False
+            changed = _active_run_changed_sessions(before, _active_run_projection_locked())
     _publish_active_run_membership_changes(changed)
 
 
@@ -9180,15 +9210,10 @@ def unregister_active_run(stream_id: str) -> None:
     global LAST_RUN_FINISHED_AT
     changed: set[str] = set()
     with ACTIVE_RUNS_LOCK:
-        previous = ACTIVE_RUNS.pop(stream_id, None)
-        previous_session = str(previous.get("session_id") or "").strip() if isinstance(previous, dict) else ""
-        if previous_session:
-            remaining = any(
-                isinstance(item, dict) and str(item.get("session_id") or "").strip() == previous_session
-                for item in ACTIVE_RUNS.values()
-            )
-            if not remaining:
-                changed.add(previous_session)
+        before = _active_run_projection_locked()
+        ACTIVE_RUNS.pop(stream_id, None)
+        _clear_suppressed_active_run(stream_id)
+        changed = _active_run_changed_sessions(before, _active_run_projection_locked())
         LAST_RUN_FINISHED_AT = time.time()
     _publish_active_run_membership_changes(changed)
     unregister_stream_owner(stream_id)

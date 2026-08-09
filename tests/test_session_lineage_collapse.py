@@ -13,11 +13,76 @@ NODE = shutil.which("node")
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 
 
+def _extract_function(source: str, name: str) -> str:
+    start = source.index(f"function {name}")
+    if source[max(0, start - 6):start] == "async ":
+        start -= 6
+    brace = source.index("{", source.index(")", start))
+    depth = 0
+    quote = None
+    escaped = False
+    line_comment = False
+    block_comment = False
+    for index in range(brace, len(source)):
+        char = source[index]
+        previous = source[index - 1] if index else ""
+        following = source[index + 1] if index + 1 < len(source) else ""
+        if line_comment:
+            if char == "\n":
+                line_comment = False
+            continue
+        if block_comment:
+            if char == "*" and following == "/":
+                block_comment = False
+            continue
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if char == "/" and following == "/":
+            line_comment = True
+            continue
+        if char == "/" and following == "*":
+            block_comment = True
+            continue
+        if char in "'\"`":
+            quote = char
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start:index + 1]
+    raise AssertionError(name)
+
+
 def test_active_run_annotation_follows_compressed_and_fork_lineage():
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
-    assert "function _activeRunRowsForProjection" in js
-    assert "active_run.started_at" in js
-    assert "_collapseSessionLineageForSidebar" in js
+    source = "\n".join((
+        "const window={_showCliSessions:true};",
+        "let _activeProject=null; let _sessionSourceFilter='webui'; let _showArchived=false;",
+        "const NO_PROJECT_FILTER='__none__';",
+        "function _activeSessionIdForSidebar(){return null;}",
+        "function _partitionSidebarSessionRows(rows){return {sessionsRaw:rows};}",
+        "function _isChildSession(s){return !!(s&&s.parent_session_id&&s.relationship_type==='child_session');}",
+        _extract_function(js, "_sessionTimestampMs"),
+        _extract_function(js, "_sessionLineageKey"),
+        _extract_function(js, "_authoritativeLineageTipId"),
+        _extract_function(js, "_collapseSessionLineageForSidebar"),
+        "function _sidebarLineageKeyForRow(s){return s._lineage_key||s._lineage_root_id||s.session_id;}",
+        _extract_function(js, "_activeRunLineageKey"),
+        _extract_function(js, "_activeRunRowsForProjection"),
+        "const rows=[",
+        "{session_id:'root',message_count:4,updated_at:10,_lineage_root_id:'root',_lineage_tip_id:'tip',active_run:{started_at:10,age_seconds:2}},",
+        "{session_id:'tip',message_count:6,updated_at:20,_lineage_root_id:'root',_lineage_tip_id:'tip'},",
+        "];",
+        "console.log(JSON.stringify(_activeRunRowsForProjection(rows).map(row=>[row.session_id,row.active_run.started_at])));",
+    ))
+    assert json.loads(_run_node(source)) == [["tip", 10]]
 
 
 def _run_node(source: str) -> str:

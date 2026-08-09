@@ -20,6 +20,8 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def _extract_function(source: str, name: str) -> str:
     marker = f"function {name}"
     start = source.index(marker)
+    if source[max(0, start - 6):start] == "async ":
+        start -= 6
     brace = source.index("{", source.index(")", start))
     depth = 0
     quote = None
@@ -98,6 +100,7 @@ def test_issue6025_active_run_stays_visible_after_switching_away():
     sidebar_visible = _extract_function(SESSIONS_JS, "_sidebarRowHasVisibleMessages")
     effective = _extract_function(SESSIONS_JS, "_isSessionEffectivelyStreaming")
     ring = _extract_function(SESSIONS_JS, "_isSessionRingStreaming")
+    active_lineage_key = _extract_function(SESSIONS_JS, "_activeRunLineageKey")
     source = f"""
 const NO_PROJECT_FILTER='__none__';
 let _activeProject='project-a'; let _sessionSourceFilter='webui'; let _showArchived=false;
@@ -115,6 +118,7 @@ function _collapseSessionLineageForSidebar(rows){{return rows;}}
 {ring}
 {sidebar_visible}
 {partition}
+{active_lineage_key}
 {projection}
 const rows=[
   {{session_id:'webui-project',raw_source:'webui',project_id:'project-a',active_run:{{started_at:10,age_seconds:4}}}},
@@ -133,8 +137,89 @@ console.log(JSON.stringify({{webui,cliRows}}));
     }
 
 
+def test_active_run_projection_uses_the_canonical_visible_lineage_tip():
+    projection = _extract_function(SESSIONS_JS, "_activeRunRowsForProjection")
+    collapse = _extract_function(SESSIONS_JS, "_collapseSessionLineageForSidebar")
+    lineage_key = _extract_function(SESSIONS_JS, "_sessionLineageKey")
+    timestamp = _extract_function(SESSIONS_JS, "_sessionTimestampMs")
+    child = _extract_function(SESSIONS_JS, "_isChildSession")
+    tip = _extract_function(SESSIONS_JS, "_authoritativeLineageTipId")
+    active_lineage_key = _extract_function(SESSIONS_JS, "_activeRunLineageKey")
+    source = f"""
+const NO_PROJECT_FILTER='__none__';
+let _activeProject=null; let _sessionSourceFilter='webui'; let _showArchived=false;
+const window={{_showCliSessions:true}};
+function _isMessagingSession(){{return false;}}
+function _sessionAttentionState(){{return null;}}
+function _hasPendingUserMessageSignal(row){{return !!(row.pending_user_message||row.has_pending_user_message);}}
+function _isSessionLocallyStreaming(){{return false;}}
+function _activeSessionIdForSidebar(){{return null;}}
+function _isCliSession(){{return false;}}
+function _isSessionEffectivelyStreaming(row){{return !!row.is_streaming;}}
+function _isSessionRingStreaming(row){{return _isSessionEffectivelyStreaming(row)||!!row.active_run;}}
+function _sidebarRowHasVisibleMessages(row){{return !!(row.message_count||row.active_run);}}
+function _partitionSidebarSessionRows(rows){{return {{sessionsRaw:rows}};}}
+{timestamp}
+{child}
+{lineage_key}
+{tip}
+{collapse}
+function _sidebarLineageKeyForRow(row){{return row._lineage_key||row._lineage_root_id||row.session_id;}}
+{active_lineage_key}
+{projection}
+const rows=[
+  {{session_id:'root',message_count:10,updated_at:10,_lineage_root_id:'root',_lineage_tip_id:'tip',active_run:{{started_at:10,age_seconds:4}}}},
+  {{session_id:'tip',message_count:20,updated_at:20,_lineage_root_id:'root',_lineage_tip_id:'tip'}}
+];
+const visible=_activeRunRowsForProjection(rows);
+console.log(JSON.stringify(visible.map(row=>({{id:row.session_id,started:row.active_run&&row.active_run.started_at}}))));
+"""
+    assert _run_node_script(source) == [{"id": "tip", "started": 10}]
+
+
+def test_active_run_renderer_paints_and_clears_the_user_visible_pill_and_tray():
+    elapsed = _extract_function(UI_JS, "_activeRunElapsedSeconds")
+    monotonic = _extract_function(UI_JS, "_activeRunMonotonicSeconds")
+    duration = _extract_function(UI_JS, "_activeRunDurationLabel")
+    renderer = _extract_function(UI_JS, "_renderActiveRunProjection")
+    source = f"""
+class Node {{
+  constructor(tag) {{ this.tagName=tag; this.children=[]; this.dataset={{}}; this.hidden=false; this.attributes={{}}; this.parentNode=null; this.textContent=''; }}
+  append(...nodes) {{ for(const node of nodes) {{ node.parentNode=this; this.children.push(node); }} }}
+  appendChild(node) {{ this.append(node); }}
+  querySelector(selector) {{ if(selector==='button') return this.children.find(node=>node.tagName==='button')||null; if(selector==='.active-run-age') return this.children.find(node=>node.className==='active-run-age')||null; return null; }}
+  setAttribute(key,value) {{ this.attributes[key]=String(value); }}
+  remove() {{ if(this.parentNode) this.parentNode.children=this.parentNode.children.filter(node=>node!==this); }}
+}}
+const host=new Node('div'), pill=new Node('button'), tray=new Node('div'); tray.hidden=true;
+const nodes={{activeRunVisibility:host,activeRunPill:pill,activeRunTray:tray}};
+globalThis.document={{createElement:tag=>new Node(tag)}};
+function $(id){{return nodes[id]||null;}}
+function t(key,count,duration){{return key==='active_run_visibility_label'?`${{count}} active · ${{duration}}`:key;}}
+function _openSidebarSession(){{}}
+let _activeRunElapsedTimer=null; const _activeRunElapsedAnchors=new Map();
+let now=100; const performance={{now:()=>now*1000}};
+function _scheduleActiveRunElapsedRefresh(){{}}
+function _stopActiveRunElapsedRefresh(){{}}
+{elapsed}
+{monotonic}
+{duration}
+function _activeRunRowsForProjection(rows){{return rows.filter(row=>row&&row.active_run&&!row.archived);}}
+globalThis.window={{_activeRunRowsForProjection}};
+{renderer}
+_renderActiveRunProjection([{{session_id:'s1',title:'Away session',active_run:{{started_at:10,age_seconds:4}}}}]);
+const painted={{hostHidden:host.hidden,pill:pill.textContent,rowCount:tray.children.length,rowLabel:tray.children[0].querySelector('button').textContent}};
+_renderActiveRunProjection([]);
+console.log(JSON.stringify({{painted,cleared:{{hostHidden:host.hidden,rowCount:tray.children.length,expanded:pill.attributes['aria-expanded']}}}}));
+"""
+    assert _run_node_script(source) == {
+        "painted": {"hostHidden": False, "pill": "1 active · 4s", "rowCount": 1, "rowLabel": "Away session"},
+        "cleared": {"hostHidden": True, "rowCount": 0, "expanded": "false"},
+    }
+
+
 def test_active_run_visibility_uses_canonical_session_matrix():
-    from api import config, route_session_list_cache as cache
+    from api import config, route_session_list_cache as cache, routes
 
     with config.ACTIVE_RUNS_LOCK:
         config.ACTIVE_RUNS.clear()
@@ -143,6 +228,33 @@ def test_active_run_visibility_uses_canonical_session_matrix():
             "archived": {"session_id": "archived", "started_at": 11},
         })
     try:
+        canonical_rows = [
+            {"session_id": "direct", "title": "Untitled", "profile": "profile-a", "message_count": 0, "updated_at": 10, "archived": False},
+            {"session_id": "profile-a", "title": "A", "profile": "profile-a", "raw_source": "telegram", "session_source": "messaging", "user_id": "u", "chat_id": "c", "message_count": 2, "updated_at": 10, "archived": False},
+            {"session_id": "profile-b", "title": "B", "profile": "profile-b", "raw_source": "telegram", "session_source": "messaging", "user_id": "u", "chat_id": "c", "message_count": 2, "updated_at": 20, "archived": False},
+        ]
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(routes, "all_sessions", lambda diag=None, include_lineage_metadata=False: list(canonical_rows))
+        monkeypatch.setattr(routes, "get_cli_sessions", lambda source_filter=None, all_profiles=False: [])
+        monkeypatch.setattr(routes, "_reconcile_stale_stream_state_for_session_rows", lambda rows: False)
+        monkeypatch.setattr(routes, "_prune_orphaned_webui_zero_message_sessions", lambda rows, diag_stage=None: rows)
+        monkeypatch.setattr(routes, "_enrich_sidebar_lineage_metadata", lambda rows: None)
+        observed_dedupe_inputs = []
+        original_dedupe = routes._keep_latest_messaging_session_per_source
+        def capture_dedupe(rows, **kwargs):
+            observed_dedupe_inputs.append(list(rows))
+            return original_dedupe(rows, **kwargs)
+        monkeypatch.setattr(routes, "_keep_latest_messaging_session_per_source", capture_dedupe)
+        payload = routes._build_session_list_cache_payload(
+            active_profile="profile-a",
+            all_profiles=False,
+            show_cli_sessions=False,
+            show_previous_messaging_sessions=False,
+            show_cron_sessions=False,
+        )
+        assert "direct" in {row["session_id"] for row in payload["sessions"]}
+        assert all({row["profile"] for row in rows} <= {"profile-a"} for rows in observed_dedupe_inputs)
+        monkeypatch.undo()
         rows = cache._session_list_cache_overlay_runtime_rows([
             {"session_id": "direct", "raw_source": "webui", "archived": False},
             {"session_id": "archived", "raw_source": "webui", "archived": True},
@@ -213,17 +325,43 @@ console.log(JSON.stringify({{first,second,skewedRefresh}}));
 def test_delayed_profile_response_cannot_repaint_activity_after_real_switch():
     invalidate = _extract_function(SESSIONS_JS, "_invalidateSessionListRenders")
     current = _extract_function(SESSIONS_JS, "_sessionListGenerationIsCurrent")
+    apply_if_current = _extract_function(SESSIONS_JS, "_applySessionListPayloadIfCurrent")
+    switch_profile = _extract_function(SESSIONS_JS, "_switchProfileForSessionLoad")
     source = f"""
-let _renderSessionListGen=7; let cleared=0; let _pendingSessionListPayload=null; let _renderSessionListQueuedRequest=null;
-let _sessionListLoadError=null;
+let _renderSessionListGen=7; let cleared=0; let applied=0;
+let _pendingSessionListPayload=null; let _renderSessionListQueuedRequest=null; let _sessionListLoadError=null;
+let _profileSwitchListEmbargo=false; let S={{activeProfile:'profile-a'}};
 globalThis.window={{_renderActiveRunProjection:rows=>{{if(!rows.length)cleared++;}}}};
+function showSessionListSkeleton(){{}}
+function _setProfileSwitchListEmbargo(value){{_profileSwitchListEmbargo=!!value;}}
+function _resetCronUnreadForProfileSwitch(){{}}
+function _clearPersistedModelState(){{}}
+function startGatewaySSE(){{}}
+function syncTopbar(){{}}
+function renderSessionList(){{return Promise.resolve();}}
+function api(){{return Promise.resolve({{active:'profile-b'}});}}
+function _applySessionListPayload(){{applied++;}}
 {invalidate}
 {current}
-const stale=_renderSessionListGen;
-_invalidateSessionListRenders();
-console.log(JSON.stringify({{staleRejected:!_sessionListGenerationIsCurrent(stale),currentAccepted:_sessionListGenerationIsCurrent(_renderSessionListGen),cleared}}));
+{apply_if_current}
+{switch_profile}
+(async()=>{{
+  const stale=_renderSessionListGen;
+  await _switchProfileForSessionLoad('profile-b');
+  const staleApplied=_applySessionListPayloadIfCurrent(stale,{{}},{{}},{{}});
+  const currentApplied=_applySessionListPayloadIfCurrent(_renderSessionListGen,{{}},{{}},{{}});
+  console.log(JSON.stringify({{staleRejected:!_sessionListGenerationIsCurrent(stale),currentAccepted:_sessionListGenerationIsCurrent(_renderSessionListGen),cleared,staleApplied,currentApplied,applied,profile:S.activeProfile}}));
+}})();
 """
-    assert _run_node_script(source) == {"staleRejected": True, "currentAccepted": True, "cleared": 1}
+    assert _run_node_script(source) == {
+        "staleRejected": True,
+        "currentAccepted": True,
+        "cleared": 1,
+        "staleApplied": False,
+        "currentApplied": True,
+        "applied": 1,
+        "profile": "profile-b",
+    }
 
 
 def test_active_run_locale_keys_cover_exact_supported_locale_set():
@@ -232,7 +370,13 @@ def test_active_run_locale_keys_cover_exact_supported_locale_set():
 {parser}
 const expected=['en','it','ja','ru','es','de','zh','zh-Hant','pt','ko','fr','cs','tr','pl','vi'];
 const names=_activeRunLocaleNames({json.dumps(I18N_JS)});
-const allKeys=expected.every(name=>{{const start={json.dumps(I18N_JS)}.indexOf(name);return start>=0;}});
+const source={json.dumps(I18N_JS)};
+const keys=['active_run_conversation_fallback','active_run_open_conversation','active_run_visibility_label'];
+const starts=expected.map(name=>source.indexOf(`\\n  ${{name==='zh-Hant'?"'zh-Hant'":name}}: {{`));
+const allKeys=starts.every((start,index)=>{{
+  const block=source.slice(start,index+1<starts.length?starts[index+1]:source.length);
+  return start>=0&&keys.every(key=>block.includes(key+':'));
+}});
 console.log(JSON.stringify({{names,exact:JSON.stringify(names)===JSON.stringify(expected),allKeys}}));
 """
     result = _run_node_script(source)

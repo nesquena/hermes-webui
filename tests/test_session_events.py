@@ -105,7 +105,7 @@ def test_active_run_membership_publishes_only_first_and_last_transition():
         config.register_active_run("b", session_id="s1", started_at=2)
         assert q.empty()
         config.unregister_active_run("a")
-        assert q.empty()
+        assert q.get_nowait()["reason"] == "active_run_membership"
         config.unregister_active_run("b")
         assert q.get_nowait()["reason"] == "active_run_membership"
     finally:

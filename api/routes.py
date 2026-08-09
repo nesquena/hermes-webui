@@ -21079,6 +21079,8 @@ def _handle_btw(handler, body):
     ephemeral.title = f"btw: {question[:60]}"
     ephemeral.save()
     stream_id = uuid.uuid4().hex
+    from api.config import suppress_active_run_visibility
+    suppress_active_run_visibility(stream_id, body["session_id"])
     ephemeral.active_stream_id = stream_id
     register_session_writeback_owner(ephemeral.session_id, stream_id)
     ephemeral.save()
@@ -21130,6 +21132,8 @@ def _handle_background(handler, body):
     bg.title = f"bg: {prompt[:60]}"
     bg.save()
     stream_id = uuid.uuid4().hex
+    from api.config import suppress_active_run_visibility
+    suppress_active_run_visibility(stream_id, body["session_id"])
     bg.active_stream_id = stream_id
     register_session_writeback_owner(bg.session_id, stream_id)
     bg.save()
