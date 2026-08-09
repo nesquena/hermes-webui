@@ -17436,6 +17436,45 @@ def _parse_run_journal_event_id(raw: str | None) -> tuple[str | None, int | None
     return _shared_parse_run_journal_event_id(raw)
 
 
+def _chat_stream_resume_after_seq(handler, qs: dict, stream_id: str | None = None) -> int | None:
+    """Return the client's resume cursor for ``/api/chat/stream`` as a seq.
+
+    Resolution order: the explicit ``after_event_id`` / ``after_seq`` query
+    params (what the WebUI frontend sends when it reconnects deliberately)
+    always win. When neither is present, fall back to the ``Last-Event-ID``
+    request header — the cursor every spec-compliant SSE client (browser
+    ``EventSource`` auto-reconnect, Android/CLI clients) sends automatically on
+    reconnect, carrying the ``id:`` of the last event it received. Every
+    journaled event on this stream already emits ``id: stream_id:seq`` via
+    ``_sse_with_id()``, so honoring the header closes the gap where an
+    auto-reconnecting client with no query cursor would replay from seq 0 and
+    double-render the transcript. Same resolution-chain precedent as
+    ``api/kanban_bridge.py`` (``?since=`` → ``Last-Event-ID``).
+
+    A header cursor for a DIFFERENT run id parses out as ``None`` (never a
+    cross-run seq), matching ``_parse_run_journal_after_seq`` semantics.
+    """
+    after_seq = _parse_run_journal_after_seq(qs, stream_id)
+    if after_seq is not None:
+        return after_seq
+    headers = getattr(handler, "headers", None)
+    if headers is None:
+        return None
+    try:
+        raw = headers.get("Last-Event-ID")
+    except Exception:
+        return None
+    raw = str(raw or "").strip()
+    if not raw:
+        return None
+    event_run_id, event_seq = _parse_run_journal_event_id(raw)
+    if event_run_id and event_seq is not None:
+        if stream_id and event_run_id != stream_id:
+            return None
+        return event_seq
+    return None
+
+
 def _parse_run_journal_after_seq(qs: dict, stream_id: str | None = None) -> int | None:
     event_run_id, event_seq = _parse_run_journal_event_id(qs.get("after_event_id", [None])[0])
     if event_run_id:
@@ -17547,7 +17586,8 @@ def _run_journal_covers_offline_gap(
 
 
 def _sse_replay_run_journal_gap_checked(
-    handler, qs: dict, stream_id: str, stream_snapshot: dict
+    handler, qs: dict, stream_id: str, stream_snapshot: dict,
+    *, after_seq: int | None = None,
 ) -> tuple[bool, int | None]:
     """Journal-replay for a reconnecting client, enforcing offline-gap coverage.
 
@@ -17557,11 +17597,24 @@ def _sse_replay_run_journal_gap_checked(
     (see ``_run_journal_covers_offline_gap``), a recovery_control apperror has
     been emitted and the caller must return instead of draining the retained
     tail (``gap_recovered=True``).
+
+    ``after_seq`` is the caller-resolved client cursor
+    (``_chat_stream_resume_after_seq``): explicit query params first, then the
+    ``Last-Event-ID`` header. When every cursor source is absent the caller
+    passes ``None`` and no replay runs at all — a fresh subscriber simply
+    drains the buffered tail. Direct callers that only supply ``qs`` keep the
+    historical behavior: the cursor is parsed from the query params here, and
+    the mere PRESENCE of an explicit cursor param (even one that parses to
+    ``None``, e.g. a foreign run id) still triggers a replay-from-start, as
+    before.
     """
-    if not (
-        qs.get("replay", [""])[0]
-        or qs.get("after_seq", [None])[0] not in (None, "")
-        or qs.get("after_event_id", [None])[0]
+    if after_seq is None:
+        after_seq = _parse_run_journal_after_seq(qs, stream_id)
+    if (
+        after_seq is None
+        and not qs.get("replay", [""])[0]
+        and qs.get("after_seq", [None])[0] in (None, "")
+        and not qs.get("after_event_id", [None])[0]
     ):
         return False, None
     try:
@@ -17572,7 +17625,6 @@ def _sse_replay_run_journal_gap_checked(
         str(stream_snapshot.get("last_event_id") or ""),
         stream_id,
     )
-    after_seq = _parse_run_journal_after_seq(qs, stream_id)
     # The subscribe snapshot already queued the retained offline tail, which
     # covers [first buffered frame → snapshot cutoff] by itself. The journal
     # only has to bridge (client cursor → first buffered frame) — and the
@@ -17770,6 +17822,10 @@ def _handle_sse_stream(handler, parsed):
     stream_id = qs.get("stream_id", [""])[0]
     if not _stream_id_visible_to_request_profile(handler, stream_id):
         return True
+    # Resume cursor: explicit query params (after_event_id/after_seq) win; the
+    # Last-Event-ID header that spec-compliant SSE clients auto-send on
+    # reconnect is the fallback. None = no cursor (fresh attach).
+    resume_after_seq = _chat_stream_resume_after_seq(handler, qs, stream_id)
     stream = STREAMS.get(stream_id)
     if stream is None:
         if _stream_runner_run_events(handler, stream_id, _runner_stream_cursor_from_query(qs)):
@@ -17787,7 +17843,7 @@ def _handle_sse_stream(handler, parsed):
         handler.send_header("Connection", "close")
         end_sse_headers(handler)
         try:
-            _replay_run_journal(handler, stream_id, _parse_run_journal_after_seq(qs, stream_id))
+            _replay_run_journal(handler, stream_id, resume_after_seq)
         except _CLIENT_DISCONNECT_ERRORS:
             pass
         return True
@@ -17806,7 +17862,7 @@ def _handle_sse_stream(handler, parsed):
     # Replay shares the drain loop's try/finally so every exit path unsubscribes.
     try:
         gap_recovered, replay_cutoff_seq = _sse_replay_run_journal_gap_checked(
-            handler, qs, stream_id, stream_snapshot
+            handler, qs, stream_id, stream_snapshot, after_seq=resume_after_seq
         )
         if gap_recovered:
             return True
@@ -18205,6 +18261,14 @@ def _gateway_sse_probe_payload(settings, watcher):
         'fallback_poll_ms': 30000,
         'ok': enabled and watcher_alive,
         'watcher_running': watcher_alive,
+        # Cross-client scope markers (hermes-webui/hermes-android#58 follow-up):
+        # this probe ONLY describes the optional gateway/agent-sessions stream.
+        # Persistent per-session streaming (GET /api/session/stream) is always
+        # available and is NOT gated by show_cli_sessions, so a negative gateway
+        # probe result must not be read as "session SSE unavailable".
+        'scope': 'gateway_sessions',
+        'session_stream_available': True,
+        'session_stream_path': '/api/session/stream',
     }
     if not enabled:
         payload['error'] = 'agent sessions not enabled'
@@ -18219,6 +18283,12 @@ def _handle_gateway_sse_stream(handler, parsed):
     """SSE endpoint for real-time gateway session updates.
     Streams change events from the gateway watcher background thread.
     Only active when show_cli_sessions (show_agent_sessions) setting is enabled.
+
+    Probe mode (``?probe=1``) reports the status of THIS optional stream only.
+    Its result says nothing about the always-on persistent per-session stream
+    (``/api/session/stream``) — the probe payload carries explicit
+    ``scope`` / ``session_stream_available`` markers so cross-client consumers
+    do not misclassify usable session streaming as unavailable.
     """
     settings = load_settings()
 

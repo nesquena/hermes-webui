@@ -95,7 +95,7 @@ def test_dead_stream_sse_replays_journal_before_404_fallback():
     assert "find_run_summary(stream_id)" in block
     assert "stream not found" in block
     assert "_replay_run_journal" in block
-    assert "_parse_run_journal_after_seq" in block
+    assert "_chat_stream_resume_after_seq" in block
     assert 'Content-Type", "text/event-stream; charset=utf-8"' in block
 
 
@@ -826,4 +826,185 @@ def test_active_stream_replay_keeps_items_for_new_run_with_same_seq_range(monkey
     assert "id: run_new:1\n" in body
     assert "id: run_new:2\n" in body
     assert body.count("id: run_new:1\n") == 1
+    assert stream.unsubscribed is True
+
+
+# ── Last-Event-ID fallback resume cursor on /api/chat/stream ────────────────
+# The stream emits `id: stream_id:seq` on every journaled event, so any
+# spec-compliant SSE client (browser EventSource auto-reconnect, Android/CLI
+# clients) sends `Last-Event-ID` automatically on reconnect. The handler must
+# honor it when no explicit query cursor is present instead of replaying from
+# seq 0 and double-rendering the transcript.
+
+
+class _HeaderHandler:
+    """Minimal request handler double carrying headers + a writable wfile."""
+
+    def __init__(self, last_event_id=None):
+        self.wfile = io.BytesIO()
+        self.headers = (
+            {"Last-Event-ID": last_event_id} if last_event_id is not None else {}
+        )
+
+    def send_response(self, _code):
+        pass
+
+    def send_header(self, _name, _value):
+        pass
+
+    def end_headers(self):
+        pass
+
+
+def test_chat_stream_resume_cursor_prefers_query_params_over_header():
+    """Explicit after_event_id/after_seq always win over Last-Event-ID."""
+    import api.routes as routes
+
+    handler = _HeaderHandler(last_event_id="run_1:9")
+    qs = {"after_event_id": ["run_1:4"]}
+    assert routes._chat_stream_resume_after_seq(handler, qs, "run_1") == 4
+
+    qs = {"after_seq": ["7"]}
+    assert routes._chat_stream_resume_after_seq(handler, qs, "run_1") == 7
+
+
+def test_chat_stream_resume_cursor_reads_last_event_id_header():
+    """With no query cursor, Last-Event-ID is the resume position."""
+    import api.routes as routes
+
+    handler = _HeaderHandler(last_event_id="run_1:3")
+    assert routes._chat_stream_resume_after_seq(handler, {}, "run_1") == 3
+
+
+def test_chat_stream_resume_cursor_rejects_foreign_run_header():
+    """A Last-Event-ID for a different run id never resolves to a seq here."""
+    import api.routes as routes
+
+    handler = _HeaderHandler(last_event_id="run_other:5")
+    assert routes._chat_stream_resume_after_seq(handler, {}, "run_1") is None
+
+
+def test_chat_stream_resume_cursor_absent_without_any_cursor():
+    """No query cursor and no header → None (fresh attach, no replay)."""
+    import api.routes as routes
+
+    handler = _HeaderHandler()
+    assert routes._chat_stream_resume_after_seq(handler, {}, "run_1") is None
+    # Malformed header values also resolve to None rather than 0.
+    handler = _HeaderHandler(last_event_id="not-a-cursor")
+    assert routes._chat_stream_resume_after_seq(handler, {}, "run_1") is None
+
+
+def test_dead_stream_replay_uses_last_event_id_header(monkeypatch):
+    """Dead-stream path: reconnect with only Last-Event-ID resumes mid-journal."""
+    import api.routes as routes
+
+    captured = {}
+    handler = _HeaderHandler(last_event_id="run_1:2")
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda stream_id: {
+            "session_id": "session_1",
+            "run_id": stream_id,
+            "terminal": True,
+        },
+    )
+
+    def fake_read_run_events(session_id, run_id, after_seq=None, max_seq=None):
+        captured["after_seq"] = after_seq
+        return {
+            "events": [
+                {
+                    "event": "done",
+                    "payload": {"session": {"session_id": session_id}},
+                    "event_id": f"{run_id}:4",
+                }
+            ]
+        }
+
+    monkeypatch.setattr(routes, "read_run_events", fake_read_run_events)
+    monkeypatch.setattr(routes, "stale_interrupted_event", lambda *_a, **_k: None)
+    previous_streams = dict(routes.STREAMS)
+    routes.STREAMS.clear()
+    try:
+        routes._handle_sse_stream(
+            handler, urlparse("/api/chat/stream?stream_id=run_1")
+        )
+    finally:
+        routes.STREAMS.clear()
+        routes.STREAMS.update(previous_streams)
+
+    assert captured["after_seq"] == 2
+    body = handler.wfile.getvalue().decode("utf-8")
+    assert "id: run_1:4\n" in body
+    assert "event: done\n" in body
+
+
+def test_live_stream_replay_uses_last_event_id_header(monkeypatch):
+    """Live path: header cursor drives the replay gap-check and dedup cutoff."""
+    import api.routes as routes
+
+    class FakeStream:
+        def __init__(self):
+            self.q = queue.Queue()
+            self.q.put_nowait(("token", {"text": "tail"}, "run_1:4"))
+            self.q.put_nowait(("stream_end", {}, "run_1:5"))
+            self.unsubscribed = False
+
+        def subscribe_with_snapshot(self):
+            return self.q, {
+                "last_event_id": "run_1:4",
+                "offline_buffered_events": 2,
+                "offline_first_event_id": "run_1:4",
+            }
+
+        def unsubscribe(self, q):
+            self.unsubscribed = q is self.q
+
+    captured = {}
+    handler = _HeaderHandler(last_event_id="run_1:2")
+    stream = FakeStream()
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda stream_id: {
+            "session_id": "session_1",
+            "run_id": stream_id,
+            "terminal": False,
+        },
+    )
+
+    def fake_read_run_events(session_id, run_id, after_seq=None, max_seq=None):
+        captured["after_seq"] = after_seq
+        return {
+            "events": [
+                {
+                    "event": "token",
+                    "payload": {"text": "bridged"},
+                    "event_id": f"{run_id}:3",
+                    "seq": 3,
+                }
+            ]
+        }
+
+    monkeypatch.setattr(routes, "read_run_events", fake_read_run_events)
+    monkeypatch.setattr(routes, "stale_interrupted_event", lambda *_a, **_k: None)
+    previous_streams = dict(routes.STREAMS)
+    routes.STREAMS.clear()
+    routes.STREAMS["run_1"] = stream
+    try:
+        routes._handle_sse_stream(
+            handler, urlparse("/api/chat/stream?stream_id=run_1")
+        )
+    finally:
+        routes.STREAMS.clear()
+        routes.STREAMS.update(previous_streams)
+
+    # Journal replay bridged (cursor → buffered tail) using the header cursor.
+    assert captured["after_seq"] == 2
+    body = handler.wfile.getvalue().decode("utf-8")
+    assert "id: run_1:3\n" in body
+    assert "id: run_1:4\n" in body
+    assert "id: run_1:5\n" in body
     assert stream.unsubscribed is True
