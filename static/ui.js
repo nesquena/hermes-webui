@@ -17474,7 +17474,7 @@ function renderMessages(options){
     const _rebuilt=document.getElementById('liveAssistantTurn');
     // A settled Anchor scene is canonical; preserving the pre-settlement live
     // shell here would hide its worklog rows from the lifecycle renderer.
-    if(_settlementHandoffValid&&_rebuilt&&_rebuilt.querySelector('[data-anchor-scene-owner="1"]')){
+    if(_settlementHandoffValid&&inner&&inner.querySelector('[data-anchor-settled-scene-owner="1"]')){
       _preservedLiveTurn=null;
     }
   }
