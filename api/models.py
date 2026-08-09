@@ -6123,6 +6123,7 @@ def _diag_stage(diag, name: str) -> None:
 def all_sessions(diag=None, *, include_lineage_metadata: bool = True):
     _diag_stage(diag, "all_sessions.active_streams")
     active_stream_ids = _active_stream_ids()
+    active_session_ids = set(_cfg.active_run_session_snapshot())
     # Phase C: try index first for O(1) read; fall back to full scan
     _diag_stage(diag, "all_sessions.index_exists")
     if not SESSION_INDEX_FILE.exists():
@@ -6250,6 +6251,7 @@ def all_sessions(diag=None, *, include_lineage_metadata: bool = True):
                 s.get('title', 'Untitled') == 'Untitled'
                 and s.get('message_count', 0) == 0
                 and not s.get('active_stream_id')
+                and str(s.get('session_id') or '') not in active_session_ids
                 and not s.get('has_pending_user_message')
                 and not s.get('worktree_path')
             )]
@@ -6305,6 +6307,7 @@ def all_sessions(diag=None, *, include_lineage_metadata: bool = True):
         s.title == 'Untitled'
         and len(s.messages) == 0
         and not s.active_stream_id
+        and str(getattr(s, 'session_id', '') or '') not in active_session_ids
         and not s.pending_user_message
         and not getattr(s, 'worktree_path', None)
     )]  # fmt: skip

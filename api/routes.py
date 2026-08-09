@@ -2213,6 +2213,11 @@ def _build_session_list_cache_payload(
     diag=None,
 ) -> dict:
     diag_stage = diag.stage if diag is not None else lambda *_a, **_k: None
+    try:
+        from api.config import active_run_session_snapshot
+        active_run_session_ids = set(active_run_session_snapshot())
+    except Exception:
+        active_run_session_ids = set()
 
     def _session_has_server_visible_messages(session: dict) -> bool:
         """Return True when a non-active sidebar row has a visibility signal.
@@ -2232,6 +2237,8 @@ def _build_session_list_cache_payload(
             if _numeric_count(attention.get("count")) > 0:
                 return True
 
+        if str(session.get("session_id") or "") in active_run_session_ids:
+            return True
         return bool(
             session.get("is_streaming")
             or session.get("active_stream_id")
@@ -10029,6 +10036,7 @@ _SIDEBAR_SESSION_RESPONSE_FIELDS = {
     "cron_running",
     "active_stream_id",
     "has_pending_user_message",
+    "active_run",
     "pending_started_at",
     "default_hidden",
     "worktree_path",

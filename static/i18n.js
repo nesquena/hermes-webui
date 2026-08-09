@@ -5,6 +5,7 @@
 
 const LOCALES = {
   en: {
+    active_run_conversation_fallback: 'Active conversation', active_run_open_conversation: 'Open conversation', active_run_visibility_label: (count, duration) => `${count} active · ${duration}`,
     offline_title: 'Connection lost',
     offline_browser_detail: 'Your browser reports that this device is offline.',
     offline_network_detail: 'Hermes is unreachable from this browser right now.',
@@ -1770,6 +1771,7 @@ const LOCALES = {
   },
 
   it: {
+    active_run_conversation_fallback: 'Conversazione attiva', active_run_open_conversation: 'Apri conversazione', active_run_visibility_label: (count, duration) => `${count} attive · ${duration}`,
     offline_title: 'Connessione persa',
     offline_browser_detail: 'Il browser segnala che questo dispositivo è offline.',
     offline_network_detail: 'Hermes non è raggiungibile da questo browser al momento.',
@@ -3517,6 +3519,7 @@ const LOCALES = {
   },
 
   ja: {
+    active_run_conversation_fallback: 'アクティブな会話', active_run_open_conversation: '会話を開く', active_run_visibility_label: (count, duration) => `${count} 件が実行中 · ${duration}`,
     offline_title: '接続が切断されました',
     offline_browser_detail: 'ブラウザはこのデバイスがオフラインだと報告しています。',
     offline_network_detail: '現在、このブラウザからHermesに到達できません。',
@@ -5269,6 +5272,7 @@ const LOCALES = {
   },
 
   ru: {
+    active_run_conversation_fallback: 'Активный разговор', active_run_open_conversation: 'Открыть разговор', active_run_visibility_label: (count, duration) => `${count} активных · ${duration}`,
     offline_title: 'Соединение потеряно',
     offline_browser_detail: 'Браузер сообщает, что это устройство офлайн.',
     offline_network_detail: 'Hermes сейчас недоступен из этого браузера.',
@@ -6995,6 +6999,7 @@ const LOCALES = {
   },
 
   es: {
+    active_run_conversation_fallback: 'Conversación activa', active_run_open_conversation: 'Abrir conversación', active_run_visibility_label: (count, duration) => `${count} activas · ${duration}`,
     offline_title: 'Conexión perdida',
     offline_browser_detail: 'Tu navegador indica que este dispositivo está sin conexión.',
     offline_network_detail: 'Hermes no está disponible desde este navegador ahora mismo.',
@@ -8688,6 +8693,7 @@ const LOCALES = {
   },
 
   de: {
+    active_run_conversation_fallback: 'Aktive Konversation', active_run_open_conversation: 'Konversation öffnen', active_run_visibility_label: (count, duration) => `${count} aktiv · ${duration}`,
     offline_title: 'Verbindung verloren',
     offline_browser_detail: 'Dein Browser meldet, dass dieses Gerät offline ist.',
     offline_network_detail: 'Hermes ist von diesem Browser aus gerade nicht erreichbar.',
@@ -10375,6 +10381,7 @@ const LOCALES = {
   },
 
   zh: {
+    active_run_conversation_fallback: '活动会话', active_run_open_conversation: '打开会话', active_run_visibility_label: (count, duration) => `${count} 个活动 · ${duration}`,
     offline_title: '连接已断开',
     offline_browser_detail: '浏览器报告此设备当前离线。',
     offline_network_detail: '此浏览器当前无法连接到 Hermes。',
@@ -12056,6 +12063,7 @@ const LOCALES = {
 
   // Traditional Chinese (zh-Hant)
   'zh-Hant': {
+    active_run_conversation_fallback: '作用中對話', active_run_open_conversation: '開啟對話', active_run_visibility_label: (count, duration) => `${count} 個作用中 · ${duration}`,
 
     offline_title: '連線中斷',
     offline_browser_detail: '瀏覽器回報此裝置目前離線。',
@@ -13806,6 +13814,7 @@ const LOCALES = {
   },
 
   pt: {
+    active_run_conversation_fallback: 'Conversa ativa', active_run_open_conversation: 'Abrir conversa', active_run_visibility_label: (count, duration) => `${count} ativas · ${duration}`,
     offline_title: 'Conexão perdida',
     offline_browser_detail: 'O navegador informa que este dispositivo está offline.',
     offline_network_detail: 'O Hermes está inacessível neste navegador agora.',
@@ -15372,6 +15381,7 @@ const LOCALES = {
     wiki_not_configured: 'Wiki not configured',
   },
   ko: {
+    active_run_conversation_fallback: '활성 대화', active_run_open_conversation: '대화 열기', active_run_visibility_label: (count, duration) => `${count}개 활성 · ${duration}`,
     offline_title: '연결이 끊겼습니다',
     offline_browser_detail: '브라우저가 이 장치가 오프라인이라고 보고합니다.',
     offline_network_detail: '현재 이 브라우저에서 Hermes에 연결할 수 없습니다.',
@@ -17109,6 +17119,7 @@ const LOCALES = {
   },
 
   fr: {
+    active_run_conversation_fallback: 'Conversation active', active_run_open_conversation: 'Ouvrir la conversation', active_run_visibility_label: (count, duration) => `${count} actives · ${duration}`,
     offline_title: 'Connexion perdue',
     offline_browser_detail: 'Votre navigateur signale que cet appareil est hors ligne.',
     offline_network_detail: 'Hermes est actuellement inaccessible depuis ce navigateur.',
@@ -18829,6 +18840,7 @@ const LOCALES = {
   },
 
   cs: {
+    active_run_conversation_fallback: 'Aktivní konverzace', active_run_open_conversation: 'Otevřít konverzaci', active_run_visibility_label: (count, duration) => `${count} aktivní · ${duration}`,
     _label: 'Čeština',
     _lang: 'cs',
     _speech: 'cs-CZ',
@@ -20535,6 +20547,7 @@ const LOCALES = {
     tool_summary_join: _i18nToolSummaryJoinCs,
   },
   tr: {
+    active_run_conversation_fallback: 'Aktif konuşma', active_run_open_conversation: 'Konuşmayı aç', active_run_visibility_label: (count, duration) => `${count} aktif · ${duration}`,
 
 
 
@@ -22277,6 +22290,7 @@ const LOCALES = {
   
   },
   pl: {
+    active_run_conversation_fallback: 'Aktywna rozmowa', active_run_open_conversation: 'Otwórz rozmowę', active_run_visibility_label: (count, duration) => `${count} aktywne · ${duration}`,
     offline_title: 'Połączenie utracone',
     offline_browser_detail: 'Twoja przeglądarka zgłasza, że to urządzenie jest offline.',
     offline_network_detail: 'Hermes jest obecnie nieosiągalny z tej przeglądarki.',
@@ -24019,6 +24033,7 @@ const LOCALES = {
     checkpoint_diff_files_changed: (n) => n === 1 ? '1 plik zmieniony' : `${n} zmienionych plików`,
   },
   vi: {
+    active_run_conversation_fallback: 'Cuộc trò chuyện đang hoạt động', active_run_open_conversation: 'Mở cuộc trò chuyện', active_run_visibility_label: (count, duration) => `${count} đang hoạt động · ${duration}`,
     offline_title: 'Mất kết nối',
     offline_browser_detail: 'Trình duyệt báo rằng thiết bị này đang ngoại tuyến.',
     offline_network_detail: 'Không thể kết nối tới Hermes từ trình duyệt lúc này.',
@@ -26208,3 +26223,10 @@ function applyLocaleToDOM() {
 
 // Apply saved locale immediately so there's no flash of English on reload.
 loadLocale();
+function _activeRunLocaleNames(source){
+  const names=[];
+  const pattern=/^  (?:'([^']+)'|([A-Za-z-]+))\s*:\s*\{/gm;
+  let match;
+  while((match=pattern.exec(String(source||'')))) names.push(match[1]||match[2]);
+  return names;
+}

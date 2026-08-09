@@ -820,6 +820,36 @@ function _isSessionEffectivelyStreaming(s) {
   ));
 }
 
+function _isSessionRingStreaming(s) {
+  return _isSessionEffectivelyStreaming(s) || Boolean(s && s.active_run);
+}
+
+function _activeRunRowsForProjection(rows) {
+  const sourceRows = Array.isArray(rows) ? rows : [];
+  const partition = typeof _partitionSidebarSessionRows === 'function'
+    ? _partitionSidebarSessionRows(
+      sourceRows,
+      typeof _activeSessionIdForSidebar === 'function' ? _activeSessionIdForSidebar() : null,
+    )
+    : {sessionsRaw: sourceRows};
+  const filtered = (Array.isArray(partition.sessionsRaw) ? partition.sessionsRaw : [])
+    .filter(s => s && s.active_run && !s.archived);
+  const activeByLineage = new Map();
+  for (const row of filtered) {
+    const key = typeof _sidebarLineageKeyForRow === 'function' ? _sidebarLineageKeyForRow(row) : String(row.session_id || '');
+    if (!key) continue;
+    const previous = activeByLineage.get(key);
+    if (!previous || Number(row.active_run.started_at) < Number(previous.active_run.started_at)) activeByLineage.set(key, row.active_run);
+  }
+  const visibleRows = typeof _collapseSessionLineageForSidebar === 'function' ? _collapseSessionLineageForSidebar(filtered) : filtered;
+  return visibleRows.flatMap(row => {
+    const key = typeof _sidebarLineageKeyForRow === 'function' ? _sidebarLineageKeyForRow(row) : String(row.session_id || '');
+    const activeRun = activeByLineage.get(key);
+    return activeRun ? [{...row, active_run: activeRun}] : [];
+  });
+}
+if(typeof window!=='undefined') window._activeRunRowsForProjection = _activeRunRowsForProjection;
+
 function _hasPendingUserMessageSignal(s) {
   return Boolean(s && (s.pending_user_message || s.has_pending_user_message));
 }
@@ -5054,6 +5084,7 @@ let _sessionListEnterAllAnimationPending = false;
 // pending/queued payloads drops a deferred apply that would do the same.
 function _invalidateSessionListRenders(){
   _renderSessionListGen++;
+  if(typeof window!=='undefined' && typeof window._renderActiveRunProjection==='function') window._renderActiveRunProjection([]);
   _pendingSessionListPayload = null;
   _renderSessionListQueuedRequest = null;
   // A retry whose fetch is invalidated here (e.g. a profile switch mid-retry)
@@ -5067,6 +5098,9 @@ function _invalidateSessionListRenders(){
     delete _sessionListLoadError.retrying;
     delete _sessionListLoadError._retryFailedFocus;
   }
+}
+function _sessionListGenerationIsCurrent(generation){
+  return generation===_renderSessionListGen;
 }
 if(typeof window!=='undefined') window._invalidateSessionListRenders = _invalidateSessionListRenders;
 
@@ -5394,6 +5428,7 @@ function _applySessionListPayload(sessData, projData, opts){
     : [];
   _reconcileActiveSessionIdleStateFromList(serverSessions);
   _allSessions = _mergeOptimisticFirstTurnSessions(serverSessions);
+  if(typeof window!=='undefined' && typeof window._renderActiveRunProjection==='function') window._renderActiveRunProjection(_allSessions);
   // Tag the cache with the scope it was loaded under (active profile +
   // all-profiles flag). If a later /api/sessions fails right after a profile
   // switch, the catch path checks this so it won't re-render the PRIOR
@@ -7408,7 +7443,7 @@ function _sessionAttentionState(s){
 function _sidebarRowHasVisibleMessages(s, activeSidForSidebar){
   return (s.message_count||0)>0 ||
     _sessionAttentionState(s) ||
-    _isSessionEffectivelyStreaming(s) ||
+    _isSessionRingStreaming(s) ||
     !!s.active_stream_id ||
     !!s.pending_user_message ||
     !!s.has_pending_user_message ||
@@ -7978,7 +8013,8 @@ function renderSessionListFromCache(){
     const el=document.createElement('div');
     const isActive=_sessionLineageContainsSession(s,activeSidForSidebar);
     const ownStreaming=_isSessionEffectivelyStreaming(s);
-    const isStreaming=ownStreaming||!!s._child_session_streaming;
+    const ownRingStreaming=_isSessionRingStreaming(s);
+    const isStreaming=ownRingStreaming||!!s._child_session_streaming;
     _rememberRenderedStreamingState(s, ownStreaming);
     _rememberRenderedSessionSnapshot(s);
     const hasUnread=(_hasUnreadForSession(s)||!!s._child_session_has_unread)&&!isActive;

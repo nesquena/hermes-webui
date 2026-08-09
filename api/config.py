@@ -9084,6 +9084,46 @@ LAST_RUN_FINISHED_AT: float | None = None
 SERVER_START_TIME = time.time()
 
 
+def active_run_session_snapshot() -> dict[str, dict[str, float]]:
+    """Return the bounded, presentation-safe active session projection."""
+    snapshot: dict[str, dict[str, float]] = {}
+    with ACTIVE_RUNS_LOCK:
+        entries = list((ACTIVE_RUNS or {}).values())
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        session_id = str(entry.get("session_id") or "").strip()
+        if not session_id:
+            continue
+        try:
+            started_at = float(entry.get("started_at"))
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(started_at) or started_at <= 0:
+            continue
+        current = snapshot.get(session_id)
+        if current is None or started_at < current["started_at"]:
+            snapshot[session_id] = {"started_at": started_at}
+    return snapshot
+
+
+_active_run_session_snapshot = active_run_session_snapshot
+
+
+def _publish_active_run_membership_changes(changed: set[str]) -> None:
+    if not changed:
+        return
+    try:
+        from api.session_events import publish_session_list_changed
+        for session_id in sorted(changed):
+            publish_session_list_changed(
+                reason="active_run_membership",
+                session_id=session_id,
+            )
+    except Exception:
+        logger.debug("Failed to publish active-run membership change", exc_info=True)
+
+
 def register_active_run(stream_id: str, **metadata) -> None:
     """Mark a WebUI agent worker as alive until its outer finally exits."""
     if not stream_id:
@@ -9093,18 +9133,44 @@ def register_active_run(stream_id: str, **metadata) -> None:
     entry.setdefault("stream_id", stream_id)
     entry.setdefault("started_at", now)
     entry.setdefault("phase", "running")
+    changed: set[str] = set()
     with ACTIVE_RUNS_LOCK:
+        before_ids = {
+            str(item.get("session_id") or "").strip()
+            for item in ACTIVE_RUNS.values()
+            if isinstance(item, dict) and str(item.get("session_id") or "").strip()
+        }
         ACTIVE_RUNS[stream_id] = entry
+        after_ids = {
+            str(item.get("session_id") or "").strip()
+            for item in ACTIVE_RUNS.values()
+            if isinstance(item, dict) and str(item.get("session_id") or "").strip()
+        }
+        changed = before_ids ^ after_ids
+    _publish_active_run_membership_changes(changed)
 
 
 def update_active_run(stream_id: str, **metadata) -> None:
     """Update active-run metadata without creating a new run implicitly."""
     if not stream_id:
         return
+    changed: set[str] = set()
     with ACTIVE_RUNS_LOCK:
+        before_ids = {
+            str(item.get("session_id") or "").strip()
+            for item in ACTIVE_RUNS.values()
+            if isinstance(item, dict) and str(item.get("session_id") or "").strip()
+        }
         entry = ACTIVE_RUNS.get(stream_id)
         if entry is not None:
             entry.update(metadata)
+            after_ids = {
+                str(item.get("session_id") or "").strip()
+                for item in ACTIVE_RUNS.values()
+                if isinstance(item, dict) and str(item.get("session_id") or "").strip()
+            }
+            changed = before_ids ^ after_ids
+    _publish_active_run_membership_changes(changed)
 
 
 def unregister_active_run(stream_id: str) -> None:
@@ -9112,9 +9178,19 @@ def unregister_active_run(stream_id: str) -> None:
     if not stream_id:
         return
     global LAST_RUN_FINISHED_AT
+    changed: set[str] = set()
     with ACTIVE_RUNS_LOCK:
-        ACTIVE_RUNS.pop(stream_id, None)
+        previous = ACTIVE_RUNS.pop(stream_id, None)
+        previous_session = str(previous.get("session_id") or "").strip() if isinstance(previous, dict) else ""
+        if previous_session:
+            remaining = any(
+                isinstance(item, dict) and str(item.get("session_id") or "").strip() == previous_session
+                for item in ACTIVE_RUNS.values()
+            )
+            if not remaining:
+                changed.add(previous_session)
         LAST_RUN_FINISHED_AT = time.time()
+    _publish_active_run_membership_changes(changed)
     unregister_stream_owner(stream_id)
 
 # Agent cache: reuse AIAgent across messages in the same WebUI session so that

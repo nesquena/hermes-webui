@@ -93,6 +93,27 @@ def test_session_events_payload_tracks_session_id_when_available():
         session_events.unsubscribe_session_events(q)
 
 
+def test_active_run_membership_publishes_only_first_and_last_transition():
+    from api import config, session_events
+
+    q = session_events.subscribe_session_events()
+    try:
+        with config.ACTIVE_RUNS_LOCK:
+            config.ACTIVE_RUNS.clear()
+        config.register_active_run("a", session_id="s1", started_at=1)
+        assert q.get_nowait()["reason"] == "active_run_membership"
+        config.register_active_run("b", session_id="s1", started_at=2)
+        assert q.empty()
+        config.unregister_active_run("a")
+        assert q.empty()
+        config.unregister_active_run("b")
+        assert q.get_nowait()["reason"] == "active_run_membership"
+    finally:
+        with config.ACTIVE_RUNS_LOCK:
+            config.ACTIVE_RUNS.clear()
+        session_events.unsubscribe_session_events(q)
+
+
 def test_session_event_queue_same_profile_different_sessions_coalesces_to_profile_refresh():
     from api import session_events
 

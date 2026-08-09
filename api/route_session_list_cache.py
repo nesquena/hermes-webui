@@ -8,7 +8,7 @@ import time
 from collections import OrderedDict
 from pathlib import Path
 
-from api.config import LOCK, SESSION_DIR, SESSIONS, SETTINGS_FILE
+from api.config import LOCK, SESSION_DIR, SESSIONS, SETTINGS_FILE, active_run_session_snapshot
 from api.models import _active_state_db_path, _active_stream_ids
 from api.profiles import _profiles_match
 
@@ -449,7 +449,11 @@ def _session_list_cache_settings_write_version() -> int:
         return 0
 
 
-def _session_list_cache_overlay_runtime_rows(rows: list[dict]) -> list[dict]:
+def _session_list_cache_overlay_runtime_rows(
+    rows: list[dict],
+    *,
+    source_authoritative: bool = True,
+) -> list[dict]:
     if not rows:
         return []
     try:
@@ -461,6 +465,8 @@ def _session_list_cache_overlay_runtime_rows(rows: list[dict]) -> list[dict]:
     except Exception:
         running_cron_jobs = {}
     cron_job_prefixes = [(jid, f"cron_{jid}_", started_at) for jid, started_at in running_cron_jobs.items()]
+    active_runs = active_run_session_snapshot()
+    now = time.time()
     session_ids = [
         str(row.get("session_id") or "").strip()
         for row in rows
@@ -477,6 +483,18 @@ def _session_list_cache_overlay_runtime_rows(rows: list[dict]) -> list[dict]:
     for row in rows:
         item = dict(row) if isinstance(row, dict) else {}
         sid = str(item.get("session_id") or "").strip()
+        item.pop("active_run", None)
+        if not source_authoritative:
+            for key in (
+                "active_stream_id",
+                "has_pending_user_message",
+                "pending_started_at",
+                "is_streaming",
+                "cron_running",
+            ):
+                item.pop(key, None)
+            overlaid.append(item)
+            continue
         live = live_sessions.get(sid)
         if live is not None:
             live_stream_id = getattr(live, "active_stream_id", None)
@@ -502,6 +520,12 @@ def _session_list_cache_overlay_runtime_rows(rows: list[dict]) -> list[dict]:
         item["cron_running"] = _session_list_row_cron_running(
             sid, item, cron_job_prefixes
         )
+        if sid in active_runs and not item.get("archived"):
+            started_at = active_runs[sid]["started_at"]
+            item["active_run"] = {
+                "started_at": started_at,
+                "age_seconds": round(max(0.0, now - started_at), 1),
+            }
         overlaid.append(item)
     overlaid.sort(key=_session_list_runtime_sort_key, reverse=True)
     return overlaid

@@ -13,6 +13,13 @@ NODE = shutil.which("node")
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 
 
+def test_active_run_annotation_follows_compressed_and_fork_lineage():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    assert "function _activeRunRowsForProjection" in js
+    assert "active_run.started_at" in js
+    assert "_collapseSessionLineageForSidebar" in js
+
+
 def _run_node(source: str) -> str:
     # Pass source via stdin rather than `-e <source>` argv — the latter is
     # capped at MAX_ARG_STRLEN (131072 bytes on Linux) and tests that embed
