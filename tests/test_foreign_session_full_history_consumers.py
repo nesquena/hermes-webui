@@ -1171,7 +1171,7 @@ let _loadingSessionId = null;
 const S = {{ session: null }};
 {NEW_SESSION_OWNER_GUARD_SRC}
 function installCreatedSession(data, captureOwner) {{
-  if (!_newSessionOwnerResponseIsCurrent(data, captureOwner)) return null;
+  if (!_newSessionOwnerResponseIsCurrent(data, null, captureOwner)) return null;
   S.session = data.session;
   return S.session.session_id;
 }}
@@ -1722,6 +1722,12 @@ function _commitTranscriptReplacement(ticket, commit) {{
     S.messages.push({{ role: 'user', content: 'newer writer' }});
   }}
   resolveConfirm(true);
+  if ({json.dumps(race_stage)} === 'same-loading') {{
+    _loadingSessionId = 'same-session';
+    await clearPromise;
+    console.log(JSON.stringify({{ sessionId: S.session && S.session.session_id, messages: S.messages, toolCalls: S.toolCalls, toasts, reconcileCalls }}));
+    return;
+  }}
   for (let i = 0; i < 20 && !resolveClear; i++) await new Promise(resolve => setTimeout(resolve, 0));
   if (!resolveClear) throw new Error('clear request did not start');
   if ({json.dumps(race_stage)} === 'post') {{
@@ -2072,7 +2078,7 @@ def test_blank_page_slash_rejects_owner_after_delayed_sidebar_render():
 
 
 def test_new_session_owner_guard_rejects_late_creation_install():
-    guard = "_newSessionOwnerResponseIsCurrent(data,!!(options&&options._captureOwner))"
+    guard = "_newSessionOwnerResponseIsCurrent(data,_creationStartSid,_creationStartLoadGeneration)"
     assert guard in SESSIONS_JS
     assert SESSIONS_JS.index(guard) < SESSIONS_JS.index("S.session=data.session")
     result = _run_node(_creation_await_owner_script())
@@ -2241,7 +2247,7 @@ def test_compression_operation_preserves_newer_stream_busy_state():
     assert result["composerStatus"] == "streaming"
 
 
-@pytest.mark.parametrize("race_stage", ["confirm", "post", "loading", "switched"])
+@pytest.mark.parametrize("race_stage", ["confirm", "post", "loading", "switched", "same-loading"])
 def test_clear_conversation_keeps_server_and_local_settlement_visible(race_stage):
     result = _run_node(_clear_conversation_race_script(race_stage))
 
@@ -2262,10 +2268,16 @@ def test_clear_conversation_keeps_server_and_local_settlement_visible(race_stage
         assert result["toolCalls"] == [{"id": "same-tool"}]
         assert result["toasts"] == []
         assert result["reconcileCalls"] == 0
-    else:
+    elif race_stage == "switched":
         assert result["sessionId"] == "other-session"
         assert result["messages"] == [{"role": "assistant", "content": "other pane"}]
         assert result["toolCalls"] == [{"id": "other-tool"}]
+        assert result["reconcileCalls"] == 0
+    else:
+        assert result["sessionId"] == "same-session"
+        assert result["messages"] == [{"role": "assistant", "content": "old"}]
+        assert result["toolCalls"] == []
+        assert result["toasts"] == []
         assert result["reconcileCalls"] == 0
 
 
@@ -2321,6 +2333,9 @@ def test_messages_generation_wiring_covers_full_load_live_turn_claims_and_same_s
     assert "const _ensureSlashOwner=async()=>" in MESSAGES_JS
     assert "if(!_slashOwnerIsCurrent(_metadataSid))return;" in MESSAGES_JS
     assert "const _metadataSid=await _ensureSlashOwner();" in MESSAGES_JS
+    assert "const _compressionLive=LIVE_STREAMS[activeSid];" in MESSAGES_JS
+    assert "_compressionLive.source!==source" in MESSAGES_JS
+    assert "clearCompressionUi(activeSid)" in MESSAGES_JS
     assert "_manualCompressionOperation" in COMMANDS_JS
     assert "_clearConversationOperation" in PANELS_JS
     assert "_readFullSessionSnapshot(sid)" in BOOT_JS
