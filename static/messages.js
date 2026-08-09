@@ -2711,6 +2711,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
   function _reattachOrRestoreAfterDeferredStreamError(source){
     if(_terminalStateReached||_streamFinalized||(typeof _ownsAttachSeam==='function'&&!_ownsAttachSeam(source))) return;
+    if((S.session&&S.session.session_id)!==activeSid) return;
     (async()=>{
       let st=null;
       try{
@@ -6392,10 +6393,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('pending_steer_leftover',e=>{
       if(typeof _ownsAttachSeam==='function'&&!_ownsAttachSeam(source)) return;
-      // The agent finished its turn with steer text still stashed (no
-      // tool-result boundary fired). Match the CLI's leftover-delivery
-      // behaviour: queue the leftover text as a next-turn user message
-      // so the existing drain in setBusy(false) ships it.
+      // Queue leftover steer text only for the current attach owner.
       try{
         const d=JSON.parse(e.data||'{}');
         const sid=d.session_id||activeSid;

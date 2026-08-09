@@ -1111,9 +1111,12 @@ def test_rejected_attach_status_cannot_close_or_replace_same_session_stream_b():
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_issue_symptom_base_fails_head_passes_with_real_attach_source():
-    base_source = subprocess.check_output(
-        ["git", "show", "origin/master:static/messages.js"], text=True, encoding="utf-8"
-    )
+    try:
+        base_source = subprocess.check_output(
+            ["git", "show", "origin/master:static/messages.js"], text=True, encoding="utf-8"
+        )
+    except subprocess.CalledProcessError:
+        pytest.skip("origin/master is unavailable in the shallow CI checkout")
     base_attach = _function_source_balanced(base_source, "attachLiveStream")
     base = _run_attach_attempt_race_from_source(base_attach, {"kind": "reproduction"})
     head = _run_attach_attempt_race({"kind": "reproduction"})
