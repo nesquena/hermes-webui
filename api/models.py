@@ -5638,6 +5638,10 @@ def _active_state_db_path() -> Path:
 def _agent_state_db_path(*, profile=None, fallback_to_active=True) -> Path | None:
     """Return agent ``state.db`` for *profile*, or ``None`` when unavailable."""
     if isinstance(profile, str) and profile:
+        if not fallback_to_active:
+            from api.profiles import _is_isolated_profile_mode, _profiles_match, get_active_profile_name
+            if _is_isolated_profile_mode() and not _profiles_match(profile, get_active_profile_name()):
+                return None
         db_path = _get_profile_home(profile) / 'state.db'
         if not db_path.exists() and fallback_to_active:
             db_path = _active_state_db_path()

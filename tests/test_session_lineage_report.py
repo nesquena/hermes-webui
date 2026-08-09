@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import api.agent_sessions as agent_sessions
 import api.models as models
+import api.profiles as profiles
 import api.routes as routes
 
 
@@ -317,6 +318,20 @@ def test_requested_profile_lineage_report_fails_closed_without_profile_state_db(
     assert requested_profiles == [("missing", False)]
     assert captured == {"status": 404, "message": "Session not found"}
     read_report.assert_not_called()
+
+
+def test_foreign_isolated_profile_rejects_before_pinned_home_resolution(monkeypatch, tmp_path):
+    pinned_db = tmp_path / "pinned" / "state.db"
+    pinned_db.parent.mkdir()
+    pinned_db.touch()
+    resolve_calls = []
+
+    monkeypatch.setattr(profiles, "_is_isolated_profile_mode", lambda: True)
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "profile-a")
+    monkeypatch.setattr(models, "_get_profile_home", lambda profile: resolve_calls.append(profile) or pinned_db)
+
+    assert models._agent_state_db_path(profile="profile-b", fallback_to_active=False) is None
+    assert resolve_calls == []
 
 
 def test_lineage_report_endpoint_rejects_invalid_profile_before_db_resolution():

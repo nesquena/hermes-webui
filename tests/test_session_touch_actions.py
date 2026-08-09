@@ -276,7 +276,7 @@ def test_session_removal_reflows_surviving_rows_smoothly():
     assert 0 <= toast_idx < hold_idx < cache_render_idx < reconcile_idx
     assert "if(renderHold) await renderHold;" in SESSIONS_JS
     assert "const serverSessions=_optimisticallyRemovedSessionIds.size" in SESSIONS_JS
-    assert "? (sessData.sessions||[]).filter(s=>s" in SESSIONS_JS
+    assert "? incomingSessions.filter(s=>s" in SESSIONS_JS
     assert "_optimisticallyRemovedSessionIds.has(typeof _sidebarRuntimeKey" in SESSIONS_JS
     assert ".session-item.session-reflowing{transition:background .15s,color .15s,transform .36s cubic-bezier(.2,.8,.2,1),box-shadow .15s ease;will-change:transform;}" in STYLE_CSS
     assert "if(_showArchived&&!_sessionPrefersReducedMotion()) _sessionSwipeReturnOffsets.set(session.session_id,'0px');" in SESSIONS_JS

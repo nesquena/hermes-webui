@@ -115,7 +115,7 @@ def test_sidebar_cache_completion_handles_compression_session_rotation():
         "_markPollingCompletionUnreadTransitions",
     )
 
-    assert "function _markSessionCompletedInList(session, previousSid = null)" in helper_block
+    assert "function _markSessionCompletedInList(session, previousSid = null, runtimeContext=null)" in helper_block
     assert "const finalSid = session.session_id || previousSid;" in helper_block
     assert "const finalIdx = _allSessions.findIndex(s => rowMatches(s,finalSid));" in helper_block
     assert "const previousIdx = previousSid ? _allSessions.findIndex(s => rowMatches(s,previousSid)) : -1;" in helper_block
@@ -150,12 +150,12 @@ def test_polling_transition_marks_completion_unread_without_sse_done():
 
     assert "const _sessionStreamingById = new Map();" in SESSIONS_JS
     assert "const wasStreaming = _sessionStreamingById.get(runtimeKey);" in transition_block
-    assert "const isStreaming = _isSessionEffectivelyStreaming(s);" in transition_block
+    assert "const isStreaming = _isSessionEffectivelyStreaming(s,operationContext);" in transition_block
     assert "s.is_streaming" in effective_block
     assert "s.active_stream_id" not in effective_block
     assert "_hasPendingUserMessageSignal(s)" in effective_block
     assert "s.pending_started_at" not in effective_block
-    assert "_isSessionLocallyStreaming(s)" in effective_block
+    assert "_isSessionLocallyStreaming(s,operationContext)" in effective_block
     assert "wasStreaming === true && !isStreaming" in transition_block, (
         "polling fallback must only fire on an observed streaming -> stopped transition"
     )
@@ -166,8 +166,8 @@ def test_polling_transition_marks_completion_unread_without_sse_done():
     # Greptile #5975: apply carries unreadGen so stale pre-switch lists skip mark.
     assert "_applySessionListPayload(sessData,projData,{unreadGen});" in refresh_block
     assert "unreadGen" in refresh_block
-    assert "_markPollingCompletionUnreadTransitions(_allSessions);" in apply_block
-    assert "_allSessions.some(s => _isSessionEffectivelyStreaming(s))" in apply_block, (
+    assert "_markPollingCompletionUnreadTransitions(_allSessions,runtimeContext);" in apply_block
+    assert "_allSessions.some(s => _isSessionEffectivelyStreaming(s,runtimeContext))" in apply_block, (
         "the streaming poll fallback must stay active for the same server-confirmed "
         "streaming states that can render a sidebar spinner"
     )
@@ -297,7 +297,7 @@ def test_polling_transition_skips_visible_focused_active_session():
     assert "_loadingSessionId !== sid" in helper_block
     assert "document.visibilityState !== 'visible'" in helper_block
     assert "!document.hasFocus()" in helper_block
-    assert "!_isSessionActivelyViewedForList(sid, s)" in transition_block, (
+    assert "!_isSessionActivelyViewedForList(sid, s, operationContext)" in transition_block, (
         "polling fallback must not create an unread marker for a session the "
         "user is visibly and focusedly reading"
     )
@@ -322,7 +322,7 @@ def test_polling_transition_tracks_the_same_effective_streaming_state_as_sidebar
     assert "s.active_stream_id" not in effective_block
     assert "_hasPendingUserMessageSignal(s)" in effective_block
     assert "s.pending_started_at" not in effective_block
-    assert "_isSessionLocallyStreaming(s)" in effective_block
+    assert "_isSessionLocallyStreaming(s,operationContext)" in effective_block
     assert "const ownStreaming=_isSessionEffectivelyStreaming(s)" in render_block, (
         "the row spinner and polling completion transition must use the same "
         "effective streaming source, including local INFLIGHT-only streams"
@@ -408,13 +408,13 @@ def test_rendered_streaming_rows_persist_observation_across_reload():
         "newSession",
     )
 
-    assert "_rememberObservedStreamingSession(s);" in remember_block, (
+    assert "_rememberObservedStreamingSession(s,runtimeContext);" in remember_block, (
         "visible spinner rows must persist an observed-running marker so long "
         "tasks still become unread if the original SSE/in-memory state is lost"
     )
     assert "if (isStreaming) {" in transition_block
-    assert "_rememberObservedStreamingSession(s);" in transition_block
-    assert "} else {\n      _forgetObservedStreamingSession(runtimeKey);" in transition_block
+    assert "_rememberObservedStreamingSession(s,operationContext);" in transition_block
+    assert "} else {\n      _forgetObservedStreamingSession(runtimeKey,operationContext);" in transition_block
 
 
 def test_active_done_marks_viewed_without_setting_unread_marker():

@@ -125,10 +125,10 @@ def test_completion_paths_keep_focus_gate_for_hidden_tab_completions():
         "completion is not prematurely marked read"
     )
 
-    polling_start = SESSIONS_JS.index("function _markPollingCompletionUnreadTransitions(sessions)")
+    polling_start = SESSIONS_JS.index("function _markPollingCompletionUnreadTransitions(sessions, runtimeContext=null)")
     polling_end = SESSIONS_JS.index("const staleRuntimeStateSids", polling_start)
     polling = SESSIONS_JS[polling_start:polling_end]
-    assert "!_isSessionActivelyViewedForList(sid, s)" in polling, (
+    assert "!_isSessionActivelyViewedForList(sid, s, operationContext)" in polling, (
         "polling completion must keep the focus-gated read check so a hidden-tab "
         "completion is not prematurely marked read"
     )

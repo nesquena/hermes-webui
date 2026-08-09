@@ -50,6 +50,7 @@ eval(extractFunc('_isForkWithResolvableParent'));
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_authoritativeLineageTipId'));
 eval(extractFunc('_buildSidebarLineageIndex'));
+eval(extractFunc('_createSidebarRuntimeContext'));
 eval(extractFunc('_sidebarActiveSessionIdentityKey'));
 eval(extractFunc('_sidebarIdentityMatchesActiveSession'));
 eval(extractFunc('_sidebarSessionMatchesActiveSession'));
@@ -169,11 +170,12 @@ const childB = {session_id:'child', profile_scope:'work', relationship_type:'chi
   read_only:true, parent_session_id:'parent-b'};
 global._allSessions = [parentA, parentB, childA, childB];
 const index = _buildSidebarLineageIndex(global._allSessions, []);
+const context = _createSidebarRuntimeContext(global._allSessions, []);
 console.log(JSON.stringify({
   projectA:index.projectFor(childA),
   projectB:index.projectFor(childB),
-  runtimeA:_sidebarRuntimeIdentityKey(childA),
-  runtimeB:_sidebarRuntimeIdentityKey(childB),
+  runtimeA:_sidebarRuntimeIdentityKey(childA,null,context),
+  runtimeB:_sidebarRuntimeIdentityKey(childB,null,context),
 }));
 """))
     assert result["projectA"] == "projA"
@@ -198,14 +200,120 @@ const rowA = {session_id:'same', profile_scope:'work', project_id:'projA'};
 const rowB = {session_id:'same', profile_scope:'work', project_id:'projB'};
 global._allSessions = [rowA, rowB];
 global.S = {session: rowA};
+const context = _createSidebarRuntimeContext(global._allSessions, []);
 console.log(JSON.stringify({
-  a:_sidebarRuntimeIdentityKey(rowA),
-  b:_sidebarRuntimeIdentityKey(rowB),
-  active:_sidebarRuntimeIdentityKey('same'),
+  a:_sidebarRuntimeIdentityKey(rowA,null,context),
+  b:_sidebarRuntimeIdentityKey(rowB,null,context),
+  active:_sidebarRuntimeIdentityKey(rowA,null,context),
 }));
 """))
     assert result["a"] != result["b"]
     assert result["active"] == result["a"]
+
+
+def test_runtime_context_precomputes_many_keys_without_rebuilding_the_lineage_index():
+    result = _run_node(_harness("""
+const rows = [];
+for (let i = 0; i < 2400; i++) rows.push({session_id:i % 2 ? 'same' : 'sid-'+i,
+  profile_scope:i % 2 ? 'profile-'+(i % 3) : 'work', project_id:'project-'+(i % 5)});
+const context = _createSidebarRuntimeContext(rows, []);
+let builds = 0;
+const build = _buildSidebarLineageIndex;
+global._buildSidebarLineageIndex = (...args) => { builds++; return build(...args); };
+const keys = rows.map(row => _sidebarRuntimeKey(row, null, context));
+console.log(JSON.stringify({builds, keys:keys.length, distinct:new Set(keys).size, same:keys[1] !== keys[3]}));
+"""))
+    assert result["builds"] == 0
+    assert result["keys"] == 2400
+    assert result["distinct"] > 1200
+    assert result["same"] is True
+
+
+def test_list_apply_reuses_one_runtime_index_for_merge_and_lineage_prune():
+    result = _run_node(_harness("""
+let buildCount = 0;
+const instrumentedIndex = extractFunc('_buildSidebarLineageIndex').replace(
+  '{', '{ buildCount++;', 1);
+eval(instrumentedIndex);
+eval(extractFunc('_createSidebarRuntimeContext'));
+eval(extractFunc('_pruneLineageReportCacheToVisibleSessions'));
+eval(extractFunc('_applySessionListPayload'));
+global.window = {_showCliSessions:false};
+global._allSessions = [{session_id:'local', profile_scope:'profile-a', project_id:'project-a',
+  is_streaming:true, message_count:1, pending_user_message:'local turn'}];
+global._sidebarReferenceSessions = [{session_id:'archived-parent', profile_scope:'profile-a',
+  project_id:'project-a', archived:true}];
+global._optimisticallyRemovedSessionIds = new Set();
+global._allSessionsScope = null;
+global._allProjects = [];
+global._sessionListLoadError = null;
+global._sessionListHasLoadedOnce = false;
+global._sessionListFirstRenderAnimated = true;
+global._sessionListSkeletonActive = true;
+global._sessionListRefreshAnimationPending = false;
+global._lastSessionListRenderSig = null;
+global._activeProject = null;
+global.NO_PROJECT_FILTER = '__none__';
+global._showAllProfiles = true;
+global._sessionSourceFilter = null;
+global._renamingSid = null;
+global._sessionActionMenu = null;
+global._otherProfileCount = 0;
+global._archivedWebuiCount = 0;
+global._archivedCliCount = 0;
+global._serverWebuiSessionCount = null;
+global._serverCliSessionCount = null;
+global._serverTimeDelta = 0;
+global._serverTz = null;
+global._cronPollGeneration = 0;
+global._sessionStreamingById = new Map();
+global._sessionListSnapshotById = new Map();
+global._sessionListSourceById = new Map();
+global._sessionObservedStreaming = {};
+global.S = {activeProfile:'profile-a', session:null};
+let pruneCalls = [];
+global._pruneLineageReportCacheToVisibleSessions = (rows,index,context) => {
+  pruneCalls.push({rows,index,context});
+};
+global._reconcileActiveSessionIdleStateFromList = () => false;
+global._mergeOptimisticFirstTurnSessions = rows => rows;
+global._syncSessionAttentionSoundState = () => {};
+global._recordSessionProfileCount = () => {};
+global._markPollingCompletionUnreadTransitions = rows => {
+  if (rows.some(row => row.session_id === 'cron-running' && row.cron_running !== true)) {
+    throw new Error('cron_running signal was changed before polling completion handling');
+  }
+};
+global._isSessionEffectivelyStreaming = row => Boolean(row && (row.is_streaming || row.cron_running));
+global.startStreamingPoll = () => {};
+global.stopStreamingPoll = () => {};
+global.ensureSessionTimeRefreshPoll = () => {};
+global.ensureActiveSessionExternalRefreshPoll = () => {};
+global.ensureSessionEventsSSE = () => {};
+global.animateNextSessionListRefresh = () => {};
+global.renderSessionListFromCache = () => {};
+global._sessionListRenderSignature = () => '';
+global._sessionListExcludeHiddenEnabled = () => true;
+global._requestedSessionSidebarSource = () => 'webui';
+global._recordSessionProfileCount = () => {};
+_applySessionListPayload({
+  active_profile:'profile-a',
+  sessions:[
+    {session_id:'incoming-a', profile_scope:'profile-a', project_id:'project-a', message_count:2},
+    {session_id:'same', profile_scope:'profile-a', project_id:'project-a', message_count:3},
+    {session_id:'same', profile_scope:'profile-b', project_id:'project-b', message_count:4},
+    {session_id:'cron-running', profile_scope:'profile-a', project_id:null, cron_running:true, is_streaming:true},
+  ],
+  sidebar_reference_sessions:[{session_id:'archived-parent', profile_scope:'profile-a', project_id:'project-a', archived:true}],
+}, {projects:[]});
+const context = pruneCalls[0].context;
+console.log(JSON.stringify({buildCount, pruneCalls:pruneCalls.length,
+  sameKeys:context.key(context.rows.find(row => row.session_id === 'same'), 'same') !==
+    context.key(context.rows.find(row => row.session_id === 'same' && row.profile_scope === 'profile-b'), 'same'),
+  sameIndex:pruneCalls[0].index === context.index,
+  cronSource:global._allSessions.find(row => row.session_id === 'cron-running').cron_running}));
+"""))
+    assert result == {"buildCount": 1, "pruneCalls": 1, "sameKeys": True, "sameIndex": True, "cronSource": True}
 
 
 def test_viewed_and_completion_state_keep_duplicate_session_ids_scoped():
@@ -231,10 +339,11 @@ const rowA = {session_id:'same', profile_scope:'work', project_id:'projA'};
 const rowB = {session_id:'same', profile_scope:'work', project_id:'projB'};
 global._allSessions = [rowA, rowB];
 global.S = {session: rowA};
-_setSessionViewedCount('same', 1, rowA);
-_setSessionViewedCount('same', 2, rowB);
-_markSessionCompletionUnread('same', 3, null, rowA);
-_markSessionCompletionUnread('same', 4, null, rowB);
+const context = _createSidebarRuntimeContext(global._allSessions, []);
+_setSessionViewedCount('same', 1, rowA, context);
+_setSessionViewedCount('same', 2, rowB, context);
+_markSessionCompletionUnread('same', 3, null, rowA, context);
+_markSessionCompletionUnread('same', 4, null, rowB, context);
 console.log(JSON.stringify({
   viewed:Object.keys(_getSessionViewedCounts()),
   unread:Object.keys(_getSessionCompletionUnread()),

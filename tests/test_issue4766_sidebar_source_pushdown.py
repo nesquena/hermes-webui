@@ -309,6 +309,20 @@ def test_profileless_sidebar_rows_do_not_inherit_a_named_active_profile_db(monke
     assert calls == [("default", False)]
 
 
+def test_profileless_sidebar_rows_keep_the_pinned_root_alias_in_isolated_mode(monkeypatch):
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "profile-a")
+    monkeypatch.setattr(profiles, "_is_isolated_profile_mode", lambda: True)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda name: name in {"default", "profile-a"})
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: "pinned-profile-a.db")
+
+    def unexpected_profile_lookup(**_kwargs):
+        raise AssertionError("profileless root alias must use the pinned active database")
+
+    monkeypatch.setattr(models, "_agent_state_db_path", unexpected_profile_lookup)
+
+    assert models._sidebar_state_db_path(None) == "pinned-profile-a.db"
+
+
 def test_state_db_overrides_read_the_database_for_each_row_profile(monkeypatch):
     rows = [
         {"session_id": "same-id", "profile": "work", "is_cli_session": True},
@@ -601,6 +615,7 @@ def test_apply_payload_and_tab_count_helpers_cover_old_and_new_payloads():
     source_fn = _extract_function(src, "_sidebarLineageSourceBucket")
     readonly_fn = _extract_function(src, "_isReadOnlySession")
     index_fn = _extract_function(src, "_buildSidebarLineageIndex")
+    context_fn = _extract_function(src, "_createSidebarRuntimeContext")
     script = f"""
 global.window = {{ _showCliSessions: true }};
 global._otherProfileCount = 0;
@@ -630,7 +645,8 @@ global._sessionActionMenu = null;
         {profile_fn}
         {source_fn}
         {readonly_fn}
-        {index_fn}
+            {index_fn}
+            {context_fn}
 global._reconcileActiveSessionIdleStateFromList = rows => rows;
 global._mergeOptimisticFirstTurnSessions = rows => rows;
 global._sessionListRenderSignature = () => '';
