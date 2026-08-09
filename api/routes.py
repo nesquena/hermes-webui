@@ -8905,21 +8905,37 @@ def _limited_webui_messages_for_display_with_sidecar(session, sidecar_messages, 
         sidecar_messages = list(sidecar_messages or [])
     state_db_messages = list(state_db_messages or [])
     if not state_db_messages:
-        return sidecar_messages
-    # NOTE: do not short-circuit to the sidecar when state.db has no strictly
-    # newer rows. A state.db row whose timestamp is at-or-before the sidecar's
-    # newest (recovery / edited-in-place / missing-timestamp cases) is still
-    # absent from the sidecar and must be reconciled — dropping it would render
-    # a tail that differs from the full merge path (silent wrong-transcript on
-    # the paginated load). The append-only merge is O(n) over already-bounded
-    # in-memory lists; the real latency win here is skipping the lineage-parent
-    # DISK load above, which we still skip. (#4070 ship-review)
-    return merge_session_messages_append_only(
-        sidecar_messages,
-        state_db_messages,
-        truncation_watermark=getattr(session, "truncation_watermark", None),
-        truncation_boundary=getattr(session, "truncation_boundary", None),
-    )
+        result = sidecar_messages
+    else:
+        # NOTE: do not short-circuit to the sidecar when state.db has no strictly
+        # newer rows. A state.db row whose timestamp is at-or-before the sidecar's
+        # newest (recovery / edited-in-place / missing-timestamp cases) is still
+        # absent from the sidecar and must be reconciled — dropping it would render
+        # a tail that differs from the full merge path (silent wrong-transcript on
+        # the paginated load). The append-only merge is O(n) over already-bounded
+        # in-memory lists; the real latency win here is skipping the lineage-parent
+        # DISK load above, which we still skip. (#4070 ship-review)
+        result = merge_session_messages_append_only(
+            sidecar_messages,
+            state_db_messages,
+            truncation_watermark=getattr(session, "truncation_watermark", None),
+            truncation_boundary=getattr(session, "truncation_boundary", None),
+        )
+    # #6481 display projection: never surface ``verification_evidence`` in a
+    # paginated session load. The merge returns references to the caller's
+    # message dicts, so sanitize shallow copies — this is a read path and must
+    # not mutate the in-memory transcript it is projecting.
+    try:
+        from api.verification_sanitizer import _strip_verification_from_messages
+        display_messages = [dict(m) for m in result if isinstance(m, dict)]
+        _strip_verification_from_messages(display_messages)
+        return display_messages
+    except Exception:
+        logger.debug(
+            "verification_evidence strip failed during limited display projection",
+            exc_info=True,
+        )
+        return result
 
 
 def _sidecar_file_exceeds_threshold(session_id, threshold_bytes) -> bool:
