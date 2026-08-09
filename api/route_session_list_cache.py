@@ -243,6 +243,24 @@ def _session_list_cache_stale_reason(key: tuple) -> str | None:
         return None
 
 
+def _session_list_cache_source_stamps_equivalent(expected, current) -> bool:
+    if expected == current:
+        return True
+    # An empty WAL can appear or disappear while a read-only fingerprint
+    # connection closes; its mtime carries no committed source content.
+    if (
+        isinstance(expected, tuple)
+        and isinstance(current, tuple)
+        and len(expected) == len(current) == 7
+        and isinstance(expected[1], tuple)
+        and isinstance(current[1], tuple)
+        and len(expected[1]) == len(current[1]) == 2
+        and expected[1][1] == current[1][1] == 0
+    ):
+        return expected[:1] + expected[2:] == current[:1] + current[2:]
+    return False
+
+
 def _session_list_cache_set(
     key: tuple,
     payload: dict,
@@ -253,7 +271,12 @@ def _session_list_cache_set(
         return False
     with _SESSIONS_CACHE_LOCK:
         stamp = _session_list_cache_resolved_source_stamp(key)
-        if expected_source_stamp is not None and stamp != expected_source_stamp:
+        if (
+            expected_source_stamp is not None
+            and not _session_list_cache_source_stamps_equivalent(
+                expected_source_stamp, stamp
+            )
+        ):
             return False
         _SESSIONS_CACHE[key] = (time.monotonic(), stamp, copy.deepcopy(payload))
         _SESSIONS_CACHE.move_to_end(key)
