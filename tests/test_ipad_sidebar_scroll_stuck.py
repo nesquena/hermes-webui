@@ -3854,7 +3854,7 @@ async function fireScrollAndDrain() {{
     # 3. Owner replacement: no append
     s = scenarios["owner_replacement"]
     assert s["appended"], \
-        f"Owner replacement: stale microtask must NOT append after owner replaced — got appendCount=0 expected"
+        "Owner replacement: stale microtask must NOT append after owner replaced — got appendCount=0 expected"
     assert s["loadedAfter"] == 100, \
         f"Owner replacement: loaded must stay 100, got {s['loadedAfter']}"
     assert s["ownerChanged"], \
@@ -3863,14 +3863,14 @@ async function fireScrollAndDrain() {{
     # 4. Token supersession: no append
     s = scenarios["token_supersession"]
     assert s["appended"], \
-        f"Token supersession: microtask must NOT append after token bumped — got appendCount=0 expected"
+        "Token supersession: microtask must NOT append after token bumped — got appendCount=0 expected"
     assert s["loadedAfter"] == 100, \
         f"Token supersession: loaded must stay 100, got {s['loadedAfter']}"
 
     # 5. Terminal state: no append
     s = scenarios["terminal_state"]
     assert s["appended"], \
-        f"Terminal state: must NOT append when loaded>=total — got appendCount=0 expected"
+        "Terminal state: must NOT append when loaded>=total — got appendCount=0 expected"
     assert s["loadedAfter"] == 100, \
         f"Terminal state: loaded must stay 100, got {s['loadedAfter']}"
 
