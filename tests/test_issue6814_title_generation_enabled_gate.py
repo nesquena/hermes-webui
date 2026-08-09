@@ -186,13 +186,19 @@ def test_manual_regenerate_returns_explicit_disabled():
     ({'provider': 'openai', 'model': 'gpt-x'}, True),          # omitted -> default on
     ({'enabled': True}, True),
     ({'enabled': False}, False),
+    ({'enabled': 'true'}, True),                                # allowlist -> on
+    ({'enabled': 'on'}, True),
+    ({'enabled': '1'}, True),
+    ({'enabled': 'yes'}, True),
     ({'enabled': 'false'}, False),
     ({'enabled': '0'}, False),
     ({'enabled': 'no'}, False),
     ({'enabled': 'off'}, False),
     ({'enabled': 'FALSE'}, False),
-    ({'enabled': ''}, True),                                    # empty string -> on
-    ({'enabled': None}, False),                                 # explicit null -> off
+    # Canonical is_truthy_value(default=True): an allowlist, not a blocklist.
+    ({'enabled': ''}, False),                                   # empty string -> NOT truthy -> off
+    ({'enabled': 'garbage'}, False),                            # unrecognized string -> off
+    ({'enabled': None}, True),                                  # explicit null -> default (on)
 ])
 def test_helper_parses_enabled_forms(cfg, expected):
     from api.streaming import _aux_title_generation_enabled

@@ -3834,13 +3834,24 @@ def _aux_title_generation_enabled() -> bool:
     """Return whether automatic title generation is enabled (default: enabled).
 
     Mirrors Hermes Agent's ``auxiliary.title_generation.enabled`` contract
-    (default true). Accepts boolean and string forms so YAML booleans and
-    stringified values parse identically.
+    byte-for-byte via its canonical ``is_truthy_value(value, default=True)``
+    semantics (agent/title_generator.py -> utils.is_truthy_value):
+
+      * ``None`` / missing -> default (True)
+      * ``bool`` -> unchanged
+      * ``str`` -> True ONLY when normalized into {"1", "true", "yes", "on"}
+        (an empty or unrecognized string is False, matching the agent — an
+        allowlist, NOT a "disable on false/0/no/off" blocklist)
+      * any other type -> ``bool(value)``
     """
     tg = _get_aux_title_config()
     val = tg.get('enabled', True)
+    if val is None:
+        return True
+    if isinstance(val, bool):
+        return val
     if isinstance(val, str):
-        return val.strip().lower() not in ('false', '0', 'no', 'off')
+        return val.strip().lower() in ('1', 'true', 'yes', 'on')
     return bool(val)
 
 
