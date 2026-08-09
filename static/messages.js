@@ -5237,6 +5237,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _resetStreamFadeState();
   }
   function _rememberRunJournalCursor(e){
+    if(!((typeof _ownsAttachSeam==='function'&&_ownsAttachSeam(source))||(_terminalStateReached&&_ownsTerminalContinuation(source)))) return;
     const raw=String(e&&e.lastEventId||'').trim();
     if(!raw) return;
     const tail=raw.includes(':')?raw.slice(raw.lastIndexOf(':')+1):raw;
@@ -6686,22 +6687,22 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const _retryDelays=[1500,3000,5000,8000,12000,20000];
         setComposerStatus(`Reconnecting… (1/${_retryDelays.length})`);
         const _probeReconnect=async(attempt=0)=>{
-          if(_terminalStateReached || _streamFinalized || (typeof _ownsAttachSeam==='function'&&!_ownsAttachSeam(source))) return;
+          if(_terminalStateReached || _streamFinalized || !_ownsAttachSeam(source)) return;
           let st=null;
           try{
             st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
           }catch(_){
             if(_deferStreamErrorIfOffline()) return;
           }
-      if(typeof _ownsAttachSeam==='function'&&!_ownsAttachSeam(source)) return;
+          if(!_ownsAttachSeam(source)) return;
           if(st&&st.active){
-      if(typeof _ownsAttachSeam==='function'&&!_ownsAttachSeam(source)) return;
+            if(!_ownsAttachSeam(source)) return;
             setComposerStatus('Reconnected');
             _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
             return;
           }
           if(st&&st.replay_available){
-      if(typeof _ownsAttachSeam==='function'&&!_ownsAttachSeam(source)) return;
+            if(!_ownsAttachSeam(source)) return;
             setComposerStatus('Restoring stream…');
             _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
             return;
@@ -6868,9 +6869,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
-      source.addEventListener(_runJournalEventName,e=>{
-        if((typeof _ownsAttachSeam==='function'&&_ownsAttachSeam(source))||(_terminalStateReached&&_ownsTerminalContinuation(source))) _rememberRunJournalCursor(e);
-      });
+      source.addEventListener(_runJournalEventName,_rememberRunJournalCursor);
     }
   }
 
