@@ -7116,6 +7116,7 @@ def _run_agent_streaming(
     model_provider=None,
     goal_related=False,
     moa_config=None,
+    owner_token=None,
 ):
     """Run agent in background thread, writing SSE events to STREAMS[stream_id].
 
@@ -7593,6 +7594,32 @@ def _run_agent_streaming(
         # in the outer finally next to _clear_thread_env().
         _turn_session_identity_tokens = _set_turn_session_identity(session_id)
         s = get_session(session_id)
+        if owner_token is not None:
+            # #6327 route-to-worker acceptance: the route layer validated the
+            # immutable owner token under the per-session AGENT lock before
+            # spawning this worker.  The worker re-reads the canonical session
+            # here; a same-SID replacement between route acceptance and this
+            # re-read must never let the conversation run on the replacement
+            # object (different profile/home/credential generation) while the
+            # pending state was written to the tokenized owner.  Fail closed
+            # with an apperror instead of running on the wrong owner.
+            from api.routes import _stream_worker_owner_token_mismatch
+
+            _worker_mismatch = _stream_worker_owner_token_mismatch(owner_token, s)
+            if _worker_mismatch is not None:
+                logger.warning(
+                    "stream worker %s refused owner for session %s: %s",
+                    stream_id,
+                    session_id,
+                    _worker_mismatch,
+                )
+                put("apperror", {
+                    "error": "session owner changed before the agent turn started",
+                    "owner_fence": _worker_mismatch,
+                    "session_id": session_id,
+                    "_status": 409,
+                })
+                return  # apperror closes the stream on the client side
         _turn_pending_source = getattr(s, 'pending_user_source', None) or 'webui'
         update_active_run(stream_id, phase="running", session_id=session_id)
         s.workspace = str(Path(workspace).expanduser().resolve())

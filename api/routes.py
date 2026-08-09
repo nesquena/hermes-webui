@@ -9612,6 +9612,193 @@ def _pre_compression_continuation_session_id(session) -> str | None:
     rows.extend(_child_rows_from_sidecars(memory_seen_ids))
     return _resolve_from_rows(rows)
 
+
+# #6327: mutating-flow compression continuation authority.  A fork/branch/
+# delegate child shares parent_session_id + profile with a real compression
+# continuation, so parent/profile equality alone is NOT continuation authority
+# (the canonical classifier in api/agent_sessions.py rejects forks for the same
+# reason).  Ownership selection in the process-wakeup mutating flow must never
+# use the newest-visible-descendant UI helper (_pre_compression_continuation_
+# session_id): that helper is designed to hand a *recovery URL* to a browser and
+# deliberately accepts any same-profile descendant, newest by timestamp.  A
+# newer fork would therefore win ownership and credential clear/suppression/
+# start would be attached to the wrong conversation.  This authority instead
+# requires the durable compression predecessor->continuation evidence — the
+# requested session (and every intermediate hop) is an archived
+# pre_compression_snapshot whose marker is persisted to disk, the candidate's
+# parent_session_id points back at that archived node, the candidate is live
+# (not itself archived) and same-profile — and FAILS CLOSED on zero or
+# ambiguous (multiple) candidates.
+_REJECTED_COMPRESSION_CONTINUATION_SOURCES = frozenset(
+    ("fork", "branch", "delegate", "delegated", "delegation", "subagent")
+)
+
+
+def _compression_continuation_session_id(snapshot) -> str | None:
+    """Return the SINGLE live compression continuation for an archived snapshot.
+
+    Mutating-flow-specific owner authority (#6327).  Unlike the UI recovery
+    helper, this rejects forks/branches/delegates, requires the durable
+    archived-snapshot predecessor evidence on every hop, and returns None on
+    zero OR ambiguous candidates (the caller requeues/fails — the archived
+    snapshot is never mutated).
+    """
+    if not getattr(snapshot, "pre_compression_snapshot", False):
+        return None
+    sid = _safe_first(getattr(snapshot, "session_id", None))
+    if not sid:
+        return None
+    # Pin the snapshot's profile: a crafted/corrupt foreign-profile sidecar
+    # whose parent_session_id collided must never leak cross-profile.
+    snapshot_profile = getattr(snapshot, "profile", None)
+    snapshot_source = str(
+        _safe_first(getattr(snapshot, "session_source", None), "") or ""
+    ).strip().lower()
+
+    def _child_rows_from_memory(seen_ids: set[str]) -> list:
+        rows = []
+        try:
+            with LOCK:
+                memory_sessions = list(SESSIONS.values())
+            for child in memory_sessions:
+                child_sid = _safe_first(getattr(child, "session_id", None))
+                if not child_sid or child_sid in seen_ids:
+                    continue
+                seen_ids.add(child_sid)
+                rows.append(child)
+        except Exception:
+            pass
+        return rows
+
+    def _child_rows_from_index(seen_ids: set[str]) -> list | None:
+        if not SESSION_INDEX_FILE.exists():
+            return None
+        try:
+            entries = json.loads(SESSION_INDEX_FILE.read_bytes())
+        except Exception:
+            return None
+        if not isinstance(entries, list):
+            return None
+        try:
+            persisted_sidecar_ids = {
+                path.stem
+                for path in SESSION_DIR.glob("*.json")
+                if not path.name.startswith("_") and is_safe_session_id(path.stem)
+            }
+        except Exception:
+            return None
+        indexed_ids: set[str] = set()
+        row_seen_ids = set(seen_ids)
+        rows = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            child_sid = _safe_first(entry.get("session_id"))
+            if not child_sid or not is_safe_session_id(child_sid):
+                continue
+            indexed_ids.add(child_sid)
+            if child_sid in row_seen_ids or not _safe_first(entry.get("parent_session_id")):
+                continue
+            row_seen_ids.add(child_sid)
+            rows.append(entry)
+        if persisted_sidecar_ids - indexed_ids - seen_ids:
+            return None
+        return rows
+
+    def _child_rows_from_sidecars(seen_ids: set[str]) -> list:
+        rows = []
+        try:
+            for path in SESSION_DIR.glob("*.json"):
+                if path.name.startswith("_"):
+                    continue
+                child_sid = path.stem
+                if not child_sid or child_sid in seen_ids:
+                    continue
+                child = Session.load_metadata_only(child_sid)
+                if child:
+                    seen_ids.add(child_sid)
+                    rows.append(child)
+        except Exception:
+            pass
+        return rows
+
+    def _row_value(row, key, default=None):
+        return row.get(key, default) if isinstance(row, dict) else getattr(row, key, default)
+
+    def _row_has_backing_state(row) -> bool:
+        child_sid = _safe_first(_row_value(row, "session_id"))
+        if not child_sid or not is_safe_session_id(child_sid):
+            return False
+        if not isinstance(row, dict):
+            return True
+        return (SESSION_DIR / f"{child_sid}.json").exists()
+
+    def _resolve_from_rows(rows: list) -> str | None:
+        children_by_parent: dict[str, list] = {}
+        for child in rows:
+            parent_sid = _safe_first(_row_value(child, "parent_session_id"))
+            child_sid = _safe_first(_row_value(child, "session_id"))
+            if not parent_sid or not child_sid or child_sid == sid:
+                continue
+            # Cross-profile guard: only follow continuations within the
+            # snapshot's profile.
+            if not _profiles_match(_row_value(child, "profile"), snapshot_profile):
+                continue
+            children_by_parent.setdefault(parent_sid, []).append(child)
+
+        candidates = []
+        frontier = [sid]
+        seen = {sid}
+        for _ in range(20):
+            if not frontier:
+                break
+            parent_sid = frontier.pop(0)
+            for child in children_by_parent.get(parent_sid, []):
+                child_sid = _safe_first(_row_value(child, "session_id"))
+                if not child_sid or child_sid in seen or not _row_has_backing_state(child):
+                    continue
+                seen.add(child_sid)
+                child_source = str(
+                    _safe_first(_row_value(child, "session_source"), "") or ""
+                ).strip().lower()
+                if child_source in _REJECTED_COMPRESSION_CONTINUATION_SOURCES:
+                    # Fork/branch/delegate: NOT continuation authority.  The
+                    # /api/session/branch route stamps session_source="fork"
+                    # on same-profile children of a parent, so rejecting this
+                    # source is what keeps a newer fork from winning ownership.
+                    continue
+                if snapshot_source and child_source and child_source != snapshot_source:
+                    # Cross-surface child (e.g. CLI continuation of a WebUI
+                    # parent) is not a mutating-flow compression continuation.
+                    continue
+                if _row_value(child, "pre_compression_snapshot", False):
+                    # Archived intermediate snapshot: hop to ITS continuation
+                    # (durable marker on the hop parent is the evidence).
+                    frontier.append(child_sid)
+                else:
+                    candidates.append(child)
+
+        if not candidates:
+            # Fail closed: no live continuation exists.
+            return None
+        if len(candidates) > 1:
+            # Fail closed: ambiguous — never guess which descendant owns the
+            # conversation (the caller requeues and the snapshot stays intact).
+            return None
+        latest_sid = _safe_first(_row_value(candidates[0], "session_id", None)) or None
+        if latest_sid and not is_safe_session_id(latest_sid):
+            return None
+        return latest_sid
+
+    memory_seen_ids: set[str] = set()
+    rows = _child_rows_from_memory(memory_seen_ids)
+    index_rows = _child_rows_from_index(memory_seen_ids)
+    if index_rows is not None:
+        return _resolve_from_rows(rows + index_rows)
+
+    rows.extend(_child_rows_from_sidecars(memory_seen_ids))
+    return _resolve_from_rows(rows)
+
 from api.workspace import (
     load_workspaces,
     save_workspaces,
@@ -21238,6 +21425,11 @@ def _start_chat_stream_for_session(
     worker_kwargs = {"model_provider": model_provider, "goal_related": goal_related}
     if moa_config and not backend_is_gateway:
         worker_kwargs["moa_config"] = moa_config
+    if owner_token is not None:
+        # #6327 route-to-worker acceptance: carry the immutable owner token
+        # into the worker so its own get_session() re-read is fenced against a
+        # same-SID replacement between route acceptance and worker start.
+        worker_kwargs["owner_token"] = owner_token
     thr = threading.Thread(
         target=worker_target,
         args=(s.session_id, msg, model, workspace, stream_id, attachments),
@@ -21528,8 +21720,20 @@ def _resolve_live_session_owner(session_id, *, preferred=None):
         # The requested SID is an archived pre-compression snapshot: resolve
         # its live continuation atomically (bounded + profile-matched) or
         # fail/requeue.  Never clear/suppress/save/start on the snapshot.
+        #
+        # #6327: ownership selection uses the mutating-flow-specific
+        # compression continuation authority (_compression_continuation_...
+        # session_id), NOT the newest-visible-descendant UI helper.  The UI
+        # helper accepts any same-profile descendant (including forks stamped
+        # by /api/session/branch) and picks the newest by timestamp, so an
+        # archived parent A with a true continuation C and a NEWER fork F
+        # would resolve F as the live owner and attach credential
+        # clear/suppression/start to the wrong conversation.  The strict
+        # authority rejects forks/branches/delegates, requires the durable
+        # archived-snapshot predecessor evidence, and fails closed on zero or
+        # ambiguous candidates.
         try:
-            continuation_sid = _pre_compression_continuation_session_id(s)
+            continuation_sid = _compression_continuation_session_id(s)
         except Exception:
             continuation_sid = None
         if not continuation_sid:
@@ -21569,9 +21773,11 @@ def _process_wakeup_owner_token_mismatch(token, owner) -> str | None:
     try:
         live_fingerprint = process_wakeup_credential_state_fingerprint(owner)
     except Exception:
-        # Transient fingerprint-read failure: don't fail the apply on it; the
-        # paused-state comparison above still guards the revalidation result.
-        return None
+        # #6327: fail closed — an unreadable credential fingerprint must NOT
+        # authorize the stale revalidation answer.  Surface a mismatch so the
+        # caller retries outside AGENT (bounded) or drops the wakeup; never
+        # treat a read failure as "still matches".
+        return "credential_fingerprint_unreadable"
     if live_fingerprint != token.get("credential_state_fingerprint"):
         return "credential_state_changed"
     return None
@@ -21595,16 +21801,33 @@ def _build_immutable_session_owner_token(
     runs OUTSIDE this lock; step 3 re-acquires it and applies only when every
     token field still matches.
 
-    Never acquires PROCESS.  Returns ``(token, live_owner)`` or
-    ``(None, None)`` when the session is gone / only archived.
+    When the requested SID is an archived pre-compression snapshot, the live
+    owner is resolved through the mutating-flow compression continuation
+    authority and the workspace + model/provider lane are RECOMPUTED from the
+    selected live owner — predecessor-derived routing is never carried into
+    the continuation.
+
+    Never acquires PROCESS.  Returns ``(token, live_owner, routing)`` or
+    ``(None, None, None)`` when the session is gone / only archived, or
+    ``(None, None, {"error": ..., "_status": ...})`` for a hard routing
+    failure (unreadable credential fingerprint, unresolvable workspace).
+    ``routing`` is ``{"workspace", "model", "provider", "normalized_model"}``
+    derived from the LIVE owner — callers must use it (not predecessor-derived
+    values) for the revalidation and the run.
     """
     live_owner = preferred
+    _fingerprint_unreadable = False
     for _ in range(4):  # bounded re-resolution across concurrent rotation
         live_owner, live_sid = _resolve_live_session_owner(
             session_id, preferred=live_owner
         )
         if live_owner is None:
-            return None, None
+            if _fingerprint_unreadable:
+                return None, None, {
+                    "error": "Failed to read credential state fingerprint",
+                    "_status": 503,
+                }
+            return None, None, None
         lock = _get_session_agent_lock(live_sid)
         with lock:
             # Canonicality under the lock: compression migrates lock entries
@@ -21616,14 +21839,41 @@ def _build_immutable_session_owner_token(
                 continue  # lock migrated underneath us — re-resolve
             if getattr(live_owner, "pre_compression_snapshot", False):
                 continue  # archived mid-resolution — re-resolve (follows continuation)
+            # ── #6327: recompute the routing lane from the LIVE owner ──────
+            # Never carry predecessor-derived routing (workspace, model/
+            # provider lane) from an archived pre-compression snapshot into
+            # the live continuation.  Workspace, profile home, the pause key
+            # (model/provider lane), and the credential fingerprint below are
+            # all derived from the selected live owner only.
+            try:
+                live_workspace = _resolve_chat_workspace_with_recovery(
+                    live_owner, None
+                )
+            except ValueError as exc:
+                return None, None, {"error": str(exc), "_status": 400}
+            _pp_provider, _pp_default, _pp_cfg = _read_profile_model_config(
+                live_owner, getattr(live_owner, "model_provider", None)
+            )
+            _lane_model, _lane_provider, _lane_normalized = (
+                _resolve_compatible_session_model_state(
+                    getattr(live_owner, "model", None),
+                    getattr(live_owner, "model_provider", None),
+                    profile_provider=_pp_provider,
+                    profile_default_model=_pp_default,
+                    profile_config=_pp_cfg,
+                    prefer_cached_catalog=True,
+                )
+            )
+            lane_model = _lane_model or model
+            lane_provider = _lane_provider or provider
             pause = getattr(live_owner, "process_wakeup_pause", None)
             pause_state = dict(pause) if isinstance(pause, dict) else None
             pause_matches = bool(
                 pause_state
                 and process_wakeup_pause_matches(
                     live_owner,
-                    model=model,
-                    provider=provider,
+                    model=lane_model,
+                    provider=lane_provider,
                     classification=classification,
                 )
             )
@@ -21632,21 +21882,38 @@ def _build_immutable_session_owner_token(
                     live_owner
                 )
             except Exception:
-                credential_fingerprint = ""
+                # #6327: fail closed — an unreadable credential fingerprint
+                # cannot authorize the out-of-AGENT answer.  Retry (bounded);
+                # on exhaustion the caller surfaces a 503 and never applies.
+                _fingerprint_unreadable = True
+                continue
             token = {
                 "requested_sid": str(session_id),
                 "session_id": str(getattr(live_owner, "session_id", "") or ""),
                 "owner": live_owner,
                 "profile": str(getattr(live_owner, "profile", "") or ""),
                 "profile_home": _process_wakeup_profile_home(live_owner),
-                "model": model,
-                "provider": provider,
+                "model": lane_model,
+                "provider": lane_provider,
+                "normalized_model": bool(_lane_normalized),
+                "workspace": str(live_workspace),
                 "pause_state": pause_state,
                 "pause_matches": pause_matches,
                 "credential_state_fingerprint": credential_fingerprint,
             }
-            return token, live_owner
-    return None, None
+            routing = {
+                "workspace": str(live_workspace),
+                "model": lane_model,
+                "provider": lane_provider,
+                "normalized_model": bool(_lane_normalized),
+            }
+            return token, live_owner, routing
+    if _fingerprint_unreadable:
+        return None, None, {
+            "error": "Failed to read credential state fingerprint",
+            "_status": 503,
+        }
+    return None, None, None
 
 
 def _save_session_quietly(session, session_id):
@@ -21736,6 +22003,11 @@ def _apply_process_wakeup_revalidation_once(
                             token.get("session_id"),
                             exc_info=True,
                         )
+                        # #6327: fail closed — the credential state is
+                        # unverifiable, so do NOT clear the pause on an
+                        # unverifiable recovery; refresh the fingerprint so the
+                        # next drain cycle revalidates instead.
+                        _credential_state_changed = True
                     if bool(revalidation.get("recovered")):
                         _recovery_reason = (
                             "credential_state_changed"
@@ -21913,6 +22185,33 @@ def _validate_start_owner_fence(owner_token, held_lock) -> str | None:
     return _process_wakeup_owner_token_mismatch(owner_token, owner)
 
 
+def _stream_worker_owner_token_mismatch(owner_token, s) -> str | None:
+    """Lock-free token check for the spawned stream worker's ``get_session()``.
+
+    #6327 required shape, step 5b (route-to-worker acceptance): the worker
+    thread re-reads the canonical session via ``get_session(session_id)``
+    after the route layer already validated the fence under AGENT.  A
+    same-SID replacement between route acceptance and that re-read would
+    otherwise make the worker run the conversation on the replacement object
+    (different profile/home/credential generation) while the pending state was
+    written to the tokenized owner.  This check carries the exact
+    owner/generation authority into the worker: identity + SID + archived
+    flag + every token field.  Read-only (no AGENT, no PROCESS).
+    """
+    if not isinstance(owner_token, dict):
+        return None
+    owner = owner_token.get("owner")
+    if owner is None:
+        return "missing_owner"
+    if s is not owner:
+        return "owner_replaced"
+    if str(getattr(s, "session_id", "") or "") != str(owner_token.get("session_id") or ""):
+        return "session_id_rotated"
+    if getattr(s, "pre_compression_snapshot", False):
+        return "session_archived"
+    return _process_wakeup_owner_token_mismatch(owner_token, s)
+
+
 # #6327: bounded retries for the out-of-AGENT credential revalidation loop in
 # start_session_turn().  Each retry re-runs the revalidation OUTSIDE the
 # per-session agent lock after the live pause/provider/fingerprint state moved
@@ -22058,11 +22357,21 @@ def start_session_turn(
     # _start_run() -> _start_chat_stream_for_session(), which re-verifies the
     # canonical owner before any pending-state mutation.
     _paused_wakeup_response = None
-    _wakeup_token, _live_owner = _build_immutable_session_owner_token(
+    _wakeup_token, _live_owner, _routing = _build_immutable_session_owner_token(
         session_id, model=model, provider=model_provider, preferred=s,
     )
     if _wakeup_token is None:
+        if _routing and _routing.get("error"):
+            return {"error": _routing["error"], "_status": int(_routing.get("_status") or 400)}
         return {"error": "Session not found", "_status": 404}
+    # #6327: the routing (workspace + model/provider lane) is RECOMPUTED from
+    # the selected LIVE owner inside the token build — never carry
+    # predecessor-derived routing (from an archived pre-compression snapshot)
+    # into the continuation's revalidation or run.
+    workspace = _routing["workspace"]
+    model = _routing["model"]
+    model_provider = _routing["provider"]
+    normalized_model = _routing["normalized_model"]
     _credential_revalidation = None
     if _wakeup_token.get("pause_matches"):
         try:
@@ -22096,11 +22405,17 @@ def start_session_turn(
                 # Rebuild on the CURRENT live owner and suppress once so the
                 # next drain cycle revalidates; with no live pause the fresh
                 # token lets the run start (or the fence requeue) cleanly.
-                _wakeup_token, _live_owner = _build_immutable_session_owner_token(
+                _wakeup_token, _live_owner, _routing = _build_immutable_session_owner_token(
                     session_id, model=model, provider=model_provider, preferred=_live_owner,
                 )
                 if _wakeup_token is None:
+                    if _routing and _routing.get("error"):
+                        return {"error": _routing["error"], "_status": int(_routing.get("_status") or 400)}
                     return {"error": "Session not found", "_status": 404}
+                workspace = _routing["workspace"]
+                model = _routing["model"]
+                model_provider = _routing["provider"]
+                normalized_model = _routing["normalized_model"]
                 _final = _suppress_process_wakeup_once(
                     _wakeup_token, model=model, provider=model_provider, session_id=session_id,
                 )
@@ -22111,11 +22426,17 @@ def start_session_turn(
                 _wakeup_token, _live_owner = _final["token"], _final["session"]
             else:
                 _revalidation_retries += 1
-                _wakeup_token, _live_owner = _build_immutable_session_owner_token(
+                _wakeup_token, _live_owner, _routing = _build_immutable_session_owner_token(
                     session_id, model=model, provider=model_provider, preferred=_live_owner,
                 )
                 if _wakeup_token is None:
+                    if _routing and _routing.get("error"):
+                        return {"error": _routing["error"], "_status": int(_routing.get("_status") or 400)}
                     return {"error": "Session not found", "_status": 404}
+                workspace = _routing["workspace"]
+                model = _routing["model"]
+                model_provider = _routing["provider"]
+                normalized_model = _routing["normalized_model"]
                 _credential_revalidation = None
                 if _wakeup_token.get("pause_matches"):
                     try:
@@ -22159,11 +22480,17 @@ def start_session_turn(
             if _revalidation_retries >= _PROCESS_WAKEUP_REVALIDATION_MAX_RETRIES:
                 return resp
             _revalidation_retries += 1
-            _wakeup_token, _live_owner = _build_immutable_session_owner_token(
+            _wakeup_token, _live_owner, _routing = _build_immutable_session_owner_token(
                 session_id, model=model, provider=model_provider, preferred=_live_owner,
             )
             if _wakeup_token is None:
+                if _routing and _routing.get("error"):
+                    return {"error": _routing["error"], "_status": int(_routing.get("_status") or 400)}
                 return {"error": "Session not found", "_status": 404}
+            workspace = _routing["workspace"]
+            model = _routing["model"]
+            model_provider = _routing["provider"]
+            normalized_model = _routing["normalized_model"]
             _credential_revalidation = None
             if _wakeup_token.get("pause_matches"):
                 try:

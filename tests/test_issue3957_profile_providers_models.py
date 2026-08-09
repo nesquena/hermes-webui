@@ -3196,7 +3196,7 @@ def _install_immutable_owner_token_fixture(monkeypatch, tmp_path, *, recovered=T
 
 def _build_token_and_revalidate(routes, session_id):
     """Run the #6327 token build + out-of-AGENT revalidation; return both."""
-    token, owner = routes._build_immutable_session_owner_token(
+    token, owner, _routing = routes._build_immutable_session_owner_token(
         session_id, model="test-model", provider="test-provider"
     )
     assert token is not None and owner is not None
@@ -3302,17 +3302,20 @@ def test_revalidation_replacement_same_sid_different_profile_generation(
             config.SESSIONS.pop(sid, None)
 
 
-def test_revalidation_compression_migration_during_wait(monkeypatch, tmp_path):
-    """Compression (old-SID archived snapshot -> continuation) while the
-    revalidation waits must never touch the snapshot (#6327 B4).
+def test_revalidation_compression_same_object_migration_during_wait(
+    monkeypatch, tmp_path
+):
+    """Production same-object compression migration while the revalidation
+    waits must never touch the archived snapshot (#6327 B4).
 
-    The writer archives the tokenized owner (``pre_compression_snapshot``,
-    old SID preserved) and migrates the canonical cache to a continuation
-    under a NEW sid with the per-session AGENT lock aliased — the exact #6327
-    compression contract.  The stale apply must requeue with
-    ``session_archived`` without mutating the snapshot; the atomic resolve
-    (``_resolve_live_session_owner`` and a fresh token build) follows to the
-    continuation; applying with the fresh token lands on the LIVE owner only.
+    Production does NOT create a separate continuation object: the LIVE
+    Session rotates ``session_id`` in place, ``SESSIONS[old]`` is popped
+    (old_sid now only exists as the archived pre-compression snapshot on
+    disk), ``SESSIONS[new]`` holds the SAME object, and the per-session AGENT
+    lock entry is aliased to the new sid.  The stale apply must requeue
+    (``session_id_rotated``) without mutating the archived snapshot copy; the
+    atomic resolve follows the SAME object under its rotated sid; applying
+    with the fresh token lands on the LIVE owner only.
     """
     import api.routes as routes
 
@@ -3322,6 +3325,12 @@ def test_revalidation_compression_migration_during_wait(monkeypatch, tmp_path):
     old_sid = session.session_id
     new_sid = "issue6327-compressed-continuation"
     original_pause = dict(session.process_wakeup_pause)
+    # The archived snapshot is the DISK copy production loads back for old_sid
+    # (separate object, marker persisted, pause carried from pre-compression).
+    archived = _StreamingFakeSession(old_sid, "alpha", tmp_path, "issue6327-stream")
+    archived.pre_compression_snapshot = True
+    archived.updated_at = 1.0
+    archived.process_wakeup_pause = dict(original_pause)
     # Keep the continuation scan hermetic: no real session index/sidecars.
     monkeypatch.setattr(routes, "SESSION_DIR", tmp_path / "sessions")
     monkeypatch.setattr(routes, "SESSION_INDEX_FILE", tmp_path / "sessions" / "_index.json")
@@ -3329,46 +3338,55 @@ def test_revalidation_compression_migration_during_wait(monkeypatch, tmp_path):
         token, owner, revalidation = _build_token_and_revalidate(routes, old_sid)
         assert owner is session
 
-        continuation = _StreamingFakeSession(
-            new_sid, "alpha", tmp_path, "issue6327-stream"
-        )
-        continuation.process_wakeup_pause = dict(original_pause)
-        continuation.parent_session_id = old_sid
-        continuation.updated_at = 2.0
-        session.updated_at = 1.0
         go = threading.Event()
         done = threading.Event()
 
-        def _compress():
-            session.pre_compression_snapshot = True
+        def _compress_same_object():
+            # Production compression contract: pop the old cache entry, rotate
+            # the SAME object's sid, stamp the predecessor link, alias the
+            # per-session AGENT lock to the new sid, and re-insert the object
+            # under the new sid.  old_sid is now only the archived snapshot.
+            with config.LOCK:
+                config.SESSIONS.pop(old_sid, None)
+            session.session_id = new_sid
+            session.parent_session_id = old_sid
+            session.pre_compression_snapshot = False
             with config.SESSION_AGENT_LOCKS_LOCK:
                 # Production aliases the per-session AGENT lock to the new SID.
                 config.SESSION_AGENT_LOCKS[new_sid] = config.SESSION_AGENT_LOCKS.get(
                     old_sid
                 )
+                config.SESSION_AGENT_LOCKS.pop(old_sid, None)
             with config.LOCK:
-                config.SESSIONS[old_sid] = session
-                config.SESSIONS[new_sid] = continuation
+                config.SESSIONS[old_sid] = archived
+                config.SESSIONS[new_sid] = session
 
-        writer = _run_concurrent_writer(go, done, _compress)
+        writer = _run_concurrent_writer(go, done, _compress_same_object)
         go.set()
         assert done.wait(10), "compression writer never ran"
         writer.join(10)
 
-        # Atomic resolve: following the archived snapshot lands on the
-        # continuation; the lock entry is aliased to the new sid.
+        # Atomic resolve: the tokenized owner IS the live continuation (same
+        # object, rotated sid); the archived snapshot stays a separate object.
         resolved_owner, resolved_sid = routes._resolve_live_session_owner(
             old_sid, preferred=session
         )
-        assert resolved_owner is continuation
+        assert resolved_owner is session
         assert resolved_sid == new_sid
+        # The non-preferred path exercises the strict mutating-flow authority:
+        # get_session(old_sid) -> archived snapshot -> follow -> same object.
+        resolved_owner2, resolved_sid2 = routes._resolve_live_session_owner(old_sid)
+        assert resolved_owner2 is session
+        assert resolved_sid2 == new_sid
         with config.SESSION_AGENT_LOCKS_LOCK:
             assert (
                 config.SESSION_AGENT_LOCKS.get(new_sid)
                 is config.SESSION_AGENT_LOCKS.get(old_sid)
-            )
+            ) or config.SESSION_AGENT_LOCKS.get(old_sid) is None
+            assert config.SESSION_AGENT_LOCKS.get(new_sid) is not None
 
-        # The stale apply refuses and NEVER mutates the archived snapshot.
+        # The stale apply refuses (sid rotated) and NEVER mutates the archived
+        # snapshot copy.
         proxy.arm()
         result = routes._apply_process_wakeup_revalidation_once(
             token, revalidation, model="test-model", provider="test-provider"
@@ -3376,19 +3394,18 @@ def test_revalidation_compression_migration_during_wait(monkeypatch, tmp_path):
         assert not proxy.attempted.is_set(), (
             "archived apply attempted PROCESS while AGENT was held (AB/BA)"
         )
-        assert result["retry"] is True and result["reason"] == "session_archived", result
-        assert session.pre_compression_snapshot is True
+        assert result["retry"] is True and result["reason"] == "session_id_rotated", result
+        assert dict(archived.process_wakeup_pause) == original_pause
         assert dict(session.process_wakeup_pause) == original_pause
-        assert dict(continuation.process_wakeup_pause) == original_pause
         assert calls["start"] == [] and calls["save"] == [] and calls["suppress"] == []
         # The next revalidation runs legitimately OUTSIDE AGENT (it takes
         # PROCESS) — stop recording before it, then re-arm for the apply.
         proxy.disarm()
 
-        # Bounded rebuild follows the continuation: applying with the fresh
-        # token lands on the LIVE owner (clears ITS pause), never the snapshot.
+        # Bounded rebuild follows the SAME object under its rotated sid:
+        # applying with the fresh token lands on the LIVE owner only.
         token2, owner2, revalidation2 = _build_token_and_revalidate(routes, old_sid)
-        assert owner2 is continuation
+        assert owner2 is session
         assert token2["session_id"] == new_sid
         proxy.arm()
         result2 = routes._apply_process_wakeup_revalidation_once(
@@ -3398,13 +3415,13 @@ def test_revalidation_compression_migration_during_wait(monkeypatch, tmp_path):
             "continuation apply attempted PROCESS while AGENT was held (AB/BA)"
         )
         assert result2["retry"] is False and result2["error"] is None, result2
-        live_pause = getattr(continuation, "process_wakeup_pause", None)
+        live_pause = getattr(session, "process_wakeup_pause", None)
         assert not (isinstance(live_pause, dict) and live_pause.get("paused"))
         assert calls["start"] == []
         assert calls["save"], "applied revalidation must persist the live owner"
-        # The archived snapshot stayed untouched end to end.
-        assert session.pre_compression_snapshot is True
-        assert dict(session.process_wakeup_pause) == original_pause
+        # The archived snapshot copy stayed untouched end to end.
+        assert archived.pre_compression_snapshot is True
+        assert dict(archived.process_wakeup_pause) == original_pause
         assert proxy.acquire(blocking=False), "a thread leaked the ownership lock"
         proxy.release()
     finally:
@@ -3413,6 +3430,7 @@ def test_revalidation_compression_migration_during_wait(monkeypatch, tmp_path):
             config.SESSIONS.pop(new_sid, None)
         with config.SESSION_AGENT_LOCKS_LOCK:
             config.SESSION_AGENT_LOCKS.pop(new_sid, None)
+            config.SESSION_AGENT_LOCKS.pop(old_sid, None)
 
 
 def test_revalidation_credential_generation_changes_before_apply(
@@ -3527,7 +3545,7 @@ def test_revalidation_owner_replaced_before_run_acceptance(monkeypatch, tmp_path
         assert applied["retry"] is False and applied["error"] is None, applied
         # Production rebuilds the token after the apply so the acceptance
         # token is fresh relative to the (cleared) pause state.
-        fresh_token, fresh_owner = routes._build_immutable_session_owner_token(
+        fresh_token, fresh_owner, _fresh_routing = routes._build_immutable_session_owner_token(
             sid, model="test-model", provider="test-provider"
         )
         assert fresh_owner is session

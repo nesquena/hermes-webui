@@ -652,6 +652,7 @@ def _run_gateway_chat_streaming(
     *,
     model_provider=None,
     goal_related=False,
+    owner_token=None,
 ):
     """Bridge a WebUI chat turn through Hermes Gateway's API server.
 
@@ -723,6 +724,28 @@ def _run_gateway_chat_streaming(
     usage = {"input_tokens": 0, "output_tokens": 0, "estimated_cost": 0}
     try:
         s = get_session(session_id)
+        if owner_token is not None:
+            # #6327 route-to-worker acceptance (gateway worker): same fence as
+            # _run_agent_streaming — never run the conversation on a
+            # same-SID replacement that landed between route acceptance and
+            # the worker's own get_session() re-read.
+            from api.routes import _stream_worker_owner_token_mismatch
+
+            _worker_mismatch = _stream_worker_owner_token_mismatch(owner_token, s)
+            if _worker_mismatch is not None:
+                logger.warning(
+                    "gateway stream worker %s refused owner for session %s: %s",
+                    stream_id,
+                    session_id,
+                    _worker_mismatch,
+                )
+                put_gateway_event("apperror", {
+                    "error": "session owner changed before the agent turn started",
+                    "owner_fence": _worker_mismatch,
+                    "session_id": session_id,
+                    "_status": 409,
+                })
+                return  # apperror closes the stream on the client side
         from api.config import get_config  # imported lazily to avoid config-cycle churn
 
         cfg = get_config()
