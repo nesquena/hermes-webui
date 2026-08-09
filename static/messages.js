@@ -2723,11 +2723,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(typeof _ownsAttachSeam==='function'&&!_ownsAttachSeam(source)) return;
       if(_deferStreamErrorIfOffline()||_deferStreamErrorIfPageHidden(source)) return;
       if(typeof _ownsAttachSeam==='function'&&!_ownsAttachSeam(source)) return;
-      if(st&&st.active){
-        setComposerStatus('Reconnected');
-        if(typeof _ownsAttachSeam==='function'&&!_ownsAttachSeam(source)) return;
-        _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
-        return;
+      if(st){
+        if(st.active){
+          setComposerStatus('Reconnected');
+          if(typeof _ownsAttachSeam==='function'&&!_ownsAttachSeam(source)) return;
+          _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
+          return;
+        }
       }
       if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;
       if(typeof _ownsAttachSeam==='function'&&!_ownsAttachSeam(source)) return;
