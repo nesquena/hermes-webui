@@ -1505,7 +1505,10 @@ async function newSession(flash, options={}){
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
       _clearEmptyComposerModelOverride();
     }
-    S.session=data.session;if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);S.messages=data.session.messages||[];
+    S.session=data.session;
+    if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
+    S.messages=data.session.messages||[];
+    const installedSessionId=S.session&&S.session.session_id||null;
     S._pendingSessionToolsets=null;
     if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
@@ -1580,6 +1583,7 @@ async function newSession(flash, options={}){
     }
     // Refresh sidebar to include the newly created session (#3874).
     if(typeof refreshSessionList==='function'){Promise.resolve(refreshSessionList('new-session')).catch(()=>{})}
+    return installedSessionId;
   })();
   try{
     return await _newSessionInFlight;
@@ -1587,6 +1591,21 @@ async function newSession(flash, options={}){
     _newSessionInFlight=null;
     _setNewSessionPending(false);
   }
+}
+
+async function _ensureSessionOwner(){
+  const currentSid=S.session&&S.session.session_id||null;
+  if(currentSid){
+    return typeof _isSessionCurrentPane==='function'&&_isSessionCurrentPane(currentSid)
+      ? currentSid
+      : null;
+  }
+  const createdSid=await newSession();
+  if(!createdSid) return null;
+  if(typeof renderSessionList==='function') await renderSessionList();
+  return typeof _isSessionCurrentPane==='function'&&_isSessionCurrentPane(createdSid)
+    ? createdSid
+    : null;
 }
 
 /**
