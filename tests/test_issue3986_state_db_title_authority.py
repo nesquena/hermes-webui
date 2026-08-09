@@ -98,11 +98,23 @@ def test_equal_timestamps_keep_sidecar_title(base_session):
     assert session["title"] == "Old sidecar title"
 
 
-def test_overrides_query_carries_last_activity_at():
-    # Source-shape guard: the sidebar overrides query must fetch
-    # last_activity_at or the last-writer comparison silently degrades.
-    import inspect
-    from api import models
-    src = inspect.getsource(models._read_state_db_sidebar_overrides)
-    assert "last_activity_expr" in src
-    assert "last_activity_at" in src
+def test_overrides_query_returns_last_activity_from_real_db(tmp_path):
+    # Database-backed guard (Greptile #6875 review): the overrides query must
+    # actually return state.db last_activity_at to the reconcile path, not
+    # just contain the column name in source.
+    import sqlite3
+    from api.models import _read_state_db_sidebar_overrides
+    db = tmp_path / "state.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, title TEXT, "
+        "last_activity_at REAL, message_count INTEGER)"
+    )
+    conn.execute(
+        "INSERT INTO sessions VALUES ('sid-db', 'tui', 'State Title', 200.0, 5)"
+    )
+    conn.commit()
+    conn.close()
+    overrides = _read_state_db_sidebar_overrides(db, {"sid-db"})
+    assert overrides["sid-db"]["_state_db_title"] == "State Title"
+    assert overrides["sid-db"]["_state_db_last_activity_at"] == 200.0
