@@ -484,17 +484,6 @@ def _session_list_cache_overlay_runtime_rows(
         item = dict(row) if isinstance(row, dict) else {}
         sid = str(item.get("session_id") or "").strip()
         item.pop("active_run", None)
-        if not source_authoritative:
-            for key in (
-                "active_stream_id",
-                "has_pending_user_message",
-                "pending_started_at",
-                "is_streaming",
-                "cron_running",
-            ):
-                item.pop(key, None)
-            overlaid.append(item)
-            continue
         live = live_sessions.get(sid)
         if live is not None:
             live_stream_id = getattr(live, "active_stream_id", None)

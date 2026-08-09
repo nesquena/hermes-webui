@@ -564,9 +564,14 @@ def test_session_list_runtime_overlay_fail_closed_and_preserves_authoritative_ro
         with config.ACTIVE_RUNS_LOCK:
             config.ACTIVE_RUNS.clear()
 
-    assert set(degraded) == {"session_id", "updated_at", "last_message_at"}
-    assert degraded["updated_at"] == 10
-    assert degraded["last_message_at"] == 20
+    assert "active_run" not in degraded
+    assert degraded["active_stream_id"] == "live-stream"
+    assert degraded["has_pending_user_message"] is True
+    assert degraded["pending_started_at"] == 30
+    assert degraded["updated_at"] == 40
+    assert degraded["last_message_at"] == 50
+    assert degraded["is_streaming"] is True
+    assert degraded["cron_running"] is False
     assert authoritative["active_run"]["started_at"] == 10
     assert authoritative["active_stream_id"] == "live-stream"
     assert authoritative["has_pending_user_message"] is True
@@ -599,7 +604,12 @@ def test_session_list_response_propagates_non_authoritative_cache_result(
 
     response = routes._session_list_payload_to_response(result)
 
-    assert response["sessions"] == [{"session_id": "sid", "archived": False}]
+    assert response["sessions"] == [{
+        "session_id": "sid",
+        "archived": False,
+        "is_streaming": False,
+        "cron_running": False,
+    }]
 
 
 def test_session_list_cache_source_stamp_tracks_state_db_wal(tmp_path, monkeypatch):

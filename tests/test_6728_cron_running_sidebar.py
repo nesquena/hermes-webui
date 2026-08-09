@@ -162,6 +162,21 @@ def test_overlay_marks_current_running_cron_row(monkeypatch):
     assert rows[0]["cron_running"] is True
 
 
+def test_non_authoritative_overlay_preserves_live_cron_lifecycle(monkeypatch):
+    import api.routes as routes
+    import api.route_session_list_cache as slc
+
+    monkeypatch.setattr(routes, "_RUNNING_CRON_JOBS", {"job6728": 1000.0})
+    monkeypatch.setattr(slc, "_session_list_cache_active_stream_ids", lambda: set())
+
+    rows = slc._session_list_cache_overlay_runtime_rows(
+        [_cron_row("cron_job6728_20260803_100000", created_at=1100)],
+        source_authoritative=False,
+    )
+
+    assert rows[0]["cron_running"] is True
+
+
 def test_overlay_does_not_mark_finished_or_other_cron_rows(monkeypatch):
     import api.routes as routes
     import api.route_session_list_cache as slc

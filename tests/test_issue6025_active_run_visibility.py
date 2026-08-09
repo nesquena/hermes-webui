@@ -275,7 +275,10 @@ def test_active_run_visibility_uses_canonical_session_matrix():
                 "is_streaming": True,
             },
         ], source_authoritative=False)
-        assert stale_rows == [{"session_id": "direct", "archived": False}]
+        assert "active_run" not in stale_rows[0]
+        assert stale_rows[0]["active_stream_id"] == "old"
+        assert stale_rows[0]["has_pending_user_message"] is True
+        assert stale_rows[0]["is_streaming"] is False
     finally:
         with config.ACTIVE_RUNS_LOCK:
             config.ACTIVE_RUNS.clear()

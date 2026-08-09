@@ -5503,9 +5503,6 @@ function _applySessionListPayload(sessData, projData, opts){
     _markPollingCompletionUnreadTransitions(_allSessions);
   }
   const isStreaming = _allSessions.some(s => _isSessionEffectivelyStreaming(s));
-  const hasRingStreaming = _allSessions.some(s => typeof _isSessionRingStreaming==='function'
-    ? _isSessionRingStreaming(s)
-    : _isSessionEffectivelyStreaming(s));
   if (isStreaming) {
     startStreamingPoll();
   } else {
