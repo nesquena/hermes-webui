@@ -1457,10 +1457,10 @@ async function send(){
         // Default: queue mode (current behavior). Also the fallback for
         // 'steer' mode when no stream is active or _trySteer is unavailable.
         const _modelState=_chatPayloadModelState();
-        queueSessionMessage(S.session.session_id,{text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'});
-        _clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);
+        queueSessionMessage(ownerSid,{text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'});
+        _clearComposerAfterQueuedSelectionSend(ownerSid);
         S.pendingFiles=[];renderTray();
-        updateQueueBadge(S.session.session_id);
+        updateQueueBadge(ownerSid);
         showToast(`Queued: "${text.slice(0,40)}${text.length>40?'…':''}"`,2000);
       }
     }
@@ -1859,6 +1859,7 @@ async function send(){
     _pendingMoaConfig=null;
     postStartData = startData;
   }catch(e){
+    if(!_slashOwnerIsCurrent(activeSid)) return;
     const errMsg=String((e&&e.message)||'');
     // If /api/chat/start returns 404, the session was deleted server-side
     // (its sidecar is gone) while GET kept returning a CLI stub (#2782). Strip
@@ -1900,12 +1901,15 @@ async function send(){
       showToast('Current session is still running. Reconnected and queued your message.',2600);
       try{
         await loadSession(activeSid);
+        if(!_slashOwnerIsCurrent(activeSid)) return;
         setComposerStatus('');
         return;
       }catch(_){
         // Fall through to standard error handling if session reload fails.
       }
     }
+
+    if(!_slashOwnerIsCurrent(activeSid)) return;
 
     delete INFLIGHT[activeSid];
     stopApprovalPolling();
@@ -1926,6 +1930,7 @@ async function send(){
     return;
   }
 
+  if(!_slashOwnerIsCurrent(activeSid)) return;
   const startData = postStartData || {};
   streamId = postStartData ? postStartData.stream_id : null;
   if(streamId&&typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();

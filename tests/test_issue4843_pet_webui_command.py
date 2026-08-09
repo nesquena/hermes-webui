@@ -182,6 +182,13 @@ def _run_send_js(*, command, status, adapter_status=None, hook_result=None, hook
           newSession: async () => {{
             ctx.S.session = {{ session_id: 'sid-1', title: 'New Chat' }};
           }},
+          _ensureSessionOwner: async () => {{
+            const current = ctx.S.session && ctx.S.session.session_id;
+            if (current) return current;
+            await ctx.newSession();
+            await ctx.renderSessionList();
+            return ctx.S.session && ctx.S.session.session_id;
+          }},
           $: id => {{
             if (id === 'msg') return msgInput;
             return genericEl;

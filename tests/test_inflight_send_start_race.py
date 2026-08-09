@@ -161,6 +161,19 @@ def test_post_start_bookkeeping_errors_cannot_block_live_attach():
     )
 
 
+def test_send_rechecks_pane_owner_after_chat_start_before_stream_mutation():
+    """A pane switch during chat/start must not attach the returned stream to the new pane."""
+    body = _function_body(MESSAGES_JS, "send")
+    chat_start_idx = body.index("const startData=await api('/api/chat/start'")
+    catch_idx = body.index("}catch(e){", chat_start_idx)
+    catch_guard_idx = body.index("if(!_slashOwnerIsCurrent(activeSid)) return;", catch_idx)
+    success_guard_idx = body.index("if(!_slashOwnerIsCurrent(activeSid)) return;", catch_guard_idx + 1)
+    stream_state_idx = body.index("S.activeStreamId = streamId;", chat_start_idx)
+    assert catch_guard_idx < body.index("const errMsg=", catch_idx)
+    assert success_guard_idx < stream_state_idx
+    assert "attachLiveStream(activeSid, streamId, uploadedNames);" in body[success_guard_idx:]
+
+
 def test_server_absent_optimistic_first_turn_rows_are_not_kept_forever():
     """A local first-turn sidebar row must expire when /api/chat/start never persisted it."""
     body = _function_body(SESSIONS_JS, "_mergeOptimisticFirstTurnSessions")
