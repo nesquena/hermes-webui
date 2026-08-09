@@ -6684,7 +6684,9 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 .insights-table{width:100%;font-size:12px;}
 .insights-table-head{display:grid;grid-template-columns:1fr 80px;padding:4px 0;border-bottom:1px solid var(--border);font-weight:600;color:var(--muted);font-size:11px;}
 .insights-table-row{display:grid;grid-template-columns:1fr 80px;padding:6px 0;border-bottom:1px solid var(--border,.05);}
-.insights-model-table .insights-table-head,.insights-model-table .insights-table-row{grid-template-columns:minmax(80px,1.4fr) 56px 64px 54px 64px 44px;gap:8px;align-items:center;}
+.insights-model-table{overflow-x:auto;display:block;}
+.insights-model-table .insights-table-head,
+.insights-model-table .insights-table-row{grid-template-columns:minmax(80px,1.4fr) 56px 64px 54px 64px 44px;gap:8px;align-items:center;min-width:402px;}
 .insights-model-health-card{padding:0;}
 .insights-model-health-card>summary{cursor:pointer;padding:12px 14px;}
 .insights-model-health-card>summary .insights-card-title{display:inline-block;margin-bottom:0;}

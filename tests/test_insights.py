@@ -564,3 +564,49 @@ def test_skill_usage_table_overflow_trio_stays_together():
     assert "grid-template-columns" in joined, (
         f"head and row must keep the shared grid-template-columns; got: {joined}"
     )
+
+
+def test_models_table_overflow_contract_stays_together():
+    """PR #6775 sibling regression: the regular Models table needs the same
+    all-width containment contract as the skill-usage table.
+
+    The card-level min-width:0 lets every .insights-card shrink in the
+    two-column usage grid, so above the 640px breakpoint the Models table
+    must own a local horizontal scroller (overflow-x:auto + display:block)
+    and its head/rows must share a min-width floor; otherwise the six-column
+    grid paints outside its card at intermediate widths (641px+)."""
+    # 1) The Models table wrapper owns a local horizontal scroller.
+    table_block = [l for l in STYLE_CSS.splitlines() if l.startswith(".insights-model-table{")][0]
+    assert "overflow-x:auto" in table_block, (
+        f".insights-model-table must own overflow-x:auto; got: {table_block}"
+    )
+    assert "display:block" in table_block, (
+        f".insights-model-table must be display:block for the scroller to size; got: {table_block}"
+    )
+
+    # 2) Header AND data rows share the same minimum content width (402px,
+    #    matching the six declared columns + gaps) in one shared rule, so
+    #    columns stay aligned while the wrapper scrolls.
+    css_lines = STYLE_CSS.splitlines()
+    head_idx = next(
+        (i for i, l in enumerate(css_lines)
+         if ".insights-model-table .insights-table-head" in l),
+        None,
+    )
+    assert head_idx is not None, "a .insights-model-table head rule must exist"
+    joined = css_lines[head_idx]
+    if not joined.strip().endswith("{"):
+        for j in range(head_idx + 1, min(head_idx + 3, len(css_lines))):
+            nxt = css_lines[j].strip()
+            if ".insights-table-row" in nxt:
+                joined = joined + "\n" + css_lines[j]
+                break
+    assert ".insights-model-table .insights-table-row" in joined, (
+        "head and row selectors must be declared together"
+    )
+    assert "min-width:402px" in joined, (
+        f"head and row must share min-width:402px; got: {joined}"
+    )
+    assert "grid-template-columns" in joined, (
+        f"head and row must keep the shared grid-template-columns; got: {joined}"
+    )
