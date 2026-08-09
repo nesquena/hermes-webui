@@ -15960,6 +15960,9 @@ function renderMessages(options){
   const scrollSnapshot=(preserveScroll||_messageUserUnpinned)?_captureMessageScrollSnapshot():null;
   const inner=$('msgInner');
   const sid=S.session?S.session.session_id:null;
+  const msgCount=S.messages.length;
+  if(_loadingSessionId===sid&&msgCount===0&&inner)return;
+  if(sid!==_messageRenderWindowSid) _resetMessageRenderWindow(sid);
   const _settlementHandoff=typeof _liveTurnSettlementHandoff==='undefined'
     ? null
     : _liveTurnSettlementHandoff;
@@ -15971,9 +15974,6 @@ function renderMessages(options){
     const activityMode=typeof chatActivityMode==='function'?chatActivityMode():'compact_worklog';
     _hydrateIdLinkedHistoricalToolScenes(S.messages,{sessionId:sid,mode:activityMode});
   }
-  const msgCount=S.messages.length;
-  if(_loadingSessionId===sid&&msgCount===0&&inner) return;
-  if(sid!==_messageRenderWindowSid) _resetMessageRenderWindow(sid);
   // During session switch, S.messages is intentionally cleared while the full
   // message fetch is still in flight. Other async updates can still call
   // renderMessages() in this window. Keep the existing loading placeholder.
