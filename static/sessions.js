@@ -2632,7 +2632,7 @@ function _setActiveProjectFilter(projectId) {
   const next = projectId === NO_PROJECT_FILTER ? NO_PROJECT_FILTER : (projectId || null);
   if (_activeProject === next) return;
   _activeProject = next;
-  _clearActiveRunProjection();
+  if(typeof _clearActiveRunProjection==='function') _clearActiveRunProjection();
   renderSessionListFromCache();
   void renderSessionList({deferWhileInteracting:false});
 }
@@ -2642,7 +2642,7 @@ function _setSessionSourceFilter(filter) {
   if (_sessionSourceFilter === next) return;
   _sessionSourceFilter = next;
   _activeProject = null;
-  _clearActiveRunProjection();
+  if(typeof _clearActiveRunProjection==='function') _clearActiveRunProjection();
   _selectedSessions.clear();
   _sessionSelectMode = false;
   try { localStorage.setItem('hermes-session-source-filter', next); } catch (_e) {}
@@ -5348,7 +5348,7 @@ function _schedulePendingSessionListApply(){
     }
     const payload=_pendingSessionListPayload;
     _pendingSessionListPayload=null;
-    if(!_sessionListGenerationIsCurrent(payload.gen)) return;
+    if(payload.gen!==_renderSessionListGen) return;
     // Profile switch may have bumped unread gen after the list gen check
     // window; still drop completion-marking for the stale pre-switch payload.
     _applySessionListPayloadIfCurrent(payload.gen,payload.sessData,payload.projData,{
@@ -5676,7 +5676,9 @@ async function _runRenderSessionListRefresh(opts, _gen){
       _schedulePendingSessionListApply();
       return;
     }
-    _applySessionListPayloadIfCurrent(_gen,sessData,projData,{unreadGen});
+    if(_sessionListGenerationIsCurrent(_gen)&&!_profileSwitchListEmbargo){
+      _applySessionListPayload(sessData,projData,{unreadGen});
+    }
   }catch(e){
     if (_gen !== _renderSessionListGen) return;
     // #4671: same embargo guard as the success path — a mid-switch /api/sessions that
@@ -8043,7 +8045,8 @@ function renderSessionListFromCache(){
     const isActive=_sessionLineageContainsSession(s,activeSidForSidebar);
     const ownStreaming=_isSessionEffectivelyStreaming(s);
     const ownRingStreaming=_isSessionRingStreaming(s);
-    const isStreaming=ownRingStreaming||!!s._child_session_streaming;
+    const isStreaming=ownStreaming||!!s._child_session_streaming;
+    const isRingStreaming=ownRingStreaming||!!s._child_session_streaming;
     _rememberRenderedStreamingState(s, ownStreaming);
     _rememberRenderedSessionSnapshot(s);
     const hasUnread=(_hasUnreadForSession(s)||!!s._child_session_has_unread)&&!isActive;
@@ -8128,7 +8131,7 @@ function renderSessionListFromCache(){
     title.title=_sessionFullTitleTooltip(rawTitle,cleanTitle,s);
     const tsMs=_sessionTimestampMs(s);
     const ts=document.createElement('span');
-    const hasAttentionState=isStreaming||hasUnread||Boolean(attention);
+    const hasAttentionState=isRingStreaming||hasUnread||Boolean(attention);
     ts.className='session-time'+(hasAttentionState?' is-hidden':'');
     ts.textContent=hasAttentionState?'':_formatRelativeSessionTime(tsMs);
     titleRow.appendChild(title);

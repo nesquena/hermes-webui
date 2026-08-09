@@ -25,7 +25,6 @@ def _extract_function(source: str, name: str) -> str:
     block_comment = False
     for index in range(brace, len(source)):
         char = source[index]
-        previous = source[index - 1] if index else ""
         following = source[index + 1] if index + 1 < len(source) else ""
         if line_comment:
             if char == "\n":
