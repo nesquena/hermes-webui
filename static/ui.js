@@ -14197,9 +14197,13 @@ function _restoreCompressionPlaceholder(){
   }
   _compressionPlaceholderSaved=null;
 }
-function clearCompressionUi(ownerSid){
+function clearCompressionUi(ownerSid,ownerOperationId){
   if(ownerSid&&window._compressionUi&&window._compressionUi.sessionId
     &&window._compressionUi.sessionId!==ownerSid)return;
+  if(ownerOperationId&&window._compressionUi&&window._compressionUi.automatic
+    &&window._compressionUi.operationId!==ownerOperationId)return;
+  if(ownerOperationId&&window._compressionUi&&window._compressionUi.operationId
+    &&window._compressionUi.operationId!==ownerOperationId)return;
   window._compressionUi=null;
   _clearCompressionElapsedTimer();
   _setCompressionSessionLock(null,ownerSid);

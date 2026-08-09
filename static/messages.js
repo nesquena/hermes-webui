@@ -6435,7 +6435,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // honest by transitioning the running divider into a completed divider;
       // final settlement removes live-only compression rows from the Worklog.
       const _compressionLive=LIVE_STREAMS[activeSid];
-      if(!_isSessionCurrentPane(activeSid)||S.activeStreamId!==streamId
+      if(S.activeStreamId!==streamId
         ||!_compressionLive||_compressionLive.streamId!==streamId||_compressionLive.source!==source)return;
       if(!S.session) return;
       const currentSid=S.session.session_id;
