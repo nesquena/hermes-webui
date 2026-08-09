@@ -462,6 +462,7 @@ def test_health_route_completes_while_config_cache_lock_is_held(monkeypatch, tmp
     )
     payload = handler.json_body()
     _assert_host_metrics_intact(payload)
+    assert payload["status"] == "ok"
     runtime = payload["webui_runtime"]
     assert runtime["sessions"] == {"available": True, "resident": 2, "cap": 41}
     assert runtime["streams"]["available"] is True
@@ -522,6 +523,7 @@ def test_health_route_completes_while_one_real_stream_channel_lock_is_held(monke
     )
     payload = handler.json_body()
     _assert_host_metrics_intact(payload)
+    assert payload["status"] == "ok"
     runtime = payload["webui_runtime"]
     assert runtime["streams"] == {
         "available": True,
@@ -758,6 +760,21 @@ def test_sessions_lock_busy_does_not_block_sibling_owner():
     assert elapsed < _NONBLOCKING_BUDGET_SECONDS
     assert snapshot["sessions"] == {"available": False, "resident": 0, "cap": 0}
     assert "models_cache" in snapshot
+
+
+def test_health_status_stays_ok_when_sessions_owner_lock_is_busy(monkeypatch):
+    from api import config, system_health
+
+    _fixed_host_metrics(monkeypatch)
+    with _held_from_worker(config.LOCK):
+        started = time.monotonic()
+        payload = system_health.build_system_health_payload()
+        elapsed = time.monotonic() - started
+
+    assert elapsed < _NONBLOCKING_BUDGET_SECONDS
+    assert payload["status"] == "ok"
+    assert payload["webui_runtime"]["sessions"]["available"] is False
+    assert payload["webui_runtime"]["models_cache"]["available"] is True
 
 
 def test_models_cache_snapshot_counts_published_groups_without_names():
