@@ -942,7 +942,7 @@ function _settleManualCompressionOperation(operation){
     ? _isSessionCurrentPane(operation.sid)
     : !!(S.session&&S.session.session_id===operation.sid);
   const newerStream=!!(sameSession&&(S.activeStreamId||S.session.active_stream_id));
-  if(sameSession&&!operation.uiFinalized&&typeof clearCompressionUi==='function') clearCompressionUi();
+  if(sameSession&&!operation.uiFinalized&&typeof clearCompressionUi==='function') clearCompressionUi(operation.sid,operation.id);
   if(typeof _setCompressionSessionLock==='function') _setCompressionSessionLock(null,operation.sid);
   if(sameSession&&!newerStream){
     if(typeof setBusy==='function') setBusy(false);
@@ -977,6 +977,7 @@ async function resumeManualCompressionForSession(sid){
       setCompressionUi({
         sessionId:sid,
         phase:'running',
+        operationId:operation.id,
         focusTopic:status.focus_topic||'',
         commandText:status.focus_topic?`/compress ${status.focus_topic}`:'/compress',
         beforeCount:visibleCount,
@@ -1054,7 +1055,7 @@ async function _runManualCompression(focusTopic){
         ? _messagesGeneration : preflightTicket.committedGeneration;
     }catch(preflightErr){
       if(!ownerStateIsCurrent()) return;
-      if(typeof clearCompressionUi==='function') clearCompressionUi();
+      if(typeof clearCompressionUi==='function') clearCompressionUi(sid,operation.id);
       if(typeof _setCompressionSessionLock==='function') _setCompressionSessionLock(null,sid);
       if(typeof setBusy==='function') setBusy(false);
       if(typeof setComposerStatus==='function') setComposerStatus('');
@@ -1105,6 +1106,7 @@ async function _runManualCompression(focusTopic){
       setCompressionUi({
         sessionId:currentSid||'',
         phase:'error',
+        operationId:operation.id,
         focusTopic:(focusTopic||'').trim(),
         commandText:focusTopic?`/compress ${focusTopic}`:'/compress',
         beforeCount:(S.messages||[]).filter(m=>m&&m.role&&m.role!=='tool').length,

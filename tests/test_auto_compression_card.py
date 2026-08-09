@@ -430,7 +430,8 @@ def test_post_compression_context_private_flag_restored_but_not_sent_to_provider
 def test_auto_compression_running_sse_uses_active_session_running_card():
     block = _compressing_listener_block()
 
-    assert "if(!S.session||S.session.session_id!==activeSid) return;" in block
+    assert "if(!_isSessionCurrentPane(activeSid)||S.activeStreamId!==streamId" in block
+    assert "_compressionLive.source!==source" in block
     assert "if(d.session_id&&d.session_id!==activeSid) return;" in block
     assert "try{ d=JSON.parse(e.data||'{}')||{}; }catch(_){ d={}; }" in block
     assert "setCompressionUi" in block
@@ -582,7 +583,7 @@ def test_auto_compression_completion_transition_is_preserved_after_running_liste
     assert "appendLiveCompressionCard({" in _compressed_listener_block()
     assert "phase:'done'" in _compressed_listener_block()
     assert "message:'Context auto-compressed'" in _compressed_listener_block()
-    assert "clearCompressionUi()" in _compressed_listener_block()
+    assert "clearCompressionUi(activeSid)" in _compressed_listener_block()
 
 
 def test_auto_compression_completion_ignores_legacy_payload_message():
@@ -784,7 +785,7 @@ def test_auto_compression_does_not_rerender_over_live_worklog():
     assert "renderMessages({preserveScroll:true})" not in block
     assert "restoreLiveTurnHtmlForSession(activeSid)" not in block
     assert block.index("appendLiveCompressionCard(state)") < block.index("setCompressionUi(state)")
-    assert "clearCompressionUi()" in block
+    assert "clearCompressionUi(activeSid)" in block
     assert "function appendLiveCompressionCard(state)" in src
     assert 'data-live-compression-card' in src
 
@@ -856,7 +857,7 @@ def test_auto_compression_sse_uses_transient_card_not_fake_message():
     assert "automatic:true" in block
     assert "appendLiveCompressionCard" in block
     assert "_setCompressionSessionLock" in block
-    assert "clearCompressionUi()" in block
+    assert "clearCompressionUi(activeSid)" in block
 
 
 def test_auto_compression_sse_keeps_inactive_and_malformed_paths_safe():
