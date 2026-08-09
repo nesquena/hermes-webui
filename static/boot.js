@@ -61,8 +61,8 @@ async function cancelStream(reason){
     S.activeStreamId=null;
     if(S.session&&S.session.session_id===sid&&S.session.active_stream_id===streamId) S.session.active_stream_id=null;
     setBusy(false);
-    if(typeof window!=='undefined'&&typeof window._voiceLeaseSettleOwner==='function'&&voiceTransport){
-      window._voiceLeaseSettleOwner(sid,streamId,{success:false},voiceTransport.source,voiceTransport.generation);
+    if(typeof window!=='undefined'&&typeof window._voiceLeaseSettleOwner==='function'){
+      window._voiceLeaseSettleOwner(sid,streamId,{success:false},voiceTransport&&voiceTransport.source,voiceTransport&&voiceTransport.generation);
     }
     if(typeof setComposerStatus==='function') setComposerStatus('');
     else setStatus('');
@@ -110,8 +110,8 @@ async function cancelSessionStream(session){
     if(S.session) S.session.active_stream_id=null;
     clearInflight();
     setBusy(false);
-    if(typeof window!=='undefined'&&typeof window._voiceLeaseSettleOwner==='function'&&voiceTransport){
-      window._voiceLeaseSettleOwner(sid,streamId,{success:false},voiceTransport.source,voiceTransport.generation);
+    if(typeof window!=='undefined'&&typeof window._voiceLeaseSettleOwner==='function'){
+      window._voiceLeaseSettleOwner(sid,streamId,{success:false},voiceTransport&&voiceTransport.source,voiceTransport&&voiceTransport.generation);
     }
     if(typeof setComposerStatus==='function') setComposerStatus('');
     else setStatus('');

@@ -1972,6 +1972,14 @@ function _releaseLiveStreamTransportAuthority(sid, generation){
   const owner=LIVE_STREAM_ATTACH_OWNERS[sid];
   if(owner&&owner.generation===generation){
     owner.state='released';
+    if(!owner.releaseTimer){
+      owner.releaseTimer=setTimeout(()=>{
+        const ownerSid=String(owner.sid||sid);
+        if(LIVE_STREAM_ATTACH_OWNERS[ownerSid]!==owner||owner.state!=='released') return;
+        if(LIVE_STREAMS[ownerSid]&&LIVE_STREAMS[ownerSid].source===owner.source) delete LIVE_STREAMS[ownerSid];
+        delete LIVE_STREAM_ATTACH_OWNERS[ownerSid];
+      },5000);
+    }
   }
 }
 function _retargetLiveStreamTransportAuthority(fromSid, toSid, streamId, generation){

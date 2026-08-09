@@ -111,6 +111,7 @@ _completion_start = BOOT.index("  window._voiceModeOnResponseComplete=function")
 VOICE_COMPLETE_SOURCE = BOOT[_completion_start:BOOT.index("  // ordinary autoReadLastAssistant", _completion_start)]
 SPEAK_SOURCE = _function_source(BOOT, "_speakResponse")
 ACTIVATE_SOURCE = _function_source(BOOT, "_activate")
+CANCEL_SESSION_SOURCE = _function_source(BOOT, "cancelSessionStream")
 
 
 HARNESS = r"""
@@ -422,6 +423,48 @@ def _run_no_speech_restart():
     return json.loads(result.stdout)
 
 
+CANCEL_SESSION_HARNESS = r"""
+const source = Buffer.from('${CANCEL_B64}', 'base64').toString();
+const state = { settlements: [], rearmed: false };
+const S = { session: { session_id: 's1', active_stream_id: 'stream-1' }, activeStreamId: 'stream-1', busy: true };
+const session = { session_id: 's1', active_stream_id: 'stream-1' };
+const windowObj = {
+  _liveStreamTransportCapture: () => null,
+  _voiceLeaseSettleOwner: (...args) => { state.settlements.push(args); state.rearmed = true; },
+};
+const document = { baseURI: 'http://localhost/' };
+const fetch = async () => ({ ok: true });
+const noOp = () => {};
+const cancelSessionStream = new Function(
+  'window', 'fetch', 'URL', 'document', 'S', 'session', 'INFLIGHT',
+  'stopApprovalPolling', 'hideApprovalCard', 'stopClarifyPolling', 'hideClarifyCard',
+  'closeLiveStream', 'clearInflightState', 'clearInflight', 'setBusy',
+  'setComposerStatus', 'setStatus', 'renderSessionList', 'console',
+  'return (' + source + ');'
+)(windowObj, fetch, URL, document, S, session, {}, noOp, noOp, noOp, noOp,
+  noOp, noOp, noOp, value => { S.busy = value; }, noOp, noOp, noOp, { info() {} });
+cancelSessionStream(session).then(() => {
+  console.log(JSON.stringify({
+    settlements: state.settlements.map(args => ({ sid: args[0], streamId: args[1], outcome: args[2], source: args[3] ?? null, generation: args[4] ?? null })),
+    rearmed: state.rearmed,
+    activeStreamId: S.activeStreamId,
+    busy: S.busy,
+    sessionStreamId: session.active_stream_id,
+  }));
+}).catch(error => { console.error(error.stack || error); process.exitCode = 1; });
+"""
+
+
+def _run_cancel_session_without_transport():
+    script = CANCEL_SESSION_HARNESS.replace(
+        "${CANCEL_B64}", base64.b64encode(CANCEL_SESSION_SOURCE.encode()).decode()
+    )
+    result = subprocess.run([NODE], input=script, capture_output=True, text=True)
+    if result.returncode:
+        raise AssertionError(result.stderr)
+    return json.loads(result.stdout)
+
+
 ATTACH_RACE_HARNESS = r"""
 const attachSource = Buffer.from('${ATTACH_B64}', 'base64').toString();
 const runtimeSource = Buffer.from('${RUNTIME_B64}', 'base64').toString();
@@ -497,7 +540,15 @@ const attachFactory = new Function('scope', `with(scope){
   let LIVE_STREAM_ATTACH_GENERATION = 0;
   function _releaseLiveStreamTransportAuthority(sid, generation) {
     const owner = LIVE_STREAM_ATTACH_OWNERS[sid];
-    if (owner && owner.generation === generation) owner.state = 'released';
+    if (owner && owner.generation === generation) {
+      owner.state = 'released';
+      if (!owner.releaseTimer) owner.releaseTimer = setTimeout(() => {
+        const ownerSid = String(owner.sid || sid);
+        if (LIVE_STREAM_ATTACH_OWNERS[ownerSid] !== owner || owner.state !== 'released') return;
+        if (LIVE_STREAMS[ownerSid] && LIVE_STREAMS[ownerSid].source === owner.source) delete LIVE_STREAMS[ownerSid];
+        delete LIVE_STREAM_ATTACH_OWNERS[ownerSid];
+      }, 5000);
+    }
   }
   window._liveStreamAttachOwners = LIVE_STREAM_ATTACH_OWNERS;
   window._liveStreamTransportRelease = _releaseLiveStreamTransportAuthority;
@@ -607,7 +658,15 @@ const attachFactory = new Function('scope', `with(scope){
   let LIVE_STREAM_ATTACH_GENERATION = 0;
   function _releaseLiveStreamTransportAuthority(sid, generation) {
     const owner = LIVE_STREAM_ATTACH_OWNERS[sid];
-    if (owner && owner.generation === generation) owner.state = 'released';
+    if (owner && owner.generation === generation) {
+      owner.state = 'released';
+      if (!owner.releaseTimer) owner.releaseTimer = setTimeout(() => {
+        const ownerSid = String(owner.sid || sid);
+        if (LIVE_STREAM_ATTACH_OWNERS[ownerSid] !== owner || owner.state !== 'released') return;
+        if (LIVE_STREAMS[ownerSid] && LIVE_STREAMS[ownerSid].source === owner.source) delete LIVE_STREAMS[ownerSid];
+        delete LIVE_STREAM_ATTACH_OWNERS[ownerSid];
+      }, 5000);
+    }
   }
   window._liveStreamAttachOwners = LIVE_STREAM_ATTACH_OWNERS;
   window._liveStreamTransportRelease = _releaseLiveStreamTransportAuthority;
@@ -684,6 +743,7 @@ const flush = () => new Promise(resolve => setTimeout(resolve, 0));
     for(let i=0;i<4&&pending.length===0;i++) await flush();
     if(pending[0]) pending[0].resolve({});
     for(let i=0;i<8;i++) await flush();
+    await new Promise(resolve => setTimeout(resolve, 5100));
   } else if (scenario.kind === 'done-fade-replacement') {
     attach('s1', 'stream-1');
     await flush();
@@ -898,6 +958,24 @@ def test_actual_messages_owner_seam_settles_voice_outcome_once():
     assert result["ownerEvents"] == [["s1", "stream-1", {}, 1, {"success": False}]]
     assert result["transportEvents"][0][3] == 1
     assert result["transportEvents"][1][3] == 2
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_sidebar_cancel_rearms_voice_owner_without_published_transport():
+    result = _run_cancel_session_without_transport()
+    assert result == {
+        "settlements": [{
+            "sid": "s1",
+            "streamId": "stream-1",
+            "outcome": {"success": False},
+            "source": None,
+            "generation": None,
+        }],
+        "rearmed": True,
+        "activeStreamId": None,
+        "busy": False,
+        "sessionStreamId": None,
+    }
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
