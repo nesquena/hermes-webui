@@ -1137,14 +1137,14 @@ def test_attach_owner_predicate_terms_are_load_bearing():
         ),
         (
             "pane",
-            "if(_isActiveSession()&&(!_isSessionCurrentPane(activeSid)||S.activeStreamId!==streamId)) return false;",
+            "if(_isActiveSession()&&((typeof _isSessionCurrentPane==='function'&&!_isSessionCurrentPane(activeSid))||S.activeStreamId!==streamId)) return false;",
             "if(false) return false;",
             {"kind": "pane-loss"},
         ),
         (
             "stream",
-            "if(_isActiveSession()&&(!_isSessionCurrentPane(activeSid)||S.activeStreamId!==streamId)) return false;",
-            "if(_isActiveSession()&&!_isSessionCurrentPane(activeSid)) return false;",
+            "if(_isActiveSession()&&((typeof _isSessionCurrentPane==='function'&&!_isSessionCurrentPane(activeSid))||S.activeStreamId!==streamId)) return false;",
+            "if(_isActiveSession()&&(typeof _isSessionCurrentPane==='function'&&!_isSessionCurrentPane(activeSid))) return false;",
             {"kind": "stream-loss"},
         ),
         (
