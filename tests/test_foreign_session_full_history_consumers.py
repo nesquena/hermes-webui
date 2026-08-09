@@ -2343,8 +2343,8 @@ def test_messages_generation_wiring_covers_full_load_live_turn_claims_and_same_s
     assert "const _btwOwnerIsCurrent=()=>typeof _isSessionCurrentPane==='function'" in BTW_SRC
     assert "if(!_btwOwnerIsCurrent()) return;" in BTW_SRC
     assert "const ownerSid=S.session.session_id;" in _maybe_extract(COMMANDS_JS, "cmdBranch", "async function")
-    assert "if(data&&data.session_id&&_commandOwnerIsCurrent(ownerSid))" in _maybe_extract(COMMANDS_JS, "cmdBranch", "async function")
-    assert "if(!_commandOwnerIsCurrent(initialSid)) return;" in _maybe_extract(COMMANDS_JS, "forkFromMessage", "async function")
+    assert "if(data&&data.session_id&&branchOwnerIsCurrent())" in _maybe_extract(COMMANDS_JS, "cmdBranch", "async function")
+    assert "S.session.session_id !== initialSid" in _maybe_extract(COMMANDS_JS, "forkFromMessage", "async function")
     assert "_isSessionCurrentPane" in OUTLINE_JS
     assert "clearCompressionUi(activeSid)" in MESSAGES_JS
     assert "_manualCompressionOperation" in COMMANDS_JS
