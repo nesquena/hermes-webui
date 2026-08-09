@@ -749,7 +749,9 @@ async function loadDir(path, opts={}){
       if(typeof syncTerminalButton==='function')syncTerminalButton();
       showToast(t('workspace_recovered_notice',S.session.workspace),5000,'warning');
     }
-    S.entries=data.entries||[];renderBreadcrumb();renderFileTree();
+    S.entries=data.entries||[];
+    _wsStoreDirListing(path||'.',data);
+    renderBreadcrumb();renderFileTree();
     // #2673 — refresh Artifacts tab when its source data (the file tree) updates.
     if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
     // Pre-fetch contents of restored expanded dirs so they render without a second click
@@ -760,11 +762,14 @@ async function loadDir(path, opts={}){
       if(pending.length){
         const results=await Promise.all(pending.map(dirPath=>
           api(_workspaceRouteForPath(dirPath, 'list'))
-            .then(dc=>({dirPath,entries:dc.entries||[]}))
-            .catch(()=>({dirPath,entries:[]}))
+            .then(dc=>({dirPath,entries:dc.entries||[],data:dc}))
+            .catch(()=>({dirPath,entries:[],data:null}))
         ));
         if(!S.session||S.session.session_id!==sessionId||treeGen!==_wsTreeGen)return;
-        for(const {dirPath,entries} of results) S._dirCache[dirPath]=entries;
+        for(const {dirPath,entries,data} of results){
+          S._dirCache[dirPath]=entries;
+          if(data)_wsStoreDirListing(dirPath,data);
+        }
       }
       if(expanded.size>0)renderFileTree();
     }
@@ -1532,4 +1537,56 @@ if (typeof document !== 'undefined') {
   } else {
     _wsUploadInit();
   }
+}
+
+// ── Directory-listing pagination (#6645) ───────────────────────────────────
+// The server caps each /api/list page at MAX_DIR_ENTRIES (200) but reports
+// total / has_more / offset / limit, so a large directory is no longer
+// silently truncated: the tree renders a "Showing X of Y — load more" row
+// that appends the next page. State lives in S._dirMeta[dirPath] (per-dir),
+// which covers both the current-directory listing and expanded subdirectories.
+const _WS_PAGE_DEFAULT_LIMIT = 200;
+function _wsStoreDirListing(dirPath, data){
+  if(!S) return null;
+  if(!S._dirMeta) S._dirMeta = {};
+  S._dirMeta[dirPath] = {
+    total: Number(data && data.total) || 0,
+    has_more: !!(data && data.has_more),
+    offset: Number(data && data.offset) || 0,
+    limit: Number(data && data.limit) || _WS_PAGE_DEFAULT_LIMIT,
+    loading: false,
+  };
+  return S._dirMeta[dirPath];
+}
+async function _wsLoadMoreDirEntries(dirPath){
+  if(!S || !S.session) return;
+  const dir = dirPath || S.currentDir || '.';
+  const meta = (S._dirMeta || {})[dir];
+  if(!meta || !meta.has_more || meta.loading) return;
+  meta.loading = true;
+  try{
+    const route = _workspaceRouteForPath(dir, 'list');
+    const nextOffset = (Number(meta.offset) || 0) + (Number(meta.limit) || _WS_PAGE_DEFAULT_LIMIT);
+    const sep = route.indexOf('?') >= 0 ? '&' : '?';
+    const data = await api(`${route}${sep}offset=${nextOffset}`);
+    if(!S.session) return;
+    const incoming = Array.isArray(data && data.entries) ? data.entries : [];
+    const existing = dir === S.currentDir ? S.entries : (S._dirCache[dir] || []);
+    const seen = new Set();
+    for(const e of existing){ if(e && e.path) seen.add(e.path); }
+    const merged = existing.concat(incoming.filter(e => e && e.path && !seen.has(e.path)));
+    if(dir === S.currentDir) S.entries = merged;
+    S._dirCache[dir] = merged;
+    _wsStoreDirListing(dir, data);
+  }catch(err){
+    console.warn('loadMoreDirEntries', err);
+    if(typeof showToast === 'function') showToast(t('file_open_failed'), 4000, 'error');
+  }finally{
+    meta.loading = false;
+  }
+  if(typeof renderFileTree === 'function') renderFileTree();
+}
+if(typeof window !== 'undefined'){
+  window._wsStoreDirListing = _wsStoreDirListing;
+  window._wsLoadMoreDirEntries = _wsLoadMoreDirEntries;
 }
