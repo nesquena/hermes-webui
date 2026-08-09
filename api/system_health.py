@@ -261,8 +261,6 @@ def _webui_runtime_payload(errors: list[dict[str, str]]) -> dict[str, Any]:
                     target[key] = None if age is None else max(0.0, float(age))
                 else:
                     target[key] = _safe_runtime_int(source.get(key, 0))
-            if not target["available"]:
-                errors.append(_safe_error(f"webui_runtime.{name}", RuntimeError("unavailable")))
         except Exception as exc:
             errors.append(_safe_error(f"webui_runtime.{name}", exc))
     return runtime
