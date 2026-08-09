@@ -5836,6 +5836,7 @@ def _read_state_db_sidebar_overrides(
             source_expr = 's.source' if 'source' in session_cols else 'NULL AS source'
             session_source_expr = 's.session_source' if 'session_source' in session_cols else 'NULL AS session_source'
             title_expr = 's.title' if 'title' in session_cols else 'NULL AS title'
+            last_activity_expr = 's.last_activity_at' if 'last_activity_at' in session_cols else 'NULL AS last_activity_at'
             message_count_expr = 's.message_count' if 'message_count' in session_cols else 'NULL AS message_count'
 
             cur.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'messages'")
@@ -5859,7 +5860,7 @@ def _read_state_db_sidebar_overrides(
                 placeholders = ','.join('?' * len(chunk))
                 cur.execute(
                     f"""
-                    SELECT s.id, {source_expr}, {session_source_expr}, {title_expr}, {message_count_expr}
+                    SELECT s.id, {source_expr}, {session_source_expr}, {title_expr}, {last_activity_expr}, {message_count_expr}
                     FROM sessions s
                     WHERE s.id IN ({placeholders})
                     """,
@@ -5888,6 +5889,11 @@ def _read_state_db_sidebar_overrides(
                     if row['message_count'] is not None:
                         try:
                             entry['_state_db_message_count'] = max(0, int(row['message_count'] or 0))
+                        except (TypeError, ValueError):
+                            pass
+                    if row['last_activity_at'] is not None:
+                        try:
+                            entry['_state_db_last_activity_at'] = float(row['last_activity_at'])
                         except (TypeError, ValueError):
                             pass
                     if entry:
@@ -5999,6 +6005,7 @@ def _apply_sidebar_state_db_override_metadata(sessions: list[dict], metadata: di
         state_db_source_label = entry.pop('_state_db_source_label', None)
         state_db_message_count = entry.pop('_state_db_message_count', None)
         state_db_last_message_at = entry.pop('_state_db_last_message_at', None)
+        state_db_last_activity_at = entry.pop('_state_db_last_activity_at', None)
         state_db_display_title = entry.pop('_state_db_display_title', None)
         if state_db_source == 'webui':
             session['source_tag'] = state_db_source_tag
@@ -6052,10 +6059,21 @@ def _apply_sidebar_state_db_override_metadata(sessions: list[dict], metadata: di
                     session['last_message_at'] = max(float(session.get('last_message_at') or 0), state_last)
                     session['updated_at'] = max(float(session.get('updated_at') or 0), state_last)
         title = session.get('title')
+        # Last-writer-wins title reconcile (#3986): the sidecar title is
+        # authoritative when the WebUI wrote it last (its `updated_at` moves
+        # on every WebUI save, including renames); the state.db title is
+        # authoritative when the agent side wrote last (its `last_activity_at`
+        # moves on TUI/CLI/Desktop activity, including renames). Legacy
+        # generic/placeholder WebUI titles keep the existing unconditional
+        # state.db adoption so #3994's placeholder fix is preserved.
+        state_db_is_newer = bool(
+            state_db_last_activity_at
+            and state_db_last_activity_at > float(session.get('updated_at') or 0)
+        )
         if (
             state_db_title
             and state_db_title != title
-            and _sidebar_title_is_generic_webui(title)
+            and (_sidebar_title_is_generic_webui(title) or state_db_is_newer)
         ):
             session['_state_db_title'] = state_db_title
             session['display_title'] = state_db_title
