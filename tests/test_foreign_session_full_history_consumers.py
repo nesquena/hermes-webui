@@ -75,7 +75,9 @@ SLASH_HELPERS = SEND_SRC[
 ]
 ASYNC_SLASH_BLOCK = SEND_SRC[
     SEND_SRC.index("  let _slashDisplayTextOverride=") : SEND_SRC.index(
-        "\n  if(!S.session){await newSession();await renderSessionList();}\n\n  const activeSid=",
+        "\n  if(!S.session){await newSession();await renderSessionList();}\n\n  const activeSid="
+        if "\n  if(!S.session){await newSession();await renderSessionList();}\n\n  const activeSid=" in SEND_SRC
+        else "\n  ownerSid=await _ensureSessionOwner();\n  if(!ownerSid)return;\n  const activeSid=",
         SEND_SRC.index("  let _slashDisplayTextOverride=")
     )
 ]
@@ -431,7 +433,9 @@ function setComposerStatus() {{}}
 async function renderSessionList() {{}}
 async function newSession() {{
   S.session = {{ session_id: 'foreign-1', message_count: 1, workspace: '/ws', model: 'goal-model' }};
+  return S.session.session_id;
 }}
+async function _ensureSessionOwner() {{ return S.session && S.session.session_id; }}
 function markInflight() {{}}
 function saveInflightState() {{}}
 function startApprovalPolling() {{}}
@@ -725,6 +729,7 @@ const S = {{
 const window = {{}};
 function _syncToolCallsForLoadedMessages() {{ throw new Error('stale load must not sync tools'); }}
 function $(id) {{ return id === 'msg' ? {{ value: '/help' }} : null; }}
+async function _ensureSessionOwner() {{ return S.session && S.session.session_id; }}
 function parseCommand(text) {{ return text === '/help' ? {{ name: 'help', args: '' }} : null; }}
 function t(key) {{ return key; }}
 function renderMessages() {{}}
@@ -857,6 +862,7 @@ def _async_slash_owner_script(
     blank_page: bool = False,
     switch_on_completion: bool = False,
     metadata_delay: bool = False,
+    delay_render: bool = False,
 ) -> str:
     command_json = json.dumps(command)
     session_literal = "null" if blank_page else "{ session_id: 'session-a', message_count: 0 }"
@@ -873,10 +879,17 @@ let generation = 0;
 let resolveCommand = null;
 let resolveMoa = null;
 let resolveMetadata = null;
+let resolveRender = null;
 let renderCount = 0;
 const toasts = [];
 function _bumpMessagesGeneration() {{ generation += 1; return generation; }}
 function _isSessionCurrentPane(sid) {{ return !!(S.session && S.session.session_id === sid); }}
+async function _ensureSessionOwner() {{
+  if (S.session && S.session.session_id) return S.session.session_id;
+  const sid = await newSession();
+  await renderSessionList();
+  return _isSessionCurrentPane(sid) ? sid : null;
+}}
 function $(id) {{ return id === 'msg' ? {{ value: {command_json} }} : null; }}
 function parseCommand(text) {{ return {{ name: text.slice(1).split(/\\s+/)[0], args: text.split(/\\s+/).slice(1).join(' ') }}; }}
 function t(key) {{ return key; }}
@@ -887,11 +900,14 @@ function hideCmdDropdown() {{}}
 function clearLiveToolCards() {{}}
 function setBusy(value) {{ S.busy = value; }}
 function setComposerStatus() {{}}
-async function renderSessionList() {{}}
+async function renderSessionList() {{
+  if ({str(delay_render).lower()}) return new Promise(resolve => {{ resolveRender = resolve; }});
+}}
 async function newSession() {{
   await Promise.resolve();
   S.session = {{ session_id: 'session-new', message_count: 0 }};
   S.messages = [];
+  return S.session.session_id;
 }}
 const _AGENT_COMMANDS_RUN_ON_WEBUI = new Set(['agent']);
 function getAgentCommandMetadata(name) {{
@@ -925,12 +941,134 @@ function switchToOtherSession() {{
   await Promise.resolve();
   await Promise.resolve();
   await new Promise(resolve => setTimeout(resolve, 0));
+  if ({str(delay_render).lower()}) {{
+    for (let i = 0; i < 20 && !resolveRender; i++) await new Promise(resolve => setTimeout(resolve, 0));
+    if (!resolveRender) throw new Error('renderSessionList did not pause');
+    switchToOtherSession();
+    resolveRender();
+    await Promise.resolve();
+    await Promise.resolve();
+  }}
   if ({str(switch_on_completion).lower()}) switchToOtherSession();
+  await Promise.resolve();
+  await Promise.resolve();
   if (resolveMetadata) resolveMetadata();
+  await Promise.resolve();
+  await Promise.resolve();
   if (resolveCommand) resolveCommand();
   if (resolveMoa) resolveMoa({{ usage: '/moa <prompt>' }});
   await pending;
   console.log(JSON.stringify({{ sessionId: S.session && S.session.session_id, messages: S.messages, renderCount, toasts }}));
+}})().catch(err => {{ console.error(err.stack || String(err)); process.exit(1); }});
+"""
+
+
+def _clear_overlap_script() -> str:
+    return f"""
+let _messagesGeneration = 0;
+function _bumpMessagesGeneration() {{ _messagesGeneration += 1; return _messagesGeneration; }}
+{CAPTURE_SRC}
+{CURRENT_SRC}
+{COMMIT_SRC}
+let _clearConversationOperation = null;
+let _clearConversationOperationSerial = 0;
+{CLEAR_SRC}
+const S = {{
+  session: {{ session_id: 'same-session', messages: [{{ role: 'assistant', content: 'old' }}] }},
+  messages: [{{ role: 'assistant', content: 'old' }}],
+  toolCalls: [],
+}};
+const confirms = [];
+const clearResolvers = [];
+let clearCalls = 0;
+let syncCalls = 0;
+const clearControl = {{
+  disabled: false,
+  attrs: {{}},
+  setAttribute(name, value) {{ this.attrs[name] = String(value); }},
+}};
+const toasts = [];
+function t(key) {{ return key; }}
+function $(id) {{ return id === 'btnClearConvModal' ? clearControl : null; }}
+function _syncHermesPanelSessionActions() {{ syncCalls += 1; clearControl.disabled = false; }}
+function showToast(message) {{ toasts.push(String(message)); }}
+function setStatus(message) {{ toasts.push(String(message)); }}
+function syncTopbar() {{}}
+function renderMessages() {{}}
+function showConfirmDialog() {{ return new Promise(resolve => confirms.push(resolve)); }}
+async function loadSession() {{ toasts.push('reconcile'); }}
+async function api(url) {{
+  if (String(url) !== '/api/session/clear') throw new Error('unexpected API request: '+url);
+  clearCalls += 1;
+  return await new Promise(resolve => clearResolvers.push(resolve));
+}}
+function _commitTranscriptReplacement(ticket, commit) {{
+  if (!_transcriptReplacementIsCurrent(ticket) || ticket.used) return false;
+  ticket.used = true;
+  _bumpMessagesGeneration();
+  commit();
+  return true;
+}}
+(async () => {{
+  const first = clearConversation();
+  await Promise.resolve();
+  if (confirms.length !== 1) throw new Error('first confirmation did not open');
+  confirms[0](true);
+  for (let i = 0; i < 20 && !clearResolvers.length; i++) await new Promise(resolve => setTimeout(resolve, 0));
+  if (clearResolvers.length !== 1) throw new Error('first clear request did not start');
+  const pendingState = {{ disabled: clearControl.disabled, busy: clearControl.attrs['aria-busy'] }};
+  const duplicate = clearConversation();
+  await Promise.resolve();
+  if (confirms.length !== 2) throw new Error('duplicate confirmation did not open');
+  confirms[1](true);
+  await Promise.resolve();
+  clearResolvers[0]({{ session: {{ session_id: 'same-session', messages: [] }} }});
+  await first;
+  await Promise.resolve();
+  const later = clearConversation();
+  await Promise.resolve();
+  if (confirms.length !== 3) throw new Error('later confirmation did not open');
+  confirms[2](true);
+  for (let i = 0; i < 20 && clearResolvers.length < 2; i++) await new Promise(resolve => setTimeout(resolve, 0));
+  if (clearResolvers.length !== 2) throw new Error('later clear request did not start');
+  clearResolvers[1]({{ session: {{ session_id: 'same-session', messages: [] }} }});
+  await later;
+  console.log(JSON.stringify({{ clearCalls, messages: S.messages, toasts, pendingState, finalState: {{ disabled: clearControl.disabled, busy: clearControl.attrs['aria-busy'] }}, syncCalls, duplicatePending: true }}));
+  void duplicate;
+}})().catch(err => {{ console.error(err.stack || String(err)); process.exit(1); }});
+"""
+
+
+def _delayed_render_owner_script() -> str:
+    owner_block = (
+        "if(!S.session){await newSession();await renderSessionList();}"
+        "const sid=S.session&&S.session.session_id;"
+    )
+    if "_ensureSessionOwner" in SESSIONS_JS:
+        owner_block = "const sid=await _ensureSessionOwner();"
+    return f"""
+const S = {{ session: null, messages: [] }};
+let resolveRender = null;
+async function renderSessionList() {{ return new Promise(resolve => resolveRender = resolve); }}
+async function newSession() {{ S.session = {{ session_id: 'session-a' }}; return 'session-a'; }}
+function _isSessionCurrentPane(sid) {{ return !!S.session && S.session.session_id === sid; }}
+async function _ensureSessionOwner() {{
+  if (S.session && S.session.session_id) return S.session.session_id;
+  const sid = await newSession();
+  await renderSessionList();
+  return _isSessionCurrentPane(sid) ? sid : null;
+}}
+async function runAction() {{
+  {owner_block}
+  if (sid) S.messages.push({{ role: 'user', content: 'action' }});
+}}
+(async () => {{
+  const action = runAction();
+  for (let i = 0; i < 20 && !resolveRender; i++) await new Promise(resolve => setTimeout(resolve, 0));
+  S.session = {{ session_id: 'session-b' }};
+  resolveRender();
+  await action;
+  console.log(JSON.stringify({{ sessionId: S.session.session_id, messages: S.messages }}));
 }})().catch(err => {{ console.error(err.stack || String(err)); process.exit(1); }});
 """
 
@@ -960,6 +1098,7 @@ function hideBackgroundBadge(taskId) {{ hidden.push(taskId); }}
 function renderMessages() {{ S.rendered = true; }}
 function showToast(message) {{ toasts.push(message); }}
 function t(key) {{ return key; }}
+function $(id) {{ return null; }}
 function api() {{ return new Promise(resolve => {{ resolveStatus = resolve; }}); }}
 function setTimeout(fn) {{ timerCount += 1; return timerCount; }}
 {BACKGROUND_SRC}
@@ -1250,6 +1389,7 @@ let resolveClear = null;
 let reconcileCalls = 0;
 const toasts = [];
 function t(key) {{ return key; }}
+function $(id) {{ return null; }}
 function showToast(message) {{ toasts.push(String(message)); }}
 function setStatus(message) {{ toasts.push(String(message)); }}
 function syncTopbar() {{}}
@@ -1583,6 +1723,24 @@ def test_blank_page_slash_metadata_claims_owner_before_session_switch():
     assert [message["content"] for message in result["messages"]] == [
         "session b existing"
     ]
+
+
+def test_blank_page_slash_rejects_owner_after_delayed_sidebar_render():
+    result = _run_node(_delayed_render_owner_script())
+
+    assert result["sessionId"] == "session-b"
+    assert result["messages"] == []
+
+
+def test_clear_refuses_overlapping_confirmed_operation():
+    result = _run_node(_clear_overlap_script())
+
+    assert result["clearCalls"] == 2
+    assert result["messages"] == []
+    assert "conversation_cleared" in result["toasts"]
+    assert result["pendingState"] == {"disabled": True, "busy": "true"}
+    assert result["finalState"] == {"disabled": False, "busy": "false"}
+    assert result["syncCalls"] == 2
 
 
 def test_background_polling_rejects_stale_owner_or_generation_and_keeps_retry():

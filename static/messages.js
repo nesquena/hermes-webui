@@ -1344,6 +1344,7 @@ async function send(){
   // immutable snapshot so later reassignments to `text` don't leak into it.
   const _failedSendDraftText=text;
   const _failedSendFilesSnapshot=Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
+  let ownerSid=null;
 
   // Dismiss handoff hint when user sends a message (resets seen_at).
   if(S.session&&S.session.session_id&&typeof _dismissHandoffHint==='function'){
@@ -1355,7 +1356,8 @@ async function send(){
   // If busy or a manual compression is still running, handle based on default_message_mode
   if(S.busy||compressionRunning){
     if(text||S.pendingFiles.length){
-      if(!S.session){await newSession();await renderSessionList();}
+      ownerSid=await _ensureSessionOwner();
+      if(!ownerSid)return;
       // Busy-control slash commands must be intercepted HERE, before the
       // defaultMessageMode routing block, so the user can always type /steer, /interrupt,
       // /queue, /terminal, /goal, or /yolo while the agent is running and have
@@ -1390,9 +1392,9 @@ async function send(){
       } else if(defaultMessageMode==='interrupt'){
         // Queue the message, then cancel so drain re-sends it.
         const _modelState=_chatPayloadModelState();
-        queueSessionMessage(S.session.session_id,{text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'});
-        updateQueueBadge(S.session.session_id);
-        _clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);
+        queueSessionMessage(ownerSid,{text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'});
+        updateQueueBadge(ownerSid);
+        _clearComposerAfterQueuedSelectionSend(ownerSid);
         S.pendingFiles=[];renderTray();
         if(S.activeStreamId&&typeof cancelStream==='function'){
           if(await cancelStream('busy-interrupt')) showToast(t('busy_interrupt_confirm'),2000);
@@ -1425,9 +1427,7 @@ async function send(){
       : !!(S.session&&S.session.session_id===sid))
   );
   const _ensureSlashOwner=async()=>{
-    if(!S.session){await newSession();await renderSessionList();}
-    const sid=S.session&&S.session.session_id;
-    return _slashOwnerIsCurrent(sid) ? sid : null;
+    return await _ensureSessionOwner();
   };
   // Slash command intercept -- local commands handled without agent round-trip.
   // We push the user message BEFORE running the handler for echo-worthy
@@ -1599,9 +1599,9 @@ async function send(){
       if(!_slashOwnerIsCurrent(_metadataSid))return;
     }
   }
-  if(!S.session){await newSession();await renderSessionList();}
-
-  const activeSid=S.session.session_id;
+  ownerSid=await _ensureSessionOwner();
+  if(!ownerSid)return;
+  const activeSid=ownerSid;
   _sendInProgressSid=activeSid;
 
   // Salvage of #4750 (@harryazj): capture the composer text and clear the
@@ -1639,7 +1639,8 @@ async function send(){
   setComposerStatus(_submittedFiles.length?'Uploading…':'');
   let uploaded=[];
   try{uploaded=await uploadPendingFiles({files:_submittedFiles, sessionId:activeSid, clearPending:false});}
-  catch(e){if(!text){setComposerStatus(`Upload error: ${e.message}`);return;}}
+  catch(e){if(!text){if(_slashOwnerIsCurrent(activeSid))setComposerStatus(`Upload error: ${e.message}`);return;}}
+  if(!_slashOwnerIsCurrent(activeSid))return;
   // Clear the uploading status now that upload is done — if we don't clear here
   // it stays visible for the entire duration of the agent stream, since
   // setComposerStatus('') is only called in setBusy(false), not setBusy(true).
@@ -1654,6 +1655,7 @@ async function send(){
     const _pending=_forcedSkillDirectivePending;
     if(!_pending.sessionId||_pending.sessionId===activeSid){
       const _directivePayload = await _pending.promise;
+      if(!_slashOwnerIsCurrent(activeSid))return;
       if(_forcedSkillDirectivePending===_pending)_forcedSkillDirectivePending = null;
       if(_directivePayload){
         const _directive = typeof _directivePayload==='string'
@@ -1673,6 +1675,7 @@ async function send(){
     }
   }
   if(!msgText){setComposerStatus('Nothing to send');return;}
+  if(!_slashOwnerIsCurrent(activeSid))return;
   // Composer textarea + persisted draft were already captured and cleared
   // immediately after capture (above, salvage of #4750 + #5912 gate fix) to close
   // the re-entrant double-send race AND avoid clobbering a draft typed during the

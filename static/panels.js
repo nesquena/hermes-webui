@@ -4791,7 +4791,6 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
 }
 
 let _clearConversationOperation = null;
-let _clearConversationOperationSerial = 0;
 
 async function clearConversation() {
   if(!S.session) return;
@@ -4799,15 +4798,17 @@ async function clearConversation() {
   const _clrMsg=await showConfirmDialog({title:t('clear_conversation_title'),message:t('clear_conversation_message'),confirmLabel:t('clear'),danger:true,focusCancel:true});
   if(!_clrMsg) return;
   if(!S.session||S.session.session_id!==clearSid)return;
+  if(_clearConversationOperation)return;
   const clearTicket=typeof _captureTranscriptReplacement==='function'
     ? _captureTranscriptReplacement()
     : null;
-  const operation={sid:clearSid,id:++_clearConversationOperationSerial};
+  const operation={sid:clearSid};
   _clearConversationOperation=operation;
+  const clearControl=$('btnClearConvModal');
+  if(clearControl){clearControl.disabled=true;clearControl.setAttribute('aria-busy','true');}
   try {
     const data = await api('/api/session/clear', {method:'POST',
       body: JSON.stringify({session_id: clearSid})});
-    if(_clearConversationOperation!==operation)return;
     if(!S.session||S.session.session_id!==clearSid)return;
     const committed=typeof _commitTranscriptReplacement==='function'
       && _commitTranscriptReplacement(clearTicket, () => {
@@ -4827,7 +4828,11 @@ async function clearConversation() {
     showToast(t('conversation_cleared'));
   } catch(e) { setStatus(t('clear_failed') + e.message); }
   finally {
-    if(_clearConversationOperation===operation) _clearConversationOperation=null;
+    if(_clearConversationOperation===operation){
+      _clearConversationOperation=null;
+      if(clearControl)clearControl.setAttribute('aria-busy','false');
+      if(typeof _syncHermesPanelSessionActions==='function') _syncHermesPanelSessionActions();
+    }
   }
 }
 
@@ -8317,7 +8322,7 @@ function _syncHermesPanelSessionActions(){
   setDisabled('btnExportJSON',!hasSession);
   setDisabled('btnShareSession',!hasSession||visibleMessages===0);
   setDisabled('btnStopSharingSession',!hasShare);
-  setDisabled('btnClearConvModal',!hasSession||visibleMessages===0);
+  setDisabled('btnClearConvModal',!hasSession||visibleMessages===0||!!_clearConversationOperation);
 }
 
 // Thin wrapper: settings now live in the main content area. External callers

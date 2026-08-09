@@ -1321,9 +1321,8 @@ async function cmdStop(){
 }
 
 async function cmdGoal(args){
-  if(!S.session){await newSession();await renderSessionList();}
-  if(!S.session||!S.session.session_id){showToast(t('no_active_session'));return;}
-  const activeSid=S.session.session_id;
+  const activeSid=await _ensureSessionOwner();
+  if(!activeSid||!S.session||S.session.session_id!==activeSid){showToast(t('no_active_session'));return;}
   try{
     const r=await api('/api/goal',{method:'POST',body:JSON.stringify({
       session_id:activeSid,
