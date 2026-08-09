@@ -4801,6 +4801,12 @@ async function clearConversation() {
   const _clrMsg=await showConfirmDialog({title:t('clear_conversation_title'),message:t('clear_conversation_message'),confirmLabel:t('clear'),danger:true,focusCancel:true});
   if(!_clrMsg) return;
   if(!_clearOwnerIsCurrent())return;
+  if(typeof _loadingSessionId!=='undefined'&&_loadingSessionId===clearSid)return;
+  const clearLoadGeneration=typeof _loadSessionGeneration==='number' ? _loadSessionGeneration : null;
+  const _clearLoadIsCurrent=()=>typeof _loadSessionGeneration==='number'
+    ? _loadSessionGeneration===clearLoadGeneration
+      && (!(_loadingSessionId)||_loadingSessionId===clearSid)
+    : (!(_loadingSessionId)||_loadingSessionId!==clearSid);
   if(_clearConversationOperation)return;
   const clearTicket=typeof _captureTranscriptReplacement==='function'
     ? _captureTranscriptReplacement()
@@ -4813,6 +4819,13 @@ async function clearConversation() {
     const data = await api('/api/session/clear', {method:'POST',
       body: JSON.stringify({session_id: clearSid})});
     if(!_clearOwnerIsCurrent())return;
+    if(!_clearLoadIsCurrent()){
+      showToast('Conversation changed while clearing; refreshing.',4000,'warning');
+      if(typeof loadSession==='function'){
+        Promise.resolve(loadSession(clearSid,{force:true,externalRefreshReason:'clear-reconcile'})).catch(()=>{});
+      }
+      return;
+    }
     const committed=typeof _commitTranscriptReplacement==='function'
       && _commitTranscriptReplacement(clearTicket, () => {
         S.session = data.session;

@@ -6401,7 +6401,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     source.addEventListener('compressing',e=>{
       // Context auto-compression is starting. Surface the same calm running
       // compression card as manual /compress while the summarizer LLM call runs.
-      if(!S.session||S.session.session_id!==activeSid) return;
+      const _compressionLive=LIVE_STREAMS[activeSid];
+      if(!_isSessionCurrentPane(activeSid)||S.activeStreamId!==streamId
+        ||!_compressionLive||_compressionLive.streamId!==streamId||_compressionLive.source!==source)return;
       let d={};
       try{ d=JSON.parse(e.data||'{}')||{}; }catch(_){ d={}; }
       if(d.session_id&&d.session_id!==activeSid) return;
@@ -6417,7 +6419,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         // Keep automatic compression inside the active Worklog. Calling
         // renderMessages() here rebuilds from the still-empty persisted
         // transcript during active streams and can erase already replayed tools.
-        if(typeof clearCompressionUi==='function') clearCompressionUi();
+        if(typeof clearCompressionUi==='function') clearCompressionUi(activeSid);
         else window._compressionUi=null;
         snapshotLiveTurn();
         return;
@@ -6432,6 +6434,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // Context was auto-compressed during this turn. Keep the live timeline
       // honest by transitioning the running divider into a completed divider;
       // final settlement removes live-only compression rows from the Worklog.
+      const _compressionLive=LIVE_STREAMS[activeSid];
+      if(!_isSessionCurrentPane(activeSid)||S.activeStreamId!==streamId
+        ||!_compressionLive||_compressionLive.streamId!==streamId||_compressionLive.source!==source)return;
       if(!S.session) return;
       const currentSid=S.session.session_id;
       let d={};
@@ -6457,9 +6462,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           continuationSessionId:continuationSid,
         });
       }
-      if(typeof clearCompressionUi==='function') clearCompressionUi();
+      if(typeof clearCompressionUi==='function') clearCompressionUi(activeSid);
       else window._compressionUi=null;
-      if(typeof _setCompressionSessionLock==='function') _setCompressionSessionLock(null);
+      if(typeof _setCompressionSessionLock==='function') _setCompressionSessionLock(null,activeSid);
       if(!S.busy&&typeof renderMessages==='function') renderMessages();
     });
 

@@ -1390,6 +1390,9 @@ async function newSession(flash, options={}){
   }
   _setNewSessionPending(true);
   _newSessionInFlight=(async()=>{
+    const _creationStartSid=S.session&&S.session.session_id||null;
+    const _creationStartLoadGeneration=typeof _loadSessionGeneration==='number'
+      ? _loadSessionGeneration : null;
     // Starting a brand-new chat must not carry named context blocks selected in
     // the previous conversation (#2543). loadSession() clears these on a sidebar
     // switch, but the New Chat path replaces S.session here without going through
@@ -1492,7 +1495,7 @@ async function newSession(flash, options={}){
     // A blank-page owner acquisition may be superseded while the create request
     // is in flight. Leave the newer pane load authoritative instead of installing
     // the late-created session over it.
-    if(!_newSessionOwnerResponseIsCurrent(data,!!(options&&options._captureOwner))) return null;
+    if(!_newSessionOwnerResponseIsCurrent(data,_creationStartSid,_creationStartLoadGeneration)) return null;
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
       _clearEmptyComposerModelOverride();
     }
@@ -1582,11 +1585,12 @@ async function newSession(flash, options={}){
   }
 }
 
-function _newSessionOwnerResponseIsCurrent(data,captureOwner){
-  if(!captureOwner) return true;
+function _newSessionOwnerResponseIsCurrent(data,startSid,startLoadGeneration){
   const createdSessionId=data&&data.session&&data.session.session_id||null;
-  if(typeof _loadingSessionId!=='undefined'&&_loadingSessionId&&_loadingSessionId!==createdSessionId) return false;
-  if(S.session&&S.session.session_id&&S.session.session_id!==createdSessionId) return false;
+  if(typeof _loadSessionGeneration==='number'&&startLoadGeneration!==null
+    &&_loadSessionGeneration!==startLoadGeneration) return false;
+  if(typeof _loadingSessionId!=='undefined'&&_loadingSessionId) return false;
+  if(S.session&&S.session.session_id!==startSid) return false;
   return true;
 }
 
@@ -1597,7 +1601,7 @@ async function _ensureSessionOwner(){
       ? currentSid
       : null;
   }
-  const createdSid=await newSession(false,{_captureOwner:true});
+  const createdSid=await newSession();
   if(!createdSid) return null;
   if(typeof renderSessionList==='function') await renderSessionList();
   return typeof _isSessionCurrentPane==='function'&&_isSessionCurrentPane(createdSid)

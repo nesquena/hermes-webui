@@ -14197,10 +14197,12 @@ function _restoreCompressionPlaceholder(){
   }
   _compressionPlaceholderSaved=null;
 }
-function clearCompressionUi(){
+function clearCompressionUi(ownerSid){
+  if(ownerSid&&window._compressionUi&&window._compressionUi.sessionId
+    &&window._compressionUi.sessionId!==ownerSid)return;
   window._compressionUi=null;
   _clearCompressionElapsedTimer();
-  _setCompressionSessionLock(null);
+  _setCompressionSessionLock(null,ownerSid);
   _restoreCompressionPlaceholder();
   renderCompressionUi();
 }
