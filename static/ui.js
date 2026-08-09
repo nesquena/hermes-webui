@@ -6104,7 +6104,7 @@ if(typeof window!=='undefined'){
       ||(typeof _recentMessageKeyScrollIntent==='function'&&_recentMessageKeyScrollIntent()))){
       _messageFollowIntentCache=false;
     }
-    if(_programmaticScroll) return;
+    if(_freshProgrammaticScrollActive()) return;
     _markMessageVirtualScrollActive();
     cancelAnimationFrame(_scrollRaf);
     _scrollRaf=requestAnimationFrame(()=>{

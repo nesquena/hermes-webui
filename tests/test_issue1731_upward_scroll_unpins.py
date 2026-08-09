@@ -143,7 +143,7 @@ def test_programmatic_scroll_guard_still_skips_listener():
     end = UI_JS.index("})", brace)
     listener = UI_JS[brace:end]
 
-    bail_idx = listener.index("if(_programmaticScroll) return")
+    bail_idx = listener.index("if(_freshProgrammaticScrollActive()) return")
     # Anchor on the actual rAF SCHEDULE, not the word "requestAnimationFrame" —
     # a comment above the guard may legitimately mention the rAF deferral.
     raf_idx = listener.index("_scrollRaf=requestAnimationFrame")

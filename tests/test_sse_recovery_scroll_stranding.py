@@ -219,7 +219,7 @@ def test_follow_intent_cache_synchronously_invalidated_before_raf():
     listener = listener[:listener.index("_scrollRaf=requestAnimationFrame")]
     lc = _compact(listener)
     invalidate = lc.find("_messageFollowIntentCache=false")
-    prog_return = lc.find("if(_programmaticScroll)return;")
+    prog_return = lc.find("if(_freshProgrammaticScrollActive())return;")
     assert invalidate != -1, (
         "scroll listener must synchronously invalidate the follow-intent cache "
         "on scroll-away-up (#6653)"
