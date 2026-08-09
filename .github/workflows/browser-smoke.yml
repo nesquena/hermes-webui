@@ -115,6 +115,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install "pyyaml>=6.0" playwright
           # Install only the Chromium browser + its system deps.
+          bash .github/scripts/prepare-playwright-apt.sh
           python -m playwright install --with-deps chromium
 
       - name: Run browser smoke
