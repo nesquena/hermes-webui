@@ -94,6 +94,22 @@ def test_settings_save_persists_mirror():
     )
 
 
+def test_settings_panel_load_persists_mirror():
+    src = _read("static/panels.js")
+    # Regression (#6856 gate finding): a successful settings-panel GET applies
+    # the authoritative value to window._autoScrollFollow — it must ALSO sync the
+    # global mirror, or an explicit OFF applied here leaves a stale ON mirror that
+    # a later boot-fetch failure restores (reopening #6819). Persist only from an
+    # explicit server boolean (never a synthesized default), matching the contract.
+    panel_block = src.split("const autoScrollFollowCb=$('settingsAutoScrollFollow');", 1)[1][:900]
+    assert "typeof settings.auto_scroll_follow==='boolean'" in panel_block, (
+        "settings-panel load must require an explicit boolean before persisting"
+    )
+    assert "_persistAutoScrollFollow(settings.auto_scroll_follow)" in panel_block, (
+        "settings-panel load must sync the global mirror from the authoritative GET value"
+    )
+
+
 # ── Behavioral guards (extracted helper logic must behave correctly) ────────
 
 def test_mirror_helpers_behavior_via_source_extraction():
