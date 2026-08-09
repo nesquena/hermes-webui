@@ -98,16 +98,23 @@ def test_static_files_still_served(cleanup_test_sessions):
 
 def test_cancel_requires_stream_id(cleanup_test_sessions):
     try:
-        data, status = get("/api/chat/cancel")
+        data, status = post("/api/chat/cancel", {})
         assert status == 400
     except urllib.error.HTTPError as e:
         assert e.code == 400
 
 def test_cancel_nonexistent_stream(cleanup_test_sessions):
-    data, status = get("/api/chat/cancel?stream_id=nonexistent_xyz")
+    data, status = post("/api/chat/cancel", {"stream_id": "nonexistent_xyz"})
     assert status == 200
     assert data["ok"] is True
     assert data["cancelled"] is False
+
+def test_cancel_get_returns_405(cleanup_test_sessions):
+    try:
+        get("/api/chat/cancel?stream_id=nonexistent_xyz")
+        assert False, "GET cancel must not succeed"
+    except urllib.error.HTTPError as e:
+        assert e.code == 405
 
 def test_send_button_in_html(cleanup_test_sessions):
     src, _ = get_text("/")
@@ -118,6 +125,7 @@ def test_cancel_function_in_boot_js(cleanup_test_sessions):
     src, _ = get_text("/static/boot.js")
     assert "async function cancelStream(" in src
     assert "api/chat/cancel" in src
+    assert "method:'POST'" in src or 'method:"POST"' in src
 
 # ── Cron history ───────────────────────────────────────────────────────────
 

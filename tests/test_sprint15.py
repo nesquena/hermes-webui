@@ -36,7 +36,7 @@ def _make_session_visible(sid):
         "model": "openai/gpt-5.4-mini",
     })
     assert status == 200, f"chat/start failed with {status}: {d}"
-    get(f"/api/chat/cancel?stream_id={urllib.parse.quote(d['stream_id'])}")
+    post("/api/chat/cancel", {"stream_id": d["stream_id"]})
 
 
 def make_project(created_list, name="Test Project", color=None):

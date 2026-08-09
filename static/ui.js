@@ -7980,6 +7980,7 @@ function setBusy(v){
         }
         $('msg').value=next.text||'';
         S.pendingFiles=Array.isArray(next.files)?[...next.files]:[];
+        window._queuedChatMode=next.mode||null;
         // Restore model from queued item (sent in /api/chat/start payload)
         // Note: profile is NOT restored — full profile switch requires server interaction
         if(next.model&&S.session&&next.model!==S.session.model){

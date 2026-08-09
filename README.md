@@ -357,8 +357,9 @@ Full list of environment variables:
 |---|---|---|
 | `HERMES_WEBUI_AGENT_DIR` | auto-discovered | Path to the Hermes Agent source or installed module root |
 | `HERMES_WEBUI_PYTHON` | auto-discovered | Python executable |
-| `HERMES_WEBUI_HOST` | `127.0.0.1` | Bind address (`0.0.0.0` for all IPv4, `::` for all IPv6, `::1` for IPv6 loopback) |
+| `HERMES_WEBUI_HOST` | `127.0.0.1` | Bind address (`0.0.0.0` for all IPv4, `::` for all IPv6, `::1` for IPv6 loopback). Non-loopback binds **require** authentication (`HERMES_WEBUI_PASSWORD` / OIDC / passkeys) or the explicit escape hatch `HERMES_WEBUI_ALLOW_INSECURE_BIND=1` |
 | `HERMES_WEBUI_PORT` | `8787` | Port |
+| `HERMES_WEBUI_ALLOW_INSECURE_BIND` | *(unset)* | Set truthy to allow non-loopback bind without WebUI auth (still logs a loud warning). Prefer setting a password instead |
 | `HERMES_WEBUI_STATE_DIR` | `$HERMES_HOME/webui` (Windows default `%LOCALAPPDATA%\hermes\webui`, POSIX default `~/.hermes/webui`) | Where sessions and state are stored. **Note (upgrade):** the default now follows `HERMES_HOME` — if you previously relocated `HERMES_HOME` to a non-default base **without** setting `HERMES_WEBUI_STATE_DIR`, your WebUI state now resolves to `$HERMES_HOME/webui` instead of the old platform-default `~/.hermes/webui`. To keep using the old location, set `HERMES_WEBUI_STATE_DIR` to it (or move the directory). Installs with `HERMES_HOME` unset or at the default base are unaffected. |
 | `HERMES_WEBUI_DEFAULT_WORKSPACE` | `~/workspace` | Default workspace |
 | `HERMES_WEBUI_DEFAULT_MODEL` | *(provider default)* | Optional model override; leave unset to use the active Hermes provider default |
@@ -443,7 +444,7 @@ Set `environmentFiles` for secrets like API keys. Protected WebUI runtime keys f
 
 ### Remote access (SSH tunnel, Tailscale, phone)
 
-The server binds to `127.0.0.1` by default. To reach it from another machine use an SSH tunnel (`ssh -N -L 8787:127.0.0.1:8787 user@host`, which `start.sh` prints for you over SSH), or join your server and phone to a [Tailscale](https://tailscale.com) network and browse to `http://<server-tailscale-ip>:8787` with `HERMES_WEBUI_HOST=0.0.0.0` + `HERMES_WEBUI_PASSWORD` set. Full walkthrough (incl. a community ARM64-Android field report): [`docs/remote-access.md`](docs/remote-access.md).
+The server binds to `127.0.0.1` by default. To reach it from another machine use an SSH tunnel (`ssh -N -L 8787:127.0.0.1:8787 user@host`, which `start.sh` prints for you over SSH), or join your server and phone to a [Tailscale](https://tailscale.com) network and browse to `http://<server-tailscale-ip>:8787` with `HERMES_WEBUI_HOST=0.0.0.0` **and** `HERMES_WEBUI_PASSWORD` set (non-loopback binds refuse to start without auth). Full walkthrough (incl. a community ARM64-Android field report): [`docs/remote-access.md`](docs/remote-access.md).
 
 ### Manual launch (without start.sh)
 

@@ -32,7 +32,7 @@ async function cancelStream(reason){
   let respBody=null;
   let respOk=false;
   try{
-    const r=await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
+    const r=await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:'{}'});
     respOk=!!(r&&r.ok);
     try{respBody=await r.json();}catch(_){}
   }catch(e){
@@ -75,7 +75,7 @@ async function cancelSessionStream(session){
   }
   let respOk=false;
   try{
-    const r=await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
+    const r=await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:'{}'});
     respOk=!!(r&&r.ok);
   }catch(e){/* close local stream; keep UI state honest below */}
   if(!respOk) return false;
@@ -2615,6 +2615,9 @@ if(window.visualViewport){
   };
   window.visualViewport.addEventListener('resize', _scheduleMobileViewportReflow);
   window.visualViewport.addEventListener('scroll', _scheduleMobileViewportReflow);
+  // #boot-reflow: force a reflow on initial paint so the first layout
+  // matches the actual visualViewport, not a stale 100dvh value.
+  _forceMobileViewportReflow();
 }
 
 // Boot: restore last session or start fresh
@@ -3751,7 +3754,17 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     }catch(_){}
   }
   const savedLocal=localStorage.getItem('hermes-webui-session');
-  const saved=urlSession||savedLocal;
+  
+  // Check if user wants to always start fresh (skips auto-resume).
+  // Clear the saved id BEFORE composing `saved`, otherwise loadSession still
+  // runs with the stale value (Greptile / merge-review finding).
+  let resumeLocal=savedLocal;
+  if(resumeLocal && localStorage.getItem('hermes-always-new-chat')==='true'){
+    try{localStorage.removeItem('hermes-webui-session');}catch(_){}
+    resumeLocal=null;
+  }
+  const saved=urlSession||resumeLocal;
+  
   if(saved){
     try{
       const savedSidebarOnlyState=(!urlSession&&savedLocal)
