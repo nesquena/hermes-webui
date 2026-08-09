@@ -274,7 +274,8 @@ function getQueuedSessionCount(sid){
 function _compressionSessionLock(){
   return window._compressionLockSid||null;
 }
-function _setCompressionSessionLock(sid){
+function _setCompressionSessionLock(sid,ownerSid){
+  if(!sid&&ownerSid&&window._compressionLockSid&&window._compressionLockSid!==ownerSid)return;
   window._compressionLockSid=sid||null;
 }
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
