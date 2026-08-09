@@ -86,6 +86,15 @@ GATEWAY_SRC = _maybe_extract(SESSIONS_JS, "startGatewaySSE")
 CAPTURE_SRC = _maybe_extract(SESSIONS_JS, "_captureTranscriptReplacement")
 CURRENT_SRC = _maybe_extract(SESSIONS_JS, "_transcriptReplacementIsCurrent")
 COMMIT_SRC = _maybe_extract(SESSIONS_JS, "_commitTranscriptReplacement")
+ENSURE_OWNER_SRC = _maybe_extract(SESSIONS_JS, "_ensureSessionOwner", "async function")
+BASE_OWNER_FALLBACK_SRC = """
+async function _ensureSessionOwner() {
+  if (S.session && S.session.session_id) return S.session.session_id;
+  const sid = await newSession();
+  await renderSessionList();
+  return _isSessionCurrentPane(sid) ? sid : null;
+}
+"""
 APPLY_COMPRESSION_SRC = _maybe_extract(COMMANDS_JS, "_applyManualCompressionResult", "async function")
 REFRESH_SRC = _maybe_extract(UI_JS, "refreshSession", "async function")
 COMPRESSION_SRC = _maybe_extract(COMMANDS_JS, "_runManualCompression", "async function")
@@ -97,6 +106,7 @@ COMPRESSION_OPERATION_SRC = COMMANDS_JS[
     )
 ]
 CLEAR_SRC = _maybe_extract(PANELS_JS, "clearConversation", "async function")
+CLEAR_SERIAL_SRC = "let _clearConversationOperationSerial = 0;" if "_clearConversationOperationSerial" in CLEAR_SRC else ""
 NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -884,12 +894,7 @@ let renderCount = 0;
 const toasts = [];
 function _bumpMessagesGeneration() {{ generation += 1; return generation; }}
 function _isSessionCurrentPane(sid) {{ return !!(S.session && S.session.session_id === sid); }}
-async function _ensureSessionOwner() {{
-  if (S.session && S.session.session_id) return S.session.session_id;
-  const sid = await newSession();
-  await renderSessionList();
-  return _isSessionCurrentPane(sid) ? sid : null;
-}}
+{ENSURE_OWNER_SRC or BASE_OWNER_FALLBACK_SRC}
 function $(id) {{ return id === 'msg' ? {{ value: {command_json} }} : null; }}
 function parseCommand(text) {{ return {{ name: text.slice(1).split(/\\s+/)[0], args: text.split(/\\s+/).slice(1).join(' ') }}; }}
 function t(key) {{ return key; }}
@@ -971,7 +976,7 @@ function _bumpMessagesGeneration() {{ _messagesGeneration += 1; return _messages
 {CURRENT_SRC}
 {COMMIT_SRC}
 let _clearConversationOperation = null;
-let _clearConversationOperationSerial = 0;
+{CLEAR_SERIAL_SRC}
 {CLEAR_SRC}
 const S = {{
   session: {{ session_id: 'same-session', messages: [{{ role: 'assistant', content: 'old' }}] }},
@@ -990,7 +995,11 @@ const clearControl = {{
 const toasts = [];
 function t(key) {{ return key; }}
 function $(id) {{ return id === 'btnClearConvModal' ? clearControl : null; }}
-function _syncHermesPanelSessionActions() {{ syncCalls += 1; clearControl.disabled = false; }}
+function _syncHermesPanelSessionActions() {{
+  syncCalls += 1;
+  const visibleMessages = (S.messages || []).filter(message => message && message.role && message.role !== 'tool').length;
+  clearControl.disabled = !S.session || visibleMessages === 0 || !!_clearConversationOperation;
+}}
 function showToast(message) {{ toasts.push(String(message)); }}
 function setStatus(message) {{ toasts.push(String(message)); }}
 function syncTopbar() {{}}
@@ -1017,6 +1026,8 @@ function _commitTranscriptReplacement(ticket, commit) {{
   for (let i = 0; i < 20 && !clearResolvers.length; i++) await new Promise(resolve => setTimeout(resolve, 0));
   if (clearResolvers.length !== 1) throw new Error('first clear request did not start');
   const pendingState = {{ disabled: clearControl.disabled, busy: clearControl.attrs['aria-busy'] }};
+  _syncHermesPanelSessionActions();
+  const pendingResyncState = {{ disabled: clearControl.disabled, busy: clearControl.attrs['aria-busy'] }};
   const duplicate = clearConversation();
   await Promise.resolve();
   if (confirms.length !== 2) throw new Error('duplicate confirmation did not open');
@@ -1033,7 +1044,7 @@ function _commitTranscriptReplacement(ticket, commit) {{
   if (clearResolvers.length !== 2) throw new Error('later clear request did not start');
   clearResolvers[1]({{ session: {{ session_id: 'same-session', messages: [] }} }});
   await later;
-  console.log(JSON.stringify({{ clearCalls, messages: S.messages, toasts, pendingState, finalState: {{ disabled: clearControl.disabled, busy: clearControl.attrs['aria-busy'] }}, syncCalls, duplicatePending: true }}));
+  console.log(JSON.stringify({{ clearCalls, messages: S.messages, toasts, pendingState, pendingResyncState, finalState: {{ disabled: clearControl.disabled, busy: clearControl.attrs['aria-busy'] }}, syncCalls, duplicatePending: true }}));
   void duplicate;
 }})().catch(err => {{ console.error(err.stack || String(err)); process.exit(1); }});
 """
@@ -1044,7 +1055,9 @@ def _delayed_render_owner_script() -> str:
         "if(!S.session){await newSession();await renderSessionList();}"
         "const sid=S.session&&S.session.session_id;"
     )
-    if "_ensureSessionOwner" in SESSIONS_JS:
+    owner_src = ""
+    if ENSURE_OWNER_SRC:
+        owner_src = ENSURE_OWNER_SRC
         owner_block = "const sid=await _ensureSessionOwner();"
     return f"""
 const S = {{ session: null, messages: [] }};
@@ -1052,12 +1065,7 @@ let resolveRender = null;
 async function renderSessionList() {{ return new Promise(resolve => resolveRender = resolve); }}
 async function newSession() {{ S.session = {{ session_id: 'session-a' }}; return 'session-a'; }}
 function _isSessionCurrentPane(sid) {{ return !!S.session && S.session.session_id === sid; }}
-async function _ensureSessionOwner() {{
-  if (S.session && S.session.session_id) return S.session.session_id;
-  const sid = await newSession();
-  await renderSessionList();
-  return _isSessionCurrentPane(sid) ? sid : null;
-}}
+{owner_src}
 async function runAction() {{
   {owner_block}
   if (sid) S.messages.push({{ role: 'user', content: 'action' }});
@@ -1068,7 +1076,7 @@ async function runAction() {{
   S.session = {{ session_id: 'session-b' }};
   resolveRender();
   await action;
-  console.log(JSON.stringify({{ sessionId: S.session.session_id, messages: S.messages }}));
+  console.log(JSON.stringify({{ sessionId: S.session.session_id, messages: S.messages, usedProductionOwner: {str(bool(ENSURE_OWNER_SRC)).lower()} }}));
 }})().catch(err => {{ console.error(err.stack || String(err)); process.exit(1); }});
 """
 
@@ -1377,7 +1385,7 @@ function _bumpMessagesGeneration() {{ _messagesGeneration += 1; return _messages
 {CURRENT_SRC}
 {COMMIT_SRC}
 let _clearConversationOperation = null;
-let _clearConversationOperationSerial = 0;
+{CLEAR_SERIAL_SRC}
 {CLEAR_SRC}
 const S = {{
   session: {{ session_id: 'same-session', messages: [{{ role: 'assistant', content: 'old' }}] }},
@@ -1422,10 +1430,15 @@ function _commitTranscriptReplacement(ticket, commit) {{
     _bumpMessagesGeneration();
     S.messages.push({{ role: 'user', content: 'newer writer' }});
   }}
+  if ({json.dumps(race_stage)} === 'switched') {{
+    S.session = {{ session_id: 'other-session', messages: [{{ role: 'assistant', content: 'other pane' }}] }};
+    S.messages = [{{ role: 'assistant', content: 'other pane' }}];
+    S.toolCalls = [{{ id: 'other-tool' }}];
+  }}
   resolveClear({{ session: {{ session_id: 'same-session', messages: [] }} }});
   await clearPromise;
   await new Promise(resolve => setTimeout(resolve, 0));
-  console.log(JSON.stringify({{ messages: S.messages, toasts, reconcileCalls }}));
+  console.log(JSON.stringify({{ sessionId: S.session && S.session.session_id, messages: S.messages, toolCalls: S.toolCalls, toasts, reconcileCalls }}));
 }})().catch(err => {{ console.error(err.stack || String(err)); process.exit(1); }});
 """
 
@@ -1730,6 +1743,7 @@ def test_blank_page_slash_rejects_owner_after_delayed_sidebar_render():
 
     assert result["sessionId"] == "session-b"
     assert result["messages"] == []
+    assert result["usedProductionOwner"] is True
 
 
 def test_clear_refuses_overlapping_confirmed_operation():
@@ -1739,8 +1753,19 @@ def test_clear_refuses_overlapping_confirmed_operation():
     assert result["messages"] == []
     assert "conversation_cleared" in result["toasts"]
     assert result["pendingState"] == {"disabled": True, "busy": "true"}
-    assert result["finalState"] == {"disabled": False, "busy": "false"}
-    assert result["syncCalls"] == 2
+    assert result["pendingResyncState"] == {"disabled": True, "busy": "true"}
+    assert result["finalState"] == {"disabled": True, "busy": "false"}
+    assert result["syncCalls"] == 3
+
+
+def test_clear_conversation_leaves_switched_pane_untouched():
+    result = _run_node(_clear_conversation_race_script("switched"))
+
+    assert result["sessionId"] == "other-session"
+    assert result["messages"] == [{"role": "assistant", "content": "other pane"}]
+    assert result["toolCalls"] == [{"id": "other-tool"}]
+    assert result["toasts"] == []
+    assert result["reconcileCalls"] == 0
 
 
 def test_background_polling_rejects_stale_owner_or_generation_and_keeps_retry():
