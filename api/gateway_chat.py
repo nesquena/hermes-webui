@@ -25,6 +25,7 @@ from api.config import (
     STREAM_REASONING_TEXT,
     _get_session_agent_lock,
     _parse_provider_qualified_model_id,
+    clear_session_writeback_owner_if_owned,
     coerce_reasoning_effort_for_model,
     gateway_approval_unavailable_reason,
     gateway_supports_approval,
@@ -848,6 +849,10 @@ def _run_gateway_chat_streaming(
         # Cancelled before the worker started; release the owner entry the route
         # layer registered so STREAM_SESSION_OWNERS does not leak (no teardown finally runs).
         unregister_stream_owner(stream_id)
+        # Also release the writeback-owner entry the route layer registered, so
+        # SESSION_WRITEBACK_OWNERS does not leak on this pre-start cancellation
+        # path (the teardown finally below never runs when we early-return here).
+        clear_session_writeback_owner_if_owned(session_id, stream_id)
         return
     register_active_run(
         stream_id,
@@ -1394,3 +1399,8 @@ def _run_gateway_chat_streaming(
         _clear_gateway_run_starting(stream_id)
         unregister_stream_owner(stream_id)
         unregister_active_run(stream_id)
+        # Release the writeback-owner entry the route layer registered for this
+        # Gateway run so SESSION_WRITEBACK_OWNERS does not grow unbounded across
+        # the process lifetime (compare-and-clear: only clears if still owned by
+        # this stream, mirroring the local streaming teardown).
+        clear_session_writeback_owner_if_owned(session_id, stream_id)

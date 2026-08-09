@@ -917,3 +917,54 @@ def test_issue6623_unresolvable_current_session_fails_closed_for_pause_merge(
     assert recorded is None
     s_old.save.assert_not_called()
     assert not (s_old.process_wakeup_pause or {}).get("paused")
+
+
+def test_issue6636_gateway_prestart_cancel_clears_writeback_owner(tmp_path, monkeypatch):
+    """RE-GATE (maintainer fix): the Gateway worker's pre-start cancellation path
+    (``q is None`` early return in ``_run_gateway_chat_streaming``) must release
+    the SESSION_WRITEBACK_OWNERS entry the route layer registered, or every
+    cancelled-before-start Gateway run leaks a permanent owner entry (unbounded
+    process-lifetime growth). Revert-sensitive: fails if the
+    clear_session_writeback_owner_if_owned call on that path is removed.
+    """
+    import api.gateway_chat as gateway_chat
+
+    session_id = "sess_gw_prestart"
+    stream_id = "stream-gw-prestart"
+    # The route layer registered the writeback owner before dispatching the worker.
+    config.register_session_writeback_owner(session_id, stream_id)
+    assert config.session_writeback_owner(session_id) == stream_id
+    # Simulate cancel-before-start: the stream map has no queue for this id, so the
+    # worker takes its `q is None` early-return teardown path.
+    config.STREAMS.pop(stream_id, None)
+
+    gateway_chat._run_gateway_chat_streaming(
+        session_id,
+        [],
+        "test-model",
+        None,
+        stream_id,
+        None,
+    )
+
+    assert config.session_writeback_owner(session_id) is None, (
+        "pre-start Gateway cancellation must clear the writeback owner it registered"
+    )
+
+
+def test_issue6636_gateway_clear_only_affects_owned_stream(tmp_path, monkeypatch):
+    """The Gateway teardown clear must be compare-and-clear: if a successor has
+    already taken writeback ownership by the time the old worker tears down, the
+    old worker's clear must NOT evict the successor's entry.
+    """
+    session_id = "sess_gw_successor"
+    old_stream = "stream-gw-old"
+    new_stream = "stream-gw-new"
+    config.register_session_writeback_owner(session_id, old_stream)
+    # Successor takes ownership before the old worker's teardown runs.
+    config.register_session_writeback_owner(session_id, new_stream)
+    # Old worker's teardown compare-and-clear must be a no-op (it no longer owns it).
+    config.clear_session_writeback_owner_if_owned(session_id, old_stream)
+    assert config.session_writeback_owner(session_id) == new_stream, (
+        "old worker teardown must not evict the successor's writeback ownership"
+    )
