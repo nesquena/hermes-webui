@@ -1230,9 +1230,9 @@ async function cmdStop(){
 
 const PICHOT_VALIDATION_GOAL=`/validation
 outcome: Exécuter le plan approuvé jusqu’à la livraison live vérifiée.
-verify: toutes les validations, preuves, publications et vérifications live prévues par le skill validation sont terminées avec succès.
+verify: toutes les validations, preuves, publications et vérifications live prévues par le skill validation sont terminées avec succès, et aucune tâche, délégation, revue, intégration, publication, déploiement ou vérification live ne reste ouverte.
 constraints: respecter le périmètre approuvé et toutes les gates de sécurité, de données et d’irréversibilité.
-stop when: aucune tâche, délégation, revue, intégration, publication, déploiement ou vérification live ne reste ouverte.`;
+stop when: un blocage Direction réel, hors du périmètre ou des gates déjà approuvés, exige une décision.`;
 
 function cmdValidation(){
   return cmdGoal(PICHOT_VALIDATION_GOAL);

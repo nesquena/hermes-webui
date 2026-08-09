@@ -97,4 +97,5 @@ def test_validation_command_starts_one_persistent_goal_for_any_active_profile():
     assert payload["args"].startswith("/validation")
     assert "livraison live vérifiée" in payload["args"]
     assert "aucune tâche, délégation, revue, intégration, publication" in payload["args"]
+    assert "blocage Direction réel" in payload["args"]
     assert "stop when:" in payload["args"]

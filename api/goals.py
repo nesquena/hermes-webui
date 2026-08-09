@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import inspect
 import logging
 import re
 import time
@@ -14,17 +15,33 @@ logger = logging.getLogger(__name__)
 try:  # Exposed as a module attribute so tests can monkeypatch it directly.
     from hermes_cli.goals import (  # type: ignore
         CONTINUATION_PROMPT_TEMPLATE,
+        CONTINUATION_PROMPT_WITH_CONTRACT_TEMPLATE,
+        DEFAULT_MAX_CONSECUTIVE_PARSE_FAILURES,
+        DEFAULT_MAX_CONSECUTIVE_TRANSPORT_FAILURES,
         DEFAULT_MAX_TURNS,
+        GoalContract,
         GoalManager as _NativeGoalManager,
         GoalState,
+        _pid_alive,
+        _session_waiting,
+        gather_background_processes,
         judge_goal,
+        parse_contract,
     )
 except Exception:  # pragma: no cover - depends on installed hermes-agent
     CONTINUATION_PROMPT_TEMPLATE = ""  # type: ignore
+    CONTINUATION_PROMPT_WITH_CONTRACT_TEMPLATE = ""  # type: ignore
+    DEFAULT_MAX_CONSECUTIVE_PARSE_FAILURES = 3  # type: ignore
+    DEFAULT_MAX_CONSECUTIVE_TRANSPORT_FAILURES = 5  # type: ignore
     DEFAULT_MAX_TURNS = 20  # type: ignore
+    GoalContract = None  # type: ignore
     _NativeGoalManager = None  # type: ignore
     GoalState = None  # type: ignore
+    _pid_alive = None  # type: ignore
+    _session_waiting = None  # type: ignore
+    gather_background_processes = None  # type: ignore
     judge_goal = None  # type: ignore
+    parse_contract = None  # type: ignore
 
 GoalManager = _NativeGoalManager  # type: ignore
 
@@ -138,6 +155,12 @@ class _ProfileGoalManager:
         goal = (goal or "").strip()
         if not goal:
             raise ValueError("goal text is empty")
+        contract = GoalContract() if GoalContract is not None else None
+        if parse_contract is not None:
+            parsed_goal, parsed_contract = parse_contract(goal)
+            if parsed_goal:
+                goal = parsed_goal
+                contract = parsed_contract
         state = GoalState(  # type: ignore[operator]
             goal=goal,
             status="active",
@@ -146,6 +169,8 @@ class _ProfileGoalManager:
             created_at=time.time(),
             last_turn_at=0.0,
         )
+        if contract is not None:
+            state.contract = contract
         self._state = state
         self._save(state)
         return state
@@ -155,6 +180,11 @@ class _ProfileGoalManager:
             return None
         self._state.status = "paused"
         self._state.paused_reason = reason
+        self._state.waiting_on_pid = None
+        self._state.waiting_on_session = None
+        self._state.waiting_until = 0.0
+        self._state.waiting_reason = None
+        self._state.waiting_since = 0.0
         self._save(self._state)
         return self._state
 
@@ -163,6 +193,11 @@ class _ProfileGoalManager:
             return None
         self._state.status = "active"
         self._state.paused_reason = None
+        self._state.waiting_on_pid = None
+        self._state.waiting_on_session = None
+        self._state.waiting_until = 0.0
+        self._state.waiting_reason = None
+        self._state.waiting_since = 0.0
         if reset_budget:
             self._state.turns_used = 0
         self._save(self._state)
@@ -175,7 +210,93 @@ class _ProfileGoalManager:
         self._save(self._state)
         self._state = None
 
-    def evaluate_after_turn(self, last_response: str, *, user_initiated: bool = True) -> Dict[str, Any]:
+    def wait_on(self, pid: int, reason: str = ""):
+        if self._state is None or self._state.status != "active":
+            raise RuntimeError("no active goal to park")
+        pid = int(pid)
+        if pid <= 0:
+            raise ValueError("pid must be a positive integer")
+        self._state.waiting_on_pid = pid
+        self._state.waiting_on_session = None
+        self._state.waiting_until = 0.0
+        self._state.waiting_reason = (reason or "").strip() or None
+        self._state.waiting_since = time.time()
+        self._save(self._state)
+        return self._state
+
+    def wait_on_session(self, session_id: str, reason: str = ""):
+        if self._state is None or self._state.status != "active":
+            raise RuntimeError("no active goal to park")
+        session_id = str(session_id or "").strip()
+        if not session_id:
+            raise ValueError("session_id must be a non-empty string")
+        self._state.waiting_on_session = session_id
+        self._state.waiting_on_pid = None
+        self._state.waiting_until = 0.0
+        self._state.waiting_reason = (reason or "").strip() or None
+        self._state.waiting_since = time.time()
+        self._save(self._state)
+        return self._state
+
+    def wait_for_seconds(self, seconds: int, reason: str = ""):
+        if self._state is None or self._state.status != "active":
+            raise RuntimeError("no active goal to park")
+        seconds = int(seconds)
+        if seconds <= 0:
+            raise ValueError("seconds must be a positive integer")
+        self._state.waiting_on_pid = None
+        self._state.waiting_on_session = None
+        self._state.waiting_until = time.time() + seconds
+        self._state.waiting_reason = (reason or "").strip() or None
+        self._state.waiting_since = time.time()
+        self._save(self._state)
+        return self._state
+
+    def stop_waiting(self) -> bool:
+        state = self._state
+        if state is None:
+            return False
+        if (
+            state.waiting_on_pid is None
+            and state.waiting_on_session is None
+            and not state.waiting_until
+        ):
+            return False
+        state.waiting_on_pid = None
+        state.waiting_on_session = None
+        state.waiting_until = 0.0
+        state.waiting_reason = None
+        state.waiting_since = 0.0
+        self._save(state)
+        return True
+
+    def is_waiting(self) -> bool:
+        state = self._state
+        if state is None:
+            return False
+        if state.waiting_on_session is not None:
+            if _session_waiting is not None and _session_waiting(state.waiting_on_session):
+                return True
+            self.stop_waiting()
+            return False
+        if state.waiting_on_pid is not None:
+            if _pid_alive is not None and _pid_alive(state.waiting_on_pid):
+                return True
+            self.stop_waiting()
+            return False
+        if state.waiting_until:
+            if time.time() < state.waiting_until:
+                return True
+            self.stop_waiting()
+        return False
+
+    def evaluate_after_turn(
+        self,
+        last_response: str,
+        *,
+        user_initiated: bool = True,
+        background_processes: Optional[list[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
         state = self._state
         if state is None or state.status != "active":
             return {
@@ -187,15 +308,80 @@ class _ProfileGoalManager:
                 "message": "",
             }
 
+        if self.is_waiting():
+            if state.waiting_on_session is not None:
+                target = f"session {state.waiting_on_session}"
+            elif state.waiting_on_pid is not None:
+                target = f"pid {state.waiting_on_pid}"
+            else:
+                remaining = max(0, int(state.waiting_until - time.time()))
+                target = f"{remaining}s remaining"
+            reason = state.waiting_reason or target
+            return {
+                "status": "active",
+                "should_continue": False,
+                "continuation_prompt": None,
+                "verdict": "waiting",
+                "reason": reason,
+                "message": f"⏳ Goal parked — waiting on {target}: {reason}",
+            }
+
         state.turns_used += 1
         state.last_turn_at = time.time()
 
         if judge_goal is None:
-            verdict, reason = "continue", "goal judge unavailable"
+            verdict, reason, parse_failed, wait_directive, transport_failed = (
+                "continue",
+                "goal judge unavailable",
+                False,
+                None,
+                False,
+            )
         else:
-            verdict, reason = judge_goal(state.goal, str(last_response or ""))
+            result = judge_goal(
+                state.goal,
+                str(last_response or ""),
+                subgoals=getattr(state, "subgoals", None) or None,
+                background_processes=background_processes,
+                contract=(
+                    state.contract
+                    if getattr(state, "has_contract", lambda: False)()
+                    else None
+                ),
+            )
+            if not isinstance(result, tuple) or len(result) != 5:
+                raise ValueError("goal judge returned an invalid result")
+            verdict, reason, parse_failed, wait_directive, transport_failed = result
         state.last_verdict = verdict
         state.last_reason = reason
+
+        if parse_failed:
+            state.consecutive_parse_failures += 1
+        else:
+            state.consecutive_parse_failures = 0
+        if transport_failed:
+            state.consecutive_transport_failures += 1
+        else:
+            state.consecutive_transport_failures = 0
+
+        if verdict == "wait" and wait_directive:
+            if wait_directive.get("session_id"):
+                self.wait_on_session(str(wait_directive["session_id"]), reason=reason)
+                target = f"session {wait_directive['session_id']}"
+            elif wait_directive.get("pid"):
+                self.wait_on(int(wait_directive["pid"]), reason=reason)
+                target = f"pid {wait_directive['pid']}"
+            else:
+                self.wait_for_seconds(int(wait_directive["seconds"]), reason=reason)
+                target = f"{wait_directive['seconds']}s"
+            return {
+                "status": "active",
+                "should_continue": False,
+                "continuation_prompt": None,
+                "verdict": "wait",
+                "reason": reason,
+                "message": f"⏳ Goal parked (judge) — waiting on {target}: {reason}",
+            }
 
         if verdict == "done":
             state.status = "done"
@@ -207,6 +393,43 @@ class _ProfileGoalManager:
                 "verdict": "done",
                 "reason": reason,
                 "message": f"✓ Goal achieved: {reason}",
+            }
+
+        if state.consecutive_transport_failures >= DEFAULT_MAX_CONSECUTIVE_TRANSPORT_FAILURES:
+            state.status = "paused"
+            state.paused_reason = (
+                f"judge API unreachable {state.consecutive_transport_failures} turns in a row"
+            )
+            self._save(state)
+            return {
+                "status": "paused",
+                "should_continue": False,
+                "continuation_prompt": None,
+                "verdict": "continue",
+                "reason": reason,
+                "message": (
+                    f"⏸ Goal paused — judge API returned errors "
+                    f"({state.consecutive_transport_failures} turns)."
+                ),
+            }
+
+        if state.consecutive_parse_failures >= DEFAULT_MAX_CONSECUTIVE_PARSE_FAILURES:
+            state.status = "paused"
+            state.paused_reason = (
+                f"judge model returned unparseable output "
+                f"{state.consecutive_parse_failures} turns in a row"
+            )
+            self._save(state)
+            return {
+                "status": "paused",
+                "should_continue": False,
+                "continuation_prompt": None,
+                "verdict": "continue",
+                "reason": reason,
+                "message": (
+                    f"⏸ Goal paused — the judge model "
+                    f"({state.consecutive_parse_failures} turns) returned invalid output."
+                ),
             }
 
         if state.turns_used >= state.max_turns:
@@ -238,6 +461,14 @@ class _ProfileGoalManager:
     def next_continuation_prompt(self) -> Optional[str]:
         if not self._state or self._state.status != "active":
             return None
+        if (
+            CONTINUATION_PROMPT_WITH_CONTRACT_TEMPLATE
+            and getattr(self._state, "has_contract", lambda: False)()
+        ):
+            return CONTINUATION_PROMPT_WITH_CONTRACT_TEMPLATE.format(
+                goal=self._state.goal,
+                contract_block=self._state.contract.render_block(),
+            )
         return CONTINUATION_PROMPT_TEMPLATE.format(goal=self._state.goal)
 
 
@@ -587,7 +818,16 @@ def evaluate_goal_after_turn(
                 "reason": "no active goal",
                 "message": "",
             }
-        decision = mgr.evaluate_after_turn(str(last_response or ""), user_initiated=user_initiated)
+        background_processes = (
+            gather_background_processes()
+            if gather_background_processes is not None
+            else None
+        )
+        evaluate = mgr.evaluate_after_turn
+        evaluate_kwargs: Dict[str, Any] = {"user_initiated": user_initiated}
+        if "background_processes" in inspect.signature(evaluate).parameters:
+            evaluate_kwargs["background_processes"] = background_processes
+        decision = evaluate(str(last_response or ""), **evaluate_kwargs)
     except Exception as exc:
         logger.debug("goal evaluation failed for session=%s: %s", sid, exc)
         return {
