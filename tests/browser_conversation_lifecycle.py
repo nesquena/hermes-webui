@@ -1378,12 +1378,19 @@ def main() -> int:
                     sessionId: value.sessionId, streamId: value.streamId,
                     ownerToken: value.ownerToken, transportGeneration: value.transportGeneration,
                   } : null;
+                  const inner = document.getElementById('msgInner');
                   const savedMessages = S.messages;
+                  const savedInnerHTML = inner.innerHTML;
                   const savedOwner = window._liveTurnSettlementOwnerKeys && window._liveTurnSettlementOwnerKeys[sid];
+                  const savedOwnerKeys = window._liveTurnSettlementOwnerKeys;
+                  const savedArmedKeys = window._liveTurnSettlementArmedOwnerKeys;
+                  const savedHandoff = window._liveTurnSettlementHandoff;
+                  const savedInflight = INFLIGHT[sid];
+                  const savedActiveStreamId = S.activeStreamId;
+                  const savedBusy = S.busy;
                   const cacheClear = () => { if (window._sessionHtmlCache) window._sessionHtmlCache.clear(); window._sessionHtmlCacheSid = null; };
                   const live = () => { const node = document.createElement('div'); node.id = 'liveAssistantTurn'; node.className = 'assistant-turn'; node.dataset.sessionId = sid; node.innerHTML = '<div class="msg-body">live answer</div>'; document.getElementById('msgInner').appendChild(node); return node; };
                   const owner = {sessionId:sid, streamId:'issue6504-stream', ownerToken:71, transportGeneration:9};
-                  const inner = document.getElementById('msgInner');
                   const clearCanonical = () => inner.querySelectorAll('[data-anchor-settled-scene-owner="1"]').forEach(node => node.closest('.assistant-turn')?.remove() || node.remove());
                   inner.querySelectorAll('[data-anchor-settled-scene-owner="1"]').forEach(node => node.closest('.assistant-turn')?.remove() || node.remove());
                   const publish = key => { window._liveTurnSettlementOwnerKeys = {[sid]:key}; window._liveTurnSettlementArmedOwnerKeys = {}; window._liveTurnSettlementHandoff = null; delete INFLIGHT[sid]; S.activeStreamId = null; S.busy = false; };
@@ -1401,7 +1408,15 @@ def main() -> int:
                   const canonicalLive = live(); armLiveTurnSettlementHandoff(owner); renderMessages();
                   const canonicalCase = {live:canonicalLive.isConnected,
                     canonical:document.querySelectorAll('[data-anchor-settled-scene-owner="1"]').length};
-                  S.messages = savedMessages; publish(savedOwner); cacheClear(); renderMessages();
+                  S.messages = savedMessages;
+                  inner.innerHTML = savedInnerHTML;
+                  window._liveTurnSettlementOwnerKeys = savedOwnerKeys;
+                  window._liveTurnSettlementArmedOwnerKeys = savedArmedKeys;
+                  window._liveTurnSettlementHandoff = savedHandoff;
+                  if (savedInflight === undefined) delete INFLIGHT[sid]; else INFLIGHT[sid] = savedInflight;
+                  S.activeStreamId = savedActiveStreamId;
+                  S.busy = savedBusy;
+                  cacheClear();
                   return {exactFirst, exactSecond, mismatches, canonicalCase,
                     canonical:document.querySelectorAll('[data-anchor-settled-scene-owner="1"]').length,
                     live:Boolean(document.getElementById('liveAssistantTurn'))};
