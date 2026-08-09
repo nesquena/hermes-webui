@@ -9598,13 +9598,19 @@ async function refreshSession() {
   dismissReconnect();
   if (!S.session) return;
   const refreshSid=S.session.session_id;
+  const refreshOwnerIsCurrent=()=>typeof _isSessionCurrentPane==='function'
+    ? _isSessionCurrentPane(refreshSid)
+    : !!(S.session&&S.session.session_id===refreshSid);
+  if(!refreshOwnerIsCurrent()) return;
   const refreshTicket=typeof _captureTranscriptReplacement==='function'
     ? _captureTranscriptReplacement()
     : {sessionId:refreshSid,generation:typeof _messagesGeneration==='number'?_messagesGeneration:0,used:false};
   try {
     const data = await api(`/api/session?session_id=${encodeURIComponent(refreshSid)}`);
     if(!data||!data.session) return;
+    if(!refreshOwnerIsCurrent()) return;
     const applyRefresh=()=>{
+      if(!refreshOwnerIsCurrent()) return;
       S.session = data.session;
       S.messages = data.session.messages || [];
       _messagesTruncated = !!data.session._messages_truncated;
@@ -9621,9 +9627,12 @@ async function refreshSession() {
       applyRefresh();
       return;
     }
+    if(!refreshOwnerIsCurrent()) return;
     const commit=_commitTranscriptReplacement(refreshTicket, applyRefresh);
     if(!commit) return;
-  } catch(e) { setStatus('Refresh failed: ' + e.message); }
+  } catch(e) {
+    if(refreshOwnerIsCurrent()) setStatus('Refresh failed: ' + e.message);
+  }
 }
 // ── Update banner ──
 function _formatUpdateTargetStatus(label,info){

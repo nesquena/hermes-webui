@@ -87,6 +87,7 @@ CAPTURE_SRC = _maybe_extract(SESSIONS_JS, "_captureTranscriptReplacement")
 CURRENT_SRC = _maybe_extract(SESSIONS_JS, "_transcriptReplacementIsCurrent")
 COMMIT_SRC = _maybe_extract(SESSIONS_JS, "_commitTranscriptReplacement")
 ENSURE_OWNER_SRC = _maybe_extract(SESSIONS_JS, "_ensureSessionOwner", "async function")
+NEW_SESSION_OWNER_GUARD_SRC = _maybe_extract(SESSIONS_JS, "_newSessionOwnerResponseIsCurrent")
 BASE_OWNER_FALLBACK_SRC = """
 async function _ensureSessionOwner() {
   if (S.session && S.session.session_id) return S.session.session_id;
@@ -98,6 +99,9 @@ async function _ensureSessionOwner() {
 APPLY_COMPRESSION_SRC = _maybe_extract(COMMANDS_JS, "_applyManualCompressionResult", "async function")
 REFRESH_SRC = _maybe_extract(UI_JS, "refreshSession", "async function")
 COMPRESSION_SRC = _maybe_extract(COMMANDS_JS, "_runManualCompression", "async function")
+STEER_SRC = COMMANDS_JS[
+    COMMANDS_JS.index("function _steerUploadedAttachmentPaths") : COMMANDS_JS.index("async function cmdTitle")
+]
 POLL_COMPRESSION_SRC = _maybe_extract(COMMANDS_JS, "_pollManualCompressionResult", "async function")
 CLEAR_COMPRESSION_SRC = _maybe_extract(COMMANDS_JS, "resumeManualCompressionForSession", "async function")
 COMPRESSION_OPERATION_SRC = COMMANDS_JS[
@@ -788,7 +792,7 @@ async function runSlash() {{
 """
 
 
-def _replacement_race_script() -> str:
+def _replacement_race_script(*, loading_transition: bool = False) -> str:
     sessions_path = str(REPO / "static" / "sessions.js")
     commands_path = str(REPO / "static" / "commands.js")
     ui_path = str(REPO / "static" / "ui.js")
@@ -830,6 +834,10 @@ const S = {{
   busy: false,
   activeStreamId: null,
 }};
+let _loadingSessionId = null;
+function _isSessionCurrentPane(sid) {{
+  return !!S.session && S.session.session_id === sid && (!_loadingSessionId || _loadingSessionId === sid);
+}}
 let resolveRequest = null;
 let requestKind = '';
 function $(id) {{ return id === 'modelSelect' ? {{ value: 'model' }} : null; }}
@@ -857,10 +865,12 @@ async function run() {{
   requestKind = 'refresh';
   const refreshPromise = refreshSession();
   if (typeof resolveRequest !== 'function') throw new Error('refresh request not started');
-  _bumpMessagesGeneration();
+  if (!{str(loading_transition).lower()}) _bumpMessagesGeneration();
   S.messages.push({{ role: 'user', content: 'newer row' }});
+  if ({str(loading_transition).lower()}) _loadingSessionId = 'other-session';
   resolveRequest({{ session: {{ session_id: 'same-session', messages: [{{ role: 'assistant', content: 'stale' }}] }} }});
   await refreshPromise;
+  if ({str(loading_transition).lower()}) _loadingSessionId = null;
   const refreshMessages = S.messages.map(m => m.content);
 
   S.messages = [{{ role: 'assistant', content: 'before compression' }}];
@@ -869,10 +879,12 @@ async function run() {{
   requestKind = 'compression';
   const compressionPromise = _runManualCompression('');
   if (typeof resolveRequest !== 'function') throw new Error('compression request not started');
-  _bumpMessagesGeneration();
+  if (!{str(loading_transition).lower()}) _bumpMessagesGeneration();
   S.messages.push({{ role: 'user', content: 'newer compression row' }});
+  if ({str(loading_transition).lower()}) _loadingSessionId = 'other-session';
   resolveRequest({{ session: {{ session_id: 'same-session', messages: [{{ role: 'assistant', content: 'stale compression' }}] }} }});
   await compressionPromise;
+  if ({str(loading_transition).lower()}) _loadingSessionId = null;
   console.log(JSON.stringify({{ refreshMessages, compressionMessages: S.messages.map(m => m.content) }}));
 }}
 run().catch(err => {{ console.error(err.stack || String(err)); process.exit(1); }});
@@ -1095,6 +1107,28 @@ async function runAction() {{
 """
 
 
+def _creation_await_owner_script() -> str:
+    return f"""
+let _loadingSessionId = null;
+const S = {{ session: null }};
+{NEW_SESSION_OWNER_GUARD_SRC}
+function installCreatedSession(data, captureOwner) {{
+  if (!_newSessionOwnerResponseIsCurrent(data, captureOwner)) return null;
+  S.session = data.session;
+  return S.session.session_id;
+}}
+const created = {{ session: {{ session_id: 'session-a' }} }};
+const acceptedWithoutTransition = installCreatedSession(created, true);
+S.session = null;
+_loadingSessionId = 'session-b';
+const rejectedDuringLoad = installCreatedSession(created, true);
+_loadingSessionId = null;
+S.session = {{ session_id: 'session-b' }};
+const rejectedAfterInstall = installCreatedSession(created, true);
+console.log(JSON.stringify({{ acceptedWithoutTransition, rejectedDuringLoad, rejectedAfterInstall, sessionId: S.session.session_id }}));
+"""
+
+
 def _normal_send_chat_start_switch_script(stage: str = "chat_start") -> str:
     return f"""
 let _sendInProgress = false;
@@ -1109,6 +1143,8 @@ let resolveUpload = null;
 let resolveDirective = null;
 let startCalls = 0;
 let attachCalls = 0;
+let restoreArgs = null;
+let clearOptimisticCalls = 0;
 const input = {{ value: 'hello', style: {{}} }};
 const S = {{
   session: {{ session_id: 'session-a', workspace: '/ws', model: 'model', profile: 'default' }},
@@ -1140,9 +1176,9 @@ function _runOptionalPreStartUiStep(_label, fn) {{ if (typeof fn === 'function')
 function _runOptionalPostStartUiStep(_label, fn) {{ if (typeof fn === 'function') fn(); }}
 function _clearPendingSessionModel() {{}}
 function _clearComposerDraft() {{}}
-function _restoreComposerDraftAfterFailedSend() {{}}
-function _clearOptimisticSessionStreaming() {{}}
-function clearOptimisticSessionStreaming() {{}}
+function _restoreComposerDraftAfterFailedSend(draftText, files, sid) {{ restoreArgs = {{ draftText, sid }}; }}
+function _clearOptimisticSessionStreaming() {{ clearOptimisticCalls += 1; }}
+function clearOptimisticSessionStreaming() {{ clearOptimisticCalls += 1; }}
 function _fetchYoloState() {{}}
 function updateSendBtn() {{}}
 function setComposerStatus() {{}}
@@ -1178,8 +1214,14 @@ function attachLiveStream() {{ attachCalls += 1; }}
 function api(url) {{
   if (String(url) !== '/api/chat/start') throw new Error('unexpected API request: ' + String(url));
   startCalls += 1;
-  return new Promise(resolve => {{
-    resolveStart = () => resolve({{ stream_id: 'stream-a' }});
+  return new Promise((resolve, reject) => {{
+    resolveStart = () => {{
+      if ({json.dumps(stage)} === 'chat_start_error') {{
+        const error = new Error('start failed');
+        error.status = 502;
+        reject(error);
+      }} else resolve({{ stream_id: 'stream-a' }});
+    }};
   }});
 }}
 {SEND_SRC}
@@ -1205,6 +1247,7 @@ function api(url) {{
   S.messages = [{{ role: 'assistant', content: 'session b existing' }}];
   S.busy = false;
   S.activeStreamId = null;
+  if ({json.dumps(stage)} === 'chat_start_error') INFLIGHT['session-a'] = {{ streamId: 'stream-a' }};
   if ({json.dumps(stage)} === 'upload') resolveUpload([]);
   else if ({json.dumps(stage)} === 'directive') resolveDirective({{ directive: 'forced' }});
   else resolveStart();
@@ -1217,6 +1260,58 @@ function api(url) {{
     activeStreamId: S.activeStreamId,
     attachCalls,
     inflightKeys: Object.keys(INFLIGHT),
+    restoreArgs,
+    clearOptimisticCalls,
+  }}));
+}})().catch(err => {{ console.error(err.stack || String(err)); process.exit(1); }});
+"""
+
+
+def _steer_loading_switch_script() -> str:
+    return f"""
+let _loadingSessionId = null;
+const file = {{ name: 'draft.txt', size: 1, lastModified: 1 }};
+const S = {{
+  session: {{ session_id: 'session-a', active_stream_id: 'stream-a', model: 'model' }},
+  activeStreamId: 'stream-a',
+  pendingFiles: [file],
+  busy: true,
+}};
+let resolveSteer = null;
+let indicatorCalls = 0;
+let clearDraftCalls = 0;
+function _isSessionCurrentPane(sid) {{
+  return !!S.session && S.session.session_id === sid && (!_loadingSessionId || _loadingSessionId === sid);
+}}
+function _chatPayloadModelState() {{ return {{ model: 'model', model_provider: null }}; }}
+function _clearComposerDraft() {{ clearDraftCalls += 1; }}
+function _saveComposerDraftNow() {{ return Promise.resolve(); }}
+function _showSteerIndicator() {{ indicatorCalls += 1; }}
+function _showSteerRecovery() {{ indicatorCalls += 100; }}
+function renderTray() {{}}
+function setComposerStatus() {{}}
+function autoResize() {{}}
+function showToast() {{}}
+function updateQueueBadge() {{}}
+function queueSessionMessage() {{}}
+function t(key) {{ return key; }}
+function api(url) {{
+  if (url !== '/api/chat/steer') throw new Error('unexpected API request: ' + url);
+  return new Promise(resolve => {{ resolveSteer = resolve; }});
+}}
+{STEER_SRC}
+(async () => {{
+  const steerPromise = _trySteer('late steer', false);
+  for (let i = 0; i < 20 && !resolveSteer; i++) await new Promise(resolve => setTimeout(resolve, 0));
+  if (!resolveSteer) throw new Error('steer request did not start');
+  _loadingSessionId = 'session-b';
+  resolveSteer({{ accepted: true }});
+  await steerPromise;
+  console.log(JSON.stringify({{
+    sessionId: S.session && S.session.session_id,
+    pendingFiles: S.pendingFiles.map(item => item.name),
+    indicatorCalls,
+    clearDraftCalls,
   }}));
 }})().catch(err => {{ console.error(err.stack || String(err)); process.exit(1); }});
 """
@@ -1918,6 +2013,17 @@ def test_blank_page_slash_rejects_owner_after_delayed_sidebar_render():
     assert result["usedProductionOwner"] is True
 
 
+def test_new_session_owner_guard_rejects_late_creation_install():
+    result = _run_node(_creation_await_owner_script())
+
+    assert result == {
+        "acceptedWithoutTransition": "session-a",
+        "rejectedDuringLoad": None,
+        "rejectedAfterInstall": None,
+        "sessionId": "session-b",
+    }
+
+
 @pytest.mark.parametrize("stage", ["upload", "directive", "chat_start"])
 def test_normal_send_rejects_late_owner_result_after_pane_switch(stage):
     result = _run_node(_normal_send_chat_start_switch_script(stage))
@@ -1929,6 +2035,26 @@ def test_normal_send_rejects_late_owner_result_after_pane_switch(stage):
     assert result["activeStreamId"] is None
     assert result["attachCalls"] == 0
     assert result["inflightKeys"] == (["session-a"] if stage == "chat_start" else [])
+
+
+def test_normal_send_restores_failed_owner_draft_after_pane_switch():
+    result = _run_node(_normal_send_chat_start_switch_script("chat_start_error"))
+
+    assert result["startCalls"] == 1
+    assert result["sessionId"] == "session-b"
+    assert result["messages"] == [{"role": "assistant", "content": "session b existing"}]
+    assert result["restoreArgs"] == {"draftText": "hello", "sid": "session-a"}
+    assert result["clearOptimisticCalls"] == 1
+    assert result["inflightKeys"] == []
+
+
+def test_steer_does_not_mutate_old_pane_during_newer_load():
+    result = _run_node(_steer_loading_switch_script())
+
+    assert result["sessionId"] == "session-a"
+    assert result["pendingFiles"] == ["draft.txt"]
+    assert result["indicatorCalls"] == 0
+    assert result["clearDraftCalls"] == 1
 
 
 def test_clear_refuses_overlapping_confirmed_operation():
@@ -2086,6 +2212,13 @@ def test_same_session_refresh_and_compression_reject_older_replacements():
     if "function _captureTranscriptReplacement()" not in SESSIONS_JS:
         pytest.skip("respec-only replacement seam is absent on the base checkout")
     result = _run_node(_replacement_race_script())
+
+    assert result["refreshMessages"] == ["before", "newer row"]
+    assert result["compressionMessages"] == ["before compression", "newer compression row"]
+
+
+def test_refresh_and_compression_reject_results_during_newer_pane_load():
+    result = _run_node(_replacement_race_script(loading_transition=True))
 
     assert result["refreshMessages"] == ["before", "newer row"]
     assert result["compressionMessages"] == ["before compression", "newer compression row"]

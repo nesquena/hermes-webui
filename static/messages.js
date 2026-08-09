@@ -1808,7 +1808,13 @@ async function send(){
     _pendingMoaConfig=null;
     postStartData = startData;
   }catch(e){
-    if(!_slashOwnerIsCurrent(activeSid)) return;
+    if(!_slashOwnerIsCurrent(activeSid)){
+      delete INFLIGHT[activeSid];
+      if(typeof clearInflightState==='function') clearInflightState(activeSid);
+      _restoreComposerDraftAfterFailedSend(_failedSendDraftText,_failedSendFilesSnapshot,activeSid,_composerDraftClearPromise);
+      if(typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
+      return;
+    }
     const errMsg=String((e&&e.message)||'');
     // If /api/chat/start returns 404, the session was deleted server-side
     // (its sidecar is gone) while GET kept returning a CLI stub (#2782). Strip

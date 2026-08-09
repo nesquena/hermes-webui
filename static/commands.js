@@ -858,11 +858,16 @@ async function _pollManualCompressionResult(sid){
 
 async function _applyManualCompressionResult(data, focusTopic, visibleCount, commandText, replacementTicket){
   const ownerSid=S.session&&S.session.session_id;
+  const ownerIsCurrent=()=>typeof _isSessionCurrentPane==='function'
+    ? _isSessionCurrentPane(ownerSid)
+    : !!(S.session&&S.session.session_id===ownerSid);
+  if(!ownerSid||!ownerIsCurrent()) return false;
   if(data&&data.session){
     const currentSid=S.session&&S.session.session_id;
     if(data.session.session_id&&data.session.session_id!==currentSid){
       await loadSession(data.session.session_id);
-      if(!S.session||S.session.session_id!==data.session.session_id)return false;
+      if(!S.session||S.session.session_id!==data.session.session_id
+        || (typeof _isSessionCurrentPane==='function'&&!_isSessionCurrentPane(data.session.session_id)))return false;
     }else{
       const ticket=replacementTicket||(
         typeof _captureTranscriptReplacement==='function'
@@ -880,14 +885,15 @@ async function _applyManualCompressionResult(data, focusTopic, visibleCount, com
           syncTopbar();
           renderMessages();
         });
-      if(!committed)return false;
+      if(!committed||!ownerIsCurrent())return false;
       await renderSessionList();
-      if(!S.session||S.session.session_id!==ownerSid
+      if(!ownerIsCurrent()
         || (ticket && ticket.committedGeneration!==undefined
           && _messagesGeneration!==ticket.committedGeneration)) return false;
       updateQueueBadge(ownerSid);
     }
   }
+  if(!ownerIsCurrent()) return false;
   const summary=data&&data.summary;
   if(typeof setCompressionUi==='function'&&S.session){
     const referenceMsg=(S.messages||[]).find(m=>typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(m));
@@ -925,7 +931,9 @@ function _beginManualCompressionOperation(sid){
 }
 function _settleManualCompressionOperation(operation){
   if(!operation||_manualCompressionOperation!==operation)return;
-  const sameSession=!!(S.session&&S.session.session_id===operation.sid);
+  const sameSession=typeof _isSessionCurrentPane==='function'
+    ? _isSessionCurrentPane(operation.sid)
+    : !!(S.session&&S.session.session_id===operation.sid);
   const newerStream=!!(sameSession&&(S.activeStreamId||S.session.active_stream_id));
   if(sameSession&&!operation.uiFinalized&&typeof clearCompressionUi==='function') clearCompressionUi();
   if(typeof _setCompressionSessionLock==='function') _setCompressionSessionLock(null);
@@ -942,7 +950,7 @@ async function resumeManualCompressionForSession(sid){
   if(!operation)return;
   let ownerGeneration=null;
   const ownerStateIsCurrent=()=>!!(
-    S.session&&S.session.session_id===sid
+    (typeof _isSessionCurrentPane==='function' ? _isSessionCurrentPane(sid) : (S.session&&S.session.session_id===sid))
     && (ownerGeneration===null||_messagesGeneration===ownerGeneration)
   );
   try{
@@ -952,7 +960,7 @@ async function resumeManualCompressionForSession(sid){
     ownerGeneration=statusTicket.generation;
     const status=await api(`/api/session/compress/status?session_id=${encodeURIComponent(sid)}`);
     if(!status||status.status!=='running') return;
-    if(!S.session||S.session.session_id!==sid||!_transcriptReplacementIsCurrent(statusTicket)) return;
+    if(!ownerStateIsCurrent()||!_transcriptReplacementIsCurrent(statusTicket)) return;
     const visibleMessages=_manualCompressionVisibleMessages();
     const visibleCount=visibleMessages.length;
     const anchorMessageKey=_compressionAnchorMessageKey(visibleMessages[visibleMessages.length-1]||null);
@@ -1010,7 +1018,7 @@ async function _runManualCompression(focusTopic){
   const operation=_beginManualCompressionOperation(ownerSid);
   if(!operation)return;
   const ownerStateIsCurrent=()=>!!(
-    S.session&&S.session.session_id===ownerSid
+    (typeof _isSessionCurrentPane==='function' ? _isSessionCurrentPane(ownerSid) : (S.session&&S.session.session_id===ownerSid))
     && (ownerGeneration===null||_messagesGeneration===ownerGeneration)
   );
   try{
@@ -1026,7 +1034,7 @@ async function _runManualCompression(focusTopic){
       if(!live||!live.session||live.session.session_id!==sid){
         throw new Error('session no longer available');
       }
-      if(!S.session||S.session.session_id!==sid||!_transcriptReplacementIsCurrent(preflightTicket)) return;
+      if(!ownerStateIsCurrent()||!_transcriptReplacementIsCurrent(preflightTicket)) return;
       const committed=typeof _commitTranscriptReplacement==='function'
         && _commitTranscriptReplacement(preflightTicket, () => {
           S.session=live.session;
@@ -1554,7 +1562,11 @@ function _steerUploadedAttachmentPaths(uploaded){
 }
 
 function _steerOwnerIsCurrent(ownerSid){
-  return !!(ownerSid&&typeof S!=='undefined'&&S.session&&S.session.session_id===ownerSid);
+  return !!(ownerSid&&typeof S!=='undefined'&&(
+    typeof _isSessionCurrentPane==='function'
+      ? _isSessionCurrentPane(ownerSid)
+      : (S.session&&S.session.session_id===ownerSid)
+  ));
 }
 
 function _steerFallbackIsDeadRun(fallback){
