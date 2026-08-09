@@ -480,7 +480,7 @@ def _capture_page_errors(page):
             location.endswith(suffix) for suffix in known_resource_suffixes
         ):
             return
-        errors.append(("console", text))
+        errors.append(("console", text, location))
 
     page.on("console", on_console)
     page.on("pageerror", lambda error: errors.append(("pageerror", str(error))))
@@ -857,6 +857,7 @@ def main() -> int:
     mutation_context = None
     page = None
     errors = []
+    renderer_page_errors = []
     anchor_scene_requests = []
     try:
         def _wait_diagnostic(label):
@@ -880,11 +881,16 @@ def main() -> int:
             return state
 
         proc, log, log_path, base_url = _start_webui_server(repo_root, env, artifact_dir)
-        playwright = sync_playwright().start()
-        browser = playwright.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage"],
-        )
+        try:
+            playwright = sync_playwright().start()
+            browser = playwright.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage"],
+            )
+        except Exception as error:
+            print(f"SETUP FAIL: headless Chromium is unavailable: {error}", file=sys.stderr)
+            exit_code = 2
+            return 2
         context = browser.new_context(base_url=base_url)
         page = context.new_page()
         anchor_scene_requests = _capture_anchor_scene_requests(page)
@@ -1093,7 +1099,7 @@ def main() -> int:
             page.evaluate(
                 """() => {
                   const state = {renders: [], arms: [], calls: [], checkpoints: [], mutations: [], renderTrace: [], active: true};
-                  const sid = () => window.S && window.S.session && window.S.session.session_id;
+                  const sid = () => typeof S !== 'undefined' && S.session && S.session.session_id;
                   const key = value => value ? {
                     sessionId: value.sessionId, streamId: value.streamId,
                     ownerToken: value.ownerToken, transportGeneration: value.transportGeneration,
@@ -1105,9 +1111,9 @@ def main() -> int:
                       liveConnected: Boolean(live && live === state.liveNode && live.isConnected),
                       settledAnswer: Boolean(document.querySelector('.assistant-turn:not(#liveAssistantTurn) .msg-body')),
                       canonicalActivity: document.querySelectorAll('[data-anchor-settled-scene-owner="1"]').length,
-                      inflight: Boolean(sessionId && window.INFLIGHT && window.INFLIGHT[sessionId]),
-                      activeStreamId: window.S && window.S.activeStreamId || null,
-                      handoff: key(window._liveTurnSettlementHandoff),
+                      inflight: Boolean(sessionId && typeof INFLIGHT !== 'undefined' && INFLIGHT[sessionId]),
+                      activeStreamId: typeof S !== 'undefined' && S.activeStreamId || null,
+                      handoff: key(typeof _liveTurnSettlementHandoff !== 'undefined' ? _liveTurnSettlementHandoff : null),
                       owner: key(window._liveTurnSettlementOwnerKeys && window._liveTurnSettlementOwnerKeys[sessionId]),
                       armedOwner: key(window._liveTurnSettlementArmedOwnerKeys && window._liveTurnSettlementArmedOwnerKeys[sessionId])});
                   };
@@ -1147,12 +1153,16 @@ def main() -> int:
                   const wrap = (name, render) => {
                     const original = window[name]; if (typeof original !== 'function') return;
                     window[name] = function(...args) {
-                      state.calls.push({name, args: args.map(value => value && typeof value === 'object' ? {sid:value.sid, forceHidden:value.forceHidden} : value)});
+                      state.calls.push({name, args: args.map(value => value && typeof value === 'object' ? {
+                        sid:value.sid, forceHidden:value.forceHidden, title:value.title, body:value.body,
+                        sessionId:value.sessionId, messageIndex:value.messageIndex,
+                      } : value)});
                       if (!render) return original.apply(this, args);
                       const renderState = phase => ({
                         phase,
-                        inflight: Boolean(sid() && window.INFLIGHT && window.INFLIGHT[sid()]),
-                        activeStreamId: window.S && window.S.activeStreamId || null,
+                        inflight: Boolean(sid() && typeof INFLIGHT !== 'undefined' && INFLIGHT[sid()]),
+                        activeStreamId: typeof S !== 'undefined' && S.activeStreamId || null,
+                        handoff: key(typeof _liveTurnSettlementHandoff !== 'undefined' ? _liveTurnSettlementHandoff : null),
                         owner: key(window._liveTurnSettlementOwnerKeys && window._liveTurnSettlementOwnerKeys[sid()]),
                         armedOwner: key(window._liveTurnSettlementArmedOwnerKeys && window._liveTurnSettlementArmedOwnerKeys[sid()]),
                       });
@@ -1161,9 +1171,9 @@ def main() -> int:
                       const result = original.apply(this, args);
                       snapshot('render-exit');
                       state.renderTrace.push(renderState('exit'));
-                      state.renders.push({inflight:Boolean(sid() && window.INFLIGHT && window.INFLIGHT[sid()]),
-                        activeStreamId:window.S && window.S.activeStreamId || null,
-                        handoff:key(window._liveTurnSettlementHandoff),
+                      state.renders.push({inflight:Boolean(sid() && typeof INFLIGHT !== 'undefined' && INFLIGHT[sid()]),
+                        activeStreamId:typeof S !== 'undefined' && S.activeStreamId || null,
+                        handoff:key(typeof _liveTurnSettlementHandoff !== 'undefined' ? _liveTurnSettlementHandoff : null),
                         owner:key(window._liveTurnSettlementOwnerKeys && window._liveTurnSettlementOwnerKeys[sid()]),
                         armedOwner:key(window._liveTurnSettlementArmedOwnerKeys && window._liveTurnSettlementArmedOwnerKeys[sid()])});
                       return result;
@@ -1267,12 +1277,17 @@ def main() -> int:
             assert oracle["streamEvents"].count("done") >= 1, oracle
             assert oracle["streamEvents"].count("stream_end") >= 1, oracle
             assert any(mutation.get("removedLive") for mutation in oracle["mutations"]), oracle
+            arm = oracle["arms"][0]
             call_names = [call["name"] for call in oracle["calls"]]
             assert call_names.count("playNotificationSound") == 1, oracle
             assert call_names.count("sendBrowserNotification") == 1, oracle
             assert call_names.count("_markSessionViewed") >= 1, oracle
+            assert call_names.count("_markSessionCompletionUnread") == 0, oracle
+            viewed_calls = [call for call in oracle["calls"] if call["name"] == "_markSessionViewed"]
+            assert all(call["args"] and call["args"][0] == arm["sessionId"] for call in viewed_calls), oracle
+            notification = next(call for call in oracle["calls"] if call["name"] == "sendBrowserNotification")
+            assert notification["args"][:2] == ["Response complete", FINAL_TEXT], oracle
             assert len(oracle["doneRuntime"]) == 1, oracle
-            arm = oracle["arms"][0]
             assert len(oracle["armObservations"]) == 1, oracle
             assert oracle["armObservations"][0]["armedOwner"] == arm, oracle
             done_runtime = oracle["doneRuntime"][0]
@@ -1286,6 +1301,7 @@ def main() -> int:
             render_entries = [trace for trace in oracle["renderTrace"] if trace["phase"] == "entry"]
             render_exits = [trace for trace in oracle["renderTrace"] if trace["phase"] == "exit"]
             assert render_entries and len(render_entries) == len(render_exits), oracle
+            assert render_entries[0]["handoff"] == arm, oracle
             assert all(not trace["inflight"] and not trace["activeStreamId"] for trace in oracle["renderTrace"]), oracle
             assert all(trace["armedOwner"] is None for trace in render_exits), oracle
             settled_state = page.evaluate(
@@ -1298,12 +1314,14 @@ def main() -> int:
                 })"""
             )
             assert not settled_state["inflight"] and not settled_state["activeStreamId"], settled_state
+            assert settled_state["canonicalActivity"] == 1, settled_state
             for checkpoint in oracle["checkpoints"]:
                 assert checkpoint["liveConnected"] or checkpoint["settledAnswer"], checkpoint
             renderer_page = page
             if UI_MUTATION:
                 mutation_context = browser.new_context(base_url=base_url)
                 renderer_page = mutation_context.new_page()
+                renderer_page_errors = _capture_page_errors(renderer_page)
 
                 def _route_mutated_ui(route):
                     route.fulfill(path=str(mutated_ui_path))
@@ -1332,18 +1350,7 @@ def main() -> int:
                   const live = () => { const node = document.createElement('div'); node.id = 'liveAssistantTurn'; node.className = 'assistant-turn'; node.dataset.sessionId = sid; node.innerHTML = '<div class="msg-body">live answer</div>'; document.getElementById('msgInner').appendChild(node); return node; };
                   const owner = {sessionId:sid, streamId:'issue6504-stream', ownerToken:71, transportGeneration:9};
                   const inner = document.getElementById('msgInner');
-                  const innerHtmlDescriptor = Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML');
-                  const installCanonicalScene = () => {
-                    Object.defineProperty(inner, 'innerHTML', {configurable:true,
-                      get:() => innerHtmlDescriptor.get.call(inner),
-                      set:value => { innerHtmlDescriptor.set.call(inner, value); if (!inner.querySelector('[data-anchor-settled-scene-owner="1"]')) inner.insertAdjacentHTML('beforeend', '<div class="assistant-turn"><div data-anchor-settled-scene-owner="1"><div data-anchor-scene-row="1">canonical</div></div></div>'); }});
-                  };
-                  const removeCanonicalHook = () => Object.defineProperty(inner, 'innerHTML', innerHtmlDescriptor);
                   const clearCanonical = () => inner.querySelectorAll('[data-anchor-settled-scene-owner="1"]').forEach(node => node.closest('.assistant-turn')?.remove() || node.remove());
-                  const dedupeCanonical = () => {
-                    const scenes = Array.from(inner.querySelectorAll('[data-anchor-settled-scene-owner="1"]'));
-                    scenes.slice(1).forEach(node => node.closest('.assistant-turn')?.remove() || node.remove());
-                  };
                   inner.querySelectorAll('[data-anchor-settled-scene-owner="1"]').forEach(node => node.closest('.assistant-turn')?.remove() || node.remove());
                   const publish = key => { window._liveTurnSettlementOwnerKeys = {[sid]:key}; window._liveTurnSettlementArmedOwnerKeys = {}; window._liveTurnSettlementHandoff = null; delete INFLIGHT[sid]; S.activeStreamId = null; S.busy = false; };
                   S.messages = [{role:'assistant', content:'settled plain answer'}]; publish(owner); cacheClear();
@@ -1353,11 +1360,11 @@ def main() -> int:
                   renderMessages(); const exactSecond = exact.isConnected;
                   const mismatches = [];
                   for (const [label, oldKey] of [['stream',{...owner,streamId:'replacement-stream'}],['owner',{...owner,ownerToken:72}],['generation',{...owner,transportGeneration:10}]]) {
-                    clearCanonical(); installCanonicalScene(); S.messages = savedMessages; publish(owner); cacheClear(); renderMessages(); dedupeCanonical(); const stale = live(); armLiveTurnSettlementHandoff(oldKey); renderMessages(); dedupeCanonical(); removeCanonicalHook();
+                    clearCanonical(); S.messages = savedMessages; publish(owner); cacheClear(); renderMessages(); const stale = live(); armLiveTurnSettlementHandoff(oldKey); renderMessages();
                     mismatches.push({label, stale:stale.isConnected, canonical:document.querySelectorAll('[data-anchor-settled-scene-owner="1"]').length});
                   }
-                  clearCanonical(); installCanonicalScene(); S.messages = savedMessages; publish(owner); cacheClear(); renderMessages(); dedupeCanonical();
-                  const canonicalLive = live(); armLiveTurnSettlementHandoff(owner); renderMessages(); dedupeCanonical(); removeCanonicalHook();
+                  clearCanonical(); S.messages = savedMessages; publish(owner); cacheClear(); renderMessages();
+                  const canonicalLive = live(); armLiveTurnSettlementHandoff(owner); renderMessages();
                   const canonicalCase = {live:canonicalLive.isConnected,
                     canonical:document.querySelectorAll('[data-anchor-settled-scene-owner="1"]').length};
                   S.messages = savedMessages; publish(savedOwner); cacheClear(); renderMessages();
@@ -1570,7 +1577,7 @@ def main() -> int:
             print("OK  hard reload: transcript-backed Anchor scene preserves settled parity")
 
         assert gateway.request_body and gateway.request_body.get("input") == PROMPT, gateway.request_body
-        unexpected_errors = errors
+        unexpected_errors = errors + renderer_page_errors
         if TEST_BITE == "issue6504-settlement-dom-oracle":
             anchor_404 = any(
                 event.get("type") == "response"
@@ -1582,8 +1589,13 @@ def main() -> int:
             )
             if anchor_404:
                 unexpected_errors = [
-                    error for error in errors
-                    if error != ("console", expected_anchor_error)
+                    error for error in unexpected_errors
+                    if not (
+                        len(error) >= 3
+                        and error[0] == "console"
+                        and error[1] == expected_anchor_error
+                        and urlsplit(error[2]).path == "/api/session/anchor-scene"
+                    )
                 ]
         if unexpected_errors:
             raise AssertionError(f"unexpected browser errors: {unexpected_errors!r}")

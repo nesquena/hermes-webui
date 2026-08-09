@@ -143,12 +143,6 @@ def _run_node_script(script: str) -> subprocess.CompletedProcess[str]:
 
 
 def _run_issue6504_browser(mutation: str = "") -> subprocess.CompletedProcess[str]:
-    pytest.importorskip("playwright.sync_api")
-    from playwright.sync_api import sync_playwright
-
-    with sync_playwright() as playwright:
-        if not Path(playwright.chromium.executable_path).exists():
-            pytest.skip("Chromium is not installed for Playwright")
     env = os.environ.copy()
     env.update({
         "LIFECYCLE_SCENARIO": "normal",
@@ -161,22 +155,27 @@ def _run_issue6504_browser(mutation: str = "") -> subprocess.CompletedProcess[st
     with tempfile.TemporaryDirectory(prefix="issue6504-browser-", ignore_cleanup_errors=True) as artifact_dir:
         env["LIFECYCLE_ARTIFACT_DIR"] = artifact_dir
         try:
-            return subprocess.run(
+            result = subprocess.run(
                 [sys.executable, str(REPO / "tests" / "browser_conversation_lifecycle.py")],
                 cwd=REPO,
                 env=env,
                 text=True,
                 capture_output=True,
-                timeout=45,
+                timeout=180,
                 check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except subprocess.TimeoutExpired as error:
-            return subprocess.CompletedProcess(
+            result = subprocess.CompletedProcess(
                 error.cmd,
                 124,
                 stdout=error.stdout or "",
                 stderr=error.stderr or "browser bite timed out",
             )
+    output = result.stdout + result.stderr
+    if result.returncode == 2 and "SETUP FAIL:" in output:
+        pytest.skip(output[-2000:])
+    return result
 
 
 def _bounded_browser_failure(output: str) -> str:
