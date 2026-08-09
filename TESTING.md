@@ -25,13 +25,18 @@ focused deterministic matrix with an isolated WebUI state directory:
   tests/test_goal_server_continuation_callsite.py \
   tests/test_stage326_pending_goal_continuation_race.py \
   tests/test_goal_command_webui.py \
-  tests/test_issue5121_provider_auth_terminal_error.py
+  tests/test_issue5121_provider_auth_terminal_error.py \
+  tests/test_webui_gateway_chat_backend.py \
+  tests/test_agent_runtime_revision_guard.py
 ```
 
-The gate proves atomic persistence and permissions, cross-process transaction exclusion,
-fork-safe owner identity, duplicate-judge idempotency, competing-claim exclusion,
-inactive-goal refusal, restart recovery with a current prompt, bounded empty response
-retries, and fail-closed behavior after any token/reasoning/tool activity.
+The gate proves atomic persistence and permissions, cross-process transaction and worker
+leadership exclusion, fork-safe owner identity and locks, exact claim/owner fencing,
+duplicate-judge idempotency, competing-claim exclusion, inactive-goal refusal, restart
+recovery with readable evidence and a current prompt, bounded empty-response retries,
+explicit SSE closure, cancellation fencing, and fail-closed behavior after any
+token/reasoning/tool/approval/clarify/process activity. It also proves that a WebUI-owned
+durable intent cannot escape to the runner-owned lifecycle.
 The callsite tests additionally pin persistence-before-SSE ordering, browser
 observation-only behavior, worker lifecycle, and both local and Gateway streaming
 backends. A manual/live check should close or reload the browser after a `continue`

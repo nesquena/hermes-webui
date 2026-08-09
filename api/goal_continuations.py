@@ -38,6 +38,8 @@ _WORKER_WAKE = threading.Event()
 _WORKER_STOP = threading.Event()
 _WORKER_THREAD: threading.Thread | None = None
 _WORKER_LIFECYCLE_LOCK = threading.Lock()
+_WORKER_LEADER_FD: int | None = None
+_WORKER_LEADER_PID: int | None = None
 
 
 def _current_owner_id() -> str:
@@ -48,6 +50,103 @@ def _current_owner_id() -> str:
         _OWNER_PID = pid
         OWNER_ID = f"webui-{pid}-{uuid.uuid4().hex}"
     return OWNER_ID
+
+
+def _after_fork_child() -> None:
+    """Discard process-local locks and worker ownership inherited by fork."""
+    global _REGISTRY_LOCK, _REGISTRY, _WORKER_STOP, _WORKER_WAKE
+    global _WORKER_THREAD, _WORKER_LIFECYCLE_LOCK
+    global _WORKER_LEADER_FD, _WORKER_LEADER_PID
+    global _OWNER_PID, OWNER_ID
+
+    if _WORKER_LEADER_FD is not None:
+        try:
+            os.close(_WORKER_LEADER_FD)
+        except OSError:
+            pass
+    _REGISTRY_LOCK = threading.RLock()
+    _REGISTRY = None
+    _WORKER_STOP = threading.Event()
+    _WORKER_WAKE = threading.Event()
+    _WORKER_THREAD = None
+    _WORKER_LIFECYCLE_LOCK = threading.Lock()
+    _WORKER_LEADER_FD = None
+    _WORKER_LEADER_PID = None
+    _OWNER_PID = os.getpid()
+    OWNER_ID = f"webui-{_OWNER_PID}-{uuid.uuid4().hex}"
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_after_fork_child)
+
+
+def _worker_leader_lock_path() -> Path:
+    path = Path(REGISTRY_PATH)
+    return path.with_name(f".{path.name}.worker.lock")
+
+
+def _try_acquire_worker_leadership() -> bool:
+    """Hold one process-wide scheduler lease for a shared registry."""
+    global _WORKER_LEADER_FD, _WORKER_LEADER_PID
+    pid = os.getpid()
+    if _WORKER_LEADER_FD is not None and _WORKER_LEADER_PID == pid:
+        return True
+    if _WORKER_LEADER_FD is not None:
+        try:
+            os.close(_WORKER_LEADER_FD)
+        except OSError:
+            pass
+        _WORKER_LEADER_FD = None
+        _WORKER_LEADER_PID = None
+
+    path = _worker_leader_lock_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        os.chmod(path, 0o600)
+        if os.name == "nt":
+            import msvcrt
+
+            if os.fstat(fd).st_size == 0:
+                os.write(fd, b"\0")
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, OSError):
+        os.close(fd)
+        return False
+    _WORKER_LEADER_FD = fd
+    _WORKER_LEADER_PID = pid
+    return True
+
+
+def _release_worker_leadership() -> None:
+    global _WORKER_LEADER_FD, _WORKER_LEADER_PID
+    fd = _WORKER_LEADER_FD
+    if fd is None:
+        return
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError:
+        logger.debug("Goal continuation worker leadership unlock failed", exc_info=True)
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        _WORKER_LEADER_FD = None
+        _WORKER_LEADER_PID = None
 
 
 @contextmanager
@@ -136,10 +235,16 @@ def _load_locked() -> dict[str, Any]:
     if _REGISTRY is not None:
         return _REGISTRY
     try:
-        raw = json.loads(Path(REGISTRY_PATH).read_text(encoding="utf-8"))
+        text = Path(REGISTRY_PATH).read_text(encoding="utf-8")
     except FileNotFoundError:
-        raw = _empty_registry()
-    except Exception:
+        _REGISTRY = _empty_registry()
+        return _REGISTRY
+    except OSError:
+        logger.error("Goal continuation registry cannot be read", exc_info=True)
+        raise
+    try:
+        raw = json.loads(text)
+    except (json.JSONDecodeError, UnicodeDecodeError):
         path = Path(REGISTRY_PATH)
         quarantine = path.with_name(
             f"{path.name}.corrupt-{int(time.time())}-{uuid.uuid4().hex[:8]}"
@@ -149,13 +254,13 @@ def _load_locked() -> dict[str, Any]:
             os.chmod(quarantine, 0o600)
             _fsync_parent(path)
             logger.error(
-                "Goal continuation registry was unreadable and was quarantined at %s",
+                "Goal continuation registry contained invalid JSON and was quarantined at %s",
                 quarantine,
                 exc_info=True,
             )
         except Exception:
             logger.error(
-                "Goal continuation registry is unreadable and could not be quarantined",
+                "Goal continuation registry is corrupt and could not be quarantined",
                 exc_info=True,
             )
         raw = _empty_registry()
@@ -273,28 +378,34 @@ def schedule_goal_continuation(
     return copy.deepcopy(record)
 
 
-def bind_goal_continuation_stream(session_id: str, stream_id: str) -> bool:
-    """Bind an admitted server stream before its worker thread can finish.
-
-    ``routes`` calls this after pending-state persistence and before ``thr.start``
-    to close the fast-empty-response race with the scheduler's return path.
-    """
+def bind_goal_continuation_stream(
+    session_id: str,
+    stream_id: str,
+    *,
+    claim_id: str,
+) -> bool:
+    """Fence and bind an admitted stream before its worker can finish."""
     sid = str(session_id or "").strip()
     stream = str(stream_id or "").strip()
-    if not sid or not stream:
+    claim = str(claim_id or "").strip()
+    if not sid or not stream or not claim:
         return False
+    timestamp = time.time()
     with _registry_transaction() as registry:
         record = registry["intents"].get(sid)
         if not isinstance(record, dict) or record.get("status") != "starting":
             return False
+        if str(record.get("claim_id") or "") != claim:
+            return False
+        if str(record.get("owner_id") or "") != _current_owner_id():
+            return False
         record["status"] = "running"
         record["stream_id"] = stream
         record["attempts"] = int(record.get("attempts") or 0) + 1
-        record["owner_id"] = _current_owner_id()
-        _record_now(record, time.time())
+        record["updated_at"] = timestamp
+        registry["intents"][sid] = record
         _save_locked()
         return True
-
 
 def adopt_legacy_browser_goal_stream(session_id: str, stream_id: str, prompt: str) -> bool:
     """Attach an old-tab continuation POST to the matching durable intent.
@@ -442,7 +553,12 @@ def drain_goal_continuations_once(
     if start_turn is None:
         from api.routes import start_session_turn as start_turn
     try:
-        response = start_turn(sid, selected["prompt"], source="goal_continuation") or {}
+        response = start_turn(
+            sid,
+            selected["prompt"],
+            source="goal_continuation",
+            continuation_claim_id=claim_id,
+        ) or {}
     except Exception as exc:
         _release_start_claim(sid, claim_id, now=timestamp, error=f"{type(exc).__name__}: {exc}", busy=False)
         logger.warning("Goal continuation start raised for session %s", sid, exc_info=True)
@@ -495,6 +611,7 @@ def requeue_goal_continuation_after_no_response(
     stream_id: str,
     *,
     had_activity: bool,
+    cancellation_check: Callable[[], bool] | None = None,
     now: float | None = None,
 ) -> bool:
     """Requeue a truly empty goal turn without replaying an active turn.
@@ -515,6 +632,18 @@ def requeue_goal_continuation_after_no_response(
             return False
         attempts = int(record.get("attempts") or 0)
         max_attempts = max(1, int(record.get("max_attempts") or DEFAULT_MAX_ATTEMPTS))
+        try:
+            cancelled = bool(cancellation_check and cancellation_check())
+        except Exception:
+            logger.warning("Goal continuation cancellation check failed closed", exc_info=True)
+            cancelled = True
+        if cancelled:
+            record["status"] = "failed"
+            record["claim_id"] = None
+            record["last_error"] = "goal continuation was cancelled; automatic replay refused"
+            _record_now(record, timestamp)
+            _save_locked()
+            return False
         if had_activity:
             record["status"] = "failed"
             record["last_error"] = "empty terminal response after observable activity; automatic replay refused"
@@ -706,7 +835,14 @@ def recover_goal_continuations(
                 summary = summary_loader(sid, str(record.get("stream_id") or "")) or {}
             except Exception:
                 logger.warning("Goal continuation run-summary recovery failed for %s", sid, exc_info=True)
-                summary = {"terminal_state": "unknown"}
+                record["status"] = "failed"
+                record["claim_id"] = None
+                record["last_error"] = (
+                    "run evidence was unavailable during recovery; automatic replay refused"
+                )
+                _record_now(record, timestamp)
+                recovered += 1
+                continue
             terminal_state = str(summary.get("terminal_state") or "unknown").strip().lower()
             observable_activity = bool(summary.get("observable_activity"))
             attempts = int(record.get("attempts") or 0)
@@ -764,6 +900,9 @@ def start_goal_continuation_worker() -> bool:
     with _WORKER_LIFECYCLE_LOCK:
         if _WORKER_THREAD is not None and _WORKER_THREAD.is_alive():
             return False
+        if not _try_acquire_worker_leadership():
+            logger.info("Goal continuation worker leadership is held by another process")
+            return False
         _WORKER_STOP.clear()
         _WORKER_WAKE.clear()
         _WORKER_THREAD = threading.Thread(
@@ -771,13 +910,25 @@ def start_goal_continuation_worker() -> bool:
             name="hermes-webui-goal-continuations",
             daemon=True,
         )
-        _WORKER_THREAD.start()
+        try:
+            _WORKER_THREAD.start()
+        except BaseException:
+            _WORKER_THREAD = None
+            _release_worker_leadership()
+            raise
         return True
 
 
-def stop_goal_continuation_worker(timeout: float = 2.0) -> None:
+def stop_goal_continuation_worker(timeout: float = 2.0) -> bool:
+    global _WORKER_THREAD
     _WORKER_STOP.set()
     _WORKER_WAKE.set()
     thread = _WORKER_THREAD
     if thread is not None and thread.is_alive():
         thread.join(timeout=timeout)
+    alive = bool(thread is not None and thread.is_alive())
+    with _WORKER_LIFECYCLE_LOCK:
+        if not alive and thread is _WORKER_THREAD:
+            _WORKER_THREAD = None
+            _release_worker_leadership()
+    return not alive

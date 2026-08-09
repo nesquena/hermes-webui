@@ -8,6 +8,8 @@ import os
 import time
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -44,6 +46,34 @@ def _schedule_one(path: str, session_id: str, ready, done) -> None:
 def _owner_after_fork(path: str, output) -> None:
     gc = _configure(path)
     output.put((os.getpid(), gc._current_owner_id()))
+
+
+def _hold_worker_leader_lock(path: str, acquired, release) -> None:
+    import fcntl
+
+    registry = Path(path)
+    lock_path = registry.with_name(f".{registry.name}.worker.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        acquired.set()
+        release.wait(10)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def _schedule_while_parent_lock_is_held(path: str, output) -> None:
+    gc = _configure(path)
+    gc.schedule_goal_continuation(
+        "fork-child-session",
+        "continue",
+        source_stream_id="source",
+        profile_home=None,
+        goal_turns_used=1,
+    )
+    output.put("scheduled")
 
 
 def test_registry_transaction_blocks_cross_process_lost_update(tmp_path):
@@ -94,3 +124,55 @@ def test_owner_identity_is_regenerated_after_fork(tmp_path):
     assert child_pid != os.getpid()
     assert child_owner != parent_owner
     assert child_owner.startswith(f"webui-{child_pid}-")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX worker leadership lock probe")
+def test_live_foreign_worker_leadership_blocks_second_worker(tmp_path, monkeypatch):
+    path = tmp_path / "goal-continuations.json"
+    ctx = multiprocessing.get_context("fork")
+    acquired = ctx.Event()
+    release = ctx.Event()
+    holder = ctx.Process(target=_hold_worker_leader_lock, args=(str(path), acquired, release))
+    holder.start()
+    assert acquired.wait(5)
+
+    gc = _configure(str(path))
+    monkeypatch.setattr(gc, "_worker_loop", lambda: None)
+    try:
+        assert gc.start_goal_continuation_worker() is False
+    finally:
+        gc.stop_goal_continuation_worker(timeout=0.2)
+        release.set()
+        holder.join(5)
+    assert holder.exitcode == 0
+
+
+@pytest.mark.skipif(os.name == "nt", reason="fork-specific inherited-lock regression")
+def test_child_reinitializes_inherited_registry_lock_after_fork(tmp_path):
+    path = tmp_path / "goal-continuations.json"
+    gc = _configure(str(path))
+    ctx = multiprocessing.get_context("fork")
+    lock_held = ctx.Event()
+    release = ctx.Event()
+
+    def hold_parent_thread_lock():
+        with gc._REGISTRY_LOCK:
+            lock_held.set()
+            release.wait(10)
+
+    import threading
+
+    holder = threading.Thread(target=hold_parent_thread_lock, daemon=True)
+    holder.start()
+    assert lock_held.wait(2)
+    output = ctx.Queue()
+    child = ctx.Process(target=_schedule_while_parent_lock_is_held, args=(str(path), output))
+    child.start()
+    child.join(3)
+    release.set()
+    holder.join(2)
+    if child.is_alive():
+        child.terminate()
+        child.join(2)
+    assert child.exitcode == 0, "child inherited a locked process-local RLock"
+    assert output.get(timeout=1) == "scheduled"

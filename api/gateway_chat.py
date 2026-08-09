@@ -1211,6 +1211,7 @@ def _run_gateway_chat_streaming(
                     session_id,
                     stream_id,
                     had_activity=_gateway_retry_had_activity,
+                    cancellation_check=cancel_event.is_set,
                 ):
                     _emit_gateway_goal_retry_scheduled(
                         session_id,
@@ -1530,6 +1531,11 @@ def _emit_gateway_goal_retry_scheduled(session_id, stream_id, put_gateway_event)
     })
     put_gateway_event("done", {
         "session": retry_session,
+        "goal_retry_scheduled": True,
+    })
+    put_gateway_event("stream_end", {
+        "session_id": session_id,
+        "stream_id": stream_id,
         "goal_retry_scheduled": True,
     })
     return True

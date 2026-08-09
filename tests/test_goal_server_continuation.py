@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import threading
 import time
 from types import SimpleNamespace
@@ -19,6 +20,9 @@ def continuation_store(tmp_path, monkeypatch):
     monkeypatch.setattr(gc, "OWNER_ID", "test-owner")
     monkeypatch.setattr(gc, "_REGISTRY", None)
     monkeypatch.setattr(gc, "_WORKER_WAKE", threading.Event())
+    monkeypatch.setattr(gc, "_WORKER_THREAD", None)
+    monkeypatch.setattr(gc, "_WORKER_LEADER_FD", None, raising=False)
+    monkeypatch.setattr(gc, "_WORKER_LEADER_PID", None, raising=False)
     gc._WORKER_STOP.clear()
     yield gc, path
     gc.stop_goal_continuation_worker(timeout=0.2)
@@ -94,7 +98,7 @@ def test_drain_starts_exactly_one_server_turn_and_marks_it_running(continuation_
     _schedule(gc)
     calls = []
 
-    def start_turn(session_id, prompt, *, source):
+    def start_turn(session_id, prompt, *, source, continuation_claim_id):
         calls.append((session_id, prompt, source))
         return {"stream_id": "server-stream-1", "_status": 200}
 
@@ -130,7 +134,7 @@ def test_concurrent_drains_cannot_double_start_one_intent(continuation_store):
     barrier = threading.Barrier(2)
     calls = []
 
-    def start_turn(session_id, prompt, *, source):
+    def start_turn(session_id, prompt, *, source, continuation_claim_id):
         calls.append((session_id, prompt, source))
         barrier.wait(timeout=2)
         return {"stream_id": "server-stream-1", "_status": 200}
@@ -179,8 +183,12 @@ def test_route_start_failure_after_bind_does_not_consume_provider_attempt(contin
     gc, _path = continuation_store
     _schedule(gc)
 
-    def failing_start(session_id, _prompt, **_kwargs):
-        assert gc.bind_goal_continuation_stream(session_id, "never-started-stream")
+    def failing_start(session_id, _prompt, *, continuation_claim_id, **_kwargs):
+        assert gc.bind_goal_continuation_stream(
+            session_id,
+            "never-started-stream",
+            claim_id=continuation_claim_id,
+        )
         raise RuntimeError("thread start failed")
 
     assert gc.drain_goal_continuations_once(
@@ -192,6 +200,65 @@ def test_route_start_failure_after_bind_does_not_consume_provider_attempt(contin
     assert record["status"] == "pending"
     assert record["attempts"] == 0
     assert record["start_failures"] == 1
+
+
+def test_bind_requires_current_claim_and_owner(continuation_store):
+    gc, _path = continuation_store
+    _schedule(gc)
+    observed = {}
+
+    def start_turn(session_id, _prompt, *, continuation_claim_id, **_kwargs):
+        observed["claim_id"] = continuation_claim_id
+        assert gc.bind_goal_continuation_stream(
+            session_id,
+            "wrong-claim-stream",
+            claim_id="stale-claim",
+        ) is False
+        record = gc.get_goal_continuation(session_id)
+        record["owner_id"] = "foreign-owner"
+        gc._replace_goal_continuation_for_test(record)
+        assert gc.bind_goal_continuation_stream(
+            session_id,
+            "foreign-owner-stream",
+            claim_id=continuation_claim_id,
+        ) is False
+        record["owner_id"] = gc._current_owner_id()
+        gc._replace_goal_continuation_for_test(record)
+        assert gc.bind_goal_continuation_stream(
+            session_id,
+            "owned-stream",
+            claim_id=continuation_claim_id,
+        ) is True
+        return {"stream_id": "owned-stream", "_status": 200}
+
+    assert gc.drain_goal_continuations_once(
+        start_turn=start_turn,
+        is_goal_active=lambda *_args, **_kwargs: True,
+        now=time.time() + 1,
+    ) == 1
+    assert observed["claim_id"]
+    assert gc.get_goal_continuation("session-a")["stream_id"] == "owned-stream"
+
+
+def test_fast_terminal_settlement_cannot_be_resurrected_by_drain(continuation_store):
+    gc, _path = continuation_store
+    _schedule(gc)
+
+    def start_turn(session_id, _prompt, *, continuation_claim_id, **_kwargs):
+        assert gc.bind_goal_continuation_stream(
+            session_id,
+            "fast-terminal-stream",
+            claim_id=continuation_claim_id,
+        )
+        assert gc.complete_goal_continuation(session_id, "fast-terminal-stream")
+        return {"stream_id": "fast-terminal-stream", "_status": 200}
+
+    assert gc.drain_goal_continuations_once(
+        start_turn=start_turn,
+        is_goal_active=lambda *_args, **_kwargs: True,
+        now=time.time() + 1,
+    ) == 1
+    assert gc.get_goal_continuation("session-a") is None
 
 
 def test_mixed_version_browser_can_adopt_only_an_unclaimed_matching_intent(continuation_store):
@@ -300,6 +367,31 @@ def test_empty_retry_is_refused_after_activity_or_attempt_exhaustion(continuatio
     assert gc.get_goal_continuation("session-a")["status"] == "failed"
 
 
+def test_empty_retry_is_refused_when_cancellation_wins_the_settlement_race(continuation_store):
+    gc, _path = continuation_store
+    clock = time.time()
+    _schedule(gc, now=clock)
+    gc.drain_goal_continuations_once(
+        start_turn=lambda *_args, **_kwargs: {
+            "stream_id": "cancelled-stream",
+            "_status": 200,
+        },
+        is_goal_active=lambda *_args, **_kwargs: True,
+        now=clock + 1,
+    )
+
+    assert gc.requeue_goal_continuation_after_no_response(
+        "session-a",
+        "cancelled-stream",
+        had_activity=False,
+        cancellation_check=lambda: True,
+        now=clock + 2,
+    ) is False
+    record = gc.get_goal_continuation("session-a")
+    assert record["status"] == "failed"
+    assert "cancel" in record["last_error"].lower()
+
+
 def test_restart_recovers_only_unjudged_active_goal(continuation_store):
     gc, _path = continuation_store
     clock = time.time()
@@ -321,6 +413,49 @@ def test_restart_recovers_only_unjudged_active_goal(continuation_store):
     recovered = gc.get_goal_continuation("session-a")
     assert recovered["status"] == "pending"
     assert recovered["owner_id"] == "test-owner"
+
+
+def test_restart_fails_closed_when_run_evidence_is_unreadable(continuation_store):
+    gc, _path = continuation_store
+    clock = time.time()
+    _schedule(gc, now=clock)
+    gc.drain_goal_continuations_once(
+        start_turn=lambda *_args, **_kwargs: {"stream_id": "evidence-stream", "_status": 200},
+        is_goal_active=lambda *_args, **_kwargs: True,
+        now=clock + 1,
+    )
+    record = gc.get_goal_continuation("session-a")
+    record["owner_id"] = "dead-owner"
+    gc._replace_goal_continuation_for_test(record)
+
+    def unreadable_summary(*_args, **_kwargs):
+        raise PermissionError("journal evidence is unreadable")
+
+    assert gc.recover_goal_continuations(
+        goal_state_loader=lambda *_args, **_kwargs: {"status": "active", "turns_used": 1},
+        run_summary_loader=unreadable_summary,
+        now=clock + 2,
+    ) == 1
+    recovered = gc.get_goal_continuation("session-a")
+    assert recovered["status"] == "failed"
+    assert "evidence" in recovered["last_error"].lower()
+
+
+def test_unreadable_registry_is_not_quarantined_as_corrupt(continuation_store, monkeypatch):
+    gc, path = continuation_store
+    _schedule(gc)
+    gc._REGISTRY = None
+    original_read_text = Path.read_text
+
+    def deny_registry_read(self, *args, **kwargs):
+        if self == path:
+            raise PermissionError("simulated permission failure")
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", deny_registry_read)
+    with pytest.raises(PermissionError, match="simulated permission failure"):
+        gc.get_goal_continuation("session-a")
+    assert path.exists(), "valid but unreadable state must not be quarantined or replaced"
 
 
 def test_restart_refuses_replay_after_observable_activity(continuation_store):
@@ -423,3 +558,21 @@ def test_inactive_goal_discards_pending_intent(continuation_store):
         now=time.time() + 1,
     ) == 0
     assert gc.get_goal_continuation("session-a") is None
+
+
+def test_timed_out_worker_stop_blocks_restart_until_old_thread_exits(continuation_store, monkeypatch):
+    gc, _path = continuation_store
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocked_worker():
+        entered.set()
+        release.wait(5)
+
+    monkeypatch.setattr(gc, "_worker_loop", blocked_worker)
+    assert gc.start_goal_continuation_worker() is True
+    assert entered.wait(1)
+    assert gc.stop_goal_continuation_worker(timeout=0.01) is False
+    assert gc.start_goal_continuation_worker() is False
+    release.set()
+    assert gc.stop_goal_continuation_worker(timeout=1) is True
