@@ -5502,8 +5502,9 @@ function _applySessionListPayload(sessData, projData, opts){
   if (typeof expectedUnreadGen !== 'number' || expectedUnreadGen === currentUnreadGen) {
     _markPollingCompletionUnreadTransitions(_allSessions);
   }
-  const isStreaming = _allSessions.some(s => _isSessionRingStreaming(s));
-  if (isStreaming) {
+  const isStreaming = _allSessions.some(s => _isSessionEffectivelyStreaming(s));
+  const hasRingStreaming = _allSessions.some(s => _isSessionRingStreaming(s));
+  if (isStreaming || hasRingStreaming) {
     startStreamingPoll();
   } else {
     stopStreamingPoll();
@@ -5676,7 +5677,7 @@ async function _runRenderSessionListRefresh(opts, _gen){
       _schedulePendingSessionListApply();
       return;
     }
-    if(_sessionListGenerationIsCurrent(_gen)&&!_profileSwitchListEmbargo){
+    if(_gen===_renderSessionListGen&&!_profileSwitchListEmbargo){
       _applySessionListPayload(sessData,projData,{unreadGen});
     }
   }catch(e){
@@ -7474,7 +7475,9 @@ function _sessionAttentionState(s){
 function _sidebarRowHasVisibleMessages(s, activeSidForSidebar){
   return (s.message_count||0)>0 ||
     _sessionAttentionState(s) ||
-    _isSessionRingStreaming(s) ||
+    (typeof _isSessionRingStreaming==='function'
+      ? _isSessionRingStreaming(s)
+      : _isSessionEffectivelyStreaming(s)) ||
     !!s.active_stream_id ||
     !!s.pending_user_message ||
     !!s.has_pending_user_message ||
@@ -8131,9 +8134,12 @@ function renderSessionListFromCache(){
     title.title=_sessionFullTitleTooltip(rawTitle,cleanTitle,s);
     const tsMs=_sessionTimestampMs(s);
     const ts=document.createElement('span');
-    const hasAttentionState=isRingStreaming||hasUnread||Boolean(attention);
+    const hasAttentionState=isStreaming||hasUnread||Boolean(attention);
+    const hasRingAttentionState=isRingStreaming||hasUnread||Boolean(attention);
     ts.className='session-time'+(hasAttentionState?' is-hidden':'');
+    if(hasRingAttentionState&&!hasAttentionState) ts.classList.add('is-hidden');
     ts.textContent=hasAttentionState?'':_formatRelativeSessionTime(tsMs);
+    if(hasRingAttentionState&&!hasAttentionState) ts.textContent='';
     titleRow.appendChild(title);
     // Project color dot: placed BETWEEN title and timestamp, not inside the
     // title span. Inside the title span it would be clipped by the ellipsis
