@@ -1502,6 +1502,11 @@ async function newSession(flash, options={}){
         ||null;
     }
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
+    const createdSessionId=data&&data.session&&data.session.session_id||null;
+    // A blank-page owner acquisition may be superseded while the create request
+    // is in flight. Leave the newer pane load authoritative instead of installing
+    // the late-created session over it.
+    if(!_newSessionOwnerResponseIsCurrent(data,!!(options&&options._captureOwner))) return null;
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
       _clearEmptyComposerModelOverride();
     }
@@ -1593,6 +1598,14 @@ async function newSession(flash, options={}){
   }
 }
 
+function _newSessionOwnerResponseIsCurrent(data,captureOwner){
+  if(!captureOwner) return true;
+  const createdSessionId=data&&data.session&&data.session.session_id||null;
+  if(typeof _loadingSessionId!=='undefined'&&_loadingSessionId&&_loadingSessionId!==createdSessionId) return false;
+  if(S.session&&S.session.session_id&&S.session.session_id!==createdSessionId) return false;
+  return true;
+}
+
 async function _ensureSessionOwner(){
   const currentSid=S.session&&S.session.session_id||null;
   if(currentSid){
@@ -1600,7 +1613,7 @@ async function _ensureSessionOwner(){
       ? currentSid
       : null;
   }
-  const createdSid=await newSession();
+  const createdSid=await newSession(false,{_captureOwner:true});
   if(!createdSid) return null;
   if(typeof renderSessionList==='function') await renderSessionList();
   return typeof _isSessionCurrentPane==='function'&&_isSessionCurrentPane(createdSid)
