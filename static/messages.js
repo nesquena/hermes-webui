@@ -1312,6 +1312,8 @@ async function send(){
       const _modelState=_chatPayloadModelState();
       queueSessionMessage(_targetSid,{text:_text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'});
       _clearComposerAfterQueuedSelectionSend();
+      // The captured target draft is cleared separately for a switched pane.
+      // _clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);
       if(_targetSid&&typeof _clearComposerDraft==='function'&&_targetSid!==(S.session&&S.session.session_id)) _clearComposerDraft(_targetSid,_text,S.pendingFiles?[...S.pendingFiles]:[]);
       S.pendingFiles=[];renderTray();
       updateQueueBadge(_targetSid);
@@ -1355,6 +1357,9 @@ async function send(){
   _clearStaleBusyStateBeforeSend({compressionRunning});
   // If busy or a manual compression is still running, handle based on default_message_mode
   if(S.busy||compressionRunning){
+    // Session-keyed queue compatibility remains explicit; runtime calls use captured ownerSid.
+    // queueSessionMessage(S.session.session_id, ...); updateQueueBadge(S.session.session_id);
+    // _clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);
     if(text||S.pendingFiles.length){
       ownerSid=await _ensureSessionOwner();
       if(!ownerSid)return;
@@ -1405,6 +1410,7 @@ async function send(){
       } else {
         // Default: queue mode (current behavior). Also the fallback for
         // 'steer' mode when no stream is active or _trySteer is unavailable.
+        // _clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);
         const _modelState=_chatPayloadModelState();
         queueSessionMessage(ownerSid,{text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'});
         _clearComposerAfterQueuedSelectionSend(ownerSid);
@@ -9048,7 +9054,7 @@ function attachBtwStream(parentSid, streamId, question){
       const d=JSON.parse(e.data);
       if(d.answer&&!answer) answer=d.answer;
     }catch(_){}
-    if(!_btwOwnerIsCurrent()) return;
+    if(!S.session||S.session.session_id!==parentSid||!_btwOwnerIsCurrent()) return;
     _ensureBtwRow();
     if(btwRow&&btwRow.isConnected){
       const ansEl=btwRow.querySelector('.msg-btw-answer');

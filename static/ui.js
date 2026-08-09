@@ -18689,7 +18689,7 @@ async function submitEdit(msgIdx, newText) {
   if(typeof _ensureAllMessagesLoaded==='function'){
     await _ensureAllMessagesLoaded();
   }
-  if(!editOwnerIsCurrent()) return;
+  if(!editOwnerIsCurrent()||S.session.session_id !== initialSid) return;
   const editTicket=typeof _captureTranscriptReplacement==='function'
     ? _captureTranscriptReplacement()
     : null;
@@ -18701,7 +18701,7 @@ async function submitEdit(msgIdx, newText) {
     // #5924 SILENT-race guard: a session switch during the truncate await must not
     // let this recovery apply session A's intent (truncate/re-arm/send) to the
     // newly-visible session.
-    if(!editOwnerIsCurrent()) return;
+    if(!editOwnerIsCurrent()||S.session.session_id !== initialSid) return;
     const committed=typeof _commitTranscriptReplacement==='function'
       && _commitTranscriptReplacement(editTicket, () => {
         S.messages = S.messages.slice(0, absoluteKeepCount);

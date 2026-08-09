@@ -1252,7 +1252,8 @@ async function cmdUse(args){
   const pending = {sessionId:S.session&&S.session.session_id||null,promise:null};
   pending.promise = new Promise(r => { resolve = r; });
   _forcedSkillDirectivePending = pending;
-  const isCurrentSession = () => !pending.sessionId || _commandOwnerIsCurrent(pending.sessionId);
+  const isCurrentSession = () => !pending.sessionId || (S.session&&S.session.session_id)===pending.sessionId;
+  const isCurrentOwner = () => !pending.sessionId || (_commandOwnerIsCurrent(pending.sessionId)&&isCurrentSession());
   try{
     const data = await api('/api/skills');
     const skills = data.skills || [];
@@ -1260,7 +1261,7 @@ async function cmdUse(args){
     if(!match){
       resolve(null);
       if(_forcedSkillDirectivePending===pending)_forcedSkillDirectivePending = null;
-      if(isCurrentSession()){
+      if(isCurrentOwner()){
         const msg = {role:'assistant', content:`No skill named \`${args}\`. Use \`/skills\` to see available skills.`};
         if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
         S.messages.push(msg); renderMessages();
@@ -1268,7 +1269,7 @@ async function cmdUse(args){
       return;
     }
     const detail = await api(`/api/skills/content?name=${encodeURIComponent(match.name)}`);
-    if(!isCurrentSession()){
+    if(!isCurrentOwner()){
       resolve(null);
       if(_forcedSkillDirectivePending===pending)_forcedSkillDirectivePending = null;
       return;
@@ -1277,16 +1278,16 @@ async function cmdUse(args){
     if(!skillContent) throw new Error(`Skill \`${match.name}\` has no readable content.`);
     const directive = `[USER OVERRIDE] You MUST follow the skill '${match.name}' content provided below before responding to the next message.`;
     resolve({name:match.name,directive,content:skillContent});
-    if(isCurrentSession()){
+    if(isCurrentOwner()){
       if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
       S.messages.push({role:'assistant', content:`Next turn: skill \`${match.name}\` will be forced.`});
       renderMessages();
     }
-    if(isCurrentSession()) showToast(`Skill \`${match.name}\` will be used for next turn.`);
+    if(isCurrentOwner()) showToast(`Skill \`${match.name}\` will be used for next turn.`);
   }catch(e){
     resolve(null);
     if(_forcedSkillDirectivePending===pending)_forcedSkillDirectivePending = null;
-    if(isCurrentSession()) showToast('Failed to load skills: '+e.message);
+    if(isCurrentOwner()) showToast('Failed to load skills: '+e.message);
   }
 }
 
@@ -1836,12 +1837,12 @@ async function cmdRetry(){
   try{
     const r=await api('/api/session/retry',{method:'POST',body:JSON.stringify({session_id:activeSid})});
     if(r&&r.error){showToast(r.error);return;}
-    if(!_commandOwnerIsCurrent(activeSid)||
+    if(!_commandOwnerIsCurrent(activeSid)||S.session.session_id!==activeSid||
        (replacementTicket&&!_transcriptReplacementIsCurrent(replacementTicket)))return;
     const data=await api('/api/session?session_id='+encodeURIComponent(activeSid));
     // #5924 SILENT-race guard: a session switch during the GET await must not let
     // this recovery apply session A's intent to whatever session is now visible.
-    if(!_commandOwnerIsCurrent(activeSid))return;
+    if(!_commandOwnerIsCurrent(activeSid)||S.session.session_id!==activeSid)return;
     if(data&&data.session){
       const committed=typeof _commitTranscriptReplacement==='function'
         && _commitTranscriptReplacement(replacementTicket, () => {
@@ -2088,6 +2089,12 @@ async function cmdBranch(args){
     : false;
   if(readOnlySession&&!branchableReadOnlySession){showToast('Read-only sessions cannot be forked.',3000);return;}
   const ownerSid=S.session.session_id;
+  const branchOwnerIsCurrent=()=>typeof _commandOwnerIsCurrent==='function'
+    ? _commandOwnerIsCurrent(ownerSid)
+    : !!(S.session&&S.session.session_id===ownerSid);
+  const branchResultOwnerIsCurrent=sid=>typeof _commandOwnerIsCurrent==='function'
+    ? _commandOwnerIsCurrent(sid)
+    : true;
   const customTitle=(args||'').trim()||null;
   try{
     const data=await api('/api/session/branch',{
@@ -2097,14 +2104,14 @@ async function cmdBranch(args){
         title:customTitle||undefined,
       }),
     });
-    if(data&&data.session_id&&_commandOwnerIsCurrent(ownerSid)){
+    if(data&&data.session_id&&branchOwnerIsCurrent()){
       await loadSession(data.session_id);
-      if(!_commandOwnerIsCurrent(data.session_id))return;
+      if(!branchResultOwnerIsCurrent(data.session_id))return;
       if(typeof renderSessionList==='function') await renderSessionList();
-      if(!_commandOwnerIsCurrent(data.session_id))return;
+      if(!branchResultOwnerIsCurrent(data.session_id))return;
       showToast(t('branch_forked'));
     }
-  }catch(e){if(_commandOwnerIsCurrent(ownerSid))showToast(t('branch_failed')+e.message);}
+  }catch(e){if(branchOwnerIsCurrent())showToast(t('branch_failed')+e.message);}
 }
 
 // ── Fork from a specific message point ──
@@ -2137,6 +2144,9 @@ async function forkFromMessage(msgIdx){
     : false;
   if(readOnlySession&&!branchableReadOnlySession){showToast('Read-only sessions cannot be forked.',3000);return;}
   const initialSid = S.session.session_id;
+  const forkResultOwnerIsCurrent=sid=>typeof _commandOwnerIsCurrent==='function'
+    ? _commandOwnerIsCurrent(sid)
+    : true;
   // Capture the absolute keep_count before any async work that may
   // reset _oldestIdx.  _oldestIdx is 0 when the full transcript is
   // already loaded, so short/already-full sessions send msgIdx unchanged.
@@ -2148,7 +2158,8 @@ async function forkFromMessage(msgIdx){
   if(!S.busy && typeof _ensureAllMessagesLoaded==='function'){
     await _ensureAllMessagesLoaded();
   }
-  if(!_commandOwnerIsCurrent(initialSid)) return;
+  if(!S.session || S.session.session_id !== initialSid
+     || (typeof _commandOwnerIsCurrent==='function'&&!_commandOwnerIsCurrent(initialSid))) return;
   try{
     const data=await api('/api/session/branch',{
       method:'POST',
@@ -2157,16 +2168,17 @@ async function forkFromMessage(msgIdx){
         keep_count:absoluteKeepCount,
       }),
     });
-    if(data&&data.session_id&&_commandOwnerIsCurrent(initialSid)){
+    if(data&&data.session_id&&S.session&&S.session.session_id===initialSid
+       && (typeof _commandOwnerIsCurrent!=='function'||_commandOwnerIsCurrent(initialSid))){
       await loadSession(data.session_id);
-      if(!_commandOwnerIsCurrent(data.session_id))return;
+      if(!forkResultOwnerIsCurrent(data.session_id))return;
       if(typeof _ensureAllMessagesLoaded==='function') await _ensureAllMessagesLoaded();
-      if(!_commandOwnerIsCurrent(data.session_id))return;
+      if(!forkResultOwnerIsCurrent(data.session_id))return;
       if(typeof renderSessionList==='function') await renderSessionList();
-      if(!_commandOwnerIsCurrent(data.session_id))return;
+      if(!forkResultOwnerIsCurrent(data.session_id))return;
       showToast(t('branch_forked'));
     }
-  }catch(e){if(_commandOwnerIsCurrent(initialSid))showToast(t('branch_failed')+e.message);}
+  }catch(e){if(typeof _commandOwnerIsCurrent!=='function'||_commandOwnerIsCurrent(initialSid))showToast(t('branch_failed')+e.message);}
 }
 
 let _skillCommandCache=[];

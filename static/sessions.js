@@ -1384,6 +1384,7 @@ function _setNewSessionPending(pending){
 }
 
 async function newSession(flash, options={}){
+  // #2518: keep cross-provider fallback provenance attached to this path.
   if(_newSessionInFlight){
     if(typeof showToast==='function') showToast(_newSessionPendingText(),1500);
     return _newSessionInFlight;
@@ -1467,7 +1468,7 @@ async function newSession(flash, options={}){
       // designed to fix — see routes.py docstring around line 1891-1894). For
       // those models we leave the wire shape with model_provider=null so the
       // slow path's cross-provider repair still runs. Closes the open
-      // follow-up from #2518.
+      // #2518: keep cross-provider fallback provenance attached to this path.
       const _bareModel=!/[/]/.test(newModelState.model)&&!newModelState.model.startsWith('@');
       // Second guard (#3410-followup): even a bare model can carry a known
       // family prefix (gpt→openai, claude→anthropic, gemini→google). If that
@@ -1495,7 +1496,10 @@ async function newSession(flash, options={}){
     // A blank-page owner acquisition may be superseded while the create request
     // is in flight. Leave the newer pane load authoritative instead of installing
     // the late-created session over it.
-    if(!_newSessionOwnerResponseIsCurrent(data,_creationStartSid,_creationStartLoadGeneration)) return null;
+    const _creationOwnerAccepted=typeof _newSessionOwnerResponseIsCurrent==='function'
+      ? _newSessionOwnerResponseIsCurrent(data,_creationStartSid,_creationStartLoadGeneration)
+      : true;
+    if(!_creationOwnerAccepted) return null;
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
       _clearEmptyComposerModelOverride();
     }
