@@ -1435,12 +1435,23 @@ def _named_custom_provider_slug_for_provider(
     if not raw:
         return ""
     raw_suffix = raw.removeprefix("custom:")
+    # Normalise the raw suffix through the same slug function the custom
+    # provider entry name goes through, so punctuation such as colons in
+    # ``custom:192.168.5.242:8000`` matches the hyphenated slug suffix
+    # ``192.168.5.242-8000`` produced by ``_custom_provider_slug_from_name``.
+    raw_slug = _custom_provider_slug_from_name(raw_suffix)
+    normalized_suffix = raw_slug.removeprefix("custom:") if raw_slug else ""
     for entry in _custom_provider_entries(config_obj):
         entry_name = str(entry.get("name") or "").strip().lower()
         slug = _custom_provider_slug_from_name(entry_name)
         if not entry_name or not slug:
             continue
-        if raw in {entry_name, slug} or raw_suffix == slug.removeprefix("custom:"):
+        slug_suffix = slug.removeprefix("custom:")
+        if (
+            raw in {entry_name, slug}
+            or raw_suffix == slug_suffix
+            or normalized_suffix == slug_suffix
+        ):
             return slug
     return ""
 
@@ -1469,6 +1480,16 @@ def _resolve_configured_provider_id(
     named_slug = _named_custom_provider_slug_for_provider(provider, config_obj)
     if named_slug:
         return named_slug
+
+    # Preserve IDs that are already canonical in the WebUI provider tables.
+    # ``x-ai`` and ``google`` are canonical slugs in ``_PROVIDER_DISPLAY`` /
+    # ``_PROVIDER_MODELS`` but the agent alias table maps them to ``xai`` and
+    # ``gemini`` respectively.  Applying the alias would make the active-provider
+    # badge and provider card mismatch their own row (#6516 gate finding).
+    # This check mirrors the logic in ``_canonicalise_provider_id``.
+    raw = str(provider or "").strip().lower()
+    if raw in _PROVIDER_DISPLAY or raw in _PROVIDER_MODELS:
+        return raw
 
     if not resolve_alias:
         raw = str(provider or "").strip().lower()
@@ -2577,16 +2598,44 @@ def _parse_provider_qualified_model_id(model_id: str) -> tuple[str, str] | None:
     return bare_model, provider_hint
 
 
+def _canonicalize_custom_provider_id(raw: str) -> str:
+    """Canonicalize a provider_id through the shared named-custom slug path.
+
+    For ``custom:*`` IDs, the suffix is run through
+    ``_custom_provider_slug_from_name`` so that ``custom:foo:bar`` and
+    ``custom:foo-bar`` both canonicalize to ``custom:foo-bar``.  Non-custom
+    IDs are returned lowercased as-is.  Returns empty string for falsy input.
+    """
+    raw = str(raw or "").strip().lower()
+    if not raw:
+        return ""
+    if raw.startswith("custom:"):
+        suffix = raw.split(":", 1)[1].strip()
+        if not suffix:
+            return raw
+        slug = _custom_provider_slug_from_name(suffix)
+        if slug:
+            return slug
+        return raw
+    return raw
+
+
 def _get_provider_base_url(provider_id):
     """Look up the configured base_url for a provider (e.g. lmstudio).
 
-    Checks two locations, in order:
+    Checks four locations, in order:
       1. ``cfg["providers"][<provider_id>]["base_url"]`` — the explicit
          per-provider override.
-      2. ``cfg["model"]["base_url"]`` — falls back here when
-         ``cfg["model"]["provider"] == provider_id``. This is the historical
-         shape (the model block carries both the active provider AND the
-         base URL for that provider in a single record).
+      2. ``cfg["model"]["base_url"]`` — the model block carries both the
+         active provider AND the base URL for that provider in a single
+         record.  This runs before the custom_providers list so the active
+         provider's URL is authoritative even when a lossy-slug collision
+         exists in ``custom_providers[]`` (#6516).
+      3. ``cfg["custom_providers"][]`` entries whose slug matches
+         *provider_id* — handles custom providers declared via the
+         ``custom_providers`` list (e.g. ``custom:192.168.5.250-8000``).
+         When more than one entry slugifies to the same slug, returns None
+         (fail closed) rather than silently picking the first match.
 
     Returns the URL stripped of trailing ``/`` if configured, otherwise None.
     """
@@ -2594,13 +2643,46 @@ def _get_provider_base_url(provider_id):
     explicit = (prov_cfg.get("base_url") or "").strip().rstrip("/")
     if explicit:
         return explicit
+    # Check the model section FIRST — the active provider's model block is
+    # authoritative for the default provider's base_url.  This must run before
+    # the custom_providers list scan so that a lossy-slug collision in
+    # custom_providers[] does not shadow the model section's URL for the
+    # active provider (#6516 gate finding).
+    #
+    # Canonicalize both the requested provider_id and the model.provider
+    # through the shared named-custom slug path before comparing.  Without
+    # this, custom:foo:bar (active model) would not match custom:foo-bar
+    # (requested route) even though they slugify to the same canonical slug
+    # — the trusted active-model URL would be ignored (#6516 round-4).
+    pid_lower = str(provider_id or "").strip().lower()
+    pid_canonical = _canonicalize_custom_provider_id(pid_lower)
     model_cfg = cfg.get("model", {}) or {}
     if isinstance(model_cfg, dict):
         model_provider = str(model_cfg.get("provider") or "").strip().lower()
-        if model_provider == str(provider_id).strip().lower():
+        mp_canonical = _canonicalize_custom_provider_id(model_provider)
+        if mp_canonical and mp_canonical == pid_canonical:
             model_base = (model_cfg.get("base_url") or "").strip().rstrip("/")
             if model_base:
                 return model_base
+    # Check custom_providers list for a matching entry.  Count ALL
+    # slug-equivalent entries (not just those with a non-empty base_url)
+    # and fail closed when more than one entry slugifies to the same slug.
+    # A URL-less colliding entry must NOT be invisible to the fail-closed
+    # check — counting only URL-bearing matches would let a crafted sibling
+    # silently shadow the intended endpoint (#6516 re-gate).
+    slug_match_count = 0
+    slug_match_url = None
+    for entry in _custom_provider_entries():
+        if not isinstance(entry, dict):
+            continue
+        slug = _custom_provider_slug_from_name(entry.get("name"))
+        if slug and slug.lower() == pid_lower:
+            slug_match_count += 1
+            cp_base = str(entry.get("base_url") or "").strip().rstrip("/")
+            if cp_base:
+                slug_match_url = cp_base
+    if slug_match_count == 1:
+        return slug_match_url
     return None
 
 
@@ -2994,30 +3076,159 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
     return model_id, config_provider, config_base_url
 
 
-def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, str | None]:
+def _resolve_custom_provider_fallback(
+    pid: str,
+    suffix: str,
+    canonical_slug: str,
+    cfg_data: dict,
+    resolve_key,
+) -> tuple[str | None, str | None]:
+    """Fallback resolution paths for ``resolve_custom_provider_connection``.
+
+    Tried only when no ``custom_providers[]`` entry slug-matches.
+    Searches (in order):
+      1. ``providers.<pid>``
+      2. ``providers.custom``
+      3. ``model.*`` when ``model.provider`` matches ``custom`` / ``pid`` / slug
+    """
+    providers_cfg = cfg_data.get("providers", {})
+    if not isinstance(providers_cfg, dict):
+        providers_cfg = {}
+    provider_specific = providers_cfg.get(pid, {}) if isinstance(providers_cfg, dict) else {}
+    provider_custom = providers_cfg.get("custom", {}) if isinstance(providers_cfg, dict) else {}
+
+    model_cfg = cfg_data.get("model", {})
+    model_provider = ""
+    if isinstance(model_cfg, dict):
+        model_provider = str(model_cfg.get("provider") or "").strip().lower()
+
+    fallback_base: str | None = None
+    for candidate in (provider_specific, provider_custom, model_cfg):
+        if isinstance(candidate, dict):
+            _base = str(candidate.get("base_url") or "").strip()
+            if _base:
+                fallback_base = _base
+                break
+
+    fallback_key = None
+    if isinstance(provider_specific, dict):
+        fallback_key = resolve_key(
+            provider_specific.get("api_key"),
+            provider_specific.get("key_env"),
+            pid,
+        )
+    if not fallback_key and isinstance(provider_custom, dict):
+        fallback_key = resolve_key(
+            provider_custom.get("api_key"),
+            provider_custom.get("key_env"),
+            pid,
+        )
+    if not fallback_key and isinstance(model_cfg, dict) and model_provider in {"custom", pid, canonical_slug}:
+        fallback_key = resolve_key(
+            model_cfg.get("api_key"),
+            model_cfg.get("key_env"),
+            pid,
+        )
+
+    if fallback_key or fallback_base:
+        return fallback_key, fallback_base or None
+    return None, None
+
+
+def _resolve_custom_provider_ambiguous(
+    slug_matches: list[dict],
+    canonical_slug: str,
+    resolve_key,
+    pid: str,
+    cfg_data: dict,
+) -> tuple[str | None, str | None]:
+    """Resolve a slug collision among multiple ``custom_providers[]`` entries.
+
+    When two or more entries have the same slugified name (e.g. two
+    ``custom_providers[].name`` values that differ only in characters removed
+    by the slugger), the result is ambiguous.  The strategy:
+
+    1. If a **trusted expected URL** is available via ``providers.<pid>.base_url``
+       or ``model.base_url`` (when ``model.provider`` matches), and exactly one
+       slug-match entry has that URL, use it.
+    2. Otherwise return ``(None, None)`` — fail closed.  No dummy key is emitted
+       for ambiguous selection; the caller should skip custom-provider resolution
+       or raise an error.
+    """
+    # Gather the base URLs of all slug-equivalent entries.
+    match_base_urls = {}
+    for entry in slug_matches:
+        url = str(entry.get("base_url") or "").strip().rstrip("/")
+        if url:
+            match_base_urls.setdefault(url, []).append(entry)
+
+    # Try to discriminate via ``providers.<pid>.base_url`` or ``model.base_url``.
+    expected_url = ""
+    providers_cfg = cfg_data.get("providers", {})
+    if isinstance(providers_cfg, dict):
+        ps = providers_cfg.get(pid, {})
+        if isinstance(ps, dict):
+            expected_url = str(ps.get("base_url") or "").strip().rstrip("/")
+    if not expected_url:
+        model_cfg = cfg_data.get("model", {})
+        if isinstance(model_cfg, dict):
+            mp = str(model_cfg.get("provider") or "").strip().lower()
+            # Canonicalize model.provider through the shared slug path so
+            # that custom:foo:bar matches custom:foo-bar (#6516 round-4).
+            mp_canonical = _canonicalize_custom_provider_id(mp)
+            if mp_canonical and mp_canonical in {pid, canonical_slug, "custom"}:
+                expected_url = str(model_cfg.get("base_url") or "").strip().rstrip("/")
+
+    if expected_url and expected_url in match_base_urls:
+        candidates = match_base_urls[expected_url]
+        if len(candidates) == 1:
+            entry = candidates[0]
+            # Prohibit the shared slug-derived env-key fallback after
+            # collision disambiguation — a crafted colliding entry must
+            # not be able to steer credential lookup to an unrelated
+            # env var.  Only use the entry's own api_key / key_env.
+            return (
+                resolve_key(entry.get("api_key"), entry.get("key_env"), None),
+                str(entry.get("base_url") or "").strip() or None,
+            )
+
+    # Still ambiguous or no expected URL — fail closed.
+    return None, None
+
+
+def resolve_custom_provider_connection(
+    provider_id: str,
+    config_data: dict | None = None,
+) -> tuple[str | None, str | None]:
     """Return (api_key, base_url) for a named ``custom:*`` provider.
 
     Supports ``custom_providers[].api_key`` as either a literal key or
     ``${ENV_VAR}``, and ``custom_providers[].key_env`` as an env-var hint.
     Returns ``(None, None)`` when no named custom provider matches.
+
+    When *config_data* is given it is used instead of ambient ``get_config()``
+    so callers from detached worker scopes can pass the owning profile's
+    config snapshot (#6516).
     """
     pid = str(provider_id or "").strip().lower()
     if not pid.startswith("custom:"):
         return None, None
 
-    def _slugify(value: str) -> str:
-        s = str(value or "").strip().lower().replace("_", "-").replace(" ", "-")
-        while "--" in s:
-            s = s.replace("--", "-")
-        return s.strip("-")
-
-    slug = _slugify(pid.split(":", 1)[1].strip())
-    if not slug:
+    # Canonicalise exactly one ``custom:`` prefix — the suffix is the slug
+    # body (display name or host:port). Slugs like ``custom:192.168.5.242:8000``
+    # carry the original colon in the suffix so must be canonicalised
+    # through the shared slug helper for consistent matching.
+    suffix = pid.split(":", 1)[1].strip()
+    if not suffix:
         return None, None
 
-    # Read the live config snapshot to avoid stale module-level cache edge
-    # cases after profile switches or runtime config edits.
-    cfg_data = get_config()
+    # Use the shared slug helper so colon-bearing names (IP:port) are
+    # consistently hyphenated when the slug is derived from a display name,
+    # and pass-through when the suffix already starts with ``custom:``
+    # (which should not happen post-normalisation, but guard anyway).
+    canonical_slug = _custom_provider_slug_from_name(suffix)
+    if not canonical_slug:
+        return None, None
 
     def _resolve_key(raw_api_key, raw_key_env, provider_hint=None) -> str | None:
         api_key = None
@@ -3035,61 +3246,84 @@ def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, st
             api_key = _lookup_custom_api_key_env(provider_hint)
         return api_key
 
+    cfg_data = config_data if isinstance(config_data, dict) else get_config()
+
+    # When config_data is provided (target-profile scope), block the
+    # process-env fallback for ${ENV} / key_env lookups so that a
+    # target-owned ${ENV} or key_env cannot be satisfied by an ambient
+    # process-env variable from a different profile (#6516 round-4).
+    _prev_block = getattr(_thread_ctx, "block_process_env_fallback", False)
+    if isinstance(config_data, dict):
+        _thread_ctx.block_process_env_fallback = True
+
+    try:
+        return _resolve_custom_provider_connection_inner(
+            pid, suffix, canonical_slug, cfg_data, _resolve_key,
+        )
+    finally:
+        if isinstance(config_data, dict):
+            _thread_ctx.block_process_env_fallback = _prev_block
+
+
+def _resolve_custom_provider_connection_inner(
+    pid: str,
+    suffix: str,
+    canonical_slug: str,
+    cfg_data: dict,
+    resolve_key,
+) -> tuple[str | None, str | None]:
+    """Inner worker for resolve_custom_provider_connection after env-guard setup."""
     custom_providers = cfg_data.get("custom_providers", [])
     if not isinstance(custom_providers, list):
         custom_providers = []
 
+    # Phase 1: count slug-equivalent entries before reading payload.
+    # Each entry whose *name* slugifies to canonical_slug is a candidate.
+    # If we cannot trust a bare slug match (multiple candidates with no
+    # base_url to break the tie), fail closed.
+    slug_matches: list[dict] = []
     for entry in custom_providers:
         if not isinstance(entry, dict):
             continue
         name = str(entry.get("name") or "").strip()
         if not name:
             continue
-        entry_slug = _slugify(name)
-        if entry_slug != slug:
-            continue
+        entry_slug = _custom_provider_slug_from_name(name)
+        if entry_slug and entry_slug == canonical_slug:
+            slug_matches.append(entry)
 
-        base_url = str(entry.get("base_url") or "").strip() or None
-        api_key = _resolve_key(entry.get("api_key"), entry.get("key_env"), pid)
-        return api_key, base_url
-
-    # If exactly one custom provider is configured, use it as a pragmatic
-    # fallback for mismatched slugs (e.g. punctuation differences).
-    if len(custom_providers) == 1 and isinstance(custom_providers[0], dict):
-        entry = custom_providers[0]
-        return (
-            _resolve_key(entry.get("api_key"), entry.get("key_env"), pid),
-            str(entry.get("base_url") or "").strip() or None,
+    if not slug_matches:
+        # Sole-custom-provider fallback: if exactly one custom provider is
+        # configured and its slug didn't match, use it as a pragmatic fallback
+        # for mismatched slugs (e.g. punctuation differences).  This was
+        # present in origin/master and must be preserved (#6516 re-gate).
+        if len(custom_providers) == 1 and isinstance(custom_providers[0], dict):
+            entry = custom_providers[0]
+            return (
+                resolve_key(entry.get("api_key"), entry.get("key_env"), pid),
+                str(entry.get("base_url") or "").strip() or None,
+            )
+        # Phase 2: no slug match — try fallback paths for setups that
+        # don't use custom_providers names directly.
+        return _resolve_custom_provider_fallback(
+            pid, suffix, canonical_slug, cfg_data, resolve_key,
         )
 
-    # Fallbacks for setups that don't use custom_providers names directly.
-    providers_cfg = cfg_data.get("providers", {})
-    provider_specific = providers_cfg.get(pid, {}) if isinstance(providers_cfg, dict) else {}
-    provider_custom = providers_cfg.get("custom", {}) if isinstance(providers_cfg, dict) else {}
+    # Phase 2: count candidates.  Single match => authoritative.
+    if len(slug_matches) == 1:
+        entry = slug_matches[0]
+        base_url = str(entry.get("base_url") or "").strip() or None
+        api_key = resolve_key(entry.get("api_key"), entry.get("key_env"), pid)
+        return api_key, base_url
 
-    model_cfg = cfg_data.get("model", {})
-    model_provider = str(model_cfg.get("provider") or "").strip().lower() if isinstance(model_cfg, dict) else ""
-
-    fallback_base = None
-    for candidate in (provider_specific, provider_custom, model_cfg):
-        if isinstance(candidate, dict):
-            _base = str(candidate.get("base_url") or "").strip()
-            if _base:
-                fallback_base = _base
-                break
-
-    fallback_key = None
-    if isinstance(provider_specific, dict):
-        fallback_key = _resolve_key(provider_specific.get("api_key"), provider_specific.get("key_env"), pid)
-    if not fallback_key and isinstance(provider_custom, dict):
-        fallback_key = _resolve_key(provider_custom.get("api_key"), provider_custom.get("key_env"), pid)
-    if not fallback_key and isinstance(model_cfg, dict) and model_provider in {"custom", pid, slug}:
-        fallback_key = _resolve_key(model_cfg.get("api_key"), model_cfg.get("key_env"), pid)
-
-    if fallback_key or fallback_base:
-        return fallback_key, fallback_base or None
-
-    return None, None
+    # Phase 2: multiple slug-equivalent entries (lossy-slug collision).
+    # If an expected URL discriminates uniquely, accept it.
+    # Otherwise fail closed: return None, None so the caller can decide.
+    return (
+        _resolve_custom_provider_ambiguous(
+            slug_matches, canonical_slug, resolve_key, pid, cfg_data,
+        )
+    )
 
 
 # Subprocess ACP transports (Cursor/Copilot CLI). Model IDs often contain '/'
@@ -9569,7 +9803,11 @@ def load_settings() -> dict:
     try:
         model_cfg = get_config().get("model", {})
         if isinstance(model_cfg, dict) and model_cfg.get("provider"):
-            settings["default_model_provider"] = str(model_cfg.get("provider"))
+            raw_provider = str(model_cfg.get("provider"))
+            resolved = _resolve_configured_provider_id(
+                raw_provider, get_config(), base_url=model_cfg.get("base_url", "")
+            )
+            settings["default_model_provider"] = resolved or raw_provider
     except Exception:
         logger.debug("Failed to resolve default model provider for settings")
     return settings

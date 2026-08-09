@@ -2,8 +2,9 @@
 
 Root causes fixed:
   1. active_provider alias not normalized in get_available_models()
-     ('z.ai' -> 'zai', 'x.ai' -> 'xai', 'google' -> 'gemini', etc.)
-     causing the provider to fall to the 'else/unknown' branch with no models.
+     ('z.ai' -> 'zai', 'x.ai' -> 'xai', etc.) causing the provider to fall
+     to the 'else/unknown' branch with no models.
+     Canonical WebUI IDs ('google', 'x-ai') are preserved verbatim (#6516).
 
   2. /api/models/live didn't normalize the provider query param, so
      provider_model_ids() received the un-aliased form and returned [].
@@ -93,10 +94,12 @@ class TestActiveProviderNormalization:
         ap = result.get("active_provider", "")
         assert ap in ("xai", ""), f"active_provider should be 'xai', got {ap!r}"
 
-    def test_google_normalized_to_gemini(self, tmp_path, monkeypatch):
+    def test_google_canonical_id_preserved(self, tmp_path, monkeypatch):
         result = self._run(tmp_path, "google", monkeypatch)
         ap = result.get("active_provider", "")
-        assert ap in ("gemini", ""), f"active_provider should be 'gemini', got {ap!r}"
+        # 'google' is a canonical slug in _PROVIDER_DISPLAY/_PROVIDER_MODELS;
+        # it must NOT be alias-resolved to 'gemini' (#6516 gate finding).
+        assert ap in ("google", ""), f"active_provider should be 'google', got {ap!r}"
 
     def test_normalization_code_present(self):
         """Source-level check: config.py must call _PROVIDER_ALIASES for active_provider."""

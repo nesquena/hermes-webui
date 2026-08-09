@@ -442,10 +442,66 @@ def _apply_profile_home_context_to_streaming_model(
         return model, provider_context, False
 
 
+def _custom_provider_authority_state(
+    config_data: dict | None,
+    provider_id: str,
+    resolved_base_url: str | None,
+) -> str:
+    """Classify target-profile authority for a ``custom:<slug>`` provider.
+
+    Returns one of:
+      "unique"    - exactly one target-owned endpoint was pinned (a real
+                    ``base_url`` resolved by the target config), so that URL
+                    and its paired key are the authoritative values to install
+                    as one provenance-coupled bundle.
+      "collision" - multiple slug-equivalent rows with no unique URL winner
+                    (a lossy-slug collision); authority is ambiguous.
+      "absent"    - the provider is not authoritatively declared / no
+                    resolvable endpoint in the target config.
+
+    This replaces the round-5 declaration-only boolean: the target selection
+    is reported as a result that distinguishes one unique row from a
+    collision or absence, so ``_resolve_custom_provider_runtime_overrides``
+    can fail closed instead of retaining ambient credentials (#6516 round-6).
+    """
+    import api.config as _config_mod
+
+    # A pinned base_url is the resolver's authoritative "one unique row"
+    # verdict in every path (sole-provider fallback, single slug match, and
+    # the expected-URL-discriminated collision all return a real base_url;
+    # only absent / unresolved-collision return (None, None)).
+    if resolved_base_url:
+        return "unique"
+
+    # No endpoint pinned: distinguish an unresolved collision (multiple
+    # slug-equivalent entries) from a simple absence, purely for the
+    # fail-closed path and for regression assertions.
+    pid = str(provider_id or "").strip().lower()
+    suffix = pid.split(":", 1)[1].strip() if pid.startswith("custom:") else ""
+    if suffix and isinstance(config_data, dict):
+        target_slug = _config_mod._custom_provider_slug_from_name(suffix) or suffix
+        custom_providers = config_data.get("custom_providers", [])
+        slug_matches = []
+        if isinstance(custom_providers, list):
+            for entry in custom_providers:
+                if not isinstance(entry, dict):
+                    continue
+                name = str(entry.get("name") or "").strip()
+                if not name:
+                    continue
+                entry_slug = _config_mod._custom_provider_slug_from_name(name)
+                if entry_slug and entry_slug == target_slug:
+                    slug_matches.append(entry)
+        if len(slug_matches) > 1:
+            return "collision"
+    return "absent"
+
+
 def _resolve_custom_provider_runtime_overrides(
     resolved_provider: str | None,
     resolved_api_key: str | None,
     resolved_base_url: str | None,
+    config_data: dict | None = None,
 ) -> tuple[str | None, str | None, str | None]:
     """Return provider/key/base_url overrides for ``custom:*`` endpoints.
 
@@ -454,15 +510,46 @@ def _resolve_custom_provider_runtime_overrides(
     without authentication, so a missing key should not fail before the first
     request; pass a harmless placeholder to the SDK and let the endpoint accept
     it or return its own auth error.
+
+    When *config_data* is given it is forwarded to
+    ``resolve_custom_provider_connection`` so the target profile's
+    ``custom_providers[]`` entries are consulted instead of the ambient
+    process-global config.  This is critical in the streaming worker, which is
+    a detached thread that does NOT inherit the per-request thread-local
+    profile context — without *config_data* the wrong profile's URL/key can
+    leak into a session running under a different profile (#6516 gate finding).
     """
     if not (isinstance(resolved_provider, str) and resolved_provider.startswith("custom:")):
         return resolved_provider, resolved_api_key, resolved_base_url
 
-    _cp_key, _cp_base = resolve_custom_provider_connection(resolved_provider)
-    if not resolved_api_key and _cp_key:
-        resolved_api_key = _cp_key
-    if not resolved_base_url and _cp_base:
-        resolved_base_url = _cp_base
+    _cp_key, _cp_base = resolve_custom_provider_connection(
+        resolved_provider, config_data=config_data,
+    )
+    if config_data is not None:
+        # Target-profile scope is a provenance-coupled bundle: clear any
+        # ambient URL/key FIRST, then install exactly what the uniquely
+        # selected target row owns.  A keyless-but-unique target keeps a
+        # None key (the keyless placeholder below is only applied AFTER a
+        # unique endpoint is pinned).  Missing, ambiguous, malformed, or
+        # partial authority must fail closed and must NOT retain an ambient
+        # URL, key, dummy rewrite, or credential-pool result (#6516 round-6).
+        resolved_api_key = None
+        resolved_base_url = None
+        _authority = _custom_provider_authority_state(
+            config_data, resolved_provider, _cp_base,
+        )
+        if _authority == "unique":
+            # Uniquely pinned target endpoint: install its exact URL and
+            # paired key as one bundle.
+            resolved_base_url = _cp_base
+            if _cp_key:
+                resolved_api_key = _cp_key
+        # "collision" / "absent" -> both already None -> fail closed.
+    else:
+        if not resolved_api_key and _cp_key:
+            resolved_api_key = _cp_key
+        if not resolved_base_url and _cp_base:
+            resolved_base_url = _cp_base
     if resolved_base_url:
         # Route through the generic custom OpenAI-compatible client once the
         # named provider has supplied the concrete endpoint. Keeping the
@@ -472,6 +559,51 @@ def _resolve_custom_provider_runtime_overrides(
         if not resolved_api_key:
             resolved_api_key = _KEYLESS_CUSTOM_API_KEY
     return resolved_provider, resolved_api_key, resolved_base_url
+
+
+def _refresh_custom_provider_under_profile_scope(
+    profile_name,
+    profile_home,
+    custom_identity,
+    resolved_provider,
+    api_key,
+    base_url,
+    logger,
+):
+    """Re-resolve a ``custom:<slug>`` provider's URL/key under the owning
+    profile's authority scope with a FRESH target-config read, so a 401 retry
+    does not reuse the stale initial-send config and does not leak the
+    ambient/default profile's credentials into the retried agent (#6516 round-5).
+
+    Reads the owning profile's config from ``profile_home`` inside
+    ``profile_scope_for_detached_worker`` so ``${ENV}`` expansion and
+    credential lookups resolve against the target profile's env. Returns
+    ``(resolved_provider, api_key, base_url, fresh_cfg)``.
+
+    For a named custom provider *custom_identity* (preserved ``custom:<slug>``
+    lane) the URL/key are re-resolved from the fresh target config, and
+    ``_resolve_custom_provider_runtime_overrides`` fails closed when the target
+    config cannot be established. For non-custom providers the provider/key/url
+    pass through unchanged, but the fresh config is still returned so retry
+    downstream uses profile-owned config rather than the stale initial one.
+    """
+    from api.config import get_config_for_profile_home as _get_config_for_home
+    from api.profiles import profile_scope_for_detached_worker as _psfdw
+
+    fresh_cfg = {}
+    _out_provider = resolved_provider
+    _out_key = api_key
+    _out_url = base_url
+    with _psfdw(profile_name, "credential retry refresh", logger_override=logger):
+        try:
+            fresh_cfg = _get_config_for_home(profile_home)
+        except Exception:
+            fresh_cfg = {}
+        if isinstance(custom_identity, str) and custom_identity.startswith("custom:"):
+            _out_provider, _out_key, _out_url = _resolve_custom_provider_runtime_overrides(
+                custom_identity, api_key, base_url, config_data=fresh_cfg,
+            )
+    return _out_provider, _out_key, _out_url, fresh_cfg
 
 
 def _same_base_url_endpoint(url_a: str, url_b: str) -> bool:
@@ -7475,7 +7607,10 @@ def _replace_session_db_in_kwargs(agent_kwargs, state_db_path):
 
 
 def _attempt_credential_self_heal(
-    provider_id, session_id, _agent_lock_ref, *, target_model=None,
+    provider_id, session_id, _agent_lock_ref, *,
+    target_model=None,
+    profile_name=None, profile_home=None,
+    original_custom_provider=None,
 ):
     """Try to silently refresh credentials after a 401/auth error (#1401).
 
@@ -7484,13 +7619,24 @@ def _attempt_credential_self_heal(
     applicable (e.g. auth.json unchanged, provider unresolvable).
 
     Steps:
-    1. Re-read ``~/.hermes/auth.json`` to pick up fresh credentials that
-       may have been written by a concurrent ``hermes model`` CLI invocation.
+    1. Re-read the owning profile's ``auth.json`` to pick up fresh credentials
+       that may have been written by a concurrent ``hermes model`` CLI
+       invocation.  Reads the target profile's auth.json (not the fixed-root
+       AUTH_JSON_PATH) so credentials are scoped to the profile that owns
+       this session.
     2. Evict the session's cached agent so it is rebuilt with fresh keys.
     3. Evict the provider's credential-pool cache entry.
     4. Re-resolve the runtime provider.
     5. Return a new agent + resolved-provider dict (the caller must
        re-invoke ``run_conversation`` with these).
+
+    When ``profile_name`` / ``profile_home`` are provided, the entire self-heal
+    (auth.json read, cache invalidation, runtime resolution) runs inside
+    ``profile_scope_for_detached_worker`` so the detached streaming worker
+    thread resolves the owning profile's credentials rather than the ambient
+    (process-global) profile.  ``original_custom_provider`` preserves the
+    original ``custom:<slug>`` identity across the collapse so the retry site
+    can re-apply custom-provider overrides correctly.
     """
     try:
         from api.oauth import (
@@ -7503,34 +7649,68 @@ def _attempt_credential_self_heal(
         )
         from hermes_cli.runtime_provider import resolve_runtime_provider
 
-        # 1. Re-read auth.json (triggers a fresh credential scan)
-        _fresh_auth = read_auth_json()
-        if not _fresh_auth:
-            logger.debug('[webui] self-heal: auth.json empty or missing, skipping')
-            return None
+        # Resolve the auth.json path for the owning profile.
+        # When profile_home is provided, use it directly; otherwise fall back
+        # to the active profile's auth store path.
+        _auth_path = None
+        if profile_home:
+            from pathlib import Path
+            _auth_path = Path(profile_home) / "auth.json"
 
-        # 2. Evict the cached agent for this session
-        _evicted_entry = None
-        with SESSION_AGENT_CACHE_LOCK:
-            _evicted_entry = SESSION_AGENT_CACHE.pop(session_id, None)
-        if _evicted_entry is not None:
-            _close_cached_agent_entry_at_session_boundary(session_id, _evicted_entry)
+        def _do_self_heal():
+            # Resolve the identity to invalidate / re-resolve against. For a
+            # named custom provider, ``provider_id`` at the call site is the
+            # already-collapsed generic ``custom``; we must use the preserved
+            # ``custom:<slug>`` identity instead so the correct named provider's
+            # credential-pool cache entry is evicted and re-resolved, not the
+            # generic ``custom`` lane (#6516 round-5).
+            _identity = original_custom_provider or provider_id
 
-        # 3. Invalidate the credential pool for this provider
-        invalidate_credential_pool_cache(provider_id)
+            # 1. Re-read auth.json (triggers a fresh credential scan)
+            #    Use the profile-scoped auth.json path when available.
+            _fresh_auth = read_auth_json(auth_path=_auth_path) if _auth_path else read_auth_json()
+            if not _fresh_auth:
+                logger.debug('[webui] self-heal: auth.json empty or missing, skipping')
+                return None
 
-        # 4. Re-resolve runtime provider with fresh credentials
-        _new_rt = resolve_runtime_provider_with_anthropic_env_lock(
-            resolve_runtime_provider,
-            requested=provider_id,
-            target_model=target_model,
-        )
+            # 2. Evict the cached agent for this session
+            _evicted_entry = None
+            with SESSION_AGENT_CACHE_LOCK:
+                _evicted_entry = SESSION_AGENT_CACHE.pop(session_id, None)
+            if _evicted_entry is not None:
+                _close_cached_agent_entry_at_session_boundary(session_id, _evicted_entry)
 
-        logger.info(
-            '[webui] self-heal: credential refresh succeeded for provider=%s session=%s',
-            provider_id, session_id,
-        )
-        return _new_rt
+            # 3. Invalidate the credential pool for the owning provider identity
+            invalidate_credential_pool_cache(_identity)
+
+            # 4. Re-resolve runtime provider with fresh credentials, using the
+            #    named identity (custom:<slug>) so the correct profile's
+            #    credentials are refreshed.
+            _new_rt = resolve_runtime_provider_with_anthropic_env_lock(
+                resolve_runtime_provider,
+                requested=_identity,
+                target_model=target_model,
+            )
+
+            logger.info(
+                '[webui] self-heal: credential refresh succeeded for provider=%s session=%s',
+                _identity, session_id,
+            )
+            return _new_rt
+
+        # Run the self-heal inside the owning profile's scope so the detached
+        # streaming worker thread resolves the correct profile's credentials.
+        if profile_name:
+            from api.profiles import profile_scope_for_detached_worker
+            with profile_scope_for_detached_worker(
+                profile_name,
+                purpose="credential-self-heal",
+            ):
+                _result = _do_self_heal()
+        else:
+            _result = _do_self_heal()
+
+        return _result
     except Exception as _heal_err:
         logger.warning(
             '[webui] self-heal: failed for provider=%s session=%s: %s',
@@ -9134,57 +9314,96 @@ def _run_agent_streaming(
             _sig_provider = getattr(s, "model_provider", None) or provider_context
             _current_sig = _mk_sig(_sig_model, _sig_provider)
             _explicitly_picked = bool(_picked_sig) and _picked_sig == _current_sig
+            # Run the entire resolution chain under ONE owning-profile authority
+            # scope (#6516 round-5). The streaming worker is a detached thread
+            # that does NOT inherit the request's profile TLS or profile env.
+            # Entering the scope for model resolution only, then resolving the
+            # runtime API key, reading the target config, and expanding ${ENV}
+            # AFTER the scope exits, meant those later steps expanded against the
+            # ambient (process-global / default) profile env — leaking the wrong
+            # profile's URL/key/credentials into a session owned by another
+            # profile. Binding model resolution, runtime credential resolution,
+            # per-profile config load + env expansion, and named-custom override
+            # selection together in one scope keeps every source of the send
+            # authority on the owning profile. No-op for the default/root profile.
             with profiles_api.profile_scope_for_detached_worker(
-                _resolved_profile_name, "model resolution", logger_override=logger
+                _resolved_profile_name, "model+credential resolution", logger_override=logger
             ):
                 warm_models_catalog_provenance_if_cold()
                 resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
                     model_with_provider_context(model, provider_context),
                     explicitly_picked=_explicitly_picked,
                 )
-            configured_base_url = resolved_base_url
+                configured_base_url = resolved_base_url
 
-            # Resolve API key via Hermes runtime provider (matches gateway behaviour).
-            # Pass the resolved provider so non-default providers get their own credentials.
-            resolved_api_key = None
-            try:
-                from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
-                from hermes_cli.runtime_provider import resolve_runtime_provider
-                _rt = resolve_runtime_provider_with_anthropic_env_lock(
-                    resolve_runtime_provider,
-                    requested=resolved_provider,
-                    target_model=resolved_model,
+                # Resolve API key via Hermes runtime provider (matches gateway
+                # behaviour). Runs inside the owning-profile scope so credential
+                # lookups and ${ENV} expansion resolve against the target profile's
+                # env, not the ambient/default profile (#6516 round-5).
+                resolved_api_key = None
+                try:
+                    from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
+                    from hermes_cli.runtime_provider import resolve_runtime_provider
+                    _rt = resolve_runtime_provider_with_anthropic_env_lock(
+                        resolve_runtime_provider,
+                        requested=resolved_provider,
+                        target_model=resolved_model,
+                    )
+                    resolved_api_key = _rt.get("api_key")
+                    if not resolved_provider:
+                        resolved_provider = _rt.get("provider")
+                    resolved_base_url = _runtime_preferred_base_url(
+                        _rt, resolved_provider, configured_base_url
+                    )
+                except Exception as _e:
+                    print(f"[webui] WARNING: resolve_runtime_provider failed: {_e}", flush=True)
+
+                # Read per-profile config at call time (not module-level snapshot).
+                # Read the SESSION's own profile home explicitly so toolsets,
+                # prefill, and fallback config — and the ${ENV} expansion inside
+                # this load — all match the profile the session runs under rather
+                # than the ambient process-global config (#3294, #6516 round-4).
+                from api.config import get_config_for_profile_home as _get_config_for_home
+                # Determine if we have a custom:slug provider that needs
+                # target-profile credential resolution.
+                _is_custom_provider = (
+                    isinstance(resolved_provider, str)
+                    and resolved_provider.startswith("custom:")
                 )
-                resolved_api_key = _rt.get("api_key")
-                if not resolved_provider:
-                    resolved_provider = _rt.get("provider")
-                resolved_base_url = _runtime_preferred_base_url(
-                    _rt, resolved_provider, configured_base_url
+                try:
+                    _cfg = _get_config_for_home(_profile_home)
+                except Exception:
+                    if _is_custom_provider:
+                        # Fail closed: do not fall back to ambient get_config()
+                        # for custom:slug providers when the target profile cannot
+                        # be loaded — that would leak the wrong profile's URL/key
+                        # (#6516 round-4).
+                        _cfg = {}
+                    else:
+                        from api.config import get_config as _get_config
+                        _cfg = _get_config()
+
+                # Preserve the original custom:slug identity for retry paths.
+                # _resolve_custom_provider_runtime_overrides collapses custom:slug
+                # to plain "custom" after resolving the endpoint, but the 401-retry
+                # paths must re-resolve from the owning profile's config — passing
+                # the already-collapsed "custom" back would skip the custom: guard
+                # and never consult config_data (#6516 re-gate).
+                _custom_provider_identity = (
+                    resolved_provider
+                    if isinstance(resolved_provider, str) and resolved_provider.startswith("custom:")
+                    else None
                 )
-            except Exception as _e:
-                print(f"[webui] WARNING: resolve_runtime_provider failed: {_e}", flush=True)
-
-            # Named custom providers (custom:slug) may not be resolvable by
-            # hermes_cli.runtime_provider directly. Fall back to config.yaml
-            # custom_providers[] so WebUI can pass explicit creds/base_url.
-            resolved_provider, resolved_api_key, resolved_base_url = _resolve_custom_provider_runtime_overrides(
-                resolved_provider, resolved_api_key, resolved_base_url
-            )
-
-            # Read per-profile config at call time (not module-level snapshot).
-            # The streaming worker is a detached thread that does NOT inherit the
-            # per-request thread-local profile context, so the ambient
-            # get_config() would resolve the process-global (default) profile and
-            # leak the wrong profile's toolsets / prefill / fallback config into
-            # this run (issue #3294). Read the SESSION's own profile home
-            # explicitly so toolsets and context match the profile the session
-            # actually runs under.
-            from api.config import get_config_for_profile_home as _get_config_for_home
-            try:
-                _cfg = _get_config_for_home(_profile_home)
-            except Exception:
-                from api.config import get_config as _get_config
-                _cfg = _get_config()
+                resolved_provider, resolved_api_key, resolved_base_url = (
+                    _resolve_custom_provider_runtime_overrides(
+                        resolved_provider, resolved_api_key, resolved_base_url,
+                        config_data=_cfg,
+                    )
+                )
+            # NOTE: model/credential/config resolution above is profile-owned.
+            # Downstream uses of _cfg / resolved_* are read-only and safe outside
+            # the scope; any re-resolution of credentials in the 401 self-heal
+            # paths re-enters this same scope (see the retry call sites).
             _prefill_context = _load_webui_prefill_context(_cfg)
             _prefill_messages = _prefill_messages_with_webui_context(_prefill_context, _cfg)
             _prefill_messages = _normalize_prefill_messages_before_user_turn(_prefill_messages)
@@ -10190,6 +10409,9 @@ def _run_agent_streaming(
                         _heal_rt = _attempt_credential_self_heal(
                             resolved_provider or '', session_id, _agent_lock,
                             target_model=resolved_model,
+                            profile_name=_resolved_profile_name,
+                            profile_home=_profile_home,
+                            original_custom_provider=_custom_provider_identity,
                         )
                         if _heal_rt is not None:
                             logger.info('[webui] self-heal: retrying stream after credential refresh')
@@ -10201,8 +10423,18 @@ def _run_agent_streaming(
                             resolved_base_url = _runtime_preferred_base_url(
                                 _heal_rt, resolved_provider, configured_base_url
                             )
-                            resolved_provider, resolved_api_key, resolved_base_url = _resolve_custom_provider_runtime_overrides(
-                                resolved_provider, resolved_api_key, resolved_base_url
+                            # Re-resolve the custom provider from a FRESH read of
+                            # the owning profile's config under its authority scope
+                            # (#6516 round-5), instead of reusing the stale
+                            # initial-send _cfg. Fails closed if the target config
+                            # cannot be established.
+                            resolved_provider, resolved_api_key, resolved_base_url, _cfg = (
+                                _refresh_custom_provider_under_profile_scope(
+                                    _resolved_profile_name, _profile_home,
+                                    _custom_provider_identity,
+                                    resolved_provider, resolved_api_key, resolved_base_url,
+                                    logger,
+                                )
                             )
                             # Rebuild agent kwargs and create a fresh agent
                             _agent_kwargs['api_key'] = resolved_api_key
@@ -11422,6 +11654,9 @@ def _run_agent_streaming(
                 _heal_rt = _attempt_credential_self_heal(
                     resolved_provider or '', session_id, _agent_lock,
                     target_model=resolved_model,
+                    profile_name=_resolved_profile_name,
+                    profile_home=_profile_home,
+                    original_custom_provider=_custom_provider_identity,
                 )
                 if _heal_rt is not None:
                     logger.info('[webui] self-heal (except path): retrying stream after credential refresh')
@@ -11434,8 +11669,18 @@ def _run_agent_streaming(
                     resolved_base_url = _runtime_preferred_base_url(
                         _heal_rt, resolved_provider, configured_base_url
                     )
-                    resolved_provider, resolved_api_key, resolved_base_url = _resolve_custom_provider_runtime_overrides(
-                        resolved_provider, resolved_api_key, resolved_base_url
+                    # Re-resolve the custom provider from a FRESH read of
+                    # the owning profile's config under its authority scope
+                    # (#6516 round-5), instead of reusing the stale
+                    # initial-send _cfg. Fails closed if the target config
+                    # cannot be established.
+                    resolved_provider, resolved_api_key, resolved_base_url, _cfg = (
+                        _refresh_custom_provider_under_profile_scope(
+                            _resolved_profile_name, _profile_home,
+                            _custom_provider_identity,
+                            resolved_provider, resolved_api_key, resolved_base_url,
+                            logger,
+                        )
                     )
                     # Build a fresh agent with the new credentials
                     _heal_kwargs = dict(_agent_kwargs) if '_agent_kwargs' in dir() else {}

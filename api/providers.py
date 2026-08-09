@@ -2854,7 +2854,12 @@ def get_providers() -> dict[str, Any]:
     active_provider = None
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, dict):
-        active_provider = model_cfg.get("provider")
+        raw_provider = model_cfg.get("provider")
+        if raw_provider:
+            from api.config import _resolve_configured_provider_id
+            active_provider = _resolve_configured_provider_id(
+                raw_provider, cfg, base_url=model_cfg.get("base_url", "")
+            ) or str(raw_provider)
 
     # Sort providers: active first, then custom:*, then has_key, then rest.
     def _provider_sort_key(p):

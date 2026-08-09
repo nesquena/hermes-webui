@@ -426,29 +426,31 @@ def test_copilot_mixed_pool_prefixed_models(monkeypatch, tmp_path):
     assert all(mid.startswith("@copilot:") for mid in model_ids), model_ids
 
 
-def test_auth_store_active_provider_alias_is_resolved(monkeypatch, tmp_path):
-    """active_provider read from auth.json must be alias-normalized.
+def test_auth_store_active_provider_canonical_id_preserved(monkeypatch, tmp_path):
+    """active_provider read from auth.json must preserve canonical WebUI IDs.
 
-    Regression: previously the alias table was applied only to config.yaml's
-    active_provider, so an aliased name in auth.json (e.g. 'google') would
-    not match the canonical pid ('gemini') and the prefixing logic would
-    add an unwanted '@gemini:' prefix to the active provider's models.
+    ``google`` is a canonical slug in ``_PROVIDER_DISPLAY`` / ``_PROVIDER_MODELS``
+    (display name "Google").  It must NOT be alias-resolved to ``gemini`` —
+    that would make the active-provider badge mismatch the provider card's
+    ``google`` row (#6516 gate finding).
+
+    The model ids should still NOT be prefixed (it's the active provider).
     """
     auth_payload = {
         "version": 1,
         "providers": {},
-        # Aliased name: 'google' → 'gemini' per _PROVIDER_ALIASES.
+        # Canonical ID: 'google' is in _PROVIDER_DISPLAY; must stay 'google'.
         "active_provider": "google",
         "credential_pool": {},
     }
 
     result = _call_get_available_models(monkeypatch, tmp_path, auth_payload)
     groups = _group_by_provider(result)
-    # Gemini should appear under its canonical display name and its model
+    # Google should appear under its canonical display name and its model
     # ids should NOT be prefixed (it's the active provider).
-    assert "Gemini" in groups, f"Expected Gemini in {list(groups)}"
-    model_ids = [m["id"] for m in groups["Gemini"]]
-    assert model_ids, "Gemini group should have models"
+    assert "Google" in groups, f"Expected Google in {list(groups)}"
+    model_ids = [m["id"] for m in groups["Google"]]
+    assert model_ids, "Google group should have models"
     assert not any(mid.startswith("@") for mid in model_ids), (
         f"Active provider models must not be prefixed; got {model_ids}"
     )
