@@ -1790,6 +1790,11 @@ class _AttemptRecordingOwnershipLock:
     def arm(self):
         self._armed.set()
 
+    def disarm(self):
+        """Stop recording subsequent acquire() attempts (e.g. between an
+        armed apply assertion and a legitimately out-of-AGENT revalidation)."""
+        self._armed.clear()
+
     @property
     def attempted(self):
         return self._attempted
@@ -3079,3 +3084,487 @@ def test_process_wakeup_revalidation_outside_agent_lock_exception(
     _run_process_wakeup_vs_streaming_deadlock(
         monkeypatch, tmp_path, settlement="exception", credential_recovered=False
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# #6327 — B4: deterministic barrier tests for the immutable owner token
+#
+# The out-of-AGENT revalidation answer is bound to an IMMUTABLE owner token
+# (exact owner identity + SID + profile/home generation + pause state +
+# credential fingerprint, snapshotted under the canonical owner's AGENT lock).
+# These tests drive the REAL token pipeline
+# (_build_immutable_session_owner_token -> _revalidate_... ->
+# _apply_process_wakeup_revalidation_once / _validate_start_owner_fence)
+# against a concurrent writer that mutates the canonical cache between the
+# pipeline steps, synchronized with Events — never sleeps.  Every test asserts
+# the stale answer is never applied/saved/suppressed/started, and that no
+# PROCESS acquisition is attempted while AGENT is held (the #6327 AB/BA
+# invariant).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _sessions_backed_get_session(session_id):
+    """get_session stand-in resolving through the canonical config.SESSIONS."""
+    with config.LOCK:
+        return config.SESSIONS.get(session_id)
+
+
+def _install_immutable_owner_token_fixture(monkeypatch, tmp_path, *, recovered=True):
+    """Install a live paused wakeup session + the #6327 token-pipeline stubs.
+
+    Returns ``(session, calls, proxy)``: ``calls`` collects start/save/suppress
+    invocations so tests can assert nothing stale was ever mutated, and
+    ``proxy`` is the armed-on-demand recording PROCESS-ownership lock wrapper.
+    """
+    import api.models as models
+    import api.routes as routes
+    import api.streaming as streaming
+
+    session, stream_id = _install_streaming_profile_env(
+        monkeypatch, tmp_path, {"alpha": "alpha-value", "beta": "beta-value"}
+    )
+    monkeypatch.setattr(
+        streaming,
+        "_set_streaming_hermes_home_override",
+        lambda home: (_StreamingFakeHomeOverride(), "tok", True),
+    )
+    monkeypatch.setattr(profiles, "_skill_modules_support_profile_home", lambda home: True)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "ambient-value")
+
+    pause = models.record_process_wakeup_provider_unavailable_pause(
+        session,
+        classification="credential_pool_empty",
+        model="test-model",
+        provider="test-provider",
+    )
+    assert pause and pause.get("paused")
+    assert models.process_wakeup_pause_matches(
+        session,
+        model="test-model",
+        provider="test-provider",
+        classification="credential_pool_empty",
+    )
+
+    # The canonical cache: get_session resolves through config.SESSIONS (the
+    # same dict the production helpers read under LOCK), so a writer thread can
+    # atomically replace/rotate the owner between pipeline steps.
+    monkeypatch.setattr(routes, "get_session", _sessions_backed_get_session)
+    with config.LOCK:
+        config.SESSIONS[session.session_id] = session
+
+    # The canonical-model lane + credential-pool leaf the revalidation hits;
+    # the remaining stubs mirror the B3 fixture so an accidental reach fails
+    # loudly instead of touching real state.
+    monkeypatch.setattr(
+        routes, "canonical_model_provider_lane", lambda m, p: ("test-model", "test-provider")
+    )
+    monkeypatch.setattr(
+        routes,
+        "provider_has_process_wakeup_recovery_credential",
+        lambda provider_id, refresh=False: recovered,
+    )
+    monkeypatch.setattr(
+        routes, "_resolve_chat_workspace_with_recovery", lambda s, w: str(tmp_path)
+    )
+    monkeypatch.setattr(routes, "_read_profile_model_config", lambda s, p: (None, None, None))
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda *a, **k: ("test-model", "test-provider", False),
+    )
+    monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda **k: None)
+
+    calls = {"start": [], "save": [], "suppress": []}
+    monkeypatch.setattr(
+        routes,
+        "_start_run",
+        lambda *a, **k: calls["start"].append(k) or {"_status": 200, "stream_id": "stub"},
+    )
+    monkeypatch.setattr(
+        routes, "_save_session_quietly", lambda *a, **k: calls["save"].append((a, k))
+    )
+    monkeypatch.setattr(
+        routes,
+        "suppress_process_wakeup_for_provider_pause",
+        lambda *a, **k: calls["suppress"].append((a, k)) or None,
+    )
+
+    proxy = _AttemptRecordingOwnershipLock(profiles._PROCESS_ENV_OWNERSHIP_LOCK)
+    monkeypatch.setattr(profiles, "_PROCESS_ENV_OWNERSHIP_LOCK", proxy)
+    return session, calls, proxy
+
+
+def _build_token_and_revalidate(routes, session_id):
+    """Run the #6327 token build + out-of-AGENT revalidation; return both."""
+    token, owner = routes._build_immutable_session_owner_token(
+        session_id, model="test-model", provider="test-provider"
+    )
+    assert token is not None and owner is not None
+    revalidation = routes._revalidate_process_wakeup_credential_outside_agent_lock(
+        token, model="test-model", provider="test-provider"
+    )
+    assert revalidation["token_session_id"] == token["session_id"]
+    assert revalidation["recovered"] is True
+    return token, owner, revalidation
+
+
+def _run_concurrent_writer(go_event, done_event, mutate):
+    """Run ``mutate()`` on a writer thread synchronized by Events (no sleeps)."""
+
+    def writer():
+        try:
+            assert go_event.wait(10)
+            mutate()
+        finally:
+            done_event.set()
+
+    thread = threading.Thread(target=writer, daemon=True)
+    thread.start()
+    return thread
+
+
+def test_revalidation_replacement_same_sid_different_profile_generation(
+    monkeypatch, tmp_path
+):
+    """Same-SID owner replacement with an identical pause but a different
+    profile generation must NOT apply the revalidation answer (#6327 B4).
+
+    A concurrent writer replaces the canonical cache owner under the SAME sid
+    (byte-identical pause dict, different profile => different home +
+    credential generation) between token build and apply: the apply must
+    refuse with ``owner_replaced``, never save/suppress/start on either
+    object, and never attempt PROCESS while AGENT is held.
+    """
+    import api.models as models
+    import api.routes as routes
+
+    session, calls, proxy = _install_immutable_owner_token_fixture(
+        monkeypatch, tmp_path, recovered=True
+    )
+    sid = session.session_id
+    original_pause = dict(session.process_wakeup_pause)
+    try:
+        token, owner, revalidation = _build_token_and_revalidate(routes, sid)
+        assert owner is session
+        assert token["profile"] == "alpha"
+
+        replacement = _StreamingFakeSession(sid, "beta", tmp_path, "issue6327-stream")
+        replacement.process_wakeup_pause = dict(original_pause)
+        go = threading.Event()
+        done = threading.Event()
+
+        def _replace_owner():
+            with config.LOCK:
+                config.SESSIONS[sid] = replacement
+
+        writer = _run_concurrent_writer(go, done, _replace_owner)
+        go.set()
+        assert done.wait(10), "replacement writer never ran"
+        writer.join(10)
+
+        proxy.arm()
+        result = routes._apply_process_wakeup_revalidation_once(
+            token, revalidation, model="test-model", provider="test-provider"
+        )
+        assert not proxy.attempted.is_set(), (
+            "replacement apply attempted PROCESS while AGENT was held (AB/BA)"
+        )
+        assert result["retry"] is True, result
+        assert result["reason"] == "owner_replaced", result
+        # The token also captures the profile generation: mutating the SAME
+        # canonical object's profile after the token was built is flagged by
+        # the mismatch detector even when identity is preserved.
+        session.profile = "beta"
+        try:
+            assert (
+                routes._process_wakeup_owner_token_mismatch(token, session)
+                == "profile_changed"
+            )
+        finally:
+            session.profile = "alpha"
+
+        # Nothing stale was saved/suppressed/started; neither object mutated.
+        assert calls["start"] == []
+        assert calls["save"] == []
+        assert calls["suppress"] == []
+        assert dict(session.process_wakeup_pause) == original_pause
+        assert dict(replacement.process_wakeup_pause) == original_pause
+        assert models.process_wakeup_pause_matches(
+            replacement,
+            model="test-model",
+            provider="test-provider",
+            classification="credential_pool_empty",
+        )
+        assert proxy.acquire(blocking=False), "a thread leaked the ownership lock"
+        proxy.release()
+    finally:
+        with config.LOCK:
+            config.SESSIONS.pop(sid, None)
+
+
+def test_revalidation_compression_migration_during_wait(monkeypatch, tmp_path):
+    """Compression (old-SID archived snapshot -> continuation) while the
+    revalidation waits must never touch the snapshot (#6327 B4).
+
+    The writer archives the tokenized owner (``pre_compression_snapshot``,
+    old SID preserved) and migrates the canonical cache to a continuation
+    under a NEW sid with the per-session AGENT lock aliased — the exact #6327
+    compression contract.  The stale apply must requeue with
+    ``session_archived`` without mutating the snapshot; the atomic resolve
+    (``_resolve_live_session_owner`` and a fresh token build) follows to the
+    continuation; applying with the fresh token lands on the LIVE owner only.
+    """
+    import api.routes as routes
+
+    session, calls, proxy = _install_immutable_owner_token_fixture(
+        monkeypatch, tmp_path, recovered=True
+    )
+    old_sid = session.session_id
+    new_sid = "issue6327-compressed-continuation"
+    original_pause = dict(session.process_wakeup_pause)
+    # Keep the continuation scan hermetic: no real session index/sidecars.
+    monkeypatch.setattr(routes, "SESSION_DIR", tmp_path / "sessions")
+    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", tmp_path / "sessions" / "_index.json")
+    try:
+        token, owner, revalidation = _build_token_and_revalidate(routes, old_sid)
+        assert owner is session
+
+        continuation = _StreamingFakeSession(
+            new_sid, "alpha", tmp_path, "issue6327-stream"
+        )
+        continuation.process_wakeup_pause = dict(original_pause)
+        continuation.parent_session_id = old_sid
+        continuation.updated_at = 2.0
+        session.updated_at = 1.0
+        go = threading.Event()
+        done = threading.Event()
+
+        def _compress():
+            session.pre_compression_snapshot = True
+            with config.SESSION_AGENT_LOCKS_LOCK:
+                # Production aliases the per-session AGENT lock to the new SID.
+                config.SESSION_AGENT_LOCKS[new_sid] = config.SESSION_AGENT_LOCKS.get(
+                    old_sid
+                )
+            with config.LOCK:
+                config.SESSIONS[old_sid] = session
+                config.SESSIONS[new_sid] = continuation
+
+        writer = _run_concurrent_writer(go, done, _compress)
+        go.set()
+        assert done.wait(10), "compression writer never ran"
+        writer.join(10)
+
+        # Atomic resolve: following the archived snapshot lands on the
+        # continuation; the lock entry is aliased to the new sid.
+        resolved_owner, resolved_sid = routes._resolve_live_session_owner(
+            old_sid, preferred=session
+        )
+        assert resolved_owner is continuation
+        assert resolved_sid == new_sid
+        with config.SESSION_AGENT_LOCKS_LOCK:
+            assert (
+                config.SESSION_AGENT_LOCKS.get(new_sid)
+                is config.SESSION_AGENT_LOCKS.get(old_sid)
+            )
+
+        # The stale apply refuses and NEVER mutates the archived snapshot.
+        proxy.arm()
+        result = routes._apply_process_wakeup_revalidation_once(
+            token, revalidation, model="test-model", provider="test-provider"
+        )
+        assert not proxy.attempted.is_set(), (
+            "archived apply attempted PROCESS while AGENT was held (AB/BA)"
+        )
+        assert result["retry"] is True and result["reason"] == "session_archived", result
+        assert session.pre_compression_snapshot is True
+        assert dict(session.process_wakeup_pause) == original_pause
+        assert dict(continuation.process_wakeup_pause) == original_pause
+        assert calls["start"] == [] and calls["save"] == [] and calls["suppress"] == []
+        # The next revalidation runs legitimately OUTSIDE AGENT (it takes
+        # PROCESS) — stop recording before it, then re-arm for the apply.
+        proxy.disarm()
+
+        # Bounded rebuild follows the continuation: applying with the fresh
+        # token lands on the LIVE owner (clears ITS pause), never the snapshot.
+        token2, owner2, revalidation2 = _build_token_and_revalidate(routes, old_sid)
+        assert owner2 is continuation
+        assert token2["session_id"] == new_sid
+        proxy.arm()
+        result2 = routes._apply_process_wakeup_revalidation_once(
+            token2, revalidation2, model="test-model", provider="test-provider"
+        )
+        assert not proxy.attempted.is_set(), (
+            "continuation apply attempted PROCESS while AGENT was held (AB/BA)"
+        )
+        assert result2["retry"] is False and result2["error"] is None, result2
+        live_pause = getattr(continuation, "process_wakeup_pause", None)
+        assert not (isinstance(live_pause, dict) and live_pause.get("paused"))
+        assert calls["start"] == []
+        assert calls["save"], "applied revalidation must persist the live owner"
+        # The archived snapshot stayed untouched end to end.
+        assert session.pre_compression_snapshot is True
+        assert dict(session.process_wakeup_pause) == original_pause
+        assert proxy.acquire(blocking=False), "a thread leaked the ownership lock"
+        proxy.release()
+    finally:
+        with config.LOCK:
+            config.SESSIONS.pop(old_sid, None)
+            config.SESSIONS.pop(new_sid, None)
+        with config.SESSION_AGENT_LOCKS_LOCK:
+            config.SESSION_AGENT_LOCKS.pop(new_sid, None)
+
+
+def test_revalidation_credential_generation_changes_before_apply(
+    monkeypatch, tmp_path
+):
+    """Credential-generation movement between token build and apply must retry
+    outside AGENT (bounded) and never apply the stale answer (#6327 B4).
+
+    The token snapshots the credential-state fingerprint at build time.  A
+    concurrent writer bumps the generation while the revalidation waits; the
+    apply must refuse with ``credential_state_changed`` (pause untouched,
+    nothing saved/suppressed/started, no PROCESS while AGENT held), and the
+    bounded rebuild on the CURRENT generation converges to a clean apply.
+    """
+    import api.routes as routes
+
+    session, calls, proxy = _install_immutable_owner_token_fixture(
+        monkeypatch, tmp_path, recovered=True
+    )
+    sid = session.session_id
+    original_pause = dict(session.process_wakeup_pause)
+    try:
+        generation = {"value": "gen-1"}
+        monkeypatch.setattr(
+            routes,
+            "process_wakeup_credential_state_fingerprint",
+            lambda _s: generation["value"],
+        )
+
+        token, owner, revalidation = _build_token_and_revalidate(routes, sid)
+        assert owner is session
+        assert token["credential_state_fingerprint"] == "gen-1"
+
+        go = threading.Event()
+        done = threading.Event()
+
+        def _bump_generation():
+            generation["value"] = "gen-2"
+
+        writer = _run_concurrent_writer(go, done, _bump_generation)
+        go.set()
+        assert done.wait(10), "generation writer never ran"
+        writer.join(10)
+
+        proxy.arm()
+        result = routes._apply_process_wakeup_revalidation_once(
+            token, revalidation, model="test-model", provider="test-provider"
+        )
+        assert not proxy.attempted.is_set(), (
+            "stale-generation apply attempted PROCESS while AGENT was held (AB/BA)"
+        )
+        assert result["retry"] is True, result
+        assert result["reason"] == "credential_state_changed", result
+        assert dict(session.process_wakeup_pause) == original_pause
+        assert calls["start"] == [] and calls["save"] == [] and calls["suppress"] == []
+        # The next revalidation runs legitimately OUTSIDE AGENT (it takes
+        # PROCESS) — stop recording before it, then re-arm for the apply.
+        proxy.disarm()
+
+        # Bounded retry: the rebuild captures the CURRENT generation and the
+        # apply converges on the live owner (pause cleared on the new
+        # generation) — the stale answer was never applied.
+        token2, owner2, revalidation2 = _build_token_and_revalidate(routes, sid)
+        assert owner2 is session
+        assert token2["credential_state_fingerprint"] == "gen-2"
+        proxy.arm()
+        result2 = routes._apply_process_wakeup_revalidation_once(
+            token2, revalidation2, model="test-model", provider="test-provider"
+        )
+        assert not proxy.attempted.is_set(), (
+            "current-generation apply attempted PROCESS while AGENT was held (AB/BA)"
+        )
+        assert result2["retry"] is False and result2["error"] is None, result2
+        live_pause = getattr(session, "process_wakeup_pause", None)
+        assert not (isinstance(live_pause, dict) and live_pause.get("paused"))
+        assert calls["start"] == []
+        assert proxy.acquire(blocking=False), "a thread leaked the ownership lock"
+        proxy.release()
+    finally:
+        with config.LOCK:
+            config.SESSIONS.pop(sid, None)
+
+
+def test_revalidation_owner_replaced_before_run_acceptance(monkeypatch, tmp_path):
+    """Owner replacement between validation/apply and run acceptance must be
+    caught by the validation-to-start fence (#6327 B4).
+
+    After the revalidation answer was applied and the token rebuilt fresh
+    (the production retry-loop shape), a concurrent writer replaces the
+    canonical owner under the same SID.  ``_validate_start_owner_fence`` must
+    fire (``owner_replaced``) while the caller still holds the canonical AGENT
+    lock: no run is started on the stale owner, no PROCESS is attempted, and
+    the replacement object is left untouched.  The control assertion proves
+    the same token passes the fence while the canonical owner is unchanged.
+    """
+    import api.routes as routes
+
+    session, calls, proxy = _install_immutable_owner_token_fixture(
+        monkeypatch, tmp_path, recovered=True
+    )
+    sid = session.session_id
+    try:
+        token, owner, revalidation = _build_token_and_revalidate(routes, sid)
+        assert owner is session
+        proxy.arm()
+        applied = routes._apply_process_wakeup_revalidation_once(
+            token, revalidation, model="test-model", provider="test-provider"
+        )
+        assert not proxy.attempted.is_set(), (
+            "apply attempted PROCESS while AGENT was held (AB/BA)"
+        )
+        assert applied["retry"] is False and applied["error"] is None, applied
+        # Production rebuilds the token after the apply so the acceptance
+        # token is fresh relative to the (cleared) pause state.
+        fresh_token, fresh_owner = routes._build_immutable_session_owner_token(
+            sid, model="test-model", provider="test-provider"
+        )
+        assert fresh_owner is session
+        assert fresh_token["pause_state"] == {}
+
+        session_lock = config._get_session_agent_lock(sid)
+        # Control: with the canonical owner unchanged the fence passes.
+        assert routes._validate_start_owner_fence(fresh_token, session_lock) is None
+
+        # Concurrent writer replaces the owner (same SID) before acceptance.
+        replacement = _StreamingFakeSession(sid, "alpha", tmp_path, "issue6327-stream")
+        replacement.process_wakeup_pause = dict(session.process_wakeup_pause)
+        go = threading.Event()
+        done = threading.Event()
+
+        def _replace_owner():
+            with config.LOCK:
+                config.SESSIONS[sid] = replacement
+
+        writer = _run_concurrent_writer(go, done, _replace_owner)
+        go.set()
+        assert done.wait(10), "replacement writer never ran"
+        writer.join(10)
+
+        proxy.arm()
+        fence_error = routes._validate_start_owner_fence(fresh_token, session_lock)
+        assert not proxy.attempted.is_set(), (
+            "fence attempted PROCESS while AGENT was held (AB/BA)"
+        )
+        assert fence_error == "owner_replaced", fence_error
+        # The acceptance gate refuses: no run started, replacement untouched.
+        assert calls["start"] == []
+        assert getattr(replacement, "process_wakeup_pause", None) == dict(
+            session.process_wakeup_pause
+        )
+        assert proxy.acquire(blocking=False), "a thread leaked the ownership lock"
+        proxy.release()
+    finally:
+        with config.LOCK:
+            config.SESSIONS.pop(sid, None)
