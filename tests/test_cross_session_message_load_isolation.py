@@ -203,6 +203,10 @@ function createEnvironment() {
     busy: false,
     activeStreamId: null,
   };
+  globalThis.setWorkspaceSearchSession = (session) => {
+    globalThis.S.session = session;
+    return true;
+  };
   globalThis._loadingSessionId = null;
   globalThis._loadingOlder = false;
   globalThis._loadSessionGeneration = 0;
@@ -585,7 +589,9 @@ def _run_node(script: str, tmp_path: Path) -> dict:
     completed = subprocess.run(
         [NODE, str(script_path)],
         cwd=str(REPO),
+        input=script,
         text=True,
+        encoding="utf-8",
         capture_output=True,
         timeout=60,
         check=False,
