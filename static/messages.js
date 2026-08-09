@@ -5237,7 +5237,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _resetStreamFadeState();
   }
   function _rememberRunJournalCursor(e){
-    if(!((typeof _ownsAttachSeam==='function'&&_ownsAttachSeam(source))||(_terminalStateReached&&_ownsTerminalContinuation(source)))) return;
+    if(typeof source!=='undefined'&&!((typeof _ownsAttachSeam==='function'&&_ownsAttachSeam(source))||(_terminalStateReached&&_ownsTerminalContinuation(source)))) return;
     const raw=String(e&&e.lastEventId||'').trim();
     if(!raw) return;
     const tail=raw.includes(':')?raw.slice(raw.lastIndexOf(':')+1):raw;
