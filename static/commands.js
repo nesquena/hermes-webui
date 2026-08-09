@@ -554,6 +554,14 @@ function _compressionAnchorMessageKey(m){
 
 // ── Command handlers ────────────────────────────────────────────────────────
 
+function _commandOwnerIsCurrent(sid){
+  return !!(sid&&(
+    typeof _isSessionCurrentPane==='function'
+      ? _isSessionCurrentPane(sid)
+      : (S.session&&S.session.session_id===sid)
+  ));
+}
+
 function cmdHelp(){
   const lines=COMMANDS.map(c=>{
     const usage=c.arg ? (String(c.arg).startsWith('[') ? ` ${c.arg}` : ` <${c.arg}>`) : '';
@@ -1190,7 +1198,7 @@ async function cmdSkills(args){
   const ownerSid=S.session&&S.session.session_id;
   try{
     const data = await api('/api/skills');
-    if(!ownerSid||!S.session||S.session.session_id!==ownerSid)return;
+    if(!_commandOwnerIsCurrent(ownerSid))return;
     let skills = data.skills || [];
     if(args){
       const q = args.toLowerCase();
@@ -1229,7 +1237,7 @@ async function cmdSkills(args){
     renderMessages();
     showToast(t('type_slash'));
   }catch(e){
-    showToast('Failed to load skills: '+e.message);
+    if(_commandOwnerIsCurrent(ownerSid)) showToast('Failed to load skills: '+e.message);
   }
 }
 
@@ -1244,7 +1252,7 @@ async function cmdUse(args){
   const pending = {sessionId:S.session&&S.session.session_id||null,promise:null};
   pending.promise = new Promise(r => { resolve = r; });
   _forcedSkillDirectivePending = pending;
-  const isCurrentSession = () => !pending.sessionId || (S.session&&S.session.session_id)===pending.sessionId;
+  const isCurrentSession = () => !pending.sessionId || _commandOwnerIsCurrent(pending.sessionId);
   try{
     const data = await api('/api/skills');
     const skills = data.skills || [];
@@ -1289,7 +1297,7 @@ async function cmdPersonality(args){
     // List available personalities
     try{
       const data=await api('/api/personalities');
-      if(!S.session||S.session.session_id!==ownerSid)return;
+      if(!_commandOwnerIsCurrent(ownerSid))return;
       if(!data.personalities||!data.personalities.length){
         showToast(t('no_personalities'));
         return;
@@ -1305,14 +1313,14 @@ async function cmdPersonality(args){
   if(name.toLowerCase()==='none'||name.toLowerCase()==='default'||name.toLowerCase()==='clear'){
     try{
       await api('/api/personality/set',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,name:''})});
-      if(!S.session||S.session.session_id!==ownerSid)return;
+      if(!_commandOwnerIsCurrent(ownerSid))return;
       showToast(t('personality_cleared'));
     }catch(e){showToast(t('failed_colon')+e.message);}
     return;
   }
   try{
     const res=await api('/api/personality/set',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,name})});
-    if(!S.session||S.session.session_id!==ownerSid)return;
+    if(!_commandOwnerIsCurrent(ownerSid))return;
     if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
     S.messages.push({role:'assistant',content:t('personality_set')+`**${name}**`});
     renderMessages();
@@ -1798,7 +1806,7 @@ async function cmdTitle(args){
   try{
     const r=await api('/api/session/rename',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,title:name})});
     if(r&&r.error){showToast(r.error);return;}
-    if(!S.session||S.session.session_id!==activeSid)return;
+    if(!_commandOwnerIsCurrent(activeSid))return;
     S.session.title=(r&&r.session&&r.session.title)||name;
     if(typeof syncTopbar==='function')syncTopbar();
     if(typeof renderSessionList==='function')renderSessionList();
@@ -1806,7 +1814,7 @@ async function cmdTitle(args){
     if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
     S.messages.push({role:'assistant',content:`${t('title_set')} **${S.session.title}**`});
     renderMessages();
-  }catch(e){showToast(t('failed_colon')+e.message);}
+  }catch(e){if(_commandOwnerIsCurrent(activeSid))showToast(t('failed_colon')+e.message);}
 }
 async function cmdRetry(){
   if(!S.session){showToast(t('no_active_session'));return;}
@@ -1828,12 +1836,12 @@ async function cmdRetry(){
   try{
     const r=await api('/api/session/retry',{method:'POST',body:JSON.stringify({session_id:activeSid})});
     if(r&&r.error){showToast(r.error);return;}
-    if(!S.session||S.session.session_id!==activeSid||
+    if(!_commandOwnerIsCurrent(activeSid)||
        (replacementTicket&&!_transcriptReplacementIsCurrent(replacementTicket)))return;
     const data=await api('/api/session?session_id='+encodeURIComponent(activeSid));
     // #5924 SILENT-race guard: a session switch during the GET await must not let
     // this recovery apply session A's intent to whatever session is now visible.
-    if(!S.session||S.session.session_id!==activeSid)return;
+    if(!_commandOwnerIsCurrent(activeSid))return;
     if(data&&data.session){
       const committed=typeof _commitTranscriptReplacement==='function'
         && _commitTranscriptReplacement(replacementTicket, () => {
@@ -1851,7 +1859,7 @@ async function cmdRetry(){
     // _reArmRecoveryPick. Scoped to activeSid so it can't leak to another session.
     _reArmRecoveryPick(activeSid, _recoveryPick);
     await send();
-  }catch(e){showToast(t('retry_failed')+e.message);}
+  }catch(e){if(_commandOwnerIsCurrent(activeSid))showToast(t('retry_failed')+e.message);}
 }
 async function cmdUndo(){
   if(!S.session){showToast(t('no_active_session'));return;}
@@ -1863,8 +1871,9 @@ async function cmdUndo(){
   try{
     const r=await api('/api/session/undo',{method:'POST',body:JSON.stringify({session_id:activeSid})});
     if(r&&r.error){showToast(r.error);return;}
-    if(!S.session||S.session.session_id!==activeSid)return;
+    if(!_commandOwnerIsCurrent(activeSid))return;
     const data=await api('/api/session?session_id='+encodeURIComponent(activeSid));
+    if(!_commandOwnerIsCurrent(activeSid))return;
     if(data&&data.session){
       const committed=typeof _commitTranscriptReplacement==='function'
         && _commitTranscriptReplacement(replacementTicket, () => {
@@ -1876,7 +1885,7 @@ async function cmdUndo(){
       if(!committed)return;
     }
     showToast(`↩ ${t('undid_n_messages')} ${r.removed_count} ${t('undid_messages_suffix')}`);
-  }catch(e){showToast(t('undo_failed')+e.message);}
+  }catch(e){if(_commandOwnerIsCurrent(activeSid))showToast(t('undo_failed')+e.message);}
 }
 async function undoLastExchange(){await cmdUndo();}
 async function cmdBtw(args){
