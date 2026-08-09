@@ -357,6 +357,11 @@ const document = {{
   hasFocus: () => _focused,
 }};
 let S = {{ session: {{ session_id: 'open', message_count: 0 }}, messages: [], lastUsage: {{}} }};
+let _allSessions = [];
+let _sidebarReferenceSessions = [];
+function _createSidebarRuntimeContext(rows, refs) {{
+  return {{ index: {{}}, key: (rowOrSid, sidOverride=null) => String(sidOverride || (rowOrSid && rowOrSid.session_id) || rowOrSid || '') }};
+}}
 
 // Stubs for the incidental side effects _ensureMessagesLoaded touches.
 function _clearSameSessionForceReloadHint() {{}}

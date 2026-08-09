@@ -36,7 +36,7 @@ def test_polling_payloads_are_deferred_while_user_scrolls_sidebar():
     assert "_pendingSessionListPayload={gen:_gen,sessData,projData,unreadGen};" in refresh_block
     assert "_schedulePendingSessionListApply();" in refresh_block
     assert "_applySessionListPayload(sessData,projData,{unreadGen});" in refresh_block
-    assert "_markPollingCompletionUnreadTransitions(_allSessions);" in apply_block, (
+    assert "_markPollingCompletionUnreadTransitions(_allSessions,runtimeContext);" in apply_block, (
         "deferring sidebar refreshes must preserve background-completion unread semantics"
     )
 

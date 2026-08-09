@@ -295,15 +295,25 @@ global._sessionListSourceById = new Map();
 global._sessionObservedStreaming = {};
 global.S = {activeProfile:'profile-a', session:null};
 let mergeContext = null;
+let mergeRows = null;
+let reconcileContext = null;
+let reconcileRows = null;
+let pollContext = null;
+let pollRows = null;
 let pruneCalls = [];
 global._pruneLineageReportCacheToVisibleSessions = (rows,index,context) => {
   pruneCalls.push({rows,index,context});
 };
-global._reconcileActiveSessionIdleStateFromList = () => false;
-global._mergeOptimisticFirstTurnSessions = (rows, context) => { mergeContext = context; return rows; };
+global._reconcileActiveSessionIdleStateFromList = (rows, context) => {
+  reconcileRows = rows; reconcileContext = context; return false;
+};
+global._mergeOptimisticFirstTurnSessions = (rows, context) => {
+  mergeRows = rows; mergeContext = context; return rows;
+};
 global._syncSessionAttentionSoundState = () => {};
 global._recordSessionProfileCount = () => {};
-global._markPollingCompletionUnreadTransitions = rows => {
+global._markPollingCompletionUnreadTransitions = (rows, context) => {
+  pollRows = rows; pollContext = context;
   if (rows.some(row => row.session_id === 'cron-running' && row.cron_running !== true)) {
     throw new Error('cron_running signal was changed before polling completion handling');
   }
@@ -320,9 +330,14 @@ global._sessionListRenderSignature = () => '';
 global._sessionListExcludeHiddenEnabled = () => true;
 global._requestedSessionSidebarSource = () => 'webui';
 global._recordSessionProfileCount = () => {};
+const incomingRows = [];
+for (let i = 0; i < 2400; i++) incomingRows.push({
+  session_id:'bulk-'+i, profile_scope:i % 2 ? 'profile-a' : 'profile-b',
+  project_id:'project-'+(i % 7), message_count:1,
+});
 _applySessionListPayload({
   active_profile:'profile-a',
-  sessions:[
+  sessions:[...incomingRows,
     {session_id:'incoming-a', profile_scope:'profile-a', project_id:'project-a', message_count:2},
     {session_id:'same', profile_scope:'profile-a', project_id:'project-a', message_count:3},
     {session_id:'same', profile_scope:'profile-b', project_id:'project-b', message_count:4},
@@ -333,12 +348,25 @@ _applySessionListPayload({
 const context = pruneCalls[0].context;
 console.log(JSON.stringify({buildCount, pruneCalls:pruneCalls.length,
   mergeUsesContext:mergeContext === pruneCalls[0].context,
+  reconcileUsesContext:reconcileContext === pruneCalls[0].context,
+  pollUsesContext:pollContext === pruneCalls[0].context,
+  rowCounts:[mergeRows.length,reconcileRows.length,pollRows.length],
   sameKeys:context.key(context.rows.find(row => row.session_id === 'same'), 'same') !==
     context.key(context.rows.find(row => row.session_id === 'same' && row.profile_scope === 'profile-b'), 'same'),
   sameIndex:pruneCalls[0].index === context.index,
   cronSource:global._allSessions.find(row => row.session_id === 'cron-running').cron_running}));
 """))
-    assert result == {"buildCount": 1, "pruneCalls": 1, "mergeUsesContext": True, "sameKeys": True, "sameIndex": True, "cronSource": True}
+    assert result == {
+        "buildCount": 1,
+        "pruneCalls": 1,
+        "mergeUsesContext": True,
+        "reconcileUsesContext": True,
+        "pollUsesContext": True,
+        "rowCounts": [2404, 2404, 2404],
+        "sameKeys": True,
+        "sameIndex": True,
+        "cronSource": True,
+    }
 
 
 def test_viewed_and_completion_state_keep_duplicate_session_ids_scoped():

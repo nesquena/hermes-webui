@@ -908,11 +908,11 @@ function _clearCronSessionCompletionUnreadForInactiveProfiles(activeProfile) {
   return true;
 }
 
-function _clearSessionViewedCount(sid, row = null) {
+function _clearSessionViewedCount(sid, row = null, runtimeContext=null) {
   if (!sid) return;
   const counts = _getSessionViewedCounts();
   const key = typeof _migrateSidebarStateEntry==='function'
-    ? _migrateSidebarStateEntry(counts, sid, row) : sid;
+    ? _migrateSidebarStateEntry(counts, sid, row, runtimeContext) : sid;
   if (!Object.prototype.hasOwnProperty.call(counts, key)) return;
   delete counts[key];
   _saveSessionViewedCounts();
@@ -1946,7 +1946,10 @@ async function newSession(flash, options={}){
     try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
     _setActiveSessionUrl(S.session.session_id);
     if(typeof startSessionStream==='function') startSessionStream(S.session.session_id);
-    _setSessionViewedCount(S.session.session_id, S.session.message_count || 0);
+    const newSessionRuntimeContext=_createSidebarRuntimeContext(
+      [...(Array.isArray(_allSessions)?_allSessions:[]),S.session],
+      typeof _sidebarReferenceSessions!=='undefined'?_sidebarReferenceSessions:[]);
+    _setSessionViewedCount(S.session.session_id, S.session.message_count || 0, S.session, newSessionRuntimeContext);
     // Sync chat-header dropdown to the session's model/provider so the UI reflects
     // the default route the server actually used (#872). Compare provider state too:
     // duplicate model ids can exist under several providers, and a stale persisted
@@ -3089,7 +3092,7 @@ function _setHandoffStorageValue(sid, suffix, ts) {
   } catch {}
 }
 
-function _clearHandoffStorageForSession(sid) {
+function _clearHandoffStorageForSession(sid, row = null, runtimeContext=null) {
   if (!sid) return;
   try {
     _setHandoffStorageValue(sid, _HANDOFF_SUFFIX_DISMISSED_AT, null);
@@ -3098,9 +3101,9 @@ function _clearHandoffStorageForSession(sid) {
   // Session deletion should also prune per-session tracking maps. Otherwise
   // heavy users accumulate one localStorage entry per deleted session forever,
   // which increases quota pressure and can make future UI persistence fail.
-  try { _clearSessionViewedCount(sid); } catch {}
-  try { _clearSessionCompletionUnread(sid); } catch {}
-  try { _forgetObservedStreamingSession(sid); } catch {}
+  try { _clearSessionViewedCount(sid, row, runtimeContext); } catch {}
+  try { _clearSessionCompletionUnread(sid, row, runtimeContext); } catch {}
+  try { _forgetObservedStreamingSession(row||sid, runtimeContext); } catch {}
 }
 
 function _getHandoffDismissedAt(sid) {
@@ -3661,7 +3664,10 @@ async function _ensureMessagesLoaded(sid, opts) {
     // read here — mirror the same _isSessionActivelyViewedForList(sid) guard
     // used on the post-load re-ack in loadSession(). (#5917 gate finding)
     if(typeof _isSessionActivelyViewedForList !== 'function' || _isSessionActivelyViewedForList(sid)){
-      _setSessionViewedCount(sid, Number(S.session.message_count || msgs.length));
+      const loadRuntimeContext=_createSidebarRuntimeContext(
+        [...(Array.isArray(_allSessions)?_allSessions:[]),...(S.session?[S.session]:[])],
+        typeof _sidebarReferenceSessions!=='undefined'?_sidebarReferenceSessions:[]);
+      _setSessionViewedCount(sid, Number(S.session.message_count || msgs.length), S.session, loadRuntimeContext);
     }
     if(typeof syncTopbar==='function') syncTopbar();
   }
@@ -4542,7 +4548,7 @@ function _optimisticallyRemoveSessionFromList(sid, row = null, runtimeContext=nu
   const before=_allSessions.length;
   _allSessions=_allSessions.filter(s=>!s||runtimeKeyFor(s,sid)!==targetKey);
   if(_selectedSessions&&_selectedSessions.has(sid)) _selectedSessions.delete(sid);
-  if(typeof _dropStaleOptimisticSessionRow==='function') _dropStaleOptimisticSessionRow(sid);
+  if(typeof _dropStaleOptimisticSessionRow==='function') _dropStaleOptimisticSessionRow(sid,operationContext);
   if(_allSessions.length!==before) renderSessionListFromCache();
 }
 
@@ -7794,7 +7800,9 @@ function _sessionRowsWithActiveEphemeralSession(rows, runtimeContext=null){
   rows=Array.isArray(rows)?rows:[];
   if(!S.session||!S.session.session_id) return rows;
   const sid=S.session.session_id;
-  const lineageIndex=runtimeContext&&runtimeContext.index||typeof _buildSidebarLineageIndex==='function'
+  const lineageIndex=runtimeContext&&runtimeContext.index
+    ?runtimeContext.index
+    :typeof _buildSidebarLineageIndex==='function'
     ?_buildSidebarLineageIndex(
       [...rows, S.session],
       typeof _sidebarReferenceSessions!=='undefined'?_sidebarReferenceSessions:[])
@@ -7819,13 +7827,15 @@ function _sessionRowsWithActiveEphemeralSession(rows, runtimeContext=null){
   return [activeRow,...rows];
 }
 
-function _ensureActiveSessionRowPresent(rows, sourceRows){
+function _ensureActiveSessionRowPresent(rows, sourceRows, runtimeContext=null){
   rows=Array.isArray(rows)?rows:[];
   const activeSid=_activeSessionIdForSidebar();
   const source=Array.isArray(sourceRows)?sourceRows:[];
-  const lineageIndex=_buildSidebarLineageIndex(
-    [...rows, ...source, ...(S.session?[S.session]:[])],
-    typeof _sidebarReferenceSessions!=='undefined'?_sidebarReferenceSessions:[]);
+  const lineageIndex=runtimeContext&&runtimeContext.index
+    ?runtimeContext.index
+    :_buildSidebarLineageIndex(
+      [...rows, ...source, ...(S.session?[S.session]:[])],
+      typeof _sidebarReferenceSessions!=='undefined'?_sidebarReferenceSessions:[]);
   if(!activeSid||rows.some(s=>_sidebarSessionMatchesActiveSession(s,activeSid,lineageIndex))) return rows;
   const activeRow=source.find(s=>_sidebarSessionMatchesActiveSession(s,activeSid,lineageIndex));
   // Only re-inject the active FRESHLY-CREATED 0-message ephemeral chat. An active
@@ -8223,7 +8233,7 @@ function renderSessionListFromCache(){
   // Direct matches must not disable content search: if a user pasted the same
   // session id into another conversation, that content hit should still appear.
   const searchMatches=_sessionSearchMergeMatches(sidebarRows,searchQueryRaw,_contentSearchResults);
-  const allMatched=_ensureActiveSessionRowPresent(searchMatches,sidebarRows);
+  const allMatched=_ensureActiveSessionRowPresent(searchMatches,sidebarRows,runtimeContext);
   const {
     cliSessionCount,
     profileFiltered,
@@ -9680,7 +9690,7 @@ async function deleteSession(sid, beforeDelete=null){
       ?_sidebarRuntimeIdentityKey(session||sid,sid,operationContext):sid);
   let optimisticRendered=false;
   const deleteRequest=api('/api/session/delete',{method:'POST',body:JSON.stringify({session_id:sid})}).then(response=>{
-    _clearHandoffStorageForSession(sid);
+    _clearHandoffStorageForSession(sid, session, operationContext);
     return {response};
   }, error=>({error}));
   if(beforeDeleteHold){
