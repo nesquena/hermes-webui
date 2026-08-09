@@ -5690,6 +5690,7 @@ async function _runRenderSessionListRefresh(opts, _gen){
     // skeleton; if the switch itself fails, its catch clears the skeleton + embargo.
     if (_profileSwitchListEmbargo) return;
     _showSessionListLoadError(e);
+    if(typeof _clearCachedActiveRunProjection==='function') _clearCachedActiveRunProjection();
     // Only fall back to the cached rows if they were loaded under the SAME
     // scope we're requesting now. After a profile switch the cache holds the
     // PRIOR profile's sessions; re-rendering them would falsely show another
@@ -5719,6 +5720,15 @@ async function _runRenderSessionListRefresh(opts, _gen){
       _clearSessionSourceTabCounts();
       renderSessionListFromCache();
     }
+  }
+}
+
+function _clearCachedActiveRunProjection(){
+  for(const row of Array.isArray(_allSessions)?_allSessions:[]){
+    if(row&&typeof row==='object') delete row.active_run;
+  }
+  if(typeof window!=='undefined'&&typeof window._renderActiveRunProjection==='function'){
+    window._renderActiveRunProjection([]);
   }
 }
 

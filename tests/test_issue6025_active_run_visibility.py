@@ -365,6 +365,24 @@ function _applySessionListPayload(){{applied++;}}
     }
 
 
+def test_failed_session_list_refresh_clears_volatile_active_run_projection():
+    clear_cached = _extract_function(SESSIONS_JS, "_clearCachedActiveRunProjection")
+    refresh = _extract_function(SESSIONS_JS, "_runRenderSessionListRefresh")
+    assert "_clearCachedActiveRunProjection();" in refresh
+    source = f"""
+let _allSessions=[{{session_id:'s1',active_run:{{started_at:10}}}},{{session_id:'s2'}}];
+let cleared=0;
+globalThis.window={{_renderActiveRunProjection:rows=>{{if(!rows.length)cleared++;}}}};
+{clear_cached}
+_clearCachedActiveRunProjection();
+console.log(JSON.stringify({{sessions:_allSessions,cleared}}));
+"""
+    assert _run_node_script(source) == {
+        "sessions": [{"session_id": "s1"}, {"session_id": "s2"}],
+        "cleared": 1,
+    }
+
+
 def test_active_run_locale_keys_cover_exact_supported_locale_set():
     parser = _extract_function(I18N_JS, "_activeRunLocaleNames")
     source = f"""
