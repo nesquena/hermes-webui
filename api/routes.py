@@ -2751,6 +2751,7 @@ def _get_cached_session_list_payload(
                     rebuild_attempts = 0
                     while True:
                         invalidation_stamp = _session_list_cache_invalidation_stamp(key)
+                        source_stamp = _session_list_cache_source_stamp(key)
                         try:
                             payload = builder()
                         except Exception:
@@ -2758,8 +2759,14 @@ def _get_cached_session_list_payload(
                                 "session list stale-cache background rebuild failed"
                             )
                             return
-                        if _session_list_cache_invalidation_stamp(key) == invalidation_stamp:
-                            _session_list_cache_set(key, payload)
+                        if (
+                            _session_list_cache_invalidation_stamp(key) == invalidation_stamp
+                            and _session_list_cache_set(
+                                key,
+                                payload,
+                                expected_source_stamp=source_stamp,
+                            )
+                        ):
                             return
                         rebuild_attempts += 1
                         if rebuild_attempts >= 3:
@@ -2801,9 +2808,16 @@ def _get_cached_session_list_payload(
             rebuild_attempts = 0
             while True:
                 invalidation_stamp = _session_list_cache_invalidation_stamp(key)
+                source_stamp = _session_list_cache_source_stamp(key)
                 payload = builder()
-                if _session_list_cache_invalidation_stamp(key) == invalidation_stamp:
-                    _session_list_cache_set(key, payload)
+                if (
+                    _session_list_cache_invalidation_stamp(key) == invalidation_stamp
+                    and _session_list_cache_set(
+                        key,
+                        payload,
+                        expected_source_stamp=source_stamp,
+                    )
+                ):
                     if diag is not None:
                         try:
                             diag.stage("session_list_cache_stored")
@@ -2866,12 +2880,16 @@ def _get_cached_session_list_payload(
         except Exception:
             pass
     invalidation_stamp = _session_list_cache_invalidation_stamp(key)
+    source_stamp = _session_list_cache_source_stamp(key)
     payload = builder()
     source_authoritative = (
         _session_list_cache_invalidation_stamp(key) == invalidation_stamp
+        and _session_list_cache_set(
+            key,
+            payload,
+            expected_source_stamp=source_stamp,
+        )
     )
-    if source_authoritative:
-        _session_list_cache_set(key, payload)
     return _session_list_cache_result(
         payload,
         source_authoritative=source_authoritative,

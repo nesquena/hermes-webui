@@ -544,6 +544,7 @@ def test_stream_owner_unregistered_on_worker_early_return(monkeypatch):
     # Owner registered by the route layer, but the stream was already cancelled
     # (never placed in STREAMS), so the worker will hit `q is None`.
     config.register_stream_owner("leak-stream", "some_session")
+    config.suppress_active_run_visibility("leak-stream", "parent-session")
     try:
         with config.STREAMS_LOCK:
             config.STREAMS.pop("leak-stream", None)
@@ -552,6 +553,8 @@ def test_stream_owner_unregistered_on_worker_early_return(monkeypatch):
         )
         with config.STREAM_SESSION_OWNERS_LOCK:
             assert "leak-stream" not in config.STREAM_SESSION_OWNERS
+        with config.ACTIVE_RUNS_LOCK:
+            assert "leak-stream" not in config._SUPPRESSED_ACTIVE_RUNS
     finally:
         with config.STREAM_SESSION_OWNERS_LOCK:
             config.STREAM_SESSION_OWNERS.clear()

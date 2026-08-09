@@ -849,7 +849,7 @@ def _run_gateway_chat_streaming(
         _clear_gateway_run_starting(stream_id)
         # Cancelled before the worker started; release the owner entry the route
         # layer registered so STREAM_SESSION_OWNERS does not leak (no teardown finally runs).
-        unregister_stream_owner(stream_id)
+        unregister_active_run(stream_id)
         # Also release the writeback-owner entry the route layer registered, so
         # SESSION_WRITEBACK_OWNERS does not leak on this pre-start cancellation
         # path (the teardown finally below never runs when we early-return here).

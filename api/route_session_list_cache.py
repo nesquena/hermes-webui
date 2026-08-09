@@ -243,15 +243,23 @@ def _session_list_cache_stale_reason(key: tuple) -> str | None:
         return None
 
 
-def _session_list_cache_set(key: tuple, payload: dict) -> None:
+def _session_list_cache_set(
+    key: tuple,
+    payload: dict,
+    *,
+    expected_source_stamp=None,
+) -> bool:
     if not isinstance(payload, dict):
-        return
-    stamp = _session_list_cache_resolved_source_stamp(key)
+        return False
     with _SESSIONS_CACHE_LOCK:
+        stamp = _session_list_cache_resolved_source_stamp(key)
+        if expected_source_stamp is not None and stamp != expected_source_stamp:
+            return False
         _SESSIONS_CACHE[key] = (time.monotonic(), stamp, copy.deepcopy(payload))
         _SESSIONS_CACHE.move_to_end(key)
         while len(_SESSIONS_CACHE) > _SESSIONS_CACHE_MAX_ENTRIES:
             _SESSIONS_CACHE.popitem(last=False)
+    return True
 
 
 def _session_list_cache_clear(profile: str | None = None) -> None:

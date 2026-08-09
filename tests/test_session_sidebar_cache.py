@@ -542,6 +542,40 @@ def test_session_list_cache_retry_limit_escape_is_non_authoritative(monkeypatch)
     assert routes._session_list_cache_get(key, allow_stale=True)[0] is None
 
 
+def test_session_list_cache_rebuild_retries_after_source_change(monkeypatch):
+    routes._session_list_cache_clear()
+    key = routes._session_list_cache_key(
+        active_profile="profile-a",
+        all_profiles=False,
+        show_cli_sessions=False,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+    )
+    source_stamps = iter([
+        ("initial",),
+        ("before-build",),
+        ("changed-during-build",),
+        ("changed-during-build",),
+        ("changed-during-build",),
+    ])
+    monkeypatch.setattr(
+        routes,
+        "_session_list_cache_source_stamp",
+        lambda _key: next(source_stamps),
+    )
+    calls = []
+
+    def builder():
+        calls.append(len(calls) + 1)
+        return _session_cache_payload(f"attempt-{calls[-1]}")
+
+    result = routes._get_cached_session_list_payload(key=key, builder=builder)
+
+    assert calls == [1, 2]
+    assert result == _session_cache_payload("attempt-2")
+    assert result.source_authoritative is True
+
+
 @pytest.mark.parametrize("stamps, authoritative", [
     ([('same',), ('same',)], True),
     ([('before',), ('changed',)], False),

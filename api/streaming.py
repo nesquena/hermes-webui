@@ -7825,7 +7825,7 @@ def _run_agent_streaming(
         # The stream was cancelled before the worker started; the route layer
         # already registered the stream owner, so release it here to avoid
         # leaking a STREAM_SESSION_OWNERS entry that the teardown finally never sees.
-        unregister_stream_owner(stream_id)
+        unregister_active_run(stream_id)
         try:
             clear_session_writeback_owner_if_owned(session_id, stream_id)
         except Exception:
