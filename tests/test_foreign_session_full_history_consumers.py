@@ -445,7 +445,8 @@ async function newSession() {{
   S.session = {{ session_id: 'foreign-1', message_count: 1, workspace: '/ws', model: 'goal-model' }};
   return S.session.session_id;
 }}
-async function _ensureSessionOwner() {{ return S.session && S.session.session_id; }}
+function _isSessionCurrentPane(sid) {{ return !!S.session && S.session.session_id === sid; }}
+{ENSURE_OWNER_SRC or BASE_OWNER_FALLBACK_SRC}
 function markInflight() {{}}
 function saveInflightState() {{}}
 function startApprovalPolling() {{}}
@@ -1077,6 +1078,133 @@ async function runAction() {{
   resolveRender();
   await action;
   console.log(JSON.stringify({{ sessionId: S.session.session_id, messages: S.messages, usedProductionOwner: {str(bool(ENSURE_OWNER_SRC)).lower()} }}));
+}})().catch(err => {{ console.error(err.stack || String(err)); process.exit(1); }});
+"""
+
+
+def _normal_send_chat_start_switch_script(stage: str = "chat_start") -> str:
+    return f"""
+let _sendInProgress = false;
+let _sendInProgressSid = null;
+let _pendingPickMatch = null;
+let _forcedSkillDirectivePending = null;
+let _queueDrainSid = null;
+let _approvalSessionId = null;
+let _clarifySessionId = null;
+let resolveStart = null;
+let resolveUpload = null;
+let resolveDirective = null;
+let startCalls = 0;
+let attachCalls = 0;
+const input = {{ value: 'hello', style: {{}} }};
+const S = {{
+  session: {{ session_id: 'session-a', workspace: '/ws', model: 'model', profile: 'default' }},
+  messages: [],
+  pendingFiles: [],
+  pendingSelections: [],
+  toolCalls: [],
+  busy: false,
+  activeStreamId: null,
+  activeProfile: 'default',
+}};
+const window = {{ _defaultMessageMode: 'steer' }};
+const document = {{ querySelector() {{ return null; }} }};
+const localStorage = {{ setItem() {{}}, removeItem() {{}}, getItem() {{ return null; }} }};
+const INFLIGHT = {{}};
+const COMMANDS = [];
+const _AGENT_COMMANDS_RUN_ON_WEBUI = new Set();
+function $(id) {{ return id === 'msg' ? input : null; }}
+function _isSessionCurrentPane(sid) {{ return !!S.session && S.session.session_id === sid; }}
+{ENSURE_OWNER_SRC}
+function _composerTextWithPendingSelections() {{ return input.value; }}
+function _flushSelectionBlocksToComposer() {{}}
+function _clearStaleBusyStateBeforeSend() {{ return false; }}
+function _clearComposerAfterQueuedSelectionSend() {{}}
+function _chatPayloadModelState() {{ return {{ model: 'model', model_provider: null }}; }}
+function _dismissHandoffHint() {{}}
+function _bumpMessagesGeneration() {{ return 1; }}
+function _runOptionalPreStartUiStep(_label, fn) {{ if (typeof fn === 'function') fn(); }}
+function _runOptionalPostStartUiStep(_label, fn) {{ if (typeof fn === 'function') fn(); }}
+function _clearPendingSessionModel() {{}}
+function _clearComposerDraft() {{}}
+function _restoreComposerDraftAfterFailedSend() {{}}
+function _clearOptimisticSessionStreaming() {{}}
+function clearOptimisticSessionStreaming() {{}}
+function _fetchYoloState() {{}}
+function updateSendBtn() {{}}
+function setComposerStatus() {{}}
+function setStatus() {{}}
+function setBusy(value) {{ S.busy = !!value; }}
+function renderMessages() {{}}
+function renderTray() {{}}
+function autoResize() {{}}
+function hideCmdDropdown() {{}}
+function clearLiveToolCards() {{}}
+function ensureLiveWorklogShell() {{}}
+function appendThinking() {{}}
+function upsertActiveSessionForLocalTurn() {{}}
+function markInflight() {{}}
+function saveInflightState() {{}}
+function startApprovalPolling() {{}}
+function startClarifyPolling() {{}}
+function stopApprovalPolling() {{}}
+function stopClarifyPolling() {{}}
+function hideApprovalCard() {{}}
+function hideClarifyCard() {{}}
+function removeThinking() {{}}
+function showToast() {{}}
+function syncTopbar() {{}}
+function updateQueueBadge() {{}}
+function queueSessionMessage() {{}}
+function t(key) {{ return key; }}
+async function uploadPendingFiles() {{
+  if ({json.dumps(stage)} === 'upload') return new Promise(resolve => {{ resolveUpload = resolve; }});
+  return [];
+}}
+function attachLiveStream() {{ attachCalls += 1; }}
+function api(url) {{
+  if (String(url) !== '/api/chat/start') throw new Error('unexpected API request: ' + String(url));
+  startCalls += 1;
+  return new Promise(resolve => {{
+    resolveStart = () => resolve({{ stream_id: 'stream-a' }});
+  }});
+}}
+{SEND_SRC}
+(async () => {{
+  if ({json.dumps(stage)} === 'directive') {{
+    _forcedSkillDirectivePending = {{
+      sessionId: 'session-a',
+      promise: new Promise(resolve => {{ resolveDirective = resolve; }}),
+    }};
+  }}
+  const sendPromise = send();
+  if ({json.dumps(stage)} === 'upload') {{
+    for (let i = 0; i < 20 && !resolveUpload; i++) await new Promise(resolve => setTimeout(resolve, 0));
+    if (!resolveUpload) throw new Error('upload was not reached');
+  }} else if ({json.dumps(stage)} === 'directive') {{
+    for (let i = 0; i < 20 && !resolveDirective; i++) await new Promise(resolve => setTimeout(resolve, 0));
+    if (!resolveDirective) throw new Error('directive was not reached');
+  }} else {{
+    for (let i = 0; i < 20 && !resolveStart; i++) await new Promise(resolve => setTimeout(resolve, 0));
+    if (!resolveStart) throw new Error('chat/start was not reached');
+  }}
+  S.session = {{ session_id: 'session-b', workspace: '/ws', model: 'model', profile: 'default' }};
+  S.messages = [{{ role: 'assistant', content: 'session b existing' }}];
+  S.busy = false;
+  S.activeStreamId = null;
+  if ({json.dumps(stage)} === 'upload') resolveUpload([]);
+  else if ({json.dumps(stage)} === 'directive') resolveDirective({{ directive: 'forced' }});
+  else resolveStart();
+  await sendPromise;
+  console.log(JSON.stringify({{
+    startCalls,
+    sessionId: S.session && S.session.session_id,
+    messages: S.messages,
+    busy: S.busy,
+    activeStreamId: S.activeStreamId,
+    attachCalls,
+    inflightKeys: Object.keys(INFLIGHT),
+  }}));
 }})().catch(err => {{ console.error(err.stack || String(err)); process.exit(1); }});
 """
 
@@ -1746,6 +1874,19 @@ def test_blank_page_slash_rejects_owner_after_delayed_sidebar_render():
     assert result["usedProductionOwner"] is True
 
 
+@pytest.mark.parametrize("stage", ["upload", "directive", "chat_start"])
+def test_normal_send_rejects_late_owner_result_after_pane_switch(stage):
+    result = _run_node(_normal_send_chat_start_switch_script(stage))
+
+    assert result["startCalls"] == (1 if stage == "chat_start" else 0)
+    assert result["sessionId"] == "session-b"
+    assert result["messages"] == [{"role": "assistant", "content": "session b existing"}]
+    assert result["busy"] is False
+    assert result["activeStreamId"] is None
+    assert result["attachCalls"] == 0
+    assert result["inflightKeys"] == (["session-a"] if stage == "chat_start" else [])
+
+
 def test_clear_refuses_overlapping_confirmed_operation():
     result = _run_node(_clear_overlap_script())
 
@@ -1766,6 +1907,27 @@ def test_clear_conversation_leaves_switched_pane_untouched():
     assert result["toolCalls"] == [{"id": "other-tool"}]
     assert result["toasts"] == []
     assert result["reconcileCalls"] == 0
+
+
+def test_send_owner_guard_covers_upload_directive_and_chat_start_awaits():
+    upload_idx = SEND_SRC.index("uploaded=await uploadPendingFiles(")
+    upload_guard_idx = SEND_SRC.index("if(!_slashOwnerIsCurrent(activeSid))return;", upload_idx)
+    directive_idx = SEND_SRC.index("const _directivePayload = await _pending.promise;")
+    directive_guard_idx = SEND_SRC.index("if(!_slashOwnerIsCurrent(activeSid))return;", directive_idx)
+    chat_start_idx = SEND_SRC.index("const startData=await api('/api/chat/start'")
+    catch_idx = SEND_SRC.index("}catch(e){", chat_start_idx)
+    catch_guard_idx = SEND_SRC.index("if(!_slashOwnerIsCurrent(activeSid)) return;", catch_idx)
+    success_guard_idx = SEND_SRC.index(
+        "if(!_slashOwnerIsCurrent(activeSid)) return;", catch_guard_idx + 1
+    )
+    stream_state_idx = SEND_SRC.index("S.activeStreamId = streamId;", chat_start_idx)
+
+    assert upload_idx < upload_guard_idx
+    assert directive_idx < directive_guard_idx
+    assert catch_idx < catch_guard_idx < success_guard_idx < stream_state_idx
+    assert "queueSessionMessage(ownerSid" in SEND_SRC
+    assert "updateQueueBadge(ownerSid)" in SEND_SRC
+    assert "const activeSid=await _ensureSessionOwner();" in CMD_GOAL_SRC
 
 
 def test_background_polling_rejects_stale_owner_or_generation_and_keeps_retry():
