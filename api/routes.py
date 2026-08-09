@@ -21533,6 +21533,7 @@ def _start_chat_stream_for_session(
     source: str = "webui",
     moa_config=None,
     external_runtime_owned: bool | None = None,
+    continuation_claim_id: str | None = None,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn."""
     if external_runtime_owned is None:
@@ -21617,7 +21618,11 @@ def _start_chat_stream_for_session(
                 if source == "goal_continuation":
                     from api.goal_continuations import bind_goal_continuation_stream
 
-                    if not bind_goal_continuation_stream(s.session_id, stream_id):
+                    if not bind_goal_continuation_stream(
+                        s.session_id,
+                        stream_id,
+                        claim_id=continuation_claim_id,
+                    ):
                         return {
                             "error": "durable goal continuation claim is no longer current",
                             "_status": 409,
@@ -21798,6 +21803,7 @@ def _start_run(
     moa_config=None,
     gateway_chat_enabled: bool | None = None,
     goal_related: bool = False,
+    continuation_claim_id: str | None = None,
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
 
@@ -21825,7 +21831,8 @@ def _start_run(
         runtime_adapter_runner_enabled,
     )
 
-    if runtime_adapter_enabled() or runtime_adapter_runner_enabled():
+    runner_owned = runtime_adapter_runner_enabled() and source != "goal_continuation"
+    if runtime_adapter_enabled() or runner_owned:
         def _legacy_start_run(request: StartRunRequest) -> dict:
             return _start_chat_stream_for_session(
                 s,
@@ -21840,6 +21847,7 @@ def _start_run(
                 moa_config=moa_config,
                 external_runtime_owned=gateway_chat_enabled,
                 goal_related=goal_related,
+                continuation_claim_id=continuation_claim_id,
             )
 
         def _legacy_adapter_factory():
@@ -21885,6 +21893,7 @@ def _start_run(
         moa_config=moa_config,
         external_runtime_owned=gateway_chat_enabled,
         goal_related=goal_related,
+        continuation_claim_id=continuation_claim_id,
     )
 
 
@@ -21944,6 +21953,7 @@ def start_session_turn(
     message: str,
     *,
     source: str = "process_wakeup",
+    continuation_claim_id: str | None = None,
 ):
     """Start a server-side agent turn for ``session_id`` with ``message``.
 
@@ -22136,6 +22146,7 @@ def start_session_turn(
         source=turn_source,
         route="start_session_turn",
         goal_related=(turn_source == "goal_continuation"),
+        continuation_claim_id=continuation_claim_id,
     )
 
     # ── Defect B: live-view of server-initiated turns ──────────────────────

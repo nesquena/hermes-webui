@@ -43,6 +43,9 @@ def test_server_starts_and_stops_durable_goal_worker():
     stop = server.index("stop_goal_continuation_worker()", shutdown)
     lifecycle_drain = server.index("drain_all_on_shutdown()", shutdown)
     assert stop < lifecycle_drain, "new goal turns must be disabled before shutdown drains"
+    bind = server.index("httpd = QuietHTTPServer")
+    start = server.index("start_goal_continuation_worker()")
+    assert bind < start, "the durable worker must not start before the server owns its port"
 
 
 def test_empty_response_retry_is_limited_to_server_goal_continuations():

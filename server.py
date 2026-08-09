@@ -646,8 +646,6 @@ def main() -> None:
 
     try:
         from api.background_process import start_drain_thread
-        from api.goal_continuations import start_goal_continuation_worker
-        start_goal_continuation_worker()
         if start_drain_thread():
             print('[ok] bg_task_complete drain thread started', flush=True)
     except Exception as e:
@@ -682,6 +680,13 @@ def main() -> None:
         except Exception as e:
             print(f'[!!] WARNING: TLS setup failed ({e}), falling back to HTTP', flush=True)
             scheme = 'http'
+
+    try:
+        from api.goal_continuations import start_goal_continuation_worker
+        if start_goal_continuation_worker():
+            print('[ok] Durable goal continuation worker started', flush=True)
+    except Exception as e:
+        print(f'[!!] WARNING: Durable goal continuation worker failed to start: {e}', flush=True)
 
     print(f'  Hermes Web UI listening on {scheme}://{HOST}:{PORT}', flush=True)
     if HOST in ('127.0.0.1', '::1') or within_container:
