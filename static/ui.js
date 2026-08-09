@@ -16554,18 +16554,7 @@ function _processWakeupCardHtml(info, rawText, extras){
 
 function renderMessages(options){
   _lastMessageRenderAt=performance.now();
-  // Measurement-burst lifecycle (#6654/#6717): every UNMARKED (externally
-  // initiated) render — session load, message append, scroll-settle, genuine
-  // content change — starts a fresh measurement burst HERE, before any rAF
-  // coalescing or early return, so a pending internal measurement callback can
-  // never carry a stale burst into the new cycle (external provenance
-  // overrides a pending internal callback). Only the internally
-  // measurement-scheduled chain (options._internalMeasurement, threaded through
-  // both rAF layers by _scheduleMessageVirtualMeasurementRefresh and
-  // _scheduleMessageVirtualizedRender) preserves the burst across renders.
-  if(!(options&&options._internalMeasurement)){
-    _resetMessageVirtualMeasurementBurst();
-  }
+  if(!(options&&options._internalMeasurement)){ _resetMessageVirtualMeasurementBurst(); }
   const preserveScroll=!!(options&&options.preserveScroll);
   const virtualFallback=!!(options&&options._virtualFallback);
   // Capture the pre-wipe scroll position when preserving OR when the reader has
