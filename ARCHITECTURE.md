@@ -58,6 +58,8 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       __init__.py          Package marker
       auth.py              Optional password authentication, signed cookies, passkeys/WebAuthn
       config.py            Discovery, globals, model detection, reloadable config
+      goals.py             WebUI wrapper around Hermes GoalManager state/evaluation
+      goal_continuations.py Durable one-intent-per-session dispatcher for automatic goal turns
       helpers.py           HTTP helpers: j(), bad(), require(), safe_resolve(), security headers
       models.py            Session model + CRUD, per-session profile tracking, CLI/state.db bridge
       profiles.py          Profile state management, hermes_cli wrapper
@@ -109,6 +111,7 @@ State directory (runtime data, separate from source):
     workspaces.json    Registered workspaces list
     last_workspace.txt Last-used workspace path
     settings.json      User settings (default model, workspace, send key, password hash)
+    goal-continuations.json Atomic 0600 registry for pending automatic /goal turns
     projects.json      Session project groups (name, color, id)
 
 Log file:
@@ -275,6 +278,34 @@ is caught).
 
 Fallback sync endpoint: POST /api/chat still exists and holds the connection open until
 the agent finishes. The frontend never uses it but it can be useful for debugging.
+
+#### 4.3.1 Automatic goal continuation ownership
+
+After the post-turn goal judge returns `continue`, the streaming backend writes one
+continuation intent per session to `goal-continuations.json` **before** emitting the
+`goal_continue` SSE event. `static/messages.js` treats that event as presentation-only;
+the server worker claims the intent and enters the ordinary `start_session_turn()` /
+`_start_run()` admission path with source `goal_continuation`.
+
+The record carries a stable continuation id, originating stream, profile home, goal
+turn number, bounded attempt count, and claim owner. Every read-modify-write transaction
+holds a process-local lock **and** an OS file lock; durable replacement is atomic, fsynced,
+and mode `0600`. The owner id is regenerated after `fork()`, failed replacements invalidate
+the in-memory cache, and unreadable registries are quarantined with mode `0600`. Together
+these rules prevent lost updates and double dispatch across overlapping WebUI processes.
+Repeated judge callbacks for the same source stream are idempotent, competing worker
+claims start at most one turn, and a restarted worker only requeues an active,
+unjudged goal intent. If the persisted goal counter already advanced, recovery derives a
+fresh prompt from the current goal state rather than replaying the stale attempted prompt.
+Completed or inactive goals are never resurrected.
+
+A provider result with no final answer, no token/reasoning/tool activity, and no
+explicit error is retryable only for a server-owned goal continuation. The current
+attempt is settled visibly as an automatic retry and the same intent is requeued with
+bounded exponential backoff. Any observed activity disables replay to avoid duplicate
+tool or external side effects. This mechanism persists the *next-turn intent*; it does
+not keep an in-process agent run alive across a WebUI service restart and is not a
+general-purpose browser queue.
 
 ### 4.4 Agent Invocation (_run_agent_streaming)
 

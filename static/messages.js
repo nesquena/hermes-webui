@@ -2183,7 +2183,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let liveReasoningText = reasoningText;
   let visibleInterimSnippets=[];
   let _latestGoalStatus=null;
-  let _pendingGoalContinuation=null;
   let assistantRow=null;
   let assistantBody=null;
   // On reconnect with recorded burst anchors, the rendered DOM has multiple
@@ -6003,14 +6002,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const continuation_prompt=String(d.continuation_prompt||d.text||'').trim();
         if(!continuation_prompt||sid!==activeSid)return;
         _applyToAnchor('goal_continue',d,e);
-        const _modelState=_chatPayloadModelState();
-        _pendingGoalContinuation={
-          sid,
-          text:continuation_prompt,
-          model:_modelState.model,
-          model_provider:_modelState.model_provider,
-          profile:S.activeProfile||'default',
-        };
+        // The durable server scheduler owns dispatch.  This event is status-only,
+        // matching the bg_task_complete server-started live-view notification.
         const toast=t('goal_continuing_toast');
         const cmsg=_resolveGoalMessage(d);
         showToast((toast&&cmsg&&cmsg!==toast)?cmsg.split('\n')[0]:toast,2200);
@@ -6314,18 +6307,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
         if(!lastAsst&&d.session&&Array.isArray(d.session.messages)){
           lastAsst=[...d.session.messages].reverse().find(m=>m&&m.role==='assistant')||null;
-        }
-        if(isActiveSession&&_pendingGoalContinuation&&typeof queueSessionMessage==='function'){
-          const _goalNext=_pendingGoalContinuation;
-          _pendingGoalContinuation=null;
-          queueSessionMessage(_goalNext.sid,{
-            text:_goalNext.text,
-            files:[],
-            model:_goalNext.model,
-            model_provider:_goalNext.model_provider,
-            profile:_goalNext.profile,
-          });
-          if(typeof updateQueueBadge==='function')updateQueueBadge(_goalNext.sid);
         }
         if(isActiveSession) _queueDrainSid=activeSid;
         renderSessionList();

@@ -606,11 +606,9 @@ def main() -> None:
         print(f'  [tip] No password set. Any process on this machine can read sessions', flush=True)
         print(f'        and memory via the local API. Set HERMES_WEBUI_PASSWORD to', flush=True)
         print(f'        enable authentication.', flush=True)
-
     oidc_startup_warning = get_oidc_startup_warning()
     if oidc_startup_warning:
         print(f'[!!] WARNING: {oidc_startup_warning}', flush=True)
-
     ok, missing, errors = verify_hermes_imports()
     if not ok and _HERMES_FOUND:
         print(f'[!!] Warning: Hermes agent found but missing modules: {missing}', flush=True)
@@ -626,11 +624,9 @@ def main() -> None:
             print('     Agent features may not work correctly.', flush=True)
         else:
             print('[ok] Agent dependencies installed successfully.', flush=True)
-
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     SESSION_DIR.mkdir(parents=True, exist_ok=True)
     DEFAULT_WORKSPACE.mkdir(parents=True, exist_ok=True)
-
     try:
         from api.gateway_watcher import start_watcher
 
@@ -650,10 +646,12 @@ def main() -> None:
 
     try:
         from api.background_process import start_drain_thread
+        from api.goal_continuations import start_goal_continuation_worker
+        start_goal_continuation_worker()
         if start_drain_thread():
             print('[ok] bg_task_complete drain thread started', flush=True)
     except Exception as e:
-        print(f'[!!] WARNING: bg_task_complete drain failed to start: {e}', flush=True)
+        print(f'[!!] WARNING: WebUI worker startup failed: {e}', flush=True)
 
     try:
         from api.background_process import start_session_channel_reaper
@@ -727,6 +725,8 @@ def main() -> None:
         _log_shutdown_audit()
         try:
             from api.gateway_watcher import stop_watcher
+            from api.goal_continuations import stop_goal_continuation_worker
+            stop_goal_continuation_worker()
             stop_watcher()
         except Exception:
             logger.debug("Failed to stop gateway watcher during shutdown")

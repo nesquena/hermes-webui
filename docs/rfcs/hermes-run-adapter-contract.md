@@ -682,7 +682,10 @@ Suggested regression coverage:
 Non-goals for Slice 3c:
 
 - no runner process, sidecar, or execution-survives-WebUI-restart claim;
-- no durable WebUI-owned queue or goal scheduler;
+- no durable WebUI-owned queue or goal scheduler, except the bounded automatic
+  next-turn intent proposed in [#6885](https://github.com/nesquena/hermes-webui/issues/6885):
+  one idempotent intent per session, admitted through the existing turn path,
+  browser-observation-only, and explicitly replaceable by the future runner;
 - no migration of `AIAgent` construction, post-turn goal evaluation, or the
   agent continuation loop out of the legacy path;
 - no change to `/goal` command semantics, queue ordering semantics, or supported

@@ -35,6 +35,13 @@ def test_gateway_chat_backend_is_default_off_for_truthy_values():
         assert webui_gateway_chat_enabled({}, env) is False
 
 
+def test_gateway_approval_and_tool_activity_block_automatic_empty_retry():
+    for event in ("approval", "clarify", "tool_call", "tool_result", "tool_progress"):
+        assert gateway_chat._gateway_event_blocks_empty_retry(event) is True
+    for event in ("warning", "status", "goal_status", "done", ""):
+        assert gateway_chat._gateway_event_blocks_empty_retry(event) is False
+
+
 def test_gateway_chat_backend_only_accepts_explicit_gateway_aliases():
     for value in ("gateway", "api_server", "api-server", " Gateway "):
         assert webui_chat_backend_mode({}, {"HERMES_WEBUI_CHAT_BACKEND": value}) == "gateway"
