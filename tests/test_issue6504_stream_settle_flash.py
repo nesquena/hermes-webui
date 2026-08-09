@@ -10,6 +10,7 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
+UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
 NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -161,18 +162,18 @@ def _run_recovery_case(
     owner = _extract("_ownsActiveStreamOrBackground", source)
     recovery_owner = _extract("_currentPaneRecoveryOwnerLost", source)
     fallback = _extract("_finalizeStreamEndFallback", source)
-    visible = _extract("_visibleLiveAssistantAnswerPresent", source)
+    visible = "function _projectInterruptedAssistantPrefix(){} function _armSettledLiveTurnHandoff(){}"
     reconcile = _extract("_reconcileStreamEndRecoveryExhaustion", source)
     if reconcile_mutation:
         reconcile = reconcile.replace(
-            "_finalizeStreamEndFallback(source,{transportGeneration,preserveVisibleAnswer:true});",
+            "_finalizeStreamEndFallback(source,{transportGeneration,outcome:'interrupted'});",
             "_finalizeStreamEndFallback(source,{transportGeneration});",
             1,
         )
     recovery = _extract("_runStreamEndRecovery", source)
     if fallback_mutation:
         recovery = recovery.replace(
-            "_finalizeStreamEndFallback(source,{transportGeneration,preserveVisibleAnswer:true});",
+            "_finalizeStreamEndFallback(source,{transportGeneration,outcome:'interrupted'});",
             "_finalizeStreamEndFallback(source,{transportGeneration});",
             1,
         )
@@ -250,6 +251,10 @@ def _run_recovery_case(
         globalThis._clearStreamHidden = () => {{}};
         globalThis._clearStreamNotificationBackground = () => {{}};
         globalThis._flushReasoningToAnchor = () => {{}};
+        globalThis._applyToAnchor = () => {{}};
+        globalThis._ensureSingleTerminalStreamErrorMarker = () => {{}};
+        globalThis._attachProjectedAnchorSceneToLastAssistant = () => {{}};
+        globalThis.trackBackgroundError = () => {{}};
         globalThis._scheduleAnchorRegistryCleanup = () => {{}};
         globalThis._clearAnchorProseIncrementalNode = () => {{}};
         globalThis._clearApprovalForOwner = () => {{}};
@@ -323,16 +328,16 @@ def _run_composed_recovery_case(*, exhaustion: bool, fallback_mutation: bool = F
     recovery = _extract("_runStreamEndRecovery")
     reconcile = _extract("_reconcileStreamEndRecoveryExhaustion")
     fallback = _extract("_finalizeStreamEndFallback")
-    visible = _extract("_visibleLiveAssistantAnswerPresent")
+    visible = "function _projectInterruptedAssistantPrefix(){} function _armSettledLiveTurnHandoff(){}"
     wire = _extract("_wireSSE")
     if fallback_mutation:
         recovery = recovery.replace(
-            "_finalizeStreamEndFallback(source,{transportGeneration,preserveVisibleAnswer:true});",
+            "_finalizeStreamEndFallback(source,{transportGeneration,outcome:'interrupted'});",
             "_finalizeStreamEndFallback(source,{transportGeneration});",
             1,
         )
         reconcile = reconcile.replace(
-            "_finalizeStreamEndFallback(source,{transportGeneration,preserveVisibleAnswer:true});",
+            "_finalizeStreamEndFallback(source,{transportGeneration,outcome:'interrupted'});",
             "_finalizeStreamEndFallback(source,{transportGeneration});",
             1,
         )
@@ -353,7 +358,7 @@ def _run_composed_recovery_case(*, exhaustion: bool, fallback_mutation: bool = F
         let _deferredStreamRecoveryBound=false;
         let liveReasoningText='';
         let reasoningText='';
-        let assistantText='final streamed answer';
+        let assistantText='partial streamed prefix';
         let assistantRow=null;
         let assistantBody={{isConnected:true,textContent:assistantText,childSentinel:{{textContent:'child sentinel'}}}};
         const liveAnswerNode=assistantBody;
@@ -387,6 +392,10 @@ def _run_composed_recovery_case(*, exhaustion: bool, fallback_mutation: bool = F
         globalThis._clearStreamHidden=()=>{{}};
         globalThis._clearStreamNotificationBackground=()=>{{}};
         globalThis._flushReasoningToAnchor=()=>{{}};
+        globalThis._applyToAnchor=()=>{{}};
+        globalThis._ensureSingleTerminalStreamErrorMarker=()=>{{}};
+        globalThis._attachProjectedAnchorSceneToLastAssistant=()=>{{}};
+        globalThis.trackBackgroundError=()=>{{}};
         globalThis._scheduleAnchorRegistryCleanup=()=>{{}};
         globalThis._clearAnchorProseIncrementalNode=()=>{{}};
         globalThis._clearApprovalForOwner=()=>{{}};
@@ -532,11 +541,11 @@ def _run_stream_end_restore_failure_case(source_override: str | None = None, eve
     current_owner = _extract("_currentLiveOwnerEntry", source)
     current_owner_active = _extract("_currentLiveOwnerActive", source)
     fallback = _extract("_finalizeStreamEndFallback", source)
-    visible = _extract("_visibleLiveAssistantAnswerPresent", source)
+    visible = "function _projectInterruptedAssistantPrefix(){} function _armSettledLiveTurnHandoff(){}"
     event_body = _extract_event_body("stream_end", source)
     if event_mutation:
         event_body = event_body.replace(
-            "_finalizeStreamEndFallback(source,{transportGeneration,preserveVisibleAnswer:true});",
+            "_finalizeStreamEndFallback(source,{transportGeneration,outcome:'interrupted'});",
             "_finalizeStreamEndFallback(source,{transportGeneration});",
             1,
         )
@@ -554,7 +563,7 @@ def _run_stream_end_restore_failure_case(source_override: str | None = None, eve
         let _persistTimer = null;
         let activeSid = 'sid-1';
         let streamId = 'stream-1';
-        let assistantText = 'final streamed answer';
+        let assistantText = 'partial streamed prefix';
         const liveAnswerNode = {{ isConnected: true, textContent: assistantText,
           childSentinel: {{ textContent: 'child sentinel' }} }};
         const source = {{ readyState: 1, close() {{ closeCalls += 1; this.readyState = 2; }} }};
@@ -576,6 +585,10 @@ def _run_stream_end_restore_failure_case(source_override: str | None = None, eve
         globalThis._clearStreamHidden = () => {{}};
         globalThis._clearStreamNotificationBackground = () => {{}};
         globalThis._flushReasoningToAnchor = () => {{}};
+        globalThis._applyToAnchor = () => {{}};
+        globalThis._ensureSingleTerminalStreamErrorMarker = () => {{}};
+        globalThis._attachProjectedAnchorSceneToLastAssistant = () => {{}};
+        globalThis.trackBackgroundError = () => {{}};
         globalThis._scheduleAnchorRegistryCleanup = () => {{}};
         globalThis._clearAnchorProseIncrementalNode = () => {{}};
         globalThis._clearApprovalForOwner = () => {{}};
@@ -1114,7 +1127,7 @@ def test_active_recovery_exhaustion_switches_to_slow_poll_instead_of_finalizing(
         active=True,
         restore_results=["active"],
         attempts=9,
-        assistant_text="final streamed answer",
+        assistant_text="partial streamed prefix",
     )
 
     assert result["renderCalls"] == 0
@@ -1250,7 +1263,7 @@ def test_error_during_stream_end_recovery_reschedules_on_advanced_generation():
     assert result["recoveryAttempts"] == 10
 
 
-def test_fallback_without_visible_live_answer_still_rebuilds_when_recovery_stops():
+def test_empty_prefix_interruption_still_rebuilds_when_recovery_stops():
     result = _run_recovery_case(
         active=True,
         restore_results=["error"],
@@ -1296,7 +1309,7 @@ def test_long_tail_recovery_reattaches_when_stream_status_stays_active():
         active=True,
         restore_results=["active"],
         attempts=15,
-        assistant_text="final streamed answer",
+        assistant_text="partial streamed prefix",
         stream_status={"active": True},
     )
 
@@ -1307,7 +1320,7 @@ def test_long_tail_recovery_reattaches_when_stream_status_stays_active():
     assert result["pending"] is False
 
 
-def test_direct_error_recovery_preserves_visible_live_answer_until_cleanup_finishes():
+def test_direct_error_recovery_renders_interrupted_prefix_until_cleanup_finishes():
     result = _run_composed_recovery_case(exhaustion=False)
 
     assert result["publishedSource"] is True
@@ -1322,8 +1335,7 @@ def test_direct_error_recovery_preserves_visible_live_answer_until_cleanup_finis
     assert result["sourceReadyState"] == 2
     assert result["closureRetired"] is True
     assert result["activeStreamId"] is None
-    assert result["visibleNodePreserved"] is True
-    assert result["childSentinel"] == "child sentinel"
+    assert result["visibleNodePreserved"] is False
     assert result["finalized"] is True
     assert result["terminal"] is True
 
@@ -1331,7 +1343,7 @@ def test_direct_error_recovery_preserves_visible_live_answer_until_cleanup_finis
     assert mutated["visibleNodePreserved"] is False
 
 
-def test_long_tail_recovery_preserves_visible_live_answer_after_exhaustion_reconcile():
+def test_long_tail_recovery_renders_interrupted_prefix_after_exhaustion_reconcile():
     result = _run_composed_recovery_case(exhaustion=True)
 
     assert result["publishedSource"] is True
@@ -1350,8 +1362,7 @@ def test_long_tail_recovery_preserves_visible_live_answer_after_exhaustion_recon
     assert result["sourceReadyState"] == 2
     assert result["closureRetired"] is True
     assert result["activeStreamId"] is None
-    assert result["visibleNodePreserved"] is True
-    assert result["childSentinel"] == "child sentinel"
+    assert result["visibleNodePreserved"] is False
     assert result["finalized"] is True
     assert result["terminal"] is True
 
@@ -1373,7 +1384,7 @@ def test_apererror_recovers_on_registered_wire_listener_generation():
     assert mutated.returncode != 0 or json.loads(mutated.stdout)["restoreCalls"] == []
 
 
-def test_long_tail_recovery_without_visible_live_answer_still_rebuilds_when_stream_turns_inactive():
+def test_long_tail_recovery_without_prefix_still_rebuilds_when_stream_turns_inactive():
     result = _run_recovery_case(
         active=True,
         restore_results=["active", False],
@@ -1391,13 +1402,11 @@ def test_long_tail_recovery_without_visible_live_answer_still_rebuilds_when_stre
     assert result["finalized"] is True
 
 
-def test_stream_end_restore_failure_preserves_visible_answer_and_finishes_terminal_cleanup():
+def test_stream_end_restore_failure_renders_interrupted_prefix_and_finishes_terminal_cleanup():
     result = _run_stream_end_restore_failure_case()
 
-    assert result["renderCalls"] == 0
-    assert result["visibleNodePreserved"] is True
-    assert result["visibleAnswerText"] == "final streamed answer"
-    assert result["childSentinelText"] == "child sentinel"
+    assert result["renderCalls"] == 1
+    assert result["visibleNodePreserved"] is False
     assert result["finalized"] is True
     assert result["terminal"] is True
     assert result["recoveryPending"] is False
@@ -1417,7 +1426,7 @@ def test_each_visible_answer_fallback_caller_is_mutation_sensitive():
             active=True,
             restore_results=restore_results,
             attempts=attempts,
-            assistant_text="final streamed answer",
+            assistant_text="partial streamed prefix",
             stream_status={"active": False, "replay_available": False},
             fallback_mutation=label == "direct",
             reconcile_mutation=label == "exhaustion",
@@ -1426,6 +1435,97 @@ def test_each_visible_answer_fallback_caller_is_mutation_sensitive():
 
     result = _run_stream_end_restore_failure_case(event_mutation=True)
     assert result["renderCalls"] == 1
+
+
+def test_settlement_rebuild_uses_admission_and_interrupted_projection_contract():
+    assert "_visibleLiveAssistantAnswerPresent" not in MESSAGES_JS
+    assert "preserveVisibleAnswer" not in MESSAGES_JS
+    fallback = _extract("_finalizeStreamEndFallback")
+    assert "const settled=options&&options.outcome==='settled'&&_settlementAdmitted(transportGeneration);" in fallback
+    assert "_projectInterruptedAssistantPrefix" in fallback
+    assert "_markSessionCompletionUnread" not in fallback
+    assert fallback.count("_flushReasoningToAnchor();")==1
+    for caller in (
+        "_reconcileStreamEndRecoveryExhaustion",
+        "_runStreamEndRecovery",
+    ):
+        assert "outcome:'interrupted'" in _extract(caller)
+    assert "outcome:'interrupted'" in _extract_event_body("stream_end")
+    assert "journal.terminal_state" not in MESSAGES_JS
+
+
+def test_settlement_handoff_is_one_shot_and_renderer_owned():
+    assert "let _liveTurnSettlementHandoff=null;" in UI_JS
+    assert "_settlementHandoffMatchesOwner" in UI_JS
+    render = _extract("renderMessages", UI_JS)
+    assert "const _settlementHandoff=_liveTurnSettlementHandoff;" in render
+    assert "_liveTurnSettlementHandoff=null;" in render
+    assert "if(sid&&(INFLIGHT[sid]||_settlementHandoffMatchesOwner(_settlementHandoff,sid)))" in render
+    handoff_block=render[render.find("let _preservedLiveTurn"):render.find("let _preservedLiveTurn")+1800]
+    assert "S.messages=" not in handoff_block
+    assert "S.activeStreamId=" not in handoff_block
+
+
+def test_production_handoff_rejects_same_session_replacement_owner():
+    matcher=_extract("_settlementHandoffMatchesOwner", UI_JS)
+    script=textwrap.dedent(
+        """
+        globalThis.window={_liveTurnSettlementOwnerKeys:{sid:{
+          sessionId:'sid',streamId:'stream-new',ownerToken:2,transportGeneration:4
+        }}};
+        """
+        + matcher
+        + """
+        const base={sessionId:'sid',streamId:'stream-new',ownerToken:2,transportGeneration:4};
+        const variants=[
+          {...base,streamId:'stream-old'},
+          {...base,ownerToken:1},
+          {...base,transportGeneration:3},
+          {...base,sessionId:'other'},
+        ];
+        console.log(JSON.stringify({
+          accepted:_settlementHandoffMatchesOwner(base,'sid'),
+          rejected:variants.map(key=>_settlementHandoffMatchesOwner(key,'sid'))
+        }));
+        """
+    )
+    proc=_run_node_script(script)
+    assert proc.returncode==0, proc.stderr
+    result=json.loads(proc.stdout)
+    assert result=={"accepted":True,"rejected":[False,False,False,False]}
+
+
+def test_production_interrupted_projection_keeps_repeated_prefix_turns_distinct():
+    project=_extract("_projectInterruptedAssistantPrefix")
+    script=textwrap.dedent(
+        """
+        let assistantText='same answer';
+        let liveReasoningText='';
+        let activeSid='sid';
+        let streamId='stream-current';
+        let _interruptedPrefixProjected=false;
+        globalThis.INFLIGHT={sid:{toolCalls:[]}};
+        globalThis.S={session:{session_id:'sid'},messages:[
+          {role:'assistant',content:'same answer',_ts:1}
+        ]};
+        globalThis._isSessionCurrentPane=()=>true;
+        """
+        + project
+        + """
+        _projectInterruptedAssistantPrefix();
+        _projectInterruptedAssistantPrefix();
+        console.log(JSON.stringify({
+          count:S.messages.length,
+          current:S.messages[1]
+        }));
+        """
+    )
+    proc=_run_node_script(script)
+    assert proc.returncode==0, proc.stderr
+    result=json.loads(proc.stdout)
+    assert result["count"]==2
+    assert result["current"]["content"]=="same answer"
+    assert result["current"]["_interrupted"] is True
 
 
 def test_long_tail_recovery_does_not_reattach_stale_stream_over_replacement_owner():

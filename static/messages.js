@@ -2051,6 +2051,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(INFLIGHT[activeSid].currentLiveSegmentSeq===undefined) INFLIGHT[activeSid].currentLiveSegmentSeq=0;
   let assistantText='';
   let reasoningText='';
+  let _interruptedPrefixProjected=false;
   if(S.session&&S.session.session_id===activeSid&&S.activeStreamId===streamId&&typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
   const existingLive=LIVE_STREAMS[activeSid];
   if(
@@ -2083,6 +2084,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _liveTransportGenerationSeq=1;
   LIVE_STREAMS[activeSid]={streamId,source:null,ownerToken:_liveOwnerToken};
   LIVE_STREAMS[activeSid].transportGeneration=_liveTransportGenerationSeq;
+  if(typeof window!=='undefined'){
+    const _ownerKeys=window._liveTurnSettlementOwnerKeys||(window._liveTurnSettlementOwnerKeys={});
+    _ownerKeys[activeSid]={sessionId:activeSid,streamId,ownerToken:_liveOwnerToken,transportGeneration:_liveTransportGenerationSeq};
+  }
   if(!reconnecting&&typeof resetTurnWorkspaceMutations==='function') resetTurnWorkspaceMutations();
   if(!reconnecting&&typeof _resetStreamScrollFollow==='function') _resetStreamScrollFollow();
   // Phase D: restore bottom run status after closeLiveStream(); that helper
@@ -2158,6 +2163,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // On reconnect, the assistantBody already has partial smd-rendered content.
   // We clear it on first new token and restart the parser from the reconnect point.
   let _smdReconnect=reconnecting;
+  let _settlementAdmission=null;
   function _isActiveSession(){
     return !!(S.session&&S.session.session_id===activeSid);
   }
@@ -2210,6 +2216,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _nextLiveTransportGeneration(){
     _liveTransportGenerationSeq+=1;
     return _liveTransportGenerationSeq;
+  }
+  function _admitSemanticSettlement(kind,transportGeneration){
+    if(!_currentLiveOwnerActive(transportGeneration)||!_ownsActiveStreamOrBackground()) return false;
+    _settlementAdmission={kind,sessionId:activeSid,streamId,ownerToken:_liveOwnerToken,generation:transportGeneration};
+    return true;
+  }
+  function _settlementAdmitted(transportGeneration){
+    const admission=_settlementAdmission;
+    return !!(admission&&admission.sessionId===activeSid&&admission.streamId===streamId&&
+      admission.ownerToken===_liveOwnerToken&&admission.generation===transportGeneration&&
+      _currentLiveOwnerActive(transportGeneration)&&_ownsActiveStreamOrBackground());
   }
   function _ownsActiveStreamOrBackground(){
     return !_isActiveSession() || S.activeStreamId===streamId;
@@ -2392,6 +2409,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       return;
     }
     _closureRetired=true;
+    _settlementAdmission=null;
     if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
     _cancelThrottledSnapshotTimer();
     _clearStreamEndRecovery(transportGeneration);
@@ -2491,23 +2509,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       void _runStreamEndRecovery(source,activeTransportGeneration);
     },delay);
   }
-  function _visibleLiveAssistantAnswerPresent(){
-    if(!_isActiveSession()) return false;
-    const liveBody=(assistantBody&&assistantBody.isConnected)
-      ? assistantBody
-      : (typeof document!=='undefined'
-          ? (($('liveAssistantTurn')||{}).querySelector&&$('liveAssistantTurn').querySelector('.assistant-segment[data-live-assistant="1"] .msg-body,[data-live-assistant="1"] .msg-body'))
-          : null);
-    return !!(
-      String(assistantText||'').trim()
-      && String(liveBody&&liveBody.textContent||'').trim()
-    );
-  }
   function _finalizeStreamEndFallback(source, options=null){
     const live=_currentLiveOwnerEntry();
     const transportGeneration=options&&typeof options.transportGeneration==='number'
       ? options.transportGeneration : null;
     if(!_currentLiveOwnerActive(transportGeneration) || !_ownsActiveStreamOrBackground()) return false;
+    const settled=options&&options.outcome==='settled'&&_settlementAdmitted(transportGeneration);
     _clearStreamEndRecovery(transportGeneration);
     if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
     _cancelThrottledSnapshotTimer();
@@ -2517,24 +2524,51 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _streamFadeCleanupReduceMotionListener();
     _smdEndParser();
     if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
-    _clearOwnerInflightState();
+    const isCurrentPane=_isSessionCurrentPane(activeSid);
+    if(settled&&isCurrentPane&&typeof _armSettledLiveTurnHandoff==='function') _armSettledLiveTurnHandoff(transportGeneration);
     _clearStreamHidden(activeSid, streamId);  // #4416: terminal path, drop hidden tracker
     _clearStreamNotificationBackground(activeSid, streamId);
+    if(!settled&&isCurrentPane&&typeof _projectInterruptedAssistantPrefix==='function') _projectInterruptedAssistantPrefix();
     _flushReasoningToAnchor();
     _scheduleAnchorRegistryCleanup();
     _clearAnchorProseIncrementalNode();
     _clearApprovalForOwner();
     _clearClarifyForOwner('terminal');
-    const preserveVisibleAnswer=!!(options&&options.preserveVisibleAnswer)&&_visibleLiveAssistantAnswerPresent();
+    if(!settled&&isCurrentPane){
+      _applyToAnchor('error',{status:'connection_lost',message:'The browser lost the live SSE connection before the response finished.',session_id:activeSid},null);
+      _ensureSingleTerminalStreamErrorMarker(S.messages);
+      _attachProjectedAnchorSceneToLastAssistant(S.messages);
+    }
+    _clearOwnerInflightState();
     _closeSource(source,{transportGeneration});
-    if(_isActiveSession()){
+    if(isCurrentPane){
       S.activeStreamId=null;
       clearLiveToolCards();if(!assistantText)removeThinking();
-      if(!preserveVisibleAnswer) renderMessages({preserveScroll:true});
+      renderMessages({preserveScroll:true});
+    }else if(!settled&&typeof trackBackgroundError==='function'){
+      const _errTitle=(typeof _allSessions!=='undefined'&&_allSessions.find(s=>s.session_id===activeSid)||{}).title||null;
+      trackBackgroundError(activeSid,_errTitle,'Connection interrupted');
     }
     renderSessionList();
     _setActivePaneIdleIfOwner();
     return true;
+  }
+  function _projectInterruptedAssistantPrefix(){
+    const prefix=String(assistantText||'');
+    if(_interruptedPrefixProjected||!prefix.trim()||!_isSessionCurrentPane(activeSid)||!Array.isArray(S.messages)) return;
+    _interruptedPrefixProjected=true;
+    S.messages.push({role:'assistant',content:prefix,_ts:Date.now()/1000,_interrupted:true,
+      reasoning:(liveReasoningText||undefined),
+      _partial_tool_calls:(INFLIGHT[activeSid]&&INFLIGHT[activeSid].toolCalls)||undefined});
+  }
+  function _armSettledLiveTurnHandoff(transportGeneration){
+    if(!_currentLiveOwnerActive(transportGeneration)||!_ownsActiveStreamOrBackground()||
+      !_isSessionCurrentPane(activeSid)||!_settlementAdmitted(transportGeneration)) return false;
+    if(typeof window!=='undefined'&&typeof window.armLiveTurnSettlementHandoff==='function'){
+      window.armLiveTurnSettlementHandoff({sessionId:activeSid,streamId,ownerToken:_liveOwnerToken,transportGeneration});
+      return true;
+    }
+    return false;
   }
   async function _reconcileStreamEndRecoveryExhaustion(source,transportGeneration){
     const live=_currentLiveOwnerEntry();
@@ -2571,7 +2605,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _clearStreamEndRecovery(transportGeneration);
       return true;
     }
-    _finalizeStreamEndFallback(source,{transportGeneration,preserveVisibleAnswer:true});
+    _finalizeStreamEndFallback(source,{transportGeneration,outcome:'interrupted'});
     return true;
   }
   async function _runStreamEndRecovery(source,transportGeneration){
@@ -2616,7 +2650,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       await _reconcileStreamEndRecoveryExhaustion(nextRecoverySource,nextRecoveryTransportGeneration);
       return;
     }
-    _finalizeStreamEndFallback(source,{transportGeneration,preserveVisibleAnswer:true});
+    _finalizeStreamEndFallback(source,{transportGeneration,outcome:'interrupted'});
   }
   function _stripLiveVisibleAssistantEchoFromThinking(text, snippets){
     let out=String(text||'');
@@ -5838,6 +5872,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       ? _nextLiveTransportGeneration()
       : ((typeof existingLive.transportGeneration==='number' ? existingLive.transportGeneration : 1)+1);
     LIVE_STREAMS[activeSid]={...existingLive,streamId,source:candidate,transportGeneration};
+    if(typeof window!=='undefined'){
+      const _ownerKeys=window._liveTurnSettlementOwnerKeys||(window._liveTurnSettlementOwnerKeys={});
+      _ownerKeys[activeSid]={sessionId:activeSid,streamId,ownerToken:_liveOwnerToken,transportGeneration};
+    }
+    _settlementAdmission=null;
     const source=candidate;
 
     // Note on #631 Bug B: the original PR description stated the server
@@ -6255,6 +6294,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     source.addEventListener('done',e=>{
       if(_streamFinalized) return;
       if(!_currentLiveEventSourceOwnsStream(source,transportGeneration)) return;
+      if(typeof _admitSemanticSettlement==='function') _admitSemanticSettlement('done',transportGeneration);
       _clearStreamEndRecovery(transportGeneration);
       // Set _streamFinalized IMMEDIATELY — before any fade delay. Without this,
       // a stream_end event arriving during the fade window sees
@@ -6320,6 +6360,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           _markSessionCompletionUnread(completedSid, completedMessageCount);
         }
         if(isSessionViewed) _markSessionViewed(completedSid, completedMessageCount);
+        if(typeof _armSettledLiveTurnHandoff==='function') _armSettledLiveTurnHandoff(transportGeneration);
         _clearOwnerInflightState();
         if(typeof _markSessionCompletedInList==='function'){
           _markSessionCompletedInList(completedSession, activeSid);
@@ -6608,7 +6649,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _scheduleStreamEndRecovery(source,200,transportGeneration);
         return;
       }
-      _finalizeStreamEndFallback(source,{transportGeneration,preserveVisibleAnswer:true});
+      _finalizeStreamEndFallback(source,{transportGeneration,outcome:'interrupted'});
     });
 
     source.addEventListener('pending_steer_leftover',e=>{
@@ -6727,6 +6768,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('apperror',e=>{
       if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
+      if(typeof _admitSemanticSettlement==='function') _admitSemanticSettlement('apperror',transportGeneration);
       _clearStreamEndRecovery(transportGeneration);
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
@@ -6873,6 +6915,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     source.addEventListener('error',async e=>{
       const _errorLive=_currentLiveOwnerEntry();
       if(!_errorLive || _errorLive.source!==source || !_ownsActiveStreamOrBackground()) return;
+      if(typeof _admitSemanticSettlement==='function') _admitSemanticSettlement('error',transportGeneration);
       _rememberRunJournalCursor(e,transportGeneration);
       if(_terminalStateReached || _streamFinalized){
         const completionLease=_acceptedCompletionLease;
@@ -7026,6 +7069,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('cancel',e=>{
       if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
+      if(typeof _admitSemanticSettlement==='function') _admitSemanticSettlement('cancel',transportGeneration);
       _clearStreamEndRecovery(transportGeneration);
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
@@ -7246,6 +7290,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const session=data&&data.session;
       if(!session) return returnStatus?'missing':false;
       if(session.active_stream_id||session.pending_user_message) return returnStatus?'active':false;
+      if(_restoreStartedAsCurrentPane){
+        if(_restoreOwnerLost()) return _staleRestoreResult();
+      }else if(_restoreBackgroundOwnerLost()){
+        return _staleRestoreResult();
+      }
+      if(typeof _admitSemanticSettlement==='function') _admitSemanticSettlement('settled-session',transportGeneration);
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _cancelThrottledSnapshotTimer();
       _clearAnchorProseIncrementalNode();
@@ -7254,6 +7304,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _streamFadeCleanupReduceMotionListener();
       _smdEndParser();
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
+      if(_isSessionCurrentPane(activeSid)&&typeof _armSettledLiveTurnHandoff==='function') _armSettledLiveTurnHandoff(transportGeneration);
       _clearOwnerInflightState();
       _flushReasoningToAnchor();
       _scheduleAnchorRegistryCleanup();
