@@ -211,6 +211,29 @@ console.log(JSON.stringify({
     assert result["active"] == result["a"]
 
 
+def test_contextless_row_identity_fails_closed_and_busy_streaming_stays_scoped():
+    result = _run_node(_harness("""
+const rowA = {session_id:'same', profile_scope:'work', project_id:'projA'};
+const rowB = {session_id:'same', profile_scope:'work', project_id:'projB'};
+global._allSessions = [rowA, rowB];
+global.S = {session:rowA, busy:true};
+const context = _createSidebarRuntimeContext(global._allSessions, []);
+eval(extractFunc('_isSessionLocallyStreaming'));
+console.log(JSON.stringify({
+  contextlessKey:_sidebarRuntimeIdentityKey(rowB),
+  activeA:_isSessionLocallyStreaming(rowA, context),
+  foreignB:_isSessionLocallyStreaming(rowB, context),
+  contextlessBusy:_isSessionLocallyStreaming(rowA),
+}));
+"""))
+    assert result == {
+        "contextlessKey": None,
+        "activeA": True,
+        "foreignB": False,
+        "contextlessBusy": True,
+    }
+
+
 def test_runtime_context_precomputes_many_keys_without_rebuilding_the_lineage_index():
     result = _run_node(_harness("""
 const rows = [];
@@ -271,12 +294,13 @@ global._sessionListSnapshotById = new Map();
 global._sessionListSourceById = new Map();
 global._sessionObservedStreaming = {};
 global.S = {activeProfile:'profile-a', session:null};
+let mergeContext = null;
 let pruneCalls = [];
 global._pruneLineageReportCacheToVisibleSessions = (rows,index,context) => {
   pruneCalls.push({rows,index,context});
 };
 global._reconcileActiveSessionIdleStateFromList = () => false;
-global._mergeOptimisticFirstTurnSessions = rows => rows;
+global._mergeOptimisticFirstTurnSessions = (rows, context) => { mergeContext = context; return rows; };
 global._syncSessionAttentionSoundState = () => {};
 global._recordSessionProfileCount = () => {};
 global._markPollingCompletionUnreadTransitions = rows => {
@@ -308,12 +332,13 @@ _applySessionListPayload({
 }, {projects:[]});
 const context = pruneCalls[0].context;
 console.log(JSON.stringify({buildCount, pruneCalls:pruneCalls.length,
+  mergeUsesContext:mergeContext === pruneCalls[0].context,
   sameKeys:context.key(context.rows.find(row => row.session_id === 'same'), 'same') !==
     context.key(context.rows.find(row => row.session_id === 'same' && row.profile_scope === 'profile-b'), 'same'),
   sameIndex:pruneCalls[0].index === context.index,
   cronSource:global._allSessions.find(row => row.session_id === 'cron-running').cron_running}));
 """))
-    assert result == {"buildCount": 1, "pruneCalls": 1, "sameKeys": True, "sameIndex": True, "cronSource": True}
+    assert result == {"buildCount": 1, "pruneCalls": 1, "mergeUsesContext": True, "sameKeys": True, "sameIndex": True, "cronSource": True}
 
 
 def test_viewed_and_completion_state_keep_duplicate_session_ids_scoped():

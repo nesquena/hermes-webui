@@ -290,11 +290,11 @@ def test_session_removal_reflows_surviving_rows_smoothly():
     delete_request = delete_body.find("const deleteRequest=api('/api/session/delete'")
     hold_await = delete_body.find("await beforeDeleteHold;", hold_start)
     optimistic_set = delete_body.find("_optimisticallyRemovedSessionIds.add(optimisticSessionKey);")
-    optimistic_remove = delete_body.find("_optimisticallyRemoveSessionFromList(sid,session);", optimistic_set)
+    optimistic_remove = delete_body.find("_optimisticallyRemoveSessionFromList(sid,session,operationContext);", optimistic_set)
     response_await = delete_body.find("const deleteResult=await deleteRequest;")
     rollback = delete_body.find("_optimisticallyRemovedSessionIds.delete(optimisticSessionKey);")
     final_render = delete_body.find("void renderSessionList().finally(()=>_optimisticallyRemovedSessionIds.delete(optimisticSessionKey));")
-    cached_remove = _sessions_block("function _optimisticallyRemoveSessionFromList(sid, row = null){", "function _sessionIdFromLocation")
+    cached_remove = _sessions_block("function _optimisticallyRemoveSessionFromList(sid, row = null, runtimeContext=null){", "function _sessionIdFromLocation")
     assert "_allSessions=_allSessions.filter(s=>!s||runtimeKeyFor(s,sid)!==targetKey);" in cached_remove
     assert "renderSessionListFromCache();" in cached_remove
     assert delete_body.find("const reflowPositions=_captureSessionReflowPositions();") < hold_start < delete_request < hold_await < optimistic_set < optimistic_remove < response_await < rollback < final_render

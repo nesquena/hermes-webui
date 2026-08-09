@@ -2534,9 +2534,9 @@ def test_streaming_state_recorded_from_own_state_not_bubbled_child():
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
     # The pattern we need: ownStreaming used for remember, isStreaming used
     # for rendering (includes child).
-    assert "const ownStreaming=_isSessionEffectivelyStreaming(s);" in js
+    assert "const ownStreaming=_isSessionEffectivelyStreaming(s,runtimeContext);" in js
     assert "const isStreaming=ownStreaming||!!s._child_session_streaming;" in js
-    assert "_rememberRenderedStreamingState(s, ownStreaming);" in js
+    assert "_rememberRenderedStreamingState(s, ownStreaming, runtimeContext);" in js
     # The old buggy pattern must not exist.
     assert "_rememberRenderedStreamingState(s, isStreaming);" not in js
 

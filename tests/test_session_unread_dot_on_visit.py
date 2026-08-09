@@ -51,7 +51,7 @@ def _function_block(name: str, next_marker: str) -> str:
 
 def test_visit_ack_helpers_exist():
     assert "function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0)" in SESSIONS_JS
-    assert "function _syncSessionListSnapshotOnVisit(sid, messageCount, lastMessageAt)" in SESSIONS_JS
+    assert "function _syncSessionListSnapshotOnVisit(sid, messageCount, lastMessageAt, runtimeContext=null)" in SESSIONS_JS
     assert "function _sessionVisitHasUnreadState(sid)" in SESSIONS_JS
 
 
@@ -59,8 +59,8 @@ def test_acknowledge_visit_syncs_viewed_snapshot_and_repaints():
     body = _function_block("_acknowledgeSessionVisit", "function _sessionVisitHasUnreadState")
     # Clears viewed count (which clears the stale completion-unread marker, #3020),
     # syncs the polling snapshot, and repaints the sidebar from cache.
-    assert "_setSessionViewedCount(sid, messageCount);" in body
-    assert "_syncSessionListSnapshotOnVisit(sid, messageCount, lastMessageAt);" in body
+    assert "_setSessionViewedCount(sid, messageCount, null, operationContext);" in body
+    assert "_syncSessionListSnapshotOnVisit(sid, messageCount, lastMessageAt, operationContext);" in body
     assert "renderSessionListFromCache" in body
 
 
@@ -120,7 +120,7 @@ def test_completion_paths_keep_focus_gate_for_hidden_tab_completions():
     focus-gated _isSessionActivelyViewedForList, not a focus-independent variant.
     """
     background = _function_block("_markSessionCompletionUnreadIfBackground", "function _clearSessionCompletionUnread")
-    assert "_isSessionActivelyViewedForList(sid, stateRow)" in background, (
+    assert "_isSessionActivelyViewedForList(sid, stateRow, operationContext)" in background, (
         "background completion must keep the focus-gated read check so a hidden-tab "
         "completion is not prematurely marked read"
     )
@@ -128,7 +128,7 @@ def test_completion_paths_keep_focus_gate_for_hidden_tab_completions():
     polling_start = SESSIONS_JS.index("function _markPollingCompletionUnreadTransitions(sessions, runtimeContext=null)")
     polling_end = SESSIONS_JS.index("const staleRuntimeStateSids", polling_start)
     polling = SESSIONS_JS[polling_start:polling_end]
-    assert "!_isSessionActivelyViewedForList(sid, s, operationContext)" in polling, (
+    assert "!_isSessionActivelyViewedForList(sid, s, sharedContext)" in polling, (
         "polling completion must keep the focus-gated read check so a hidden-tab "
         "completion is not prematurely marked read"
     )
