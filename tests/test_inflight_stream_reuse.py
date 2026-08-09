@@ -182,7 +182,7 @@ def test_load_session_same_sid_noop_does_not_mask_pending_switch_back():
     assert guard_pos < compact.find("_loadingSessionId=sid;")
     # The guarded block must still early-return for the same-session no-op,
     # while now also acknowledging the visit to clear a stale unread dot.
-    assert "_sessionVisitHasUnreadState(sid)" in compact[guard_pos:guard_pos + 600]
+    assert "_sessionVisitHasUnreadState(sid,S.session)" in compact[guard_pos:guard_pos + 600]
     assert "return;}" in compact[guard_pos:guard_pos + 900]
 
 

@@ -2035,7 +2035,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!activeSid||!streamId) return;
   const _messageOperationRow=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id===activeSid)
     ?S.session:null;
-  const _messageOperationContext=_messageRuntimeContextForRow(_messageOperationRow);
+  const _messageOperationContext=typeof _messageRuntimeContextForRow==='function'
+    ?_messageRuntimeContextForRow(_messageOperationRow)
+    :null;
   const reconnecting=!!options.reconnecting;
   // #4416: start (or, on reconnect for the SAME stream, keep) tracking whether
   // the tab was hidden during this stream so the done-notification fires for a
@@ -6034,7 +6036,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const isSessionViewed=_isSessionActivelyViewed(activeSid);
         const completedSession=d.session||{session_id:activeSid};
         const completedSid=completedSession.session_id||activeSid;
-        const _completionOperationContext=_messageRuntimeContextForRow(completedSession);
+        const _completionOperationContext=typeof _messageRuntimeContextForRow==='function'
+          ?_messageRuntimeContextForRow(completedSession)
+          :null;
         const completedMessageCount=completedSession.message_count != null
           ? completedSession.message_count
           : (
@@ -6876,7 +6880,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _clearClarifyForOwner('terminal');
       const isSessionViewed=_isSessionActivelyViewed(activeSid);
       const completedSid=session.session_id||activeSid;
-      const _completionOperationContext=_messageRuntimeContextForRow(session);
+      const _completionOperationContext=typeof _messageRuntimeContextForRow==='function'
+        ?_messageRuntimeContextForRow(session)
+        :null;
       if(!isSessionViewed && typeof _markSessionCompletionUnread==='function'){
         _markSessionCompletionUnread(completedSid, session.message_count, null, session, _completionOperationContext);
       }

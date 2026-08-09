@@ -1947,9 +1947,11 @@ async function newSession(flash, options={}){
     try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
     _setActiveSessionUrl(S.session.session_id);
     if(typeof startSessionStream==='function') startSessionStream(S.session.session_id);
-    const newSessionRuntimeContext=_createSidebarRuntimeContext(
-      [...(Array.isArray(_allSessions)?_allSessions:[]),S.session],
-      typeof _sidebarReferenceSessions!=='undefined'?_sidebarReferenceSessions:[]);
+    const newSessionRuntimeContext=typeof _createSidebarRuntimeContext==='function'
+      ?_createSidebarRuntimeContext(
+        [...(Array.isArray(_allSessions)?_allSessions:[]),S.session],
+        typeof _sidebarReferenceSessions!=='undefined'?_sidebarReferenceSessions:[])
+      :null;
     _setSessionViewedCount(S.session.session_id, S.session.message_count || 0, S.session, newSessionRuntimeContext);
     // Sync chat-header dropdown to the session's model/provider so the UI reflects
     // the default route the server actually used (#872). Compare provider state too:
@@ -3668,9 +3670,11 @@ async function _ensureMessagesLoaded(sid, opts) {
     // read here — mirror the same _isSessionActivelyViewedForList(sid) guard
     // used on the post-load re-ack in loadSession(). (#5917 gate finding)
     if(typeof _isSessionActivelyViewedForList !== 'function' || _isSessionActivelyViewedForList(sid)){
-      const loadRuntimeContext=_createSidebarRuntimeContext(
-        [...(Array.isArray(_allSessions)?_allSessions:[]),...(S.session?[S.session]:[])],
-        typeof _sidebarReferenceSessions!=='undefined'?_sidebarReferenceSessions:[]);
+      const loadRuntimeContext=typeof _createSidebarRuntimeContext==='function'
+        ?_createSidebarRuntimeContext(
+          [...(Array.isArray(_allSessions)?_allSessions:[]),...(S.session?[S.session]:[])],
+          typeof _sidebarReferenceSessions!=='undefined'?_sidebarReferenceSessions:[])
+        :null;
       _setSessionViewedCount(sid, Number(S.session.message_count || msgs.length), S.session, loadRuntimeContext);
     }
     if(typeof syncTopbar==='function') syncTopbar();
