@@ -238,6 +238,36 @@ def test_overlay_nested_job_prefixes_do_not_cross_claim(monkeypatch):
     assert rows[0]["cron_running"] is True
 
 
+def test_overlay_shorter_running_job_cannot_claim_longer_job_session(monkeypatch):
+    """A running `backup` must NOT claim a `backup_full` session when only
+
+    `backup` is running (#6728 gate finding). Prefixes are built ONLY from
+    RUNNING jobs, so if `backup_full` is not running, longest-prefix sorting
+    never sees the true longer owner and `cron_backup_` would otherwise swallow
+    `cron_backup_full_YYYYMMDD_HHMMSS`. The remainder after the matched prefix
+    must be EXACTLY a run timestamp, so `full_20260803_210000` is rejected.
+    """
+    import api.routes as routes
+    import api.route_session_list_cache as slc
+
+    # Only `backup` is running; `backup_full` is NOT tracked.
+    monkeypatch.setattr(routes, "_RUNNING_CRON_JOBS", {"backup": 1000.0})
+    monkeypatch.setattr(slc, "_session_list_cache_active_stream_ids", lambda: set())
+
+    rows = slc._session_list_cache_overlay_runtime_rows(
+        [
+            _cron_row("cron_backup_20260803_100000", created_at=1100),
+            _cron_row("cron_backup_full_20260803_210000", created_at=2100),
+        ]
+    )
+    by_sid = {row["session_id"]: row for row in rows}
+    # The genuine `backup` run is live.
+    assert by_sid["cron_backup_20260803_100000"]["cron_running"] is True
+    # The `backup_full` session must stay completed — `backup`'s prefix leaves
+    # `full_20260803_210000`, which is not a bare run timestamp.
+    assert by_sid["cron_backup_full_20260803_210000"]["cron_running"] is False
+
+
 def test_sidebar_response_preserves_cron_running(monkeypatch):
     import api.routes as routes
 

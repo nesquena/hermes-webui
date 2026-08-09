@@ -2,6 +2,7 @@
 
 import os
 import copy
+import re
 import threading
 import time
 from collections import OrderedDict
@@ -10,6 +11,14 @@ from pathlib import Path
 from api.config import LOCK, SESSION_DIR, SESSIONS, SETTINGS_FILE
 from api.models import _active_state_db_path, _active_stream_ids
 from api.profiles import _profiles_match
+
+
+# Cron session ids are ``cron_{job_id}_{run_timestamp}`` where the run
+# timestamp is ``YYYYMMDD_HHMMSS`` (e.g. cron_job6728_20260803_100000). Used to
+# validate that the text after a matched ``cron_{jid}_`` prefix is EXACTLY a run
+# timestamp, so a shorter job id (backup) cannot claim a longer job id's session
+# (backup_full) when the longer job is not itself running (#6728 gate fix).
+_CRON_RUN_TS_RE = re.compile(r"\d{8}_\d{6}")
 
 
 _SESSIONS_CACHE_TTL_SECONDS = 2.5
@@ -511,10 +520,18 @@ def _session_list_row_cron_running(
     # would let a running shorter-prefix job claim a completed longer-prefix
     # session. Mirrors the max(matches, key=len) convention in
     # api.routes._latest_cron_session_info_for_jobs.
+    #
+    # #6728 (gate fix): prefixes are built ONLY from RUNNING jobs, so if the
+    # true longer owner (backup_full) is not running, longest-prefix sorting
+    # never sees it and a running `backup` would otherwise swallow a
+    # `cron_backup_full_YYYYMMDD_HHMMSS` session (the leftover `full_...` still
+    # starts with nothing it should match). Require the text AFTER the prefix to
+    # be exactly a run-timestamp (YYYYMMDD_HHMMSS) so a shorter job id cannot
+    # claim a longer job id's session regardless of which jobs are running.
     for _jid, prefix, started_at in sorted(
         cron_job_prefixes, key=lambda item: len(item[1]), reverse=True
     ):
-        if sid.startswith(prefix):
+        if sid.startswith(prefix) and _CRON_RUN_TS_RE.fullmatch(sid[len(prefix):]):
             return created_at >= started_at
     return False
 
