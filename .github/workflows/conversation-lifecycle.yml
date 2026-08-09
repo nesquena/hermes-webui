@@ -12,6 +12,7 @@ on:
       - 'api/**.py'
       - 'server.py'
       - 'tests/browser_conversation_lifecycle.py'
+      - 'tests/test_issue6504_stream_settle_flash.py'
       - 'tests/browser_historical_transcript_hydration.py'
       - 'requirements*.txt'
       - 'pyproject.toml'
@@ -23,6 +24,7 @@ on:
       - 'api/**.py'
       - 'server.py'
       - 'tests/browser_conversation_lifecycle.py'
+      - 'tests/test_issue6504_stream_settle_flash.py'
       - 'tests/browser_historical_transcript_hydration.py'
       - 'requirements*.txt'
       - 'pyproject.toml'
@@ -78,6 +80,24 @@ jobs:
           LIFECYCLE_SCENARIO: normal
           LIFECYCLE_TEST_BITE: settle-worklog-frame-proof
         run: python tests/browser_conversation_lifecycle.py
+
+      - name: Run issue 6504 DOM oracle
+        if: matrix.scenario == 'normal'
+        env:
+          LIFECYCLE_ARTIFACT_DIR: lifecycle-artifacts
+          LIFECYCLE_SCENARIO: normal
+          LIFECYCLE_TEST_BITE: issue6504-settlement-dom-oracle
+        run: python -m pytest tests/test_issue6504_stream_settle_flash.py -k test_issue6504_dom_oracle --no-header --no-summary -q
+
+      - name: Run issue 6504 DOM oracle mutations
+        if: matrix.scenario == 'normal'
+        env:
+          LIFECYCLE_ARTIFACT_DIR: lifecycle-artifacts
+          LIFECYCLE_SCENARIO: normal
+          LIFECYCLE_TEST_BITE: issue6504-settlement-dom-oracle
+        run: |
+          LIFECYCLE_UI_MUTATION=drop-valid-handoff-preserve python -m pytest tests/test_issue6504_stream_settle_flash.py -k 'test_issue6504_dom_oracle_mutation_fails and drop_valid_handoff_preserve' -q
+          LIFECYCLE_UI_MUTATION=drop-canonical-scene-suppression python -m pytest tests/test_issue6504_stream_settle_flash.py -k 'test_issue6504_dom_oracle_mutation_fails and canonical_scene_suppression' -q
 
       - name: Upload failure artifacts
         if: failure()

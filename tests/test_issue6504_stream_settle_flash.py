@@ -1,6 +1,8 @@
 import json
+import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import textwrap
 from pathlib import Path
@@ -12,9 +14,6 @@ REPO = Path(__file__).resolve().parents[1]
 MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
 UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
 NODE = shutil.which("node")
-
-pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
-
 
 def _extract(name: str, source: str = MESSAGES_JS) -> str:
     marker = f"async function {name}("
@@ -111,6 +110,8 @@ def _extract_restore_timeout_body() -> str:
 
 
 def _run_node_script(script: str) -> subprocess.CompletedProcess[str]:
+    if NODE is None:
+        pytest.skip("node not on PATH")
     wrapped = textwrap.dedent(
         f"""
         (async()=>{{
@@ -139,6 +140,71 @@ def _run_node_script(script: str) -> subprocess.CompletedProcess[str]:
         )
     finally:
         script_path.unlink(missing_ok=True)
+
+
+def _run_issue6504_browser(mutation: str = "") -> subprocess.CompletedProcess[str]:
+    pytest.importorskip("playwright.sync_api")
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        if not Path(playwright.chromium.executable_path).exists():
+            pytest.skip("Chromium is not installed for Playwright")
+    env = os.environ.copy()
+    env.update({
+        "LIFECYCLE_SCENARIO": "normal",
+        "LIFECYCLE_TEST_BITE": "issue6504-settlement-dom-oracle",
+    })
+    if mutation:
+        env["LIFECYCLE_UI_MUTATION"] = mutation
+    else:
+        env.pop("LIFECYCLE_UI_MUTATION", None)
+    with tempfile.TemporaryDirectory(prefix="issue6504-browser-", ignore_cleanup_errors=True) as artifact_dir:
+        env["LIFECYCLE_ARTIFACT_DIR"] = artifact_dir
+        try:
+            return subprocess.run(
+                [sys.executable, str(REPO / "tests" / "browser_conversation_lifecycle.py")],
+                cwd=REPO,
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=180,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as error:
+            return subprocess.CompletedProcess(
+                error.cmd,
+                124,
+                stdout=error.stdout or "",
+                stderr=error.stderr or "browser bite timed out",
+            )
+
+
+def _bounded_browser_failure(output: str) -> str:
+    lines = [
+        line for line in output.splitlines()
+        if "CONVERSATION LIFECYCLE GATE FAILED" in line
+        or "wait failed" in line
+    ]
+    return "\n".join(lines[-4:]) or output[-4000:]
+
+
+def test_issue6504_dom_oracle():
+    result = _run_issue6504_browser()
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, _bounded_browser_failure(output)
+    assert "ISSUE6504 DOM ORACLE PASS" in output, _bounded_browser_failure(output)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["drop-valid-handoff-preserve", "drop-canonical-scene-suppression"],
+    ids=["drop_valid_handoff_preserve", "drop_canonical_scene_suppression"],
+)
+def test_issue6504_dom_oracle_mutation_fails(mutation: str):
+    result = _run_issue6504_browser(mutation)
+    output = result.stdout + result.stderr
+    assert result.returncode != 0, _bounded_browser_failure(output)
+    assert f"ISSUE6504 MUTATION FAIL {mutation}" in output, _bounded_browser_failure(output)
 
 
 def _run_recovery_case(
@@ -1609,7 +1675,6 @@ def test_production_composed_settlement_projection_marker_and_handoff():
           admittedKey,
           handoffAccepted,
           messages:S.messages,
-          completionNotifications:0,
           markerPresent:S.messages.some(_isTerminalStreamErrorMarkerMessage)
         }));
         """
@@ -1621,7 +1686,6 @@ def test_production_composed_settlement_projection_marker_and_handoff():
         "sessionId":"sid","streamId":"stream","ownerToken":1,"transportGeneration":2
     }
     assert result["handoffAccepted"] is True
-    assert result["completionNotifications"]==0
     assert result["markerPresent"] is True
     assert result["messages"][1]["_interrupted"] is True
 
