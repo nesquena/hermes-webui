@@ -7,6 +7,11 @@
 // See api/todo_state.py for the wire contract.
 const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[],activeStreamId:null,currentDir:'.',activeProfile:'default',activeProfileIsDefault:true,showHiddenWorkspaceFiles:false,todos:[],todoStateMeta:null,_pendingSessionToolsets:null};
 
+// Keep focused script harnesses functional when the optional workspace module is omitted.
+if(typeof setWorkspaceSearchSession!=='function'){
+  globalThis.setWorkspaceSearchSession=session=>Reflect.set(S,'session',session);
+}
+
 function assistantDisplayName(){
   if(S.activeProfile&&S.activeProfile!=='default') return S.activeProfile.charAt(0).toUpperCase()+S.activeProfile.slice(1);
   return window._botName||'Hermes';
@@ -491,7 +496,7 @@ async function startCompressionRecovery(btn){
     if(!sid) throw new Error('Compression recovery did not return a session.');
     try{localStorage.setItem('hermes-webui-session',sid);}catch(_){}
     if(typeof loadSession==='function') await loadSession(sid,{preserveActiveInput:false});
-    else if(data.session){setWorkspaceSearchSession(data.session);S.messages=data.session.messages||[];syncTopbar();renderMessages();}
+    else if(data.session){if(typeof setWorkspaceSearchSession==='function')setWorkspaceSearchSession(data.session);S.messages=data.session.messages||[];syncTopbar();renderMessages();}
     if(typeof renderSessionList==='function') await renderSessionList();
     if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(sid);
     if(typeof showToast==='function') showToast((data&&data.message)||'Started focused continuation.',3000,'success');
@@ -20692,7 +20697,7 @@ async function promptNewFile(targetDir = S.currentDir || '.'){
       // System-minted session (#6022): explicit worktree:false — creating a
       // file from a blank page must not inherit the config worktree default.
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
-      if(r&&r.session){S._pendingSessionToolsets=null;setWorkspaceSearchSession(r.session);S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
+      if(r&&r.session){S._pendingSessionToolsets=null;if(typeof setWorkspaceSearchSession==='function')setWorkspaceSearchSession(r.session);S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
     }catch(e){setStatus(t('create_failed')+e.message);return;}
   }
   if(!S.session)return;
@@ -20725,7 +20730,7 @@ async function promptNewFolder(targetDir = S.currentDir || '.'){
       // System-minted session (#6022): explicit worktree:false — creating a
       // folder from a blank page must not inherit the config worktree default.
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
-      if(r&&r.session){S._pendingSessionToolsets=null;setWorkspaceSearchSession(r.session);S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
+      if(r&&r.session){S._pendingSessionToolsets=null;if(typeof setWorkspaceSearchSession==='function')setWorkspaceSearchSession(r.session);S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
     }catch(e){setStatus(t('folder_create_failed')+e.message);return;}
   }
   if(!S.session)return;
