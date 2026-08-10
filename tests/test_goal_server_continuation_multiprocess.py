@@ -139,7 +139,9 @@ def test_live_foreign_worker_leadership_blocks_second_worker(tmp_path, monkeypat
     gc = _configure(str(path))
     monkeypatch.setattr(gc, "_worker_loop", lambda: None)
     try:
-        assert gc.start_goal_continuation_worker() is False
+        # Every server starts a standby thread. It retries the leadership lock
+        # after the current owner exits instead of remaining schedulerless.
+        assert gc.start_goal_continuation_worker() is True
     finally:
         gc.stop_goal_continuation_worker(timeout=0.2)
         release.set()

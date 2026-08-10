@@ -36,7 +36,15 @@ def test_gateway_chat_backend_is_default_off_for_truthy_values():
 
 
 def test_gateway_approval_and_tool_activity_block_automatic_empty_retry():
-    for event in ("approval", "clarify", "tool_call", "tool_result", "tool_progress"):
+    for event in (
+        "approval",
+        "clarify",
+        "tool_call",
+        "tool_result",
+        "tool_progress",
+        "tool",
+        "tool_complete",
+    ):
         assert gateway_chat._gateway_event_blocks_empty_retry(event) is True
     for event in ("warning", "status", "goal_status", "done", ""):
         assert gateway_chat._gateway_event_blocks_empty_retry(event) is False

@@ -363,7 +363,7 @@ def test_fast_terminal_settlement_cannot_be_resurrected_by_drain(continuation_st
         is_goal_active=lambda *_args, **_kwargs: True,
         now=time.time() + 1,
     ) == 1
-    assert gc.get_goal_continuation("session-a") is None
+    assert gc.get_goal_continuation("session-a")["status"] == "completed"
 
 
 def test_mixed_version_browser_can_adopt_only_an_unclaimed_matching_intent(continuation_store):
@@ -497,7 +497,7 @@ def test_empty_retry_is_refused_when_cancellation_wins_the_settlement_race(conti
     assert "cancel" in record["last_error"].lower()
 
 
-def test_restart_recovers_only_unjudged_active_goal(continuation_store):
+def test_restart_fails_closed_for_unjudged_foreign_goal(continuation_store):
     gc, _path = continuation_store
     clock = time.time()
     _schedule(gc, turns=4, now=clock)
@@ -516,8 +516,8 @@ def test_restart_recovers_only_unjudged_active_goal(continuation_store):
         now=200.0,
     ) == 1
     recovered = gc.get_goal_continuation("session-a")
-    assert recovered["status"] == "pending"
-    assert recovered["owner_id"] == "test-owner"
+    assert recovered["status"] == "failed"
+    assert "foreign owner" in recovered["last_error"]
 
 
 def test_restart_fails_closed_when_run_evidence_is_unreadable(continuation_store):
@@ -543,7 +543,7 @@ def test_restart_fails_closed_when_run_evidence_is_unreadable(continuation_store
     ) == 1
     recovered = gc.get_goal_continuation("session-a")
     assert recovered["status"] == "failed"
-    assert "evidence" in recovered["last_error"].lower()
+    assert "foreign owner" in recovered["last_error"].lower()
 
 
 def test_unreadable_registry_is_not_quarantined_as_corrupt(continuation_store, monkeypatch):
@@ -586,7 +586,7 @@ def test_restart_refuses_replay_after_observable_activity(continuation_store):
     ) == 1
     recovered = gc.get_goal_continuation("session-a")
     assert recovered["status"] == "failed"
-    assert "observable activity" in recovered["last_error"]
+    assert "foreign owner" in recovered["last_error"]
 
 
 def test_restart_never_replays_a_turn_already_judged(continuation_store):
@@ -650,7 +650,7 @@ def test_terminal_settlement_is_stream_owned_and_deletion_can_prune_it(continuat
     assert gc.fail_goal_continuation("session-a", "owned-stream", "terminal failure") is True
     assert gc.get_goal_continuation("session-a")["status"] == "failed"
     assert gc.complete_goal_continuation("session-a") is True
-    assert gc.get_goal_continuation("session-a") is None
+    assert gc.get_goal_continuation("session-a")["status"] == "completed"
 
 
 def test_inactive_goal_discards_pending_intent(continuation_store):
@@ -662,7 +662,7 @@ def test_inactive_goal_discards_pending_intent(continuation_store):
         is_goal_active=lambda *_args, **_kwargs: False,
         now=time.time() + 1,
     ) == 0
-    assert gc.get_goal_continuation("session-a") is None
+    assert gc.get_goal_continuation("session-a")["status"] == "cancelled"
 
 
 def test_timed_out_worker_stop_blocks_restart_until_old_thread_exits(continuation_store, monkeypatch):
@@ -680,4 +680,123 @@ def test_timed_out_worker_stop_blocks_restart_until_old_thread_exits(continuatio
     assert gc.stop_goal_continuation_worker(timeout=0.01) is False
     assert gc.start_goal_continuation_worker() is False
     release.set()
+    assert gc.stop_goal_continuation_worker(timeout=1) is True
+
+
+def test_claim_revalidates_goal_before_starting_turn(continuation_store):
+    gc, _path = continuation_store
+    _schedule(gc)
+    checks = iter([True, False])
+
+    assert gc.drain_goal_continuations_once(
+        start_turn=lambda *_args, **_kwargs: pytest.fail("paused goal must not start"),
+        is_goal_active=lambda *_args, **_kwargs: next(checks),
+        now=time.time() + 1,
+    ) == 0
+    assert gc.get_goal_continuation("session-a")["status"] == "cancelled"
+
+
+def test_foreign_running_owner_is_never_replayed_automatically(continuation_store):
+    gc, _path = continuation_store
+    _schedule(gc, turns=4)
+    record = gc.get_goal_continuation("session-a")
+    record.update({
+        "status": "running",
+        "stream_id": "old-live-stream",
+        "owner_id": "foreign-owner",
+        "attempts": 1,
+    })
+    gc._replace_goal_continuation_for_test(record)
+
+    assert gc.recover_goal_continuations(
+        goal_state_loader=lambda *_args, **_kwargs: {"status": "active", "turns_used": 4},
+        run_summary_loader=lambda *_args, **_kwargs: {
+            "terminal_state": "unknown",
+            "observable_activity": False,
+        },
+        now=200.0,
+    ) == 1
+    recovered = gc.get_goal_continuation("session-a")
+    assert recovered["status"] == "failed"
+    assert "foreign owner" in recovered["last_error"]
+
+
+def test_cancelled_retry_cannot_be_admitted_later(continuation_store):
+    gc, _path = continuation_store
+    clock = time.time()
+    _schedule(gc, now=clock)
+    gc.drain_goal_continuations_once(
+        start_turn=lambda *_args, **_kwargs: {"stream_id": "cancel-stream", "_status": 200},
+        is_goal_active=lambda *_args, **_kwargs: True,
+        now=clock + 1,
+    )
+    assert gc.requeue_goal_continuation_after_no_response(
+        "session-a", "cancel-stream", had_activity=False, now=clock + 2,
+    ) is True
+    assert gc.cancel_goal_continuation(
+        "session-a", "cancel-stream", reason="user cancelled", now=clock + 2.1,
+    ) is True
+    assert gc.get_goal_continuation("session-a")["status"] == "cancelled"
+    assert gc.drain_goal_continuations_once(
+        start_turn=lambda *_args, **_kwargs: pytest.fail("cancelled retry must not start"),
+        is_goal_active=lambda *_args, **_kwargs: True,
+        now=200.0,
+    ) == 0
+
+
+def test_completed_tombstone_rejects_delayed_legacy_tab(continuation_store):
+    gc, _path = continuation_store
+    _schedule(gc)
+    prompt = gc.get_goal_continuation("session-a")["prompt"]
+    assert gc.complete_goal_continuation("session-a") is True
+    assert gc.legacy_browser_goal_prompt_matches("session-a", prompt) is True
+    assert gc.adopt_legacy_browser_goal_stream("session-a", "late-stream", prompt) is False
+
+
+def test_malformed_journal_is_evidence_unavailable(monkeypatch):
+    import api.run_journal as journal
+
+    monkeypatch.setattr(journal, "latest_run_summary", lambda *_args: {"terminal_state": "unknown"})
+    monkeypatch.setattr(
+        journal,
+        "read_run_events",
+        lambda *_args: {"events": [], "malformed": [{"line": 1}]},
+    )
+    summary = __import__("api.goal_continuations", fromlist=["x"])._default_run_summary_loader(
+        "session-a", "stream-a"
+    )
+    assert summary["evidence_unavailable"] is True
+
+
+def test_strict_goal_snapshot_propagates_profile_read_failure(monkeypatch, tmp_path):
+    import api.goals as goals
+
+    class BrokenDB:
+        def get_meta(self, _key):
+            raise PermissionError("goal state unreadable")
+
+    monkeypatch.setattr(goals, "_profile_db", lambda _home: BrokenDB())
+    with pytest.raises(PermissionError, match="unreadable"):
+        goals.goal_state_snapshot_strict("session-a", profile_home=tmp_path)
+
+
+def test_standby_worker_retries_leadership(continuation_store, monkeypatch):
+    gc, _path = continuation_store
+    acquired = threading.Event()
+    attempts = iter([False, True])
+
+    def try_acquire():
+        result = next(attempts, True)
+        if result:
+            acquired.set()
+        return result
+
+    monkeypatch.setattr(gc, "_try_acquire_worker_leadership", try_acquire)
+    monkeypatch.setattr(gc, "recover_goal_continuations", lambda: 0)
+    monkeypatch.setattr(gc, "reconcile_goal_continuations_once", lambda: 0)
+    monkeypatch.setattr(gc, "drain_goal_continuations_once", lambda: 0)
+    monkeypatch.setattr(gc, "_IDLE_POLL_SECONDS", 0.01)
+
+    assert gc.start_goal_continuation_worker() is True
+    assert acquired.wait(1)
     assert gc.stop_goal_continuation_worker(timeout=1) is True
