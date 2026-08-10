@@ -12903,9 +12903,9 @@ def _accept_and_publish_steer_event(agent, session_id: str, stream_id: str, text
         lambda: agent.steer(text),
     )
     if reason == "terminal":
-        return False, "stream_dead"
+        return False, "stream_dead", False
     if reason == "journal_malformed":
-        return False, "steer_error"
+        return False, "steer_error", False
     if error is not None:
         logger.warning(
             "Failed to persist accepted steer for session=%s stream=%s",
@@ -12913,9 +12913,9 @@ def _accept_and_publish_steer_event(agent, session_id: str, stream_id: str, text
             stream_id,
             exc_info=(type(error), error, error.__traceback__),
         )
-        return accepted, None
+        return accepted, "persistence_error", False
     if not accepted or not isinstance(journaled, dict):
-        return False, None
+        return False, None, False
 
     event_id = journaled.get("event_id")
     payload["created_at"] = journaled.get("created_at", created_at)
@@ -12929,7 +12929,7 @@ def _accept_and_publish_steer_event(agent, session_id: str, stream_id: str, text
             except Exception:
                 logger.debug("Failed to note steer event id %s", event_id, exc_info=True)
     if stream is None or not callable(getattr(stream, "put_nowait", None)):
-        return True, None
+        return True, None, True
     try:
         item = (
             ("steer_delivered", payload, event_id)
@@ -12944,7 +12944,7 @@ def _accept_and_publish_steer_event(agent, session_id: str, stream_id: str, text
             stream_id,
             exc_info=True,
         )
-    return True, None
+    return True, None, True
 
 
 def _handle_chat_steer(handler, body: dict) -> bool:
@@ -12970,7 +12970,9 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     or Stop-and-send.
 
     Returns 200 with {"accepted": bool, "fallback": str|None,
-    "stream_id": str|None}.
+    "stream_id": str|None, "durable": false?}. The optional ``durable`` field
+    is emitted only for accepted runtime delivery whose journal persistence
+    failed, preserving the legacy success response while exposing degradation.
     """
     from api.helpers import j, bad
     from api import config as _cfg
@@ -13053,7 +13055,7 @@ def _handle_chat_steer(handler, body: dict) -> bool:
                            "stream_id": None})
 
     try:
-        accepted, fallback = _accept_and_publish_steer_event(
+        accepted, fallback, durable = _accept_and_publish_steer_event(
             agent,
             sid,
             active_stream_id,
@@ -13064,8 +13066,11 @@ def _handle_chat_steer(handler, body: dict) -> bool:
         return j(handler, {"accepted": False, "fallback": "steer_error",
                            "stream_id": active_stream_id})
 
-    return j(handler, {"accepted": accepted, "fallback": fallback,
-                       "stream_id": active_stream_id})
+    response = {"accepted": accepted, "fallback": fallback,
+                "stream_id": active_stream_id}
+    if accepted and durable is False:
+        response["durable"] = False
+    return j(handler, response)
 
 
 def cancel_stream(stream_id: str) -> bool:

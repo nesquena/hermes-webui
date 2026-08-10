@@ -377,8 +377,11 @@ not call `agent.steer()` and returns the existing `stream_dead` recovery signal,
 so the browser restores the user's draft instead of claiming delivery. If Steer
 wins the lock, acceptance and `steer_delivered` persistence finish before a
 terminal writer can append. If journal persistence fails after runtime
-acceptance, WebUI logs the durability failure and does not broadcast a
-non-replayable delivery event.
+acceptance, WebUI returns `accepted: true`, `durable: false`, and
+`fallback: persistence_error`, logs the durability failure, and does not
+broadcast a non-replayable delivery event. The browser must preserve the fact
+that runtime delivery occurred while warning that the Steer may disappear after
+refresh; it must not restore or resend the accepted input automatically.
 
 ## Implementation Slices
 

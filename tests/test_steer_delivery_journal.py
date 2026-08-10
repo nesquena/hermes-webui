@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -194,9 +195,24 @@ def test_journal_failure_does_not_turn_runtime_acceptance_into_http_failure(
     assert snapshot["offline_buffered_events"] == 0
     assert _response(handler) == {
         "accepted": True,
-        "fallback": None,
+        "fallback": "persistence_error",
         "stream_id": stream_id,
+        "durable": False,
     }
+
+
+def test_frontend_warns_when_accepted_steer_is_not_durable():
+    root = Path(__file__).resolve().parents[1]
+    commands = (root / "static" / "commands.js").read_text(encoding="utf-8")
+    i18n = (root / "static" / "i18n.js").read_text(encoding="utf-8")
+    start = commands.index("async function _trySteer(")
+    end = commands.index("\nasync function cmdTitle", start)
+    body = commands[start:end]
+
+    assert "result.durable===false||result.fallback==='persistence_error'" in body
+    assert "showToast(t('steer_delivery_not_durable'),5000,'warning')" in body
+    assert "else showToast(t('cmd_steer_delivered'),2500)" in body
+    assert i18n.count("steer_delivery_not_durable:") >= 15
 
 
 def test_terminal_journal_wins_race_without_late_delivery_event(
