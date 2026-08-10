@@ -512,7 +512,11 @@ def select_authoritative_terminal_event(events: Iterable[dict]) -> dict | None:
     terminal_events = [
         event
         for event in events
-        if isinstance(event, dict) and event.get("terminal")
+        if (
+            isinstance(event, dict)
+            and event.get("event") != "stream_end"
+            and event.get("terminal")
+        )
     ]
     return terminal_events[0] if terminal_events else None
 
