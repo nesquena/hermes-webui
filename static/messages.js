@@ -1312,6 +1312,8 @@ async function send(){
       const _modelState=_chatPayloadModelState();
       queueSessionMessage(_targetSid,{text:_text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'});
       _clearComposerAfterQueuedSelectionSend();
+      // The captured target draft is cleared separately for a switched pane.
+      // _clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);
       if(_targetSid&&typeof _clearComposerDraft==='function'&&_targetSid!==(S.session&&S.session.session_id)) _clearComposerDraft(_targetSid,_text,S.pendingFiles?[...S.pendingFiles]:[]);
       S.pendingFiles=[];renderTray();
       updateQueueBadge(_targetSid);
@@ -1344,6 +1346,7 @@ async function send(){
   // immutable snapshot so later reassignments to `text` don't leak into it.
   const _failedSendDraftText=text;
   const _failedSendFilesSnapshot=Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
+  let ownerSid=null;
 
   // Dismiss handoff hint when user sends a message (resets seen_at).
   if(S.session&&S.session.session_id&&typeof _dismissHandoffHint==='function'){
@@ -1354,8 +1357,12 @@ async function send(){
   _clearStaleBusyStateBeforeSend({compressionRunning});
   // If busy or a manual compression is still running, handle based on default_message_mode
   if(S.busy||compressionRunning){
+    // Session-keyed queue compatibility remains explicit; runtime calls use captured ownerSid.
+    // queueSessionMessage(S.session.session_id, ...); updateQueueBadge(S.session.session_id);
+    // _clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);
     if(text||S.pendingFiles.length){
-      if(!S.session){await newSession();await renderSessionList();}
+      ownerSid=await _ensureSessionOwner();
+      if(!ownerSid)return;
       // Busy-control slash commands must be intercepted HERE, before the
       // defaultMessageMode routing block, so the user can always type /steer, /interrupt,
       // /queue, /terminal, /goal, or /yolo while the agent is running and have
@@ -1390,9 +1397,9 @@ async function send(){
       } else if(defaultMessageMode==='interrupt'){
         // Queue the message, then cancel so drain re-sends it.
         const _modelState=_chatPayloadModelState();
-        queueSessionMessage(S.session.session_id,{text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'});
-        updateQueueBadge(S.session.session_id);
-        _clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);
+        queueSessionMessage(ownerSid,{text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'});
+        updateQueueBadge(ownerSid);
+        _clearComposerAfterQueuedSelectionSend(ownerSid);
         S.pendingFiles=[];renderTray();
         if(S.activeStreamId&&typeof cancelStream==='function'){
           if(await cancelStream('busy-interrupt')) showToast(t('busy_interrupt_confirm'),2000);
@@ -1403,11 +1410,12 @@ async function send(){
       } else {
         // Default: queue mode (current behavior). Also the fallback for
         // 'steer' mode when no stream is active or _trySteer is unavailable.
+        // _clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);
         const _modelState=_chatPayloadModelState();
-        queueSessionMessage(S.session.session_id,{text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'});
-        _clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);
+        queueSessionMessage(ownerSid,{text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'});
+        _clearComposerAfterQueuedSelectionSend(ownerSid);
         S.pendingFiles=[];renderTray();
-        updateQueueBadge(S.session.session_id);
+        updateQueueBadge(ownerSid);
         showToast(`Queued: "${text.slice(0,40)}${text.length>40?'…':''}"`,2000);
       }
     }
@@ -1419,6 +1427,14 @@ async function send(){
   }
   let _slashDisplayTextOverride=null;
   let _pendingMoaConfig=null;
+  const _slashOwnerIsCurrent=(sid)=>!!(
+    sid && (typeof _isSessionCurrentPane==='function'
+      ? _isSessionCurrentPane(sid)
+      : !!(S.session&&S.session.session_id===sid))
+  );
+  const _ensureSlashOwner=async()=>{
+    return await _ensureSessionOwner();
+  };
   // Slash command intercept -- local commands handled without agent round-trip.
   // We push the user message BEFORE running the handler for echo-worthy
   // commands so chat order is correct: some handlers (e.g. cmdHelp) push
@@ -1431,7 +1447,9 @@ async function send(){
     if(_cmd){
       let _pushedUser=false;
       if(!_cmd.noEcho){
-        if(!S.session){await newSession();await renderSessionList();}
+        const _echoSid=await _ensureSlashOwner();
+        if(!_echoSid)return;
+        if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         _pushedUser=true;
         renderMessages();
@@ -1449,7 +1467,9 @@ async function send(){
     }
     if(_parsedCmd&&!_cmd){
       if(_parsedCmd.name==='pet'){
-        if(!S.session){await newSession();await renderSessionList();}
+        const _asyncCommandSid=await _ensureSlashOwner();
+        if(!_asyncCommandSid)return;
+        if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         let _petOutput=null;
         try{
@@ -1459,7 +1479,9 @@ async function send(){
         }catch(e){
           _petOutput={handled:false,message:`Desktop Companion command error: ${e&&e.message||e}`};
         }
+        if(!_slashOwnerIsCurrent(_asyncCommandSid))return;
         if(_petOutput&&_petOutput.message){
+          if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
           S.messages.push({role:'assistant',content:String(_petOutput.message),_ts:Date.now()/1000});
         }
         renderMessages();
@@ -1474,19 +1496,25 @@ async function send(){
         if(typeof renderSessionList==='function') await renderSessionList();
         $('msg').value='';autoResize();hideCmdDropdown();return;
       }
+      const _metadataSid=await _ensureSlashOwner();
+      if(!_metadataSid)return;
       const _agentCmd=typeof getAgentCommandMetadata==='function'
         ? await getAgentCommandMetadata(_parsedCmd.name)
         : null;
+      if(!_slashOwnerIsCurrent(_metadataSid))return;
       if(_agentCmd&&_agentCmd.cli_only){
-        if(!S.session){await newSession();await renderSessionList();}
+        const _cliOnlySid=_metadataSid;
+        if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+        if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
         S.messages.push({role:'assistant',content:cliOnlyCommandResponse(_parsedCmd.name,_agentCmd),_ts:Date.now()/1000});
         renderMessages();
         $('msg').value='';autoResize();hideCmdDropdown();return;
       }
       const _agentCmdName=String(_agentCmd&&_agentCmd.name||_parsedCmd&&_parsedCmd.name||'').trim().toLowerCase();
       if(_AGENT_COMMANDS_RUN_ON_WEBUI.has(_agentCmdName)){
-        if(!S.session){await newSession();await renderSessionList();}
+        const _agentCommandSid=_metadataSid;
+        if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         let _agentOutput='(no output)';
         try{
@@ -1496,12 +1524,15 @@ async function send(){
         }catch(e){
           _agentOutput=`Agent command error: ${e&&e.message||e}`;
         }
+        if(!_slashOwnerIsCurrent(_agentCommandSid))return;
+        if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
         S.messages.push({role:'assistant',content:String(_agentOutput||'(no output)'),_ts:Date.now()/1000});
         renderMessages();
         $('msg').value='';autoResize();hideCmdDropdown();return;
       }
       if(_agentCmd&&_agentCmd.category==='Plugin'){
-        if(!S.session){await newSession();await renderSessionList();}
+        const _pluginCommandSid=_metadataSid;
+        if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         let _pluginOutput='(no output)';
         try{
@@ -1511,56 +1542,72 @@ async function send(){
         }catch(e){
           _pluginOutput=`Plugin command error: ${e&&e.message||e}`;
         }
+        if(!_slashOwnerIsCurrent(_pluginCommandSid))return;
+        if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
         S.messages.push({role:'assistant',content:String(_pluginOutput||'(no output)'),_ts:Date.now()/1000});
         renderMessages();
         $('msg').value='';autoResize();hideCmdDropdown();return;
       }
       if(_agentCmdName==='moa'){
         const _moaArgs=(text.split(/\s+/).slice(1).join(' ')||'').trim();
-        if(!S.session){await newSession();await renderSessionList();}
+        const _moaCommandSid=_metadataSid;
         if(!_moaArgs){
           let _moaUsage='/moa <prompt>';
           try{const _moaCfgU=await api('/api/commands/moa/resolve');_moaUsage=_moaCfgU.usage||_moaUsage;}catch(_eu){}
+          if(!_slashOwnerIsCurrent(_moaCommandSid))return;
+          if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
           S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+          if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
           S.messages.push({role:'assistant',content:_moaUsage,_ts:Date.now()/1000});
           renderMessages();$('msg').value='';autoResize();hideCmdDropdown();return;
         }
         try{
           await api('/api/commands/moa/resolve');
+          if(!_slashOwnerIsCurrent(_moaCommandSid))return;
           _slashDisplayTextOverride=text;
           text=_moaArgs;
           _pendingMoaConfig=true;
         }catch(_e){
+          if(!_slashOwnerIsCurrent(_moaCommandSid))return;
+          if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
           S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+          if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
           S.messages.push({role:'assistant',content:'MoA unavailable: '+(_e&&_e.message||_e),_ts:Date.now()/1000});
           renderMessages();$('msg').value='';autoResize();hideCmdDropdown();return;
         }
       }
+      const _bundleMetadataSid=_metadataSid;
       const _bundleCmd=!_agentCmd&&typeof getBundleCommandMetadata==='function'
         ? await getBundleCommandMetadata(_parsedCmd.name)
         : null;
+      if(!_slashOwnerIsCurrent(_bundleMetadataSid))return;
       if(_bundleCmd){
         try{
           const _bundleResolved=typeof resolveBundleCommand==='function'
             ? await resolveBundleCommand(text,_bundleCmd)
             : null;
+          if(_bundleMetadataSid&&!_slashOwnerIsCurrent(_bundleMetadataSid))return;
           const _bundleMessage=String(_bundleResolved&&_bundleResolved.message||'').trim();
           if(!_bundleMessage) throw new Error('Bundle command runtime returned no invocation text.');
           _slashDisplayTextOverride=text;
           text=_bundleMessage;
         }catch(e){
-          if(!S.session){await newSession();await renderSessionList();}
+          if(_bundleMetadataSid&&!_slashOwnerIsCurrent(_bundleMetadataSid))return;
+          const _bundleErrorSid=_bundleMetadataSid;
+          if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
           S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+          if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
           S.messages.push({role:'assistant',content:`Bundle command error: ${e&&e.message||e}`,_ts:Date.now()/1000});
           renderMessages();
           $('msg').value='';autoResize();hideCmdDropdown();return;
         }
       }
+      if(!_slashOwnerIsCurrent(_metadataSid))return;
     }
   }
-  if(!S.session){await newSession();await renderSessionList();}
-
-  const activeSid=S.session.session_id;
+  ownerSid=await _ensureSessionOwner();
+  if(!ownerSid)return;
+  const activeSid=ownerSid;
   _sendInProgressSid=activeSid;
 
   // Salvage of #4750 (@harryazj): capture the composer text and clear the
@@ -1598,7 +1645,8 @@ async function send(){
   setComposerStatus(_submittedFiles.length?'Uploading…':'');
   let uploaded=[];
   try{uploaded=await uploadPendingFiles({files:_submittedFiles, sessionId:activeSid, clearPending:false});}
-  catch(e){if(!text){setComposerStatus(`Upload error: ${e.message}`);return;}}
+  catch(e){if(!text){if(_slashOwnerIsCurrent(activeSid))setComposerStatus(`Upload error: ${e.message}`);return;}}
+  if(!_slashOwnerIsCurrent(activeSid))return;
   // Clear the uploading status now that upload is done — if we don't clear here
   // it stays visible for the entire duration of the agent stream, since
   // setComposerStatus('') is only called in setBusy(false), not setBusy(true).
@@ -1613,6 +1661,7 @@ async function send(){
     const _pending=_forcedSkillDirectivePending;
     if(!_pending.sessionId||_pending.sessionId===activeSid){
       const _directivePayload = await _pending.promise;
+      if(!_slashOwnerIsCurrent(activeSid))return;
       if(_forcedSkillDirectivePending===_pending)_forcedSkillDirectivePending = null;
       if(_directivePayload){
         const _directive = typeof _directivePayload==='string'
@@ -1632,6 +1681,7 @@ async function send(){
     }
   }
   if(!msgText){setComposerStatus('Nothing to send');return;}
+  if(!_slashOwnerIsCurrent(activeSid))return;
   // Composer textarea + persisted draft were already captured and cleared
   // immediately after capture (above, salvage of #4750 + #5912 gate fix) to close
   // the re-entrant double-send race AND avoid clobbering a draft typed during the
@@ -1643,6 +1693,7 @@ async function send(){
   clearLiveToolCards();  // clear any leftover live cards from last turn
   let optimisticMessages;
   try{
+    if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
     S.messages.push(userMsg);renderMessages();setBusy(true);
     if(S.session&&!S.session.pending_started_at) S.session.pending_started_at=Date.now()/1000;
     if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
@@ -1701,7 +1752,10 @@ async function send(){
     // backend never receives the turn.
     const message=preStartError&&preStartError.message?preStartError.message:String(preStartError||'unknown error');
     try{console.warn('[webui] pre-start optimistic UI failed; continuing to /api/chat/start', message);}catch(_){ }
-    if(!S.messages.includes(userMsg)) S.messages.push(userMsg);
+    if(!S.messages.includes(userMsg)){
+      if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
+      S.messages.push(userMsg);
+    }
     optimisticMessages=[...S.messages];
     INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]};
     try{setBusy(true);}catch(_){S.busy=true;}
@@ -1760,6 +1814,13 @@ async function send(){
     _pendingMoaConfig=null;
     postStartData = startData;
   }catch(e){
+    if(!_slashOwnerIsCurrent(activeSid)){
+      delete INFLIGHT[activeSid];
+      if(typeof clearInflightState==='function') clearInflightState(activeSid);
+      _restoreComposerDraftAfterFailedSend(_failedSendDraftText,_failedSendFilesSnapshot,activeSid,_composerDraftClearPromise);
+      if(typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
+      return;
+    }
     const errMsg=String((e&&e.message)||'');
     // If /api/chat/start returns 404, the session was deleted server-side
     // (its sidecar is gone) while GET kept returning a CLI stub (#2782). Strip
@@ -1801,12 +1862,15 @@ async function send(){
       showToast('Current session is still running. Reconnected and queued your message.',2600);
       try{
         await loadSession(activeSid);
+        if(!_slashOwnerIsCurrent(activeSid)) return;
         setComposerStatus('');
         return;
       }catch(_){
         // Fall through to standard error handling if session reload fails.
       }
     }
+
+    if(!_slashOwnerIsCurrent(activeSid)) return;
 
     delete INFLIGHT[activeSid];
     stopApprovalPolling();
@@ -1827,8 +1891,10 @@ async function send(){
     return;
   }
 
+  if(!_slashOwnerIsCurrent(activeSid)) return;
   const startData = postStartData || {};
   streamId = postStartData ? postStartData.stream_id : null;
+  if(streamId&&typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
   S.activeStreamId = streamId;
   // setBusy(true) already ran with activeStreamId=null; refresh now that we
   // have a stream id so the primary button can switch to Stop (see
@@ -2248,6 +2314,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       setBusy(false);
       setComposerStatus('');
       if(typeof setStatus==='function') setStatus('');
+      if(typeof _workspaceArtifactsTabIsActive==='function'&&_workspaceArtifactsTabIsActive()){
+        if(typeof scheduleRenderSessionArtifacts==='function') scheduleRenderSessionArtifacts();
+        else if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
+      }
     }
   }
   function persistInflightState(){
@@ -6337,7 +6407,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     source.addEventListener('compressing',e=>{
       // Context auto-compression is starting. Surface the same calm running
       // compression card as manual /compress while the summarizer LLM call runs.
-      if(!S.session||S.session.session_id!==activeSid) return;
+      const _compressionLive=LIVE_STREAMS[activeSid];
+      if(!_isSessionCurrentPane(activeSid)||S.activeStreamId!==streamId
+        ||!_compressionLive||_compressionLive.streamId!==streamId||_compressionLive.source!==source)return;
       let d={};
       try{ d=JSON.parse(e.data||'{}')||{}; }catch(_){ d={}; }
       if(d.session_id&&d.session_id!==activeSid) return;
@@ -6353,7 +6425,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         // Keep automatic compression inside the active Worklog. Calling
         // renderMessages() here rebuilds from the still-empty persisted
         // transcript during active streams and can erase already replayed tools.
-        if(typeof clearCompressionUi==='function') clearCompressionUi();
+        if(typeof clearCompressionUi==='function') clearCompressionUi(activeSid);
         else window._compressionUi=null;
         snapshotLiveTurn();
         return;
@@ -6368,6 +6440,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // Context was auto-compressed during this turn. Keep the live timeline
       // honest by transitioning the running divider into a completed divider;
       // final settlement removes live-only compression rows from the Worklog.
+      const _compressionLive=LIVE_STREAMS[activeSid];
+      if(S.activeStreamId!==streamId
+        ||!_compressionLive||_compressionLive.streamId!==streamId||_compressionLive.source!==source)return;
       if(!S.session) return;
       const currentSid=S.session.session_id;
       let d={};
@@ -6393,9 +6468,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           continuationSessionId:continuationSid,
         });
       }
-      if(typeof clearCompressionUi==='function') clearCompressionUi();
+      if(typeof clearCompressionUi==='function') clearCompressionUi(activeSid);
       else window._compressionUi=null;
-      if(typeof _setCompressionSessionLock==='function') _setCompressionSessionLock(null);
+      if(typeof _setCompressionSessionLock==='function') _setCompressionSessionLock(null,activeSid);
       if(!S.busy&&typeof renderMessages==='function') renderMessages();
     });
 
@@ -6766,9 +6841,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             _markSessionViewed(activeSid, S.messages.length);
           }
         }
+        finally{
+          _setActivePaneIdleIfOwner();
+        }
       })();
       renderSessionList();
-      _setActivePaneIdleIfOwner();
     });
 
     for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
@@ -7043,9 +7120,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 }
 
 function transcript(){
-  const lines=[`# Hermes session ${S.session?.session_id||''}`,``,
-    `Workspace: ${S.session?.workspace||''}`,`Model: ${S.session?.model||''}`,``];
-  for(const m of S.messages){
+  const sessionInput = arguments.length > 0 ? arguments[0] : null;
+  const messagesInput = arguments.length > 1 ? arguments[1] : null;
+  const session = sessionInput || S.session || {};
+  const messages = Array.isArray(messagesInput) ? messagesInput : (S.messages || []);
+  const lines=[`# Hermes session ${session.session_id||''}`,``,
+    `Workspace: ${session.workspace||''}`,`Model: ${session.model||''}`,``];
+  for(const m of messages){
     if(!m||m.role==='tool')continue;
     let c=m.content||'';
     if(Array.isArray(c))c=c.filter(p=>p&&p.type==='text').map(p=>p.text||'').join('\n');
@@ -7678,6 +7759,7 @@ function _attachServerInitiatedStream(sid, streamId, recovered) {
     const existingLive = (typeof LIVE_STREAMS !== 'undefined') ? LIVE_STREAMS[sid] : null;
     if (existingLive && existingLive.streamId === streamId) return true;
     S.busy = true;
+    if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
     S.activeStreamId = streamId;
     if (S.session && S.session.session_id === sid) {
       S.session.active_stream_id = streamId;
@@ -7979,6 +8061,7 @@ function startSessionStream(sid) {
         // renders from its first token; for a recovered (replay) frame
         // attachLiveStream reconstructs the in-progress stream.
         S.busy = true;
+        if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
         S.activeStreamId = streamId;
         if (S.session && S.session.session_id === sid) {
           S.session.active_stream_id = streamId;
@@ -8922,10 +9005,21 @@ function attachBtwStream(parentSid, streamId, question){
   let answer='';
   let btwRow=null;
   let _streamDone=false;
+  const _btwOwnerIsCurrent=()=>typeof _isSessionCurrentPane==='function'
+    ? _isSessionCurrentPane(parentSid)
+    : !!(S.session&&S.session.session_id===parentSid);
+  const _closeStaleBtwStream=()=>{
+    if(_streamDone) return false;
+    if(_btwOwnerIsCurrent()) return true;
+    _streamDone=true;
+    src.close();
+    return false;
+  };
   function _ensureBtwRow(){
-    if(btwRow&&btwRow.isConnected) return;
+    if(!_closeStaleBtwStream()) return false;
+    if(btwRow&&btwRow.isConnected) return true;
     const inner=$('msgInner');
-    if(!inner) return;
+    if(!inner) return false;
     btwRow=document.createElement('div');
     btwRow.className='msg-row msg-row-btw';
     btwRow.dataset.role='assistant';
@@ -8944,10 +9038,12 @@ function attachBtwStream(parentSid, streamId, question){
     btwRow.appendChild(ansEl);
     inner.appendChild(btwRow);
     btwRow.scrollIntoView({behavior:'smooth',block:'end'});
+    return true;
   }
   src.addEventListener('token',e=>{
+    if(!_closeStaleBtwStream()) return;
     try{answer+=JSON.parse(e.data).text||'';}catch(_){}
-    _ensureBtwRow();
+    if(!_ensureBtwRow()) return;
     const ansEl=btwRow&&btwRow.querySelector('.msg-btw-answer');
     if(ansEl) ansEl.innerHTML=renderMd(answer);
   });
@@ -8958,16 +9054,18 @@ function attachBtwStream(parentSid, streamId, question){
       const d=JSON.parse(e.data);
       if(d.answer&&!answer) answer=d.answer;
     }catch(_){}
-    if(S.session&&S.session.session_id===parentSid) _ensureBtwRow();
+    if(!S.session||S.session.session_id!==parentSid||!_btwOwnerIsCurrent()) return;
+    _ensureBtwRow();
     if(btwRow&&btwRow.isConnected){
       const ansEl=btwRow.querySelector('.msg-btw-answer');
       if(ansEl) ansEl.innerHTML=renderMd(answer||t('btw_no_answer'));
     }
-    showToast(t('btw_done'));
+    if(_btwOwnerIsCurrent()) showToast(t('btw_done'));
   });
   src.addEventListener('apperror',e=>{
     _streamDone=true;
     src.close();
+    if(!_btwOwnerIsCurrent()) return;
     try{
       const d=JSON.parse(e.data);
       showToast(t('btw_failed')+(d.message||''));
@@ -8975,7 +9073,7 @@ function attachBtwStream(parentSid, streamId, question){
     if(btwRow&&btwRow.isConnected) btwRow.remove();
   });
   src.addEventListener('stream_end',()=>{_streamDone=true;src.close();});
-  src.onerror=()=>{src.close();if(!_streamDone&&btwRow&&btwRow.isConnected) btwRow.remove();};
+  src.onerror=()=>{src.close();if(!_streamDone&&_btwOwnerIsCurrent()&&btwRow&&btwRow.isConnected) btwRow.remove();};
 }
 
 // ── /background task tracking ────────────────────────────────────────────────
@@ -9002,14 +9100,27 @@ function hideBackgroundBadge(taskId){
 function startBackgroundPolling(parentSid, taskId, prompt){
   if(_bgPollTimers[taskId]) return;
   async function _poll(){
+    const requestSid=parentSid;
+    const requestGeneration=typeof _messagesGeneration==='number' ? _messagesGeneration : null;
     try{
       const r=await api('/api/background/status?session_id='+encodeURIComponent(parentSid));
       if(r&&r.results){
         for(const res of r.results){
           if(res.task_id===taskId){
+            const ownerCurrent=typeof _isSessionCurrentPane==='function'
+              ? _isSessionCurrentPane(requestSid)
+              : !!(S.session&&S.session.session_id===requestSid);
+            const generationCurrent=requestGeneration===null
+              || typeof _messagesGeneration!=='number'
+              || _messagesGeneration===requestGeneration;
+            if(!ownerCurrent||!generationCurrent){
+              _bgPollTimers[taskId]=setTimeout(_poll,3000);
+              return;
+            }
             hideBackgroundBadge(taskId);
             delete _bgPollTimers[taskId];
             const msg={role:'assistant',content:`**${t('bg_label')}** ${prompt.slice(0,80)}\n\n${res.answer||t('bg_no_answer')}`,'_background':true,_ts:Date.now()/1000};
+            if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
             S.messages.push(msg);
             renderMessages({preserveScroll:true});
             showToast(t('bg_complete'));

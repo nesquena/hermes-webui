@@ -2098,11 +2098,97 @@ $('btnNewChat').onclick=async()=>{
   }
   await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();
 };
-$('btnDownload').onclick=()=>{
+let _downloadTranscriptOperation = null;
+$('btnDownload').onclick=async()=>{
   if(!S.session)return;
-  const blob=new Blob([transcript()],{type:'text/markdown'});
+  const sid=S.session.session_id;
+  let transcriptSession=S.session;
+  let transcriptMessages=S.messages;
+  if(typeof _messagesTruncated!=='undefined'&&_messagesTruncated){
+    if(S.busy||S.activeStreamId){
+      if(typeof showToast==='function'){
+        showToast((typeof t==='function'&&t('download_transcript_busy_full'))||'Wait for the current response to finish before downloading the full transcript.',3000,'warning');
+      }
+      return;
+    }
+    if(_downloadTranscriptOperation){
+      if(typeof showToast==='function'){
+        showToast((typeof t==='function'&&t('download_transcript_preparing_full'))||'Preparing full transcript…',2000,'warning');
+      }
+      return;
+    }
+    const operation={
+      sessionId:sid,
+      ticket:typeof _captureTranscriptReplacement==='function'
+        ? _captureTranscriptReplacement()
+        : {
+            sessionId:sid,
+            generation:typeof _messagesGeneration==='number'?_messagesGeneration:null,
+            loadGeneration:typeof _loadSessionGeneration==='number'?_loadSessionGeneration:null,
+            used:false,
+          },
+      button:$('btnDownload'),
+    };
+    _downloadTranscriptOperation=operation;
+    if(operation.button){
+      operation.button.disabled=true;
+      operation.button.setAttribute('aria-busy','true');
+    }
+    try{
+      if(typeof _readFullSessionSnapshot!=='function'){
+        if(typeof showToast==='function'){
+          showToast((typeof t==='function'&&t('download_transcript_failed_full'))||'Failed to load the full transcript.',4000,'error');
+        }
+        return;
+      }
+      if(typeof showToast==='function'){
+        showToast((typeof t==='function'&&t('download_transcript_preparing_full'))||'Preparing full transcript…',2000);
+      }
+      const snapshot=await _readFullSessionSnapshot(sid);
+      if(!snapshot||!snapshot.session) throw new Error('full transcript snapshot unavailable');
+      const paneCurrent=typeof _isSessionCurrentPane==='function'
+        ? _isSessionCurrentPane(operation.sessionId)
+        : !!(S.session&&S.session.session_id===operation.sessionId
+          &&(typeof _loadingSessionId==='undefined'||!_loadingSessionId||_loadingSessionId===operation.sessionId));
+      const ticketCurrent=typeof _transcriptReplacementIsCurrent==='function'
+        ? _transcriptReplacementIsCurrent(operation.ticket)
+        : !!(operation.ticket&&S.session&&S.session.session_id===operation.ticket.sessionId
+          &&(operation.ticket.generation===null||_messagesGeneration===operation.ticket.generation)
+          &&(operation.ticket.loadGeneration===null||typeof _loadSessionGeneration!=='number'
+            ||_loadSessionGeneration===operation.ticket.loadGeneration));
+      if(!paneCurrent||!ticketCurrent){
+        if(typeof showToast==='function'){
+          showToast((typeof t==='function'&&t('download_transcript_changed_full'))||'The conversation changed while the full transcript was loading. Try again.',3000,'warning');
+        }
+        return;
+      }
+      if(S.busy||S.activeStreamId){
+        if(typeof showToast==='function'){
+          showToast((typeof t==='function'&&t('download_transcript_busy_full'))||'Wait for the current response to finish before downloading the full transcript.',3000,'warning');
+        }
+        return;
+      }
+      transcriptSession=snapshot.session;
+      transcriptMessages=snapshot.messages||[];
+    }catch(e){
+      console.warn('btnDownload full-load failed:',e);
+      if(typeof showToast==='function'){
+        showToast((typeof t==='function'&&t('download_transcript_failed_full'))||'Failed to load the full transcript.',4000,'error');
+      }
+      return;
+    }finally{
+      if(_downloadTranscriptOperation===operation){
+        _downloadTranscriptOperation=null;
+        if(operation.button){
+          operation.button.disabled=false;
+          operation.button.removeAttribute('aria-busy');
+        }
+      }
+    }
+  }
+  const blob=new Blob([transcript(transcriptSession,transcriptMessages)],{type:'text/markdown'});
   const a=document.createElement('a');a.href=URL.createObjectURL(blob);
-  a.download=`hermes-${S.session.session_id}.md`;a.click();URL.revokeObjectURL(a.href);
+  a.download=`hermes-${sid}.md`;a.click();URL.revokeObjectURL(a.href);
 };
 $('btnExportJSON').onclick=()=>{
   if(!S.session)return;

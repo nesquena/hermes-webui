@@ -4790,20 +4790,69 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
   `;
 }
 
+let _clearConversationOperation = null;
+
 async function clearConversation() {
   if(!S.session) return;
+  const clearSid=S.session.session_id;
+  const _clearOwnerIsCurrent=()=>typeof _isSessionCurrentPane==='function'
+    ? _isSessionCurrentPane(clearSid)
+    : !!(S.session&&S.session.session_id===clearSid);
   const _clrMsg=await showConfirmDialog({title:t('clear_conversation_title'),message:t('clear_conversation_message'),confirmLabel:t('clear'),danger:true,focusCancel:true});
   if(!_clrMsg) return;
+  if(!_clearOwnerIsCurrent())return;
+  if(typeof _loadingSessionId!=='undefined'&&_loadingSessionId===clearSid)return;
+  const clearLoadGeneration=typeof _loadSessionGeneration==='number' ? _loadSessionGeneration : null;
+  const _clearLoadIsCurrent=()=>typeof _loadSessionGeneration==='number'
+    ? _loadSessionGeneration===clearLoadGeneration
+      && (!(_loadingSessionId)||_loadingSessionId===clearSid)
+    : (!(_loadingSessionId)||_loadingSessionId!==clearSid);
+  if(_clearConversationOperation)return;
+  const clearTicket=typeof _captureTranscriptReplacement==='function'
+    ? _captureTranscriptReplacement()
+    : null;
+  const operation={sid:clearSid};
+  _clearConversationOperation=operation;
+  const clearControl=$('btnClearConvModal');
+  if(clearControl){clearControl.disabled=true;clearControl.setAttribute('aria-busy','true');}
   try {
     const data = await api('/api/session/clear', {method:'POST',
-      body: JSON.stringify({session_id: S.session.session_id})});
-    S.session = data.session;
-    S.messages = [];
-    S.toolCalls = [];
-    syncTopbar();
-    renderMessages();
+      body: JSON.stringify({session_id: clearSid})});
+    if(!_clearOwnerIsCurrent())return;
+    if(!_clearLoadIsCurrent()){
+      showToast('Conversation changed while clearing; refreshing.',4000,'warning');
+      if(typeof loadSession==='function'){
+        Promise.resolve(loadSession(clearSid,{force:true,externalRefreshReason:'clear-reconcile'})).catch(()=>{});
+      }
+      return;
+    }
+    const committed=typeof _commitTranscriptReplacement==='function'
+      && _commitTranscriptReplacement(clearTicket, () => {
+        S.session = data.session;
+        S.messages = [];
+        S.toolCalls = [];
+        syncTopbar();
+        renderMessages();
+      });
+    if(!committed){
+      showToast('Conversation changed while clearing; refreshing.',4000,'warning');
+      if(typeof loadSession==='function'){
+        Promise.resolve(loadSession(clearSid,{force:true,externalRefreshReason:'clear-reconcile'})).catch(()=>{});
+      }
+      return;
+    }
     showToast(t('conversation_cleared'));
-  } catch(e) { setStatus(t('clear_failed') + e.message); }
+  } catch(e) {
+    if(!_clearOwnerIsCurrent())return;
+    setStatus(t('clear_failed') + e.message);
+  }
+  finally {
+    if(_clearConversationOperation===operation){
+      _clearConversationOperation=null;
+      if(clearControl)clearControl.setAttribute('aria-busy','false');
+      if(typeof _syncHermesPanelSessionActions==='function') _syncHermesPanelSessionActions();
+    }
+  }
 }
 
 // ── Skills panel ──
@@ -8292,7 +8341,7 @@ function _syncHermesPanelSessionActions(){
   setDisabled('btnExportJSON',!hasSession);
   setDisabled('btnShareSession',!hasSession||visibleMessages===0);
   setDisabled('btnStopSharingSession',!hasShare);
-  setDisabled('btnClearConvModal',!hasSession||visibleMessages===0);
+  setDisabled('btnClearConvModal',!hasSession||visibleMessages===0||!!_clearConversationOperation);
 }
 
 // Thin wrapper: settings now live in the main content area. External callers
