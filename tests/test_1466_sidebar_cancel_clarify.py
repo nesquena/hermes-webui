@@ -42,7 +42,10 @@ class TestSidebarCancelAction:
 
     def test_cancel_session_stream_uses_session_owned_stream_id(self):
         """Cancel-from-sidebar must call /api/chat/cancel with the row's stream id."""
-        body = _function_body(BOOT_JS, "cancelSessionStream")
+        # Window bumped 1800 → 2400 in #6405: the persistence_failed branch
+        # added to cancelSessionStream() (greptile P1 streaming-state fix)
+        # grew the function past the default 1800-char read window.
+        body = _function_body(BOOT_JS, "cancelSessionStream", 2400)
         assert "session&&session.active_stream_id" in body or "session && session.active_stream_id" in body
         assert "stream_id=${encodeURIComponent(streamId)}" in body
         assert "S.activeStreamId" not in body.split("const streamId", 1)[1].split("fetch", 1)[0], (
@@ -51,7 +54,8 @@ class TestSidebarCancelAction:
 
     def test_cancel_session_stream_clears_only_owned_clarify_and_approval_cards(self):
         """Cancelling A from sidebar must not blanket-clear B's clarify/approval cards."""
-        body = _function_body(BOOT_JS, "cancelSessionStream")
+        # Window bumped 1800 → 2400 in #6405 (see test above for rationale).
+        body = _function_body(BOOT_JS, "cancelSessionStream", 2400)
         assert "_clarifySessionId===sid" in body, (
             "clarify card cleanup must be gated to the cancelled session id"
         )
