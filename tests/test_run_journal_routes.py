@@ -862,10 +862,10 @@ def test_chat_stream_resume_cursor_prefers_query_params_over_header():
 
     handler = _HeaderHandler(last_event_id="run_1:9")
     qs = {"after_event_id": ["run_1:4"]}
-    assert routes._chat_stream_resume_cursor(handler, qs, "run_1") == (4, True)
+    assert routes._chat_stream_resume_cursor(handler, qs, "run_1") == (4, True, "run_1:4")
 
     qs = {"after_seq": ["7"]}
-    assert routes._chat_stream_resume_cursor(handler, qs, "run_1") == (7, True)
+    assert routes._chat_stream_resume_cursor(handler, qs, "run_1") == (7, True, None)
 
 
 def test_chat_stream_resume_cursor_explicit_unparseable_query_blocks_header():
@@ -879,9 +879,10 @@ def test_chat_stream_resume_cursor_explicit_unparseable_query_blocks_header():
     # presence must still block the (parseable) header.
     handler = _HeaderHandler(last_event_id="run_1:9")
     qs = {"after_event_id": ["run_other:2"]}
-    after_seq, requested = routes._chat_stream_resume_cursor(handler, qs, "run_1")
+    after_seq, requested, raw = routes._chat_stream_resume_cursor(handler, qs, "run_1")
     assert after_seq is None
     assert requested is True  # asked to resume → replay-from-start downstream
+    assert raw == "run_other:2"  # explicit query cursor surfaced, header ignored
 
 
 def test_chat_stream_resume_cursor_reads_last_event_id_header():
@@ -889,7 +890,7 @@ def test_chat_stream_resume_cursor_reads_last_event_id_header():
     import api.routes as routes
 
     handler = _HeaderHandler(last_event_id="run_1:3")
-    assert routes._chat_stream_resume_cursor(handler, {}, "run_1") == (3, True)
+    assert routes._chat_stream_resume_cursor(handler, {}, "run_1") == (3, True, "run_1:3")
 
 
 def test_chat_stream_resume_cursor_foreign_run_header_is_requested_but_unusable():
@@ -899,9 +900,10 @@ def test_chat_stream_resume_cursor_foreign_run_header_is_requested_but_unusable(
     import api.routes as routes
 
     handler = _HeaderHandler(last_event_id="run_other:5")
-    after_seq, requested = routes._chat_stream_resume_cursor(handler, {}, "run_1")
+    after_seq, requested, raw = routes._chat_stream_resume_cursor(handler, {}, "run_1")
     assert after_seq is None
     assert requested is True
+    assert raw == "run_other:5"
 
 
 def test_chat_stream_resume_cursor_absent_without_any_cursor():
@@ -909,10 +911,10 @@ def test_chat_stream_resume_cursor_absent_without_any_cursor():
     import api.routes as routes
 
     handler = _HeaderHandler()
-    assert routes._chat_stream_resume_cursor(handler, {}, "run_1") == (None, False)
+    assert routes._chat_stream_resume_cursor(handler, {}, "run_1") == (None, False, None)
     # Malformed header values are unusable but still a resume request.
     handler = _HeaderHandler(last_event_id="not-a-cursor")
-    assert routes._chat_stream_resume_cursor(handler, {}, "run_1") == (None, True)
+    assert routes._chat_stream_resume_cursor(handler, {}, "run_1") == (None, True, "not-a-cursor")
 
 
 def test_dead_stream_replay_uses_last_event_id_header(monkeypatch):
@@ -928,18 +930,23 @@ def test_dead_stream_replay_uses_last_event_id_header(monkeypatch):
             "session_id": "session_1",
             "run_id": stream_id,
             "terminal": True,
+            "last_seq": 4,
         },
     )
+
+    journal = [
+        {"event": "token", "payload": {"text": "j1"}, "event_id": "run_1:1", "seq": 1},
+        {"event": "token", "payload": {"text": "j2"}, "event_id": "run_1:2", "seq": 2},
+        {"event": "token", "payload": {"text": "j3"}, "event_id": "run_1:3", "seq": 3},
+        {"event": "done", "payload": {"session": {"session_id": "session_1"}}, "event_id": "run_1:4", "seq": 4},
+    ]
 
     def fake_read_run_events(session_id, run_id, after_seq=None, max_seq=None):
         captured["after_seq"] = after_seq
         return {
             "events": [
-                {
-                    "event": "done",
-                    "payload": {"session": {"session_id": session_id}},
-                    "event_id": f"{run_id}:4",
-                }
+                e for e in journal
+                if after_seq is None or int(e["seq"]) > int(after_seq)
             ]
         }
 
@@ -957,6 +964,10 @@ def test_dead_stream_replay_uses_last_event_id_header(monkeypatch):
 
     assert captured["after_seq"] == 2
     body = handler.wfile.getvalue().decode("utf-8")
+    # Resume after seq 2: only seq 3 and 4 are emitted, not 1-2.
+    assert "id: run_1:1\n" not in body
+    assert "id: run_1:2\n" not in body
+    assert "id: run_1:3\n" in body
     assert "id: run_1:4\n" in body
     assert "event: done\n" in body
 
@@ -1101,10 +1112,78 @@ def test_live_stream_invalid_cursor_replays_from_start_not_skips(monkeypatch):
     assert stream.unsubscribed is True
 
 
+def test_live_stream_cursor_equal_to_cutoff_does_not_double_send(monkeypatch):
+    """A valid cursor EQUAL to the snapshot cutoff must enter the drain dedup
+    bound (equality is in-range, NOT ahead). The buffered copy of the event at
+    the cursor was already delivered to this client, so it must be filtered —
+    only the not-yet-seen frames after it are drained (Codex r2 #1 off-by-one).
+    """
+    import api.routes as routes
+
+    class FakeStream:
+        def __init__(self):
+            self.q = queue.Queue()
+            # Retained tail: client already holds through seq 3; seq 4 is new.
+            self.q.put_nowait(("token", {"text": "f2"}, "run_1:2"))
+            self.q.put_nowait(("token", {"text": "f3"}, "run_1:3"))
+            self.q.put_nowait(("stream_end", {}, "run_1:4"))
+            self.unsubscribed = False
+
+        def subscribe_with_snapshot(self):
+            return self.q, {
+                "last_event_id": "run_1:3",
+                "offline_buffered_events": 3,
+                "offline_first_event_id": "run_1:2",
+            }
+
+        def unsubscribe(self, q):
+            self.unsubscribed = q is self.q
+
+    captured = {}
+    handler = _HeaderHandler(last_event_id="run_1:3")  # cursor == snapshot cutoff
+    stream = FakeStream()
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda stream_id: {
+            "session_id": "session_1",
+            "run_id": stream_id,
+            "terminal": False,
+        },
+    )
+
+    def fake_read_run_events(session_id, run_id, after_seq=None, max_seq=None):
+        captured["after_seq"] = after_seq
+        captured["max_seq"] = max_seq
+        return {"events": []}
+
+    monkeypatch.setattr(routes, "read_run_events", fake_read_run_events)
+    monkeypatch.setattr(routes, "stale_interrupted_event", lambda *_a, **_k: None)
+    previous_streams = dict(routes.STREAMS)
+    routes.STREAMS.clear()
+    routes.STREAMS["run_1"] = stream
+    try:
+        routes._handle_sse_stream(
+            handler, urlparse("/api/chat/stream?stream_id=run_1")
+        )
+    finally:
+        routes.STREAMS.clear()
+        routes.STREAMS.update(previous_streams)
+
+    body = handler.wfile.getvalue().decode("utf-8")
+    # The events at/below the cursor (seqs 2 and 3) were already delivered —
+    # they must be filtered out, NOT re-sent. Only the new terminal frame (4)
+    # is drained.
+    assert "id: run_1:2\n" not in body
+    assert "id: run_1:3\n" not in body
+    assert "id: run_1:4\n" in body
+    assert stream.unsubscribed is True
+
+
 def test_dead_stream_ahead_of_stream_cursor_returns_full_replay(monkeypatch):
-    """A cursor AHEAD of the stream is ahead-of-stream, not a fence to clamp
-    onto the terminal event. The dead-stream replay must NOT be emptied by
-    treating it as a resume point (Codex CORE #2 terminal-filter)."""
+    """A cursor AHEAD of the dead stream's authoritative last_seq is normalized
+    to replay-from-start, so the journal's real events are emitted instead of
+    an empty SSE body (Codex r2 #2 dead-stream half)."""
     import api.routes as routes
 
     captured = {}
@@ -1116,15 +1195,21 @@ def test_dead_stream_ahead_of_stream_cursor_returns_full_replay(monkeypatch):
             "session_id": "session_1",
             "run_id": stream_id,
             "terminal": True,
+            "last_seq": 2,
         },
     )
+
+    journal = [
+        {"event": "token", "payload": {"text": "hello"}, "event_id": "run_1:1", "seq": 1},
+        {"event": "done", "payload": {"session": {"session_id": "session_1"}}, "event_id": "run_1:2", "seq": 2},
+    ]
 
     def fake_read_run_events(session_id, run_id, after_seq=None, max_seq=None):
         captured["after_seq"] = after_seq
         return {
             "events": [
-                {"event": "token", "payload": {"text": "hello"}, "event_id": f"{run_id}:1"},
-                {"event": "done", "payload": {"session": {"session_id": session_id}}, "event_id": f"{run_id}:2"},
+                e for e in journal
+                if after_seq is None or int(e["seq"]) > int(after_seq)
             ]
         }
 
@@ -1140,12 +1225,13 @@ def test_dead_stream_ahead_of_stream_cursor_returns_full_replay(monkeypatch):
         routes.STREAMS.clear()
         routes.STREAMS.update(previous_streams)
 
-    # The dead-stream path passes the parsed seq through; replay uses it as the
-    # floor. The point is the stream is NOT emptied by clamping onto a terminal
-    # fence — the client asked to resume past the end, and the dead-stream
-    # journal replay serves the (here empty) tail past seq 999 rather than
-    # fabricating a filtered terminal frame.
-    assert captured["after_seq"] == 999
+    # 999 > last_seq (2) → normalized to replay-from-start, and the replay body
+    # actually carries the journal's events (not an empty response).
+    assert captured["after_seq"] == 0
+    body = handler.wfile.getvalue().decode("utf-8")
+    assert "id: run_1:1\n" in body
+    assert "id: run_1:2\n" in body
+    assert "event: done\n" in body
 
 
 def test_runner_observe_reconnect_uses_last_event_id_header(monkeypatch):
@@ -1198,3 +1284,83 @@ def test_runner_observe_reconnect_uses_last_event_id_header(monkeypatch):
     assert calls == [("run-1", "run-1:5")]
     body = handler.wfile.getvalue().decode("utf-8")
     assert "event: stream_end" in body
+
+
+class _RunnerProbeHandler:
+    def __init__(self, last_event_id=None):
+        self.wfile = io.BytesIO()
+        self.headers = (
+            {"Last-Event-ID": last_event_id} if last_event_id is not None else {}
+        )
+
+    def send_response(self, _code):
+        pass
+
+    def send_header(self, _name, _value):
+        pass
+
+    def end_headers(self):
+        pass
+
+
+def _run_runner_probe(monkeypatch, url, last_event_id=None):
+    """Drive _handle_sse_stream down the runner-observe path, returning the
+    (run_id, cursor) the runner's observe_run was called with."""
+    import api.routes as routes
+
+    calls = []
+
+    class FakeRunnerClient:
+        def observe_run(self, run_id, *, cursor=None):
+            calls.append((run_id, cursor))
+            return {
+                "run_id": run_id,
+                "cursor": "7",
+                "events": [
+                    {"event": "stream_end", "payload": {"ok": True}, "event_id": f"{run_id}:7"},
+                ],
+            }
+
+    monkeypatch.setenv("HERMES_WEBUI_RUNTIME_ADAPTER", "runner-local")
+    monkeypatch.setattr(routes, "_runtime_runner_client_factory", lambda: FakeRunnerClient())
+    handler = _RunnerProbeHandler(last_event_id=last_event_id)
+    try:
+        routes._handle_sse_stream(handler, urlparse(url))
+    finally:
+        monkeypatch.delenv("HERMES_WEBUI_RUNTIME_ADAPTER", raising=False)
+    return calls
+
+
+def test_runner_malformed_explicit_cursor_blocks_header(monkeypatch):
+    """Runner path: an explicit but malformed after_event_id must NOT let the
+    Last-Event-ID header override it — the runner gets NO cursor (full replay),
+    not the header value (Codex r2 #3 probe)."""
+    calls = _run_runner_probe(
+        monkeypatch,
+        "/api/chat/stream?stream_id=run_1&after_event_id=malformed",
+        last_event_id="run_1:9",
+    )
+    assert calls == [("run_1", None)]
+
+
+def test_runner_foreign_cursor_passes_no_cursor_for_full_replay(monkeypatch):
+    """Runner path: a foreign after_event_id (foreign:2) is unusable for this
+    run — the runner must get NO cursor (full replay), never the leaked seq
+    '2' that would skip runner events (Codex r2 #3 probe)."""
+    calls = _run_runner_probe(
+        monkeypatch,
+        "/api/chat/stream?stream_id=run_1&after_event_id=foreign:2",
+    )
+    assert calls == [("run_1", None)]
+
+
+def test_runner_explicit_opaque_cursor_wins(monkeypatch):
+    """Runner path: an explicit opaque ``cursor=`` query param keeps precedence
+    over both after_* params and the Last-Event-ID header (the runner-local
+    contract)."""
+    calls = _run_runner_probe(
+        monkeypatch,
+        "/api/chat/stream?stream_id=run_1&cursor=opaque-xyz",
+        last_event_id="run_1:5",
+    )
+    assert calls == [("run_1", "opaque-xyz")]
