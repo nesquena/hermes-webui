@@ -102,3 +102,37 @@ def test_read_session_message_tail_expands_when_recent_value_crosses_initial_win
 
     assert [message["content"] for message in tail] == ["three", "four"]
     assert offset == 2
+
+
+def test_read_session_message_tail_handles_multibyte_metadata_and_top_level_auxiliary_fields(tmp_path, monkeypatch):
+    from api import models
+
+    sid = "tail_reader_multibyte_metadata"
+    path = tmp_path / f"{sid}.json"
+    path.write_text(
+        json.dumps(
+            {
+                "title": "😀" * 20 + "[",
+                "message_count": 3,
+                "messages": [
+                    {"role": "user", "content": "one"},
+                    {"role": "assistant", "content": "two"},
+                    {"role": "assistant", "content": "three"},
+                ],
+                "tool_calls": [],
+                "anchor_activity_scenes": {"real": {"message_index": 2}},
+                "extra": {"anchor_activity_scenes": {"fake": {"message_index": 0}}},
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+
+    tail, offset = models.read_session_message_tail(sid, 3)
+    auxiliary = models.read_session_auxiliary_metadata(sid)
+
+    assert [message["content"] for message in tail] == ["one", "two", "three"]
+    assert offset == 0
+    assert auxiliary["anchor_activity_scenes"] == {"real": {"message_index": 2}}

@@ -64,6 +64,15 @@ def write_json(handle, value):
 
 
 def repair(source: Path, destination: Path):
+    source = source.resolve()
+    destination = destination.resolve()
+    try:
+        same_file = destination.exists() and source.samefile(destination)
+    except OSError:
+        same_file = False
+    if source == destination or same_file:
+        raise ValueError("source and destination must be different files")
+
     seen_ids = set()
     input_messages = 0
     output_messages = 0

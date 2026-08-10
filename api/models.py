@@ -1248,14 +1248,46 @@ def read_session_auxiliary_metadata(session_id: str) -> dict:
             suffix = handle.read()
         text = suffix.decode("utf-8")
         decoder = json.JSONDecoder()
+        top_level_keys = {}
+        leading = len(text) - len(text.lstrip())
+        root_object_in_buffer = text[leading:leading + 1] == "{"
+        key_depth = 1 if root_object_in_buffer else 0
+        depth = key_depth
+        index = leading + 1 if root_object_in_buffer else 0
+        while index < len(text):
+            char = text[index]
+            if char == '"':
+                start = index
+                index += 1
+                escaped = False
+                while index < len(text):
+                    if escaped:
+                        escaped = False
+                    elif text[index] == "\\":
+                        escaped = True
+                    elif text[index] == '"':
+                        break
+                    index += 1
+                if index >= len(text):
+                    break
+                if depth == key_depth:
+                    key = json.loads(text[start:index + 1])
+                    probe = index + 1
+                    while probe < len(text) and text[probe].isspace():
+                        probe += 1
+                    if probe < len(text) and text[probe] == ":":
+                        top_level_keys.setdefault(key, probe)
+                index += 1
+                continue
+            if char in "[{":
+                depth += 1
+            elif char in "]}":
+                depth = max(0, depth - 1)
+            index += 1
 
-        def value_for(key, end=None):
-            marker = f'"{key}"'
-            pos = text.rfind(marker) if end is None else text.rfind(marker, 0, end)
-            if pos < 0:
-                return None
-            colon = text.find(":", pos + len(marker))
-            if colon < 0:
+        def value_for(key):
+            colon = top_level_keys.get(key)
+            if colon is None:
                 return None
             value_start = colon + 1
             while value_start < len(text) and text[value_start].isspace():
@@ -1264,7 +1296,7 @@ def read_session_auxiliary_metadata(session_id: str) -> dict:
             return value
 
         anchor = value_for("anchor_activity_scenes")
-        tool_calls = value_for("tool_calls", text.rfind('"anchor_activity_scenes"') if '"anchor_activity_scenes"' in text else None)
+        tool_calls = value_for("tool_calls")
         result = {}
         if isinstance(anchor, dict):
             result["anchor_activity_scenes"] = anchor
@@ -1304,7 +1336,8 @@ def read_session_message_tail(session_id: str, value_limit: int) -> tuple[list, 
             marker = _find_top_level_json_key(head_text, "messages")
             if marker is None:
                 return [], 0
-            open_rel = head.find(b"[", marker)
+            marker_byte = len(head_text[:marker].encode("utf-8"))
+            open_rel = head.find(b"[", marker_byte)
             if open_rel < 0:
                 return [], 0
             expected_open = open_rel
