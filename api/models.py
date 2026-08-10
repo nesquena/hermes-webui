@@ -1125,6 +1125,183 @@ def _load_session_from_path(path: Path) -> "Session | None":
     return Session(**data)
 
 
+def _reverse_json_array_pair(data: bytes, absolute_base: int, expected_open: int):
+    """Find the closing bracket of the final top-level array efficiently.
+
+    The root-object sentinel distinguishes the huge top-level ``messages`` array
+    from arrays nested inside the final message. We can identify its closing
+    bracket without traversing the array's contents; ``expected_open`` comes from
+    the small metadata prefix and is retained as the pair's opening coordinate.
+    """
+    end = len(data) - 1
+    while end >= 0 and data[end] in b" \\t\\r\\n":
+        end -= 1
+    if end >= 0 and data[end] == ord("}"):
+        end -= 1
+    stack = [(ord("{"), -1)]  # root object sentinel
+    in_string = False
+    idx = end
+    while idx >= 0:
+        byte = data[idx]
+        if byte == ord('"'):
+            slashes = 0
+            probe = idx - 1
+            while probe >= 0 and data[probe] == ord('\\'):
+                slashes += 1
+                probe -= 1
+            if slashes % 2 == 0:
+                in_string = not in_string
+        elif not in_string:
+            if byte == ord("]"):
+                if len(stack) == 1:
+                    return expected_open, absolute_base + idx
+                stack.append((ord("["), idx))
+            elif byte == ord("}"):
+                stack.append((ord("{"), idx))
+            elif byte in (ord("{"), ord("[")) and len(stack) > 1:
+                expected, _close_idx = stack[-1]
+                if byte != expected:
+                    return None
+                stack.pop()
+        idx -= 1
+    return None
+
+
+def _reverse_json_tail_start(data: bytes, open_idx: int, close_idx: int, value_limit: int) -> int | None:
+    """Return the byte offset of the Nth-last value in a JSON array."""
+    if value_limit <= 0:
+        return close_idx
+    stack = []
+    in_string = False
+    commas = 0
+    idx = close_idx - 1
+    while idx > open_idx:
+        byte = data[idx]
+        if byte == ord('"'):
+            slashes = 0
+            probe = idx - 1
+            while probe > open_idx and data[probe] == ord('\\'):
+                slashes += 1
+                probe -= 1
+            if slashes % 2 == 0:
+                in_string = not in_string
+        elif not in_string:
+            if byte == ord("}"):
+                stack.append(ord("{"))
+            elif byte == ord("]"):
+                stack.append(ord("["))
+            elif byte in (ord("{"), ord("[")) and stack:
+                if byte != stack[-1]:
+                    return None
+                stack.pop()
+            elif byte == ord(",") and not stack:
+                commas += 1
+                if commas >= value_limit:
+                    return idx + 1
+        idx -= 1
+    return open_idx + 1
+
+
+def _decode_json_values(raw: bytes) -> list:
+    """Decode comma-separated JSON values without wrapping the whole sidecar."""
+    text = raw.decode("utf-8")
+    decoder = json.JSONDecoder()
+    values = []
+    pos = 0
+    while pos < len(text):
+        while pos < len(text) and (text[pos].isspace() or text[pos] == ","):
+            pos += 1
+        if pos >= len(text):
+            break
+        value, pos = decoder.raw_decode(text, pos)
+        values.append(value)
+    return values
+
+
+def read_session_message_tail(session_id: str, value_limit: int) -> tuple[list, int]:
+    """Read only the newest raw message rows from a sidecar JSON file.
+
+    This is the cold display path for ``?messages=1&msg_limit=N``. It never
+    calls ``Session.load`` and never deserializes the full transcript. The
+    returned offset is the raw array index of the first returned value, derived
+    from the persisted ``message_count`` metadata when available.
+    """
+    if not is_safe_session_id(session_id):
+        return [], 0
+    try:
+        limit = max(1, int(value_limit))
+    except (TypeError, ValueError):
+        return [], 0
+    path = SESSION_DIR / f"{session_id}.json"
+    if not path.exists():
+        return [], 0
+    try:
+        file_size = path.stat().st_size
+        with path.open("rb") as handle:
+            head = handle.read(min(file_size, 256 * 1024))
+            marker = re.search(rb'"messages"\s*:', head)
+            if marker is None:
+                return [], 0
+            open_rel = head.find(b"[", marker.end())
+            if open_rel < 0:
+                return [], 0
+            expected_open = open_rel
+            window_size = min(file_size, max(256 * 1024, 1024 * 1024))
+            pair = None
+            while True:
+                start = max(0, file_size - window_size)
+                handle.seek(start)
+                window = handle.read(file_size - start)
+                pair = _reverse_json_array_pair(window, start, expected_open)
+                if pair is not None:
+                    break
+                if start == 0 or window_size >= min(file_size, 128 * 1024 * 1024):
+                    return [], 0
+                window_size = min(file_size, window_size * 2)
+            open_abs, close_abs = pair
+            # Scan from the close bracket backward. If the Nth-last value starts
+            # before the current window, expand and retry with a larger window.
+            while True:
+                start_abs = _reverse_json_tail_start(
+                    window,
+                    max(0, open_abs - start),
+                    close_abs - start,
+                    limit,
+                )
+                if start_abs is None:
+                    return [], 0
+                value_start_abs = start + start_abs
+                if value_start_abs >= start:
+                    handle.seek(value_start_abs)
+                    raw = handle.read(close_abs - value_start_abs)
+                    values = _decode_json_values(raw)
+                    if values:
+                        break
+                if start == 0 or window_size >= min(file_size, 128 * 1024 * 1024):
+                    return [], 0
+                window_size = min(file_size, window_size * 2)
+                start = max(0, file_size - window_size)
+                handle.seek(start)
+                window = handle.read(file_size - start)
+                pair = _reverse_json_array_pair(window, start, expected_open)
+                if pair is None:
+                    return [], 0
+                open_abs, close_abs = pair
+            prefix = _read_metadata_json_prefix(path)
+            total_count = None
+            if prefix:
+                try:
+                    metadata = json.loads(prefix)
+                    total_count = int(metadata.get("message_count"))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    total_count = None
+            offset = max(0, total_count - len(values)) if total_count is not None else 0
+            return values, offset
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        logger.debug("Failed to read bounded message tail for %s", session_id, exc_info=True)
+        return [], 0
+
+
 def _lookup_index_message_count(session_id):
     """Return the indexed message count without loading the full session file."""
     return _index_message_count_map().get(str(session_id))

@@ -1,0 +1,47 @@
+from types import SimpleNamespace
+from unittest.mock import patch
+from urllib.parse import urlparse
+
+
+def test_initial_bounded_session_load_uses_metadata_and_tail_reader():
+    import api.routes as routes
+    from tests.test_session_tail_payload import _FakeSession
+
+    session = _FakeSession([
+        {"role": "assistant", "content": "tail-a"},
+        {"role": "assistant", "content": "tail-b"},
+    ])
+    session.__dict__["_metadata_message_count"] = 1000
+    captured = {}
+    get_session_calls = []
+
+    def fake_get_session(sid, metadata_only=False):
+        get_session_calls.append((sid, metadata_only))
+        return session
+
+    def fake_j(_handler, data, status=200, extra_headers=None):
+        captured["session"] = data["session"]
+        captured["status"] = status
+        return data
+
+    with patch("api.routes.get_session", side_effect=fake_get_session), \
+         patch("api.routes.read_session_message_tail", return_value=(session.messages, 998)), \
+         patch("api.routes._clear_stale_stream_state", return_value=False), \
+         patch("api.routes._lookup_cli_session_metadata", return_value={}), \
+         patch("api.routes.get_state_db_session_messages", side_effect=AssertionError("unbounded state.db read")), \
+         patch("api.routes.redact_session_data", side_effect=lambda raw: raw), \
+         patch("api.routes.j", side_effect=fake_j):
+        routes.handle_get(
+            SimpleNamespace(),
+            urlparse(
+                "/api/session?session_id=tail_payload_001&messages=1&resolve_model=0&msg_limit=2"
+            ),
+        )
+
+    assert get_session_calls == [("tail_payload_001", True)]
+    assert [message["content"] for message in captured["session"]["messages"]] == [
+        "tail-a",
+        "tail-b",
+    ]
+    assert captured["session"]["message_count"] == 1000
+    assert captured["session"]["_messages_offset"] == 998

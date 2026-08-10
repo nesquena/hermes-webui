@@ -9619,6 +9619,7 @@ from api.models import (
     get_cli_sessions,
     get_cli_session_messages,
     get_state_db_session_messages,
+    read_session_message_tail,
     get_state_db_session_message_prefix_summary,
     get_state_db_session_message_keys_before_timestamp,
     get_state_db_session_summary,
@@ -12824,7 +12825,14 @@ def handle_get(handler, parsed) -> bool:
         try:
             _t1 = _time.monotonic()
             if _diag: _diag.stage("t1_after_get_session_check")
-            s = get_session(sid, metadata_only=(not load_messages))
+            # Keep the initial bounded display request metadata-only. A full
+            # Session.load() here would deserialize the complete sidecar before
+            # the tail window can be sliced (#session-load-tail).
+            _initial_bounded_load = msg_limit is not None and msg_before is None
+            s = get_session(
+                sid,
+                metadata_only=(not load_messages or _initial_bounded_load),
+            )
             _session_profile = getattr(s, 'profile', None) or None
             if not _session_visible_to_active_profile(_session_profile, handler):
                 if _session_profile:
@@ -12856,7 +12864,25 @@ def handle_get(handler, parsed) -> bool:
             if is_messaging_session:
                 cli_messages = get_cli_session_messages(sid)
             elif load_messages:
-                if msg_limit is not None:
+                _tail_loaded = False
+                if _initial_bounded_load and not is_messaging_session:
+                    try:
+                        _tail_budget = max(300, int(msg_limit) * 10)
+                        _tail, _tail_offset = read_session_message_tail(sid, _tail_budget)
+                        _metadata_count = getattr(s, "_metadata_message_count", None)
+                        if _tail or _metadata_count == 0:
+                            limited_sidecar_messages = _tail
+                            s._display_tail_loaded = True
+                            s._display_tail_offset = max(0, int(_tail_offset or 0))
+                            s._display_tail_total_count = (
+                                max(int(_metadata_count), s._display_tail_offset + len(_tail))
+                                if _metadata_count is not None
+                                else s._display_tail_offset + len(_tail)
+                            )
+                            _tail_loaded = True
+                    except (TypeError, ValueError, OSError):
+                        logger.debug("Bounded session tail read failed for %s", sid, exc_info=True)
+                if not _tail_loaded and msg_limit is not None:
                     (
                         state_db_since_timestamp,
                         limited_sidecar_messages,
@@ -12865,21 +12891,26 @@ def handle_get(handler, parsed) -> bool:
                         msg_limit,
                         msg_before=msg_before,
                     )
-                _state_db_reader_kwargs = {"profile": _session_profile}
-                if state_db_since_timestamp is not None:
-                    _state_db_reader_kwargs["since_timestamp"] = state_db_since_timestamp
-                # Apply the display-path row backstop ONLY on provably-safe
-                # reads where no truncation_boundary prefix is required for the
-                # merge — see _state_db_backstop_limit_for_display. Compressed
-                # sessions and msg_before paging need their full prefix rows for
-                # correct reconciliation, so those stay uncapped.
-                _backstop = _state_db_backstop_limit_for_display(s, msg_before)
-                if _backstop is not None:
-                    _state_db_reader_kwargs["limit"] = _backstop
-                state_db_messages = get_state_db_session_messages(
-                    sid,
-                    **_state_db_reader_kwargs,
-                )
+                if _tail_loaded:
+                    # The WebUI sidecar is authoritative for this initial
+                    # display tail. Avoid a second unbounded state.db merge.
+                    state_db_messages = []
+                else:
+                    _state_db_reader_kwargs = {"profile": _session_profile}
+                    if state_db_since_timestamp is not None:
+                        _state_db_reader_kwargs["since_timestamp"] = state_db_since_timestamp
+                    # Apply the display-path row backstop ONLY on provably-safe
+                    # reads where no truncation_boundary prefix is required for the
+                    # merge — see _state_db_backstop_limit_for_display. Compressed
+                    # sessions and msg_before paging need their full prefix rows for
+                    # correct reconciliation, so those stay uncapped.
+                    _backstop = _state_db_backstop_limit_for_display(s, msg_before)
+                    if _backstop is not None:
+                        _state_db_reader_kwargs["limit"] = _backstop
+                    state_db_messages = get_state_db_session_messages(
+                        sid,
+                        **_state_db_reader_kwargs,
+                    )
             elif not is_messaging_session:
                 # Metadata-only callers still need the same append-only
                 # reconciliation contract as full loads so stale/replayed
@@ -12961,6 +12992,8 @@ def handle_get(handler, parsed) -> bool:
                     msg_before=msg_before,
                     expand_renderable=expand_renderable,
                 )
+                if getattr(s, "_display_tail_loaded", False):
+                    _messages_offset += int(getattr(s, "_display_tail_offset", 0) or 0)
                 if msg_limit is not None:
                     _truncated_msgs = _messages_for_limited_payload(_truncated_msgs)
                 _truncated_msgs = _hydrate_anchor_activity_scenes(
@@ -13047,7 +13080,12 @@ def handle_get(handler, parsed) -> bool:
                     _messages_offset,
                     len(_truncated_msgs),
                 )
-            _merged_message_count = _summary_message_count if _summary_message_count is not None else len(_all_msgs)
+            if getattr(s, "_display_tail_loaded", False):
+                _merged_message_count = int(
+                    getattr(s, "_display_tail_total_count", len(_all_msgs)) or len(_all_msgs)
+                )
+            else:
+                _merged_message_count = _summary_message_count if _summary_message_count is not None else len(_all_msgs)
             _merged_last_message_at = _summary_last_message_at if _summary_last_message_at is not None else 0
             if _summary_last_message_at is None and _all_msgs:
                 try:
