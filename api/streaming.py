@@ -5210,6 +5210,42 @@ def _api_safe_message_positions(messages):
     return final_out
 
 
+def _context_message_dedup_key(msg):
+    """Return a dedup key that includes stable message id and lifecycle ownership.
+
+    Content-based identity (``_message_identity``) conflates distinct turns that
+    share the same role and normalized text (#6310). When a stable per-message
+    ``id`` is present, prepend it so that separate turns are never dropped.
+    Without an id the key falls back to lifecycle-aware content identity — this
+    is appropriate for pre-id stages where genuine duplication is the only concern.
+
+    Lifecycle ownership (``_partial``, ``_error``, ``_anchor_stream_id``,
+    ``_anchor_activity_scene``) is embedded in ``_message_identity`` so that
+    an unsettled partial row and a settled final row with the same content and
+    id are treated as distinct turns (#6322).
+    """
+    msg_id = msg.get('id') if isinstance(msg, dict) else None
+    if isinstance(msg_id, bool):
+        msg_id = None
+    if not isinstance(msg_id, int) or msg_id < 0:
+        msg_id = None
+    content_key = _message_identity(msg)
+    if content_key is None:
+        return None
+    return (msg_id,) + content_key
+
+
+def _is_lifecycle_unsettled(msg):
+    """True when *msg* is a non-terminal row (partial or error).
+
+    Used by ``_deduplicate_context_messages`` to decide which of two adjacent
+    same-content rows owns the authoritative lifecycle.
+    """
+    if not isinstance(msg, dict):
+        return False
+    return bool(msg.get('_partial')) or bool(msg.get('_error'))
+
+
 def _deduplicate_context_messages(messages):
     """Remove duplicate messages from context by identity, keeping first occurrence.
 
@@ -5222,6 +5258,7 @@ def _deduplicate_context_messages(messages):
     if not messages:
         return messages
     seen = set()
+    seen_content = set()
     deduped = []
     user_exact_index = {}
     for msg in messages:
@@ -5241,31 +5278,95 @@ def _deduplicate_context_messages(messages):
         if _is_compressed_context_tool_result_summary_message(msg) and not msg.get('tool_call_id'):
             deduped.append(msg)
             continue
-        key = _message_identity(msg)
-        if isinstance(msg, dict) and msg.get('role') == 'user' and key is not None:
+
+        content_key = _message_content_identity(msg)
+        lifecycle_key = _message_identity(msg)
+
+        # Backstop 1: adjacent same-content rows resolved by lifecycle ownership.
+        # The id-aware primary key can't decide which of two adjacent rows with
+        # the *same* content identity owns the authoritative turn — we must
+        # check lifecycle and, when one row is settled and the other is not,
+        # let the settled row survive.
+        if deduped and content_key is not None and content_key == _message_content_identity(deduped[-1]):
+            prev_lifecycle_key = _message_identity(deduped[-1])
+            cur_lifecycle_key = _message_identity(msg)
+            if prev_lifecycle_key == cur_lifecycle_key:
+                # Same content and same lifecycle ownership → genuine duplicate,
+                # collapse regardless of stable ids (#6322).
+                continue
+            if _is_lifecycle_unsettled(msg) and not _is_lifecycle_unsettled(deduped[-1]):
+                # Current is unsettled (partial/error), previous is settled →
+                # skip the transient row, keep the final/anchor-owning one.
+                continue
+            if not _is_lifecycle_unsettled(msg) and _is_lifecycle_unsettled(deduped[-1]):
+                # Current is settled, previous is unsettled (partial/error) →
+                # replace the old unsettled entry with the settled row so
+                # the final/anchor-owning row is authoritative (#6322).
+                prev_key = _context_message_dedup_key(deduped[-1])
+                if prev_key is not None:
+                    seen.discard(prev_key)
+                deduped[-1] = msg
+                key = _context_message_dedup_key(msg)
+                if key is not None:
+                    seen.add(key)
+                if lifecycle_key is not None:
+                    seen_content.add(lifecycle_key)
+                continue
+
+        # Backstop 2: drop id-less rows whose lifecycle-aware identity is already
+        # seen.  The merge at L8803 joins context_messages + state.db without
+        # stable ids, so an id-bearing row followed by the same row without an
+        # id would otherwise survive against the id-aware key.  Using the full
+        # lifecycle-aware identity (``_message_identity``) ensures that id-less
+        # rows with _different_ unsettled/settled/anchor ownership are not
+        # incorrectly collapsed — only a true content+lifecycle duplicate is
+        # dropped (#6322).
+        msg_id = msg.get('id') if isinstance(msg, dict) else None
+        if isinstance(msg_id, bool):
+            msg_id = None
+        if not isinstance(msg_id, int) or msg_id < 0:
+            msg_id = None
+        if msg_id is None and lifecycle_key is not None and lifecycle_key in seen_content:
+            continue
+
+        # Primary dedup: lifecycle-aware id key.
+        key = _context_message_dedup_key(msg)
+
+        # User exact dedup: handle active turn updates and exact user duplicates
+        if isinstance(msg, dict) and msg.get('role') == 'user' and content_key is not None:
+            msg_id_for_exact = msg.get('id') if isinstance(msg, dict) else None
+            if isinstance(msg_id_for_exact, bool):
+                msg_id_for_exact = None
+            if not isinstance(msg_id_for_exact, int) or msg_id_for_exact < 0:
+                msg_id_for_exact = None
             user_exact_key = (
-                key,
+                content_key,
                 msg.get('timestamp'),
                 msg.get('_ts'),
                 msg.get('_source') or 'webui',
                 json.dumps(msg.get('attachments') or [], sort_keys=True, ensure_ascii=False),
+                msg_id_for_exact,
             )
             prior_exact_idx = user_exact_index.get(user_exact_key)
             if msg.get('_active_turn_token'):
                 if prior_exact_idx is not None:
                     deduped[prior_exact_idx] = msg
                     continue
-                if key in seen:
+                if key is not None and key in seen:
                     deduped.append(msg)
                     user_exact_index[user_exact_key] = len(deduped) - 1
                     continue
             elif prior_exact_idx is not None:
                 continue
             user_exact_index[user_exact_key] = len(deduped)
+
         if key is not None and key in seen:
             continue
+
         if key is not None:
             seen.add(key)
+        if lifecycle_key is not None:
+            seen_content.add(lifecycle_key)
         deduped.append(msg)
     return deduped
 
@@ -5582,7 +5683,14 @@ def _session_context_messages(session):
     return session.messages or []
 
 
-def _message_identity(msg):
+def _message_content_identity(msg):
+    """Return content-only identity (no lifecycle metadata).
+
+    This is the content part of ``_message_identity``, used by Backstop 1 in
+    ``_deduplicate_context_messages`` to detect adjacent same-content rows
+    before applying lifecycle preference. Callers wanting full turn identity
+    including lifecycle ownership should use ``_message_identity`` instead.
+    """
     if not isinstance(msg, dict):
         return None
     role = str(msg.get('role') or '')
@@ -5617,6 +5725,52 @@ def _message_identity(msg):
         " ".join(str(text or '').split())[:500],
         str(msg.get('tool_call_id') or ''),
         json.dumps(msg.get('tool_calls') or [], sort_keys=True, ensure_ascii=False),
+    )
+
+
+def _message_identity(msg):
+    if not isinstance(msg, dict):
+        return None
+    role = str(msg.get('role') or '')
+    content = msg.get('content', '')
+    text = _message_text(content)
+    if role == 'user':
+        # WebUI sends the model a workspace-prefixed user_message while the
+        # visible optimistic bubble contains only the human text. Treat them as
+        # the same turn for merge/dedup purposes; otherwise compaction results
+        # render two adjacent user bubbles ("Ok" and "[Workspace...]\nOk").
+        text = _strip_workspace_prefix(text, include_legacy=True)
+    if not text and not msg.get('tool_call_id') and not msg.get('tool_calls'):
+        # Empty assistant messages (e.g. _partial markers with no visible
+        # content) previously returned None, making them invisible to the
+        # merge dedup in _merge_display_messages_after_agent_result. This
+        # caused exponential accumulation: each turn's merge copied ALL
+        # prior _partial messages because they had no identity to track.
+        # Now, _partial messages with empty text get a stable identity
+        # keyed on their role + _partial flag + reasoning/tool metadata,
+        # so the merge can dedup identical empty partials.
+        if msg.get('_partial'):
+            reasoning_key = " ".join(str(msg.get('reasoning') or '').split())[:200]
+            return (
+                role,
+                '',  # empty text
+                '',  # no tool_call_id
+                '__partial__' + reasoning_key,
+                bool(msg.get('_partial')),
+                bool(msg.get('_error')),
+                str(msg.get('_anchor_stream_id') or ''),
+                '<scene>' if isinstance(msg.get('_anchor_activity_scene'), dict) else '',
+            )
+        return None
+    return (
+        role,
+        " ".join(str(text or '').split())[:500],
+        str(msg.get('tool_call_id') or ''),
+        json.dumps(msg.get('tool_calls') or [], sort_keys=True, ensure_ascii=False),
+        bool(msg.get('_partial')),
+        bool(msg.get('_error')),
+        str(msg.get('_anchor_stream_id') or ''),
+        '<scene>' if isinstance(msg.get('_anchor_activity_scene'), dict) else '',
     )
 
 
