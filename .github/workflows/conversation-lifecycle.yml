@@ -15,6 +15,7 @@ on:
       - 'tests/browser_historical_transcript_hydration.py'
       - 'requirements*.txt'
       - 'pyproject.toml'
+      - '.github/scripts/prepare-playwright-apt.sh'
       - '.github/workflows/conversation-lifecycle.yml'
   push:
     branches: [master]
@@ -26,6 +27,7 @@ on:
       - 'tests/browser_historical_transcript_hydration.py'
       - 'requirements*.txt'
       - 'pyproject.toml'
+      - '.github/scripts/prepare-playwright-apt.sh'
       - '.github/workflows/conversation-lifecycle.yml'
 
 jobs:
@@ -62,6 +64,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt playwright
+          bash .github/scripts/prepare-playwright-apt.sh
           python -m playwright install --with-deps chromium
 
       - name: Run conversation lifecycle gate

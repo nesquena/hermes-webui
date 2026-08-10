@@ -28,9 +28,19 @@ def function_block(src: str, name: str) -> str:
 
     depth = 0
     in_string = None
+    in_line_comment = False
+    in_block_comment = False
     escape = False
     for i in range(brace, len(src)):
         ch = src[i]
+        if in_line_comment:
+            if ch == "\n":
+                in_line_comment = False
+            continue
+        if in_block_comment:
+            if ch == "*" and i + 1 < len(src) and src[i + 1] == "/":
+                in_block_comment = False
+            continue
         if in_string:
             if escape:
                 escape = False
@@ -38,6 +48,22 @@ def function_block(src: str, name: str) -> str:
                 escape = True
             elif ch == in_string:
                 in_string = None
+            continue
+        if (
+            ch == "/"
+            and i + 1 < len(src)
+            and src[i + 1] == "/"
+            and (i == 0 or src[i - 1] != "\\")
+        ):
+            in_line_comment = True
+            continue
+        if (
+            ch == "/"
+            and i + 1 < len(src)
+            and src[i + 1] == "*"
+            and (i == 0 or src[i - 1] != "\\")
+        ):
+            in_block_comment = True
             continue
         if ch in "'`\"":
             in_string = ch

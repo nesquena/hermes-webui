@@ -8,6 +8,12 @@ def read(path):
     return (ROOT / path).read_text(encoding="utf-8")
 
 
+def directive_consume_block(src):
+    start = src.index("const _directivePayload = await _pending.promise;")
+    end = src.index("if(_directivePayload)", start)
+    return src[start:end]
+
+
 def test_use_entry_in_commands_array():
     src = read("static/commands.js")
     assert "{name:'use'," in src, "COMMANDS must contain a {name:'use', ...} entry"
@@ -58,13 +64,16 @@ def test_use_entry_has_subArgs_skills():
 def test_directive_consumed_at_injection_site():
     """_forcedSkillDirectivePending is cleared at the consume site, not in finally."""
     src = read("static/messages.js")
-    finally_part = src.split("finally")[1] if "finally" in src else ""
-    assert "_forcedSkillDirectivePending = null;" not in finally_part, \
-        "_forcedSkillDirectivePending must NOT be cleared in the finally block"
+    consume_start = src.index("const _directivePayload = await _pending.promise;")
+    assert "_forcedSkillDirectivePending = null;" not in src[:consume_start], \
+        "_forcedSkillDirectivePending must not be cleared before the consume site"
     assert "const _directivePayload = await _pending.promise;" in src, \
         "consume site must await the pending promise"
-    assert "_forcedSkillDirectivePending = null;" in src, \
-        "_forcedSkillDirectivePending must be cleared somewhere in messages.js"
+    block = directive_consume_block(src)
+    assert "if(_forcedSkillDirectivePending===_pending)" in block, \
+        "consume block must compare the pending directive before clearing it"
+    assert "_forcedSkillDirectivePending = null;" in block, \
+        "consume block must clear the pending directive"
 
 
 def test_directive_injection_before_empty_guard():
@@ -119,11 +128,14 @@ def test_directive_pending_captures_session_id():
 
 def test_directive_only_consumed_by_matching_session():
     src = read("static/messages.js")
+    block = directive_consume_block(src)
     assert "const _pending=_forcedSkillDirectivePending;" in src, \
         "send() must snapshot the pending directive before awaiting it"
     assert "if(!_pending.sessionId||_pending.sessionId===activeSid){" in src, \
         "send() must only consume /use directives issued for the active session"
-    assert "if(_forcedSkillDirectivePending===_pending)_forcedSkillDirectivePending = null;" in src, \
+    assert "if(_forcedSkillDirectivePending===_pending)" in block, \
         "send() must not clear a newer pending directive created while awaiting"
+    assert "_forcedSkillDirectivePending =" in block, \
+        "send() must clear only the consumed directive"
     assert "[FORCED SKILL CONTEXT: ${_forcedSkillName}]" in src, \
         "send() must prepend deterministic forced-skill content before the user message"

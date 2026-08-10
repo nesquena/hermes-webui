@@ -245,7 +245,9 @@ jobs:
 
       - name: Install Playwright browsers
         if: needs.changes.outputs.docs_only != 'true'
-        run: python -m playwright install --with-deps chromium
+        run: |
+          bash .github/scripts/prepare-playwright-apt.sh
+          python -m playwright install --with-deps chromium
 
       - name: Run tests (shard ${{ matrix.shard }} of 5)
         if: needs.changes.outputs.docs_only != 'true'
