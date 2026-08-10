@@ -7086,7 +7086,7 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
    even though the modal itself scrolls. The max-height cap + overflow stay so
    the inner form scrolls; only the alignment changes. */
 @media (max-width: 640px) and (max-height: 480px){
-  .kanban-modal-overlay{align-items:flex-start;}
+  .kanban-modal-overlay{align-items:flex-start;overflow-y:auto;}
   .kanban-modal{max-height:calc(100dvh - 24px);}
 }
 
