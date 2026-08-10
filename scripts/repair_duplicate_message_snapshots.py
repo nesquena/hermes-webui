@@ -49,7 +49,7 @@ class JSONReader:
                 return value
             except (json.JSONDecodeError, UnicodeDecodeError):
                 if not self._fill():
-                    raise ValueError("truncated JSON value")
+                    raise ValueError("truncated JSON value") from None
 
     def byte(self):
         self.skip_ws()

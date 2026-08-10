@@ -8932,6 +8932,22 @@ def _sidecar_file_exceeds_threshold(session_id, threshold_bytes) -> bool:
         return False
 
 
+def _state_db_messages_for_bounded_tail(session, sidecar_messages):
+    """Read only the state.db suffix needed to reconcile a bounded sidecar tail."""
+    reader_kwargs = {
+        "profile": getattr(session, "profile", None) or None,
+        "limit": _STATE_DB_DISPLAY_ROW_BACKSTOP,
+    }
+    timestamps = [_message_timestamp_as_float(msg) for msg in list(sidecar_messages or [])]
+    valid_timestamps = [ts for ts in timestamps if ts is not None]
+    if len(valid_timestamps) == len(timestamps) and valid_timestamps:
+        reader_kwargs["since_timestamp"] = min(valid_timestamps)
+    return get_state_db_session_messages(
+        getattr(session, "session_id", None),
+        **reader_kwargs,
+    )
+
+
 def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before=None):
     """Return (timestamp floor, sidecar messages) for bounded state.db tail reads.
 
@@ -12838,6 +12854,15 @@ def handle_get(handler, parsed) -> bool:
                 sid,
                 metadata_only=(not load_messages or _initial_bounded_load),
             )
+            if _initial_bounded_load and (
+                getattr(s, "truncation_watermark", None) not in (None, "")
+                or getattr(s, "truncation_boundary", None) not in (None, "")
+            ):
+                # Tail-only reconciliation cannot safely reconstruct a deleted
+                # prefix. Rare truncation/recovery sessions retain the full-load
+                # path rather than risking transcript resurrection or loss.
+                s = get_session(sid, metadata_only=False)
+                _initial_bounded_load = False
             _session_profile = getattr(s, 'profile', None) or None
             if not _session_visible_to_active_profile(_session_profile, handler):
                 if _session_profile:
@@ -12903,13 +12928,12 @@ def handle_get(handler, parsed) -> bool:
                         msg_before=msg_before,
                     )
                 if _tail_loaded:
-                    # Preserve the existing reconciliation contract. The sidecar
-                    # tail avoids the multi-gigabyte parse, while state.db remains
-                    # authoritative for rows that were appended or repaired after
-                    # the sidecar snapshot.
-                    state_db_messages = get_state_db_session_messages(
-                        sid,
-                        profile=_session_profile,
+                    # Reconcile only the bounded state.db suffix. A successful
+                    # sidecar tail must not materialize the complete database
+                    # transcript on the latency-sensitive initial request.
+                    state_db_messages = _state_db_messages_for_bounded_tail(
+                        s,
+                        limited_sidecar_messages,
                     )
                 else:
                     _state_db_reader_kwargs = {"profile": _session_profile}
@@ -12998,7 +13022,23 @@ def handle_get(handler, parsed) -> bool:
                             _summary_message_count = max(0, int(metadata_count))
                     except (TypeError, ValueError):
                         pass
-            else:
+            if load_messages:
+                if getattr(s, "_display_tail_loaded", False):
+                    # Reconciliation can append state.db rows that were committed
+                    # after the sidecar snapshot. Keep the absolute cursor/count in
+                    # the same coordinate space as the merged suffix, not the stale
+                    # sidecar metadata alone.
+                    _sidecar_tail_count = len(limited_sidecar_messages or [])
+                    _tail_base_count = int(
+                        getattr(s, "_display_tail_total_count", 0) or 0
+                    )
+                    _tail_offset = int(getattr(s, "_display_tail_offset", 0) or 0)
+                    _merged_tail_extra = max(0, len(_all_msgs) - _sidecar_tail_count)
+                    s._display_tail_total_count = max(
+                        _tail_base_count,
+                        _tail_offset + len(_all_msgs),
+                        _tail_base_count + _merged_tail_extra,
+                    )
                 _summary_message_count = None
                 _summary_last_message_at = None
             if load_messages:
