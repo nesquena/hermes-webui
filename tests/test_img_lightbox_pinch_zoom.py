@@ -164,3 +164,27 @@ class TestZoomableStageCss:
                 break
         else:
             raise AssertionError(".img-lightbox-canvas img selector not found in style.css")
+
+
+class TestBackdropDismissalPreserved:
+    def test_undragged_viewport_click_bubbles_to_backdrop(self):
+        """The gesture viewport covers 90vw x 90vh and the img is
+        pointer-events:none, so an undragged click on the viewport's
+        letterboxed area must bubble to the lightbox backdrop handler
+        (lb.onclick -> _closeImgLightbox). Unconditionally stopping
+        propagation here regressed close-on-backdrop for small/portrait
+        images, so suppression must be conditional on a prior drag or on a
+        non-viewport target (the transformed canvas)."""
+        src = UI.read_text(encoding="utf-8")
+        assert "const wasDragged = state.dragged;" in src
+        assert "if(wasDragged || e.target !== viewport){" in src
+        assert "if(e.stopPropagation) e.stopPropagation();" in src
+        # Backdrop close handler must still be wired on the lightbox root.
+        assert "lb.onclick = () => _closeImgLightbox(lb);" in src
+
+    def test_drag_flag_reset_on_viewport_click(self):
+        """state.dragged must be consumed and cleared on every viewport
+        click so the post-drag suppression is one-shot per gesture."""
+        src = UI.read_text(encoding="utf-8")
+        assert "const wasDragged = state.dragged;" in src
+        assert "state.dragged = false;" in src

@@ -2606,14 +2606,18 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
   }
 
   function _onViewportClick(e) {
-    if(state.dragged){
-      state.dragged = false;
+    const wasDragged = state.dragged;
+    state.dragged = false;
+    // Suppress the browser's post-drag click (pointerdown+up on the same
+    // element closes the lightbox right after a pan) and clicks on the
+    // transformed canvas (image pixels). An undragged click on the
+    // viewport's own letterboxed area must bubble to the lightbox backdrop
+    // handler so clicking empty space around a fitted image still closes
+    // the dialog — the img is pointer-events:none, so clicks on visible
+    // pixels target the canvas while letterboxed clicks target the viewport.
+    if(wasDragged || e.target !== viewport){
+      if(e.stopPropagation) e.stopPropagation();
     }
-    // Always stop the click from bubbling to the lightbox backdrop —
-    // otherwise the browser's post-drag click (pointerdown+up on the same
-    // element) closes the lightbox right after a pan, and plain clicks on
-    // the image should never close it either.
-    if(e.stopPropagation) e.stopPropagation();
   }
 
   function _touchDist(touches) {
