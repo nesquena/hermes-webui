@@ -107,11 +107,14 @@ from api.helpers import (
     _build_csp_report_only_policy,
     _CLIENT_DISCONNECT_ERRORS,
 )
-from api.profiles import set_request_profile, clear_request_profile
+from api.profiles import set_request_profile, clear_request_profile, resolve_profile_with_tab_context
 from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put, apply_cors_preflight_headers
 from api.startup import auto_install_agent_deps, fix_credential_permissions
 from api.updates import WEBUI_VERSION
 from api.crash_visibility import install_crash_visibility
+
+# ── Access-log redaction (#6559) ─────────────────────────────────────────────
+_REDACT_TAB_CONTEXT = re.compile(r'(?<=[?&])tab_context=[^&\s]+')
 
 
 class QuietHTTPServer(ThreadingHTTPServer):
@@ -362,7 +365,7 @@ class Handler(BaseHTTPRequestHandler):
             'ts': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
             'remote': remote,
             'method': getattr(self, 'command', None) or '-',
-            'path': getattr(self, 'path', None) or '-',
+            'path': _REDACT_TAB_CONTEXT.sub('tab_context=<redacted>', getattr(self, 'path', None) or '-'),
             'status': int(code) if str(code).isdigit() else code,
             'ms': duration_ms,
         }
@@ -373,9 +376,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         self._req_t0 = time.time(); reset_trusted_auth_request_state(self)
-        cookie_profile = get_profile_cookie(self)
-        if cookie_profile:
-            set_request_profile(cookie_profile)
+        resolved_profile = resolve_profile_with_tab_context(self)
+        if resolved_profile:
+            set_request_profile(resolved_profile)
         try:
             parsed = urlparse(self.path)
             if not check_auth(self, parsed): return
@@ -398,9 +401,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_write(self, route_func) -> None:
         self._req_t0 = time.time(); reset_trusted_auth_request_state(self)
-        cookie_profile = get_profile_cookie(self)
-        if cookie_profile:
-            set_request_profile(cookie_profile)
+        resolved_profile = resolve_profile_with_tab_context(self)
+        if resolved_profile:
+            set_request_profile(resolved_profile)
         try:
             parsed = urlparse(self.path)
             _is_csp_report_post = (

@@ -4135,6 +4135,20 @@ function _profileQueryIntentFromLocation(){
     };
   }catch(_e){return empty;}
 }
+function _profileTabUrl(profileName){
+  // Build a ?profile=<name> URL suitable for anchor href.
+  // Preserves existing query/hash params; removes only 'profile' if present
+  // so nested profiles from a new-tab-to-new-tab chain work correctly.
+  if(typeof window==='undefined'||!window.location) return '?'+new URLSearchParams({profile:profileName}).toString();
+  try{
+    const current=new URL(window.location.href);
+    current.searchParams.set('profile',profileName);
+    // Include tab context if one exists (set inside a tab-context-aware tab)
+    const ctx=typeof sessionStorage!=='undefined'?sessionStorage.getItem('hermes-tab-profile-ctx'):null;
+    if(ctx) current.searchParams.set('tab_context',ctx);
+    return current.pathname+(current.search||'')+(current.hash||'');
+  }catch(_e){return '?'+new URLSearchParams({profile:profileName}).toString();}
+}
 function _consumeProfileQueryParamFromLocation(){
   if(typeof window==='undefined'||!window.location||!window.history||typeof window.history.replaceState!=='function') return;
   try{
@@ -6075,7 +6089,7 @@ function ensureSessionEventsSSE(){
   if(_sessionEventsSSE) return;
   try{
     // Same-origin relative URL preserves subpath mounts and normal WebUI cookies.
-    _sessionEventsSSE = new EventSource('api/sessions/events');
+    _sessionEventsSSE = new EventSource(typeof _tabContextUrl === 'function' ? _tabContextUrl('api/sessions/events') : 'api/sessions/events');
     _sessionEventsSSE.onopen = () => {
       _sessionEventsReconnectAttempt = 0;
       if(!_sessionEventsNeedsRefreshOnOpen) return;
@@ -6225,7 +6239,7 @@ function startGatewaySSE(){
   // saves connection pool slots (#4151).
   if(_sidebarSseBackgrounded()) return;
   try{
-    _gatewaySSE = new EventSource('api/sessions/gateway/stream');
+    _gatewaySSE = new EventSource(typeof _tabContextUrl === 'function' ? _tabContextUrl('api/sessions/gateway/stream') : 'api/sessions/gateway/stream');
     _gatewaySSE.addEventListener('sessions_changed', (ev) => {
       try{
         const data = JSON.parse(ev.data);

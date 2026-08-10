@@ -3381,7 +3381,7 @@
 .profile-dropdown{display:none;position:fixed;min-width:260px;max-width:min(260px,calc(100vw - 32px));background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 -4px 24px rgba(0,0,0,.4);z-index:200;overflow:hidden;max-height:380px;overflow-y:auto;}
 .profile-dropdown.open{display:block;}
 .profile-dropdown.open-below{box-shadow:0 4px 24px rgba(0,0,0,.4);}
-.profile-opt{padding:10px 14px;cursor:pointer;transition:background .12s;}
+.profile-opt{padding:10px 14px;cursor:pointer;transition:background .12s;display:block;color:inherit;text-decoration:none;}
 .profile-opt:hover{background:rgba(255,255,255,.07);}
 .profile-opt.active{background:var(--accent-bg);}
 .profile-opt-name{font-size:13px;color:var(--text);font-weight:500;}

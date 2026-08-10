@@ -130,6 +130,16 @@ def test_poisoned_profile_cache_opens_then_switches_after_fresh_refresh():
             this.onclick = null;
             this.textContent = '';
             this._innerHTML = '';
+            this._listeners = {{}};
+          }}
+          addEventListener(type, handler) {{
+            if (!this._listeners[type]) this._listeners[type] = [];
+            this._listeners[type].push(handler);
+          }}
+          dispatchEvent(event) {{
+            const handlers = this._listeners[event.type] || [];
+            for (const h of handlers) h(event);
+            if (typeof this.onclick === 'function' && !event._preventedDefault) this.onclick(event);
           }}
           set innerHTML(value) {{
             this._innerHTML = String(value || '');
@@ -218,7 +228,9 @@ def test_poisoned_profile_cache_opens_then_switches_after_fresh_refresh():
           const profileOptions = dd.children.filter((child) => String(child.className).includes('profile-opt'));
           const other = profileOptions.find((child) => child.innerHTML.includes('other'));
           assert(other, 'fresh refresh should render the valid profile option');
-          await other.onclick();
+          other.dispatchEvent({{type:'click',button:0,ctrlKey:false,shiftKey:false,metaKey:false,altKey:false}});
+          // Give the async switchToProfile handler time to settle
+          await new Promise((resolve) => setImmediate(resolve));
           assert.strictEqual(__profileTest.switchedTo(), 'other');
         }}
 
