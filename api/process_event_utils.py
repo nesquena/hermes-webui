@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass
+import hashlib
 import logging
 import math
 import re
@@ -215,19 +216,28 @@ def wakeup_event_key(text: Any) -> tuple | None:
     be deduplicated.
     """
     body = _strip_workspace_tag(text)
-    async_match = _ASYNC_DELEGATION_HEADER_RE.match(body)
-    if async_match is not None:
-        return ("async_delegation", async_match.group("id"))
-    m = _WAKEUP_COMPLETION_RE.match(body)
-    if m is None and body.startswith(_INTERNAL_WAKEUP_PREFIX):
-        # The wrapper wraps the raw envelope; ``\A`` anchors make ``search``
-        # useless, so re-match on the sliced inner block.
+    canonical_body = body
+    if body.startswith(_INTERNAL_WAKEUP_PREFIX):
         inner = body.find("[IMPORTANT: Background process ")
         if inner >= 0:
-            m = _WAKEUP_COMPLETION_RE.match(body[inner:])
+            if body.endswith("]]"):
+                canonical_body = body[inner:-1]
+            else:
+                canonical_body = body[inner:]
+    async_match = _ASYNC_DELEGATION_HEADER_RE.match(canonical_body)
+    if async_match is not None:
+        payload_digest = hashlib.sha256(canonical_body.encode("utf-8")).hexdigest()
+        return ("async_delegation", async_match.group("id"), payload_digest)
+    m = _WAKEUP_COMPLETION_RE.match(canonical_body)
     if m is None:
         return None
-    return ("completion", m.group("sid"), m.group("exit_code"))
+    payload_digest = hashlib.sha256(canonical_body.encode("utf-8")).hexdigest()
+    return (
+        "completion",
+        m.group("sid"),
+        m.group("exit_code"),
+        payload_digest,
+    )
 
 
 def stamp_wakeup_source_if_untagged(msg: Any) -> bool:
@@ -283,7 +293,9 @@ def stamp_message_source(
     """
     if isinstance(msg, dict) and active_turn_token:
         msg["_active_turn_token"] = str(active_turn_token)
-    if not isinstance(msg, dict) or not source or source == "webui":
+    if not isinstance(msg, dict) or source == "webui":
+        return
+    if not source:
         # No explicit source: fall back to the content-shape backstop so
         # wakeup deliveries that arrive untagged (self-POST wake turns,
         # gateway-side turns merged from state.db) still carry the durable

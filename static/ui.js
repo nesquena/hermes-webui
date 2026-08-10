@@ -635,6 +635,7 @@ function _hasLaterRenderableAssistant(messages, rawIdx){
   const rows=Array.isArray(messages)?messages:[];
   for(let i=Number(rawIdx)+1;i<rows.length;i++){
     const candidate=rows[i];
+    if(candidate&&candidate.role==='user'&&!_isInternalTransportMessage(candidate)) return false;
     if(candidate&&candidate.role==='assistant'&&_messageIsRenderable(candidate)) return true;
   }
   return false;

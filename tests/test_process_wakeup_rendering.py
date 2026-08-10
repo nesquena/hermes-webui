@@ -127,6 +127,12 @@ const markerWakeupContent = [
   '',
   '[Attached files: result.txt]',
 ].join(String.fromCharCode(10));
+const humanBoundary = [
+  {role: 'user', content: '[ASYNC DELEGATION BATCH COMPLETE — deleg_boundary]', _source: 'async_delegation'},
+  {role: 'assistant', content: '# CONCLUSION\n---\n> 🟢 Réponse / recommandation: critical internal result'},
+  {role: 'user', content: 'unrelated human request'},
+  {role: 'assistant', content: 'answer to unrelated request'},
+];
 
 process.stdout.write(JSON.stringify({
   visible: visible.map(e => ({rawIdx: e.rawIdx, role: e.m.role, source: e.m._source || '', text: String(e.m.content).slice(0, 32)})),
@@ -136,6 +142,7 @@ process.stdout.write(JSON.stringify({
   attachmentOnlyRenderable: _messageIsRenderable(attachmentOnlyWakeup),
   projectedIntermediate: _projectInternalProgressContent(S.messages, 2, S.messages[2].content),
   projectedFinal: _projectInternalProgressContent(S.messages, 4, S.messages[4].content),
+  projectedBeforeHumanBoundary: _projectInternalProgressContent(humanBoundary, 1, humanBoundary[1].content),
   strippedWakeupDisplay: _stripAttachedFilesMarkerForDisplay(_stripWorkspaceDisplayPrefix(markerWakeupContent)),
 }));
 """
@@ -188,6 +195,11 @@ def test_intermediate_internal_reply_is_compact_but_latest_candidate_final_is_un
     result = _run_driver()
     assert result["projectedIntermediate"] == "**Progression** — phase one done"
     assert result["projectedFinal"].startswith("# CONCLUSION")
+
+
+def test_internal_projection_never_crosses_a_real_user_boundary():
+    result = _run_driver()
+    assert result["projectedBeforeHumanBoundary"].startswith("# CONCLUSION")
 
 
 def test_process_wakeup_uses_compact_status_row_not_normal_user_bubble():

@@ -60,8 +60,9 @@ def test_is_wakeup_user_text_rejects_human_text():
 
 
 def test_wakeup_event_key_completion_shapes_agree():
-    key = ("completion", "proc_5b9fcce4cbff", "1")
-    assert wakeup_event_key(RAW_COMPLETION) == key
+    key = wakeup_event_key(RAW_COMPLETION)
+    assert key is not None
+    assert key[:3] == ("completion", "proc_5b9fcce4cbff", "1")
     assert wakeup_event_key(PREFIXED_COMPLETION) == key
     assert wakeup_event_key(WRAPPED_COMPLETION) == key
 
@@ -103,7 +104,8 @@ def test_stamp_message_source_falls_back_to_backstop():
 
     msg3 = {"role": "user", "content": RAW_COMPLETION}
     stamp_message_source(msg3, "webui", active_turn_token="s1:1.0")
-    assert msg3["_source"] == "process_wakeup"
+    assert "_source" not in msg3
+    assert "_display_kind" not in msg3
     assert msg3["_active_turn_token"] == "s1:1.0"
 
 
@@ -132,6 +134,16 @@ def test_normalize_keeps_distinct_processes_and_watch_rows():
     assert all(m["_source"] == "process_wakeup" for m in out)
 
 
+def test_normalize_keeps_divergent_payloads_for_same_process_identity():
+    partial = RAW_COMPLETION.replace("error Couldn't", "partial output: Couldn't")
+    final = RAW_COMPLETION.replace("error Couldn't", "final output: Couldn't")
+    out = _normalize_wakeup_rows_for_display([
+        {"role": "user", "content": partial},
+        {"role": "user", "content": final},
+    ])
+    assert [row["content"] for row in out] == [partial, final]
+
+
 def test_normalize_stamps_previously_stamped_rows_into_dedup():
     first = {
         "role": "user",
@@ -151,7 +163,9 @@ def test_normalize_passes_through_empty_and_non_list():
 
 def test_async_delegation_shape_key_and_backstop_metadata():
     assert is_wakeup_user_text(ASYNC_DELEGATION)
-    assert wakeup_event_key(ASYNC_DELEGATION) == (
+    key = wakeup_event_key(ASYNC_DELEGATION)
+    assert key is not None
+    assert key[:2] == (
         "async_delegation",
         "deleg_c60b0f8e",
     )
