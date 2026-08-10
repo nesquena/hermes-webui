@@ -7,6 +7,8 @@ import json
 import inspect
 import os
 import re
+import shutil
+import subprocess
 import sys
 import threading
 import types
@@ -18,6 +20,7 @@ from types import SimpleNamespace
 
 import api.config as config
 import api.profiles as profiles
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -245,6 +248,7 @@ def test_codex_account_usage_is_fetched_under_active_profile_home(monkeypatch, t
                 "remaining_percent": 85.0,
                 "reset_at": "2030-03-17T17:30:00Z",
                 "detail": None,
+                "limit_window_seconds": None,
             },
             {
                 "label": "Weekly",
@@ -252,6 +256,7 @@ def test_codex_account_usage_is_fetched_under_active_profile_home(monkeypatch, t
                 "remaining_percent": 60.0,
                 "reset_at": "2030-03-24T12:30:00Z",
                 "detail": None,
+                "limit_window_seconds": None,
             },
         ],
         "details": ["Credits balance: $12.50"],
@@ -357,8 +362,16 @@ def test_codex_account_usage_subprocess_reports_read_only_credential_pool(monkey
         payload = {
             "plan_type": "pro" if headers.get("chatgpt-account-id") == "acct-primary" else "plus",
             "rate_limit": {
-                "primary_window": {"used_percent": 15 if headers.get("chatgpt-account-id") == "acct-primary" else 95, "reset_at": 1_900_000_000},
-                "secondary_window": {"used_percent": 40, "reset_at": "2030-03-24T12:30:00Z"},
+                "primary_window": {
+                    "used_percent": 15 if headers.get("chatgpt-account-id") == "acct-primary" else 95,
+                    "reset_at": 1_900_000_000,
+                    "limit_window_seconds": 18_000,
+                },
+                "secondary_window": {
+                    "used_percent": 40,
+                    "reset_at": "2030-03-24T12:30:00Z",
+                    "limit_window_seconds": 604_800,
+                },
             },
             "credits": {"has_credits": True, "balance": 12.5},
         }
@@ -390,6 +403,8 @@ def test_codex_account_usage_subprocess_reports_read_only_credential_pool(monkey
     assert snapshot["source"] == "usage_api_pool"
     assert snapshot["windows"][0]["label"] == "Session"
     assert snapshot["windows"][0]["used_percent"] == 15
+    assert snapshot["windows"][0]["limit_window_seconds"] == 18_000
+    assert snapshot["windows"][1]["limit_window_seconds"] == 604_800
     assert snapshot["details"] == ["1/2 credentials available", "1 exhausted", "Plans: Pro"]
     assert snapshot["available"] is True
     assert snapshot["pool"] == {
@@ -407,6 +422,7 @@ def test_codex_account_usage_subprocess_reports_read_only_credential_pool(monkey
                 "used_percent": 15.0,
                 "reset_at": "2030-03-17T17:46:40Z",
                 "detail": None,
+                "limit_window_seconds": 18_000,
                 "credential_label": "Team primary",
             },
             {
@@ -415,6 +431,7 @@ def test_codex_account_usage_subprocess_reports_read_only_credential_pool(monkey
                 "used_percent": 40.0,
                 "reset_at": "2030-03-24T12:30:00Z",
                 "detail": None,
+                "limit_window_seconds": 604_800,
                 "credential_label": "Team primary",
             },
         ],
@@ -430,6 +447,7 @@ def test_codex_account_usage_subprocess_reports_read_only_credential_pool(monkey
                         "remaining_percent": 85.0,
                         "reset_at": "2030-03-17T17:46:40Z",
                         "detail": None,
+                        "limit_window_seconds": 18_000,
                     },
                     {
                         "label": "Weekly",
@@ -437,6 +455,7 @@ def test_codex_account_usage_subprocess_reports_read_only_credential_pool(monkey
                         "remaining_percent": 60.0,
                         "reset_at": "2030-03-24T12:30:00Z",
                         "detail": None,
+                        "limit_window_seconds": 604_800,
                     },
                 ],
                 "details": ["Credits balance: $12.50"],
@@ -603,7 +622,15 @@ def test_codex_account_usage_subprocess_probes_pool_entries_concurrently(monkeyp
         payload = {
             "plan_type": "team",
             "rate_limit": {
-                "primary_window": {"used_percent": used, "reset_at": "2030-03-17T17:30:00Z"},
+                "primary_window": {
+                    "used_percent": used,
+                    "reset_at": "2030-03-17T17:30:00Z",
+                    "limit_window_seconds": 604_800 if account_id == "acct-a" else 18_000,
+                },
+                "secondary_window": {
+                    "used_percent": 70 if account_id == "acct-a" else 30,
+                    "reset_at": "2030-03-24T12:30:00Z",
+                },
             },
         }
         return _FakeResponse(json.dumps(payload).encode("utf-8"))
@@ -625,8 +652,14 @@ def test_codex_account_usage_subprocess_probes_pool_entries_concurrently(monkeyp
     assert [event[0] for event in events[:first_exit]] == ["enter", "enter"]
     assert snapshot["pool"]["queried_credentials"] == 2
     assert [row["label"] for row in snapshot["pool"]["credentials"]] == ["Slow A", "Slow B"]
-    assert snapshot["pool"]["best_remaining_by_window"][0]["credential_label"] == "Slow B"
-    assert snapshot["pool"]["best_remaining_by_window"][0]["remaining_percent"] == 90.0
+    assert [
+        (window["label"], window["limit_window_seconds"], window["credential_label"], window["remaining_percent"])
+        for window in snapshot["pool"]["best_remaining_by_window"]
+    ] == [
+        ("Session", 604_800, "Slow A", 20.0),
+        ("Weekly", None, "Slow B", 70.0),
+        ("Session", 18_000, "Slow B", 90.0),
+    ]
     assert token_a not in output
     assert token_b not in output
 
@@ -752,7 +785,13 @@ def test_account_usage_pool_payload_round_trips_to_provider_quota_status():
         "title": "Account limits",
         "plan": None,
         "windows": [
-            {"label": "Session", "used_percent": 25, "reset_at": "2030-03-17T17:30:00Z", "detail": "Best of 2"},
+            {
+                "label": "Weekly",
+                "used_percent": 25,
+                "reset_at": "2030-03-17T17:30:00Z",
+                "detail": "Best of 2",
+                "limit_window_seconds": 604_800,
+            },
         ],
         "details": ["2/3 credentials available"],
         "available": True,
@@ -763,8 +802,32 @@ def test_account_usage_pool_payload_round_trips_to_provider_quota_status():
             "available_credentials": 2,
             "exhausted_credentials": 1,
             "failed_credentials": 0,
+            "best_remaining_by_window": [
+                {
+                    "label": "Weekly",
+                    "remaining_percent": 75.0,
+                    "used_percent": 25,
+                    "reset_at": "2030-03-17T17:30:00Z",
+                    "detail": "Best of 2",
+                    "limit_window_seconds": 604_800,
+                    "credential_label": "Credential 1",
+                }
+            ],
             "credentials": [
-                {"label": "Credential 1", "status": "available", "windows": []},
+                {
+                    "label": "Credential 1",
+                    "status": "available",
+                    "windows": [
+                        {
+                            "label": "Weekly",
+                            "used_percent": 25,
+                            "remaining_percent": 75.0,
+                            "reset_at": "2030-03-17T17:30:00Z",
+                            "detail": None,
+                            "limit_window_seconds": 604_800,
+                        }
+                    ],
+                },
                 {
                     "label": "Credential 2",
                     "status": "exhausted",
@@ -779,7 +842,47 @@ def test_account_usage_pool_payload_round_trips_to_provider_quota_status():
     serialized = providers._serialize_account_usage_snapshot(snapshot)
 
     assert serialized["windows"][0]["remaining_percent"] == 75.0
+    assert serialized["windows"][0]["used_percent"] == 25
+    assert serialized["windows"][0]["reset_at"] == "2030-03-17T17:30:00Z"
+    assert serialized["windows"][0]["limit_window_seconds"] == 604_800
     assert serialized["pool"] == payload["pool"]
+
+
+def test_account_usage_snapshot_without_window_duration_remains_compatible():
+    """Older Agent windows load successfully with an explicit nullable duration."""
+    import api.providers as providers
+
+    snapshot = SimpleNamespace(
+        provider="openai-codex",
+        source="usage_api",
+        title="Account limits",
+        plan=None,
+        windows=(
+            SimpleNamespace(
+                label="Session",
+                used_percent=35,
+                reset_at="2030-03-17T17:30:00Z",
+                detail=None,
+            ),
+        ),
+        details=(),
+        available=True,
+        unavailable_reason=None,
+        fetched_at="2030-03-17T12:30:00Z",
+    )
+
+    serialized = providers._serialize_account_usage_snapshot(snapshot)
+
+    assert serialized["windows"] == [
+        {
+            "label": "Session",
+            "used_percent": 35,
+            "remaining_percent": 65.0,
+            "reset_at": "2030-03-17T17:30:00Z",
+            "detail": None,
+            "limit_window_seconds": None,
+        }
+    ]
 
 
 def test_anthropic_oauth_usage_unavailable_reason_is_reported(monkeypatch, tmp_path):
@@ -1241,6 +1344,56 @@ def test_provider_quota_card_is_rendered_in_providers_panel():
     assert "_providerQuotaUnavailableReason" in panels
     assert "provider_quota_retry_after" in panels
     assert "accountLimits.details)&&!accountLimits.pool" in panels
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is required")
+def test_codex_quota_window_labels_use_duration_not_position():
+    """The production helper must label Codex windows from truthful duration metadata."""
+    panels = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+    start = panels.index("function _formatProviderQuotaWindowLabel")
+    end = panels.index("\nfunction _formatProviderQuotaLastChecked", start)
+    helper = panels[start:end]
+    cases = [
+        [{"provider": "openai-codex"}, {"label": "Weekly", "limit_window_seconds": 18_000}],
+        [{"provider": "openai-codex"}, {"label": "Session", "limit_window_seconds": 604_800}],
+        [{"provider": "openai-codex"}, {"label": "Session"}],
+        [{"provider": "openai-codex"}, {"label": "Weekly", "limit_window_seconds": "invalid"}],
+        [{"provider": "openai-codex"}, {"label": "Session", "limit_window_seconds": 86_400}],
+        [{"provider": "openai-codex"}, {"label": "Daily", "limit_window_seconds": 86_400}],
+        [{"provider": "anthropic"}, {"label": "Session", "limit_window_seconds": 604_800}],
+    ]
+    translations = {
+        "provider_quota_session_limit": "5-hour limit",
+        "provider_quota_weekly_limit": "Weekly limit",
+        "provider_quota_usage_limit": "Usage limit",
+        "provider_quota_window_fallback": "Window",
+    }
+    script = f"""
+const translations = {json.dumps(translations)};
+function t(key) {{ return translations[key] || key; }}
+{helper}
+const cases = {json.dumps(cases)};
+process.stdout.write(JSON.stringify(cases.map(([limits, window]) =>
+  _formatProviderQuotaWindowLabel(limits, window)
+)));
+"""
+
+    result = subprocess.run(
+        [shutil.which("node"), "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(result.stdout) == [
+        "5-hour limit",
+        "Weekly limit",
+        "Usage limit",
+        "Usage limit",
+        "Usage limit",
+        "Daily",
+        "Session",
+    ]
 
 
 def test_provider_quota_card_has_manual_refresh_control():

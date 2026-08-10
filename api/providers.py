@@ -209,6 +209,7 @@ def _snapshot_payload(snapshot):
             "used_percent": getattr(window, "used_percent", None),
             "reset_at": _iso(getattr(window, "reset_at", None)),
             "detail": getattr(window, "detail", None),
+            "limit_window_seconds": _number(getattr(window, "limit_window_seconds", None)),
         })
     payload = {
         "provider": str(getattr(snapshot, "provider", "") or ""),
@@ -348,6 +349,7 @@ def _codex_snapshot_from_usage_payload(payload):
             used_percent=float(used),
             reset_at=_parse_dt(window.get("reset_at")),
             detail=None,
+            limit_window_seconds=_number(window.get("limit_window_seconds")),
         ))
 
     details = []
@@ -388,6 +390,7 @@ def _snapshot_windows_payload(snapshot):
             "remaining_percent": remaining_percent,
             "reset_at": _iso(getattr(window, "reset_at", None)),
             "detail": getattr(window, "detail", None),
+            "limit_window_seconds": _number(getattr(window, "limit_window_seconds", None)),
         })
     return windows
 
@@ -487,20 +490,27 @@ def _best_remaining_by_window(rows):
             remaining = _number(window.get("remaining_percent"))
             if not window_label or remaining is None:
                 continue
+            limit_window_seconds = _number(window.get("limit_window_seconds"))
+            window_key = (
+                ("duration", limit_window_seconds)
+                if limit_window_seconds is not None
+                else ("label", window_label.lower())
+            )
             candidate = {
                 "label": window_label,
                 "remaining_percent": remaining,
                 "used_percent": window.get("used_percent"),
                 "reset_at": window.get("reset_at"),
                 "detail": window.get("detail"),
+                "limit_window_seconds": limit_window_seconds,
                 "credential_label": label,
             }
-            current = best.get(window_label.lower())
+            current = best.get(window_key)
             # The normalized Codex account-limit payload currently exposes
             # percentages, not absolute request/token capacity. If absolute
             # remaining capacity becomes available, prefer it here.
             if current is None or float(remaining) > float(current.get("remaining_percent") or -1):
-                best[window_label.lower()] = candidate
+                best[window_key] = candidate
     return list(best.values())
 
 
@@ -556,6 +566,7 @@ def _codex_pool_snapshot(entries, rows, queried):
             used_percent=window.get("used_percent"),
             reset_at=window.get("reset_at"),
             detail="Best of " + str(len(available_rows)) + " available credentials",
+            limit_window_seconds=window.get("limit_window_seconds"),
         )
         for window in best_windows
     )
@@ -1546,6 +1557,7 @@ def _serialize_account_usage_snapshot(snapshot: Any) -> dict[str, Any] | None:
             "remaining_percent": remaining_percent,
             "reset_at": _isoformat_utc(getattr(window, "reset_at", None)),
             "detail": str(getattr(window, "detail", "") or "").strip() or None,
+            "limit_window_seconds": _quota_number(getattr(window, "limit_window_seconds", None)),
         })
 
     details = [
@@ -1636,6 +1648,7 @@ def _account_usage_payload_to_snapshot(payload: Any) -> Any:
             used_percent=window.get("used_percent"),
             reset_at=window.get("reset_at"),
             detail=window.get("detail"),
+            limit_window_seconds=window.get("limit_window_seconds"),
         )
         for window in (payload.get("windows") or ())
         if isinstance(window, dict)
