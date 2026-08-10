@@ -666,6 +666,8 @@ def main() -> None:
 
     _abort_if_already_serving(HOST, PORT)
     httpd = QuietHTTPServer((HOST, PORT), Handler)
+    from api.goal_continuations import start_goal_continuation_worker
+    start_goal_continuation_worker()
 
     from api.config import TLS_ENABLED, TLS_CERT, TLS_KEY
     scheme = 'https' if TLS_ENABLED else 'http'
@@ -680,13 +682,6 @@ def main() -> None:
         except Exception as e:
             print(f'[!!] WARNING: TLS setup failed ({e}), falling back to HTTP', flush=True)
             scheme = 'http'
-
-    try:
-        from api.goal_continuations import start_goal_continuation_worker
-        if start_goal_continuation_worker():
-            print('[ok] Durable goal continuation worker started', flush=True)
-    except Exception as e:
-        print(f'[!!] WARNING: Durable goal continuation worker failed to start: {e}', flush=True)
 
     print(f'  Hermes Web UI listening on {scheme}://{HOST}:{PORT}', flush=True)
     if HOST in ('127.0.0.1', '::1') or within_container:
@@ -730,21 +725,19 @@ def main() -> None:
         _log_shutdown_audit()
         try:
             from api.gateway_watcher import stop_watcher
-            from api.goal_continuations import stop_goal_continuation_worker
-            stop_goal_continuation_worker()
             stop_watcher()
         except Exception:
             logger.debug("Failed to stop gateway watcher during shutdown")
-        try:
-            from api.session_lifecycle import drain_all_on_shutdown
-            drain_all_on_shutdown()
-        except Exception:
-            logger.debug("Failed to drain lifecycle on shutdown", exc_info=True)
         try:
             from api.background_process import stop_drain_thread
             stop_drain_thread()
         except Exception:
             logger.debug("Failed to stop bg_task_complete drain thread during shutdown", exc_info=True)
+        try:
+            from api.session_lifecycle import drain_all_on_shutdown
+            drain_all_on_shutdown()
+        except Exception:
+            logger.debug("Failed to drain lifecycle on shutdown", exc_info=True)
         try:
             from api.background_process import stop_session_channel_reaper
             stop_session_channel_reaper()

@@ -907,17 +907,24 @@ def test_goal_continuation_empty_response_after_user_mediated_activity_is_not_re
     monkeypatch.setattr(gc, "OWNER_ID", "streaming-test-owner")
     callbacks = {}
     if activity_event == "approval":
-        import tools.approval as approval
+        approval = types.ModuleType("tools.approval")
+        tools_pkg = types.ModuleType("tools")
+        tools_pkg.__path__ = []
+        tools_pkg.__dict__["approval"] = approval
+        monkeypatch.setitem(sys.modules, "tools", tools_pkg)
+        monkeypatch.setitem(sys.modules, "tools.approval", approval)
 
         monkeypatch.setattr(
             approval,
             "register_gateway_notify",
             lambda sid, cb: callbacks.setdefault(sid, cb),
+            raising=False,
         )
         monkeypatch.setattr(
             approval,
             "unregister_gateway_notify",
             lambda sid: callbacks.pop(sid, None),
+            raising=False,
         )
     else:
         from api import clarify

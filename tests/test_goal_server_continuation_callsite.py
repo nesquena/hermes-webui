@@ -37,15 +37,20 @@ def test_browser_observes_goal_continue_but_never_dispatches_it():
 
 def test_server_starts_and_stops_durable_goal_worker():
     server = (ROOT / "server.py").read_text()
+    background = (ROOT / "api" / "background_process.py").read_text()
+    assert "start_drain_thread" in server
+    assert "stop_drain_thread" in server
     assert "start_goal_continuation_worker" in server
-    assert "stop_goal_continuation_worker" in server
+    assert "stop_goal_continuation_worker" in background
     shutdown = server.index("finally:\n        httpd.server_close()")
-    stop = server.index("stop_goal_continuation_worker()", shutdown)
+    stop = server.index("stop_drain_thread()", shutdown)
     lifecycle_drain = server.index("drain_all_on_shutdown()", shutdown)
     assert stop < lifecycle_drain, "new goal turns must be disabled before shutdown drains"
     bind = server.index("httpd = QuietHTTPServer")
     start = server.index("start_goal_continuation_worker()")
     assert bind < start, "the durable worker must not start before the server owns its port"
+    drain_stop = background.index("def stop_drain_thread(")
+    assert background.index("stop_goal_continuation_worker", drain_stop) > drain_stop
 
 
 def test_empty_response_retry_is_limited_to_server_goal_continuations():
