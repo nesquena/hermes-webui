@@ -422,7 +422,7 @@ class TestFrontendWiring:
             }})().catch(err=>{{console.error(err); process.exit(1);}});
             """
         )
-        subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
+        subprocess.run([node], input=script, check=True, capture_output=True, text=True)
 
     def test_attachment_only_steer_indicator_uses_file_label(self):
         import json
@@ -838,7 +838,7 @@ class TestFrontendWiring:
             }})().catch(err=>{{console.error(err); process.exit(1);}});
             """
         )
-        subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
+        subprocess.run([node], input=script, check=True, capture_output=True, text=True)
 
     def test_send_busy_steer_accepts_file_only_input(self):
         idx = self.msgs.find("if(S.busy||compressionRunning)")

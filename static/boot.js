@@ -81,8 +81,15 @@ async function cancelSessionStream(session){
   if(!respOk) return false;
   if(typeof closeLiveStream==='function') closeLiveStream(sid, streamId);
   session.active_stream_id=null;
-  delete INFLIGHT[sid];
-  clearInflightState(sid);
+  const pending=typeof INFLIGHT!=='undefined'&&INFLIGHT?INFLIGHT[sid]:null;
+  const delivered= pending&&Array.isArray(pending.deliveredSteers)?pending.deliveredSteers:[];
+  if(delivered.length){
+    INFLIGHT[sid]={...pending,streamId:null,deliveredSteers:delivered};
+    if(typeof saveInflightState==='function') saveInflightState(sid,INFLIGHT[sid]);
+  }else{
+    delete INFLIGHT[sid];
+    clearInflightState(sid);
+  }
   if(S.session&&S.session.session_id===sid){
     S.activeStreamId=null;
     if(S.session) S.session.active_stream_id=null;

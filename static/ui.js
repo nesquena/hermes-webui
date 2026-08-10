@@ -9019,24 +9019,94 @@ function _compactInflightState(state){
     currentActivityBurstId:state.currentActivityBurstId||0,
     currentLiveSegmentSeq:state.currentLiveSegmentSeq||0,
     activityBurstAnchors:Array.isArray(state.activityBurstAnchors)?state.activityBurstAnchors.slice(-50):[],
+    // #3058: pre-settlement recovery cache for delivered steers. The durable copy
+    // is the anchor activity scene written at settlement; this only covers the gap.
+    deliveredSteers:Array.isArray(state.deliveredSteers)?state.deliveredSteers:[],
     todos,
     todoStateMeta,
   }, limits.stringChars);
 }
+function _compactDeliveredSteerForStorage(record, maxTextChars=12000){
+  const source=record&&typeof record==='object'?record:{};
+  const payload=source.payload&&typeof source.payload==='object'?source.payload:{};
+  const streamId=String(source.stream_id||payload.stream_id||'');
+  const localId=String(source.local_id||payload.local_id||source.event_id||payload.event_id||'');
+  const rawText=String(payload.text??source.text??'');
+  const text=rawText.length>maxTextChars
+    ? rawText.slice(0,Math.max(32,maxTextChars))+'\n\n[truncated for browser recovery storage]'
+    : rawText;
+  const compactPayload={
+    local_id:localId,
+    stream_id:streamId,
+    ordinal:payload.ordinal??source.ordinal??undefined,
+    status:'delivered',
+    text,
+    files:Array.isArray(payload.files)?payload.files.slice(-20):[],
+    delivered:true,
+    origin:payload.origin||source.origin||'webui',
+  };
+  return {
+    source_event_type:'steer_delivered',
+    stream_id:streamId,
+    local_id:localId,
+    event_id:source.event_id||payload.event_id||null,
+    status:'delivered',
+    created_at:source.created_at??payload.created_at??undefined,
+    payload:compactPayload,
+  };
+}
 function _writeInflightStateMap(all){
   const limits=_getInflightStateLimits();
-  const entries=Object.entries(all||{})
+  let entries=Object.entries(all||{})
     .sort((a,b)=>Number(b[1]&&b[1].updated_at||0)-Number(a[1]&&a[1].updated_at||0))
     .slice(0,limits.maxSessions);
-  const compact={};
-  for(const [sid,entry] of entries) compact[sid]=entry;
-  let json=JSON.stringify(compact);
-  if(json.length>limits.jsonChars){
-    const current=entries[0];
-    json=JSON.stringify(current?{[current[0]]:current[1]}:{});
+  const serialize=items=>JSON.stringify(Object.fromEntries(items));
+  let json=serialize(entries);
+  while(json.length>limits.jsonChars&&entries.length>1){
+    entries=entries.slice(0,-1);
+    json=serialize(entries);
+  }
+  if(json.length>limits.jsonChars&&entries.length){
+    const [sid,entry]=entries[0];
+    const reduced={...entry};
+    const trimOldest=(field)=>{
+      while(json.length>limits.jsonChars&&Array.isArray(reduced[field])&&reduced[field].length>1){
+        reduced[field]=reduced[field].slice(1);
+        json=serialize([[sid,reduced]]);
+      }
+    };
+    // Keep delivery records ahead of less durable live-tail data. Compact
+    // their optional fields before dropping any record for the storage limit.
+    trimOldest('messages');
+    trimOldest('toolCalls');
+    trimOldest('activityBurstAnchors');
+    if(json.length>limits.jsonChars&&Array.isArray(reduced.deliveredSteers)){
+      reduced.deliveredSteers=reduced.deliveredSteers.map(record=>_compactDeliveredSteerForStorage(record,12000));
+      json=serialize([[sid,reduced]]);
+    }
+    if(json.length>limits.jsonChars&&Array.isArray(reduced.deliveredSteers)){
+      reduced.deliveredSteers=reduced.deliveredSteers.map(record=>_compactDeliveredSteerForStorage(record,2000));
+      json=serialize([[sid,reduced]]);
+    }
+    if(json.length>limits.jsonChars&&Array.isArray(reduced.deliveredSteers)){
+      reduced.deliveredSteers=reduced.deliveredSteers.map(record=>_compactDeliveredSteerForStorage(record,256));
+      json=serialize([[sid,reduced]]);
+    }
+    trimOldest('deliveredSteers');
+    if(json.length>limits.jsonChars){
+      for(const field of ['lastAssistantText','lastReasoningText']){
+        if(typeof reduced[field]==='string'&&reduced[field].length){
+          reduced[field]=reduced[field].slice(-2000);
+          json=serialize([[sid,reduced]]);
+        }
+      }
+    }
+    entries=[[sid,reduced]];
+    json=serialize(entries);
   }
   if(json.length>limits.jsonChars){
-    localStorage.removeItem(INFLIGHT_STATE_KEY);
+    // Leave an existing snapshot intact when even the newest reduced entry
+    // cannot fit; removing the whole key would erase unrelated recovery state.
     return false;
   }
   localStorage.setItem(INFLIGHT_STATE_KEY,json);
@@ -9050,6 +9120,7 @@ function saveInflightState(sid, state){
     all[sid]=entry;
     _writeInflightStateMap(all);
   }catch(err){
+    // Retry with the current entry after dropping an oversized recovery map.
     if(!_isStorageQuotaError(err)) return;
     try{
       localStorage.removeItem(INFLIGHT_STATE_KEY);
@@ -9065,7 +9136,8 @@ function loadInflightState(sid, streamId){
   const entry=all[sid];
   if(!entry) return null;
   if(streamId&&entry.streamId&&entry.streamId!==streamId) return null;
-  if(entry.updated_at&&Date.now()-entry.updated_at>10*60*1000){
+  const retainsDeliveredSteers=Array.isArray(entry.deliveredSteers)&&entry.deliveredSteers.length>0;
+  if(entry.updated_at&&Date.now()-entry.updated_at>10*60*1000&&!retainsDeliveredSteers){
     clearInflightState(sid);
     return null;
   }
@@ -12570,6 +12642,33 @@ function _anchorSceneNodeForRow(row, opts){
         id:row.row_id||row.local_id||'',
       });
     }
+  }else if(row.role==='user'&&String(row.source_event_type||'')==='steer_delivered'){
+    // #3058 slice 3: a delivered steer renders as a user message inside the turn.
+    // Keyed on the source event type, not the role, so a hydrated or newer-client
+    // scene row that merely projects role 'user' cannot inherit the Steer label.
+    // No edit / retry / fork / delete affordance is attached: the record is
+    // immutable and is not a Queue entry.
+    const text=String(row.text||'').trim();
+    if(!text) return null;
+    node=document.createElement('div');
+    node.className='msg-row steer-delivered-row';
+    node.setAttribute('data-role','user');
+    node.setAttribute('data-steer-delivery','delivered');
+    const steerLabel=document.createElement('div');
+    steerLabel.className='steer-delivered-label';
+    steerLabel.textContent=(typeof t==='function')?t('steer_delivered'):'Steer delivered';
+    node.appendChild(steerLabel);
+    const steerBody=document.createElement('div');
+    steerBody.className='msg-body';
+    steerBody.textContent=text;
+    node.appendChild(steerBody);
+    const steerFiles=(row.payload&&Array.isArray(row.payload.files))?row.payload.files:[];
+    if(steerFiles.length){
+      const filesEl=document.createElement('div');
+      filesEl.className='steer-delivered-files';
+      filesEl.textContent=steerFiles.join(', ');
+      node.appendChild(filesEl);
+    }
   }else if(row.role==='control'){
     node=_activityStatusNode({
       kind:settled?'done':'waiting',
@@ -12944,6 +13043,59 @@ function _updateLiveAnchorReasoningRowForFallback(turn, text, opts){
   if(typeof scrollIfPinned==='function') scrollIfPinned();
   return true;
 }
+function _renderLiveAnchorSceneUserRowsOnly(streamId, rows, opts){
+  if(!Array.isArray(rows)||!rows.length) return false;
+  if(!S.session||!S.activeStreamId) return false;
+  if(opts&&opts.sessionId&&S.session.session_id!==opts.sessionId) return false;
+  if(streamId&&S.activeStreamId!==streamId) return false;
+  $('emptyState').style.display='none';
+  let turn=$('liveAssistantTurn');
+  if(!turn){
+    turn=_createAssistantTurn();
+    turn.id='liveAssistantTurn';
+    $('msgInner').appendChild(turn);
+  }
+  turn.setAttribute('data-anchor-scene-live-owner','1');
+  turn.setAttribute('data-anchor-stream-id',String(streamId||''));
+  turn.setAttribute('data-anchor-scene-live-mode',String((opts&&opts.mode)||chatActivityMode()||''));
+  if(S.session) turn.dataset.sessionId=S.session.session_id;
+  const blocks=_assistantTurnBlocks(turn);
+  if(!blocks) return false;
+  blocks.querySelectorAll('[data-steer-delivery="delivered"]').forEach(el=>el.remove());
+  let painted=false;
+  for(const row of rows){
+    const node=_anchorSceneNodeForRow(row,{settled:false});
+    if(!node) continue;
+    blocks.appendChild(node);
+    painted=true;
+  }
+  return painted;
+}
+function _renderSettledAnchorSceneUserRowsOnlyForMessage(message, segment, rawIdx){
+  if(!message||!message._anchor_activity_scene||!segment) return false;
+  const blocks=_assistantTurnBlocks(segment.closest('.assistant-turn'));
+  if(!blocks) return false;
+  const rows=_anchorSceneRowsForRendering(message._anchor_activity_scene,{settled:true})
+    .filter(row=>row&&row.role==='user'&&String(row.source_event_type||'')==='steer_delivered');
+  if(!rows.length) return false;
+  blocks.querySelectorAll('[data-anchor-settled-scene-row="1"][data-steer-delivery="delivered"]').forEach(el=>el.remove());
+  let painted=false;
+  for(const row of rows){
+    const node=_anchorSceneNodeForRow(row,{settled:true});
+    if(!node) continue;
+    node.setAttribute('data-anchor-scene-row','1');
+    node.setAttribute('data-anchor-settled-scene-row','1');
+    node.setAttribute('data-anchor-row-id',String(row.row_id||row.local_id||''));
+    if(row.local_id) node.setAttribute('data-anchor-local-id',String(row.local_id));
+    node.setAttribute('data-anchor-row-role',String(row.role||'user'));
+    node.setAttribute('data-anchor-source-event-type',String(row.source_event_type||''));
+    node.setAttribute('data-anchor-owner-idx',String(rawIdx));
+    if(segment.parentElement===blocks) blocks.insertBefore(node,segment);
+    else blocks.appendChild(node);
+    painted=true;
+  }
+  return painted;
+}
 function renderLiveAnchorActivityScene(streamId, scene, opts){
   opts=opts||{};
   const requestedMode=opts.mode;
@@ -12959,9 +13111,22 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   // honor requestedMode ONLY when there is no usable active mode.
   const knownMode=(m)=>m==='compact_worklog'||m==='transparent_stream'||m==='hide_all_activity';
   const sceneMode=knownMode(activeMode)?activeMode:(knownMode(requestedMode)?requestedMode:activeMode);
-  if(sceneMode==='hide_all_activity') return false;
-  const existingTurn=$('liveAssistantTurn');
   const requestedSessionId=String(opts.sessionId||'');
+  if(sceneMode==='hide_all_activity'){
+    // Final-answer-only hides assistant ACTIVITY. A delivered steer is the user's
+    // own input inside the turn, so it stays visible; nothing else is painted. With
+    // no such row the early-out is unchanged. (#3058)
+    const deliveredSteerRows=(Array.isArray(scene&&scene.activity_rows)?scene.activity_rows:[])
+      .filter(row=>row&&row.role==='user'&&String(row.source_event_type||'')==='steer_delivered');
+    if(!deliveredSteerRows.length) return false;
+    const existingTurn=$('liveAssistantTurn');
+    const existingTurnSessionId=String(existingTurn&&existingTurn.dataset&&existingTurn.dataset.sessionId||'');
+    if(existingTurn&&requestedSessionId&&existingTurnSessionId&&existingTurnSessionId!==requestedSessionId){
+      if(!_resetMismatchedLiveAssistantTurnForSession(existingTurn, requestedSessionId)) return false;
+    }
+    return _renderLiveAnchorSceneUserRowsOnly(streamId,deliveredSteerRows,{...opts,mode:sceneMode});
+  }
+  const existingTurn=$('liveAssistantTurn');
   const existingTurnSessionId=String(existingTurn&&existingTurn.dataset&&existingTurn.dataset.sessionId||'');
   if(existingTurn&&requestedSessionId&&existingTurnSessionId&&existingTurnSessionId!==requestedSessionId){
     if(!_resetMismatchedLiveAssistantTurnForSession(existingTurn, requestedSessionId)) return false;
@@ -12969,7 +13134,11 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   if(sceneMode==='transparent_stream'){
     return _renderLiveAnchorActivitySceneTransparent(streamId,scene,opts);
   }
-  if(typeof isSimplifiedToolCalling==='function'&&!isSimplifiedToolCalling()) return false;
+  const sceneRows=Array.isArray(scene&&scene.activity_rows)?scene.activity_rows:[];
+  const deliveredSteerRows=sceneRows.filter(row=>row&&row.role==='user'&&String(row.source_event_type||'')==='steer_delivered');
+  if(typeof isSimplifiedToolCalling==='function'&&!isSimplifiedToolCalling()){
+    return deliveredSteerRows.length?_renderLiveAnchorSceneUserRowsOnly(streamId,deliveredSteerRows,{...opts,mode:sceneMode}):false;
+  }
   if(sceneMode!=='compact_worklog') return false;
   if(!S.session||!S.activeStreamId) return false;
   if(opts.sessionId&&S.session.session_id!==opts.sessionId) return false;
@@ -12984,6 +13153,7 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   }
   turn.setAttribute('data-anchor-scene-live-owner','1');
   turn.setAttribute('data-anchor-stream-id',String(streamId||''));
+  turn.setAttribute('data-anchor-scene-live-mode',String(sceneMode||''));
   // Re-stamp when reusing a turn restored or previously rendered in another mode.
   if(S.session) turn.dataset.sessionId=S.session.session_id;
   const blocks=_assistantTurnBlocks(turn);
@@ -13038,6 +13208,7 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   }
   turn.setAttribute('data-anchor-scene-live-owner','1');
   turn.setAttribute('data-anchor-stream-id',String(streamId||''));
+  turn.setAttribute('data-anchor-scene-live-mode',String((opts&&opts.mode)||'transparent_stream'));
   turn.setAttribute('data-live-assistant-turn','1');
   if(S.session) turn.dataset.sessionId=S.session.session_id;
   const blocks=_assistantTurnBlocks(turn);
@@ -13385,6 +13556,9 @@ function _anchorSceneSceneHasWorklogWorthyRows(scene){
   for(const row of rows){
     if(!row||typeof row!=='object') continue;
     const role=String(row.role||'');
+    // #3058 mirror: keyed on the source event type, not the role, so only a
+    // delivered steer promotes an otherwise all-prose turn.
+    if(String(row.source_event_type||'')==='steer_delivered') return true;
     if(role==='tool'||role==='thinking') return true;
     if(role==='lifecycle'){
       const source=String(row.source_event_type||'');
@@ -13744,6 +13918,14 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   if(!_anchorSceneSceneHasWorklogWorthyRows(message._anchor_activity_scene)) return false;
   if(typeof isTransparentStream==='function'&&isTransparentStream()){
     return _renderSettledAnchorSceneTransparentForMessage(message,segment,rawIdx);
+  }
+  const deliveredSteerRows=_anchorSceneRowsForRendering(message._anchor_activity_scene,{settled:true})
+    .filter(row=>row&&row.role==='user'&&String(row.source_event_type||'')==='steer_delivered');
+  if(deliveredSteerRows.length&&(
+    (typeof isFinalAnswerOnlyMode==='function'&&isFinalAnswerOnlyMode())
+    || (typeof isCompactWorklogMode==='function'&&!isCompactWorklogMode())
+  )){
+    return _renderSettledAnchorSceneUserRowsOnlyForMessage(message,segment,rawIdx);
   }
   if(typeof isCompactWorklogMode==='function'&&!isCompactWorklogMode()) return false;
   const blocks=_assistantTurnBlocks(segment.closest('.assistant-turn'));
@@ -18511,7 +18693,7 @@ function _hideLiveActivityForFinalAnswerOnly(){
   const turn=$('liveAssistantTurn');
   const inner=_assistantTurnBlocks(turn);
   if(inner){
-    inner.querySelectorAll('.transparent-event-row,.agent-activity-thinking,.wl-reason,#liveRunStatus,.live-worklog[data-live-worklog-shell],.tool-worklog-group[data-live-tool-call-group],.tool-call-group[data-live-tool-call-group],.tool-card-row[data-live-tid],[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>el.remove());
+    inner.querySelectorAll('.transparent-event-row,.agent-activity-thinking,.wl-reason,#liveRunStatus,.live-worklog[data-live-worklog-shell],.tool-worklog-group[data-live-tool-call-group],.tool-call-group[data-live-tool-call-group],.tool-card-row[data-live-tid],[data-live-assistant="1"],[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>el.remove());
   }
   const legacyThinking=$('thinkingRow');
   if(legacyThinking) legacyThinking.remove();

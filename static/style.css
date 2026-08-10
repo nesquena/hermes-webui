@@ -2291,6 +2291,13 @@
   .steer-indicator{display:flex;align-items:baseline;gap:8px;padding:10px 0;opacity:.65;font-style:italic;color:var(--accent-text);}
   .steer-indicator .steer-body{white-space:pre-wrap;word-break:break-word;}
   .steer-badge{display:inline-block;font-size:10px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--accent-text);background:var(--accent-bg);border:1px solid var(--accent-bg-strong);border-radius:4px;padding:1px 6px;vertical-align:middle;line-height:1.6;font-style:normal;flex-shrink:0;}
+  /* Delivered steer: an immutable user row inside the turn's timeline (#3058) */
+  /* Width and alignment are NOT set here: .msg-row[data-role="user"] outranks a
+     lone class, so they live with the classic-layout rules further down. */
+  .steer-delivered-row{padding:8px 0;min-width:0;box-sizing:border-box;}
+  .steer-delivered-row .steer-delivered-label{font-size:10px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--accent-text);opacity:.75;margin-bottom:4px;}
+  .steer-delivered-row .msg-body{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;min-width:0;}
+  .steer-delivered-row .steer-delivered-files{margin-top:4px;font-size:11px;opacity:.6;overflow-wrap:anywhere;min-width:0;}
   /* Steer recovery bar: dismissible after failure, same lifecycle as steer-indicator */
   .steer-recovery{display:flex;align-items:center;gap:0.5rem;padding:0.5rem 0.75rem;margin:0.25rem 0;border-radius:var(--radius-md);background:var(--surface-subtle);font-size:0.85rem}
   .steer-recovery-label{flex:1;min-width:0;color:var(--text)}
@@ -5995,6 +6002,17 @@ body code[class*="language-"],body pre[class*="language-"],body pre code[class*=
 .msg-row[data-role="user"] { align-self: flex-end; max-width: 60%; }
 @media (max-width: 900px) { .msg-row[data-role="user"] { max-width: 78%; } }
 @media (max-width: 600px) { .msg-row[data-role="user"] { max-width: 90%; } }
+/* #3058: a delivered steer is a user row, but it sits inside the turn's own block
+   column (.assistant-turn-blocks / .tool-worklog-list), not the conversation
+   column, so the classic right-aligned 60% layout would squeeze it to a fraction
+   of an already-narrow rail. Three simple selectors, so it outranks the two-part
+   rules above regardless of source order or viewport. */
+.msg-row.steer-delivered-row[data-role="user"] { align-self: stretch; max-width: 100%; }
+/* #3058: in Final-answer-only the live turn can exist only to host a delivered
+   steer. That mode's contract is to show nothing until the answer arrives, so the
+   "Hermes" role header must not appear above a turn holding just the user's own
+   steer. Stateless: the header returns the moment any other block is painted. */
+.assistant-turn[data-anchor-scene-live-owner="1"][data-anchor-scene-live-mode="hide_all_activity"]:has(> .assistant-turn-blocks > [data-steer-delivery="delivered"]):not(:has(> .assistant-turn-blocks > *:not([data-steer-delivery="delivered"]))) > .msg-role.assistant { display: none; }
 /* Hide the entire "empty tool-anchor" assistant row (content='' with
    tool_calls). renderMessages keeps it in the DOM so tool cards can anchor
    to it, but visually it adds a ghost "Hermes" header above the tool cards.
