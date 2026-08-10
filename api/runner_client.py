@@ -54,6 +54,21 @@ class HttpRunnerClient:
         return cls(base_url=base_url, api_key=str(source.get(_RUNNER_API_KEY_ENV) or ""))
 
     def start_run(self, request) -> dict[str, Any]:
+        # #6327 runner acceptance (fail closed): the owner fence is claimed
+        # under the WebUI per-session AGENT lock right before this call; the
+        # runner validates/records the generation so an unowned run is never
+        # acknowledged.  Refuse to even POST a run that carries no non-empty
+        # fence — a run without owner authority must never reach the runner.
+        fence = request.owner_fence
+        if (
+            not isinstance(fence, dict)
+            or not fence
+            or not str(fence.get("session_id") or "").strip()
+        ):
+            raise RunnerClientError(
+                "refusing to start an unowned run: owner_fence must be a non-empty "
+                "generation/route fence claimed under the session owner's lock"
+            )
         return self._post("/v1/runs", {
             "session_id": request.session_id,
             "message": request.message,
@@ -65,10 +80,7 @@ class HttpRunnerClient:
             "toolsets": list(request.toolsets or []),
             "source": request.source,
             "metadata": dict(request.metadata or {}),
-            # #6327: owner fence claimed under the WebUI per-session AGENT lock
-            # right before this call; the runner validates/records the
-            # generation so an unowned run is never acknowledged.
-            "owner_fence": dict(request.owner_fence or {}),
+            "owner_fence": dict(fence),
         })
 
     def observe_run(self, run_id: str, *, cursor: str | None = None) -> dict[str, Any]:

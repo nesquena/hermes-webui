@@ -7617,7 +7617,7 @@ def _run_agent_streaming(
                 s,
                 stream_id=stream_id,
                 session_id=session_id,
-                wakeup_prompt=msg if _turn_pending_source == "process_wakeup" else None,
+                wakeup_prompt=msg_text if _turn_pending_source == "process_wakeup" else None,
                 requeue_wakeup=(_turn_pending_source == "process_wakeup"),
             )
             if _worker_mismatch is not None:
@@ -9166,6 +9166,40 @@ def _run_agent_streaming(
                     cfg=_cfg,
                 )
                 _run_conversation_kwargs["user_message"] = user_message
+            # #6327 sink boundary: the route-to-worker claim
+            # (``_worker_atomic_owner_claim``) released the per-session AGENT
+            # lock before this first provider call, so a same-SID replacement
+            # in that window would otherwise reach the provider unowned.
+            # Re-verify the canonical owner under the lock immediately before
+            # the sink and refuse with an apperror (retire + re-defer) instead
+            # of calling the provider on a replaced session.
+            if owner_token is not None:
+                from api.routes import _worker_retire_pending_state, _worker_sink_owner_fence
+
+                _sink_mismatch = _worker_sink_owner_fence(owner_token, s)
+                if _sink_mismatch is not None:
+                    logger.warning(
+                        "stream worker %s refused owner at provider sink for session %s: %s",
+                        stream_id,
+                        session_id,
+                        _sink_mismatch,
+                    )
+                    _worker_retire_pending_state(
+                        owner_token,
+                        stream_id=stream_id,
+                        session_id=session_id,
+                        wakeup_prompt=msg_text if _turn_pending_source == "process_wakeup" else None,
+                        requeue_wakeup=(_turn_pending_source == "process_wakeup"),
+                        reason=_sink_mismatch,
+                    )
+                    put("apperror", {
+                        "error": "session owner changed before the agent turn started",
+                        "owner_fence": _sink_mismatch,
+                        "session_id": session_id,
+                        "retryable": True,
+                        "_status": 409,
+                    })
+                    return  # apperror closes the stream on the client side
             result = agent.run_conversation(**_run_conversation_kwargs)
             # #4729: the run is done — flush any reasoning tail still in the coalescing
             # buffer (the agent never calls reasoning_callback(None), and a turn can end on

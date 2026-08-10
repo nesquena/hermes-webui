@@ -3586,3 +3586,456 @@ def test_revalidation_owner_replaced_before_run_acceptance(monkeypatch, tmp_path
     finally:
         with config.LOCK:
             config.SESSIONS.pop(sid, None)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# #6327 — B5: barrier tests for owner replacement at the side-effect boundary
+#
+# The route-to-worker claim (``_worker_atomic_owner_claim``) releases the
+# per-session AGENT lock before the worker's first actual sink (the provider
+# call for the direct worker, the /v1/runs POST for the gateway worker, the
+# runner HTTP call for runner-local), so a same-SID replacement landing AFTER
+# the claim's comparison but BEFORE the sink must never produce an
+# unauthorized provider/network call.  These tests drive the REAL production
+# compositions (worker claim -> sink fence / runner fence) against a
+# concurrent writer synchronized with Events — never sleeps — and assert:
+# zero unauthorized sink calls, no deadlock (the claim never re-acquires the
+# non-reentrant AGENT lock for the retire), exact pending cleanup, durable
+# wakeup redelivery, and current-owner success controls.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _register_stream_owner(session_id, stream_id):
+    config.STREAM_SESSION_OWNERS[stream_id] = session_id
+
+
+class _FakeRunnerClient:
+    """Runner-client stand-in recording the owner fence of every start_run."""
+
+    def __init__(self, posts):
+        self._posts = posts
+
+    def start_run(self, request):
+        self._posts.append(dict(request.owner_fence or {}))
+        return {
+            "run_id": "run-1",
+            "stream_id": "run-1",
+            "session_id": request.session_id,
+            "status": "started",
+            "_status": 200,
+        }
+
+
+def _assert_no_ownership_lock_leak(proxy):
+    assert proxy.acquire(blocking=False), "a thread leaked the ownership lock"
+    proxy.release()
+
+
+def test_worker_atomic_claim_replacement_retires_outside_lock_no_deadlock(
+    monkeypatch, tmp_path
+):
+    """The claim computes the disposition under the lock and retires AFTER
+    releasing it — a nested re-acquisition of the non-reentrant per-session
+    AGENT lock inside the retire path deadlocks the worker (#6327 blocker 2)."""
+    import api.background_process as bg
+    import api.routes as routes
+
+    session, calls, proxy = _install_immutable_owner_token_fixture(
+        monkeypatch, tmp_path, recovered=True
+    )
+    sid = session.session_id
+    stream_id = "issue6327-b5-claim"
+    deferred = []
+    monkeypatch.setattr(
+        bg, "record_deferred_wakeup", lambda s, _c, p: deferred.append((s, p))
+    )
+    try:
+        token, owner, _revalidation = _build_token_and_revalidate(routes, sid)
+        assert owner is session
+
+        replacement = _StreamingFakeSession(sid, "beta", tmp_path, stream_id)
+        with config.LOCK:
+            config.SESSIONS[sid] = replacement
+        _register_stream_owner(sid, stream_id)
+        session.pending_user_message = "wakeup"
+        session.pending_user_source = "process_wakeup"
+        session.active_stream_id = stream_id
+
+        proxy.arm()
+        result_holder = {}
+
+        def _claim():
+            result_holder["result"] = routes._worker_atomic_owner_claim(
+                token,
+                session,
+                stream_id=stream_id,
+                session_id=sid,
+                wakeup_prompt="wakeup",
+                requeue_wakeup=True,
+            )
+
+        t = threading.Thread(target=_claim, daemon=True)
+        t.start()
+        t.join(15)
+        assert not t.is_alive(), "worker claim deadlocked on the AGENT lock"
+        assert not proxy.attempted.is_set(), "claim attempted PROCESS while AGENT held"
+        assert result_holder.get("result") == "owner_replaced", result_holder
+        # Exact pending cleanup: the canonical owner moved, so the retire must
+        # NOT clobber the stale object's provisional fields or persist it...
+        assert session.pending_user_message == "wakeup"
+        assert session.active_stream_id == stream_id
+        assert calls["save"] == []
+        # ...and must redeliver durably + drop the stream-owner registry entry.
+        assert deferred == [(sid, "wakeup")], deferred
+        assert config.STREAM_SESSION_OWNERS.get(stream_id) is None
+
+        # Current-owner success control: the same claim with NO replacement
+        # passes and performs no retire/requeue.
+        with config.LOCK:
+            config.SESSIONS[sid] = session
+        deferred.clear()
+        assert (
+            routes._worker_atomic_owner_claim(
+                token,
+                session,
+                stream_id=stream_id,
+                session_id=sid,
+                wakeup_prompt="wakeup",
+                requeue_wakeup=True,
+            )
+            is None
+        )
+        assert deferred == []
+        _assert_no_ownership_lock_leak(proxy)
+    finally:
+        with config.LOCK:
+            config.SESSIONS.pop(sid, None)
+        config.STREAM_SESSION_OWNERS.pop(stream_id, None)
+
+
+def _install_b5_claim_replace(monkeypatch, routes, sid, replacement):
+    """Wrap the REAL worker claim to atomically replace the canonical owner
+    right after the claim's comparison succeeds (barrier: replacement lands
+    AFTER comparison, BEFORE the sink).  Returns the ``replaced`` Event."""
+    real_claim = routes._worker_atomic_owner_claim
+    replaced = threading.Event()
+
+    def claim_then_replace(*args, **kwargs):
+        result = real_claim(*args, **kwargs)
+        assert result is None, result  # claim passed on the original owner
+        with config.LOCK:
+            config.SESSIONS[sid] = replacement
+        replaced.set()
+        return result
+
+    monkeypatch.setattr(routes, "_worker_atomic_owner_claim", claim_then_replace)
+    return replaced
+
+
+def test_direct_worker_replacement_after_claim_refuses_at_sink(
+    monkeypatch, tmp_path
+):
+    """Direct worker: a same-SID replacement landing after the worker's claim
+    comparison but before the first provider call is refused at the sink
+    boundary — zero unauthorized provider calls, apperror, durable wakeup
+    redelivery, exact stream-owner cleanup, no deadlock (#6327 barrier list)."""
+    import api.background_process as bg
+    import api.routes as routes
+    import api.streaming as streaming
+
+    session, calls, proxy = _install_immutable_owner_token_fixture(
+        monkeypatch, tmp_path, recovered=True
+    )
+    sid = session.session_id
+    stream_id = session.active_stream_id
+    deferred = []
+    monkeypatch.setattr(
+        bg, "record_deferred_wakeup", lambda s, _c, p: deferred.append((s, p))
+    )
+    sink_calls = []
+
+    class _RefusingAgent(_StreamingFakeAgent):
+        def run_conversation(self, **kwargs):
+            sink_calls.append(kwargs)
+            raise AssertionError(
+                "provider sink must never be reached for a replaced owner"
+            )
+
+    monkeypatch.setattr(streaming, "_get_ai_agent", lambda: _RefusingAgent)
+    monkeypatch.setattr(
+        streaming, "append_turn_journal_event_for_stream", lambda *a, **k: None
+    )
+    monkeypatch.setattr(streaming, "_finalize_cancelled_turn", lambda *a, **k: None)
+    try:
+        token, owner, _revalidation = _build_token_and_revalidate(routes, sid)
+        assert owner is session
+
+        replacement = _StreamingFakeSession(sid, "beta", tmp_path, stream_id)
+        session.pending_user_source = "process_wakeup"
+        session.pending_user_message = "hello"
+        session.active_stream_id = stream_id
+        _register_stream_owner(sid, stream_id)
+        replaced = _install_b5_claim_replace(monkeypatch, routes, sid, replacement)
+
+        stream_exc = []
+        done = threading.Event()
+        q = streaming.STREAMS[stream_id]  # captured: teardown pops the entry
+
+        def run_worker():
+            try:
+                streaming._run_agent_streaming(
+                    session_id=sid,
+                    msg_text="hello",
+                    model="test-model",
+                    model_provider="test-provider",
+                    workspace=str(tmp_path),
+                    stream_id=stream_id,
+                    owner_token=token,
+                )
+            except BaseException as exc:  # pragma: no cover - failure path
+                stream_exc.append(exc)
+            finally:
+                done.set()
+
+        # NOTE: the streaming worker owns PROCESS for its whole turn by design
+        # (unconditional streaming env ownership), so no armed ownership-lock
+        # proxy assertion here — the #6327 AB/BA invariant is covered by the
+        # claim-level tests (B4/B5 above).
+        t = threading.Thread(target=run_worker, daemon=True)
+        t.start()
+        assert replaced.wait(15), "replacement after claim never ran"
+        assert done.wait(25), "direct worker never settled"
+        t.join(25)
+        assert not t.is_alive(), "direct worker deadlocked"
+        if stream_exc:
+            raise stream_exc[0]
+        assert sink_calls == [], "zero unauthorized provider calls expected"
+
+        events = []
+        while True:
+            try:
+                events.append(q.get_nowait())
+            except Exception:
+                break
+        apperrors = [
+            ev for ev in events if isinstance(ev, tuple) and ev and ev[0] == "apperror"
+        ]
+        assert apperrors, f"no apperror emitted: {events!r}"
+        payload = apperrors[0][1]
+        assert payload["owner_fence"] == "owner_replaced", payload
+        assert payload["retryable"] is True
+        assert deferred == [(sid, "hello")], deferred
+        assert config.STREAM_SESSION_OWNERS.get(stream_id) is None
+        _assert_no_ownership_lock_leak(proxy)
+    finally:
+        with config.LOCK:
+            config.SESSIONS.pop(sid, None)
+        config.STREAM_SESSION_OWNERS.pop(stream_id, None)
+
+
+def test_gateway_worker_replacement_after_claim_refuses_at_sink(
+    monkeypatch, tmp_path
+):
+    """Gateway worker: same barrier as the direct worker — replacement after
+    the claim comparison but before the /v1/runs POST is refused at the sink;
+    zero network POSTs, apperror, durable wakeup redelivery, no deadlock."""
+    import api.background_process as bg
+    import api.gateway_chat as gateway_chat
+    import api.routes as routes
+    import api.streaming as streaming
+
+    session, calls, proxy = _install_immutable_owner_token_fixture(
+        monkeypatch, tmp_path, recovered=True
+    )
+    sid = session.session_id
+    stream_id = session.active_stream_id
+    deferred = []
+    monkeypatch.setattr(
+        bg, "record_deferred_wakeup", lambda s, _c, p: deferred.append((s, p))
+    )
+    urlopen_calls = []
+
+    def _refuse_urlopen(*a, **k):
+        urlopen_calls.append((a, k))
+        raise AssertionError("gateway /v1/runs POST must never fire for a replaced owner")
+
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", _refuse_urlopen)
+    monkeypatch.setattr(gateway_chat, "get_session", lambda _sid: session)
+    monkeypatch.setattr(gateway_chat, "_gateway_use_runs_api_enabled", lambda *a, **k: True)
+    monkeypatch.setattr(gateway_chat, "gateway_supports_approval", lambda *a, **k: True)
+    monkeypatch.setattr(gateway_chat, "_gateway_base_url", lambda *a, **k: "http://gateway.local")
+    monkeypatch.setattr(gateway_chat, "_gateway_api_key", lambda *a, **k: "")
+    monkeypatch.setattr(
+        gateway_chat, "_gateway_reasoning_effort_for_request", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        config, "_main_model_request_overrides", lambda *a, **k: {}
+    )
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {})
+    monkeypatch.setattr(
+        streaming, "_prefill_messages_with_webui_context", lambda *a, **k: []
+    )
+    monkeypatch.setattr(
+        streaming,
+        "_normalize_prefill_messages_before_user_turn",
+        lambda *a, **k: [],
+    )
+    monkeypatch.setattr(streaming, "_public_prefill_context_status", lambda *a, **k: None)
+    monkeypatch.setattr(streaming, "_webui_ephemeral_system_prompt", lambda *a, **k: "")
+    try:
+        token, owner, _revalidation = _build_token_and_revalidate(routes, sid)
+        assert owner is session
+
+        replacement = _StreamingFakeSession(sid, "beta", tmp_path, stream_id)
+        session.pending_user_source = "process_wakeup"
+        session.pending_user_message = "hello"
+        session.active_stream_id = stream_id
+        _register_stream_owner(sid, stream_id)
+        replaced = _install_b5_claim_replace(monkeypatch, routes, sid, replacement)
+
+        worker_exc = []
+        done = threading.Event()
+        q = streaming.STREAMS[stream_id]  # captured: teardown pops the entry
+
+        def run_worker():
+            try:
+                gateway_chat._run_gateway_chat_streaming(
+                    sid,
+                    "hello",
+                    "test-model",
+                    str(tmp_path),
+                    stream_id,
+                    model_provider="test-provider",
+                    owner_token=token,
+                )
+            except BaseException as exc:  # pragma: no cover - failure path
+                worker_exc.append(exc)
+            finally:
+                done.set()
+
+        # NOTE: the gateway worker owns PROCESS for its whole turn by design —
+        # the #6327 AB/BA invariant is covered by the claim-level tests.
+        t = threading.Thread(target=run_worker, daemon=True)
+        t.start()
+        assert replaced.wait(15), "replacement after claim never ran"
+        assert done.wait(25), "gateway worker never settled"
+        t.join(25)
+        assert not t.is_alive(), "gateway worker deadlocked"
+        if worker_exc:
+            raise worker_exc[0]
+        assert urlopen_calls == [], "zero unauthorized network POSTs expected"
+
+        events = []
+        while True:
+            try:
+                events.append(q.get_nowait())
+            except Exception:
+                break
+        apperrors = [
+            ev for ev in events if isinstance(ev, tuple) and ev and ev[0] == "apperror"
+        ]
+        assert apperrors, f"no gateway apperror emitted: {events!r}"
+        payload = apperrors[0][1]
+        assert payload["owner_fence"] == "owner_replaced", payload
+        assert payload["retryable"] is True
+        assert deferred == [(sid, "hello")], deferred
+        assert config.STREAM_SESSION_OWNERS.get(stream_id) is None
+        _assert_no_ownership_lock_leak(proxy)
+    finally:
+        with config.LOCK:
+            config.SESSIONS.pop(sid, None)
+        config.STREAM_SESSION_OWNERS.pop(stream_id, None)
+
+
+def test_runner_local_replacement_before_runner_call_refuses_with_fence(
+    monkeypatch, tmp_path
+):
+    """Runner-local: a same-SID replacement after the route's comparison but
+    before the runner HTTP call must be refused by the fence claim in
+    ``_start_run`` — zero runner POSTs, retryable 409, durable wakeup
+    redelivery.  The current-owner control proves the NON-EMPTY JSON-safe
+    generation/route fence is carried in the request."""
+    import api.background_process as bg
+    import api.routes as routes
+
+    real_start_run = routes._start_run
+    session, calls, proxy = _install_immutable_owner_token_fixture(
+        monkeypatch, tmp_path, recovered=True
+    )
+    # The fixture stubs _start_run to record calls; the runner-local barrier
+    # must drive the REAL production helper (fence claim + adapter dispatch).
+    monkeypatch.setattr(routes, "_start_run", real_start_run)
+    sid = session.session_id
+    deferred = []
+    monkeypatch.setattr(
+        bg, "record_deferred_wakeup", lambda s, _c, p: deferred.append((s, p))
+    )
+    runner_posts = []
+    monkeypatch.setenv("HERMES_WEBUI_RUNTIME_ADAPTER", "runner-local")
+    monkeypatch.setattr(
+        routes,
+        "_runtime_runner_client_factory",
+        lambda: _FakeRunnerClient(runner_posts),
+    )
+    try:
+        token, owner, _revalidation = _build_token_and_revalidate(routes, sid)
+        assert owner is session
+
+        replacement = _StreamingFakeSession(sid, "beta", tmp_path, "issue6327-runner")
+        with config.LOCK:
+            config.SESSIONS[sid] = replacement
+
+        proxy.arm()
+        resp = routes._start_run(
+            session,
+            msg="hello",
+            attachments=[],
+            workspace=str(tmp_path),
+            model="test-model",
+            model_provider="test-provider",
+            normalized_model=False,
+            source="process_wakeup",
+            route="start_session_turn",
+            owner_token=token,
+        )
+        assert not proxy.attempted.is_set(), "fence claim attempted PROCESS while AGENT held"
+        assert runner_posts == [], "zero unauthorized runner POSTs expected"
+        assert resp["_status"] == 409, resp
+        assert resp["retryable"] is True, resp
+        assert resp["owner_fence"] == "owner_replaced", resp
+        assert deferred == [(sid, "hello")], deferred
+        # Stale owner's provisional fields untouched (owner moved — never
+        # clobber the wrong object).
+        assert getattr(session, "pending_user_message", None) is None
+
+        # Current-owner success control: the run proceeds and the runner
+        # receives the non-empty generation/route fence.
+        with config.LOCK:
+            config.SESSIONS[sid] = session
+        runner_posts.clear()
+        deferred.clear()
+        ok = routes._start_run(
+            session,
+            msg="hello",
+            attachments=[],
+            workspace=str(tmp_path),
+            model="test-model",
+            model_provider="test-provider",
+            normalized_model=False,
+            source="process_wakeup",
+            route="start_session_turn",
+            owner_token=token,
+        )
+        assert ok["_status"] == 200, ok
+        assert len(runner_posts) == 1, runner_posts
+        fence = runner_posts[0]
+        assert isinstance(fence, dict) and fence, "owner_fence must be non-empty"
+        assert fence["session_id"] == sid
+        assert fence["profile"] == "alpha"
+        assert fence["generation"]
+        assert fence["route"]["provider"] == "test-provider"
+        assert deferred == []
+        _assert_no_ownership_lock_leak(proxy)
+    finally:
+        with config.LOCK:
+            config.SESSIONS.pop(sid, None)

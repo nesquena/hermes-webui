@@ -21587,6 +21587,7 @@ def _start_run(
     """
     from api.runtime_adapter import (
         LegacyJournalRuntimeAdapter,
+        RunnerRuntimeAdapter,
         StartRunRequest,
         build_runtime_adapter,
         runtime_adapter_enabled,
@@ -21620,6 +21621,33 @@ def _start_run(
             )
             if adapter is None:
                 raise NotImplementedError("runtime adapter selection returned no adapter")
+            owner_fence = None
+            if isinstance(adapter, RunnerRuntimeAdapter) and owner_token is not None:
+                # #6327 runner acceptance: claim the compact NON-EMPTY
+                # JSON-safe generation/route fence under the canonical owner's
+                # per-session AGENT lock immediately before the runner HTTP
+                # call, so a same-SID replacement after the route's comparison
+                # can never reach the runner/provider.  On movement, retire the
+                # route's provisional pending state, re-defer the wakeup, and
+                # surface a retryable 409 so the caller requeues instead of
+                # silently 500ing — an unowned run is never acknowledged.
+                owner_fence, fence_error = _claim_runner_owner_fence(owner_token, s)
+                if fence_error is not None:
+                    _worker_retire_pending_state(
+                        owner_token,
+                        stream_id="",
+                        session_id=str(getattr(s, "session_id", "") or ""),
+                        wakeup_prompt=msg if source == "process_wakeup" else None,
+                        requeue_wakeup=(source == "process_wakeup"),
+                        reason=fence_error,
+                    )
+                    return {
+                        "error": "session owner changed before the agent turn started",
+                        "owner_fence": fence_error,
+                        "retryable": True,
+                        "session_id": str(getattr(s, "session_id", "") or ""),
+                        "_status": 409,
+                    }
             result = adapter.start_run(
                 StartRunRequest(
                     session_id=s.session_id,
@@ -21631,6 +21659,7 @@ def _start_run(
                     model=model,
                     source=source,
                     metadata={"route": route},
+                    owner_fence=owner_fence,
                 )
             )
         except NotImplementedError as exc:
@@ -22363,42 +22392,137 @@ def _worker_atomic_owner_claim(
             reason="empty_sid",
         )
     lock = _get_session_agent_lock(live_sid)
+    reason = None
     with lock:
         with SESSION_AGENT_LOCKS_LOCK:
             canonical = SESSION_AGENT_LOCKS.get(live_sid)
         if canonical is not lock:
-            return _worker_retire_pending_state(
-                owner_token,
-                stream_id=stream_id,
-                session_id=session_id,
-                wakeup_prompt=wakeup_prompt,
-                requeue_wakeup=requeue_wakeup,
-                reason="lock_migrated",
-            )
+            reason = "lock_migrated"
+        else:
+            try:
+                resolved = get_session(live_sid)
+            except KeyError:
+                resolved = None
+            if resolved is None or resolved is not owner:
+                reason = "owner_replaced"
+            else:
+                reason = _process_wakeup_owner_token_mismatch(owner_token, owner)
+    if reason is not None:
+        # #6327 review: never retire while still holding the claim lock.
+        # ``_worker_retire_pending_state`` re-acquires the SAME non-reentrant
+        # per-session AGENT lock (``_get_session_agent_lock`` returns a plain
+        # ``threading.Lock``) to transact the cleanup; a nested acquisition
+        # here deadlocks the worker.  Compute the disposition under the lock,
+        # release it, THEN retire/requeue/compare-and-clear.
+        return _worker_retire_pending_state(
+            owner_token,
+            stream_id=stream_id,
+            session_id=session_id,
+            wakeup_prompt=wakeup_prompt,
+            requeue_wakeup=requeue_wakeup,
+            reason=reason,
+        )
+    return None
+
+
+def _worker_sink_owner_fence(owner_token, s) -> str | None:
+    """Re-verify the canonical owner at the worker's first provider/network sink.
+
+    #6327 required shape: the route-to-worker claim
+    (``_worker_atomic_owner_claim``) releases the per-session AGENT lock
+    before the worker's first actual sink (the provider call for the direct
+    worker, the /v1/runs POST for the gateway worker), so a same-SID
+    replacement in that window would otherwise reach the sink unowned.  This
+    check re-acquires the canonical lock immediately before the sink and
+    returns the mismatch reason when the owner moved — the worker emits an
+    apperror and retires/requeues instead of making an unauthorized
+    provider/network call.  Returns None when the owner still matches.
+    Never acquires PROCESS; never raises.
+    """
+    if not isinstance(owner_token, dict):
+        return None
+    owner = owner_token.get("owner")
+    if owner is None:
+        return "missing_owner"
+    if s is not owner:
+        return "owner_replaced"
+    live_sid = str(getattr(owner, "session_id", "") or "")
+    if not live_sid:
+        return "empty_sid"
+    lock = _get_session_agent_lock(live_sid)
+    with lock:
+        with SESSION_AGENT_LOCKS_LOCK:
+            canonical = SESSION_AGENT_LOCKS.get(live_sid)
+        if canonical is not lock:
+            return "lock_migrated"
         try:
             resolved = get_session(live_sid)
         except KeyError:
             resolved = None
         if resolved is None or resolved is not owner:
-            return _worker_retire_pending_state(
-                owner_token,
-                stream_id=stream_id,
-                session_id=session_id,
-                wakeup_prompt=wakeup_prompt,
-                requeue_wakeup=requeue_wakeup,
-                reason="owner_replaced",
-            )
+            return "owner_replaced"
+        return _process_wakeup_owner_token_mismatch(owner_token, owner)
+
+
+def _claim_runner_owner_fence(owner_token, s):
+    """Atomically claim the canonical owner and build the runner-local fence.
+
+    #6327 required shape (runner acceptance): called from ``_start_run``
+    immediately before the runner HTTP call.  Under the canonical per-session
+    AGENT lock, re-verifies the immutable owner token against the live owner
+    (identity + SID + every token field) and returns a compact NON-EMPTY
+    JSON-safe generation/route fence the runner must validate atomically
+    before its first provider/network side effect.  Never contains live
+    Session objects.
+
+    Returns ``(fence, None)`` on success; ``(None, reason)`` on owner
+    movement — the caller retires/requeues and surfaces a retryable error so
+    an unowned run is never acknowledged.
+    """
+    if not isinstance(owner_token, dict):
+        return None, None
+    owner = owner_token.get("owner")
+    if owner is None:
+        return None, "missing_owner"
+    if s is not owner:
+        return None, "owner_replaced"
+    live_sid = str(getattr(owner, "session_id", "") or "")
+    if not live_sid:
+        return None, "empty_sid"
+    lock = _get_session_agent_lock(live_sid)
+    with lock:
+        with SESSION_AGENT_LOCKS_LOCK:
+            canonical = SESSION_AGENT_LOCKS.get(live_sid)
+        if canonical is not lock:
+            return None, "lock_migrated"
+        try:
+            resolved = get_session(live_sid)
+        except KeyError:
+            resolved = None
+        if resolved is None or resolved is not owner:
+            return None, "owner_replaced"
         mismatch = _process_wakeup_owner_token_mismatch(owner_token, owner)
         if mismatch:
-            return _worker_retire_pending_state(
-                owner_token,
-                stream_id=stream_id,
-                session_id=session_id,
-                wakeup_prompt=wakeup_prompt,
-                requeue_wakeup=requeue_wakeup,
-                reason=mismatch,
-            )
-    return None
+            return None, mismatch
+        # Compact generation/route fence under canonical owner authority: the
+        # generation (profile + home + credential-state fingerprint) and the
+        # route lane (workspace/model/provider) RECOMPUTED from the live owner
+        # when the token was built.  The token fields were just re-verified
+        # against the live owner under this lock, so they are the current
+        # authority, not stale predecessor-derived values.
+        fence = {
+            "session_id": str(live_sid),
+            "profile": str(getattr(owner, "profile", "") or ""),
+            "profile_home": str(owner_token.get("profile_home") or ""),
+            "generation": str(owner_token.get("credential_state_fingerprint") or ""),
+            "route": {
+                "workspace": str(owner_token.get("workspace") or ""),
+                "model": str(owner_token.get("model") or ""),
+                "provider": str(owner_token.get("provider") or ""),
+                "normalized_model": bool(owner_token.get("normalized_model")),
+            },
+        }
+    return fence, None
 
 
 def _worker_retire_pending_state(
@@ -22431,14 +22555,23 @@ def _worker_retire_pending_state(
                 with SESSION_AGENT_LOCKS_LOCK:
                     canonical = SESSION_AGENT_LOCKS.get(live_sid)
                 if canonical is not lock:
-                    return reason
-                try:
-                    resolved = get_session(live_sid)
-                except KeyError:
-                    resolved = None
-                if resolved is None or resolved is not owner:
-                    return reason
-                _retire_provisional_pending_state(owner, stream_id=stream_id)
+                    # Owner lock migrated — the provisional sidecar belongs to
+                    # a stale object; fall through so the wakeup is still
+                    # redelivered and the stream-owner entry dropped.
+                    pass
+                else:
+                    try:
+                        resolved = get_session(live_sid)
+                    except KeyError:
+                        resolved = None
+                    # Only retire the provisional sidecar when the canonical
+                    # cache still maps the tokenized owner: a moved owner must
+                    # never be clobbered, but redelivery/cleanup below still
+                    # run so the replacement cannot be skipped (#6327 review:
+                    # \"ensure an owner replacement cannot return before wakeup
+                    # redelivery and stream-owner cleanup\").
+                    if resolved is not None and resolved is owner:
+                        _retire_provisional_pending_state(owner, stream_id=stream_id)
         except Exception:
             logger.debug(
                 "failed to retire provisional pending state for session %s (reason=%s)",
@@ -22605,32 +22738,20 @@ def start_session_turn(
     except KeyError:
         return {"error": "Session not found", "_status": 404}
 
-    try:
-        workspace = _resolve_chat_workspace_with_recovery(s, None)
-    except ValueError as e:
-        return {"error": str(e), "_status": 400}
-
-    requested_model = s.model
-    requested_provider = getattr(s, "model_provider", None)
-    # Server-initiated wakeup (Option Z): resolve persisted model via the
-    # standard helper in cache-only mode so wakeups never trigger a cold
-    # catalog rebuild. Thread the session's PROFILE model defaults through too
-    # (mirrors _handle_chat_start) — a brand-new session that spawned a
-    # background task before its first human turn has an empty s.model, and
-    # without the profile defaults the resolver would fall back to the global
-    # DEFAULT_MODEL instead of the profile's configured default (greptile flag).
-    _pp_provider, _pp_default, _pp_cfg = _read_profile_model_config(s, requested_provider)
-    model, model_provider, normalized_model = _resolve_compatible_session_model_state(
-        requested_model,
-        requested_provider,
-        profile_provider=_pp_provider,
-        profile_default_model=_pp_default,
-        profile_config=_pp_cfg,
-        prefer_cached_catalog=True,
-    )
-    # ── #6327: immutable owner token fences the out-of-AGENT revalidation ──
-    # For a named profile, _process_wakeup_provider_has_recovery_credential()
-    # enters profile_scope_for_detached_worker(), which holds
+    # ── #6327: select the LIVE owner FIRST, then derive the routing lane ──
+    # (workspace + profile/model/provider) ONLY from that owner.  The
+    # requested SID may be an archived pre-compression snapshot whose stale or
+    # invalid workspace must never 400 before its live continuation is
+    # considered: _build_immutable_session_owner_token resolves the canonical
+    # live owner through the continuation authority and recomputes the lane
+    # from it (predecessor-derived routing is never carried into the
+    # continuation).  ``s`` is used only as the preferred candidate seed and
+    # the requested model/provider fallback when the live owner has none
+    # persisted.
+    #
+    # #6327 immutable owner token fences the out-of-AGENT revalidation: for a
+    # named profile, _process_wakeup_provider_has_recovery_credential() enters
+    # profile_scope_for_detached_worker(), which holds
     # _PROCESS_ENV_OWNERSHIP_LOCK (PROCESS) for its full body.  Streaming now
     # owns PROCESS for the entire turn (unconditional) and waits for AGENT at
     # writeback, so revalidating while holding AGENT is a reachable AB/BA
@@ -22653,16 +22774,15 @@ def start_session_turn(
     # canonical owner before any pending-state mutation.
     _paused_wakeup_response = None
     _wakeup_token, _live_owner, _routing = _build_immutable_session_owner_token(
-        session_id, model=model, provider=model_provider, preferred=s,
+        session_id,
+        model=getattr(s, "model", None),
+        provider=getattr(s, "model_provider", None),
+        preferred=s,
     )
     if _wakeup_token is None:
         if _routing and _routing.get("error"):
             return {"error": _routing["error"], "_status": int(_routing.get("_status") or 400)}
         return {"error": "Session not found", "_status": 404}
-    # #6327: the routing (workspace + model/provider lane) is RECOMPUTED from
-    # the selected LIVE owner inside the token build — never carry
-    # predecessor-derived routing (from an archived pre-compression snapshot)
-    # into the continuation's revalidation or run.
     workspace = _routing["workspace"]
     model = _routing["model"]
     model_provider = _routing["provider"]

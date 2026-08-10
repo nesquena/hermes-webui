@@ -68,6 +68,20 @@ def test_runner_client_start_run_posts_explicit_boundary_payload(monkeypatch):
             toolsets=["terminal"],
             source="webui",
             metadata={"route": "/api/chat/start"},
+            # #6327: non-empty JSON-safe generation/route fence claimed under
+            # the canonical owner's AGENT lock immediately before the call.
+            owner_fence={
+                "session_id": "s1",
+                "profile": "default",
+                "profile_home": "/home/test/.hermes",
+                "generation": "fingerprint-1",
+                "route": {
+                    "workspace": "/workspace",
+                    "model": "gpt-5.5",
+                    "provider": "openai-codex",
+                    "normalized_model": False,
+                },
+            },
         )
     )
 
@@ -86,7 +100,46 @@ def test_runner_client_start_run_posts_explicit_boundary_payload(monkeypatch):
         "toolsets": ["terminal"],
         "source": "webui",
         "metadata": {"route": "/api/chat/start"},
+        "owner_fence": {
+            "session_id": "s1",
+            "profile": "default",
+            "profile_home": "/home/test/.hermes",
+            "generation": "fingerprint-1",
+            "route": {
+                "workspace": "/workspace",
+                "model": "gpt-5.5",
+                "provider": "openai-codex",
+                "normalized_model": False,
+            },
+        },
     }
+
+
+def test_runner_client_start_run_refuses_empty_owner_fence(monkeypatch):
+    """#6327 fail-closed acceptance: a run without a non-empty owner fence is
+    never POSTed — an unowned run must never be acknowledged by the runner."""
+
+    def fake_urlopen(req, timeout=0):
+        raise AssertionError("start_run must not POST without a valid owner fence")
+
+    _patch_opener(monkeypatch, fake_urlopen)
+    client = HttpRunnerClient(base_url="http://runner.local/", api_key="secret")
+
+    for bad_fence in (None, {}, {"session_id": ""}):
+        try:
+            client.start_run(
+                StartRunRequest(
+                    session_id="s1",
+                    message="hello",
+                    workspace="/workspace",
+                    profile="default",
+                    owner_fence=bad_fence,
+                )
+            )
+        except RunnerClientError as exc:
+            assert "owner_fence" in str(exc)
+        else:
+            raise AssertionError(f"start_run accepted empty fence {bad_fence!r}")
 
 
 def test_runner_client_maps_observe_status_and_controls(monkeypatch):

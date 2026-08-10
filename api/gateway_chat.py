@@ -827,6 +827,40 @@ def _run_gateway_chat_streaming(
                 body_extras["reasoning_effort"] = reasoning_effort
             if _gw_overrides.get("service_tier"):
                 body_extras["service_tier"] = _gw_overrides["service_tier"]
+            # #6327 sink boundary: same as the direct worker — the claim
+            # released the per-session AGENT lock before this /v1/runs POST,
+            # so re-verify the canonical owner under the lock immediately
+            # before the network sink and refuse instead of POSTing an
+            # unowned run.
+            if owner_token is not None:
+                from api.routes import _worker_retire_pending_state, _worker_sink_owner_fence
+
+                _sink_mismatch = _worker_sink_owner_fence(owner_token, s)
+                if _sink_mismatch is not None:
+                    logger.warning(
+                        "gateway stream worker %s refused owner at runs-API sink for session %s: %s",
+                        stream_id,
+                        session_id,
+                        _sink_mismatch,
+                    )
+                    _worker_retire_pending_state(
+                        owner_token,
+                        stream_id=stream_id,
+                        session_id=session_id,
+                        wakeup_prompt=msg_text
+                        if (getattr(s, "pending_user_source", None) or "") == "process_wakeup"
+                        else None,
+                        requeue_wakeup=(getattr(s, "pending_user_source", None) or "") == "process_wakeup",
+                        reason=_sink_mismatch,
+                    )
+                    put_gateway_event("apperror", {
+                        "error": "session owner changed before the agent turn started",
+                        "owner_fence": _sink_mismatch,
+                        "session_id": session_id,
+                        "retryable": True,
+                        "_status": 409,
+                    })
+                    return  # apperror closes the stream on the client side
             try:
                 final_text, usage = _run_gateway_runs_api_streaming(
                     session_id, msg_text, model, workspace, stream_id,
