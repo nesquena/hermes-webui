@@ -39,16 +39,21 @@ RUN apt-get update -y --fix-missing --no-install-recommends \
 # Installs to /usr/local/lib (takes ldconfig priority over /usr/lib).
 # Build tools are purged after compilation to keep the image lean.
 # Build args are for forward version bumps only (3.54+, etc.).
+# When bumping SQLITE_VERSION, recompute the SHA-256 from the official
+# download and update SQLITE_SHA256 accordingly.
 ARG SQLITE_VERSION=3530000
 ARG SQLITE_YEAR=2026
+ARG SQLITE_SHA256=851e9b38192fe2ceaa65e0baa665e7fa06230c3d9bd1a6a9662d02380d73365a
 RUN apt-get update \
     && apt-get install -y --no-install-recommends gcc make libc6-dev \
     && cd /tmp \
     && curl -fsSL "https://sqlite.org/${SQLITE_YEAR}/sqlite-autoconf-${SQLITE_VERSION}.tar.gz" \
        -o sqlite.tar.gz \
+    && echo "${SQLITE_SHA256}  sqlite.tar.gz" | sha256sum -c - \
     && tar xzf sqlite.tar.gz \
     && cd "sqlite-autoconf-${SQLITE_VERSION}" \
     && ./configure --prefix=/usr/local --disable-static --disable-readline \
+       --enable-fts5 --enable-fts4 --enable-rtree \
     && make -j"$(nproc)" \
     && make install \
     && /sbin/ldconfig \
@@ -56,7 +61,15 @@ RUN apt-get update \
     && apt-get purge -y gcc make libc6-dev \
     && apt-get autoremove -y \
     && apt-get clean && rm -rf /var/lib/apt/lists/* \
-    && python3 -c "import sqlite3; v = sqlite3.sqlite_version; assert tuple(int(x) for x in v.split('.')) >= (3, 51, 3), f'SQLite {v} still vulnerable'"
+    && python3 -c "\
+import sqlite3; \
+v = sqlite3.sqlite_version; \
+assert tuple(int(x) for x in v.split('.')) >= (3, 51, 3), \
+    f'SQLite {v} still vulnerable'; \
+c = sqlite3.connect(':memory:'); \
+c.execute('CREATE VIRTUAL TABLE _fts5_build_check USING fts5(x)'); \
+c.execute('DROP TABLE _fts5_build_check'); \
+c.close()"
 
 # Optional GPU user-space acceleration libraries for users who pass through
 # host GPU devices. The default image remains CPU-only.

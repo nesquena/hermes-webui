@@ -29,10 +29,27 @@ def test_dockerfile_compiles_sqlite_from_source():
 
 
 def test_dockerfile_sqlite_upgrade_uses_build_args():
-    """Version and year must be build args so bumps don't require editing
-    the RUN block."""
+    """Version, year, and SHA-256 must be build args so bumps don't require
+    editing the RUN block."""
     assert "ARG SQLITE_VERSION=" in DOCKERFILE
     assert "ARG SQLITE_YEAR=" in DOCKERFILE
+    assert "ARG SQLITE_SHA256=" in DOCKERFILE, (
+        "Dockerfile must pin the amalgamation tarball SHA-256 as a build arg."
+    )
+
+
+def test_dockerfile_sqlite_upgrade_verifies_checksum():
+    """The tarball must be verified against the pinned SHA-256 before
+    extraction to prevent artifact substitution."""
+    start = DOCKERFILE.find("ARG SQLITE_VERSION=")
+    assert start != -1
+    end = DOCKERFILE.find("\n\n", DOCKERFILE.find("RUN", start))
+    block = DOCKERFILE[start:end] if end != -1 else DOCKERFILE[start:]
+
+    assert "sha256sum -c" in block, (
+        "The SQLite compile layer must verify the downloaded tarball against "
+        "the pinned SHA-256 checksum before extraction."
+    )
 
 
 def test_dockerfile_sqlite_upgrade_has_build_time_assertion():
@@ -43,6 +60,34 @@ def test_dockerfile_sqlite_upgrade_has_build_time_assertion():
     )
     assert "3, 51, 3" in DOCKERFILE, (
         "Build-time assertion must check for >= 3.51.3 (the minimum fix version)."
+    )
+
+
+def test_dockerfile_sqlite_upgrade_enables_fts5():
+    """The compile must enable FTS5 to match the distro package's feature
+    set. state.db uses FTS5 for session/message full-text search."""
+    start = DOCKERFILE.find("ARG SQLITE_VERSION=")
+    assert start != -1
+    end = DOCKERFILE.find("\n\n", DOCKERFILE.find("RUN", start))
+    block = DOCKERFILE[start:end] if end != -1 else DOCKERFILE[start:]
+
+    assert "--enable-fts5" in block, (
+        "The SQLite compile must pass --enable-fts5 to ./configure. "
+        "Without it, FTS5 virtual tables (used by state.db) fail silently."
+    )
+
+
+def test_dockerfile_sqlite_upgrade_verifies_fts5_at_build_time():
+    """The build-time assertion must prove FTS5 vtable creation works,
+    not just the version number."""
+    start = DOCKERFILE.find("ARG SQLITE_VERSION=")
+    assert start != -1
+    end = DOCKERFILE.find("\n\n", DOCKERFILE.find("RUN", start))
+    block = DOCKERFILE[start:end] if end != -1 else DOCKERFILE[start:]
+
+    assert "fts5" in block.lower() and "CREATE VIRTUAL TABLE" in block, (
+        "The build-time assertion must create an FTS5 virtual table to prove "
+        "the module is available, not just check the version number."
     )
 
 
