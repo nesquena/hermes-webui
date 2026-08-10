@@ -770,6 +770,26 @@ def _worktree_retained_payload_for_session_id(sid: str) -> dict:
         return {}
 
 
+def _pre_delete_session_metadata(sid: str):
+    """Capture the session object BEFORE destructive delete cleanup (#6855).
+
+    The delete handler previously resolved ``get_session()`` and the worktree
+    payload AFTER ``SESSIONS.pop`` and sidecar deletion, so by the time they
+    ran the session was already gone — silently dropping ``worktree_retained``
+    and the session-delete profile. This helper is called right before the
+    pop, while the session is still resolvable. state.db-only unsafe ids are
+    never in ``SESSIONS``, so it returns None for them and the handler falls
+    back to the CLI metadata captured at authorization time.
+    """
+    try:
+        return get_session(sid, metadata_only=True)
+    except KeyError:
+        return None
+    except Exception:
+        logger.debug("Failed to resolve session for deleted session %s", sid)
+        return None
+
+
 def _active_profile_config_path() -> Path:
     """Return config.yaml for the request's active WebUI profile.
 
@@ -8041,12 +8061,19 @@ def _session_deleted_tombstone_marks_was_webui(sid: str) -> bool:
 
 
 def _state_db_session_source(sid: str) -> str:
-    """Return the lowercased ``sessions.source`` for ``sid`` from state.db.
+    """Return the authoritative ``sessions.source`` for ``sid`` from state.db.
 
     Cheap single-row lookup used to distinguish delegated ``subagent`` children
     (which have a recoverable state.db transcript) from genuinely-deleted WebUI
     sessions.  Returns "" on any error / missing row so callers fall back to
     their existing behaviour.
+
+    The raw stored value is returned WITHOUT normalization (#6855): the
+    api_server-class provenance gates consume this value and must fail closed,
+    so ``strip().lower()`` widening here would let non-canonical sources like
+    ``API_SERVER`` or `` api_server`` authorize destructive paths. Rows are
+    stored canonically (``api`` / ``api_server`` / ``subagent`` / ...), so
+    callers comparing against those exact lowercase values are unaffected.
 
     The lookup is a parameterized SQL query, so it is safe for session ids that
     are not path-safe (e.g. imported external rows like
@@ -8068,7 +8095,7 @@ def _state_db_session_source(sid: str) -> str:
         return ""
     if not row:
         return ""
-    return str(row[0] or "").strip().lower()
+    return str(row[0] or "")
 
 
 def _is_api_server_class_state_db_source(source: str) -> bool:
@@ -8080,13 +8107,13 @@ def _is_api_server_class_state_db_source(source: str) -> bool:
     because the WebUI archives/deletes them directly in state.db. Any other
     real state.db row (messaging, gateway, cron, subagent, ...) keeps the
     path-safe id requirement.
-    Exact membership only (#6855): no hyphen/space normalization, no
-    derived-label fallback. A raw source like ``api-server`` (effectively
-    unknown) must NOT authorize the destructive delete/archive paths —
-    only the exact ``api`` / ``api_server`` values may.
+    EXACT raw membership only (#6855): no trimming, no case-folding, no
+    hyphen/space normalization and no derived-label fallback. A genuine
+    api_server row is always stored canonically (``api`` / ``api_server``); a
+    non-canonical value like ``API_SERVER``, `` api_server`` or ``api_serverx``
+    must NOT authorize the destructive delete/archive paths — fail closed.
     """
-    marker = str(source or "").strip().lower()
-    return marker in {"api", "api_server"}
+    return str(source or "") in {"api", "api_server"}
 
 
 def _delete_unsafe_id_authorized(sid: str) -> bool:
@@ -8170,7 +8197,7 @@ def _set_state_db_session_archived(
                     ).fetchone()
                     if (
                         not src_row
-                        or str(src_row[0] or "").strip().lower() not in require_source_in
+                        or str(src_row[0] or "") not in require_source_in
                     ):
                         _conn.rollback()
                         return False
@@ -15238,18 +15265,18 @@ def handle_post(handler, parsed) -> bool:
         cli_meta_for_delete = _lookup_cli_session_metadata(sid)
         if cli_meta_for_delete.get("read_only"):
             return bad(handler, "Read-only imported sessions cannot be deleted from WebUI", 400)
-        # A delegated subagent child (#5307) is view-only and owned by the
-        # delegate runner — deleting it would erase its state.db transcript.
+        # Delegated subagent children (#5307) are view-only; deleting one
+        # would erase its state.db transcript.
         if _session_is_subagent_view_only(sid):
             return bad(handler, "Subagent sessions are view-only and cannot be deleted from WebUI", 400)
         is_messaging_session = _is_messaging_session_id(sid)
         state_db_cleanup_failed = False
-        # Serialize with recovery, bound contention so a timeout can't delay the delete.
+        # Serialize with recovery so lock contention can't delay the delete.
         session_lock = _get_session_agent_lock(sid)
         if not session_lock.acquire(timeout=5):
             return bad(handler, "Session busy, try again", 503)
         try:
-            # #6855: unsafe-id source revalidated inside the delete txn (atomic check+act).
+            # #6855: unsafe-id source revalidated in the delete txn (atomic check+act).
             if unsafe_id and not is_messaging_session:
                 try:
                     from api.models import delete_cli_session
@@ -15259,6 +15286,7 @@ def handle_post(handler, parsed) -> bool:
                     logger.warning("Failed to delete CLI session %s", sid, exc_info=True)
                 if state_db_cleanup_failed:
                     return bad(handler, "Invalid session_id", 400)
+            session_for_delete = _pre_delete_session_metadata(sid)
             with LOCK:
                 SESSIONS.pop(sid, None)
             try:
@@ -15287,14 +15315,17 @@ def handle_post(handler, parsed) -> bool:
                     logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
         finally:
             session_lock.release()
-        try:
-            event_profile = getattr(get_session(sid, metadata_only=True), "profile", None)
-        except KeyError:
-            event_profile = None
-        except Exception:
-            logger.debug("Failed to resolve profile for deleted session %s", sid, exc_info=True)
-            event_profile = None
-        worktree_retained = _worktree_retained_payload_for_session_id(sid)
+        # #6855 review: the session object was captured BEFORE SESSIONS.pop +
+        # sidecar deletion (see _pre_delete_session_metadata) — reading it here
+        # would raise KeyError and silently drop worktree_retained/profile.
+        if session_for_delete is not None:
+            event_profile = getattr(session_for_delete, "profile", None)
+            worktree_retained = _worktree_retained_payload(session_for_delete)
+        else:
+            # state.db-only unsafe id: never in SESSIONS, so the profile comes
+            # from the CLI metadata captured at authorization time (#6855).
+            event_profile = cli_meta_for_delete.get("profile")
+            worktree_retained = {}
         # The api_server-class authorization for unsafe ids already ran at the
         # top of this handler (before any destructive cleanup) — see
         # _delete_unsafe_id_authorized (#6855).

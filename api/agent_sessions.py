@@ -136,15 +136,17 @@ def is_api_server_class_row(row: dict) -> bool:
     """Return True when a session row belongs to the imported/read-only
     ``api_server`` class (#6843).
 
-    Exact membership on the authoritative ``source`` field only (#6855):
-    no hyphen/space normalization and no derived-label fallback, mirroring
+    EXACT raw membership on the authoritative ``source`` field only (#6855):
+    no trimming, no case-folding, no hyphen/space normalization and no
+    derived-label fallback, mirroring
     ``routes._is_api_server_class_state_db_source``. A raw source like
-    ``api-server`` must NOT be classified as the api_server class by the
-    sidebar projection — only the exact ``api`` / ``api_server`` values may.
+    ``api-server``, ``API_SERVER`` or `` api_server`` must NOT be classified
+    as the api_server class by the sidebar projection — only the exact
+    ``api`` / ``api_server`` values may (rows are stored canonically).
     """
     if not isinstance(row, dict):
         return False
-    return str(row.get("source") or "").strip().lower() in _API_SERVER_CLASS_SOURCES
+    return str(row.get("source") or "") in _API_SERVER_CLASS_SOURCES
 
 
 def _optional_col(name: str, columns: set[str], fallback: str = "NULL") -> str:

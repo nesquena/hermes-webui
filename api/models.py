@@ -9569,7 +9569,7 @@ def _delete_cli_session_locked(sid, hermes_home, require_source_in: tuple[str, .
                 ).fetchone()
                 if (
                     not src_row
-                    or str(src_row[0] or "").strip().lower() not in require_source_in
+                    or str(src_row[0] or "") not in require_source_in
                 ):
                     conn.rollback()
                     return False

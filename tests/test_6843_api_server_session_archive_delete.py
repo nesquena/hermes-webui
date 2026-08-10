@@ -480,15 +480,22 @@ def test_delete_rejected_unsafe_messaging_session_leaves_artifacts_intact(
 
 
 def test_api_server_class_source_predicates_require_exact_membership():
-    """Finding 1 (#6855): the api_server-class predicates must be EXACT
-    membership on the authoritative source. ``api-server`` (hyphen) is an
-    effectively-unknown source and must NOT authorize the destructive paths
-    (previously the hyphen was normalized to ``api_server``)."""
+    """Findings 1 + re-gate r4 (#6855): the api_server-class predicates must
+    be EXACT raw membership on the authoritative source. ``api-server``
+    (hyphen), ``API_SERVER`` (case), `` api_server`` (whitespace) and
+    ``api_serverx`` (prefix/suffix) are all effectively-unknown sources and
+    must NOT authorize the destructive paths (previously strip().lower()
+    normalized them into the set)."""
     from api.agent_sessions import is_api_server_class_row
 
     assert routes._is_api_server_class_state_db_source("api_server") is True
     assert routes._is_api_server_class_state_db_source("api") is True
-    assert routes._is_api_server_class_state_db_source("API_SERVER") is True
+    assert routes._is_api_server_class_state_db_source("API_SERVER") is False
+    assert routes._is_api_server_class_state_db_source("Api_Server") is False
+    assert routes._is_api_server_class_state_db_source(" api_server") is False
+    assert routes._is_api_server_class_state_db_source("api_server ") is False
+    assert routes._is_api_server_class_state_db_source("api_serverx") is False
+    assert routes._is_api_server_class_state_db_source("xapi_server") is False
     assert routes._is_api_server_class_state_db_source("api-server") is False
     assert routes._is_api_server_class_state_db_source("api server") is False
     assert routes._is_api_server_class_state_db_source("telegram") is False
@@ -496,7 +503,11 @@ def test_api_server_class_source_predicates_require_exact_membership():
 
     assert is_api_server_class_row({"source": "api_server"}) is True
     assert is_api_server_class_row({"source": "api"}) is True
-    assert is_api_server_class_row({"source": "API_SERVER"}) is True
+    assert is_api_server_class_row({"source": "API_SERVER"}) is False
+    assert is_api_server_class_row({"source": " api_server"}) is False
+    assert is_api_server_class_row({"source": "api_server "}) is False
+    assert is_api_server_class_row({"source": "api_serverx"}) is False
+    assert is_api_server_class_row({"source": "xapi_server"}) is False
     assert is_api_server_class_row({"source": "api-server"}) is False
     assert is_api_server_class_row({"source": "telegram", "source_tag": "api_server"}) is False, (
         "derived labels must not upgrade a non-api_server authoritative source"
@@ -518,6 +529,76 @@ def test_delete_unsafe_api_server_hyphen_source_still_400s(isolated_state_db, mo
     assert captured["status"] == 400, captured
     assert "Invalid session_id" in str(captured["payload"].get("error", ""))
     assert _row_exists(isolated_state_db["db"], sid) is True
+
+
+@pytest.mark.parametrize(
+    "raw_source",
+    [
+        "API_SERVER",
+        "Api_Server",
+        " api_server",
+        "api_server ",
+        "api_serverx",
+        "xapi_server",
+        " api ",
+    ],
+)
+def test_delete_unsafe_id_noncanonical_api_server_source_still_400s(
+    isolated_state_db, monkeypatch, raw_source
+):
+    """Re-gate r4 (#6855): only the EXACT canonical ``api``/``api_server``
+    raw source authorizes the unsafe-id delete bypass. Uppercase, whitespace,
+    prefix and suffix variants of ``api_server`` must fail closed — the row
+    and its sidecar survive (previously ``strip().lower()`` normalized them
+    into the set and delete removed the row)."""
+    sid = "noncanon:%s:imported:1a2b3c4d5e6f" % raw_source.replace(" ", "_")
+    _make_state_db(isolated_state_db["db"], sid, source=raw_source, title=None)
+    sidecar = isolated_state_db["sessions_dir"] / f"{sid}.json"
+    sidecar.write_text('{"session_id": "%s"}' % sid, encoding="utf-8")
+
+    assert models.is_safe_session_id(sid) is False
+
+    captured = _capture_post(monkeypatch, {"session_id": sid})
+    assert routes.handle_post(object(), SimpleNamespace(path="/api/session/delete")) is True
+
+    assert captured["status"] == 400, captured
+    assert "Invalid session_id" in str(captured["payload"].get("error", ""))
+    assert _row_exists(isolated_state_db["db"], sid) is True, (
+        "non-canonical api_server row must survive a rejected unsafe-id delete"
+    )
+    assert sidecar.exists(), "sidecar must survive a rejected non-canonical unsafe-id delete"
+
+
+@pytest.mark.parametrize(
+    "raw_source",
+    ["API_SERVER", " api_server", "api_serverx", "xapi_server"],
+)
+def test_archive_unsafe_id_noncanonical_api_server_source_still_400s(
+    isolated_state_db, monkeypatch, raw_source
+):
+    """Re-gate r4 (#6855): archive of an unsafe id whose state.db source is a
+    non-canonical api_server variant fails closed — the ``archived`` flag is
+    untouched (previously ``strip().lower()`` authorized it and set the flag,
+    which the sidebar never consumes for non-canonical rows)."""
+    sid = "archnoncanon:%s:imported:1a2b3c4d5e6f" % raw_source.replace(" ", "_")
+    _make_state_db(isolated_state_db["db"], sid, source=raw_source, title=None)
+    cli_meta = {
+        "session_id": sid,
+        "source_tag": raw_source,
+        "raw_source": raw_source,
+        "session_source": "other",
+        "read_only": True,
+        "profile": "default",
+    }
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda s: cli_meta)
+
+    captured = _capture_post(monkeypatch, {"session_id": sid, "archived": True})
+    assert routes.handle_post(object(), SimpleNamespace(path="/api/session/archive")) is True
+
+    assert captured["status"] == 400, captured
+    assert _read_archived(isolated_state_db["db"], sid) == 0, (
+        "archive must fail closed for non-canonical api_server sources (#6855)"
+    )
 
 
 def test_delete_unsafe_id_source_flip_fails_closed_atomically(isolated_state_db, monkeypatch):
