@@ -81,7 +81,7 @@ def test_read_jsonl_tail_returns_only_recent_rows(tmp_path):
         lines.append(json.dumps({"seq": i, "event": "token", "payload": {"i": i}}))
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    events, _malformed = _read_jsonl(path, max_rows=10, tail=True)
+    events, _malformed, _ok = _read_jsonl(path, max_rows=10, tail=True)
     # Newest 10 events retained (seq 90..99); older head events dropped.
     assert len(events) == 10
     assert [e["seq"] for e in events] == list(range(90, 100))
@@ -97,7 +97,7 @@ def test_read_jsonl_tail_respects_byte_cap(tmp_path):
     full_size = path.stat().st_size
     # Ask for the last ~10% of the file.
     cap = full_size // 10
-    events, _malformed = _read_jsonl(path, max_bytes=cap, tail=True)
+    events, _malformed, _ok = _read_jsonl(path, max_bytes=cap, tail=True)
     # The tail read returns only events within the byte window (bounded, not all
     # 1000). The LAST event is always included (it's within the window).
     assert len(events) < 1000
@@ -110,7 +110,7 @@ def test_read_jsonl_default_unbounded_still_works(tmp_path):
     path.write_text(
         "\n".join(json.dumps({"seq": i}) for i in range(5)) + "\n", encoding="utf-8"
     )
-    events, _mal = _read_jsonl(path)
+    events, _mal, _ok = _read_jsonl(path)
     assert [e["seq"] for e in events] == [0, 1, 2, 3, 4]
 
 
@@ -158,7 +158,7 @@ def test_read_jsonl_tail_line_numbers_correct_when_file_exceeds_cap(tmp_path):
     lines[malformed_real_line - 1] = "BROKEN_LINE_NOT_JSON"
     path.write_text("".join(l + "\n" for l in lines), encoding="utf-8")
 
-    events, malformed = _read_jsonl(path, max_bytes=2000, max_rows=10000, tail=True)
+    events, malformed, _ok = _read_jsonl(path, max_bytes=2000, max_rows=10000, tail=True)
     assert len(events) < 200  # head events dropped (bounded tail window)
     assert len(malformed) == 1
     # The reported line number must be the TRUE 1-based line, not a byte offset.
@@ -179,7 +179,7 @@ def test_read_jsonl_tail_line_numbers_correct_with_rows_cap(tmp_path):
 
     # Keep only the last 20 lines (file lines 81..100). The malformed line is
     # file line 91, so it stays in the kept window and must be reported as 91.
-    events, malformed = _read_jsonl(path, max_bytes=1 << 30, max_rows=20, tail=True)
+    events, malformed, _ok = _read_jsonl(path, max_bytes=1 << 30, max_rows=20, tail=True)
     assert len(events) <= 20
     assert len(malformed) == 1
     assert malformed[0]["line"] == 91, f"expected 91, got {malformed[0]['line']}"
@@ -192,7 +192,7 @@ def test_read_jsonl_tail_line_numbers_correct_no_seek(tmp_path):
     lines = [json.dumps({"seq": 0}), json.dumps({"seq": 1}), "BROKEN", json.dumps({"seq": 3})]
     path.write_text("".join(l + "\n" for l in lines), encoding="utf-8")
 
-    events, malformed = _read_jsonl(path, max_bytes=1 << 30, max_rows=100, tail=True)
+    events, malformed, _ok = _read_jsonl(path, max_bytes=1 << 30, max_rows=100, tail=True)
     assert len(events) == 3  # seq 0, 1, 3
     assert len(malformed) == 1
     assert malformed[0]["line"] == 3, f"expected 3, got {malformed[0]['line']}"
@@ -311,7 +311,8 @@ def _run_path_of(writer):
 
 def read_events_via_full_read(path):
     from api.run_journal import _read_jsonl
-    return _read_jsonl(path)
+    events, malformed, _ok = _read_jsonl(path)
+    return events, malformed
 
 
 def _summary_from_events_pub(session_id, run_id, events):
@@ -448,21 +449,27 @@ def test_bare_carriage_return_terminator_rejected(tmp_path):
 
 
 def test_preceding_event_recovery_is_bounded(tmp_path):
-    """Regression (reviewer round 5, updated r9): the preceding oversized record
-    must never be MATERIALIZED. Under r9 fail-closed (#6139 r9 item 2) an
-    oversized predecessor is SKIPPED entirely — its full-record JSON validity
-    cannot be proven without materializing the payload, so its fabricated prefix
-    is never trusted. The scan continues to the preceding normal-sized valid
-    event (recovered), proving the multi-MB payload was never parsed into a
-    Python object. An explicit budget large enough to scan PAST the oversized
-    record is passed so the skip is fail-closed (not a budget stop)."""
+    """Regression (reviewer round 5, updated r14): a VALID oversized predecessor
+    (complete, newline-terminated) is now READ and json.loads-ed DIRECTLY under
+    r14 finding 2, not blanket-skipped as under r9. The r9 invariant (never trust
+    an oversized record without full validation) is preserved by requiring json.loads
+    success — a malformed/invalid oversized predecessor still fails json.loads and
+    is skipped, continuing backward to the preceding valid event.
+
+    This test pins the VALID oversized predecessor case (round 5 regression target):
+    seq=2 is a valid JSON done record larger than _BOUNDARY_SUMMARY_PREFIX_BYTES.
+    Under r9 it was skipped (blanket fail-closed). Under r14 it is READ + json.loads-ed
+    and ACCEPTED as the last complete line (seq=2 recovered). The test budget is
+    sized to cover: 2 backward scans through seq=2 (~2x pred length), 1 full read of
+    seq=2 for json.loads (~1x pred length), and margin — so the scan can read the
+    oversized candidate and return it (not run out of budget before reaching it)."""
     import os
     from api.run_journal import _SESSION_REPLAY_MAX_BYTES, _run_path, _read_last_complete_line_before
 
     writer = RunJournalWriter("session_1", "run_bounded_preceding", session_dir=tmp_path)
     # seq=1: a normal-sized token (the recoverable preceding event).
     writer.append_sse_event("token", {"text": "ok"})
-    # seq=2: an oversized but COMPLETE done (with newline) — must be SKIPPED, not materialized.
+    # seq=2: an oversized but COMPLETE done (with newline) — VALID JSON, now READ directly.
     huge = {"text": "X" * (_SESSION_REPLAY_MAX_BYTES + 100_000)}
     writer.append_sse_event("done", {"session": {"session_id": "session_1"}, **huge})
     path = _run_path(writer.session_id, writer.run_id, session_dir=writer.session_dir)
@@ -479,24 +486,29 @@ def test_preceding_event_recovery_is_bounded(tmp_path):
         size_pinned = os.fstat(fh.fileno()).st_size
         seek = size_pinned - min(size_pinned, _SESSION_REPLAY_MAX_BYTES)
         record_start = __import__("api.run_journal", fromlist=["_find_record_start_before"])._find_record_start_before(fh, size_pinned, seek)
-        # Budget large enough to scan PAST the oversized done (seq=2) to the token,
-        # so the skip is fail-closed rather than a budget stop.
+        # Budget sized to cover: 2 backward scans through seq=2 (~2x pred length),
+        # 1 full read of seq=2 for json.loads (~1x pred length), plus margin.
+        # 3x the oversized predecessor length + margin ensures the scan can
+        # read the oversized candidate and return it without budget exhaustion.
+        pred_size = _SESSION_REPLAY_MAX_BYTES + 100_000
         result = _read_last_complete_line_before(
-            fh, size_pinned, record_start, budget=_SESSION_REPLAY_MAX_BYTES + 200_000
+            fh, size_pinned, record_start, budget=3 * pred_size + 500_000
         )
-    # The oversized done (seq=2) is skipped (fail-closed); the token (seq=1) is recovered.
-    assert result is not None, "the normal-sized token (seq=1) must be recovered"
-    assert result.get("seq") == 1, (
-        f"expected seq=1 (the oversized done was skipped fail-closed); got seq={result.get('seq')}"
+    # The VALID oversized done (seq=2) is now READ and ACCEPTED (r14 finding 2).
+    assert result is not None, "the valid oversized done (seq=2) must be recovered"
+    assert result.get("seq") == 2, (
+        f"expected seq=2 (the valid oversized done is now read directly under r14); "
+        f"got seq={result.get('seq')}"
     )
-    assert result.get("event") == "token", "the recovered event is the token, not the oversized done"
-    # The oversized payload was never materialized: no fabricated-summary marker,
-    # and the token carries its real (small) payload, not the empty fabricated one.
+    assert result.get("event") == "done", "the recovered event is the done (seq=2), not the token"
+    # The oversized payload IS read into memory for json.loads (r14 changed this),
+    # but is NOT fabricated via a prefix-extraction path — no fabricated-summary marker.
     assert result.get("_summary_extracted_from_oversized_record") is None, (
-        "the oversized record's prefix was fabricated instead of being skipped (fail-closed)"
+        "the valid oversized record was read directly (json.loads), not fabricated via prefix"
     )
-    assert result.get("payload") == {"text": "ok"}, (
-        "the recovered token carries its real payload — the oversized done was skipped, not fabricated"
+    # The result carries the real session_id from the done, not a fabricated empty payload.
+    assert result.get("payload", {}).get("session", {}).get("session_id") == "session_1", (
+        "the recovered done carries its real payload — read directly, not fabricated"
     )
 
 
@@ -513,8 +525,8 @@ def test_ordinary_size_done_bare_cr_rejected_both_readers(tmp_path):
                         "terminal_state": "completed", "payload": {}})
     p = tmp_path / "bare_cr.jsonl"
     p.write_bytes((rec1 + "\n" + rec2 + "\r").encode("utf-8"))
-    ev_full, _ = _read_jsonl(p)
-    ev_tail, _ = _read_jsonl_tail(p, max_bytes=10000, max_rows=100)
+    ev_full, _, _ok = _read_jsonl(p)
+    ev_tail, _, _ok = _read_jsonl_tail(p, max_bytes=10000, max_rows=100)
     # Neither reader should accept the bare-\r-terminated done.
     assert not any(e.get("event") == "done" for e in ev_full), "FULL reader accepts bare \\r"
     assert not any(e.get("event") == "done" for e in ev_tail), "TAIL reader accepts bare \\r"
@@ -537,8 +549,8 @@ def test_ordinary_size_done_eof_no_newline_rejected_both_readers(tmp_path):
                         "terminal_state": "completed", "payload": {}})
     p = tmp_path / "eof_no_nl.jsonl"
     p.write_bytes((rec1 + "\n" + rec2).encode("utf-8"))
-    ev_full, _ = _read_jsonl(p)
-    ev_tail, _ = _read_jsonl_tail(p, max_bytes=10000, max_rows=100)
+    ev_full, _, _ok = _read_jsonl(p)
+    ev_tail, _, _ok = _read_jsonl_tail(p, max_bytes=10000, max_rows=100)
     assert not any(e.get("event") == "done" for e in ev_full), "FULL accepts EOF-no-newline"
     assert not any(e.get("event") == "done" for e in ev_tail), "TAIL accepts EOF-no-newline"
 
@@ -695,7 +707,7 @@ def test_read_jsonl_tail_handles_file_deleted_during_boundary_scan(tmp_path, mon
 
     # --- Part A: NON-VACUITY. A normal read recovers the straddling done's
     # summary (seq=2) — proving the boundary helpers actually fire.
-    events_normal, _ = _read_jsonl_tail(path, max_bytes=cap, max_rows=None)
+    events_normal, _, _ok = _read_jsonl_tail(path, max_bytes=cap, max_rows=None)
     seqs = {e.get("seq") for e in events_normal if isinstance(e, dict)}
     assert 2 in seqs, (
         f"the oversized done (seq=2) straddling summary must be recovered by the "
@@ -714,11 +726,13 @@ def test_read_jsonl_tail_handles_file_deleted_during_boundary_scan(tmp_path, mon
         open_calls["n"] += 1
         return real_open(self, *args, **kwargs)
 
-    def patched_find(fh, size, seek_pos, *, budget=None):
+    def patched_find(fh, size, seek_pos, *, budget=None, fault=None):
         boundary_calls["n"] += 1
         # Unlink the pinned file from under the open descriptor and raise — the
         # realistic single-open TOCTOU (fd invalidated mid-recovery, inside the
         # boundary scan that the old test never reached).
+        if fault is not None:
+            fault[0] = True  # the production helper sets the fault flag before raising
         try:
             path.unlink()
         except OSError:
@@ -728,10 +742,10 @@ def test_read_jsonl_tail_handles_file_deleted_during_boundary_scan(tmp_path, mon
     monkeypatch.setattr(Path, "open", patched_open)
     monkeypatch.setattr(run_journal, "_find_record_start_before", patched_find)
 
-    events, malformed = _read_jsonl_tail(path, max_bytes=cap, max_rows=None)
-    assert isinstance(events, list) and isinstance(malformed, list), (
-        f"_read_jsonl_tail must return a (list, list) safe fallback; got "
-        f"({type(events).__name__}, {type(malformed).__name__})"
+    events, malformed, _ok = _read_jsonl_tail(path, max_bytes=cap, max_rows=None)
+    assert isinstance(events, list) and isinstance(malformed, list) and isinstance(_ok, bool), (
+        f"_read_jsonl_tail must return a (list, list, bool) safe fallback; got "
+        f"({type(events).__name__}, {type(malformed).__name__}, {type(_ok).__name__})"
     )
     assert boundary_calls["n"] >= 1, (
         "the boundary helper _find_record_start_before was never reached — the "
@@ -805,7 +819,7 @@ def test_blank_line_before_oversized_partial_done_recovers_preceding_event(tmp_p
     find_summary = find_run_summary(run_id, session_dir=tmp_path)
 
     # Authoritative full read (the baseline: must match this).
-    full_events, _ = _read_jsonl(path)
+    full_events, _, _ok = _read_jsonl(path)
     authoritative = _summary_from_events(session_id, run_id, full_events)
 
     # Both tail readers must agree with the full reader.
@@ -923,7 +937,7 @@ def test_tail_read_uses_single_generation_under_delete_recreate(tmp_path, monkey
 
     monkeypatch.setattr(Path, "open", generation_pinned_open)
 
-    events, _malformed = _read_jsonl_tail(path, max_bytes=cap, max_rows=4096)
+    events, _malformed, _ok = _read_jsonl_tail(path, max_bytes=cap, max_rows=4096)
     seqs = [e.get("seq") for e in events if isinstance(e, dict) and "seq" in e]
 
     # The journal must be opened exactly ONCE (single-generation contract).
@@ -1002,7 +1016,7 @@ def test_invalid_predecessor_rows_skipped_until_valid_event(tmp_path, monkeypatc
 
     tail_summary = latest_run_summary(session_id, run_id, session_dir=tmp_path)
     find_summary = find_run_summary(run_id, session_dir=tmp_path)
-    full_events, _ = _read_jsonl(path)
+    full_events, _, _ok = _read_jsonl(path)
     authoritative = _summary_from_events(session_id, run_id, full_events)
 
     # Both tail readers recover the valid token (seq=1), agreeing with the full reader.
@@ -1026,14 +1040,20 @@ def test_invalid_predecessor_rows_skipped_until_valid_event(tmp_path, monkeypatc
 
 
 def test_oversized_malformed_predecessor_not_accepted_via_fabricated_prefix(tmp_path):
-    """Regression (reviewer round 8, updated r9): under r9 fail-closed (#6139 r9
-    item 2) EVERY oversized predecessor is skipped — its full-record JSON
-    validity cannot be proven without materializing the payload, so the
-    fabricated prefix is never trusted, regardless of whether the oversized row
-    is brace-balanced, structurally complete, or malformed. This test pins the
-    malformed case (the round-8 regression target): the predecessor is an
-    oversized structurally-INCOMPLETE record, but it must be skipped for the r9
-    reason (oversized), not accepted.
+    """Regression (reviewer round 8, updated r14): under r14 finding 2, oversized
+    predecessors are READ and json.loads-ed DIRECTLY, not blanket-skipped as
+    under r9. The r9 invariant (never trust an oversized record without full
+    validation) is preserved by requiring json.loads success — a malformed/
+    invalid oversized predecessor FAILS json.loads and is skipped, continuing
+    backward to the preceding valid event.
+
+    This test pins the malformed case (the round-8 regression target): the
+    predecessor is an oversized structurally-INCOMPLETE record (newline-terminated
+    but no closing brace — truncated mid-payload value). Under r9 it was skipped
+    for being oversized. Under r14 it is READ for json.loads and FAILS → skipped,
+    recovering token(seq=1). The MECHANISM changed (blanket-skip-by-size →
+    read-and-parse, skip-on-parse-failure), but the BEHAVIOR is the same:
+    malformed/invalid oversized predecessors are never trusted.
 
     Journal shape:
         token(seq=1)
@@ -1041,10 +1061,10 @@ def test_oversized_malformed_predecessor_not_accepted_via_fabricated_prefix(tmp_
          incomplete (no closing brace — truncated mid-payload value)>
         <oversized partial done seq=3: the crash-truncated boundary, no newline>
 
-    The scan for the predecessor of seq=3 hits the oversized seq=2 row first.
-    Under r9 fail-closed it skips seq=2 (oversized → untrustworthy) and recovers
-    token(seq=1). The budget is sized to scan PAST the oversized predecessor's
-    bytes so the skip is fail-closed (not a budget stop)."""
+    The scan for the predecessor of seq=3 hits the oversized seq=2 row first,
+    reads it for json.loads, the parse fails → skips → recovers token(seq=1).
+    The budget must cover: 2 backward scans through seq=2 (~2x pred length),
+    1 read of seq=2 for json.loads (~1x pred length), and 1 read of seq=1 (~50 B)."""
     import os
     from api.run_journal import (
         _SESSION_REPLAY_MAX_BYTES,
@@ -1081,19 +1101,22 @@ def test_oversized_malformed_predecessor_not_accepted_via_fabricated_prefix(tmp_
     final_start = len(token_bytes) + len(pred_bytes)
     with path.open("rb") as fh:
         size = os.fstat(fh.fileno()).st_size
-        # Budget sized to scan PAST the oversized predecessor's bytes (two
-        # backward newline scans through ~cap+1000 bytes each) so the skip is
-        # fail-closed rather than a budget stop. The token line parse adds ~50 B.
+        # Budget sized to cover: 2 backward scans through the oversized predecessor
+        # (~2x pred length), 1 read of the oversized predecessor for json.loads
+        # (~1x pred length), and 1 read of the small token line (~50 B) plus margin.
+        # 3x the oversized predecessor length ensures the scan can read it,
+        # fail json.loads, and continue to seq=1 without budget exhaustion.
         result = _read_last_complete_line_before(
-            fh, size, final_start, budget=2 * (cap + 1000) + 10_000
+            fh, size, final_start, budget=3 * (cap + 1000) + 20_000
         )
 
-    # The oversized malformed predecessor (seq=2) must be SKIPPED (fail-closed);
-    # the valid token (seq=1) is recovered — never the fabricated terminal done.
+    # The oversized malformed predecessor (seq=2) FAILS json.loads → skipped;
+    # the valid token (seq=1) is recovered — never a fabricated terminal done.
     assert result is not None, "the valid token (seq=1) must be recovered"
     assert result.get("seq") == 1, (
-        f"expected seq=1 (the oversized row was skipped fail-closed); got "
-        f"seq={result.get('seq')} — the oversized predecessor was trusted instead of skipped"
+        f"expected seq=1 (the malformed oversized predecessor failed json.loads and "
+        f"was skipped); got seq={result.get('seq')} — the malformed predecessor was "
+        f"incorrectly accepted"
     )
     assert not result.get("terminal"), (
         "a non-terminal token must be recovered, not a fabricated terminal done"
@@ -1255,16 +1278,18 @@ def test_backward_scan_budget_bounds_physical_descriptor_reads(tmp_path):
 
 
 def test_balanced_invalid_oversized_predecessor_skipped_trailing_comma(tmp_path):
-    """Regression (reviewer round 9, item 2): a brace-balanced, newline-
-    terminated oversized row that is INVALID JSON (trailing comma here; see the
-    companion test for a malformed nested value) must NOT be promoted into a
-    fabricated terminal summary. Brace balance is necessary but not sufficient
-    for JSON validity.
+    """Regression (reviewer round 9, item 2, updated r14): a brace-balanced,
+    newline-terminated oversized row that is INVALID JSON (trailing comma here;
+    see the companion test for a malformed nested value) must NOT be promoted
+    into a fabricated terminal summary. Brace balance is necessary but not
+    sufficient for JSON validity.
 
-    Under r9 fail-closed, EVERY oversized predecessor is skipped (its full-
-    record validity cannot be proven without materializing the payload), so the
-    balanced-invalid row is skipped and the preceding valid token (seq=1) is
-    recovered — never the fabricated terminal seq=2."""
+    Under r14 finding 2, oversized predecessors are READ and json.loads-ed
+    DIRECTLY. A balanced-but-invalid row FAILS json.loads and is skipped,
+    recovering the preceding valid token (seq=1). The r9 invariant (never trust
+    a malformed/invalid oversized predecessor) is preserved; the MECHANISM changed
+    from blanket-skip-by-size to read-and-parse-skip-on-parse-failure. This test
+    pins the trailing-comma invalid case (brace-balanced but JSON invalid)."""
     import os
     from api.run_journal import (
         _BOUNDARY_SUMMARY_PREFIX_BYTES,
@@ -1281,7 +1306,7 @@ def test_balanced_invalid_oversized_predecessor_skipped_trailing_comma(tmp_path)
     token_line = '{"seq":1,"event":"token","payload":{"t":"valid"}}\n'
     # Oversized predecessor: brace-balanced + newline-terminated but INVALID JSON
     # (trailing comma after the payload value). Its head fabricates a terminal
-    # 'done/seq=2' prefix via _extract_boundary_record_summary.
+    # 'done/seq=2' prefix via _extract_boundary_record_summary, but json.loads FAILS.
     oversized_pred = (
         '{"seq":2,"event":"done","terminal":true,'
         '"terminal_state":"completed","payload":{"t":"' + big + '"},}\n'
@@ -1301,16 +1326,19 @@ def test_balanced_invalid_oversized_predecessor_skipped_trailing_comma(tmp_path)
     final_start = len(token_bytes) + len(pred_bytes)
     with path.open("rb") as fh:
         size = os.fstat(fh.fileno()).st_size
-        # Budget sized to scan PAST the oversized predecessor's bytes so the
-        # skip is fail-closed (not a budget stop).
+        # Budget sized to cover: 2 backward scans through the oversized predecessor
+        # (~2x pred length), 1 read of the oversized predecessor for json.loads
+        # (~1x pred length), and 1 read of the small token line (~50 B) plus margin.
+        # 4x the oversized predecessor length ensures the scan can read it,
+        # fail json.loads, and continue to seq=1 without budget exhaustion.
         result = _read_last_complete_line_before(
-            fh, size, final_start, budget=2 * len(pred_bytes) + 10_000
+            fh, size, final_start, budget=4 * len(pred_bytes) + 10_000
         )
 
     assert result is not None, "the valid token (seq=1) must be recovered"
     assert result.get("seq") == 1, (
-        f"expected seq=1 (the trailing-comma oversized row was skipped "
-        f"fail-closed); got seq={result.get('seq')} — the fabricated terminal "
+        f"expected seq=1 (the trailing-comma oversized row failed json.loads and "
+        f"was skipped); got seq={result.get('seq')} — the fabricated terminal "
         f"prefix was accepted as if the brace-balanced-but-invalid row were valid JSON"
     )
     assert not result.get("terminal"), (
@@ -1320,9 +1348,12 @@ def test_balanced_invalid_oversized_predecessor_skipped_trailing_comma(tmp_path)
 
 def test_balanced_invalid_oversized_predecessor_skipped_malformed_nested_value(tmp_path):
     """Companion to test_balanced_invalid_oversized_predecessor_skipped_trailing_comma
-    (reviewer round 9, item 2): a brace-balanced, newline-terminated oversized row
-    that is invalid JSON due to a malformed nested value (unquoted nested key) —
-    also skipped fail-closed under r9, recovering the preceding valid token."""
+    (reviewer round 9, item 2, updated r14): a brace-balanced, newline-terminated
+    oversized row that is invalid JSON due to a malformed nested value (unquoted
+    nested key) is also READ and json.loads-ed under r14. The parse FAILS →
+    skipped → recovers the preceding valid token (seq=1). The r9 invariant
+    (never trust a malformed/invalid oversized predecessor) is preserved; the
+    MECHANISM changed from blanket-skip-by-size to read-and-parse-skip-on-parse-failure."""
     import os
     from api.run_journal import (
         _BOUNDARY_SUMMARY_PREFIX_BYTES,
@@ -1357,14 +1388,19 @@ def test_balanced_invalid_oversized_predecessor_skipped_malformed_nested_value(t
     final_start = len(token_bytes) + len(pred_bytes)
     with path.open("rb") as fh:
         size = os.fstat(fh.fileno()).st_size
+        # Budget sized to cover: 2 backward scans through the oversized predecessor
+        # (~2x pred length), 1 read of the oversized predecessor for json.loads
+        # (~1x pred length), and 1 read of the small token line (~50 B) plus margin.
+        # 4x the oversized predecessor length ensures the scan can read it,
+        # fail json.loads, and continue to seq=1 without budget exhaustion.
         result = _read_last_complete_line_before(
-            fh, size, final_start, budget=2 * len(pred_bytes) + 10_000
+            fh, size, final_start, budget=4 * len(pred_bytes) + 10_000
         )
 
     assert result is not None, "the valid token (seq=1) must be recovered"
     assert result.get("seq") == 1, (
-        f"expected seq=1 (the malformed-nested-value oversized row was skipped "
-        f"fail-closed); got seq={result.get('seq')} — the fabricated terminal "
+        f"expected seq=1 (the malformed-nested-value oversized row failed json.loads "
+        f"and was skipped); got seq={result.get('seq')} — the fabricated terminal "
         f"prefix was accepted as if the brace-balanced-but-invalid row were valid JSON"
     )
     assert not result.get("terminal"), (
@@ -1419,20 +1455,20 @@ def test_read_jsonl_tail_boundary_scan_uses_shared_budget_no_read_after_exhausti
     real_extract = run_journal._extract_boundary_record_summary
     real_valid = run_journal._record_is_valid_complete
 
-    def patched_find(fh, size, seek_pos, *, budget=None):
+    def patched_find(fh, size, seek_pos, *, budget=None, fault=None):
         if budget is not None:
             budget_ids_seen["find"].append(id(budget))
-        return real_find(fh, size, seek_pos, budget=budget)
+        return real_find(fh, size, seek_pos, budget=budget, fault=fault)
 
-    def patched_extract(fh, record_start, *, budget=None):
+    def patched_extract(fh, record_start, *, budget=None, fault=None):
         if budget is not None:
             budget_ids_seen["extract"].append(id(budget))
-        return real_extract(fh, record_start, budget=budget)
+        return real_extract(fh, record_start, budget=budget, fault=fault)
 
-    def patched_valid(fh, size, record_start, *, budget=None):
+    def patched_valid(fh, size, record_start, *, budget=None, fault=None):
         if budget is not None:
             budget_ids_seen["valid"].append(id(budget))
-        return real_valid(fh, size, record_start, budget=budget)
+        return real_valid(fh, size, record_start, budget=budget, fault=fault)
 
     monkeypatch.setattr(run_journal, "_find_record_start_before", patched_find)
     monkeypatch.setattr(run_journal, "_extract_boundary_record_summary", patched_extract)
@@ -1466,7 +1502,7 @@ def test_read_jsonl_tail_boundary_scan_uses_shared_budget_no_read_after_exhausti
         return real
 
     monkeypatch.setattr(Path, "open", patched_open)
-    events, _ = _read_jsonl_tail(path, max_bytes=cap, max_rows=None)
+    events, _, _ok = _read_jsonl_tail(path, max_bytes=cap, max_rows=None)
 
     # (a) Non-vacuity: the boundary helpers ran and recovered seq=2.
     seqs = {e.get("seq") for e in events if isinstance(e, dict)}
@@ -1545,8 +1581,8 @@ def test_balanced_invalid_oversized_boundary_record_trailing_comma(tmp_path):
         fh.write(token.encode("utf-8"))
         fh.write(oversized_boundary.encode("utf-8"))
 
-    full_events, _ = _read_jsonl(path)
-    tail_events, _ = _read_jsonl_tail(path, max_bytes=cap, max_rows=None)
+    full_events, _, _ok = _read_jsonl(path)
+    tail_events, _, _ok = _read_jsonl_tail(path, max_bytes=cap, max_rows=None)
     full_seqs = {e.get("seq") for e in full_events if isinstance(e, dict)}
     tail_seqs = {e.get("seq") for e in tail_events if isinstance(e, dict)}
     assert 2 not in full_seqs, "baseline: the trailing-comma record is invalid JSON (full reader rejects it)"
@@ -1597,8 +1633,8 @@ def test_balanced_invalid_oversized_boundary_record_malformed_nested_value(tmp_p
         fh.write(token.encode("utf-8"))
         fh.write(oversized_boundary.encode("utf-8"))
 
-    full_events, _ = _read_jsonl(path)
-    tail_events, _ = _read_jsonl_tail(path, max_bytes=cap, max_rows=None)
+    full_events, _, _ok = _read_jsonl(path)
+    tail_events, _, _ok = _read_jsonl_tail(path, max_bytes=cap, max_rows=None)
     full_seqs = {e.get("seq") for e in full_events if isinstance(e, dict)}
     tail_seqs = {e.get("seq") for e in tail_events if isinstance(e, dict)}
     assert 2 not in full_seqs, "baseline: the malformed-nested-value record is invalid JSON"
@@ -1779,14 +1815,14 @@ def test_predecessor_recovery_not_starved_by_validity_proof_budget(tmp_path):
     assert path.stat().st_size > cap, "sanity: the journal must exceed the tail window"
 
     # Ground truth: the full reader keeps the valid done (seq=1) + trailing token.
-    full_events, _ = _read_jsonl(path)
+    full_events, _, _ok = _read_jsonl(path)
     full_seqs = {e.get("seq") for e in full_events if isinstance(e, dict)}
     assert 1 in full_seqs and 2 not in full_seqs and 3 in full_seqs, (
         f"baseline: full reader keeps seq=1 (valid done) + seq=3 (token), rejects "
         f"seq=2 (invalid); got {full_seqs}"
     )
 
-    tail_events, _ = _read_jsonl_tail(path, max_bytes=cap, max_rows=None)
+    tail_events, _, _ok = _read_jsonl_tail(path, max_bytes=cap, max_rows=None)
     tail_seqs = {e.get("seq") for e in tail_events if isinstance(e, dict)}
     assert 1 in tail_seqs, (
         f"the preceding valid terminal (seq=1) was NOT recovered under a "
@@ -1877,7 +1913,7 @@ def test_malformed_oversized_boundary_extraction_none_recovers_preceding(tmp_pat
 
     # (2) Ground truth: the full reader keeps the valid done (seq=1) + trailing
     # token (seq=3) and rejects the malformed seq=2.
-    full_events, _ = _read_jsonl(path)
+    full_events, _, _ok = _read_jsonl(path)
     full_seqs = {e.get("seq") for e in full_events if isinstance(e, dict)}
     assert full_seqs == {1, 3}, (
         f"baseline: full reader keeps seq=1 (valid done) + seq=3 (token), rejects "
@@ -1890,11 +1926,11 @@ def test_malformed_oversized_boundary_extraction_none_recovers_preceding(tmp_pat
     recovery_calls = {"n": 0, "budgets": []}
     real_recovery = run_journal._read_last_complete_line_before
 
-    # The real signature is (fh, size_arg, end_offset, *, budget). Patch carefully:
-    def patched_recovery_real(fh, size_arg, end_offset, *, budget=None):
+    # The real signature is (fh, size_arg, end_offset, *, budget, fault). Patch carefully:
+    def patched_recovery_real(fh, size_arg, end_offset, *, budget=None, fault=None):
         recovery_calls["n"] += 1
         recovery_calls["budgets"].append(budget)
-        return real_recovery(fh, size_arg, end_offset, budget=budget)
+        return real_recovery(fh, size_arg, end_offset, budget=budget, fault=fault)
 
     monkeypatch.setattr(run_journal, "_read_last_complete_line_before", patched_recovery_real)
 
@@ -1911,7 +1947,7 @@ def test_malformed_oversized_boundary_extraction_none_recovers_preceding(tmp_pat
 
     # (4) The tail reader must keep seq=1 (recovered predecessor) and exclude
     # seq=2, matching the full reader.
-    tail_events, _ = _read_jsonl_tail(path, max_bytes=cap, max_rows=None)
+    tail_events, _, _ok = _read_jsonl_tail(path, max_bytes=cap, max_rows=None)
     tail_seqs = {e.get("seq") for e in tail_events if isinstance(e, dict)}
     assert tail_seqs == {1, 3}, (
         f"the tail reader diverged from the full reader: tail_seqs={tail_seqs} "
@@ -2038,7 +2074,7 @@ def _assert_valid_oversized_boundary_accepted(tmp_path, *, record_size_multiple,
     )
 
     # Ground truth: the full reader sees the tool_limit_reached done.
-    full_events, _ = _read_jsonl(path)
+    full_events, _, _ok = _read_jsonl(path)
     full_seqs = [e.get("seq") for e in full_events]
     assert full_seqs == expected_seqs_full, (
         f"baseline: full reader seqs {full_seqs} (expected {expected_seqs_full})"
@@ -2054,7 +2090,7 @@ def _assert_valid_oversized_boundary_accepted(tmp_path, *, record_size_multiple,
     # records (when present) follow it. Assert the EXACT ordered tail sequence:
     # a reordered tail ([3, 2, 4]), a duplicate boundary summary, or an unexpected
     # extra row must all fail this — not merely "seq 2 is present somewhere".
-    tail_events, _ = _read_jsonl_tail(path, max_bytes=cap, max_rows=None)
+    tail_events, _, _ok = _read_jsonl_tail(path, max_bytes=cap, max_rows=None)
     tail_seqs = [e.get("seq") for e in tail_events]
     expected_tail_seqs = [2, 3, 4] if with_trailing else [2]
     assert tail_seqs == expected_tail_seqs, (
@@ -2135,4 +2171,178 @@ def test_valid_oversized_boundary_near_2x_cap_before_metering_stream_end(tmp_pat
     accepted."""
     _assert_valid_oversized_boundary_accepted(
         tmp_path, record_size_multiple=1.95, with_trailing=True
+    )
+
+
+def test_valid_oversized_boundary_above_ceiling_as_final_row(tmp_path):
+    """Regression (reviewer round 14, finding 1): a VALID terminal ``done`` ABOVE
+    the ``_VALIDITY_PROOF_MAX_BYTES`` ceiling (2x cap = 8 MiB) as the final row
+    must be ACCEPTED, not discarded. Under r13 the validity proof capped its scan
+    at the ceiling, so a valid >8 MiB record couldn't reach its newline terminator
+    → fail-closed → valid terminal rejected → (1, False, running) vs full reader
+    (2, True, tool_limit_reached). The r14 fix adds tier 2 (streaming depth scan)
+    and raises the boundary budget to 4x cap. This exercises tier 2 (2.4x cap =
+    ~9.6 MiB, above the 8 MiB ceiling)."""
+    _assert_valid_oversized_boundary_accepted(
+        tmp_path, record_size_multiple=2.4, with_trailing=False
+    )
+
+
+def test_valid_oversized_boundary_above_ceiling_before_metering_stream_end(tmp_path):
+    """Regression (reviewer round 14, finding 1): a VALID terminal ``done`` above
+    the ceiling followed by ``metering`` → ``stream_end`` must be accepted. This is
+    the production order with an above-ceiling transcript payload."""
+    _assert_valid_oversized_boundary_accepted(
+        tmp_path, record_size_multiple=2.4, with_trailing=True
+    )
+
+
+def test_oversized_valid_predecessor_recovered_no_event_id_collision(tmp_path):
+    """Regression (reviewer round 14, finding 2): a VALID predecessor larger than
+    ``_BOUNDARY_SUMMARY_PREFIX_BYTES`` (8 KiB) must be RECOVERED, not blanket-skipped.
+    Under r9-r13, ``_read_last_complete_line_before`` skipped any line > 8 KiB as
+    "oversized fail-closed", dropping a valid 20 KiB ``tool_complete`` predecessor.
+    That made ``latest_run_summary`` report a stale ``last_seq`` (1 instead of 2),
+    so ``stale_interrupted_event`` synthesized ``event_id = f"{run_id}:{last_seq+1}"
+    = "r1:2"`` — COLLIDING with the real seq-2 event's id ("r1:2").
+
+    The r14 fix reads + json.loads-es the complete predecessor line directly
+    (charging the budget). The valid 20 KiB predecessor is recovered (last_seq=2),
+    so ``stale_interrupted_event`` synthesizes "r1:3" (no collision).
+
+    Layout: valid token seq=1, valid 20 KiB tool_complete seq=2, crash-truncated
+    oversized done seq=3 (no newline — the boundary). The tail reader must keep
+    seq=2 (last_seq=2), and the synthesized recovery id must NOT be "r1:2"."""
+    from api.run_journal import (
+        _SESSION_REPLAY_MAX_BYTES,
+        _read_jsonl,
+        latest_run_summary,
+    )
+
+    cap = _SESSION_REPLAY_MAX_BYTES
+    valid_token = '{"seq":1,"event":"token","payload":{"t":"a"}}\n'
+    # A 20 KiB VALID tool_complete — larger than the 8 KiB prefix allowance but a
+    # complete, parseable line (not oversized-payload like a done transcript).
+    big_output = "Q" * 20_000
+    valid_tool_complete = (
+        '{"seq":2,"event":"tool_complete","payload":{"output":"' + big_output + '"}}\n'
+    )
+    assert len(valid_tool_complete) > 8192, "fixture: predecessor must exceed the 8 KiB prefix allowance"
+    # Crash-truncated oversized done (no close/newline) — the boundary record.
+    big_done = "X" * (cap + 50_000)
+    truncated_done = (
+        '{"seq":3,"event":"done","terminal":true,'
+        '"terminal_state":"completed","payload":{"t":"' + big_done + '"'
+    )
+    path = tmp_path / "_run_journal" / "s1" / "r1.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as fh:
+        fh.write(valid_token.encode("utf-8"))
+        fh.write(valid_tool_complete.encode("utf-8"))
+        fh.write(truncated_done.encode("utf-8"))
+    assert path.stat().st_size > cap, "sanity: the journal must exceed the tail window"
+
+    # Ground truth: the full reader keeps seq=1 + seq=2 (both valid), rejects seq=3 (truncated).
+    full_events, _, _ = _read_jsonl(path)
+    full_seqs = {e.get("seq") for e in full_events if isinstance(e, dict)}
+    assert full_seqs == {1, 2}, f"baseline: full reader keeps seq 1 and 2; got {full_seqs}"
+
+    # The tail reader must recover seq=2 (the 20 KiB valid predecessor), NOT skip it.
+    summary = latest_run_summary("s1", "r1", session_dir=tmp_path)
+    assert summary["last_seq"] == 2, (
+        f"the valid 20 KiB predecessor (seq=2) was dropped (last_seq={summary['last_seq']}); "
+        f"r14 finding 2: a complete predecessor >8 KiB must be read + parsed, not blanket-skipped"
+    )
+
+    # stale_interrupted_event computes event_id = f"{run_id}:{last_seq + 1}". With
+    # last_seq=2 it synthesizes "r1:3"; under the r13 bug (last_seq=1) "r1:2" collides.
+    real_seq2_id = "r1:2"
+    synth_id = f"r1:{summary['last_seq'] + 1}"
+    assert synth_id != real_seq2_id, (
+        f"stale_interrupted_event would synthesize event_id={synth_id!r} which COLLIDES "
+        f"with the real seq-2 event id {real_seq2_id!r}; the valid 20 KiB predecessor "
+        f"was dropped so last_seq undercounted (#6139 r14 finding 2)"
+    )
+    assert synth_id == "r1:3", (
+        f"expected synthesized id 'r1:3' (last_seq=2 + 1); got {synth_id!r}"
+    )
+
+
+def test_transient_oserror_not_cached_retry_recovers(tmp_path, monkeypatch):
+    """Regression (reviewer round 14, finding 3): a transient OSError during the
+    boundary scan must NOT be cached as authoritative. Under r13 the failed
+    best-effort summary was cached under the matching inode signature, so the
+    second ``latest_run_summary`` / ``find_run_summary`` call returned the stale
+    failure instead of retrying — a completed run stayed ``unknown``. Frozen master
+    (no cache) propagates and recovers.
+
+    The r14 fix threads an ``ok`` flag from ``_read_jsonl_tail``; the summary
+    readers skip ``_cache_summary`` when ``ok=False``, so the next call retries.
+    This injects a one-shot OSError in the boundary validity helper, asserts the
+    first call returns best-effort (unknown), the cache stays empty, and the second
+    call (no fault) recovers ``completed`` via a fresh read."""
+    from api import run_journal
+    from api.run_journal import _SESSION_REPLAY_MAX_BYTES, latest_run_summary
+
+    cap = _SESSION_REPLAY_MAX_BYTES
+    # A completed journal with a boundary-straddling oversized done so the boundary
+    # helpers run (and the fault is reachable).
+    head = '{"seq":1,"event":"token","payload":{"t":"head"}}\n'
+    big = "Z" * (cap + 50_000)
+    done = (
+        '{"seq":2,"event":"done","terminal":true,'
+        '"terminal_state":"completed","payload":{"t":"' + big + '"}}\n'
+    )
+    path = tmp_path / "_run_journal" / "s1" / "r1.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as fh:
+        fh.write(head.encode("utf-8"))
+        fh.write(done.encode("utf-8"))
+
+    # Baseline: the run is completed.
+    run_journal._SUMMARY_CACHE.clear()
+    baseline = latest_run_summary("s1", "r1", session_dir=tmp_path)
+    assert baseline["terminal_state"] == "completed", (
+        f"baseline sanity: expected completed, got {baseline['terminal_state']!r}"
+    )
+
+    # Inject a one-shot OSError in the validity helper on the FIRST call after
+    # clearing the cache. The fault flag must be set so ok=False propagates.
+    run_journal._SUMMARY_CACHE.clear()
+    real_valid = run_journal._record_is_valid_complete
+    calls = {"n": 0}
+
+    def patched_valid(fh, size, record_start, *, budget=None, fault=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            if fault is not None:
+                fault[0] = True  # match the production helper's fault-flag contract
+            raise OSError("simulated one-shot EIO during boundary scan")
+        return real_valid(fh, size, record_start, budget=budget, fault=fault)
+
+    monkeypatch.setattr(run_journal, "_record_is_valid_complete", patched_valid)
+
+    # First call (fault): best-effort result, NOT cached.
+    first = latest_run_summary("s1", "r1", session_dir=tmp_path)
+    assert first["terminal_state"] != "completed", (
+        f"first call (during fault) reported {first['terminal_state']!r}; the "
+        f"transient OSError should have produced a best-effort non-completed result"
+    )
+    # The cache must be EMPTY: the failed read must not be cached.
+    assert str(path) not in run_journal._SUMMARY_CACHE, (
+        "the transient-OSError failed summary was cached as authoritative; the "
+        "next call would return the stale failure instead of retrying (#6139 r14 finding 3)"
+    )
+
+    # Second call (no fault): the validity helper is called again and the read
+    # recovers completed.
+    second = latest_run_summary("s1", "r1", session_dir=tmp_path)
+    assert second["terminal_state"] == "completed", (
+        f"second call (no fault) reported {second['terminal_state']!r} (expected "
+        f"'completed'); the transient OSError was cached and the retry did not happen "
+        f"(#6139 r14 finding 3)"
+    )
+    assert calls["n"] >= 2, (
+        f"the validity helper was called {calls['n']} time(s) across both calls "
+        f"(expected >= 2); the second call did not retry the read"
     )

@@ -188,8 +188,8 @@ def _read_jsonl(
     max_rows: int | None = None,
     tail: bool = False,
     attribute_lines: bool = True,
-) -> tuple[list[dict], list[dict]]:
-    """Read a run-journal JSONL file into (events, malformed).
+) -> tuple[list[dict], list[dict], bool]:
+    """Read a run-journal JSONL file into (events, malformed, ok).
 
     Memory: unbounded by default this reads the WHOLE file via read_text() and
     parses every line — fine for small journals but a turn with heavy tool use
@@ -203,8 +203,12 @@ def _read_jsonl(
       ``last_seq``/``last_event_id``/``terminal_state`` from the LAST events —
       a tail read keeps those correct for a large COMPLETED run without parsing
       the whole history. A line split at the seek boundary is discarded.
+      Returns ``ok=False`` iff a transient OSError was caught during the
+      boundary scan, so callers can skip caching failed results. (#6139 r14)
     - ``tail=False`` with caps: read forward but stop once ``max_bytes``/``max_rows``
       is exceeded (head cap), via the existing bounded line iterator.
+      Returns ``ok=True`` (the non-tail paths don't have the boundary-helper
+      OSError-swallow problem in the same way).
 
     ``malformed`` entries carry ``{"line": n, "raw": ...}`` with 1-based line
     numbers relative to the whole file (tail mode computes the offset).
@@ -244,12 +248,12 @@ def _read_jsonl(
                 else:
                     malformed.append({"line": line_no, "raw": raw.decode("utf-8", "replace")})
         except FileNotFoundError:
-            return events, malformed
+            return events, malformed, True
         except ValueError:
             # _iter_bounded_raw_jsonl_lines raises "replay_limit_bytes" once the
             # byte cap is exceeded; the events collected so far are returned.
-            return events, malformed
-        return events, malformed
+            return events, malformed, True
+        return events, malformed, True
 
     # Unbounded whole-file read (original behavior).
     # Read RAW BYTES and split on b"\n" only — NOT read_text() (which does
@@ -260,7 +264,7 @@ def _read_jsonl(
     try:
         raw_bytes = path.read_bytes()
     except FileNotFoundError:
-        return events, malformed
+        return events, malformed, True
     # Accept a final record only if it ends in \n (covers both LF and CRLF,
     # since CRLF ends in \n). Otherwise discard the last line.
     if raw_bytes and not raw_bytes.endswith(b"\n"):
@@ -280,7 +284,7 @@ def _read_jsonl(
             events.append(parsed)
         else:
             malformed.append({"line": line_no, "raw": raw})
-    return events, malformed
+    return events, malformed, True
 
 
 # Bounded prefix read for oversized journal records. The record layout from
@@ -306,7 +310,7 @@ _VALIDITY_PROOF_MAX_BYTES = 2 * _SESSION_REPLAY_MAX_BYTES
 
 
 def _find_record_start_before(
-    fh, size: int, seek_pos: int, *, budget: _ReadBudget | None = None
+    fh, size: int, seek_pos: int, *, budget: _ReadBudget | None = None, fault: list[bool] | None = None
 ) -> int:
     """Return the byte offset where the JSONL record overlapping ``seek_pos``
     begins, i.e. the byte just after the last newline strictly before seek_pos.
@@ -324,6 +328,9 @@ def _find_record_start_before(
     the helper runs unbounded (the whole tail read is already bounded by the
     caller). Capping only ever narrows the examined window — the byte-found
     offset math is unchanged when the full chunk is read. (#6139 r10 item 1.)
+
+    When ``fault`` is a mutable list[bool], a caught OSError sets fault[0]=True
+    to signal the caller that a transient read fault occurred. (#6139 r14)
     """
     if seek_pos <= 0:
         return 0
@@ -353,11 +360,13 @@ def _find_record_start_before(
         # TOCTOU: journal deleted between the stat() above and this open/read
         # (cleanup racing a status poll). Return the safe fallback rather than
         # letting the exception escape to the HTTP handler. (#6139 Greptile P1)
+        if fault is not None:
+            fault[0] = True
         return 0
     return 0
 
 
-def _read_last_complete_line_before(fh, size: int, end_offset: int, *, budget: int | _ReadBudget | None = None) -> dict | None:
+def _read_last_complete_line_before(fh, size: int, end_offset: int, *, budget: int | _ReadBudget | None = None, fault: list[bool] | None = None) -> dict | None:
     """Return the summary of the last complete JSONL record strictly before
     ``end_offset``, without materializing a multi-MB payload.
 
@@ -388,6 +397,9 @@ def _read_last_complete_line_before(fh, size: int, end_offset: int, *, budget: i
     predecessor scan counts against the SAME allowance as boundary lookup /
     structural validation). If ``budget`` is None it defaults to
     ``_SESSION_REPLAY_MAX_BYTES``.
+
+    When ``fault`` is a mutable list[bool], a caught OSError sets fault[0]=True
+    to signal the caller that a transient read fault occurred. (#6139 r14)
     """
     if end_offset <= 0:
         return None
@@ -435,31 +447,33 @@ def _read_last_complete_line_before(fh, size: int, end_offset: int, *, budget: i
             if scan_end <= 0:
                 return None
             continue
-        # Oversized predecessor (> _BOUNDARY_SUMMARY_PREFIX_BYTES): fail-closed.
-        # Its full-record JSON validity can NEVER be proven without materializing
-        # the payload, so per #6139 r9 item 2 the fabricated prefix is NOT
-        # trusted. The row is skipped and the scan continues to the preceding
-        # normal-sized valid event. (The scan work done so far by
-        # _rfind_byte_before is already charged via the shared budget.)
-        if line_len > _BOUNDARY_SUMMARY_PREFIX_BYTES:
-            # An oversized predecessor's validity cannot be proven without
-            # materializing its payload, so per #6139 r9 it is skipped
-            # (fail-closed). The scan continues to the preceding normal-sized
-            # valid event.
-            rows_scanned += 1
-            scan_end = line_start
-            if scan_end <= 0:
-                return None
-            continue
-        # Normal-size candidate line: charge the budget for the parse read too
-        # (the maintainer named "candidate parsing" in item 1), then read.
+        # Candidate predecessor line. This loop only reaches COMPLETE lines
+        # (newline-terminated on both sides — _rfind_byte_before found the
+        # surrounding newlines, and the caller's end_offset is the boundary
+        # record's start, strictly after this line). So unlike the BOUNDARY
+        # record, a predecessor can be VALIDATED by reading + json.loads-ing the
+        # whole line: it is not crash-truncated.
+        #
+        # #6139 r14 finding 2: the prior code blanket-skipped any line
+        # > _BOUNDARY_SUMMARY_PREFIX_BYTES (8 KiB) as "oversized fail-closed",
+        # conflating the boundary record's 8 KiB prefix-extraction limit with a
+        # validity limit. That dropped VALID predecessors larger than 8 KiB (e.g.
+        # a 20 KiB tool_complete event) → latest_run_summary reported a stale
+        # last_seq → stale_interrupted_event synthesized an event_id colliding
+        # with the real dropped event's id. A complete line is parseable
+        # regardless of size; the only bound is the shared budget. Read + parse
+        # the line directly, charging the budget; skip only on budget exhaustion
+        # or a parse failure (genuinely malformed), continuing backward to the
+        # preceding valid event.
         to_read = budget_obj.take(line_len)
         if to_read == 0:
-            return None  # exhausted before parsing this candidate — stop
+            return None  # budget exhausted before parsing this candidate — stop
         try:
             fh.seek(line_start)
             raw = fh.read(to_read)
         except (FileNotFoundError, OSError):
+            if fault is not None:
+                fault[0] = True
             return None  # TOCTOU: journal deleted mid-read — safe fallback
         try:
             parsed = json.loads(raw.decode("utf-8", errors="replace"))
@@ -640,38 +654,79 @@ def _record_is_structurally_complete(
 
 
 def _record_is_valid_complete(
-    fh, size: int, record_start: int, *, budget: _ReadBudget | None = None
+    fh, size: int, record_start: int, *, budget: _ReadBudget | None = None, fault: list[bool] | None = None
 ) -> bool:
-    """Return True iff the JSONL record at ``record_start`` is a valid JSON
-    value (a dict) followed by a newline terminator.
+    """Return True iff the JSONL record at ``record_start`` is a valid (or
+    structurally-complete) JSON value (a dict) followed by a newline terminator.
 
     This is the validity gate for trusting a fabricated boundary-record summary
     (#6139 r10 item 2): brace balance is necessary but NOT sufficient for JSON
     validity. A brace-balanced record with a trailing comma (``...,}``) or a
     malformed nested value (``...bad:nested...}``) is NOT valid JSON and must
     NOT be fabricated into a terminal event. The full reader ``_read_jsonl``
-    correctly rejects such rows; the tail reader must MATCH it.
+    correctly rejects such rows; the tail reader must MATCH it for records it
+    can afford to validate in full.
 
-    Implementation: scan forward from ``record_start`` in chunks, accumulating
-    bytes until the first newline terminator (the JSONL record boundary),
-    charging each read to the shared budget, then parse the accumulated record
-    ONCE with ``json.JSONDecoder.raw_decode`` (which parses exactly one value and
-    returns its end offset; the byte at that offset must be the record's newline).
-    This reads ONLY the record's actual length — a small record costs one chunk,
-    not the full forward window (#6139 r11: the r10 greedy single read of
-    ``min(size - record_start, _VALIDITY_PROOF_MAX_BYTES)`` charged ~cap for a
-    tiny record, putting summary-path physical reads at 2x cap even for normal
-    journals). A legitimately oversized terminal ``done`` (~cap payload) is still
-    proven valid by reading its full length. Capped at
-    ``_VALIDITY_PROOF_MAX_BYTES`` so a pathological record fails closed (recovers
-    the older valid event) rather than reading unbounded.
+    Two tiers (#6139 r14 finding 1):
 
-    The caller owns the handle and passes the pinned size. ``budget`` charges each
-    chunk read against the shared boundary-recovery meter; if the allowance can't
-    reach the terminator, returns False (fail-closed).
+    - Tier 1 (record length <= ``_VALIDITY_PROOF_MAX_BYTES``): scan forward in
+      chunks to the newline terminator, materialize the record, and parse it
+      ONCE with ``json.JSONDecoder.raw_decode`` (which parses exactly one value
+      and returns its end offset; the byte at that offset must be the record's
+      newline). This is FULLY correct — it rejects trailing commas, malformed
+      nested values, and any grammatical error — and is the path the r10
+      adversarial fixtures (all < 8 MiB) rely on. A small record costs one
+      chunk; a legitimately oversized ``done`` up to the ceiling is proven valid
+      by reading its full length.
+
+    - Tier 2 (record length > ``_VALIDITY_PROOF_MAX_BYTES``): a bounded-memory
+      STREAMING structural-completeness scan that does NOT materialize the
+      record. Scan forward tracking brace/bracket depth + string/escape state
+      until the top-level depth returns to 0 immediately followed by a newline.
+      A crash-truncated record (the only realistic failure mode for a
+      >ceiling record, since ``append_run_event`` serializes via ``json.dumps``
+      and fsyncs) never reaches depth 0 — or has no newline after — so it is
+      rejected. A brace-balanced + newline-terminated record is accepted.
+
+      Documented residual (#6139 r14): unlike tier 1, tier 2 does NOT perform
+      full JSON grammar validation — it accepts brace-balanced records. This is
+      acceptable because (a) the journal writer produces valid JSON via
+      ``json.dumps`` on an fsync'd append-only file, so a >ceiling record is
+      valid-or-truncated, never corrupted-in-place; (b) the r10 adversarial
+      fixtures (trailing comma, malformed nested value) are < 8 MiB and stay on
+      tier 1, which rejects them; (c) a >ceiling brace-balanced-but-invalid
+      record would require post-write corruption of an fsync'd file. Stale-
+      but-nonterminal (the recoverable direction) is never falsely terminal.
+
+    The caller owns the handle and passes the pinned size. ``budget`` charges
+    each chunk read against the shared meter; if the allowance can't reach the
+    terminator/depth-0, returns False (fail-closed).
+
+    When ``fault`` is a mutable list[bool], a caught OSError sets fault[0]=True
+    to signal the caller that a transient read fault occurred. (#6139 r14)
     """
     if record_start < 0 or record_start >= size:
         return False
+    record_len = size - record_start
+    if record_len <= 0:
+        return False
+    if record_len <= _VALIDITY_PROOF_MAX_BYTES:
+        return _record_is_valid_complete_tier1(
+            fh, size, record_start, budget=budget, fault=fault
+        )
+    return _record_is_valid_complete_tier2(fh, size, record_start, budget=budget, fault=fault)
+
+
+def _record_is_valid_complete_tier1(
+    fh, size: int, record_start: int, *, budget: _ReadBudget | None = None, fault: list[bool] | None = None
+) -> bool:
+    """Tier 1 validity proof: full ``raw_decode`` on the materialized record
+    (record length <= ``_VALIDITY_PROOF_MAX_BYTES``). See
+    ``_record_is_valid_complete`` for the two-tier contract.
+
+    When ``fault`` is a mutable list[bool], a caught OSError sets fault[0]=True
+    to signal the caller that a transient read fault occurred. (#6139 r14)
+    """
     max_window = min(size - record_start, _VALIDITY_PROOF_MAX_BYTES)
     if max_window <= 0:
         return False
@@ -691,6 +746,8 @@ def _record_is_valid_complete(
             fh.seek(pos)
             block = fh.read(want)
         except (FileNotFoundError, OSError):
+            if fault is not None:
+                fault[0] = True
             return False  # TOCTOU: journal deleted mid-read — safe fallback
         if not block:
             break
@@ -726,8 +783,92 @@ def _record_is_valid_complete(
     return False
 
 
+def _record_is_valid_complete_tier2(
+    fh, size: int, record_start: int, *, budget: _ReadBudget | None = None, fault: list[bool] | None = None
+) -> bool:
+    """Tier 2 validity proof: bounded-memory streaming structural-completeness
+    scan for records longer than ``_VALIDITY_PROOF_MAX_BYTES``. Does NOT
+    materialize the record — tracks brace/bracket depth + string/escape state
+    forward in chunks until the top-level depth returns to 0 immediately
+    followed by a newline terminator. See ``_record_is_valid_complete`` for the
+    two-tier contract and the documented residual (accepts brace-balanced
+    records, which is sound because the journal writer fsyncs valid JSON).
+
+    When ``fault`` is a mutable list[bool], a caught OSError sets fault[0]=True
+    to signal the caller that a transient read fault occurred. (#6139 r14)
+    """
+    chunk_size = _SESSION_REPLAY_READ_CHUNK_BYTES
+    pos = record_start
+    depth = 0
+    in_string = False
+    escaped = False
+    # `await_terminator`: depth has returned to 0; now require \n (or \r\n).
+    # `pending_cr`: depth-0 byte was \r; the next byte must be \n (CRLF) or reject.
+    await_terminator = False
+    pending_cr = False
+    while pos < size:
+        want = min(chunk_size, size - pos)
+        if budget is not None:
+            got = budget.take(want)
+            if got <= 0:
+                return False  # can't reach the record's end within budget — fail-closed
+            want = min(want, got)
+        try:
+            fh.seek(pos)
+            block = fh.read(want)
+        except (FileNotFoundError, OSError):
+            if fault is not None:
+                fault[0] = True
+            return False  # TOCTOU: journal deleted mid-read — safe fallback
+        if not block:
+            break
+        i = 0
+        n = len(block)
+        while i < n:
+            c = block[i]
+            if pending_cr:
+                # Previous depth-0 byte was \r; require \n now (CRLF ok).
+                if c == 0x0A:  # \n
+                    return True
+                return False  # bare \r followed by non-\n — reject
+            if await_terminator:
+                # Depth is 0; the only acceptable next bytes are the record's
+                # newline terminator (\n, or \r\n). A bare \r is rejected
+                # (matches tier 1 + the tail reader's terminator gate).
+                if c == 0x0A:  # \n
+                    return True
+                if c == 0x0D:  # \r
+                    pending_cr = True
+                    i += 1
+                    continue
+                return False  # trailing garbage after the top-level value — reject
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif c == 0x5C:  # backslash
+                    escaped = True
+                elif c == 0x22:  # closing quote
+                    in_string = False
+                i += 1
+                continue
+            if c == 0x22:  # opening quote
+                in_string = True
+            elif c in (0x7B, 0x5B):  # { or [
+                depth += 1
+            elif c in (0x7D, 0x5D):  # } or ]
+                depth -= 1
+                if depth == 0:
+                    # Top-level value closed; the next byte must be the terminator.
+                    await_terminator = True
+            i += 1
+        pos += len(block)
+    # Reached EOF without a clean depth-0 + newline terminator: crash-truncated
+    # or unterminated. Reject (fail-closed — recover the older valid event).
+    return False
+
+
 def _extract_boundary_record_summary(
-    fh, record_start: int, *, budget: _ReadBudget | None = None
+    fh, record_start: int, *, budget: _ReadBudget | None = None, fault: list[bool] | None = None
 ) -> dict | None:
     """Extract ONLY the summary fields of an oversized journal record that
     straddles the tail-window boundary, without materializing its payload.
@@ -745,6 +886,9 @@ def _extract_boundary_record_summary(
     remaining allowance; if the allowance hits 0 the function returns None. The
     rest of the function operates on whatever prefix was read — if a shorter-
     than-expected prefix can't be parsed, returns None.
+
+    When ``fault`` is a mutable list[bool], a caught OSError sets fault[0]=True
+    to signal the caller that a transient read fault occurred. (#6139 r14)
     """
     try:
         fh.seek(record_start)
@@ -756,6 +900,8 @@ def _extract_boundary_record_summary(
         else:
             prefix_raw = fh.read(_BOUNDARY_SUMMARY_PREFIX_BYTES)
     except (FileNotFoundError, OSError):
+        if fault is not None:
+            fault[0] = True
         return None
     text = prefix_raw.decode("utf-8", errors="replace")
     # Find the top-level "payload" key (depth 1 inside the record object).
@@ -833,7 +979,7 @@ def _find_top_level_payload_key(text: str) -> int | None:
 
 def _read_jsonl_tail(
     path: Path, *, max_bytes: int | None, max_rows: int | None, attribute_lines: bool = True
-) -> tuple[list[dict], list[dict]]:
+) -> tuple[list[dict], list[dict], bool]:
     """Read the trailing portion of a JSONL journal (bounded memory).
 
     Seeks to (size - max_bytes) and reads forward, discarding the partial line
@@ -845,20 +991,24 @@ def _read_jsonl_tail(
     The file is opened ONCE and the size is pinned via os.fstat — ensuring all
     recovery helpers read from a single inode generation. A delete-and-recreate
     between stages cannot mix rows from different generations.
+
+    Returns a 3-tuple (events, malformed, ok) where ``ok`` is False iff a
+    transient OSError was caught during the boundary scan. (#6139 r14)
     """
     events: list[dict] = []
     malformed: list[dict] = []
+    fault = [False]  # shared mutable flag for boundary-helper OSError tracking
     try:
         fh = path.open("rb")
     except (FileNotFoundError, OSError):
-        return events, malformed
+        return events, malformed, True
     try:
         try:
             size = os.fstat(fh.fileno()).st_size   # ONE pin; same generation for all stages
         except OSError:
-            return events, malformed
+            return events, malformed, True
         if size <= 0:
-            return events, malformed
+            return events, malformed, True
         read_bytes_cap = (
             max_bytes if (max_bytes is not None and max_bytes > 0)
             else _SESSION_REPLAY_MAX_BYTES
@@ -891,20 +1041,25 @@ def _read_jsonl_tail(
         boundary_summary: dict | None = None
         if size > read_bytes:
             seek_pos = size - read_bytes
-            # Boundary START lookup + 8 KiB prefix extraction share ONE meter sized
-            # at 2x the tail window (#6139 r10 item 1): the backward lookup scans
-            # the bytes before the window up to the record start, and prefix
-            # extraction reads _BOUNDARY_SUMMARY_PREFIX_BYTES, so 2x cap bounds
-            # both for a single straddling record.
-            boundary_budget = _ReadBudget(2 * read_bytes_cap)
-            record_start = _find_record_start_before(fh, size, seek_pos, budget=boundary_budget)
+            # Boundary START lookup + 8 KiB prefix extraction share ONE meter
+            # (#6139 r10 item 1). The backward lookup scans the bytes before the
+            # tail window up to the record start; for a straddling record up to the
+            # validity ceiling (4x cap, #6139 r14 finding 1) that pre-window portion
+            # can be up to ~3x cap, plus _BOUNDARY_SUMMARY_PREFIX_BYTES for the
+            # prefix extraction. Size the meter at 4x cap so a record the validity
+            # gate can accept can also be located + prefix-extracted without
+            # exhausting the meter (the r14 bug: a 12 MiB valid done exhausted the
+            # 2x cap lookup budget scanning its own pre-window bytes, so extraction
+            # got budget_remaining=0 -> None -> valid terminal rejected).
+            boundary_budget = _ReadBudget(4 * read_bytes_cap)
+            record_start = _find_record_start_before(fh, size, seek_pos, budget=boundary_budget, fault=fault)
             # record_start is where the straddling record begins. Extract its summary
             # via a bounded prefix read (never materializes the payload) — BUT only
             # trust it as terminal if the record is a structurally-complete AND
             # grammatically-valid JSON record. Brace balance is NOT JSON validity
             # (#6139 r10 item 2): a brace-balanced record with a trailing comma or a
             # malformed nested value must NOT be fabricated into a terminal event.
-            boundary_summary = _extract_boundary_record_summary(fh, record_start, budget=boundary_budget)
+            boundary_summary = _extract_boundary_record_summary(fh, record_start, budget=boundary_budget, fault=fault)
             # A boundary record is REJECTED (must not be trusted as terminal, and
             # the preceding valid event must be recovered instead) on EITHER path:
             #   (a) the prefix summary could not be extracted at all (extraction
@@ -936,8 +1091,15 @@ def _read_jsonl_tail(
                 # gate can possibly accept can pay for its own complete validation;
                 # the incremental chunked read means a small record still costs
                 # only one chunk, so the constant-in-file-size property holds.
-                validity_budget = _ReadBudget(_VALIDITY_PROOF_MAX_BYTES)
-                if _record_is_valid_complete(fh, size, record_start, budget=validity_budget):
+                # (#6139 r14 finding 1): the validity proof now has two tiers. Tier 1
+                # (≤_VALIDITY_PROOF_MAX_BYTES) does full JSON parsing; tier 2 (>ceiling)
+                # does streaming structural-completeness scanning. The budget must be
+                # larger than _VALIDITY_PROOF_MAX_BYTES so tier 2 can scan a legitimately
+                # large (>8 MiB) terminal record to its depth-0 + newline. 4x cap (16 MiB)
+                # covers real transcripts while staying a constant bound independent of
+                # file size (a pathological multi-GB record fails-closed).
+                validity_budget = _ReadBudget(4 * read_bytes_cap)
+                if _record_is_valid_complete(fh, size, record_start, budget=validity_budget, fault=fault):
                     boundary_rejected = False  # valid + complete: trust the prefix
                 else:
                     boundary_summary = None  # extracted-but-invalid: fail-closed
@@ -957,7 +1119,7 @@ def _read_jsonl_tail(
                 # boundary physical I/O is then capped at 2*cap + cap = 3*cap
                 # regardless of file size.
                 predecessor_budget = _ReadBudget(read_bytes_cap)
-                preceding = _read_last_complete_line_before(fh, size, record_start, budget=predecessor_budget)
+                preceding = _read_last_complete_line_before(fh, size, record_start, budget=predecessor_budget, fault=fault)
                 if preceding is not None:
                     events.append(preceding)
             # Now drop the partial first fragment from the window so we only parse
@@ -973,7 +1135,7 @@ def _read_jsonl_tail(
             # No straddling record recovered AND no complete lines in the window.
             # (When boundary_summary was recovered we already have it; an empty text
             # just means there were no trailing complete records, which is fine.)
-            return events, malformed
+            return events, malformed, not fault[0]
         # 1-based line number of the first whole line in `text`, across the whole
         # file. The discarded prefix (size - read_bytes bytes) contains some number
         # of complete lines; the first whole line in the window is the next one. We
@@ -1045,10 +1207,10 @@ def _read_jsonl_tail(
                 events.append(parsed)
             else:
                 malformed.append({"line": line_no, "raw": raw_line})
-        return events, malformed
+        return events, malformed, not fault[0]
     except (FileNotFoundError, OSError):
         # A read failure mid-recovery: return what we have (best-effort).
-        return events, malformed
+        return events, malformed, not fault[0]
     finally:
         fh.close()
 
@@ -1128,7 +1290,7 @@ def bound_run_journal_snapshot_args(args: Any) -> Any:
 
 
 def _next_seq(path: Path) -> int:
-    events, _malformed = _read_jsonl(path)
+    events, _malformed, _ok = _read_jsonl(path)
     seqs = [int(event.get("seq") or 0) for event in events if isinstance(event.get("seq"), int)]
     return (max(seqs) + 1) if seqs else 1
 
@@ -1354,7 +1516,7 @@ def read_run_events(
     max_rows: int | None = None,
 ) -> dict:
     path = _run_path(session_id, run_id, session_dir=session_dir)
-    events, malformed = _read_jsonl(path, max_bytes=max_bytes, max_rows=max_rows)
+    events, malformed, _ok = _read_jsonl(path, max_bytes=max_bytes, max_rows=max_rows)
     if after_seq is not None:
         events = [event for event in events if int(event.get("seq") or 0) > int(after_seq)]
     if max_seq is not None:
@@ -1424,11 +1586,17 @@ def latest_run_summary(
     # run's terminal marker lives at the end and must not require parsing the
     # full history. Callers needing head/all events use read_run_events().
     pre_read_signature = _summary_cache_signature(path)
-    events, _malformed = _read_jsonl(
+    events, _malformed, ok = _read_jsonl(
         path, max_bytes=max_bytes, max_rows=max_rows, tail=True, attribute_lines=False
     )
     summary = _summary_from_events(session_id, run_id, events)
-    _cache_summary(path, summary, expected_signature=pre_read_signature)
+    # #6139 r14 finding 3: a transient OSError during the boundary scan produces
+    # a best-effort/failed summary (terminal_state="unknown", empty events).
+    # Caching it under the matching inode signature would make subsequent calls
+    # return the stale failure instead of retrying. Skip caching when the read
+    # faulted so the next call retries and recovers.
+    if ok:
+        _cache_summary(path, summary, expected_signature=pre_read_signature)
     return summary
 
 
@@ -1483,11 +1651,16 @@ def find_run_summary(
             pre_read_signature = _summary_cache_signature(path)
             # Tail read: summary needs the terminal/last events (see
             # latest_run_summary), so bound memory on large completed runs.
-            events, _malformed = _read_jsonl(
+            events, _malformed, ok = _read_jsonl(
                 path, max_bytes=max_bytes, max_rows=max_rows, tail=True, attribute_lines=False
             )
             summary = _summary_from_events(session_id, rid, events)
-            _cache_summary(path, summary, expected_signature=pre_read_signature)
+            # #6139 r14 finding 3: a transient OSError during the boundary scan
+            # produces a best-effort/failed summary. Caching it under the matching
+            # inode signature would make subsequent calls return the stale failure
+            # instead of retrying. Skip caching when the read faulted.
+            if ok:
+                _cache_summary(path, summary, expected_signature=pre_read_signature)
         summary["path"] = str(path)
         return summary
     return None

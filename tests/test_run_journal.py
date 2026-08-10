@@ -168,7 +168,7 @@ def test_summary_cache_does_not_store_result_when_journal_changes_during_read(tm
     original_read = run_journal._read_jsonl
 
     def append_after_read(path, **kwargs):
-        events, malformed = original_read(path, **kwargs)
+        events, malformed, ok = original_read(path, **kwargs)
         append_run_event(
             "session_1",
             "run_1",
@@ -176,7 +176,7 @@ def test_summary_cache_does_not_store_result_when_journal_changes_during_read(tm
             {"message": "Cancelled by user"},
             session_dir=tmp_path,
         )
-        return events, malformed
+        return events, malformed, ok
 
     monkeypatch.setattr(run_journal, "_read_jsonl", append_after_read)
 
@@ -196,7 +196,7 @@ def test_summary_cache_rejects_first_append_that_races_missing_journal_read(tmp_
 
     def append_after_missing_read(path, **kwargs):
         nonlocal appended
-        events, malformed = original_read(path, **kwargs)
+        events, malformed, ok = original_read(path, **kwargs)
         if not appended:
             appended = True
             append_run_event(
@@ -206,7 +206,7 @@ def test_summary_cache_rejects_first_append_that_races_missing_journal_read(tmp_
                 {"session": {}},
                 session_dir=tmp_path,
             )
-        return events, malformed
+        return events, malformed, ok
 
     monkeypatch.setattr(run_journal, "_read_jsonl", append_after_missing_read)
 
