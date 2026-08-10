@@ -73,8 +73,70 @@ def _profile_db(profile_home: str | Path):
     return db
 
 
+def _profile_home_context_api():
+    """Return the native context-local Hermes home setters when available."""
+    try:
+        from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    except Exception:  # pragma: no cover - depends on installed hermes-agent
+        return None
+    return set_hermes_home_override, reset_hermes_home_override
+
+
 class _ProfileGoalManager:
-    """Small WebUI-local GoalManager adapter with explicit profile persistence."""
+    """Run the native GoalManager under a context-local profile home."""
+
+    def __init__(
+        self,
+        session_id: str,
+        *,
+        profile_home: str | Path,
+        default_max_turns: int = 20,
+        context_api=None,
+    ):
+        if _NativeGoalManager is None:
+            raise RuntimeError("Hermes goal manager unavailable")
+        context_api = context_api or _profile_home_context_api()
+        if context_api is None:
+            raise RuntimeError("Hermes profile context unavailable")
+        self.session_id = session_id
+        self.profile_home = Path(profile_home).expanduser().resolve()
+        self._set_home, self._reset_home = context_api
+        self._manager = self._scoped(
+            _NativeGoalManager,
+            session_id=session_id,
+            default_max_turns=default_max_turns,
+        )
+
+    def _scoped(self, func, *args, **kwargs):
+        token = self._set_home(self.profile_home)
+        try:
+            return func(*args, **kwargs)
+        finally:
+            self._reset_home(token)
+
+    @property
+    def state(self):
+        return self._manager.state
+
+    def __getattr__(self, name):
+        value = getattr(self._manager, name)
+        if not callable(value):
+            return value
+
+        def scoped_call(*args, **kwargs):
+            return self._scoped(value, *args, **kwargs)
+
+        return scoped_call
+
+    def _restore_state(self, snapshot) -> None:
+        from hermes_cli.goals import save_goal  # type: ignore
+
+        self._manager._state = snapshot
+        self._scoped(save_goal, self.session_id, snapshot)
+
+
+class _LegacyProfileGoalManager:
+    """Explicit-DB fallback for Hermes versions without profile context."""
 
     def __init__(self, session_id: str, *, profile_home: str | Path, default_max_turns: int = 20):
         if GoalState is None:
@@ -193,7 +255,7 @@ class _ProfileGoalManager:
         if judge_goal is None:
             verdict, reason = "continue", "goal judge unavailable"
         else:
-            verdict, reason = judge_goal(state.goal, str(last_response or ""))
+            verdict, reason, *_ = judge_goal(state.goal, str(last_response or ""))
         state.last_verdict = verdict
         state.last_reason = reason
 
@@ -245,8 +307,16 @@ def _manager(session_id: str, *, profile_home: str | Path | None = None):
     if GoalManager is None:
         return None
     if profile_home and GoalManager is _NativeGoalManager and GoalState is not None:
+        context_api = _profile_home_context_api()
         try:
-            return _ProfileGoalManager(
+            if context_api is not None:
+                return _ProfileGoalManager(
+                    session_id=session_id,
+                    profile_home=profile_home,
+                    default_max_turns=_default_max_turns(),
+                    context_api=context_api,
+                )
+            return _LegacyProfileGoalManager(
                 session_id=session_id,
                 profile_home=profile_home,
                 default_max_turns=_default_max_turns(),
@@ -407,6 +477,9 @@ def restore_goal_state(session_id: str, snapshot: Any, *, profile_home: str | Pa
             pass
         return
     if isinstance(mgr, _ProfileGoalManager):
+        mgr._restore_state(snapshot)
+        return
+    if isinstance(mgr, _LegacyProfileGoalManager):
         mgr._state = snapshot
         mgr._save(snapshot)
         return
