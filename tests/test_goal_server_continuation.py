@@ -776,6 +776,7 @@ def test_strict_goal_snapshot_propagates_profile_read_failure(monkeypatch, tmp_p
             raise PermissionError("goal state unreadable")
 
     monkeypatch.setattr(goals, "_profile_db", lambda _home: BrokenDB())
+    monkeypatch.setattr(goals, "GoalState", None)
     with pytest.raises(PermissionError, match="unreadable"):
         goals.goal_state_snapshot_strict("session-a", profile_home=tmp_path)
 
