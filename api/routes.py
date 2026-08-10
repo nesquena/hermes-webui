@@ -21978,7 +21978,16 @@ def _start_chat_stream_for_session(
             s.pending_attachments = []
             s.pending_started_at = None
             s.pending_user_source = None
-            s.save()
+            try:
+                save_session = getattr(s, "save", None)
+                if callable(save_session):
+                    save_session()
+            except Exception:
+                logger.warning(
+                    "Failed to persist stream-start rollback for session %s",
+                    s.session_id,
+                    exc_info=True,
+                )
         raise
     response = {
         "stream_id": stream_id,
