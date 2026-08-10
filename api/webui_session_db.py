@@ -43,6 +43,7 @@ _METADATA_FIELDS = frozenset(
         "compression_anchor_message_key",
         "compression_anchor_summary",
         "pre_compression_snapshot",
+        "compression_continuation_of",
         "context_engine",
         "compression_anchor_engine",
         "compression_anchor_mode",

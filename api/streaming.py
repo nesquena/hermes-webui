@@ -7594,6 +7594,7 @@ def _run_agent_streaming(
         # in the outer finally next to _clear_thread_env().
         _turn_session_identity_tokens = _set_turn_session_identity(session_id)
         s = get_session(session_id)
+        _turn_pending_source = getattr(s, 'pending_user_source', None) or 'webui'
         if owner_token is not None:
             # #6327 route-to-worker acceptance: the route layer validated the
             # immutable owner token under the per-session AGENT lock before
@@ -7601,11 +7602,24 @@ def _run_agent_streaming(
             # here; a same-SID replacement between route acceptance and this
             # re-read must never let the conversation run on the replacement
             # object (different profile/home/credential generation) while the
-            # pending state was written to the tokenized owner.  Fail closed
-            # with an apperror instead of running on the wrong owner.
-            from api.routes import _stream_worker_owner_token_mismatch
+            # pending state was written to the tokenized owner.  The claim
+            # re-verifies the exact owner/generation authority UNDER the
+            # canonical AGENT lock (closing the check-to-provider-call gap)
+            # and, on mismatch, transactionally retires the route's
+            # provisional pending state + re-defers the wakeup so the drain
+            # redelivers — never "acknowledge success and fail later on an
+            # unowned stream".  Fail closed with an apperror instead of
+            # running on the wrong owner.
+            from api.routes import _worker_atomic_owner_claim
 
-            _worker_mismatch = _stream_worker_owner_token_mismatch(owner_token, s)
+            _worker_mismatch = _worker_atomic_owner_claim(
+                owner_token,
+                s,
+                stream_id=stream_id,
+                session_id=session_id,
+                wakeup_prompt=msg if _turn_pending_source == "process_wakeup" else None,
+                requeue_wakeup=(_turn_pending_source == "process_wakeup"),
+            )
             if _worker_mismatch is not None:
                 logger.warning(
                     "stream worker %s refused owner for session %s: %s",
@@ -7617,10 +7631,10 @@ def _run_agent_streaming(
                     "error": "session owner changed before the agent turn started",
                     "owner_fence": _worker_mismatch,
                     "session_id": session_id,
+                    "retryable": True,
                     "_status": 409,
                 })
                 return  # apperror closes the stream on the client side
-        _turn_pending_source = getattr(s, 'pending_user_source', None) or 'webui'
         update_active_run(stream_id, phase="running", session_id=session_id)
         s.workspace = str(Path(workspace).expanduser().resolve())
         _last_persisted_model = None
@@ -9401,6 +9415,17 @@ def _run_agent_streaming(
                     # over the just-preserved snapshot back to the original fork
                     # parent, losing access to the recoverable history in old_sid.json.
                     s.parent_session_id = old_sid
+                    # #6327: durable explicit predecessor->continuation edge.
+                    # parent_session_id alone is shared with /api/session/branch
+                    # forks, and session_source is provenance (a compressed fork
+                    # preserves session_source="fork"); neither is mutation
+                    # authority.  This field is the ONLY durable evidence that
+                    # old_sid's archived pre-compression snapshot continues into
+                    # THIS live session, so an old-SID wakeup can resolve the
+                    # live owner without ever guessing between a continuation and
+                    # a newer fork.  Forks created by the branch route never
+                    # carry it.
+                    s.compression_continuation_of = old_sid
                     with LOCK:
                         cached_old_session = SESSIONS.pop(old_sid, None)
                         if cached_old_session is not None and cached_old_session is not s:

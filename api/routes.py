@@ -9623,12 +9623,20 @@ def _pre_compression_continuation_session_id(session) -> str | None:
 # deliberately accepts any same-profile descendant, newest by timestamp.  A
 # newer fork would therefore win ownership and credential clear/suppression/
 # start would be attached to the wrong conversation.  This authority instead
-# requires the durable compression predecessor->continuation evidence — the
-# requested session (and every intermediate hop) is an archived
-# pre_compression_snapshot whose marker is persisted to disk, the candidate's
-# parent_session_id points back at that archived node, the candidate is live
-# (not itself archived) and same-profile — and FAILS CLOSED on zero or
-# ambiguous (multiple) candidates.
+# requires the DURABLE explicit predecessor->continuation edge
+# (``compression_continuation_of``, stamped by production compression on the
+# live continuation alongside parent_session_id) — the requested session (and
+# every intermediate hop) is an archived pre_compression_snapshot whose marker
+# is persisted to disk, the candidate's edge/parent points back at that
+# archived node, the candidate is live (not itself archived) and same-profile —
+# and FAILS CLOSED on zero or ambiguous (multiple) candidates.
+#
+# ``session_source`` is provenance, NOT mutation authority: production
+# compression rotates the SAME session object in place and preserves its
+# provenance, so a real compressed fork keeps session_source="fork" on both the
+# archived snapshot and the live continuation.  Such a child is accepted ONLY
+# when it carries the durable edge; a branch-route fork (edge absent) is an
+# independent conversation and never wins ownership.
 _REJECTED_COMPRESSION_CONTINUATION_SOURCES = frozenset(
     ("fork", "branch", "delegate", "delegated", "delegation", "subagent")
 )
@@ -9638,10 +9646,17 @@ def _compression_continuation_session_id(snapshot) -> str | None:
     """Return the SINGLE live compression continuation for an archived snapshot.
 
     Mutating-flow-specific owner authority (#6327).  Unlike the UI recovery
-    helper, this rejects forks/branches/delegates, requires the durable
-    archived-snapshot predecessor evidence on every hop, and returns None on
-    zero OR ambiguous candidates (the caller requeues/fails — the archived
-    snapshot is never mutated).
+    helper, this requires the durable explicit compression
+    predecessor->continuation edge (``compression_continuation_of`` stamped
+    by production compression on the live continuation) or, for legacy
+    pre-edge chains, a same-surface parent link that is NOT fork/branch/
+    delegate provenance.  ``session_source`` is provenance, not mutation
+    authority: production compression rotates the SAME session object in
+    place and preserves its provenance (a compressed fork keeps
+    session_source=\"fork\"), so a fork-provenance child IS accepted when it
+    carries the durable edge — but a branch-route fork (no edge) never wins
+    ownership.  Returns None on zero OR ambiguous candidates (the caller
+    requeues/fails — the archived snapshot is never mutated).
     """
     if not getattr(snapshot, "pre_compression_snapshot", False):
         return None
@@ -9697,7 +9712,13 @@ def _compression_continuation_session_id(snapshot) -> str | None:
             if not child_sid or not is_safe_session_id(child_sid):
                 continue
             indexed_ids.add(child_sid)
-            if child_sid in row_seen_ids or not _safe_first(entry.get("parent_session_id")):
+            if child_sid in row_seen_ids:
+                continue
+            # Accept rows carrying either the durable compression
+            # predecessor->continuation edge OR a parent link (legacy chains).
+            if not _safe_first(entry.get("parent_session_id")) and not _safe_first(
+                entry.get("compression_continuation_of")
+            ):
                 continue
             row_seen_ids.add(child_sid)
             rows.append(entry)
@@ -9738,13 +9759,26 @@ def _compression_continuation_session_id(snapshot) -> str | None:
         for child in rows:
             parent_sid = _safe_first(_row_value(child, "parent_session_id"))
             child_sid = _safe_first(_row_value(child, "session_id"))
-            if not parent_sid or not child_sid or child_sid == sid:
+            if not child_sid or child_sid == sid:
                 continue
             # Cross-profile guard: only follow continuations within the
             # snapshot's profile.
             if not _profiles_match(_row_value(child, "profile"), snapshot_profile):
                 continue
-            children_by_parent.setdefault(parent_sid, []).append(child)
+            # Index by BOTH the parent link (legacy chains) and the durable
+            # compression predecessor->continuation edge (#6327): production
+            # compression sets both, but the edge is the mutation authority —
+            # a child whose parent_session_id is stale/missing still resolves
+            # through compression_continuation_of.
+            for link_sid in (
+                parent_sid,
+                _safe_first(_row_value(child, "compression_continuation_of")),
+            ):
+                if not link_sid:
+                    continue
+                children_by_parent.setdefault(link_sid, []).append(child)
+                if parent_sid and link_sid == parent_sid:
+                    break
 
         candidates = []
         frontier = [sid]
@@ -9761,12 +9795,26 @@ def _compression_continuation_session_id(snapshot) -> str | None:
                 child_source = str(
                     _safe_first(_row_value(child, "session_source"), "") or ""
                 ).strip().lower()
+                # #6327: durable explicit predecessor->continuation edge.  The
+                # live continuation stamped by production compression carries
+                # compression_continuation_of == the archived snapshot's sid —
+                # this is the ONLY authority that distinguishes a real
+                # continuation from a branch-route fork, and it is valid even
+                # when BOTH sides preserve fork provenance (production
+                # compression rotates the same session object in place).
+                child_continuation_of = str(
+                    _safe_first(_row_value(child, "compression_continuation_of"), "") or ""
+                ).strip()
+                durable_edge = bool(child_continuation_of) and child_continuation_of == parent_sid
                 if child_source in _REJECTED_COMPRESSION_CONTINUATION_SOURCES:
-                    # Fork/branch/delegate: NOT continuation authority.  The
-                    # /api/session/branch route stamps session_source="fork"
-                    # on same-profile children of a parent, so rejecting this
-                    # source is what keeps a newer fork from winning ownership.
-                    continue
+                    if not durable_edge:
+                        # Fork/branch/delegate WITHOUT the durable edge is an
+                        # independent conversation (stamped by
+                        # /api/session/branch): never continuation authority —
+                        # a newer fork must not win ownership over the true
+                        # continuation.  With the edge (a compressed fork) it
+                        # IS the continuation.
+                        continue
                 if snapshot_source and child_source and child_source != snapshot_source:
                     # Cross-surface child (e.g. CLI continuation of a WebUI
                     # parent) is not a mutating-flow compression continuation.
@@ -21748,13 +21796,52 @@ def _resolve_live_session_owner(session_id, *, preferred=None):
     return s, live_sid
 
 
+def _live_owner_routing_lane(owner, *, fallback_model=None, fallback_provider=None):
+    """Recompute the routing lane (workspace + model/provider) from a live owner.
+
+    #6327: the immutable owner token snapshots the workspace + model/provider
+    lane RECOMPUTED from the selected LIVE owner (never predecessor-derived
+    routing).  This helper recomputes the SAME lane at apply/fence time so
+    every field that authorizes apply/start is compared exactly — a
+    workspace/model/provider movement during the out-of-AGENT revalidation
+    window fails closed instead of applying the stale answer to the new lane.
+
+    Returns ``(workspace, model, provider, normalized)``.  Raises ValueError
+    when the live workspace cannot be resolved (stale/invalid workspace) —
+    callers fail closed (``workspace_unresolvable``).
+    """
+    workspace = _resolve_chat_workspace_with_recovery(owner, None)
+    _pp_provider, _pp_default, _pp_cfg = _read_profile_model_config(
+        owner, getattr(owner, "model_provider", None)
+    )
+    _lane_model, _lane_provider, _lane_normalized = (
+        _resolve_compatible_session_model_state(
+            getattr(owner, "model", None),
+            getattr(owner, "model_provider", None),
+            profile_provider=_pp_provider,
+            profile_default_model=_pp_default,
+            profile_config=_pp_cfg,
+            prefer_cached_catalog=True,
+        )
+    )
+    return (
+        str(workspace),
+        _lane_model or fallback_model,
+        _lane_provider or fallback_provider,
+        bool(_lane_normalized),
+    )
+
+
 def _process_wakeup_owner_token_mismatch(token, owner) -> str | None:
     """Return a reason string when the live owner no longer matches ``token``.
 
     Called while holding the canonical AGENT lock for ``owner``'s live sid.
     ``token`` was snapshotted under the same lock earlier; every mutable
     field the out-of-AGENT revalidation (and the validation-to-start fence)
-    depends on is compared exactly.  ``None`` means the token still matches.
+    depends on is compared exactly — owner identity, SID, archived flag,
+    profile + home generation, the ROUTE lane (workspace + model/provider,
+    recomputed from the live owner, #6327), pause version/state, and the
+    credential-state fingerprint.  ``None`` means the token still matches.
     """
     if owner is not token.get("owner"):
         return "owner_replaced"
@@ -21766,6 +21853,32 @@ def _process_wakeup_owner_token_mismatch(token, owner) -> str | None:
         return "profile_changed"
     if _process_wakeup_profile_home(owner) != token.get("profile_home"):
         return "profile_home_changed"
+    # ── #6327: fence the route lane that authorizes apply/start ────────────
+    # The token records workspace/model/provider RECOMPUTED from the selected
+    # live owner.  Recompute the same lane now: a workspace/model/provider
+    # movement during the out-of-AGENT revalidation window must never let the
+    # stale answer (or the run) apply to the new lane.
+    if token.get("workspace") is not None:
+        try:
+            _live_workspace, _live_model, _live_provider, _live_normalized = (
+                _live_owner_routing_lane(
+                    owner,
+                    fallback_model=token.get("model"),
+                    fallback_provider=token.get("provider"),
+                )
+            )
+        except ValueError:
+            # Stale/invalid live workspace: fail closed — the apply would 400
+            # on the workspace anyway.
+            return "workspace_unresolvable"
+        if str(_live_workspace) != str(token.get("workspace") or ""):
+            return "workspace_changed"
+        if str(_live_model or "") != str(token.get("model") or ""):
+            return "model_changed"
+        if str(_live_provider or "") != str(token.get("provider") or ""):
+            return "provider_changed"
+        if bool(_live_normalized) != bool(token.get("normalized_model")):
+            return "normalized_model_changed"
     live_pause = getattr(owner, "process_wakeup_pause", None)
     live_pause_state = dict(live_pause) if isinstance(live_pause, dict) else None
     if live_pause_state != token.get("pause_state"):
@@ -21844,28 +21957,20 @@ def _build_immutable_session_owner_token(
             # provider lane) from an archived pre-compression snapshot into
             # the live continuation.  Workspace, profile home, the pause key
             # (model/provider lane), and the credential fingerprint below are
-            # all derived from the selected live owner only.
+            # all derived from the selected live owner only.  The SAME lane
+            # recompute runs at apply/fence time
+            # (_process_wakeup_owner_token_mismatch) so every field that
+            # authorizes apply/start is compared exactly.
             try:
-                live_workspace = _resolve_chat_workspace_with_recovery(
-                    live_owner, None
+                live_workspace, lane_model, lane_provider, lane_normalized = (
+                    _live_owner_routing_lane(
+                        live_owner,
+                        fallback_model=model,
+                        fallback_provider=provider,
+                    )
                 )
             except ValueError as exc:
                 return None, None, {"error": str(exc), "_status": 400}
-            _pp_provider, _pp_default, _pp_cfg = _read_profile_model_config(
-                live_owner, getattr(live_owner, "model_provider", None)
-            )
-            _lane_model, _lane_provider, _lane_normalized = (
-                _resolve_compatible_session_model_state(
-                    getattr(live_owner, "model", None),
-                    getattr(live_owner, "model_provider", None),
-                    profile_provider=_pp_provider,
-                    profile_default_model=_pp_default,
-                    profile_config=_pp_cfg,
-                    prefer_cached_catalog=True,
-                )
-            )
-            lane_model = _lane_model or model
-            lane_provider = _lane_provider or provider
             pause = getattr(live_owner, "process_wakeup_pause", None)
             pause_state = dict(pause) if isinstance(pause, dict) else None
             pause_matches = bool(
@@ -21895,7 +22000,7 @@ def _build_immutable_session_owner_token(
                 "profile_home": _process_wakeup_profile_home(live_owner),
                 "model": lane_model,
                 "provider": lane_provider,
-                "normalized_model": bool(_lane_normalized),
+                "normalized_model": bool(lane_normalized),
                 "workspace": str(live_workspace),
                 "pause_state": pause_state,
                 "pause_matches": pause_matches,
@@ -21905,7 +22010,7 @@ def _build_immutable_session_owner_token(
                 "workspace": str(live_workspace),
                 "model": lane_model,
                 "provider": lane_provider,
-                "normalized_model": bool(_lane_normalized),
+                "normalized_model": bool(lane_normalized),
             }
             return token, live_owner, routing
     if _fingerprint_unreadable:
@@ -22185,31 +22290,221 @@ def _validate_start_owner_fence(owner_token, held_lock) -> str | None:
     return _process_wakeup_owner_token_mismatch(owner_token, owner)
 
 
-def _stream_worker_owner_token_mismatch(owner_token, s) -> str | None:
-    """Lock-free token check for the spawned stream worker's ``get_session()``.
+def _worker_atomic_owner_claim(
+    owner_token,
+    s,
+    *,
+    stream_id,
+    session_id,
+    wakeup_prompt=None,
+    requeue_wakeup=False,
+) -> str | None:
+    """Atomically claim the canonical owner at the worker's side-effect boundary.
 
     #6327 required shape, step 5b (route-to-worker acceptance): the worker
     thread re-reads the canonical session via ``get_session(session_id)``
     after the route layer already validated the fence under AGENT.  A
     same-SID replacement between route acceptance and that re-read would
     otherwise make the worker run the conversation on the replacement object
-    (different profile/home/credential generation) while the pending state was
-    written to the tokenized owner.  This check carries the exact
-    owner/generation authority into the worker: identity + SID + archived
-    flag + every token field.  Read-only (no AGENT, no PROCESS).
+    (different profile/home/credential generation) while the pending state
+    was written to the tokenized owner.  This claim carries the exact
+    owner/generation authority into the worker UNDER the canonical per-session
+    AGENT lock — closing the check-to-provider-call gap — and verifies the
+    worker's own re-read ``s`` is the tokenized owner with every token field
+    still matching (identity + SID + archived flag + route lane + pause +
+    credential fingerprint).
+
+    On mismatch the provisional pending state the ROUTE wrote (pending
+    sidecar + active stream id) is TRANSACTIONALLY retired under the same
+    lock, the wakeup is re-deferred (``requeue_wakeup``) so the drain
+    redelivers on the CURRENT live owner, and the stream owner registry entry
+    is dropped — never \"acknowledge success and fail later on an unowned
+    stream\".  The caller emits the apperror; its own finally closes the
+    stream channel.
+
+    Returns None when the owner is claimed; else the mismatch reason.  Never
+    acquires PROCESS; never raises into the worker.
     """
     if not isinstance(owner_token, dict):
         return None
     owner = owner_token.get("owner")
     if owner is None:
-        return "missing_owner"
+        return _worker_retire_pending_state(
+            owner_token,
+            stream_id=stream_id,
+            session_id=session_id,
+            wakeup_prompt=wakeup_prompt,
+            requeue_wakeup=requeue_wakeup,
+            reason="missing_owner",
+        )
     if s is not owner:
-        return "owner_replaced"
-    if str(getattr(s, "session_id", "") or "") != str(owner_token.get("session_id") or ""):
-        return "session_id_rotated"
-    if getattr(s, "pre_compression_snapshot", False):
-        return "session_archived"
-    return _process_wakeup_owner_token_mismatch(owner_token, s)
+        # The worker's re-read is not the tokenized owner (same-SID
+        # replacement, or in-place SID rotation where get_session(stale_sid)
+        # falls back to the archived pre-compression snapshot).  Never run on
+        # the wrong object: retire the route's provisional pending state and
+        # re-defer the wakeup so the next drain resolves the CURRENT live
+        # owner through the continuation authority.
+        return _worker_retire_pending_state(
+            owner_token,
+            stream_id=stream_id,
+            session_id=session_id,
+            wakeup_prompt=wakeup_prompt,
+            requeue_wakeup=requeue_wakeup,
+            reason="owner_replaced",
+        )
+    live_sid = str(getattr(owner, "session_id", "") or "")
+    if not live_sid:
+        return _worker_retire_pending_state(
+            owner_token,
+            stream_id=stream_id,
+            session_id=session_id,
+            wakeup_prompt=wakeup_prompt,
+            requeue_wakeup=requeue_wakeup,
+            reason="empty_sid",
+        )
+    lock = _get_session_agent_lock(live_sid)
+    with lock:
+        with SESSION_AGENT_LOCKS_LOCK:
+            canonical = SESSION_AGENT_LOCKS.get(live_sid)
+        if canonical is not lock:
+            return _worker_retire_pending_state(
+                owner_token,
+                stream_id=stream_id,
+                session_id=session_id,
+                wakeup_prompt=wakeup_prompt,
+                requeue_wakeup=requeue_wakeup,
+                reason="lock_migrated",
+            )
+        try:
+            resolved = get_session(live_sid)
+        except KeyError:
+            resolved = None
+        if resolved is None or resolved is not owner:
+            return _worker_retire_pending_state(
+                owner_token,
+                stream_id=stream_id,
+                session_id=session_id,
+                wakeup_prompt=wakeup_prompt,
+                requeue_wakeup=requeue_wakeup,
+                reason="owner_replaced",
+            )
+        mismatch = _process_wakeup_owner_token_mismatch(owner_token, owner)
+        if mismatch:
+            return _worker_retire_pending_state(
+                owner_token,
+                stream_id=stream_id,
+                session_id=session_id,
+                wakeup_prompt=wakeup_prompt,
+                requeue_wakeup=requeue_wakeup,
+                reason=mismatch,
+            )
+    return None
+
+
+def _worker_retire_pending_state(
+    owner_token,
+    *,
+    stream_id,
+    session_id,
+    wakeup_prompt=None,
+    requeue_wakeup=False,
+    reason="",
+) -> str:
+    """Transactionally retire the route's provisional pending state.
+
+    The route layer wrote pending sidecar fields (pending_user_message /
+    pending_attachments / pending_started_at / pending_user_source) and the
+    active stream id onto the tokenized owner before spawning the worker.
+    When the worker refuses the owner at its side-effect boundary, those
+    provisional fields must be retired (not left dangling behind an acked
+    stream), the wakeup re-deferred so the drain redelivers, and the stream
+    owner registry entry dropped.  Retiring runs under the canonical per-
+    session AGENT lock so it is atomic with any concurrent writer.  Never
+    acquires PROCESS; never raises into the worker.
+    """
+    owner = owner_token.get("owner")
+    live_sid = str(getattr(owner, "session_id", "") or "") if owner is not None else ""
+    if live_sid:
+        try:
+            lock = _get_session_agent_lock(live_sid)
+            with lock:
+                with SESSION_AGENT_LOCKS_LOCK:
+                    canonical = SESSION_AGENT_LOCKS.get(live_sid)
+                if canonical is not lock:
+                    return reason
+                try:
+                    resolved = get_session(live_sid)
+                except KeyError:
+                    resolved = None
+                if resolved is None or resolved is not owner:
+                    return reason
+                _retire_provisional_pending_state(owner, stream_id=stream_id)
+        except Exception:
+            logger.debug(
+                "failed to retire provisional pending state for session %s (reason=%s)",
+                session_id,
+                reason,
+                exc_info=True,
+            )
+    if requeue_wakeup and wakeup_prompt:
+        try:
+            from api.background_process import record_deferred_wakeup
+
+            record_deferred_wakeup(str(session_id), "", str(wakeup_prompt))
+        except Exception:
+            logger.debug(
+                "failed to re-defer wakeup for session %s (reason=%s)",
+                session_id,
+                reason,
+                exc_info=True,
+            )
+    try:
+        unregister_stream_owner(stream_id)
+    except Exception:
+        logger.debug("failed to unregister stream owner for stream %s", stream_id, exc_info=True)
+    return reason
+
+
+def _retire_provisional_pending_state(session, *, stream_id) -> None:
+    """Clear the provisional pending sidecar fields for a refused stream.
+
+    Mirrors the route-side ``_prepare_chat_start_session_for_stream`` write:
+    pending_user_message/pending_attachments/pending_started_at/
+    pending_user_source are the exact fields that helper set.  The active
+    stream id is cleared only when it still points at the refused stream (a
+    newer turn may have claimed the session in the meantime — never clobber
+    it).  Called while holding the canonical per-session AGENT lock.
+    """
+    changed = False
+    for attr in (
+        "pending_user_message",
+        "pending_attachments",
+        "pending_started_at",
+        "pending_user_source",
+    ):
+        if getattr(session, attr, None) not in (None, [], ""):
+            try:
+                setattr(session, attr, [] if attr == "pending_attachments" else None)
+                changed = True
+            except Exception:
+                logger.debug(
+                    "failed to clear provisional field %s on session %s",
+                    attr,
+                    getattr(session, "session_id", None),
+                    exc_info=True,
+                )
+    if getattr(session, "active_stream_id", None) == stream_id:
+        try:
+            session.active_stream_id = None
+            changed = True
+        except Exception:
+            logger.debug(
+                "failed to clear active_stream_id on session %s",
+                getattr(session, "session_id", None),
+                exc_info=True,
+            )
+    if changed:
+        _save_session_quietly(session, getattr(session, "session_id", None))
 
 
 # #6327: bounded retries for the out-of-AGENT credential revalidation loop in

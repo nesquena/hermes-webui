@@ -65,6 +65,10 @@ class HttpRunnerClient:
             "toolsets": list(request.toolsets or []),
             "source": request.source,
             "metadata": dict(request.metadata or {}),
+            # #6327: owner fence claimed under the WebUI per-session AGENT lock
+            # right before this call; the runner validates/records the
+            # generation so an unowned run is never acknowledged.
+            "owner_fence": dict(request.owner_fence or {}),
         })
 
     def observe_run(self, run_id: str, *, cursor: str | None = None) -> dict[str, Any]:

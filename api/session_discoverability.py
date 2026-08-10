@@ -58,6 +58,7 @@ def _record_from_mapping(mapping: dict, source_name: str) -> dict:
         "is_cli_session": mapping.get("is_cli_session"),
         "parent_session_id": mapping.get("parent_session_id"),
         "pre_compression_snapshot": bool(mapping.get("pre_compression_snapshot")),
+        "compression_continuation_of": mapping.get("compression_continuation_of"),
         "_lineage_root_id": mapping.get("_lineage_root_id"),
         "archived": bool(mapping.get("archived")),
         "project_id": mapping.get("project_id"),

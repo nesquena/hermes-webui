@@ -725,13 +725,26 @@ def _run_gateway_chat_streaming(
     try:
         s = get_session(session_id)
         if owner_token is not None:
-            # #6327 route-to-worker acceptance (gateway worker): same fence as
-            # _run_agent_streaming — never run the conversation on a
-            # same-SID replacement that landed between route acceptance and
-            # the worker's own get_session() re-read.
-            from api.routes import _stream_worker_owner_token_mismatch
+            # #6327 route-to-worker acceptance (gateway worker): same atomic
+            # claim as _run_agent_streaming — re-verify the exact
+            # owner/generation authority UNDER the canonical per-session AGENT
+            # lock (closing the check-to-provider-call gap) and, on mismatch,
+            # transactionally retire the route's provisional pending state +
+            # re-defer the wakeup; never run the conversation on a same-SID
+            # replacement that landed between route acceptance and the
+            # worker's own get_session() re-read.
+            from api.routes import _worker_atomic_owner_claim
 
-            _worker_mismatch = _stream_worker_owner_token_mismatch(owner_token, s)
+            _worker_mismatch = _worker_atomic_owner_claim(
+                owner_token,
+                s,
+                stream_id=stream_id,
+                session_id=session_id,
+                wakeup_prompt=msg_text
+                if (getattr(s, "pending_user_source", None) or "") == "process_wakeup"
+                else None,
+                requeue_wakeup=(getattr(s, "pending_user_source", None) or "") == "process_wakeup",
+            )
             if _worker_mismatch is not None:
                 logger.warning(
                     "gateway stream worker %s refused owner for session %s: %s",
@@ -743,6 +756,7 @@ def _run_gateway_chat_streaming(
                     "error": "session owner changed before the agent turn started",
                     "owner_fence": _worker_mismatch,
                     "session_id": session_id,
+                    "retryable": True,
                     "_status": 409,
                 })
                 return  # apperror closes the stream on the client side
