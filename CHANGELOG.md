@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Opt-in strict workspace registration for Add Space (#6424).** Deployments that must keep the agent/file-API trust boundary narrow can set `HERMES_WEBUI_STRICT_WORKSPACE_REGISTRATION=1` so `/api/workspaces/add` only accepts paths under the home directory, the default workspace, or roots listed in `HERMES_WEBUI_ALLOWED_WORKSPACE_ROOTS`. The default remains the existing external-mount registration contract (#953/#991); remote-terminal target paths are unchanged.
+
 ### Changed
 
 - **The workspace file tree can now be sorted, and the "Show hidden files" toggle moved into a menu.** The workspace pane's ⋮ options menu gains a "Sort by" group — Name (A→Z), Name (Z→A), Date created, Date modified — and your choice persists across sessions. "Date created" is disabled with an inline note on platforms/servers that don't report creation time. The pre-existing "Show hidden files" toggle moves from a permanent inline row into that same menu, reclaiming vertical space on every workspace view; a small indicator on the heading still reflects when hidden files are shown. Thanks @rodboev. (#6091, #6066)
