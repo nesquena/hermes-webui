@@ -862,10 +862,11 @@ def test_chat_stream_resume_cursor_prefers_query_params_over_header():
 
     handler = _HeaderHandler(last_event_id="run_1:9")
     qs = {"after_event_id": ["run_1:4"]}
-    assert routes._chat_stream_resume_cursor(handler, qs, "run_1") == (4, True, "run_1:4")
+    # (after_seq, requested, raw_cursor, runner_cursor)
+    assert routes._chat_stream_resume_cursor(handler, qs, "run_1") == (4, True, "run_1:4", "run_1:4")
 
     qs = {"after_seq": ["7"]}
-    assert routes._chat_stream_resume_cursor(handler, qs, "run_1") == (7, True, None)
+    assert routes._chat_stream_resume_cursor(handler, qs, "run_1") == (7, True, None, "7")
 
 
 def test_chat_stream_resume_cursor_explicit_unparseable_query_blocks_header():
@@ -879,10 +880,12 @@ def test_chat_stream_resume_cursor_explicit_unparseable_query_blocks_header():
     # presence must still block the (parseable) header.
     handler = _HeaderHandler(last_event_id="run_1:9")
     qs = {"after_event_id": ["run_other:2"]}
-    after_seq, requested, raw = routes._chat_stream_resume_cursor(handler, qs, "run_1")
+    after_seq, requested, raw, runner = routes._chat_stream_resume_cursor(handler, qs, "run_1")
     assert after_seq is None
     assert requested is True  # asked to resume → replay-from-start downstream
     assert raw == "run_other:2"  # explicit query cursor surfaced, header ignored
+    # No valid paired seq and a foreign journal run → no runner cursor (full replay).
+    assert runner is None
 
 
 def test_chat_stream_resume_cursor_reads_last_event_id_header():
@@ -890,7 +893,7 @@ def test_chat_stream_resume_cursor_reads_last_event_id_header():
     import api.routes as routes
 
     handler = _HeaderHandler(last_event_id="run_1:3")
-    assert routes._chat_stream_resume_cursor(handler, {}, "run_1") == (3, True, "run_1:3")
+    assert routes._chat_stream_resume_cursor(handler, {}, "run_1") == (3, True, "run_1:3", "run_1:3")
 
 
 def test_chat_stream_resume_cursor_foreign_run_header_is_requested_but_unusable():
@@ -900,10 +903,13 @@ def test_chat_stream_resume_cursor_foreign_run_header_is_requested_but_unusable(
     import api.routes as routes
 
     handler = _HeaderHandler(last_event_id="run_other:5")
-    after_seq, requested, raw = routes._chat_stream_resume_cursor(handler, {}, "run_1")
+    after_seq, requested, raw, runner = routes._chat_stream_resume_cursor(handler, {}, "run_1")
     assert after_seq is None
     assert requested is True
     assert raw == "run_other:5"
+    # The runner keys cursors per run independently, so the opaque header value
+    # is preserved for the runner even though the journal path rejects it.
+    assert runner == "run_other:5"
 
 
 def test_chat_stream_resume_cursor_absent_without_any_cursor():
@@ -911,10 +917,12 @@ def test_chat_stream_resume_cursor_absent_without_any_cursor():
     import api.routes as routes
 
     handler = _HeaderHandler()
-    assert routes._chat_stream_resume_cursor(handler, {}, "run_1") == (None, False, None)
-    # Malformed header values are unusable but still a resume request.
+    assert routes._chat_stream_resume_cursor(handler, {}, "run_1") == (None, False, None, None)
+    # Malformed header values are unusable but still a resume request. A
+    # colon-less opaque value is preserved for the runner (runner ids need not
+    # be journal-shaped); a colon value that fails int() parsing is not.
     handler = _HeaderHandler(last_event_id="not-a-cursor")
-    assert routes._chat_stream_resume_cursor(handler, {}, "run_1") == (None, True, "not-a-cursor")
+    assert routes._chat_stream_resume_cursor(handler, {}, "run_1") == (None, True, "not-a-cursor", "not-a-cursor")
 
 
 def test_dead_stream_replay_uses_last_event_id_header(monkeypatch):
@@ -1364,3 +1372,37 @@ def test_runner_explicit_opaque_cursor_wins(monkeypatch):
         last_event_id="run_1:5",
     )
     assert calls == [("run_1", "opaque-xyz")]
+
+
+def test_runner_paired_opaque_event_id_resumes(monkeypatch):
+    """Runner path: an opaque runner event id (event:2) PAIRED with a valid
+    after_seq resumes at that seq — never None (full replay), which would
+    duplicate tokens/tool events (Codex r3 probe 1)."""
+    calls = _run_runner_probe(
+        monkeypatch,
+        "/api/chat/stream?stream_id=run_1&after_event_id=event:2&after_seq=2",
+    )
+    assert calls == [("run_1", "2")]
+
+
+def test_runner_header_only_opaque_event_id_resumes(monkeypatch):
+    """Runner path: a header-only opaque runner event id (Last-Event-ID:
+    event:2) resumes from it — never None (full replay / duplicates)
+    (Codex r3 probe 2)."""
+    calls = _run_runner_probe(
+        monkeypatch,
+        "/api/chat/stream?stream_id=run_1",
+        last_event_id="event:2",
+    )
+    assert calls == [("run_1", "event:2")]
+
+
+def test_runner_malformed_explicit_with_valid_seq_uses_seq(monkeypatch):
+    """Runner path: a malformed after_event_id PAIRED with a valid after_seq
+    resumes at the seq, not the malformed raw value (Codex r3 probe 2
+    counterpart)."""
+    calls = _run_runner_probe(
+        monkeypatch,
+        "/api/chat/stream?stream_id=run_1&after_event_id=malformed&after_seq=5",
+    )
+    assert calls == [("run_1", "5")]

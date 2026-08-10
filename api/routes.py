@@ -17436,29 +17436,39 @@ def _parse_run_journal_event_id(raw: str | None) -> tuple[str | None, int | None
     return _shared_parse_run_journal_event_id(raw)
 
 
-def _chat_stream_resume_cursor(handler, qs: dict, stream_id: str | None = None) -> tuple[int | None, bool, str | None]:
+def _chat_stream_resume_cursor(handler, qs: dict, stream_id: str | None = None) -> tuple[int | None, bool, str | None, str | None]:
     """Resolve the client's resume cursor for ``/api/chat/stream``.
 
-    Returns ``(after_seq, resume_requested, raw_cursor)``:
+    Returns ``(after_seq, resume_requested, raw_cursor, runner_cursor)``:
 
     - ``after_seq``: the parsed same-run cursor seq, or ``None`` when there is
-      no usable same-run cursor.
+      no usable same-run (journal-shaped) cursor.
     - ``resume_requested``: True when the client SUPPLIED any cursor — via the
       ``after_event_id`` / ``after_seq`` query params, ``replay=1``, or the
       ``Last-Event-ID`` header — regardless of whether it parsed.
     - ``raw_cursor``: the opaque cursor string exactly as the client supplied it
-      (the ``Last-Event-ID`` value, or the explicit ``after_event_id``), so
-      consumers that need the opaque form (the runner observe path) can use the
-      ALREADY-RESOLVED value instead of re-reading the header or re-parsing
-      query params.
+      (the ``Last-Event-ID`` value, or the explicit ``after_event_id``).
+    - ``runner_cursor``: the cursor to hand to the runner observe path, resolved
+      with PROVENANCE so the runner adapter (whose cursors are opaque, not
+      journal-shaped) gets a cursor it can actually use:
+
+        * a valid ``after_seq`` pairs with whatever ``after_event_id`` was
+          supplied — even an opaque runner id like ``event:2`` that the
+          journal parser reads as a foreign run — so the paired runner cursor
+          resumes at the seq (never ``None`` / full replay, which would
+          duplicate events);
+        * a header-only opaque runner id (``Last-Event-ID: event:2``) is
+          preserved as-is so the runner resumes from it;
+        * a malformed or foreign explicit cursor WITHOUT a valid paired
+          ``after_seq`` yields ``None`` — it must block the header and replay
+          from start (this preserves the r2 malformed-blocks-header rule and
+          never forwards an unusable cursor to the runner).
 
     The presence flag must stay separate from validity: a malformed, foreign-run,
     or ahead-of-stream cursor resolves to ``after_seq=None`` but still means the
     client *asked* to resume. That request must be honored with a
     replay-from-start so no journal events are silently skipped — whereas a
-    genuinely cursor-less request is a fresh subscribe (no replay). Collapsing
-    both into a bare ``None`` is what let an invalid cursor bypass replay and
-    drain a truncated buffer.
+    genuinely cursor-less request is a fresh subscribe (no replay).
 
     Precedence is decided by query-parameter PRESENCE, not successful parsing:
     when an explicit ``after_seq`` / ``after_event_id`` is supplied (even an
@@ -17472,30 +17482,78 @@ def _chat_stream_resume_cursor(handler, qs: dict, stream_id: str | None = None) 
     ``_sse_with_id()``. Same resolution-chain precedent as
     ``api/kanban_bridge.py`` (``?since=`` → ``Last-Event-ID``).
     """
+    after_seq_raw = qs.get("after_seq", [None])[0]
     has_explicit_query = (
-        qs.get("after_seq", [None])[0] not in (None, "")
+        after_seq_raw not in (None, "")
         or bool(qs.get("after_event_id", [None])[0])
         or bool(qs.get("replay", [""])[0])
     )
     if has_explicit_query:
         explicit_raw = str(qs.get("after_event_id", [None])[0] or "").strip() or None
-        return _parse_run_journal_after_seq(qs, stream_id), True, explicit_raw
+        after_seq = _parse_run_journal_after_seq(qs, stream_id)
+        # Runner cursor provenance. ``after_seq`` is authoritative when it
+        # parses — it pairs with whatever ``after_event_id`` shape was
+        # supplied, including opaque runner ids (``event:2``) that the journal
+        # parser reads as a foreign run. Read it directly here (not via
+        # ``_parse_run_journal_after_seq``, which checks ``after_event_id``
+        # FIRST and would swallow a paired opaque runner id as "foreign").
+        paired_seq = _parse_run_journal_after_seq_value(after_seq_raw)
+        if paired_seq is not None:
+            runner_cursor = str(paired_seq)
+        else:
+            event_run_id, event_seq = _parse_run_journal_event_id(explicit_raw)
+            runner_cursor = (
+                explicit_raw
+                if explicit_raw and event_seq is not None and (not stream_id or event_run_id == stream_id)
+                else None
+            )
+        return after_seq, True, explicit_raw, runner_cursor
     headers = getattr(handler, "headers", None)
     if headers is None:
-        return None, False, None
+        return None, False, None, None
     try:
         raw = headers.get("Last-Event-ID")
     except Exception:
-        return None, False, None
+        return None, False, None, None
     raw = str(raw or "").strip()
     if not raw:
-        return None, False, None
+        return None, False, None, None
     event_run_id, event_seq = _parse_run_journal_event_id(raw)
     if event_run_id and event_seq is not None:
         if stream_id and event_run_id != stream_id:
-            return None, True, raw  # foreign-run cursor: asked to resume, can't honor
-        return event_seq, True, raw
-    return None, True, raw  # malformed header cursor: asked to resume, can't honor
+            # Foreign-run journal cursor: asked to resume THIS run but the cursor
+            # names a different journal run — can't honor it for the journal
+            # path (after_seq stays None → replay-from-start). The runner path
+            # keys cursors by run_id independently (the cursor is forwarded as
+            # an opaque per-run query param), so a ``run:seq`` header still
+            # reaches it as-is; this mirrors how a foreign after_event_id on
+            # the journal path is rejected while the same client's explicit
+            # opaque cursor= would still reach the runner.
+            return None, True, raw, raw
+        return event_seq, True, raw, raw
+    # Malformed as a JOURNAL cursor. A colon-less opaque value is a plausible
+    # runner cursor (runner ids need not be journal-shaped), so preserve it for
+    # the runner; a value that merely fails int() parsing is unusable anywhere.
+    runner_cursor = raw if ":" not in raw else None
+    return None, True, raw, runner_cursor
+
+
+def _parse_run_journal_after_seq_value(raw) -> int | None:
+    """Parse a bare ``after_seq`` value, independent of any ``after_event_id``.
+
+    Used by the runner-cursor provenance path, where ``after_seq`` is
+    authoritative on its own and must NOT be gated behind the
+    ``after_event_id``-first ordering of ``_parse_run_journal_after_seq`` (a
+    paired opaque runner id like ``event:2`` would otherwise be read as a
+    foreign run and swallow the seq). Mirrors the ``after_seq`` tail of that
+    parser: absent/blank → None, non-numeric → 0.
+    """
+    if raw in (None, ""):
+        return None
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _parse_run_journal_after_seq(qs: dict, stream_id: str | None = None) -> int | None:
@@ -17874,20 +17932,20 @@ def _handle_sse_stream(handler, parsed):
     # unusable (invalid/foreign/ahead-of-stream) cursor must replay from start
     # rather than silently skip journal events.
     resume_cursor = _chat_stream_resume_cursor(handler, qs, stream_id)
-    resume_after_seq, resume_requested, resume_raw_cursor = resume_cursor
+    resume_after_seq, resume_requested, resume_raw_cursor, runner_resume_cursor = resume_cursor
     stream = STREAMS.get(stream_id)
     if stream is None:
         # Runner-observe path: consume the ALREADY-RESOLVED cursor — do not
-        # re-parse query params or re-read the header (Codex r2 #3). The
+        # re-parse query params or re-read the header (Codex r2 #3 / r3). The
         # explicit opaque ``cursor`` query param still wins for runner clients
-        # that speak that contract. Otherwise use the resolved opaque cursor
-        # (the Last-Event-ID the resolver already read and precedence-checked).
-        # An invalid/foreign resume request (after_seq None, requested True)
-        # passes NO cursor so the runner replays from start rather than
-        # resuming from a cursor we could not honor.
+        # that speak that contract. Otherwise use the resolver's
+        # provenance-resolved runner cursor: a valid ``after_seq`` pairs with
+        # opaque runner ids (event:2), a header-only opaque runner id resumes
+        # as-is, and a malformed/foreign cursor without a valid paired seq
+        # yields None (replay from start, never forwarding an unusable cursor).
         runner_cursor = str(qs.get("cursor", [""])[0] or "").strip() or None
-        if runner_cursor is None and resume_requested and resume_after_seq is not None:
-            runner_cursor = resume_raw_cursor or str(resume_after_seq)
+        if runner_cursor is None and resume_requested:
+            runner_cursor = runner_resume_cursor
         if _stream_runner_run_events(handler, stream_id, runner_cursor):
             return True
         try:
