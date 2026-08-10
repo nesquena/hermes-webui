@@ -8450,6 +8450,15 @@ def _session_message_content_key(msg: dict):
         content = " ".join(
             _strip_workspace_prefix(content, include_legacy=True).split()
         )
+        # Issue #6460: same class of bug as #5339, different asymmetry
+        # source. hermes-agent's session_db persistence path flattens
+        # image-attachment content and appends a "[screenshot]" placeholder
+        # before writing to state.db; the WebUI sidecar row keeps the
+        # original text with no placeholder. That made a state.db row and
+        # its sidecar counterpart for the SAME image-bearing turn key
+        # differently, defeating dedup the same way the workspace-prefix
+        # mismatch did before #5360. Strip the placeholder here too.
+        content = " ".join(re.sub(r"\[screenshot\]", "", content).split())
     return (
         role,
         content,
