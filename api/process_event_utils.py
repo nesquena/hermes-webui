@@ -73,6 +73,10 @@ _WAKEUP_WATCH_MATCH_RE = re.compile(
     r"Command: (?P<cmd>[^\n]*)\n"
     r"Matched output:\n"
 )
+_ASYNC_DELEGATION_HEADER_RE = re.compile(
+    r"^\s*\[ASYNC DELEGATION(?: BATCH)? COMPLETE\s+—\s+(?P<id>[^\]\s]+)\]",
+    re.IGNORECASE,
+)
 
 
 def wakeup_display_meta(text: Any) -> dict | None:
@@ -138,6 +142,26 @@ def attach_wakeup_display_meta(msg: Any, source: Any) -> None:
         msg["_wakeup_meta"] = meta
 
 
+def attach_internal_event_meta(msg: Any, source: Any) -> None:
+    """Keep transport events auditable without attributing them to the user."""
+    if not isinstance(msg, dict) or source not in {"process_wakeup", "async_delegation"}:
+        return
+    msg["_display_kind"] = "internal_event"
+    msg["_user_originated"] = False
+    if source != "async_delegation":
+        return
+    msg["_event_kind"] = "workflow.async_delegation.terminal"
+    try:
+        match = _ASYNC_DELEGATION_HEADER_RE.match(str(msg.get("content") or ""))
+    except Exception:
+        match = None
+    if not match:
+        return
+    delegation_id = match.group("id")
+    msg["_event_id"] = f"async_delegation:{delegation_id}:terminal"
+    msg["_workflow_id"] = f"delegation:{delegation_id}"
+
+
 def build_active_turn_token(stream_id: Any, started_at: Any) -> str | None:
     """Return the exact eager-row token for one active WebUI turn."""
     if not stream_id:
@@ -172,6 +196,7 @@ def stamp_message_source(
         return
     msg["_source"] = source
     attach_wakeup_display_meta(msg, source)
+    attach_internal_event_meta(msg, source)
 
 
 def _claim_bounded_local(delegation_id: str) -> bool:

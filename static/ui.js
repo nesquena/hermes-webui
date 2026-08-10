@@ -615,9 +615,47 @@ function _cancelMessageVirtualizedRender(){
     _messageVirtualScrollRaf=0;
   }
 }
+function _isInternalTransportMessage(m){
+  if(!m||typeof m!=='object') return false;
+  return m._display_kind==='internal_event'
+    || m._user_originated===false
+    || m._source==='process_wakeup'
+    || m._source==='async_delegation';
+}
+function _assistantFollowsInternalTransport(messages, rawIdx){
+  const rows=Array.isArray(messages)?messages:[];
+  for(let i=Number(rawIdx)-1;i>=0;i--){
+    const candidate=rows[i];
+    if(!candidate||candidate.role==='tool') continue;
+    if(candidate.role==='user') return _isInternalTransportMessage(candidate);
+  }
+  return false;
+}
+function _hasLaterRenderableAssistant(messages, rawIdx){
+  const rows=Array.isArray(messages)?messages:[];
+  for(let i=Number(rawIdx)+1;i<rows.length;i++){
+    const candidate=rows[i];
+    if(candidate&&candidate.role==='assistant'&&_messageIsRenderable(candidate)) return true;
+  }
+  return false;
+}
+function _projectInternalProgressContent(messages, rawIdx, content){
+  const text=String(content||'').trim();
+  if(!text||!_assistantFollowsInternalTransport(messages, rawIdx)) return content;
+  if(!_hasLaterRenderableAssistant(messages, rawIdx)) return content;
+  let summary=text
+    .replace(/^\s*#\s*CONCLUSION\s*\n\s*---\s*\n?/i,'')
+    .replace(/^\s*>?\s*🟢\s*Réponse\s*\/\s*recommandation\s*:\s*/i,'')
+    .split(/\n\s*\n/,1)[0]
+    .replace(/\s+/g,' ')
+    .trim();
+  if(!summary) summary='Étape interne terminée';
+  if(summary.length>240) summary=summary.slice(0,237).trimEnd()+'…';
+  return `**Progression** — ${summary}`;
+}
 function _messageIsRenderable(m){
   if(!m||!m.role||m.role==='tool') return false;
-  if(m._source === 'process_wakeup') return !!(msgContent(m)||m.attachments?.length);
+  if(_isInternalTransportMessage(m)) return false;
   if(_isContextCompactionMessage(m)||_isPreservedCompressionTaskListMessage(m)) return false;
   if(_isRecoveryControlMessage(m)) return false;
   const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
@@ -16588,8 +16626,9 @@ function renderMessages(options){
         }
       }
     }
-    const isProcessWakeup=m&&m._source==='process_wakeup';
     const isUser=m.role==='user';
+    const isProcessWakeup=m&&m._source==='process_wakeup';
+    if(!isUser) content=_projectInternalProgressContent(S.messages, rawIdx, content);
     if(!isUser&&_isMarkerOnlyAssistantCompressionMessage(m)){
       content='**Error:** No response received after context compression. Please retry.';
     }
