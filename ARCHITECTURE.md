@@ -59,6 +59,7 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       auth.py              Optional password authentication, signed cookies, passkeys/WebAuthn
       config.py            Discovery, globals, model detection, reloadable config
       helpers.py           HTTP helpers: j(), bad(), require(), safe_resolve(), security headers
+      goals.py             Persistent-goal commands and profile-scoped native GoalManager bridge
       models.py            Session model + CRUD, per-session profile tracking, CLI/state.db bridge
       profiles.py          Profile state management, hermes_cli wrapper
       onboarding.py        First-run onboarding status, real provider config writes, OAuth linking, readiness detection
@@ -393,6 +394,25 @@ read_file_content(workspace, rel):
     - Enforces MAX_FILE_BYTES = 200KB size limit
     - Reads as UTF-8 with errors='replace' (binary files show replacement chars)
     - Returns {path, content, size, lines}
+
+### 4.8 Persistent Goal Profile Boundary
+
+`api/goals.py` exposes the WebUI `/goal` command payloads and post-turn evaluation hook.
+Hermes Agent's native `GoalManager` is the authoritative owner of goal evaluation,
+continuation decisions, wait barriers, failure counters, contracts, subgoals, and
+`state.db` persistence.
+
+For a profile-scoped WebUI session, the bridge binds that profile's Hermes home with
+the Agent's context-local `set_hermes_home_override()` API before constructing or
+calling the native manager. The override is reset in a `finally` block after every
+operation, so concurrent sessions using the same session ID under different profiles
+cannot cross-read or cross-write goal state. Goal snapshot rollback uses the same
+scoped native persistence path.
+
+Older Hermes Agent versions that do not expose the context-local home API continue
+through `_LegacyProfileGoalManager`, which pins persistence to the selected profile's
+explicit `state.db` path. Keep this fallback compatibility-only: new goal semantics
+belong in Hermes Agent's native manager rather than a second WebUI implementation.
 
 ---
 
