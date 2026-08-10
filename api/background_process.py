@@ -1218,7 +1218,11 @@ def _canonical_wakeup_session_id(session_id: str) -> str:
     if not getattr(session, "pre_compression_snapshot", False):
         return target
 
-    profile = str(getattr(session, "profile", "") or "") or None
+    # This runs on a background completion thread, where profile=None would
+    # select state_sync's TLS/process-global fallback.  Legacy/default WebUI
+    # sidecars legitimately store None or "", so pin those values to the
+    # explicit root-profile alias instead of risking a named profile's DB.
+    profile = str(getattr(session, "profile", "") or "") or "default"
     db = None
     try:
         from api.state_sync import _get_state_db
