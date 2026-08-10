@@ -9620,6 +9620,7 @@ from api.models import (
     get_cli_session_messages,
     get_state_db_session_messages,
     read_session_message_tail,
+    read_session_auxiliary_metadata,
     get_state_db_session_message_prefix_summary,
     get_state_db_session_message_keys_before_timestamp,
     get_state_db_session_summary,
@@ -12828,7 +12829,11 @@ def handle_get(handler, parsed) -> bool:
             # Keep the initial bounded display request metadata-only. A full
             # Session.load() here would deserialize the complete sidecar before
             # the tail window can be sliced (#session-load-tail).
-            _initial_bounded_load = msg_limit is not None and msg_before is None
+            _initial_bounded_load = (
+                msg_limit is not None
+                and msg_before is None
+                and _sidecar_file_exceeds_threshold(sid, _SIDECAR_BYTE_TAIL_THRESHOLD)
+            )
             s = get_session(
                 sid,
                 metadata_only=(not load_messages or _initial_bounded_load),
@@ -12870,8 +12875,14 @@ def handle_get(handler, parsed) -> bool:
                         _tail_budget = max(300, int(msg_limit) * 10)
                         _tail, _tail_offset = read_session_message_tail(sid, _tail_budget)
                         _metadata_count = getattr(s, "_metadata_message_count", None)
-                        if _tail or _metadata_count == 0:
+                        if _tail:
                             limited_sidecar_messages = _tail
+                            _auxiliary = read_session_auxiliary_metadata(sid)
+                            if _auxiliary:
+                                s.anchor_activity_scenes = _auxiliary.get(
+                                    "anchor_activity_scenes", {}
+                                )
+                                s.tool_calls = _auxiliary.get("tool_calls", [])
                             s._display_tail_loaded = True
                             s._display_tail_offset = max(0, int(_tail_offset or 0))
                             s._display_tail_total_count = (
@@ -12892,9 +12903,14 @@ def handle_get(handler, parsed) -> bool:
                         msg_before=msg_before,
                     )
                 if _tail_loaded:
-                    # The WebUI sidecar is authoritative for this initial
-                    # display tail. Avoid a second unbounded state.db merge.
-                    state_db_messages = []
+                    # Preserve the existing reconciliation contract. The sidecar
+                    # tail avoids the multi-gigabyte parse, while state.db remains
+                    # authoritative for rows that were appended or repaired after
+                    # the sidecar snapshot.
+                    state_db_messages = get_state_db_session_messages(
+                        sid,
+                        profile=_session_profile,
+                    )
                 else:
                     _state_db_reader_kwargs = {"profile": _session_profile}
                     if state_db_since_timestamp is not None:

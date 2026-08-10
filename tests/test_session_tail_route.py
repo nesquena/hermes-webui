@@ -28,7 +28,8 @@ def test_initial_bounded_session_load_uses_metadata_and_tail_reader():
          patch("api.routes.read_session_message_tail", return_value=(session.messages, 998)), \
          patch("api.routes._clear_stale_stream_state", return_value=False), \
          patch("api.routes._lookup_cli_session_metadata", return_value={}), \
-         patch("api.routes.get_state_db_session_messages", side_effect=AssertionError("unbounded state.db read")), \
+         patch("api.routes._sidecar_file_exceeds_threshold", return_value=True), \
+         patch("api.routes.get_state_db_session_messages", return_value=[]), \
          patch("api.routes.redact_session_data", side_effect=lambda raw: raw), \
          patch("api.routes.j", side_effect=fake_j):
         routes.handle_get(
