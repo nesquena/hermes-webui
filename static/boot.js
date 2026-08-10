@@ -3033,6 +3033,129 @@ function registerHermesSkin(descriptor){
 }
 if(typeof window!=='undefined') window.registerHermesSkin=registerHermesSkin;
 
+// ── Extension-registered message renderer (message-renderer capability) ──────
+// Lets a trusted local extension replace the live-stream message display with a
+// custom renderer (e.g. a rich commerce-product card, a canvas visualiser, or a
+// structured-output viewer) while leaving all core SSE/state machinery intact.
+//
+// Contract
+// --------
+//   window.registerHermesRenderer(descriptor)
+//     descriptor.id          — non-empty string, e.g. 'my-ext-renderer'
+//     descriptor.mount(root, source, ctx)
+//                            — called once per live stream, immediately after
+//                              the SSE source is registered.  root is the live
+//                              assistant turn wrapper element (a block-level div
+//                              inside the chat pane).  source is the EventSource.
+//                              ctx = { sessionId, streamId }.
+//     descriptor.unmount(root)
+//                            — called on stream end (done/error/cancel).
+//                              The renderer MUST clean up any listeners or timers
+//                              it registered to root or its descendants.
+//     descriptor.canActivate(caps)
+//                            — optional predicate.  Receives the frozen
+//                              HERMES_HOST_CAPABILITIES object so the renderer can
+//                              assert the capability key it depends on is present
+//                              before registering.  Return false to skip.
+//
+// Security model
+// --------------
+//   The renderer owns ONLY the root element it receives.  It MUST NOT reach
+//   outside root (no document.body edits, no sibling mutations).  Core message
+//   rendering (renderMessages, SSE state, INFLIGHT, S.messages) is unchanged;
+//   the renderer is purely additive/visual inside its root.
+//
+//   Only ONE renderer can be active at a time.  Calling registerHermesRenderer
+//   a second time replaces the previous registration (idempotent by id, or
+//   silently replaces on a different id).
+//
+// Disabling at runtime
+// --------------------
+//   window.HermesMessageRenderer.setDisabled(true)   — suppress future mounts
+//   window.HermesMessageRenderer.setDisabled(false)  — re-enable
+//   Call before page load to suppress the renderer entirely, or at runtime to
+//   pause it without un-registering.
+
+(function(){
+  'use strict';
+
+  // Private state — not exposed directly on window.
+  let _rendererDescriptor = null;
+  let _disabled = false;
+
+  // Internal mount/unmount hooks wired by messages.js _wireSSE.
+  // These are set on window so messages.js can call them without
+  // a hard module dependency.  They are prefixed with _ to signal
+  // they are internal infrastructure, not part of the public extension API.
+  function _mount(root, source, ctx){
+    if(_disabled || !_rendererDescriptor) return;
+    // Snapshot the descriptor at mount time so that a concurrent
+    // registerHermesRenderer() call cannot split mount and unmount across
+    // two different descriptors for the same stream.
+    const snapshot = _rendererDescriptor;
+    root._hermesRendererSnapshot = snapshot;
+    try{
+      snapshot.mount(root, source, ctx);
+    }catch(e){
+      // Renderer errors must never crash the core stream.
+      if(typeof console!=='undefined') console.warn('[HermesRenderer] mount error:', e);
+    }
+  }
+
+  function _unmount(root){
+    // Use the snapshot stored at mount time, not the current _rendererDescriptor,
+    // so we always call unmount on the descriptor that performed the mount.
+    const snapshot = (root && root._hermesRendererSnapshot) || _rendererDescriptor;
+    if(!snapshot) return;
+    if(root) root._hermesRendererSnapshot = null;
+    try{
+      snapshot.unmount(root);
+    }catch(e){
+      if(typeof console!=='undefined') console.warn('[HermesRenderer] unmount error:', e);
+    }
+  }
+
+  // Public registration API — called by extensions.
+  function registerHermesRenderer(descriptor){
+    try{
+      if(!descriptor || typeof descriptor !== 'object') return false;
+      const id = String(descriptor.id || '').trim();
+      if(!id) return false;                                         // id required
+      if(typeof descriptor.mount !== 'function') return false;      // mount required
+      if(typeof descriptor.unmount !== 'function') return false;    // unmount required
+      // canActivate is optional; if present, call it with current capabilities.
+      if(typeof descriptor.canActivate === 'function'){
+        const caps = (window.hermesExt && window.hermesExt.capabilities) || {};
+        try{ if(!descriptor.canActivate(caps)) return false; }catch(_){ return false; }
+      }
+      _rendererDescriptor = {
+        id,
+        mount:   descriptor.mount,
+        unmount: descriptor.unmount,
+      };
+      // Wire internal hooks for messages.js.
+      if(typeof window !== 'undefined'){
+        window._hermesRendererMount   = _mount;
+        window._hermesRendererUnmount = _unmount;
+      }
+      return true;
+    }catch(_){ return false; }
+  }
+
+  // Public control surface — lets page scripts/extensions pause the renderer.
+  const HermesMessageRenderer = {
+    setDisabled(value){ _disabled = !!value; },
+    isDisabled(){ return _disabled; },
+    /** Returns the id of the currently registered renderer, or null. */
+    activeId(){ return _rendererDescriptor ? _rendererDescriptor.id : null; },
+  };
+
+  if(typeof window !== 'undefined'){
+    window.registerHermesRenderer  = registerHermesRenderer;
+    window.HermesMessageRenderer   = HermesMessageRenderer;
+  }
+})();
+
 function applyBotName(){
   // The saved assistant name applies to the default profile only.
   // Non-default profiles use their own profile names.
