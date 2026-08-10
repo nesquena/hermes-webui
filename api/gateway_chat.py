@@ -805,6 +805,8 @@ def _gateway_event_blocks_empty_retry(event: str) -> bool:
         "tool_call",
         "tool_result",
         "tool_progress",
+        "tool",
+        "tool_complete",
     }
 
 

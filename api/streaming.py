@@ -12471,6 +12471,21 @@ def cancel_stream(stream_id: str) -> bool:
     # would race that teardown and return None.
     if not _cancel_session_id and _snap_owner_session_id:
         _cancel_session_id = _snap_owner_session_id
+    if _cancel_session_id:
+        try:
+            from api.goal_continuations import cancel_goal_continuation
+
+            cancel_goal_continuation(
+                _cancel_session_id,
+                stream_id,
+                reason="stream cancelled by user",
+            )
+        except Exception:
+            logger.warning(
+                "Failed to durably cancel goal continuation for stream %s",
+                stream_id,
+                exc_info=True,
+            )
     # Use the snapshots captured under streams_lock above (the worker's finally
     # may have popped the live buffers by now via agent.interrupt()). For the
     # ACTIVE_RUNS-only path (stream absent) the snapshots are None → fall back to

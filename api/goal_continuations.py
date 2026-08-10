@@ -459,7 +459,13 @@ def legacy_browser_goal_prompt_matches(session_id: str, prompt: str) -> bool:
         record = registry["intents"].get(sid)
         return bool(
             isinstance(record, dict)
-            and record.get("status") in {"pending", "starting", "running"}
+            and record.get("status") in {
+                "pending",
+                "starting",
+                "running",
+                "completed",
+                "cancelled",
+            }
             and str(record.get("prompt") or "").strip() == expected_prompt
         )
 
@@ -493,6 +499,8 @@ def _release_start_claim(
     with _registry_transaction() as registry:
         record = registry["intents"].get(session_id)
         if not isinstance(record, dict) or record.get("claim_id") != claim_id:
+            return
+        if record.get("status") not in {"starting", "running"}:
             return
         # bind_goal_continuation_stream may already have moved the record to
         # running; a route-start exception still returns ownership to pending.
@@ -538,7 +546,10 @@ def drain_goal_continuations_once(
             if float(record.get("available_at") or 0.0) > timestamp:
                 continue
             if not _call_goal_active(active_check, record):
-                registry["intents"].pop(sid, None)
+                record["status"] = "cancelled"
+                record["available_at"] = None
+                record["last_error"] = "goal inactive before continuation claim"
+                _record_now(record, timestamp)
                 _save_locked()
                 continue
             claim_id = uuid.uuid4().hex
@@ -567,6 +578,13 @@ def drain_goal_continuations_once(
         return 0
     if start_turn is None:
         from api.routes import start_session_turn as start_turn
+    if not _call_goal_active(active_check, selected):
+        cancel_goal_continuation(
+            sid,
+            reason="goal became inactive before continuation admission",
+            now=timestamp,
+        )
+        return 0
     try:
         response = start_turn(
             sid,
@@ -697,7 +715,43 @@ def complete_goal_continuation(session_id: str, stream_id: str | None = None) ->
             return False
         if expected_stream and record.get("stream_id") != expected_stream:
             return False
-        registry["intents"].pop(sid, None)
+        record["status"] = "completed"
+        record["claim_id"] = None
+        record["claim_started_at"] = None
+        record["completed_at"] = time.time()
+        record["last_error"] = None
+        _record_now(record, record["completed_at"])
+        _save_locked()
+        return True
+
+
+def cancel_goal_continuation(
+    session_id: str,
+    stream_id: str | None = None,
+    *,
+    reason: str = "goal continuation cancelled",
+    now: float | None = None,
+) -> bool:
+    """Durably fence a continuation against later admission or retry."""
+    sid = str(session_id or "").strip()
+    expected_stream = str(stream_id or "").strip()
+    timestamp = float(time.time() if now is None else now)
+    with _registry_transaction() as registry:
+        record = registry["intents"].get(sid)
+        if not isinstance(record, dict):
+            return False
+        current_stream = str(record.get("stream_id") or "").strip()
+        if expected_stream and current_stream and current_stream != expected_stream:
+            return False
+        if record.get("status") in {"completed", "cancelled"}:
+            return True
+        record["status"] = "cancelled"
+        record["claim_id"] = None
+        record["claim_started_at"] = None
+        record["available_at"] = None
+        record["last_error"] = str(reason or "goal continuation cancelled")[:500]
+        record["cancelled_at"] = timestamp
+        _record_now(record, timestamp)
         _save_locked()
         return True
 
@@ -733,14 +787,14 @@ def _replace_goal_continuation_for_test(record: dict[str, Any]) -> None:
 
 
 def _default_goal_state_loader(session_id: str, *, profile_home: str | None = None) -> dict[str, Any]:
-    from api.goals import CONTINUATION_PROMPT_TEMPLATE, goal_state_snapshot
+    from api.goals import CONTINUATION_PROMPT_TEMPLATE, goal_state_snapshot_strict
     from api.models import get_session
 
     try:
         get_session(session_id)
     except (KeyError, FileNotFoundError):
         return {"status": "missing", "turns_used": 0}
-    state = goal_state_snapshot(session_id, profile_home=profile_home)
+    state = goal_state_snapshot_strict(session_id, profile_home=profile_home)
     goal_text = str(getattr(state, "goal", "") or "").strip()
     continuation_prompt = (
         CONTINUATION_PROMPT_TEMPLATE.format(goal=goal_text)
@@ -760,7 +814,9 @@ def _default_run_summary_loader(session_id: str, stream_id: str) -> dict[str, An
     from api.run_journal import latest_run_summary, read_run_events
 
     summary = latest_run_summary(session_id, stream_id)
-    events = (read_run_events(session_id, stream_id) or {}).get("events") or []
+    run_events = read_run_events(session_id, stream_id) or {}
+    events = run_events.get("events") or []
+    summary["evidence_unavailable"] = bool(run_events.get("malformed"))
     activity_prefixes = (
         "token",
         "reason",
@@ -831,6 +887,25 @@ def reconcile_goal_continuations_once(
         status = str(snapshot.get("status") or "")
         continuation_id = str(snapshot.get("continuation_id") or "")
         stream_id = str(snapshot.get("stream_id") or "")
+        if str(snapshot.get("owner_id") or "") != _current_owner_id():
+            with _registry_transaction() as registry:
+                record = registry["intents"].get(sid)
+                if (
+                    not isinstance(record, dict)
+                    or record.get("status") not in {"starting", "running"}
+                    or str(record.get("continuation_id") or "") != continuation_id
+                    or str(record.get("owner_id") or "") == _current_owner_id()
+                ):
+                    continue
+                record["status"] = "failed"
+                record["claim_id"] = None
+                record["last_error"] = (
+                    "foreign owner still owns an unjudged continuation; automatic replay refused"
+                )
+                _record_now(record, timestamp)
+                _save_locked()
+                changed += 1
+            continue
         if status == "starting":
             lease_anchor = float(
                 snapshot.get("claim_started_at")
@@ -894,7 +969,11 @@ def reconcile_goal_continuations_once(
             summary = summary_loader(sid, stream_id) or {}
             observable_activity = bool(summary.get("observable_activity"))
             terminal_state = str(summary.get("terminal_state") or "unknown").strip().lower()
-            evidence_error = None
+            evidence_error = (
+                "run journal contains malformed evidence; automatic replay refused"
+                if summary.get("evidence_unavailable")
+                else None
+            )
         except Exception as exc:
             logger.warning("Goal continuation orphan evidence failed for %s", sid, exc_info=True)
             observable_activity = True
@@ -973,7 +1052,6 @@ def recover_goal_continuations(
     """
     timestamp = float(time.time() if now is None else now)
     state_loader = goal_state_loader or _default_goal_state_loader
-    summary_loader = run_summary_loader or _default_run_summary_loader
     recovered = 0
     with _registry_transaction() as registry:
         for sid in list(registry["intents"]):
@@ -988,7 +1066,12 @@ def recover_goal_continuations(
             state_status = str((state or {}).get("status") or "") if isinstance(state, dict) else ""
             turns_used = int((state or {}).get("turns_used") or 0) if isinstance(state, dict) else 0
             if state_status != "active":
-                registry["intents"].pop(sid, None)
+                record["status"] = "cancelled"
+                record["claim_id"] = None
+                record["last_error"] = (
+                    f"goal became {state_status or 'unavailable'}; continuation cancelled"
+                )
+                _record_now(record, timestamp)
                 recovered += 1
                 continue
             origin_turns = int(record.get("goal_turns_used") or 0)
@@ -1024,43 +1107,14 @@ def recover_goal_continuations(
                 _record_now(record, timestamp)
                 recovered += 1
                 continue
-            try:
-                summary = summary_loader(sid, str(record.get("stream_id") or "")) or {}
-            except Exception:
-                logger.warning("Goal continuation run-summary recovery failed for %s", sid, exc_info=True)
-                record["status"] = "failed"
-                record["claim_id"] = None
-                record["last_error"] = (
-                    "run evidence was unavailable during recovery; automatic replay refused"
-                )
-                _record_now(record, timestamp)
-                recovered += 1
-                continue
-            terminal_state = str(summary.get("terminal_state") or "unknown").strip().lower()
-            observable_activity = bool(summary.get("observable_activity"))
-            attempts = int(record.get("attempts") or 0)
-            max_attempts = max(1, int(record.get("max_attempts") or DEFAULT_MAX_ATTEMPTS))
-            if observable_activity:
-                record["status"] = "failed"
-                record["last_error"] = (
-                    "interrupted goal turn emitted observable activity; automatic replay refused"
-                )
-            elif terminal_state in {"completed", "done"}:
-                record["status"] = "failed"
-                record["last_error"] = "completed goal turn lacks a durable judge verdict; replay refused"
-            elif attempts >= max_attempts:
-                record["status"] = "failed"
-                record["last_error"] = f"goal continuation recovery exhausted {attempts}/{max_attempts} attempts"
-            else:
-                record["status"] = "pending"
-                record["stream_id"] = None
-                record["claim_id"] = None
-                record["claim_started_at"] = None
-                record["admitted_at"] = None
-                record["last_heartbeat_at"] = None
-                record["owner_id"] = _current_owner_id()
-                record["available_at"] = timestamp
-                record["last_error"] = f"recovered after {terminal_state} terminal state"
+            # A foreign owner may still be alive even when this process now
+            # holds scheduler leadership (rolling restart / timed-out shutdown).
+            # Without a positively fenced owner lease, replay is unsafe.
+            record["status"] = "failed"
+            record["claim_id"] = None
+            record["last_error"] = (
+                "foreign owner still owns an unjudged continuation; automatic replay refused"
+            )
             _record_now(record, timestamp)
             recovered += 1
         if recovered:
@@ -1075,11 +1129,16 @@ def wake_goal_continuation_worker() -> None:
 
 
 def _worker_loop() -> None:
-    try:
-        recover_goal_continuations()
-    except Exception:
-        logger.warning("Goal continuation startup recovery failed", exc_info=True)
     while not _WORKER_STOP.is_set():
+        if _WORKER_LEADER_FD is None:
+            if not _try_acquire_worker_leadership():
+                _WORKER_WAKE.wait(_IDLE_POLL_SECONDS)
+                _WORKER_WAKE.clear()
+                continue
+            try:
+                recover_goal_continuations()
+            except Exception:
+                logger.warning("Goal continuation startup recovery failed", exc_info=True)
         try:
             reconcile_goal_continuations_once()
         except Exception:
@@ -1100,9 +1159,6 @@ def start_goal_continuation_worker() -> bool:
     with _WORKER_LIFECYCLE_LOCK:
         if _WORKER_THREAD is not None and _WORKER_THREAD.is_alive():
             return False
-        if not _try_acquire_worker_leadership():
-            logger.info("Goal continuation worker leadership is held by another process")
-            return False
         _WORKER_STOP.clear()
         _WORKER_WAKE.clear()
         _WORKER_THREAD = threading.Thread(
@@ -1114,7 +1170,6 @@ def start_goal_continuation_worker() -> bool:
             _WORKER_THREAD.start()
         except BaseException:
             _WORKER_THREAD = None
-            _release_worker_leadership()
             raise
         return True
 
