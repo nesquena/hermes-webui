@@ -136,7 +136,9 @@ def test_done_handler_is_idempotent_for_replay_or_duplicate_done_events():
         "done handler must return early when the stream was already finalized"
     )
     guard_idx = body.find("if(_streamFinalized) return;")
-    sound_idx = body.find("playNotificationSound();")
+    # The completion chime now takes the completed session id (owned-turn
+    # voice-mode suppression), so match the call, not the empty argument list.
+    sound_idx = body.find("playNotificationSound(")
     assert sound_idx != -1, "done handler should still play completion sound once"
     assert guard_idx != -1 and guard_idx < sound_idx, (
         "completion sound must be behind the duplicate-done finalization guard"
@@ -152,8 +154,11 @@ def test_attention_events_use_distinct_sound_from_completion():
     assert "playAttentionSound(_attentionSoundKey(activeSid,'approval',1));" in approval_body
     assert "playAttentionSound(_attentionSoundKey(activeSid,'clarify',1));" in clarify_body
     for body in (approval_body, clarify_body):
-        assert "playNotificationSound();" not in body
-    assert "playNotificationSound();" in done_body
+        assert "playNotificationSound(" not in body
+    assert "playNotificationSound(completedSid);" in done_body, (
+        "the completion chime must be told WHICH session finished — a bare call "
+        "cannot scope voice-mode suppression to the owning turn"
+    )
     assert "playAttentionSound();" not in done_body
     assert "osc.type='sine'" in attention_body
     assert "window._lastAttentionSoundAt" in attention_body

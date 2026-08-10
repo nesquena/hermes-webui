@@ -48,7 +48,7 @@ def test_browser_tts_watchdog_rearms_listening_if_onend_drops():
 def test_browser_tts_callbacks_and_deactivate_clear_recovery_handles():
     src = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
     speak_body = _extract_function(src, "_speakResponse")
-    assert "const utter=new SpeechSynthesisUtterance(clean);" in speak_body
+    assert "const utter=new SpeechSynthesisUtterance(bChunks[idx]);" in speak_body
     assert "utter.onend=()=>{" in speak_body
     assert "utter.onerror=()=>{" in speak_body
     assert speak_body.count("_clearBrowserTtsRecovery();") >= 2, (
@@ -57,7 +57,7 @@ def test_browser_tts_callbacks_and_deactivate_clear_recovery_handles():
     assert "_browserTtsSuppressNextErrorRearm=false;" in speak_body
     assert "_voiceModeActive&&_voiceModeState==='speaking'" in speak_body
     assert "if(_browserTtsSuppressNextErrorRearm){" in speak_body
-    assert "_armBrowserTtsRecovery(clean, utter.rate);" in speak_body
+    assert "_armBrowserTtsRecovery(bChunks[idx], utter.rate);" in speak_body
 
     deactivate_body = _extract_function(src, "_deactivate")
     assert "_clearBrowserTtsRecovery();" in deactivate_body, (
@@ -68,15 +68,21 @@ def test_browser_tts_callbacks_and_deactivate_clear_recovery_handles():
 
 def test_edge_audio_branch_stays_separate():
     src = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
-    edge_match = re.search(
-        r'if\(engine==="edge"\)\{(.*?)\n\s+return;\n\s+\}',
+    ui = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
+    # Server audio engines (edge/openai/elevenlabs) route through the shared
+    # chunked player; the browser speechSynthesis watchdog must stay out of
+    # that branch and out of the shared player itself.
+    m = re.search(
+        r'if\(engine==="elevenlabs"\|\|engine==="openai"\|\|engine==="edge"\)\{(.*?)\n\s+return;\n\s+\}',
         src,
         re.DOTALL,
     )
-    assert edge_match, "Edge audio branch must exist"
-    edge_body = edge_match.group(1)
-    assert "const audio = new Audio(url);" in edge_body
-    assert "audio.onended = () => {" in edge_body
-    assert "_armBrowserTtsRecovery" not in edge_body, (
-        "The browser speechSynthesis workaround must not be injected into the Edge audio branch."
+    assert m, "Shared server-audio branch must exist"
+    assert "_armBrowserTtsRecovery" not in m.group(1), (
+        "The browser speechSynthesis workaround must not be injected into the server audio branch."
     )
+    player = re.search(r'function _playServerTtsChunks\(.*?\n\}', ui, re.DOTALL)
+    assert player, "_playServerTtsChunks must exist in ui.js"
+    assert "new Audio(url)" in player.group(0)
+    assert "audio.onended" in player.group(0)
+    assert "_armBrowserTtsRecovery" not in player.group(0)

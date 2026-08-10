@@ -535,10 +535,15 @@ def test_openai_voice_placeholder_in_panels():
 def test_play_openai_tts_exists_in_ui_js():
     src = (STATIC_DIR / "ui.js").read_text(encoding="utf-8")
     assert 'function _playOpenaiTts(text, btn)' in src
-    assert "body:JSON.stringify({text:text, engine:'openai'})" in src
+    # chunked playback: the openai engine routes through the shared
+    # sequential player with a per-chunk request body
+    assert "return {text:chunk, engine:'openai'};" in src
+    assert "_playServerTtsChunks(_ttsChunksFor(text)" in src
 
 
 def test_boot_js_handles_openai_engine():
     src = (STATIC_DIR / "boot.js").read_text(encoding="utf-8")
-    assert 'if(engine==="openai")' in src
-    assert "body: JSON.stringify({text: clean, engine: 'openai'})" in src
+    # openai is handled by the shared chunked server-TTS branch
+    assert 'engine==="elevenlabs"||engine==="openai"||engine==="edge"' in src
+    assert "_playServerTtsChunks(chunks" in src
+    assert 'return {text:chunk, engine:engine};' in src
