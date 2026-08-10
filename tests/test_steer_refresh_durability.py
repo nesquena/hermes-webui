@@ -166,6 +166,59 @@ def test_run_journal_snapshot_rebuilds_delivered_steer_row(monkeypatch):
     assert compact_steer[0]["seq"] == 3
 
 
+def test_run_journal_snapshot_keeps_steer_between_later_activity(monkeypatch):
+    from api import routes
+
+    sid = "snapshot_steer_order_sid"
+    stream_id = "snapshot_steer_order_run"
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda _stream_id: {
+            "session_id": sid,
+            "run_id": stream_id,
+            "last_seq": 6,
+            "last_event_id": f"{stream_id}:6",
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda _sid, _run: {
+            "events": [
+                {"event": "token", "event_id": f"{stream_id}:1", "seq": 1,
+                 "run_id": stream_id, "session_id": sid, "payload": {"text": "before"}},
+                {"event": "steer_delivered", "event_id": f"{stream_id}:2", "seq": 2,
+                 "run_id": stream_id, "session_id": sid,
+                 "payload": {"text": "steer here", "status": "delivered"}},
+                {"event": "tool", "event_id": f"{stream_id}:3", "seq": 3,
+                 "run_id": stream_id, "session_id": sid,
+                 "payload": {"name": "terminal", "id": "call-1", "args": {"command": "pwd"}}},
+                {"event": "tool_complete", "event_id": f"{stream_id}:4", "seq": 4,
+                 "run_id": stream_id, "session_id": sid,
+                 "payload": {"name": "terminal", "id": "call-1", "preview": "ok"}},
+                {"event": "reasoning", "event_id": f"{stream_id}:5", "seq": 5,
+                 "run_id": stream_id, "session_id": sid, "payload": {"text": "later thought"}},
+                {"event": "token", "event_id": f"{stream_id}:6", "seq": 6,
+                 "run_id": stream_id, "session_id": sid, "payload": {"text": "after"}},
+            ]
+        },
+    )
+
+    snapshot = routes._run_journal_live_snapshot(stream_id)
+    rows = snapshot["anchor_activity_scene"]["activity_rows"]
+    visible = [(row["role"], row.get("source_event_type"), row.get("text")) for row in rows]
+    assert visible == [
+        ("prose", "token", "before"),
+        ("control", "steer_delivered", "steer here"),
+        ("tool", "tool_complete", "ok"),
+        ("thinking", "reasoning", "later thought"),
+        ("prose", "token", "after"),
+    ]
+    assert [row["order_index"] for row in rows] == list(range(len(rows)))
+    assert [row["seq"] for row in rows] == [1, 2, 3, 5, 6]
+
+
 @pytest.mark.skipif(NODE is None, reason="node is required")
 def test_anchor_projection_classifies_steer_as_durable_control_boundary():
     anchors = ROOT / "static" / "assistant_turn_anchors.js"
