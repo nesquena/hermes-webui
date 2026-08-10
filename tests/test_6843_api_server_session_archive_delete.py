@@ -471,3 +471,254 @@ def test_delete_rejected_unsafe_messaging_session_leaves_artifacts_intact(
     assert _row_exists(isolated_state_db["db"], sid) is True, (
         "state.db row must survive a rejected unsafe-id delete"
     )
+
+
+# ---------------------------------------------------------------------------
+# Re-gate r3 (#6855): exact-membership, atomic check+act, attachment identity,
+# archive fail-open
+# ---------------------------------------------------------------------------
+
+
+def test_api_server_class_source_predicates_require_exact_membership():
+    """Finding 1 (#6855): the api_server-class predicates must be EXACT
+    membership on the authoritative source. ``api-server`` (hyphen) is an
+    effectively-unknown source and must NOT authorize the destructive paths
+    (previously the hyphen was normalized to ``api_server``)."""
+    from api.agent_sessions import is_api_server_class_row
+
+    assert routes._is_api_server_class_state_db_source("api_server") is True
+    assert routes._is_api_server_class_state_db_source("api") is True
+    assert routes._is_api_server_class_state_db_source("API_SERVER") is True
+    assert routes._is_api_server_class_state_db_source("api-server") is False
+    assert routes._is_api_server_class_state_db_source("api server") is False
+    assert routes._is_api_server_class_state_db_source("telegram") is False
+    assert routes._is_api_server_class_state_db_source("") is False
+
+    assert is_api_server_class_row({"source": "api_server"}) is True
+    assert is_api_server_class_row({"source": "api"}) is True
+    assert is_api_server_class_row({"source": "API_SERVER"}) is True
+    assert is_api_server_class_row({"source": "api-server"}) is False
+    assert is_api_server_class_row({"source": "telegram", "source_tag": "api_server"}) is False, (
+        "derived labels must not upgrade a non-api_server authoritative source"
+    )
+
+
+def test_delete_unsafe_api_server_hyphen_source_still_400s(isolated_state_db, monkeypatch):
+    """Finding 1 end-to-end: an unsafe id backed by an ``api-server``
+    (hyphen) row is NOT the api_server class — delete must 400 and the row
+    must survive (the hyphen was previously normalized to api_server)."""
+    sid = "hyphen:api:server:imported:1a2b3c4d5e6f"
+    _make_state_db(isolated_state_db["db"], sid, source="api-server", title=None)
+
+    assert models.is_safe_session_id(sid) is False
+
+    captured = _capture_post(monkeypatch, {"session_id": sid})
+    assert routes.handle_post(object(), SimpleNamespace(path="/api/session/delete")) is True
+
+    assert captured["status"] == 400, captured
+    assert "Invalid session_id" in str(captured["payload"].get("error", ""))
+    assert _row_exists(isolated_state_db["db"], sid) is True
+
+
+def test_delete_unsafe_id_source_flip_fails_closed_atomically(isolated_state_db, monkeypatch):
+    """Finding 2 (#6855): the api_server-class source is revalidated INSIDE
+    the BEGIN IMMEDIATE delete transaction. A source that flips between the
+    route-level check and the delete (authorization saw api_server, the row
+    is now gateway — a non-api_server, non-messaging source) must fail
+    closed: 400, row survives, sidecar untouched. (A flip to a messaging
+    source is independently protected by the messaging guard, which skips
+    the state.db delete entirely.)"""
+    sid = "flip:agent:main:0a1b2c3d4e5f"
+    _make_state_db(isolated_state_db["db"], sid, source="gateway", title="Gateway run")
+    # Simulate the TOCTOU: the route-level pre-check sees api_server...
+    monkeypatch.setattr(routes, "_state_db_session_source", lambda s: "api_server")
+    # ...but the state.db row the transaction reads is really gateway.
+    sidecar = isolated_state_db["sessions_dir"] / f"{sid}.json"
+    sidecar.write_text('{"session_id": "%s"}' % sid, encoding="utf-8")
+
+    assert models.is_safe_session_id(sid) is False
+    assert routes._is_messaging_session_id(sid) is False, (
+        "precondition: gateway is not messaging, so the in-transaction gate is what denies"
+    )
+
+    captured = _capture_post(monkeypatch, {"session_id": sid})
+    assert routes.handle_post(object(), SimpleNamespace(path="/api/session/delete")) is True
+
+    assert captured["status"] == 400, captured
+    assert "Invalid session_id" in str(captured["payload"].get("error", ""))
+    assert _row_exists(isolated_state_db["db"], sid) is True, (
+        "gateway row must survive an unsafe-id delete whose source flipped after authz"
+    )
+    assert sidecar.exists(), "sidecar must survive the atomic denial"
+
+
+def test_delete_cli_session_require_source_in_gates_atomically(isolated_state_db):
+    """Finding 2 unit level: delete_cli_session(require_source_in=...) denies
+    a row whose CURRENT source is not an exact member — inside the same
+    transaction — and still deletes when it is."""
+    db = isolated_state_db["db"]
+    tel = "tel-gated-001"
+    _make_state_db(db, tel, source="telegram", title="Telegram chat")
+    assert models.delete_cli_session(tel, require_source_in=("api", "api_server")) is False
+    assert _row_exists(db, tel) is True, "denied source must leave the row intact"
+
+    api = "api-gated-001"
+    _make_state_db(db, api, source="api_server", title="API imported")
+    assert models.delete_cli_session(api, require_source_in=("api", "api_server")) is True
+    assert _row_exists(db, api) is False
+
+
+def test_delete_unsafe_id_skips_attachment_cleanup_collision(
+    isolated_state_db, monkeypatch, tmp_path
+):
+    """Finding 3 (#6855): the attachment sanitizer collapses distinct ids
+    (``victim:session`` vs ``victim_session``) onto ONE directory. Deleting
+    an unsafe id must therefore SKIP attachment cleanup, so the safe
+    session's uploads are never erased (reproduced cross-session data loss)."""
+    import re as _re
+
+    import api.upload as upload
+
+    root = tmp_path / "attachments"
+
+    def fake_dir(session_id, *, root=root):
+        dest = (
+            root / _re.sub(r"[^\w.\-]", "_", str(session_id or "session"))[:120]
+        ).resolve()
+        dest.mkdir(parents=True, exist_ok=True)
+        return dest
+
+    monkeypatch.setattr(upload, "_session_attachment_dir", fake_dir)
+
+    safe_sid = "victim_session"
+    unsafe_sid = "victim:session"
+    # Both ids sanitize to the same directory in the real code; mirror that.
+    assert fake_dir(unsafe_sid) == fake_dir(safe_sid)
+
+    _make_state_db(isolated_state_db["db"], unsafe_sid, source="api_server", title=None)
+    victim_file = fake_dir(safe_sid) / "photo.png"
+    victim_file.write_bytes(b"data")
+
+    assert models.is_safe_session_id(unsafe_sid) is False
+
+    captured = _capture_post(monkeypatch, {"session_id": unsafe_sid})
+    assert routes.handle_post(object(), SimpleNamespace(path="/api/session/delete")) is True
+
+    assert captured["status"] == 200, captured
+    assert victim_file.exists(), (
+        "deleting unsafe id %r must not erase %r's attachments "
+        "(identity collision, #6855)" % (unsafe_sid, safe_sid)
+    )
+
+
+def test_delete_safe_id_still_cleans_attachments(isolated_state_db, monkeypatch, tmp_path):
+    """Finding 3 guard: the skip is scoped to UNSAFE ids only — a normal
+    safe-id delete still removes its own attachment directory."""
+    import re as _re
+
+    import api.upload as upload
+
+    root = tmp_path / "attachments"
+
+    def fake_dir(session_id, *, root=root):
+        dest = (
+            root / _re.sub(r"[^\w.\-]", "_", str(session_id or "session"))[:120]
+        ).resolve()
+        dest.mkdir(parents=True, exist_ok=True)
+        return dest
+
+    monkeypatch.setattr(upload, "_session_attachment_dir", fake_dir)
+
+    sid = "safe_sess_att_001"
+    _make_state_db(isolated_state_db["db"], sid, source="webui", title="Safe")
+    attach = fake_dir(sid)
+    (attach / "doc.pdf").write_bytes(b"data")
+
+    captured = _capture_post(monkeypatch, {"session_id": sid})
+    assert routes.handle_post(object(), SimpleNamespace(path="/api/session/delete")) is True
+
+    assert captured["status"] == 200, captured
+    assert not (attach / "doc.pdf").exists(), (
+        "safe-id delete must still clean its own attachments"
+    )
+
+
+def test_archive_no_metadata_fallback_when_source_lookup_empty(
+    isolated_state_db, monkeypatch
+):
+    """Finding 4 (#6855): when the authoritative state.db source lookup
+    returns empty/error, archive must NOT fall back to the cached metadata
+    source_tag. A real telegram row with stale api_server metadata must 400
+    with the archived flag untouched (previously archived with HTTP 200)."""
+    sid = "ro-telegram-stale-meta-1"
+    _make_state_db(isolated_state_db["db"], sid, source="telegram", title="Telegram chat")
+    cli_meta = {
+        "session_id": sid,
+        "source_tag": "api_server",
+        "raw_source": "api_server",
+        "session_source": "api",
+        "read_only": True,
+        "profile": "default",
+    }
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda s: cli_meta)
+    # Authoritative lookup fails/returns empty — the OLD code OR-ed in the
+    # cached `_arch_source_tag` (api_server) and archived the telegram row.
+    monkeypatch.setattr(routes, "_state_db_session_source", lambda s: "")
+
+    captured = _capture_post(monkeypatch, {"session_id": sid, "archived": True})
+    assert routes.handle_post(object(), SimpleNamespace(path="/api/session/archive")) is True
+
+    assert captured["status"] == 400, captured
+    assert "Read-only imported sessions cannot be archived" in str(
+        captured["payload"].get("error", "")
+    )
+    assert _read_archived(isolated_state_db["db"], sid) == 0, (
+        "archive must fail closed when the authoritative source lookup is empty (#6855)"
+    )
+
+
+def test_archive_source_flip_fails_closed_in_transaction(isolated_state_db, monkeypatch):
+    """Finding 4 (#6855): the archive UPDATE revalidates the authoritative
+    source inside the same transaction. When the pre-check passes
+    (api_server) but the row's current source is telegram, the archive must
+    fail closed with the flag untouched (mirrors the delete-path fix)."""
+    sid = "ro-telegram-flip-1"
+    _make_state_db(isolated_state_db["db"], sid, source="telegram", title="Telegram chat")
+    cli_meta = {
+        "session_id": sid,
+        "source_tag": "api_server",
+        "raw_source": "api_server",
+        "session_source": "api",
+        "read_only": True,
+        "profile": "default",
+    }
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda s: cli_meta)
+    # Pre-check sees api_server (patched)...
+    monkeypatch.setattr(routes, "_state_db_session_source", lambda s: "api_server")
+
+    captured = _capture_post(monkeypatch, {"session_id": sid, "archived": True})
+    assert routes.handle_post(object(), SimpleNamespace(path="/api/session/archive")) is True
+
+    assert captured["status"] in (400, 404), captured
+    assert _read_archived(isolated_state_db["db"], sid) == 0, (
+        "archive flag must stay untouched when the in-transaction source check denies"
+    )
+
+
+def test_set_state_db_archived_require_source_in(isolated_state_db):
+    """Finding 4 unit level: _set_state_db_session_archived with
+    require_source_in=... flips only exact api_server-class rows, atomically."""
+    db = isolated_state_db["db"]
+    tel = "ro-tel-unit-1"
+    _make_state_db(db, tel, source="telegram", title="Telegram chat")
+    assert routes._set_state_db_session_archived(
+        tel, True, require_source_in=("api", "api_server")
+    ) is False
+    assert _read_archived(db, tel) == 0
+
+    api = "ro-api-unit-1"
+    _make_state_db(db, api, source="api_server", title="API imported")
+    assert routes._set_state_db_session_archived(
+        api, True, require_source_in=("api", "api_server")
+    ) is True
+    assert _read_archived(db, api) == 1

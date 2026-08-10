@@ -132,27 +132,19 @@ def _with_normalized_source(row: dict) -> dict:
 _API_SERVER_CLASS_SOURCES = frozenset({"api", "api_server"})
 
 
-def _api_server_class_markers(row: dict) -> set[str]:
-    """Normalized source markers for a session row ('' for missing keys).
-
-    Mirrors routes._is_api_server_sidecar_row: every source field is lowercased
-    and normalized so ``api-server`` / ``api server`` match ``api_server``.
-    """
-    markers = set()
-    for key in ("source", "source_tag", "raw_source", "session_source", "source_label"):
-        marker = str(row.get(key) or "").strip().lower()
-        if marker.endswith(" session"):
-            marker = marker[: -len(" session")].strip()
-        markers.add(marker.replace("-", "_").replace(" ", "_"))
-    return markers
-
-
 def is_api_server_class_row(row: dict) -> bool:
     """Return True when a session row belongs to the imported/read-only
-    ``api_server`` class (#6843)."""
+    ``api_server`` class (#6843).
+
+    Exact membership on the authoritative ``source`` field only (#6855):
+    no hyphen/space normalization and no derived-label fallback, mirroring
+    ``routes._is_api_server_class_state_db_source``. A raw source like
+    ``api-server`` must NOT be classified as the api_server class by the
+    sidebar projection — only the exact ``api`` / ``api_server`` values may.
+    """
     if not isinstance(row, dict):
         return False
-    return bool(_api_server_class_markers(row) & _API_SERVER_CLASS_SOURCES)
+    return str(row.get("source") or "").strip().lower() in _API_SERVER_CLASS_SOURCES
 
 
 def _optional_col(name: str, columns: set[str], fallback: str = "NULL") -> str:

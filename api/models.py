@@ -9485,8 +9485,17 @@ def _cleanup_manifest_thread_lock(hermes_home):
         return lock
 
 
-def delete_cli_session(sid) -> bool:
-    """Delete a CLI session while serializing manifest and DB cleanup."""
+def delete_cli_session(sid, require_source_in: tuple[str, ...] | None = None) -> bool:
+    """Delete a CLI session while serializing manifest and DB cleanup.
+
+    ``require_source_in`` (optional, #6855): when given, the row's CURRENT
+    ``sessions.source`` must be an exact member of this set INSIDE the
+    ``BEGIN IMMEDIATE`` transaction that deletes it. The route-level
+    authorization is re-verified atomically with the destructive act so a
+    source flipped between check and act cannot erase a non-api_server row.
+    On mismatch the transaction rolls back and nothing is deleted (fail
+    closed). None keeps the historical behavior (no provenance gate).
+    """
     try:
         from api.profiles import get_active_hermes_home
         hermes_home = Path(get_active_hermes_home()).expanduser().resolve()
@@ -9496,13 +9505,13 @@ def delete_cli_session(sid) -> bool:
     try:
         with _cleanup_manifest_thread_lock(hermes_home):
             with _cleanup_manifest_process_lock(hermes_home):
-                return _delete_cli_session_locked(sid, hermes_home)
+                return _delete_cli_session_locked(sid, hermes_home, require_source_in)
     except Exception:
         logger.warning("Failed to delete CLI session %s from state.db", sid, exc_info=True)
         return False
 
 
-def _delete_cli_session_locked(sid, hermes_home) -> bool:
+def _delete_cli_session_locked(sid, hermes_home, require_source_in: tuple[str, ...] | None = None) -> bool:
     """Delete a CLI session from state.db using Hermes' session semantics.
 
     A scoped transaction implements the Agent invariant while giving branch and
@@ -9543,6 +9552,27 @@ def _delete_cli_session_locked(sid, hermes_home) -> bool:
             }
             if not {"id", "parent_session_id"}.issubset(columns):
                 return False
+
+            # #6855 review: the provenance decision must be authoritative AND
+            # atomic with the destructive act. When a source gate is required,
+            # revalidate the row's CURRENT source inside this BEGIN IMMEDIATE
+            # transaction (which holds the write lock) — a source flipped
+            # between route-level authorization and deletion must fail closed
+            # here, leaving the row and every artifact untouched. Exact
+            # membership only; a missing ``source`` column or row also denies.
+            if require_source_in is not None:
+                if "source" not in columns:
+                    conn.rollback()
+                    return False
+                src_row = conn.execute(
+                    "SELECT source FROM sessions WHERE id = ?", (sid,)
+                ).fetchone()
+                if (
+                    not src_row
+                    or str(src_row[0] or "").strip().lower() not in require_source_in
+                ):
+                    conn.rollback()
+                    return False
 
             selected = ["id", "parent_session_id"]
             for column in (
