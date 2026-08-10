@@ -15394,7 +15394,28 @@ def handle_post(handler, parsed) -> bool:
             try:
                 from api.models import delete_cli_session
 
-                state_db_cleanup_failed = not delete_cli_session(sid)
+                # #6855 review: the destructive call must authorize on the
+                # provenance resolved at the call site
+                # (``cli_meta_for_delete``), not on the upstream read_only
+                # projection staying correct. Rows that reach this branch are
+                # WebUI-owned; an api_server-class (imported/read-only) row
+                # must never be erased here — fail closed, and when a source
+                # WAS resolved, re-verify that exact source inside the delete
+                # transaction (same fail-closed shape as the unsafe-id path,
+                # scoped to the call-site provenance instead of the
+                # api_server-class set).
+                resolved_source = (cli_meta_for_delete.get("source_tag") or "")
+                if _is_api_server_class_state_db_source(resolved_source):
+                    state_db_cleanup_failed = True
+                elif resolved_source:
+                    state_db_cleanup_failed = not delete_cli_session(
+                        sid, require_source_in=(resolved_source,)
+                    )
+                else:
+                    # No state.db row surfaced at the call site (typical
+                    # sidecar-only WebUI session): the historical unrestricted
+                    # cleanup is a no-op returning True for absent rows.
+                    state_db_cleanup_failed = not delete_cli_session(sid)
             except Exception:
                 state_db_cleanup_failed = True
                 logger.warning("Failed to delete CLI session %s", sid, exc_info=True)

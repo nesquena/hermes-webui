@@ -724,6 +724,77 @@ def test_delete_safe_id_still_cleans_attachments(isolated_state_db, monkeypatch,
     )
 
 
+def test_delete_path_safe_api_server_class_row_fails_closed(
+    isolated_state_db, monkeypatch
+):
+    """Re-gate r5 (#6855): the path-safe state.db delete must not erase an
+    api_server-class row. The branch is reached only for WebUI-owned rows, but
+    the destructive call authorizes on the provenance resolved at the call
+    site (``cli_meta_for_delete``) — an api_server-class row that slips past
+    the upstream read_only guard must survive with ``state_db_cleanup_failed``
+    reported (fail closed), never be deleted by an unrestricted call.
+    """
+    sid = "path-safe-ro-import-1"
+    _make_state_db(isolated_state_db["db"], sid, source="api_server", title="API imported")
+    # Deliberately NO ``read_only`` key: the destructive call must not depend
+    # on the upstream read_only projection staying correct (#6855).
+    cli_meta = {
+        "session_id": sid,
+        "source_tag": "api_server",
+        "raw_source": "api_server",
+        "session_source": "api_server",
+        "profile": "default",
+    }
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda s: cli_meta)
+
+    assert models.is_safe_session_id(sid) is True
+    assert routes._is_messaging_session_id(sid) is False, (
+        "precondition: the api_server row is not messaging, so the branch runs"
+    )
+
+    captured = _capture_post(monkeypatch, {"session_id": sid})
+    assert routes.handle_post(object(), SimpleNamespace(path="/api/session/delete")) is True
+
+    assert captured["status"] == 200, captured
+    assert captured["payload"]["state_db_cleanup_failed"] is True, (
+        "path-safe api_server-class delete must report cleanup failure, not erase the row"
+    )
+    assert _row_exists(isolated_state_db["db"], sid) is True, (
+        "api_server-class row must survive the path-safe delete (#6855)"
+    )
+
+
+def test_delete_path_safe_webui_row_deletes_with_exact_source_gate(
+    isolated_state_db, monkeypatch
+):
+    """Re-gate r5 (#6855): a WebUI-owned path-safe row is deleted with the
+    exact source resolved at the call site re-verified inside the delete
+    transaction — the positive counterpart of the api_server-class denial.
+    """
+    sid = "path-safe-webui-own-1"
+    _make_state_db(isolated_state_db["db"], sid, source="webui", title="Safe")
+    cli_meta = {
+        "session_id": sid,
+        "source_tag": "webui",
+        "raw_source": "webui",
+        "session_source": "webui",
+        "profile": "default",
+    }
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda s: cli_meta)
+
+    assert models.is_safe_session_id(sid) is True
+    assert routes._is_messaging_session_id(sid) is False
+
+    captured = _capture_post(monkeypatch, {"session_id": sid})
+    assert routes.handle_post(object(), SimpleNamespace(path="/api/session/delete")) is True
+
+    assert captured["status"] == 200, captured
+    assert captured["payload"]["state_db_cleanup_failed"] is False, captured
+    assert _row_exists(isolated_state_db["db"], sid) is False, (
+        "WebUI-owned row must be deleted by the path-safe delete (#6855)"
+    )
+
+
 def test_archive_no_metadata_fallback_when_source_lookup_empty(
     isolated_state_db, monkeypatch
 ):
