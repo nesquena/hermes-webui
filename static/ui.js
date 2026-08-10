@@ -16628,7 +16628,7 @@ function renderMessages(options){
     }
     const isUser=m.role==='user';
     const isProcessWakeup=m&&m._source==='process_wakeup';
-    if(!isUser) content=_projectInternalProgressContent(S.messages, rawIdx, content);
+    if(!isUser&&typeof _projectInternalProgressContent==='function') content=_projectInternalProgressContent(S.messages, rawIdx, content);
     if(!isUser&&_isMarkerOnlyAssistantCompressionMessage(m)){
       content='**Error:** No response received after context compression. Please retry.';
     }
