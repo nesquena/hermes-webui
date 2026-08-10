@@ -31,6 +31,8 @@ DEFAULT_MAX_ATTEMPTS = 3
 _BUSY_RETRY_SECONDS = 0.25
 _IDLE_POLL_SECONDS = 0.5
 _MAX_START_FAILURES = 5
+_STARTING_LEASE_SECONDS = 30.0
+_RUNNING_HEARTBEAT_GRACE_SECONDS = 30.0
 
 _REGISTRY_LOCK = threading.RLock()
 _REGISTRY: dict[str, Any] | None = None
@@ -364,6 +366,9 @@ def schedule_goal_continuation(
             "status": "pending",
             "owner_id": _current_owner_id(),
             "claim_id": None,
+            "claim_started_at": None,
+            "admitted_at": None,
+            "last_heartbeat_at": None,
             "attempts": 0,
             "max_attempts": attempts_limit,
             "start_failures": 0,
@@ -402,6 +407,8 @@ def bind_goal_continuation_stream(
         record["status"] = "running"
         record["stream_id"] = stream
         record["attempts"] = int(record.get("attempts") or 0) + 1
+        record["admitted_at"] = timestamp
+        record["last_heartbeat_at"] = timestamp
         record["updated_at"] = timestamp
         registry["intents"][sid] = record
         _save_locked()
@@ -431,9 +438,13 @@ def adopt_legacy_browser_goal_stream(session_id: str, stream_id: str, prompt: st
         record["status"] = "running"
         record["stream_id"] = stream
         record["claim_id"] = None
+        record["claim_started_at"] = None
         record["attempts"] = int(record.get("attempts") or 0) + 1
         record["owner_id"] = _current_owner_id()
-        _record_now(record, time.time())
+        timestamp = time.time()
+        record["admitted_at"] = timestamp
+        record["last_heartbeat_at"] = timestamp
+        _record_now(record, timestamp)
         _save_locked()
         return True
 
@@ -490,6 +501,9 @@ def _release_start_claim(
         record["status"] = "pending"
         record["stream_id"] = None
         record["claim_id"] = None
+        record["claim_started_at"] = None
+        record["admitted_at"] = None
+        record["last_heartbeat_at"] = None
         if not busy:
             record["start_failures"] = int(record.get("start_failures") or 0) + 1
         failures = int(record.get("start_failures") or 0)
@@ -530,6 +544,7 @@ def drain_goal_continuations_once(
             claim_id = uuid.uuid4().hex
             record["status"] = "starting"
             record["claim_id"] = claim_id
+            record["claim_started_at"] = timestamp
             record["owner_id"] = _current_owner_id()
             record["last_error"] = None
             _record_now(record, timestamp)
@@ -593,7 +608,9 @@ def drain_goal_continuations_once(
             record["stream_id"] = stream_id
             record["attempts"] = int(record.get("attempts") or 0) + 1
             record["owner_id"] = _current_owner_id()
-            _record_now(record, time.time())
+            record["admitted_at"] = timestamp
+            record["last_heartbeat_at"] = timestamp
+            _record_now(record, timestamp)
             _save_locked()
         elif record.get("status") == "running" and record.get("stream_id") == stream_id:
             pass
@@ -659,6 +676,9 @@ def requeue_goal_continuation_after_no_response(
         record["status"] = "pending"
         record["stream_id"] = None
         record["claim_id"] = None
+        record["claim_started_at"] = None
+        record["admitted_at"] = None
+        record["last_heartbeat_at"] = None
         record["owner_id"] = _current_owner_id()
         record["available_at"] = timestamp + _retry_delay(attempts)
         record["last_error"] = "empty provider response; automatic retry scheduled"
@@ -760,6 +780,176 @@ def _default_run_summary_loader(session_id: str, stream_id: str) -> dict[str, An
     return summary
 
 
+def _default_run_active(session_id: str, stream_id: str) -> bool:
+    """Return whether the admitted stream still has a live WebUI worker."""
+    sid = str(session_id or "").strip()
+    stream = str(stream_id or "").strip()
+    if not sid or not stream:
+        return False
+    try:
+        from api import config
+
+        with config.ACTIVE_RUNS_LOCK:
+            run = (config.ACTIVE_RUNS or {}).get(stream)
+            if isinstance(run, dict) and str(run.get("session_id") or "") == sid:
+                return True
+    except Exception:
+        logger.debug("Goal continuation live-run check failed", exc_info=True)
+        raise
+    return False
+
+
+def reconcile_goal_continuations_once(
+    *,
+    active_run_check: Callable[[str, str], bool] | None = None,
+    run_summary_loader: Callable[[str, str], Any] | None = None,
+    now: float | None = None,
+) -> int:
+    """Reconcile expired admission leases and orphaned running streams.
+
+    A successful ``start_session_turn`` response is only admission, not proof
+    that a worker ever started. ``starting`` claims therefore expire, while a
+    ``running`` record must periodically prove liveness through the in-process
+    run registries. Automatic replay is allowed only when the journal proves
+    there was no observable model/tool activity; otherwise the record fails
+    closed for explicit inspection.
+    """
+    timestamp = float(time.time() if now is None else now)
+    active_check = active_run_check or _default_run_active
+    summary_loader = run_summary_loader or _default_run_summary_loader
+    changed = 0
+
+    with _registry_transaction() as registry:
+        candidates = [
+            copy.deepcopy(record)
+            for record in registry["intents"].values()
+            if isinstance(record, dict) and record.get("status") in {"starting", "running"}
+        ]
+
+    for snapshot in candidates:
+        sid = str(snapshot.get("session_id") or "")
+        status = str(snapshot.get("status") or "")
+        continuation_id = str(snapshot.get("continuation_id") or "")
+        stream_id = str(snapshot.get("stream_id") or "")
+        if status == "starting":
+            lease_anchor = float(
+                snapshot.get("claim_started_at")
+                or snapshot.get("updated_at")
+                or snapshot.get("created_at")
+                or 0.0
+            )
+            if lease_anchor and timestamp - lease_anchor < _STARTING_LEASE_SECONDS:
+                continue
+            with _registry_transaction() as registry:
+                record = registry["intents"].get(sid)
+                if (
+                    not isinstance(record, dict)
+                    or record.get("status") != "starting"
+                    or str(record.get("continuation_id") or "") != continuation_id
+                    or str(record.get("claim_id") or "")
+                    != str(snapshot.get("claim_id") or "")
+                ):
+                    continue
+                record["status"] = "pending"
+                record["claim_id"] = None
+                record["claim_started_at"] = None
+                record["owner_id"] = _current_owner_id()
+                record["available_at"] = timestamp
+                record["last_error"] = "starting claim lease expired before stream admission"
+                _record_now(record, timestamp)
+                _save_locked()
+                changed += 1
+            continue
+
+        heartbeat_anchor = float(
+            snapshot.get("last_heartbeat_at")
+            or snapshot.get("admitted_at")
+            or snapshot.get("updated_at")
+            or 0.0
+        )
+        if heartbeat_anchor and timestamp - heartbeat_anchor < _RUNNING_HEARTBEAT_GRACE_SECONDS:
+            continue
+        try:
+            live = bool(active_check(sid, stream_id))
+        except Exception:
+            logger.warning("Goal continuation liveness check failed for %s", sid, exc_info=True)
+            continue
+        if live:
+            with _registry_transaction() as registry:
+                record = registry["intents"].get(sid)
+                if (
+                    not isinstance(record, dict)
+                    or record.get("status") != "running"
+                    or str(record.get("continuation_id") or "") != continuation_id
+                    or str(record.get("stream_id") or "") != stream_id
+                ):
+                    continue
+                record["last_heartbeat_at"] = timestamp
+                _record_now(record, timestamp)
+                _save_locked()
+                changed += 1
+            continue
+
+        try:
+            summary = summary_loader(sid, stream_id) or {}
+            observable_activity = bool(summary.get("observable_activity"))
+            terminal_state = str(summary.get("terminal_state") or "unknown").strip().lower()
+            evidence_error = None
+        except Exception as exc:
+            logger.warning("Goal continuation orphan evidence failed for %s", sid, exc_info=True)
+            observable_activity = True
+            terminal_state = "unknown"
+            evidence_error = f"run evidence unavailable: {type(exc).__name__}: {exc}"
+
+        with _registry_transaction() as registry:
+            record = registry["intents"].get(sid)
+            if (
+                not isinstance(record, dict)
+                or record.get("status") != "running"
+                or str(record.get("continuation_id") or "") != continuation_id
+                or str(record.get("stream_id") or "") != stream_id
+            ):
+                continue
+            attempts = int(record.get("attempts") or 0)
+            max_attempts = max(1, int(record.get("max_attempts") or DEFAULT_MAX_ATTEMPTS))
+            if evidence_error:
+                record["status"] = "failed"
+                record["last_error"] = evidence_error[:500]
+            elif observable_activity:
+                record["status"] = "failed"
+                record["last_error"] = (
+                    "orphaned goal continuation emitted observable activity; automatic replay refused"
+                )
+            elif terminal_state in {"completed", "done", "cancelled"}:
+                record["status"] = "failed"
+                record["last_error"] = (
+                    f"orphaned goal continuation reached {terminal_state} without a durable judge verdict"
+                )
+            elif attempts >= max_attempts:
+                record["status"] = "failed"
+                record["last_error"] = f"orphan recovery exhausted {attempts}/{max_attempts} attempts"
+            else:
+                record["status"] = "pending"
+                record["stream_id"] = None
+                record["claim_id"] = None
+                record["claim_started_at"] = None
+                record["admitted_at"] = None
+                record["last_heartbeat_at"] = None
+                record["owner_id"] = _current_owner_id()
+                record["available_at"] = timestamp + _retry_delay(attempts)
+                record["last_error"] = (
+                    "admitted stream had no live worker or observable activity "
+                    f"({terminal_state}); retry scheduled"
+                )
+            _record_now(record, timestamp)
+            _save_locked()
+            changed += 1
+
+    if changed:
+        _WORKER_WAKE.set()
+    return changed
+
+
 def _call_loader(loader: Callable[..., Any], record: dict[str, Any]) -> Any:
     try:
         return loader(record["session_id"], profile_home=record.get("profile_home"))
@@ -822,6 +1012,9 @@ def recover_goal_continuations(
                         "status": "pending",
                         "owner_id": _current_owner_id(),
                         "claim_id": None,
+                        "claim_started_at": None,
+                        "admitted_at": None,
+                        "last_heartbeat_at": None,
                         "attempts": 0,
                         "start_failures": 0,
                         "available_at": timestamp,
@@ -862,6 +1055,9 @@ def recover_goal_continuations(
                 record["status"] = "pending"
                 record["stream_id"] = None
                 record["claim_id"] = None
+                record["claim_started_at"] = None
+                record["admitted_at"] = None
+                record["last_heartbeat_at"] = None
                 record["owner_id"] = _current_owner_id()
                 record["available_at"] = timestamp
                 record["last_error"] = f"recovered after {terminal_state} terminal state"
@@ -884,6 +1080,10 @@ def _worker_loop() -> None:
     except Exception:
         logger.warning("Goal continuation startup recovery failed", exc_info=True)
     while not _WORKER_STOP.is_set():
+        try:
+            reconcile_goal_continuations_once()
+        except Exception:
+            logger.warning("Goal continuation reconciliation failed", exc_info=True)
         try:
             started = drain_goal_continuations_once()
         except Exception:

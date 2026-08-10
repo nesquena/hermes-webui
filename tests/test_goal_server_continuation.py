@@ -93,6 +93,111 @@ def test_failed_atomic_replace_does_not_leave_phantom_cached_intent(continuation
     assert gc.get_goal_continuation("session-b") is None
 
 
+def test_reconcile_expired_starting_claim_requeues_without_burning_attempt(continuation_store):
+    gc, _path = continuation_store
+    record = _schedule(gc, now=100.0)
+    record.update(
+        status="starting",
+        claim_id="claim-stuck",
+        owner_id=gc._current_owner_id(),
+        updated_at=100.0,
+    )
+    gc._replace_goal_continuation_for_test(record)
+
+    assert gc.reconcile_goal_continuations_once(now=131.0) == 1
+
+    current = gc.get_goal_continuation("session-a")
+    assert current["status"] == "pending"
+    assert current["claim_id"] is None
+    assert current["attempts"] == 0
+    assert current["available_at"] == 131.0
+    assert "lease expired" in current["last_error"]
+
+
+def test_reconcile_admitted_run_without_worker_or_activity_requeues(continuation_store):
+    gc, _path = continuation_store
+    _schedule(gc, now=100.0)
+    assert gc.drain_goal_continuations_once(
+        start_turn=lambda *_args, **_kwargs: {"_status": 200, "stream_id": "orphan-stream"},
+        is_goal_active=lambda *_args, **_kwargs: True,
+        now=100.0,
+    ) == 1
+
+    assert gc.reconcile_goal_continuations_once(
+        active_run_check=lambda _sid, _stream: False,
+        run_summary_loader=lambda _sid, _stream: {
+            "terminal_state": "unknown",
+            "observable_activity": False,
+        },
+        now=131.0,
+    ) == 1
+
+    current = gc.get_goal_continuation("session-a")
+    assert current["status"] == "pending"
+    assert current["stream_id"] is None
+    assert current["claim_id"] is None
+    assert current["attempts"] == 1
+    assert current["available_at"] > 131.0
+    assert "no live worker" in current["last_error"]
+
+
+def test_reconcile_live_run_refreshes_durable_heartbeat(continuation_store):
+    gc, _path = continuation_store
+    _schedule(gc, now=100.0)
+    gc.drain_goal_continuations_once(
+        start_turn=lambda *_args, **_kwargs: {"_status": 200, "stream_id": "live-stream"},
+        is_goal_active=lambda *_args, **_kwargs: True,
+        now=100.0,
+    )
+
+    assert gc.reconcile_goal_continuations_once(
+        active_run_check=lambda _sid, _stream: True,
+        run_summary_loader=lambda *_args: (_ for _ in ()).throw(
+            AssertionError("live runs must not inspect terminal evidence")
+        ),
+        now=131.0,
+    ) == 1
+
+    current = gc.get_goal_continuation("session-a")
+    assert current["status"] == "running"
+    assert current["stream_id"] == "live-stream"
+    assert current["last_heartbeat_at"] == 131.0
+
+
+def test_default_liveness_ignores_sse_channel_without_worker(monkeypatch, continuation_store):
+    gc, _path = continuation_store
+    from api import config
+
+    monkeypatch.setattr(config, "STREAMS", {"stream-a": object()})
+    monkeypatch.setattr(config, "ACTIVE_RUNS", {})
+    assert gc._default_run_active("session-a", "stream-a") is False
+
+    config.ACTIVE_RUNS["stream-a"] = {"session_id": "session-a"}
+    assert gc._default_run_active("session-a", "stream-a") is True
+
+
+def test_reconcile_orphan_after_observable_activity_fails_closed(continuation_store):
+    gc, _path = continuation_store
+    _schedule(gc, now=100.0)
+    gc.drain_goal_continuations_once(
+        start_turn=lambda *_args, **_kwargs: {"_status": 200, "stream_id": "unsafe-stream"},
+        is_goal_active=lambda *_args, **_kwargs: True,
+        now=100.0,
+    )
+
+    assert gc.reconcile_goal_continuations_once(
+        active_run_check=lambda _sid, _stream: False,
+        run_summary_loader=lambda _sid, _stream: {
+            "terminal_state": "interrupted",
+            "observable_activity": True,
+        },
+        now=131.0,
+    ) == 1
+
+    current = gc.get_goal_continuation("session-a")
+    assert current["status"] == "failed"
+    assert "observable activity" in current["last_error"]
+
 def test_drain_starts_exactly_one_server_turn_and_marks_it_running(continuation_store):
     gc, _path = continuation_store
     _schedule(gc)
