@@ -160,6 +160,105 @@ def test_colon_bearing_missing_fallback_keeps_authoritative_provider():
     }
 
 
+# Non-default model of a named custom_providers[] entry. The catalog render
+# paths build the option with the qualified "@custom:<slug>:<model>" value and
+# NEVER set data-model (that attribute is only set by the fallback injection
+# path _ensureModelOptionInDropdown). Regression for #6884: the returned model
+# id must be the stripped bare name ("sol"), not the raw dropdown value.
+_NON_DEFAULT_CUSTOM_DRIVER = r"""
+const fs = require('fs');
+const uiSrc = fs.readFileSync(process.argv[1], 'utf8');
+
+function extractFunction(source, name) {
+  const marker = 'function ' + name + '(';
+  const start = source.indexOf(marker);
+  if (start < 0) throw new Error('not found: ' + name);
+  const brace = source.indexOf('{', source.indexOf(')', start));
+  let depth = 0;
+  for (let i = brace; i < source.length; i++) {
+    if (source[i] === '{') depth += 1;
+    else if (source[i] === '}') {
+      depth -= 1;
+      if (depth === 0) return source.slice(start, i + 1);
+    }
+  }
+  throw new Error('unterminated: ' + name);
+}
+
+eval([
+  '_getOptionProviderId',
+  '_providerFromModelValue',
+  '_modelStateForSelect',
+].map(name => extractFunction(uiSrc, name)).join('\n'));
+
+globalThis.document = {
+  createElement(tag) {
+    return {
+      tagName: String(tag).toUpperCase(),
+      value: '',
+      textContent: '',
+      dataset: {},
+      parentElement: null,
+    };
+  },
+};
+globalThis.getModelLabel = value => String(value || '');
+globalThis.window = { _configuredModelBadges: {} };
+
+const group = {tagName: 'OPTGROUP', dataset: {provider: 'custom:hetmer.net'}};
+const luna = {
+  value: 'luna',
+  textContent: 'luna',
+  dataset: {},
+  parentElement: group,
+};
+const sol = {
+  value: '@custom:hetmer.net:sol',
+  textContent: 'sol',
+  dataset: {},  // no data-model — normal catalog render path
+  parentElement: group,
+};
+const select = {
+  id: 'modelSelect',
+  options: [luna, sol],
+  querySelectorAll() { return []; },
+  get selectedOptions() { return [sol]; },
+  get value() { return sol.value; },
+  set value(value) {},
+};
+
+process.stdout.write(JSON.stringify({
+  nonDefault: _modelStateForSelect(select, '@custom:hetmer.net:sol'),
+  defaultUnprefixed: _modelStateForSelect(select, 'luna'),
+}));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_non_default_named_custom_provider_model_strips_qualified_prefix():
+    assert NODE is not None
+    result = subprocess.run(
+        [NODE, "-e", _NON_DEFAULT_CUSTOM_DRIVER, str(UI_JS)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+
+    # #6884: the normally-rendered option has no data-model, so the qualified
+    # "@custom:hetmer.net:sol" value must be stripped to the bare model id.
+    assert payload["nonDefault"] == {
+        "model": "sol",
+        "model_provider": "custom:hetmer.net",
+    }
+    # Sanity: the unprefixed default option still returns its value as-is.
+    assert payload["defaultUnprefixed"] == {
+        "model": "luna",
+        "model_provider": "custom:hetmer.net",
+    }
+
+
 _RENDERED_CLICK_DRIVER = r"""
 
 const fs = require('fs');

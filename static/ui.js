@@ -2908,7 +2908,16 @@ function _modelStateForSelect(sel, modelId){
     // id (e.g. model-a:free) synthesized as @custom:backup:model-a:free would
     // otherwise mis-parse to provider "custom:backup:model-a" (#6221 re-gate).
     const routedProvider=selected?String(_getOptionProviderId(selected)||'').trim():'';
-    return {model:routedModel||value,model_provider:routedProvider||explicitProvider};
+    // Normally-rendered catalog options only carry the qualified
+    // @custom:<slug>:<model> value — data-model is set solely by the fallback
+    // injection path (_ensureModelOptionInDropdown). When it is missing, strip
+    // the same @<provider>: prefix already parsed as explicitProvider instead
+    // of sending the raw dropdown value as the model id (#6884).
+    const explicitPrefix=`@${explicitProvider}:`;
+    const strippedModel=value.toLowerCase().startsWith(explicitPrefix.toLowerCase())
+      ?value.slice(explicitPrefix.length)
+      :value;
+    return {model:routedModel||strippedModel||value,model_provider:routedProvider||explicitProvider};
   }
   // Resolve the provider from the option whose VALUE matches the requested
   // model — never blindly from sel.selectedOptions[0] (#5567). During a profile
