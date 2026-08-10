@@ -14,8 +14,11 @@ from api.session_lineage import (
     build_completion_delivery_context,
     claim_completion_delivery,
     mark_completion_incorporated,
+    pending_completion_delivery_contexts,
     read_completion_delivery_receipt,
     release_completion_delivery_claim,
+    release_turn_admission,
+    verify_completion_incorporation_artifacts,
 )
 from api.turn_journal import read_turn_journal
 from tests._wakeup_helpers import FakeProcessRegistry, install_fake_registry
@@ -666,6 +669,131 @@ def _persist_accepted_prompt(session, context, prompt):
     session.save()
 
 
+def _install_counting_completion_core(monkeypatch, calls, finished):
+    """Run admission normally but replace provider execution with one durable turn."""
+    from api import streaming
+
+    def counting_core(
+        session_id,
+        msg_text,
+        _model,
+        _workspace,
+        stream_id,
+        _attachments=None,
+        **_kwargs,
+    ):
+        calls.append((session_id, msg_text, stream_id))
+        current = Session.load(session_id)
+        assert current is not None
+        setattr(current, "active_stream_id", None)
+        setattr(current, "pending_user_message", None)
+        current.pending_attachments = []
+        current.pending_started_at = None
+        setattr(current, "pending_user_source", None)
+        current.save()
+        with config.LOCK:
+            config.SESSIONS[session_id] = current
+        with routes.STREAMS_LOCK:
+            routes.STREAMS.pop(stream_id, None)
+        finished.set()
+        return {"executed": True}
+
+    monkeypatch.setattr(streaming, "_run_agent_streaming_core", counting_core)
+
+
+def test_incorporated_acceptance_exception_retries_and_executes_once(monkeypatch, tmp_path):
+    """C5: incorporation is not terminal until the parked worker actually executes."""
+    _configure_completion_recovery(monkeypatch, tmp_path)
+    session = Session(session_id="acceptance-retry", title="acceptance-retry", profile="default")
+    session.save()
+    context = _completion_context("acceptance-retry", "proc-acceptance-retry", tmp_path)
+    executions = []
+    finished = threading.Event()
+    _install_counting_completion_core(monkeypatch, executions, finished)
+    monkeypatch.setattr(routes, "set_last_workspace", lambda _workspace: None)
+    monkeypatch.setattr(routes, "publish_session_list_changed", lambda *_a, **_k: None)
+
+    def fail_acceptance():
+        raise OSError("synthetic acceptance failure")
+
+    first = routes._start_chat_stream_for_session(
+        session,
+        msg="resume this completion",
+        attachments=[],
+        workspace=str(tmp_path),
+        model="test-model",
+        model_provider="test-provider",
+        source="process_wakeup",
+        external_runtime_owned=False,
+        completion_context=context,
+        completion_acceptance=fail_acceptance,
+    )
+    assert first["_status"] == 503
+    assert first["type"] == "completion_incorporation_failed"
+    assert executions == []
+    receipt = read_completion_delivery_receipt(context, session_dir=tmp_path)
+    assert receipt is not None and receipt["state"] == "incorporated"
+
+    accepted = []
+    second = routes._start_chat_stream_for_session(
+        session,
+        msg="resume this completion",
+        attachments=[],
+        workspace=str(tmp_path),
+        model="test-model",
+        model_provider="test-provider",
+        source="process_wakeup",
+        external_runtime_owned=False,
+        completion_context=context,
+        completion_acceptance=lambda: accepted.append("accepted"),
+    )
+    assert int(second.get("_status") or 200) == 200
+    assert second.get("completion_duplicate") is not True
+    assert finished.wait(timeout=2)
+    assert executions == [
+        ("acceptance-retry", "resume this completion", context.correlation_id[:32])
+    ]
+    assert accepted == ["accepted"]
+    assert _wait_until(
+        lambda: (
+            read_completion_delivery_receipt(context, session_dir=tmp_path) or {}
+        ).get("execution_state")
+        == "delivered"
+    )
+
+    replay = routes._start_chat_stream_for_session(
+        session,
+        msg="resume this completion",
+        attachments=[],
+        workspace=str(tmp_path),
+        model="test-model",
+        model_provider="test-provider",
+        source="process_wakeup",
+        external_runtime_owned=False,
+        completion_context=context,
+        completion_acceptance=lambda: accepted.append("duplicate"),
+    )
+    assert replay["_status"] == 200
+    assert replay["completion_duplicate"] is True
+    assert executions == [
+        ("acceptance-retry", "resume this completion", context.correlation_id[:32])
+    ]
+    assert accepted == ["accepted", "duplicate"]
+    document = json.loads(
+        (tmp_path / "_completion_delivery_receipts.json").read_text(encoding="utf-8")
+    )
+    assert list(document["receipts"]) == [context.completion_key]
+    persisted = json.loads((tmp_path / "acceptance-retry.json").read_text(encoding="utf-8"))
+    assert len(
+        [
+            row
+            for row in persisted["context_messages"]
+            if (row.get("_completion_delivery") or {}).get("completion_key")
+            == context.completion_key
+        ]
+    ) == 1
+
+
 def test_crash_boundaries_before_incorporation_recover_once(monkeypatch, tmp_path):
     _configure_completion_recovery(monkeypatch, tmp_path)
     session = Session(session_id="recover", title="recover", profile="default")
@@ -746,23 +874,113 @@ def test_cas_before_execution_gate_never_executes_accepted_only(monkeypatch, tmp
     assert receipt is not None and receipt["state"] == "accepted"
 
 
-def test_incorporated_restart_is_incomplete_final_without_tool_replay(monkeypatch, tmp_path):
+def test_incorporated_restart_resumes_exact_turn_once(monkeypatch, tmp_path):
+    """C5: fresh-process repair must execute a durable ungated checkpoint once."""
     _configure_completion_recovery(monkeypatch, tmp_path)
     session = Session(session_id="incorporated", title="incorporated", profile="default")
     session.save()
     context = _completion_context("incorporated", "proc-incorporated", tmp_path)
-    claim = claim_completion_delivery(context, session_dir=tmp_path)
+    stream_id = context.correlation_id[:32]
+    admission = routes._reserve_turn_admission(session, stream_id)
+    claim = claim_completion_delivery(
+        context,
+        session_dir=tmp_path,
+        reservation_id=stream_id,
+    )
     assert claim is not None
-    mark_completion_incorporated(claim)
+    prepared = routes._prepare_chat_start_session_for_stream(
+        session,
+        msg="resume after restart",
+        attachments=[],
+        workspace=str(tmp_path),
+        model="test-model",
+        model_provider="test-provider",
+        stream_id=stream_id,
+        source="process_wakeup",
+        admission=admission,
+        defer_journal=True,
+        completion_context=context,
+    )
+    prepared = routes._append_prepared_chat_turn_journal(
+        session,
+        prepared,
+        msg="resume after restart",
+        attachments=[],
+        workspace=str(tmp_path),
+        model="test-model",
+        model_provider="test-provider",
+    )
+    admission.admitted.set()
+    verify_completion_incorporation_artifacts(
+        claim,
+        turn_admission=admission,
+        message="resume after restart",
+        session_dir=tmp_path,
+    )
+    mark_completion_incorporated(
+        claim,
+        session_dir=tmp_path,
+        execution_pending=True,
+    )
     release_completion_delivery_claim(claim)
-    before = (tmp_path / "incorporated.json").read_bytes()
+    release_turn_admission(admission)
 
-    class ForbiddenThread:
-        def __init__(self, *_args, **_kwargs):
-            raise AssertionError("incorporated completion must never replay tools")
+    # Process exit drops only in-memory owners. Startup repair must rely on the
+    # sidecar, journal, checkpoint, and incorporated receipt just read from disk.
+    with config.LOCK:
+        config.SESSIONS.clear()
+    with config.ACTIVE_RUNS_LOCK:
+        config.ACTIVE_RUNS.clear()
+    with routes.STREAMS_LOCK:
+        routes.STREAMS.clear()
+    monkeypatch.setattr(bp, "_PROCESS_CHECKPOINT_RECOVERED", False)
+    monkeypatch.setattr(bp, "_PROCESS_RECOVERY_DONE", False)
+    monkeypatch.setattr(routes, "set_last_workspace", lambda _workspace: None)
+    monkeypatch.setattr(routes, "publish_session_list_changed", lambda *_a, **_k: None)
+    executions = []
+    finished = threading.Event()
+    _install_counting_completion_core(monkeypatch, executions, finished)
 
-    monkeypatch.setattr(routes.threading, "Thread", ForbiddenThread)
-    assert routes.recover_accepted_completion_delivery(context) is False
-    assert (tmp_path / "incorporated.json").read_bytes() == before
-    receipt = read_completion_delivery_receipt(context, session_dir=tmp_path)
-    assert receipt is not None and receipt["state"] == "incorporated"
+    class RecoveryRegistry(FakeProcessRegistry):
+        def recover_from_checkpoint(self):
+            return 0
+
+        def list_sessions(self):
+            return []
+
+    registry = RecoveryRegistry()
+    install_fake_registry(monkeypatch, registry)
+    candidates = pending_completion_delivery_contexts(session_dir=tmp_path)
+    assert [candidate.completion_key for candidate in candidates] == [
+        context.completion_key
+    ]
+
+    assert bp.recover_processes_for_webui(
+        registry,
+        lambda *_args, **_kwargs: None,
+    ) == 0
+    assert finished.wait(timeout=2)
+    assert executions == [("incorporated", "resume after restart", stream_id)]
+    assert registry.is_completion_consumed("proc-incorporated") is True
+    assert _wait_until(
+        lambda: (
+            read_completion_delivery_receipt(context, session_dir=tmp_path) or {}
+        ).get("execution_state")
+        == "delivered"
+    )
+    assert _wait_until(lambda: not config.ACTIVE_RUNS)
+    with config.LOCK:
+        config.SESSIONS.clear()
+    with routes.STREAMS_LOCK:
+        routes.STREAMS.clear()
+    monkeypatch.setattr(bp, "_PROCESS_CHECKPOINT_RECOVERED", False)
+    monkeypatch.setattr(bp, "_PROCESS_RECOVERY_DONE", False)
+    assert bp.recover_processes_for_webui(
+        registry,
+        lambda *_args, **_kwargs: None,
+    ) == 0
+    assert executions == [("incorporated", "resume after restart", stream_id)]
+    document = json.loads(
+        (tmp_path / "_completion_delivery_receipts.json").read_text(encoding="utf-8")
+    )
+    assert list(document["receipts"]) == [context.completion_key]

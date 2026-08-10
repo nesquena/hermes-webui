@@ -28,6 +28,7 @@ _COMPLETION_RECEIPT_FILE_NAME = "_completion_delivery_receipts.json"
 _COMPLETION_RECEIPT_LOCK_NAME = "_completion_delivery_receipts.lock"
 _COMPLETION_RECEIPT_VERSION = 2
 _COMPLETION_RECEIPT_STATES = frozenset({"accepted", "incorporated"})
+_COMPLETION_EXECUTION_STATES = frozenset({"pending", "started", "delivered"})
 _SAFE_SESSION_ID_CHARS = frozenset(
     "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-"
 )
@@ -968,6 +969,9 @@ def _validated_completion_receipt_record(
     if not isinstance(accepted_at, (int, float)) or isinstance(accepted_at, bool):
         raise CompletionDeliveryReceiptError("malformed completion accepted timestamp")
     incorporated_at = record.get("incorporated_at")
+    execution_state = record.get("execution_state")
+    execution_started_at = record.get("execution_started_at")
+    delivered_at = record.get("delivered_at")
     if state == "incorporated":
         if (
             not isinstance(incorporated_at, (int, float))
@@ -975,8 +979,44 @@ def _validated_completion_receipt_record(
             or incorporated_at < accepted_at
         ):
             raise CompletionDeliveryReceiptError("malformed completion incorporated timestamp")
+        # Receipts written before execution-state tracking intentionally have no
+        # execution_state.  They remain terminal to avoid replaying historical
+        # tool calls after an upgrade.  Only explicit ``pending`` receipts are
+        # eligible for the new pre-gate restart repair.
+        if execution_state is not None and execution_state not in _COMPLETION_EXECUTION_STATES:
+            raise CompletionDeliveryReceiptError("malformed completion execution state")
+        if execution_state in {"started", "delivered"}:
+            if (
+                not isinstance(execution_started_at, (int, float))
+                or isinstance(execution_started_at, bool)
+                or execution_started_at < incorporated_at
+            ):
+                raise CompletionDeliveryReceiptError(
+                    "malformed completion execution timestamp"
+                )
+        elif execution_started_at is not None:
+            raise CompletionDeliveryReceiptError(
+                "unstarted completion has execution timestamp"
+            )
+        if execution_state == "delivered":
+            if (
+                not isinstance(delivered_at, (int, float))
+                or isinstance(delivered_at, bool)
+                or not isinstance(execution_started_at, (int, float))
+                or isinstance(execution_started_at, bool)
+                or delivered_at < execution_started_at
+            ):
+                raise CompletionDeliveryReceiptError(
+                    "malformed completion delivery timestamp"
+                )
+        elif delivered_at is not None:
+            raise CompletionDeliveryReceiptError(
+                "undelivered completion has delivery timestamp"
+            )
     elif incorporated_at is not None:
         raise CompletionDeliveryReceiptError("accepted completion has incorporated timestamp")
+    elif execution_state is not None or execution_started_at is not None or delivered_at is not None:
+        raise CompletionDeliveryReceiptError("accepted completion has execution state")
     for forbidden in ("prompt", "wakeup_prompt", "output", "tool_output"):
         if forbidden in record:
             raise CompletionDeliveryReceiptError("completion receipt contains prompt payload")
@@ -1006,15 +1046,17 @@ def read_completion_delivery_receipt(
     return _read_completion_receipt_from_document(document, context)
 
 
-def accepted_completion_delivery_contexts(
+def _restart_completion_delivery_contexts(
     *,
+    receipt_state: str,
+    execution_state: str | None = None,
     session_dir: Path | str | None = None,
 ) -> list[CompletionDeliveryContext]:
-    """Return validated accepted-only receipts for restart repair."""
+    """Return validated restart candidates without weakening legacy terminality."""
     directory = _resolved_session_dir(session_dir)
     path = directory / _COMPLETION_RECEIPT_FILE_NAME
     document = _read_completion_receipt_document(path)
-    accepted: list[CompletionDeliveryContext] = []
+    candidates: list[CompletionDeliveryContext] = []
     for completion_key, record in sorted(document["receipts"].items()):
         if not isinstance(record, dict):
             raise CompletionDeliveryReceiptError("malformed completion receipt remains visible")
@@ -1057,7 +1099,9 @@ def accepted_completion_delivery_contexts(
             raise CompletionDeliveryReceiptError(
                 "conflicting completion receipt remains visible"
             ) from exc
-        if validated["state"] != "accepted":
+        if validated["state"] != receipt_state:
+            continue
+        if validated.get("execution_state") != execution_state:
             continue
         try:
             target = resolve_session_lineage(
@@ -1070,9 +1114,18 @@ def accepted_completion_delivery_contexts(
             ) from exc
         if target.root_session_id != lineage_id:
             raise CompletionDeliveryReceiptError(
-                "accepted completion delivery crossed lineage"
+                f"{receipt_state} completion delivery crossed lineage"
             )
-        accepted.append(
+        if (
+            receipt_state == "incorporated"
+            and target.delivery_session_id != receipt_delivery_session_id
+        ):
+            # The exact checkpoint is part of the incorporated identity.  Do
+            # not rebind executable work to a newer compression tip.
+            raise CompletionDeliveryReceiptError(
+                "pending completion delivery moved compression tips"
+            )
+        candidates.append(
             CompletionDeliveryContext(
                 kind=completion_kind,
                 completion_id=completion_id,
@@ -1080,14 +1133,41 @@ def accepted_completion_delivery_contexts(
                 session_key=f"ui:{lineage_id}",
                 origin_ui_session_id=origin_session_id,
                 root_session_id=lineage_id,
-                delivery_session_id=target.delivery_session_id,
+                delivery_session_id=(
+                    receipt_delivery_session_id
+                    if receipt_state == "incorporated"
+                    else target.delivery_session_id
+                ),
                 profile=target.profile,
                 correlation_sha256=receipt_context.correlation_sha256,
                 turn_id=receipt_context.turn_id,
                 receipt_delivery_session_id=receipt_delivery_session_id,
             )
         )
-    return accepted
+    return candidates
+
+
+def accepted_completion_delivery_contexts(
+    *,
+    session_dir: Path | str | None = None,
+) -> list[CompletionDeliveryContext]:
+    """Return validated accepted-only receipts for source-row repair."""
+    return _restart_completion_delivery_contexts(
+        receipt_state="accepted",
+        session_dir=session_dir,
+    )
+
+
+def pending_completion_delivery_contexts(
+    *,
+    session_dir: Path | str | None = None,
+) -> list[CompletionDeliveryContext]:
+    """Return incorporated workers that never crossed their execution gate."""
+    return _restart_completion_delivery_contexts(
+        receipt_state="incorporated",
+        execution_state="pending",
+        session_dir=session_dir,
+    )
 
 
 def _lock_completion_receipt(path: Path, *, nonblocking: bool = True):
@@ -1141,8 +1221,9 @@ def claim_completion_delivery(
     *,
     session_dir: Path | str | None = None,
     reservation_id: str | None = None,
+    resume_incorporated: bool = False,
 ) -> CompletionDeliveryClaim | None:
-    """Claim or create one accepted receipt; incorporated receipts are final."""
+    """Claim an accepted attempt or explicitly reclaim an ungated incorporation."""
     if not isinstance(context, CompletionDeliveryContext):
         raise TypeError("completion context is required")
     receipt_path, claim_lock_path = _completion_receipt_paths(context, session_dir)
@@ -1164,8 +1245,12 @@ def claim_completion_delivery(
             document = _read_completion_receipt_document(receipt_path)
             current = _read_completion_receipt_from_document(document, context)
             if current is not None and current["state"] == "incorporated":
-                _unlock_completion_file(backend, handle, lock_module)
-                return None
+                if not (
+                    resume_incorporated
+                    and current.get("execution_state") == "pending"
+                ):
+                    _unlock_completion_file(backend, handle, lock_module)
+                    return None
             attempt = int(current["attempt"]) + 1 if current is not None else 1
             accepted_at = float(current["accepted_at"]) if current is not None else time.time()
             record = _new_completion_receipt_record(
@@ -1213,6 +1298,7 @@ def mark_completion_incorporated(
     claim: CompletionDeliveryClaim,
     *,
     session_dir: Path | str | None = None,
+    execution_pending: bool = False,
 ) -> dict:
     """CAS one held accepted receipt to incorporated and read it back."""
     if not isinstance(claim, CompletionDeliveryClaim) or not claim.acquired:
@@ -1239,6 +1325,8 @@ def mark_completion_incorporated(
         updated = dict(current)
         updated["state"] = "incorporated"
         updated["incorporated_at"] = time.time()
+        if execution_pending:
+            updated["execution_state"] = "pending"
         document["receipts"][context.completion_key] = updated
         _write_completion_receipt(receipt_path, document)
         durable_document = _read_completion_receipt_document(receipt_path)
@@ -1249,6 +1337,103 @@ def mark_completion_incorporated(
         _unlock_completion_file(store_backend, store_handle, store_module)
     claim.state = "incorporated"
     return durable
+
+
+def _transition_completion_execution(
+    context: CompletionDeliveryContext,
+    *,
+    reservation_id: str,
+    expected_state: str,
+    next_state: str,
+    timestamp_field: str,
+    session_dir: Path | str | None = None,
+) -> dict:
+    """Durably CAS one incorporated receipt around the provider boundary."""
+    if not isinstance(context, CompletionDeliveryContext):
+        raise TypeError("completion context is required")
+    selected_reservation = str(reservation_id or "").strip()
+    if not selected_reservation:
+        raise CompletionDeliveryReceiptError("completion reservation is required")
+    receipt_path, claim_lock_path = _completion_receipt_paths(context, session_dir)
+    claim_backend, claim_handle, claim_module = _lock_completion_receipt(
+        claim_lock_path,
+        nonblocking=False,
+    )
+    try:
+        store_backend, store_handle, store_module = _lock_completion_receipt(
+            _completion_receipt_store_lock_path(session_dir),
+            nonblocking=False,
+        )
+        try:
+            document = _read_completion_receipt_document(receipt_path)
+            current = _read_completion_receipt_from_document(document, context)
+            if (
+                current is None
+                or current.get("state") != "incorporated"
+                or current.get("execution_state") != expected_state
+                or current.get("reservation_id") != selected_reservation
+            ):
+                raise CompletionDeliveryReceiptError(
+                    f"completion execution CAS expected {expected_state}"
+                )
+            updated = dict(current)
+            updated["execution_state"] = next_state
+            updated[timestamp_field] = time.time()
+            document["receipts"][context.completion_key] = updated
+            _write_completion_receipt(receipt_path, document)
+            durable_document = _read_completion_receipt_document(receipt_path)
+            durable = _read_completion_receipt_from_document(
+                durable_document,
+                context,
+            )
+            if (
+                durable is None
+                or durable != updated
+                or durable.get("execution_state") != next_state
+            ):
+                raise CompletionDeliveryReceiptError(
+                    "completion execution receipt read-back failed"
+                )
+            assert durable is not None
+            return durable
+        finally:
+            _unlock_completion_file(store_backend, store_handle, store_module)
+    finally:
+        _unlock_completion_file(claim_backend, claim_handle, claim_module)
+
+
+def mark_completion_execution_started(
+    context: CompletionDeliveryContext,
+    *,
+    reservation_id: str,
+    session_dir: Path | str | None = None,
+) -> dict:
+    """Fence provider/tool execution after the worker gate opens."""
+    return _transition_completion_execution(
+        context,
+        reservation_id=reservation_id,
+        expected_state="pending",
+        next_state="started",
+        timestamp_field="execution_started_at",
+        session_dir=session_dir,
+    )
+
+
+def mark_completion_execution_delivered(
+    context: CompletionDeliveryContext,
+    *,
+    reservation_id: str,
+    session_dir: Path | str | None = None,
+) -> dict:
+    """Record successful terminal writeback so replays remain duplicates."""
+    return _transition_completion_execution(
+        context,
+        reservation_id=reservation_id,
+        expected_state="started",
+        next_state="delivered",
+        timestamp_field="delivered_at",
+        session_dir=session_dir,
+    )
 
 
 def verify_completion_incorporation_artifacts(

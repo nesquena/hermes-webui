@@ -10,6 +10,8 @@ from api.models import Session
 from api.session_lineage import (
     build_completion_delivery_context,
     completion_delivery_metadata,
+    mark_completion_execution_delivered,
+    mark_completion_execution_started,
 )
 from api.turn_journal import read_turn_journal
 
@@ -94,13 +96,32 @@ def test_drain_orders_converge_on_one_completion(monkeypatch, tmp_path):
         def __getattr__(self, name):
             return getattr(self.thread, name)
 
-    def admitted_worker(session_id, prompt, _model, _workspace, stream_id, _attachments, *, admission, **_kwargs):
+    def admitted_worker(
+        session_id,
+        prompt,
+        _model,
+        _workspace,
+        stream_id,
+        _attachments,
+        *,
+        admission,
+        completion_context,
+        **_kwargs,
+    ):
         admissions.append(admission)
         admission.admitted.set()
         assert admission.gate.wait(timeout=5)
         if not admission.abort.is_set():
+            mark_completion_execution_started(
+                completion_context,
+                reservation_id=stream_id,
+            )
             execution_actions.append(
                 {"session_id": session_id, "prompt": prompt, "stream_id": stream_id}
+            )
+            mark_completion_execution_delivered(
+                completion_context,
+                reservation_id=stream_id,
             )
 
     bp_threading = SimpleNamespace(**vars(bp.threading))
@@ -205,6 +226,7 @@ def test_drain_orders_converge_on_one_completion(monkeypatch, tmp_path):
         assert list(receipt_document["receipts"]) == [completion_key]
         receipt = receipt_document["receipts"][completion_key]
         assert receipt["state"] == "incorporated"
+        assert receipt["execution_state"] == "delivered"
         assert receipt["reservation_id"] == admissions[admission_start].stream_id
 
         persisted_tip = json.loads((order_dir / f"{tip.session_id}.json").read_text(encoding="utf-8"))

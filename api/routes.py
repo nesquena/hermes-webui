@@ -21862,7 +21862,11 @@ def _start_chat_stream_for_session(
                 "retryable": True,
                 "_status": 503,
             }
-        if existing_receipt is not None and existing_receipt.get("state") == "incorporated":
+        if (
+            existing_receipt is not None
+            and existing_receipt.get("state") == "incorporated"
+            and existing_receipt.get("execution_state") != "pending"
+        ):
             try:
                 if callable(completion_acceptance):
                     completion_acceptance()
@@ -21935,6 +21939,7 @@ def _start_chat_stream_for_session(
                             completion_claim = claim_completion_delivery(
                                 completion_context,
                                 reservation_id=stream_id,
+                                resume_incorporated=True,
                             )
                         except CompletionDeliveryBusyError:
                             _abort_prepared_chat_turn(s, stream_id, admission)
@@ -22050,6 +22055,7 @@ def _start_chat_stream_for_session(
     )
     worker_kwargs = {
         "admission": admission,
+        "completion_context": completion_context,
         "model_provider": model_provider,
         "goal_related": goal_related,
     }
@@ -22105,7 +22111,10 @@ def _start_chat_stream_for_session(
                 turn_admission=admission,
                 message=msg,
             )
-            mark_completion_incorporated(completion_claim)
+            mark_completion_incorporated(
+                completion_claim,
+                execution_pending=True,
+            )
             if callable(completion_acceptance):
                 completion_acceptance()
         except Exception:
@@ -22299,7 +22308,10 @@ def recover_accepted_completion_delivery(completion_context) -> bool:
             turn_admission=admission,
             message=recovery_message,
         )
-        mark_completion_incorporated(claim)
+        # Accepted-only startup repair never owned a parked provider worker.
+        # Preserve its historical no-replay terminality rather than exposing it
+        # as an execution-pending receipt.
+        mark_completion_incorporated(claim, execution_pending=False)
         with session_lock:
             if session.active_stream_id == stream_id:
                 session.active_stream_id = None
@@ -22323,6 +22335,66 @@ def recover_accepted_completion_delivery(completion_context) -> bool:
         raise
     finally:
         release_completion_delivery_claim(claim)
+
+
+def recover_incorporated_completion_delivery(completion_context) -> bool:
+    """Restart one exactly checkpointed worker that never crossed its gate."""
+    from api.session_lineage import read_completion_delivery_receipt
+
+    receipt = read_completion_delivery_receipt(completion_context)
+    if (
+        receipt is None
+        or receipt.get("state") != "incorporated"
+        or receipt.get("execution_state") != "pending"
+    ):
+        return False
+    session = Session.load(completion_context.delivery_session_id)
+    if session is None:
+        raise KeyError(completion_context.delivery_session_id)
+    recovery_message = str(getattr(session, "pending_user_message", "") or "")
+    recovery_attachments = list(getattr(session, "pending_attachments", None) or [])
+    recovery_source = str(
+        getattr(session, "pending_user_source", "") or "process_wakeup"
+    )
+    if not recovery_message:
+        raise RuntimeError("incorporated completion has no recoverable source prompt")
+    session_lock = _get_session_agent_lock(session.session_id)
+    with session_lock:
+        active_stream_id = getattr(session, "active_stream_id", None)
+        if active_stream_id:
+            with STREAMS_LOCK:
+                active_owner = active_stream_id in STREAMS
+            from api import config as live_config
+
+            with live_config.ACTIVE_RUNS_LOCK:
+                active_owner = bool(
+                    active_owner or active_stream_id in (live_config.ACTIVE_RUNS or {})
+                )
+            if (
+                active_owner
+                or active_stream_id != completion_context.correlation_sha256[:32]
+                or getattr(session, "pending_completion_key", None)
+                != completion_context.completion_key
+            ):
+                return False
+            # The pending receipt plus exact sidecar identity supersedes generic
+            # young-pending grace after a fresh process has no live owner.
+            setattr(session, "active_stream_id", None)
+    result = _start_chat_stream_for_session(
+        session,
+        msg=recovery_message,
+        attachments=recovery_attachments,
+        workspace=str(getattr(session, "workspace", "") or ""),
+        model=str(getattr(session, "model", "") or ""),
+        model_provider=getattr(session, "model_provider", None),
+        source=recovery_source,
+        completion_context=completion_context,
+    )
+    return bool(
+        isinstance(result, dict)
+        and int(result.get("_status") or 200) == 200
+        and not result.get("completion_duplicate")
+    )
 
 
 def _runtime_runner_client_factory():

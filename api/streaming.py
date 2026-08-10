@@ -7979,6 +7979,7 @@ def _run_admitted_agent_streaming(
     attachments=None,
     *,
     admission,
+    completion_context=None,
     completion_observer=None,
     ephemeral=False,
     model_provider=None,
@@ -7986,7 +7987,12 @@ def _run_admitted_agent_streaming(
     moa_config=None,
 ):
     """Park an admitted local worker, run its core, and release exact ownership."""
-    from api.session_lineage import TurnAdmission, release_turn_admission
+    from api.session_lineage import (
+        TurnAdmission,
+        mark_completion_execution_delivered,
+        mark_completion_execution_started,
+        release_turn_admission,
+    )
 
     if not isinstance(admission, TurnAdmission):
         raise ValueError("local streaming requires an exact TurnAdmission")
@@ -8015,7 +8021,12 @@ def _run_admitted_agent_streaming(
                 return
         if admission.abort.is_set():
             return
-        return _run_agent_streaming_core(
+        if completion_context is not None:
+            mark_completion_execution_started(
+                completion_context,
+                reservation_id=stream_id,
+            )
+        result = _run_agent_streaming_core(
             session_id,
             msg_text,
             model,
@@ -8028,6 +8039,12 @@ def _run_admitted_agent_streaming(
             moa_config=moa_config,
             _lineage_root_session_id=admission.root_session_id,
         )
+        if completion_context is not None:
+            mark_completion_execution_delivered(
+                completion_context,
+                reservation_id=stream_id,
+            )
+        return result
     except BaseException:
         admission.abort.set()
         admission.admitted.set()

@@ -1975,8 +1975,14 @@ def recover_processes_for_webui(process_registry=None, get_session_fn=None) -> i
                 )
                 continue
             register_process_session(session_key, session_key)
-        from api.routes import recover_accepted_completion_delivery
-        from api.session_lineage import accepted_completion_delivery_contexts
+        from api.routes import (
+            recover_accepted_completion_delivery,
+            recover_incorporated_completion_delivery,
+        )
+        from api.session_lineage import (
+            accepted_completion_delivery_contexts,
+            pending_completion_delivery_contexts,
+        )
 
         repaired_receipts = 0
         for completion_context in accepted_completion_delivery_contexts():
@@ -1994,6 +2000,22 @@ def recover_processes_for_webui(process_registry=None, get_session_fn=None) -> i
                     completion_context.completion_key,
                     exc_info=True,
                 )
+        resumed_receipts = 0
+        for completion_context in pending_completion_delivery_contexts():
+            try:
+                if not recover_incorporated_completion_delivery(completion_context):
+                    continue
+                resumed_receipts += 1
+                if completion_context.kind == "process":
+                    _mark_registry_completion_consumed(
+                        completion_context.completion_id
+                    )
+            except Exception:
+                logger.error(
+                    "Incorporated completion receipt remains unexecuted: %s",
+                    completion_context.completion_key,
+                    exc_info=True,
+                )
         _PROCESS_RECOVERY_DONE = True
         if recovered:
             logger.info("Recovered %d background process(es) for WebUI", recovered)
@@ -2001,6 +2023,11 @@ def recover_processes_for_webui(process_registry=None, get_session_fn=None) -> i
             logger.info(
                 "Repaired %d accepted completion receipt(s) without execution",
                 repaired_receipts,
+            )
+        if resumed_receipts:
+            logger.info(
+                "Resumed %d incorporated completion receipt(s)",
+                resumed_receipts,
             )
         return recovered
 

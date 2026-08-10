@@ -309,6 +309,8 @@ def test_completion_receipt_is_single_owner_restart_safe_and_prompt_free(tmp_pat
     final_receipt = final_document["receipts"][context.completion_key]
     assert final_receipt["attempt"] == 2
     assert final_receipt["incorporated_at"] >= final_receipt["accepted_at"]
+    assert "execution_state" not in final_receipt
+    assert lineage.pending_completion_delivery_contexts(session_dir=tmp_path) == []
     assert first.receipt_path.name == "_completion_delivery_receipts.json"
     assert first.receipt_path.stat().st_mode & 0o777 == 0o600
 

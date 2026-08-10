@@ -9,9 +9,14 @@ import urllib.error
 
 import api.gateway_chat as gateway_chat
 import api.models as models
+import api.routes as routes
 import api.streaming as streaming
 from api.config import PENDING_GOAL_CONTINUATION, STREAMS, create_stream_channel
 from api.models import new_session
+from api.session_lineage import (
+    build_completion_delivery_context,
+    completion_delivery_metadata,
+)
 from api.gateway_chat import (
     _gateway_http_error_event,
     _gateway_reasoning_delta,
@@ -344,6 +349,8 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     assert isinstance(saved.messages[0]["timestamp"], float)
     assert isinstance(saved.messages[1]["timestamp"], float)
     assert saved.messages[0]["timestamp"] < saved.messages[1]["timestamp"]
+    assert [m["role"] for m in saved.context_messages] == ["user", "assistant"]
+    assert [m["content"] for m in saved.context_messages] == ["Say hello", "hello"]
     assert saved.active_stream_id is None
     assert stream_id not in STREAMS
     assert captured["url"] == "http://gateway.local/v1/chat/completions"
@@ -394,6 +401,122 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
         "tid": "call-1",
     }) in event_pairs
     assert all(len(item) == 3 and item[2] for item in events)
+
+
+def test_gateway_completion_writeback_reuses_one_correlated_checkpoint(tmp_path, monkeypatch):
+    """C6: eager completion context is reused, not appended a second time."""
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"continued"}}]}\n\n'
+            yield b'data: [DONE]\n\n'
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr(
+        streaming,
+        "_load_webui_prefill_context",
+        lambda _cfg: {
+            "status": "not_configured",
+            "source": "none",
+            "label": "",
+            "message_count": 0,
+            "messages": [],
+        },
+    )
+    monkeypatch.setattr(
+        streaming,
+        "_prefill_messages_with_webui_context",
+        lambda _ctx, _cfg: [],
+    )
+    monkeypatch.setattr(
+        gateway_chat.urllib.request,
+        "urlopen",
+        lambda req, timeout=0: FakeResponse(),
+    )
+
+    s = new_session()
+    context = build_completion_delivery_context(
+        {
+            "type": "process_complete",
+            "process_id": "proc-gateway-checkpoint",
+            "session_key": f"ui:{s.session_id}",
+            "origin_ui_session_id": s.session_id,
+            "origin_profile": "default",
+        },
+        s.session_id,
+        session_dir=session_dir,
+    )
+    stream_id = context.correlation_id[:32]
+    s.active_stream_id = stream_id
+    s.pending_user_message = "continue from completion"
+    s.pending_attachments = []
+    s.pending_started_at = 123.0
+    s.pending_user_source = "process_wakeup"
+    s.pending_turn_id = context.turn_id
+    s.pending_completion_key = context.completion_key
+    s.pending_completion_correlation_sha256 = context.correlation_id
+    routes._checkpoint_user_message_for_eager_session_save(
+        s,
+        "continue from completion",
+        [],
+        123.0,
+        source="process_wakeup",
+        completion_context=context,
+    )
+    s.save()
+    STREAMS[stream_id] = create_stream_channel()
+
+    gateway_chat._run_gateway_chat_streaming_core(
+        s.session_id,
+        "continue from completion",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+    )
+
+    saved = models.get_session(s.session_id)
+    metadata = completion_delivery_metadata(context)
+    completion_rows = [
+        row
+        for row in saved.context_messages
+        if row.get("role") == "user"
+        and row.get("_completion_delivery") == metadata
+    ]
+    assert len(completion_rows) == 1
+    assert completion_rows[0]["content"] == "continue from completion"
+    assert completion_rows[0]["_completion_correlation_sha256"] == context.correlation_id
+    assert completion_rows[0]["_turn_id"] == context.turn_id
+    assert [row["role"] for row in saved.context_messages] == ["user", "assistant"]
+    assert [row["content"] for row in saved.context_messages] == [
+        "continue from completion",
+        "continued",
+    ]
+    assert len(
+        [
+            row
+            for row in streaming._context_messages_for_new_turn(saved, "later turn")
+            if row.get("content") == "continue from completion"
+        ]
+    ) == 1
+    assert len(
+        [
+            row
+            for row in saved.messages
+            if row.get("_completion_delivery") == metadata
+        ]
+    ) == 1
 
 
 def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp_path, monkeypatch):
