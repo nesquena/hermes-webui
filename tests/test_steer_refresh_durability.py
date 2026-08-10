@@ -177,8 +177,8 @@ def test_run_journal_snapshot_keeps_steer_between_later_activity(monkeypatch):
         lambda _stream_id: {
             "session_id": sid,
             "run_id": stream_id,
-            "last_seq": 6,
-            "last_event_id": f"{stream_id}:6",
+            "last_seq": 7,
+            "last_event_id": f"{stream_id}:7",
         },
     )
     monkeypatch.setattr(
@@ -188,18 +188,20 @@ def test_run_journal_snapshot_keeps_steer_between_later_activity(monkeypatch):
             "events": [
                 {"event": "token", "event_id": f"{stream_id}:1", "seq": 1,
                  "run_id": stream_id, "session_id": sid, "payload": {"text": "before"}},
-                {"event": "steer_delivered", "event_id": f"{stream_id}:2", "seq": 2,
+                {"event": "reasoning", "event_id": f"{stream_id}:2", "seq": 2,
+                 "run_id": stream_id, "session_id": sid, "payload": {"text": "earlier thought"}},
+                {"event": "steer_delivered", "event_id": f"{stream_id}:3", "seq": 3,
                  "run_id": stream_id, "session_id": sid,
                  "payload": {"text": "steer here", "status": "delivered"}},
-                {"event": "tool", "event_id": f"{stream_id}:3", "seq": 3,
+                {"event": "tool", "event_id": f"{stream_id}:4", "seq": 4,
                  "run_id": stream_id, "session_id": sid,
                  "payload": {"name": "terminal", "id": "call-1", "args": {"command": "pwd"}}},
-                {"event": "tool_complete", "event_id": f"{stream_id}:4", "seq": 4,
+                {"event": "tool_complete", "event_id": f"{stream_id}:5", "seq": 5,
                  "run_id": stream_id, "session_id": sid,
                  "payload": {"name": "terminal", "id": "call-1", "preview": "ok"}},
-                {"event": "reasoning", "event_id": f"{stream_id}:5", "seq": 5,
+                {"event": "reasoning", "event_id": f"{stream_id}:6", "seq": 6,
                  "run_id": stream_id, "session_id": sid, "payload": {"text": "later thought"}},
-                {"event": "token", "event_id": f"{stream_id}:6", "seq": 6,
+                {"event": "token", "event_id": f"{stream_id}:7", "seq": 7,
                  "run_id": stream_id, "session_id": sid, "payload": {"text": "after"}},
             ]
         },
@@ -210,13 +212,14 @@ def test_run_journal_snapshot_keeps_steer_between_later_activity(monkeypatch):
     visible = [(row["role"], row.get("source_event_type"), row.get("text")) for row in rows]
     assert visible == [
         ("prose", "token", "before"),
+        ("thinking", "reasoning", "earlier thought"),
         ("control", "steer_delivered", "steer here"),
         ("tool", "tool_complete", "ok"),
         ("thinking", "reasoning", "later thought"),
         ("prose", "token", "after"),
     ]
     assert [row["order_index"] for row in rows] == list(range(len(rows)))
-    assert [row["seq"] for row in rows] == [1, 2, 3, 5, 6]
+    assert [row["seq"] for row in rows] == [1, 2, 3, 4, 6, 7]
 
 
 @pytest.mark.skipif(NODE is None, reason="node is required")

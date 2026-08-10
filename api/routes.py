@@ -3349,8 +3349,8 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     prose_segment_first_seq = 0
     fresh_segment = True
     last_ts = None
-    reasoning_first_tool_count: int | None = None
-    reasoning_first_seq: int | None = None
+    reasoning_segments: list[dict] = []
+    reasoning_segment_break = False
 
     def mark_boundary(event_seq: int | None = None) -> int:
         nonlocal current_activity_burst_id, prose_segment_first_seq
@@ -3428,13 +3428,21 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         return _compact_for_echo_compare(reasoning_text).endswith(candidate)
 
     def strip_reasoning_echo_tail(text: str) -> bool:
-        nonlocal reasoning_text, reasoning_first_tool_count, reasoning_first_seq
+        nonlocal reasoning_text
         next_reasoning, did_remove = _strip_compact_echo_suffix(reasoning_text, text)
         if did_remove:
             reasoning_text = next_reasoning
-            if not _compact_for_echo_compare(reasoning_text):
-                reasoning_first_tool_count = None
-                reasoning_first_seq = None
+            remaining = len(next_reasoning)
+            kept: list[dict] = []
+            for segment in reasoning_segments:
+                if remaining <= 0:
+                    break
+                segment_text = str(segment.get("text") or "")
+                retained = segment_text[:remaining]
+                if retained:
+                    kept.append({**segment, "text": retained})
+                remaining -= len(retained)
+            reasoning_segments[:] = kept
         return did_remove
 
     for event in events:
@@ -3452,10 +3460,12 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             continue
         if event_name == "reasoning":
             text = str(payload.get("text") or "")
-            if text and reasoning_first_tool_count is None:
-                reasoning_first_tool_count = len(tool_calls)
-                reasoning_first_seq = event_seq or None
-            reasoning_text += text
+            if text:
+                if not reasoning_segments or reasoning_segment_break:
+                    reasoning_segments.append({"text": "", "seq": event_seq or None})
+                    reasoning_segment_break = False
+                reasoning_segments[-1]["text"] += text
+                reasoning_text += text
             continue
         if event_name == "interim_assistant":
             visible = str(payload.get("text") or "").strip()
@@ -3507,6 +3517,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             text = str(payload.get("text") or "").strip()
             if text:
                 mark_boundary(event_seq)
+                reasoning_segment_break = True
                 delivered_steer_events.append(
                     {
                         "event_id": _run_journal_snapshot_event_id_for_run(
@@ -3597,12 +3608,18 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             },
         }
 
-    def scene_thinking_row(text: str, *, status: str, journal_seq: int | None) -> dict | None:
+    def scene_thinking_row(
+        text: str,
+        *,
+        status: str,
+        journal_seq: int | None,
+        segment_index: int,
+    ) -> dict | None:
         clean = str(text or "").strip()
         if not clean:
             return None
         preview = " ".join(clean.split())
-        local_id = f"live-thinking:{stream_id}:1"
+        local_id = f"live-thinking:{stream_id}:{segment_index}"
         return {
             "row_id": local_id,
             "order_index": len(anchor_activity_rows),
@@ -3715,25 +3732,23 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         }
 
     anchor_activity_rows: list[dict] = []
-    thinking_row_inserted = False
-    tool_rows_rendered = 0
+    thinking_rows_inserted = False
 
     def append_thinking_row(*, force: bool = False) -> None:
-        nonlocal thinking_row_inserted
-        if thinking_row_inserted:
+        nonlocal thinking_rows_inserted
+        if thinking_rows_inserted:
             return
-        if not force and reasoning_first_tool_count and tool_rows_rendered < reasoning_first_tool_count:
-            return
-        row = scene_thinking_row(
-            reasoning_text,
-            status="running",
-            journal_seq=reasoning_first_seq,
-        )
-        if not row:
-            return
-        row["order_index"] = len(anchor_activity_rows)
-        anchor_activity_rows.append(row)
-        thinking_row_inserted = True
+        for segment_index, segment in enumerate(reasoning_segments, start=1):
+            row = scene_thinking_row(
+                segment.get("text") or "",
+                status="running",
+                journal_seq=segment.get("seq"),
+                segment_index=segment_index,
+            )
+            if row:
+                row["order_index"] = len(anchor_activity_rows)
+                anchor_activity_rows.append(row)
+        thinking_rows_inserted = True
 
     tool_rows_by_burst: dict[int, list[tuple[int, dict]]] = {}
     ungrouped_tool_rows: list[tuple[int, dict]] = []
@@ -3775,7 +3790,6 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             row["order_index"] = len(anchor_activity_rows)
             anchor_activity_rows.append(row)
             consumed_tools.add(order)
-            tool_rows_rendered += 1
             append_thinking_row()
         text_start = max(text_start, text_end)
 
@@ -3800,7 +3814,6 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             continue
         row["order_index"] = len(anchor_activity_rows)
         anchor_activity_rows.append(row)
-        tool_rows_rendered += 1
         append_thinking_row()
 
     append_thinking_row(force=True)
