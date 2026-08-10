@@ -222,6 +222,49 @@ def test_run_journal_snapshot_keeps_steer_between_later_activity(monkeypatch):
     assert [row["seq"] for row in rows] == [1, 2, 3, 4, 6, 7]
 
 
+def test_run_journal_snapshot_splits_reasoning_across_steer_boundary(monkeypatch):
+    from api import routes
+
+    sid = "snapshot_reasoning_split_sid"
+    stream_id = "snapshot_reasoning_split_run"
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda _stream_id: {
+            "session_id": sid,
+            "run_id": stream_id,
+            "last_seq": 3,
+            "last_event_id": f"{stream_id}:3",
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda _sid, _run: {
+            "events": [
+                {"event": "reasoning", "event_id": f"{stream_id}:1", "seq": 1,
+                 "run_id": stream_id, "session_id": sid,
+                 "payload": {"text": "before steer"}},
+                {"event": "steer_delivered", "event_id": f"{stream_id}:2", "seq": 2,
+                 "run_id": stream_id, "session_id": sid,
+                 "payload": {"text": "new direction", "status": "delivered"}},
+                {"event": "reasoning", "event_id": f"{stream_id}:3", "seq": 3,
+                 "run_id": stream_id, "session_id": sid,
+                 "payload": {"text": "after steer"}},
+            ]
+        },
+    )
+
+    snapshot = routes._run_journal_live_snapshot(stream_id)
+    rows = snapshot["anchor_activity_scene"]["activity_rows"]
+    assert [(row["role"], row["text"], row["seq"]) for row in rows] == [
+        ("thinking", "before steer", 1),
+        ("control", "new direction", 2),
+        ("thinking", "after steer", 3),
+    ]
+    assert snapshot["last_reasoning_text"] == "before steerafter steer"
+
+
 @pytest.mark.skipif(NODE is None, reason="node is required")
 def test_anchor_projection_classifies_steer_as_durable_control_boundary():
     anchors = ROOT / "static" / "assistant_turn_anchors.js"
