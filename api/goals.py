@@ -415,14 +415,17 @@ def goal_state_snapshot_strict(
     profile_home: str | Path | None = None,
 ) -> Any:
     """Load goal state without converting I/O or parse failures to absence."""
-    if profile_home and GoalManager is _NativeGoalManager and GoalState is not None:
-        mgr = _ProfileGoalManager(
-            session_id=str(session_id or ""),
-            profile_home=profile_home,
-            default_max_turns=_default_max_turns(),
-            strict_load=True,
-        )
-        return copy.deepcopy(mgr.state)
+    if profile_home:
+        sid = str(session_id or "")
+        db = _profile_db(profile_home)
+        if db is None:
+            raise RuntimeError("profile goal database unavailable")
+        raw = db.get_meta(_meta_key(sid))
+        if not raw:
+            return None
+        if GoalState is None:
+            raise RuntimeError("Hermes goal state unavailable")
+        return copy.deepcopy(GoalState.from_json(raw))
     return goal_state_snapshot(session_id, profile_home=profile_home)
 
 
