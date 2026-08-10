@@ -42,6 +42,26 @@ def make_session(created_list):
     return sid
 
 
+def _extract_listener_block(src: str, needle: str) -> str:
+    start = src.find(needle)
+    if start < 0:
+        return ""
+    arrow = src.find("=>", start)
+    body_start = src.find("{", arrow)
+    if arrow < 0 or body_start < 0:
+        return src[start:start + 800]
+    depth = 0
+    for idx in range(body_start, len(src)):
+        ch = src[idx]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start:idx + 1]
+    return src[start:start + 1600]
+
+
 def _make_session_visible(sid):
     from api.models import Session
     from tests.conftest import TEST_WORKSPACE
@@ -383,11 +403,10 @@ def test_token_handler_guards_session_id(cleanup_test_sessions):
     """
     src = (REPO_ROOT / "static/messages.js").read_text()
     # Sprint 12 refactored es.addEventListener -> source.addEventListener inside _wireSSE()
-    token_idx = src.find("source.addEventListener('token'")
-    if token_idx < 0:
-        token_idx = src.find("es.addEventListener('token'")
-    assert token_idx >= 0, "token event handler not found"
-    token_block = src[token_idx:token_idx+300]
+    token_block = _extract_listener_block(src, "source.addEventListener('token'")
+    if not token_block:
+        token_block = _extract_listener_block(src, "es.addEventListener('token'")
+    assert token_block, "token event handler not found"
     assert "activeSid" in token_block, \
         "token handler must check activeSid before writing to DOM"
     assert "S.session.session_id!==activeSid" in token_block or \
@@ -1102,7 +1121,7 @@ def test_messages_js_stream_perf_cleanup_lifecycle(cleanup_test_sessions):
     cancel_body = _terminal_body("source.addEventListener('cancel'", "_streamFadeCleanupReduceMotionListener();")
     assert "_cancelThrottledSnapshotTimer();" in cancel_body and "_clearAnchorProseIncrementalNode();" in cancel_body, \
         "cancel terminal handler must tear down the snapshot timer + anchor prose cache"
-    stream_error_body = _terminal_body("function _handleStreamError(source)", "_streamFadeCleanupReduceMotionListener();")
+    stream_error_body = _terminal_body("function _handleStreamError(source,activeTransportGeneration)", "_streamFadeCleanupReduceMotionListener();")
     assert "_cancelThrottledSnapshotTimer();" in stream_error_body and "_clearAnchorProseIncrementalNode();" in stream_error_body, \
         "_handleStreamError must tear down the snapshot timer + anchor prose cache"
     restore_body = _terminal_body("async function _restoreSettledSession(source", "_cancelAnimationFramePendingStreamRender();")

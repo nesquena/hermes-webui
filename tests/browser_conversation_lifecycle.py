@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -37,6 +38,7 @@ SCENARIO = os.environ.get("LIFECYCLE_SCENARIO", "normal").strip() or "normal"
 TOOL_NAME = "read_file"
 TOOL_ID = "lifecycle-tool-1"
 TEST_BITE = os.environ.get("LIFECYCLE_TEST_BITE", "").strip()
+UI_MUTATION = os.environ.get("LIFECYCLE_UI_MUTATION", "").strip()
 GATEWAY_ACTIVITY_TIMEOUT = 60.0
 ANCHOR_SCENE_PERSIST_TIMEOUT = 60.0
 ANCHOR_SCENE_PROJECTION_TIMEOUT = 10_000
@@ -86,6 +88,34 @@ def _safe_request_post_data(request_or_route_request) -> str:
     if isinstance(raw, bytes):
         return raw.decode("utf-8")
     return str(raw)
+
+
+def _mutate_ui_source(source: str, mutation: str) -> str:
+    if mutation == "drop-valid-handoff-preserve":
+        needle = "_preservedLiveTurn=_lt;"
+        replacement = "/* issue6504 mutation: valid handoff preservation removed */"
+    elif mutation == "drop-canonical-scene-suppression":
+        prefix = "if(_settlementHandoffValid&&inner&&inner.querySelector('[data-anchor-settled-scene-owner=\"1\"]')){"
+        candidates = [
+            (prefix + newline + "      _preservedLiveTurn=null;", newline)
+            for newline in ("\n", "\r\n")
+        ]
+        matches = [(candidate, newline) for candidate, newline in candidates if source.count(candidate) == 1]
+        if len(matches) != 1:
+            raise AssertionError(
+                f"issue6504 mutation {mutation!r} expected one source token, found "
+                f"{sum(source.count(candidate) for candidate, _ in candidates)}"
+            )
+        needle, newline = matches[0]
+        replacement = prefix + newline + "      /* issue6504 mutation: canonical-scene suppression removed */"
+    else:
+        raise ValueError(f"Unsupported LIFECYCLE_UI_MUTATION {mutation!r}")
+    count = source.count(needle)
+    if count != 1:
+        raise AssertionError(
+            f"issue6504 mutation {mutation!r} expected one source token, found {count}"
+        )
+    return source.replace(needle, replacement, 1)
 
 
 def _free_port() -> int:
@@ -396,6 +426,19 @@ class DeterministicGateway:
                         })
                         self._event("run.completed", {
                             "event": "run.completed",
+                            "session": {
+                                "session_id": (owner.request_body or {}).get("session_id"),
+                                "messages": [
+                                    {"role": "user", "content": PROMPT},
+                                    {"role": "assistant", "content": FINAL_TEXT},
+                                ],
+                                "message_count": 2,
+                                "tool_calls": [{
+                                    "name": TOOL_NAME,
+                                    "tool_call_id": TOOL_ID,
+                                    "status": "completed",
+                                }],
+                            },
                             "usage": {"input_tokens": 12, "output_tokens": 5},
                         })
                     self.wfile.write(b"data: [DONE]\n\n")
@@ -426,14 +469,18 @@ class DeterministicGateway:
 
 def _capture_page_errors(page):
     errors = []
-    benign = ("favicon", "manifest.json", "serviceworker", "sw.js")
+    known_resource_suffixes = ("/favicon.ico", "/manifest.json", "/service-worker.js", "/sw.js")
 
     def on_console(message):
         if message.type != "error":
             return
         text = message.text
-        if not any(needle in text.lower() for needle in benign):
-            errors.append(("console", text))
+        location = (message.location or {}).get("url", "").lower()
+        if "status of 404" in text.lower() and any(
+            location.endswith(suffix) for suffix in known_resource_suffixes
+        ):
+            return
+        errors.append(("console", text, location))
 
     page.on("console", on_console)
     page.on("pageerror", lambda error: errors.append(("pageerror", str(error))))
@@ -731,16 +778,37 @@ def main() -> int:
         "drop-anchor-persistence",
         "drop-terminal-anchor-row",
         "settle-worklog-frame-proof",
+        "issue6504-settlement-dom-oracle",
     }:
         raise ValueError(
             f"Unsupported LIFECYCLE_TEST_BITE {TEST_BITE!r}; "
             "expected one of '', 'drop-anchor-persistence', "
-            "'drop-terminal-anchor-row', 'settle-worklog-frame-proof'"
+            "'drop-terminal-anchor-row', 'settle-worklog-frame-proof', "
+            "'issue6504-settlement-dom-oracle'"
         )
     if TEST_BITE == "drop-terminal-anchor-row" and scenario != "terminal-error":
         raise ValueError(
             "drop-terminal-anchor-row is only valid for "
             "LIFECYCLE_SCENARIO=terminal-error"
+        )
+    if TEST_BITE == "issue6504-settlement-dom-oracle" and scenario != "normal":
+        raise ValueError(
+            "issue6504-settlement-dom-oracle is only valid for "
+            "LIFECYCLE_SCENARIO=normal"
+        )
+    if UI_MUTATION not in {
+        "",
+        "drop-valid-handoff-preserve",
+        "drop-canonical-scene-suppression",
+    }:
+        raise ValueError(
+            f"Unsupported LIFECYCLE_UI_MUTATION {UI_MUTATION!r}; expected empty, "
+            "'drop-valid-handoff-preserve', or 'drop-canonical-scene-suppression'"
+        )
+    if UI_MUTATION and TEST_BITE != "issue6504-settlement-dom-oracle":
+        raise ValueError(
+            "LIFECYCLE_UI_MUTATION requires "
+            "LIFECYCLE_TEST_BITE=issue6504-settlement-dom-oracle"
         )
 
     gateway = DeterministicGateway(scenario)
@@ -786,20 +854,49 @@ def main() -> int:
     exit_code = 1
     playwright = None
     browser = None
+    mutation_context = None
     page = None
     errors = []
+    renderer_page_errors = []
     anchor_scene_requests = []
     try:
+        def _wait_diagnostic(label):
+            try:
+                state = page.evaluate(
+                    """label => ({
+                      label,
+                      url: location.href,
+                      sType: typeof S,
+                      sessionId: typeof S !== 'undefined' && S && S.session && S.session.session_id,
+                      messages: typeof S !== 'undefined' && S && Array.isArray(S.messages) ? S.messages.length : null,
+                      busy: typeof S !== 'undefined' && S && S.busy,
+                      activeStreamId: typeof S !== 'undefined' && S && S.activeStreamId,
+                      inflight: typeof S !== 'undefined' && S && S.session && INFLIGHT && Boolean(INFLIGHT[S.session.session_id]),
+                      bodyText: (document.querySelector('#msgInner') || {}).innerText || '',
+                    })""",
+                    label,
+                )
+            except Exception as diagnostic_error:
+                state = {"label": label, "diagnosticError": str(diagnostic_error)}
+            return state
+
         proc, log, log_path, base_url = _start_webui_server(repo_root, env, artifact_dir)
-        playwright = sync_playwright().start()
-        browser = playwright.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage"],
-        )
+        try:
+            playwright = sync_playwright().start()
+            browser = playwright.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage"],
+            )
+        except Exception as error:
+            print(f"SETUP FAIL: headless Chromium is unavailable: {error}", file=sys.stderr)
+            exit_code = 2
+            return 2
         context = browser.new_context(base_url=base_url)
         page = context.new_page()
+        if TEST_BITE == "issue6504-settlement-dom-oracle":
+            page.emulate_media(reduced_motion="no-preference")
         anchor_scene_requests = _capture_anchor_scene_requests(page)
-        if TEST_BITE:
+        if TEST_BITE in {"drop-anchor-persistence", "drop-terminal-anchor-row"}:
             def _route_anchor_scene(route):
                 if TEST_BITE == "drop-anchor-persistence":
                     route.fulfill(
@@ -837,15 +934,95 @@ def main() -> int:
 
             page.route("**/api/session/anchor-scene", _route_anchor_scene)
         errors = _capture_page_errors(page)
+        if UI_MUTATION:
+            with urllib.request.urlopen(base_url + "/", timeout=15) as index_response:
+                index_html = index_response.read().decode("utf-8")
+            ui_match = re.search(r'src="([^"]*static/ui\.js[^"]*)"', index_html)
+            if not ui_match:
+                raise AssertionError("versioned static/ui.js script was not present in the served page")
+            ui_url = base_url + "/" + ui_match.group(1).lstrip("/")
+            with urllib.request.urlopen(ui_url, timeout=15) as ui_response:
+                served_ui_source = ui_response.read().decode("utf-8")
+            mutated_ui_source = _mutate_ui_source(served_ui_source, UI_MUTATION)
+            mutated_ui_path = artifact_dir / f"issue6504-{UI_MUTATION}.js"
+            mutated_ui_path.write_text(mutated_ui_source, encoding="utf-8")
         page.goto("/", wait_until="domcontentloaded")
         page.wait_for_selector("#msg", state="visible", timeout=15000)
+        if TEST_BITE == "issue6504-settlement-dom-oracle":
+            page.evaluate(
+                """() => {
+                  const original = window.armLiveTurnSettlementHandoff;
+                  window.__issue6504Arms = [];
+                  window.__issue6504StreamEvents = [];
+                  window.__issue6504DoneRuntime = [];
+                  window.__issue6504DoneListeners = [];
+                  window.__issue6504DoneDispatches = 0;
+                  window.__issue6504FadeWordsBeforeDone = 0;
+                  if (typeof original === 'function') {
+                    window.armLiveTurnSettlementHandoff = function(value) {
+                      const result = original.apply(this, arguments);
+                      const armed = window._liveTurnSettlementArmedOwnerKeys &&
+                        window._liveTurnSettlementArmedOwnerKeys[value && value.sessionId];
+                      window.__issue6504Arms.push({
+                        key: value || null,
+                        armedOwner: armed ? {
+                          sessionId: armed.sessionId, streamId: armed.streamId,
+                          ownerToken: armed.ownerToken, transportGeneration: armed.transportGeneration,
+                        } : null,
+                      });
+                      return result;
+                    };
+                  }
+                  const originalAddEventListener = EventSource.prototype.addEventListener;
+                  const captureDoneRuntime = () => {
+                    const sid = typeof S !== 'undefined' && S.session && S.session.session_id;
+                    const live = sid && typeof LIVE_STREAMS !== 'undefined' && LIVE_STREAMS[sid];
+                    if (!sid || !live) return;
+                    window.__issue6504DoneRuntime.push({
+                      activeStreamId: typeof S !== 'undefined' && S.activeStreamId,
+                      sessionId: sid,
+                      live: live ? {
+                        streamId: live.streamId, ownerToken: live.ownerToken,
+                        transportGeneration: live.transportGeneration,
+                        source: Boolean(live.source),
+                      } : null,
+                      inflight: Boolean(sid && typeof INFLIGHT !== 'undefined' && INFLIGHT[sid]),
+                      ownerKeys: typeof _liveTurnSettlementOwnerKeys !== 'undefined' ? _liveTurnSettlementOwnerKeys : null,
+                    });
+                  };
+                  EventSource.prototype.addEventListener = function(name, listener, options) {
+                    if (name === 'done') {
+                      const observed = function(...args) {
+                        window.__issue6504StreamEvents.push(name);
+                        if (window.__issue6504ManualDoneDispatch) {
+                          const before = window.__issue6504DoneRuntime.length;
+                          captureDoneRuntime();
+                          if (window.__issue6504DoneRuntime.length > before) window.__issue6504DoneDispatches += 1;
+                        }
+                        return listener.apply(this, args);
+                      };
+                      window.__issue6504DoneListeners.push({source:this, listener:observed, options});
+                      return originalAddEventListener.call(this, name, observed, options);
+                    }
+                    if (name === 'stream_end') {
+                      const observed = function(...args) {
+                        window.__issue6504StreamEvents.push(name);
+                        return listener.apply(this, args);
+                      };
+                      return originalAddEventListener.call(this, name, observed, options);
+                    }
+                    return originalAddEventListener.call(this, name, listener, options);
+                  };
+                }"""
+            )
         page.locator("#msg").fill(PROMPT)
         page.locator("#btnSend").click()
 
         if not gateway.activity_ready.wait(timeout=GATEWAY_ACTIVITY_TIMEOUT):
             raise AssertionError(
                 "mock Gateway did not reach the live activity checkpoint; "
-                f"request body: {gateway.request_body!r}; events: {gateway.emitted_events!r}"
+                f"request body: {gateway.request_body!r}; events: {gateway.emitted_events!r}; "
+                f"browser errors: {errors!r}"
             )
         page.wait_for_function(
             """({reasoning, tool}) => {
@@ -926,25 +1103,180 @@ def main() -> int:
                 }"""
             )
 
+        if TEST_BITE == "issue6504-settlement-dom-oracle":
+            page.evaluate(
+                """() => {
+                  const state = {renders: [], arms: [], calls: [], checkpoints: [], mutations: [], renderTrace: [], active: true};
+                  const sid = () => typeof S !== 'undefined' && S.session && S.session.session_id;
+                  const key = value => value ? {
+                    sessionId: value.sessionId, streamId: value.streamId,
+                    ownerToken: value.ownerToken, transportGeneration: value.transportGeneration,
+                  } : null;
+                  const snapshot = kind => {
+                    const sessionId = sid();
+                    const live = document.getElementById('liveAssistantTurn');
+                    state.checkpoints.push({kind,
+                      liveConnected: Boolean(live && live === state.liveNode && live.isConnected),
+                      settledAnswer: Boolean(document.querySelector('.assistant-turn:not(#liveAssistantTurn) .msg-body')),
+                      canonicalActivity: document.querySelectorAll('[data-anchor-settled-scene-owner="1"]').length,
+                      inflight: Boolean(sessionId && typeof INFLIGHT !== 'undefined' && INFLIGHT[sessionId]),
+                      activeStreamId: typeof S !== 'undefined' && S.activeStreamId || null,
+                      handoff: key(typeof _liveTurnSettlementHandoff !== 'undefined' ? _liveTurnSettlementHandoff : null),
+                      owner: key(window._liveTurnSettlementOwnerKeys && window._liveTurnSettlementOwnerKeys[sessionId]),
+                      armedOwner: key(window._liveTurnSettlementArmedOwnerKeys && window._liveTurnSettlementArmedOwnerKeys[sessionId])});
+                  };
+                  state.begin = () => {
+                    state.liveNode = document.getElementById('liveAssistantTurn');
+                    state.renders = [];
+                    state.calls = []; state.checkpoints = []; state.mutations = []; state.renderTrace = [];
+                    const transcript = document.getElementById('msgInner');
+                    state.observer = new MutationObserver(records => {
+                      for (const record of records) {
+                        state.mutations.push({
+                          type: record.type,
+                          target: record.target && record.target.id || null,
+                          added: Array.from(record.addedNodes).map(node => node.id || node.nodeName),
+                          addedLive: Array.from(record.addedNodes).some(node => node === state.liveNode),
+                          removed: Array.from(record.removedNodes).map(node => ({
+                            id: node.id || null,
+                            owner: Boolean(node.querySelector && node.querySelector('[data-anchor-settled-scene-owner="1"]')),
+                          })),
+                          removedLive: Array.from(record.removedNodes).some(node => node === state.liveNode),
+                        });
+                      }
+                      snapshot('mutation');
+                    });
+                    state.observer.observe(transcript, {childList: true, subtree: true});
+                    const frame = () => state.active && requestAnimationFrame(() => setTimeout(() => { snapshot('frame'); frame(); }, 0));
+                    frame(); snapshot('armed-before-terminal');
+                  };
+                  state.stop = () => { state.active = false; state.observer.disconnect();
+                    state.arms = (window.__issue6504Arms || []).map(observation => observation.key); snapshot('stopped'); return {
+                    renders: state.renders.slice(), arms: state.arms.slice(), calls: state.calls.slice(),
+                    checkpoints: state.checkpoints.slice(), mutations: state.mutations.slice(), renderTrace: state.renderTrace.slice(),
+                    streamEvents: (window.__issue6504StreamEvents || []).slice(),
+                    doneRuntime: (window.__issue6504DoneRuntime || []).slice(),
+                    doneDispatches: window.__issue6504DoneDispatches || 0,
+                    fadeWordsBeforeDone: window.__issue6504FadeWordsBeforeDone || 0,
+                    armObservations: (window.__issue6504Arms || []).slice()}; };
+                  const wrap = (name, render) => {
+                    const original = window[name]; if (typeof original !== 'function') return;
+                    window[name] = function(...args) {
+                      state.calls.push({name, args: args.map(value => value && typeof value === 'object' ? {
+                        sid:value.sid, forceHidden:value.forceHidden, title:value.title, body:value.body,
+                        sessionId:value.sessionId, messageIndex:value.messageIndex,
+                      } : value)});
+                      if (!render) return original.apply(this, args);
+                      const renderState = phase => ({
+                        phase,
+                        inflight: Boolean(sid() && typeof INFLIGHT !== 'undefined' && INFLIGHT[sid()]),
+                        activeStreamId: typeof S !== 'undefined' && S.activeStreamId || null,
+                        handoff: key(typeof _liveTurnSettlementHandoff !== 'undefined' ? _liveTurnSettlementHandoff : null),
+                        owner: key(window._liveTurnSettlementOwnerKeys && window._liveTurnSettlementOwnerKeys[sid()]),
+                        armedOwner: key(window._liveTurnSettlementArmedOwnerKeys && window._liveTurnSettlementArmedOwnerKeys[sid()]),
+                      });
+                      snapshot('render-entry');
+                      state.renderTrace.push(renderState('entry'));
+                      const result = original.apply(this, args);
+                      snapshot('render-exit');
+                      state.renderTrace.push(renderState('exit'));
+                      state.renders.push({inflight:Boolean(sid() && typeof INFLIGHT !== 'undefined' && INFLIGHT[sid()]),
+                        activeStreamId:typeof S !== 'undefined' && S.activeStreamId || null,
+                        handoff:key(typeof _liveTurnSettlementHandoff !== 'undefined' ? _liveTurnSettlementHandoff : null),
+                        owner:key(window._liveTurnSettlementOwnerKeys && window._liveTurnSettlementOwnerKeys[sid()]),
+                        armedOwner:key(window._liveTurnSettlementArmedOwnerKeys && window._liveTurnSettlementArmedOwnerKeys[sid()])});
+                      return result;
+                    };
+                  };
+                  wrap('renderMessages', true); wrap('playNotificationSound', false); wrap('sendBrowserNotification', false);
+                  wrap('_markSessionCompletionUnread', false); wrap('_markSessionViewed', false);
+                  window.__issue6504DomOracle = state;
+                }"""
+            )
+            page.evaluate("window._fadeTextEffect=true; window.__issue6504DomOracle.begin()")
+
         gateway.release_settle.set()
         if not gateway.final_prefix_ready.wait(timeout=10):
             raise AssertionError("mock Gateway did not emit the final-answer prefix")
         if scenario == "normal":
-            page.wait_for_function(
-                """text => {
-                  const turn = document.querySelector('#liveAssistantTurn');
-                  return Boolean(turn) && turn.innerText.includes(text);
-                }""",
-                arg=FINAL_ACK_TEXT,
-                timeout=10000,
-            )
-            gateway.release_terminal.set()
-            page.wait_for_function(
-                """text => typeof S !== 'undefined' && S.busy === false && !S.activeStreamId &&
-                  ((document.querySelector('#msgInner') || {}).innerText || '').includes(text)""",
-                arg=FINAL_TEXT,
-                timeout=15000,
-            )
+            try:
+                page.wait_for_function(
+                    """text => {
+                      const turn = document.querySelector('#liveAssistantTurn');
+                      return Boolean(turn) && turn.innerText.includes(text);
+                    }""",
+                    arg=FINAL_ACK_TEXT,
+                    timeout=10000,
+                )
+            except Exception as error:
+                raise AssertionError(
+                    f"final-prefix-ack wait failed: {_wait_diagnostic('final-prefix-ack')}"
+                ) from error
+            if TEST_BITE == "issue6504-settlement-dom-oracle":
+                try:
+                    page.wait_for_function(
+                        """() => window._fadeTextEffect === true""",
+                        timeout=10000,
+                    )
+                except Exception as error:
+                    raise AssertionError(
+                        f"fade-effect-arm wait failed: {_wait_diagnostic('fade-effect-arm')}"
+                    ) from error
+            if TEST_BITE == "issue6504-settlement-dom-oracle":
+                page.wait_for_function(
+                    "() => window.__issue6504DoneListeners && window.__issue6504DoneListeners.length",
+                    timeout=10000,
+                )
+                page.wait_for_function(
+                    "() => document.querySelectorAll('#liveAssistantTurn .stream-fade-word').length > 0",
+                    timeout=10000,
+                )
+                page.evaluate(
+                    """text => {
+                      window.__issue6504FadeWordsBeforeDone = document.querySelectorAll(
+                        '#liveAssistantTurn .stream-fade-word'
+                      ).length;
+                      const sid = S.session && S.session.session_id;
+                      const messages = Array.isArray(S.messages) ? S.messages.slice() : [];
+                      const last = messages.length ? messages[messages.length - 1] : null;
+                      if (last && last.role === 'assistant') last.content = text;
+                      else messages.push({role:'assistant', content:text});
+                      const session = {
+                        ...S.session,
+                        session_id: sid,
+                        messages,
+                        message_count: messages.length,
+                      };
+                      const event = {data: JSON.stringify({
+                        session,
+                        usage: {input_tokens:12, output_tokens:5},
+                      })};
+                      const target = window.__issue6504DoneListeners[0];
+                      window.__issue6504ManualDoneDispatch = true;
+                      try { target.listener.call(target.source, event); }
+                      finally { window.__issue6504ManualDoneDispatch = false; }
+                    }""",
+                    FINAL_TEXT,
+                )
+                page.wait_for_function(
+                    "() => window.__issue6504DoneDispatches >= 1",
+                    timeout=15000,
+                )
+            else:
+                gateway.release_terminal.set()
+            try:
+                page.wait_for_function(
+                    """text => typeof S !== 'undefined' && S.busy === false && !S.activeStreamId &&
+                      ((document.querySelector('#msgInner') || {}).innerText || '').includes(text)""",
+                    arg=FINAL_TEXT,
+                    timeout=15000,
+                )
+            except Exception as error:
+                raise AssertionError(
+                    f"final-text-settle wait failed: {_wait_diagnostic('final-text-settle')}"
+                ) from error
+            if TEST_BITE == "issue6504-settlement-dom-oracle":
+                gateway.release_terminal.set()
         else:
             gateway.release_terminal.set()
             page.wait_for_function(
@@ -956,6 +1288,151 @@ def main() -> int:
             )
         session_id = page.evaluate("S.session && S.session.session_id")
         assert session_id, "active session id missing after settlement"
+        if TEST_BITE == "issue6504-settlement-dom-oracle":
+            page.wait_for_function(
+                "() => window.__issue6504StreamEvents.includes('stream_end')",
+                timeout=15000,
+            )
+            oracle = page.evaluate("window.__issue6504DomOracle.stop()")
+            assert len(oracle["arms"]) == 1, oracle
+            assert oracle["doneDispatches"] == 1, oracle
+            assert oracle["streamEvents"].count("done") >= 1, oracle
+            assert oracle["streamEvents"].count("stream_end") >= 1, oracle
+            assert oracle["fadeWordsBeforeDone"] > 0, oracle
+            assert any(mutation.get("removedLive") for mutation in oracle["mutations"]), oracle
+            arm = oracle["arms"][0]
+            call_names = [call["name"] for call in oracle["calls"]]
+            assert call_names.count("playNotificationSound") == 1, oracle
+            assert call_names.count("sendBrowserNotification") == 1, oracle
+            assert call_names.count("_markSessionViewed") >= 1, oracle
+            assert call_names.count("_markSessionCompletionUnread") == 0, oracle
+            viewed_calls = [call for call in oracle["calls"] if call["name"] == "_markSessionViewed"]
+            assert all(call["args"] and call["args"][0] == arm["sessionId"] for call in viewed_calls), oracle
+            notification = next(call for call in oracle["calls"] if call["name"] == "sendBrowserNotification")
+            assert notification["args"][:2] == ["Response complete", FINAL_TEXT], oracle
+            assert len(notification["args"]) == 3, oracle
+            assert notification["args"][2]["sid"] == arm["sessionId"], oracle
+            assert notification["args"][2]["forceHidden"] is False, oracle
+            assert len(oracle["doneRuntime"]) == 1, oracle
+            assert len(oracle["armObservations"]) == 1, oracle
+            assert oracle["armObservations"][0]["armedOwner"] == arm, oracle
+            done_runtime = oracle["doneRuntime"][0]
+            assert arm["sessionId"] == done_runtime["sessionId"], oracle
+            assert arm["streamId"] == done_runtime["activeStreamId"], oracle
+            assert isinstance(arm["ownerToken"], int) and isinstance(arm["transportGeneration"], int), oracle
+            assert done_runtime["inflight"] and done_runtime["live"], oracle
+            assert done_runtime["live"]["streamId"] == arm["streamId"], oracle
+            assert done_runtime["live"]["ownerToken"] == arm["ownerToken"], oracle
+            assert done_runtime["live"]["transportGeneration"] == arm["transportGeneration"], oracle
+            render_entries = [trace for trace in oracle["renderTrace"] if trace["phase"] == "entry"]
+            render_exits = [trace for trace in oracle["renderTrace"] if trace["phase"] == "exit"]
+            assert render_entries and len(render_entries) == len(render_exits), oracle
+            assert render_entries[0]["handoff"] == arm, oracle
+            assert all(not trace["inflight"] and not trace["activeStreamId"] for trace in oracle["renderTrace"]), oracle
+            assert all(trace["handoff"] is None for trace in render_exits), oracle
+            assert all(trace["armedOwner"] is None for trace in render_exits), oracle
+            settled_state = page.evaluate(
+                """() => ({
+                  inflight: Boolean(S.session && INFLIGHT[S.session.session_id]),
+                  activeStreamId: S.activeStreamId,
+                  live: Boolean(document.getElementById('liveAssistantTurn')),
+                  settledAnswer: Boolean(document.querySelector('.assistant-turn:not(#liveAssistantTurn) .msg-body')),
+                  canonicalActivity: document.querySelectorAll('[data-anchor-settled-scene-owner="1"]').length,
+                })"""
+            )
+            assert not settled_state["inflight"] and not settled_state["activeStreamId"], settled_state
+            assert settled_state["canonicalActivity"] == 1, settled_state
+            for checkpoint in oracle["checkpoints"]:
+                assert checkpoint["liveConnected"] or checkpoint["settledAnswer"], checkpoint
+            renderer_page = page
+            if UI_MUTATION:
+                mutation_context = browser.new_context(base_url=base_url)
+                renderer_page = mutation_context.new_page()
+                renderer_page_errors = _capture_page_errors(renderer_page)
+                mutation_route_hits = [0]
+
+                def _route_mutated_ui(route):
+                    mutation_route_hits[0] += 1
+                    route.fulfill(path=str(mutated_ui_path))
+
+                renderer_page.route("**/static/ui.js*", _route_mutated_ui)
+            if UI_MUTATION:
+                session_url = page.url
+                if "/session/" not in session_url:
+                    session_url = f"{base_url}/session/{session_id}"
+                renderer_page.goto(session_url, wait_until="domcontentloaded")
+                renderer_page.wait_for_selector("#msgInner", state="attached", timeout=15000)
+                renderer_page.wait_for_function(
+                    "sid => typeof S !== 'undefined' && S.session && S.session.session_id === sid",
+                    arg=session_id,
+                    timeout=15000,
+                )
+                assert mutation_route_hits[0] >= 1, (
+                    f"ISSUE6504 MUTATION SETUP FAIL {UI_MUTATION}: "
+                    f"expected at least one static/ui.js interception, got {mutation_route_hits[0]}"
+                )
+            renderer_cases = renderer_page.evaluate(
+                """() => {
+                  const sid = S.session.session_id;
+                  const key = value => value ? {
+                    sessionId: value.sessionId, streamId: value.streamId,
+                    ownerToken: value.ownerToken, transportGeneration: value.transportGeneration,
+                  } : null;
+                  const inner = document.getElementById('msgInner');
+                  const savedMessages = S.messages;
+                  const savedInnerHTML = inner.innerHTML;
+                  const savedOwner = window._liveTurnSettlementOwnerKeys && window._liveTurnSettlementOwnerKeys[sid];
+                  const savedOwnerKeys = window._liveTurnSettlementOwnerKeys;
+                  const savedArmedKeys = window._liveTurnSettlementArmedOwnerKeys;
+                  const savedHandoff = window._liveTurnSettlementHandoff;
+                  const savedInflight = INFLIGHT[sid];
+                  const savedActiveStreamId = S.activeStreamId;
+                  const savedBusy = S.busy;
+                  const cacheClear = () => { if (window._sessionHtmlCache) window._sessionHtmlCache.clear(); window._sessionHtmlCacheSid = null; };
+                  const live = () => { const node = document.createElement('div'); node.id = 'liveAssistantTurn'; node.className = 'assistant-turn'; node.dataset.sessionId = sid; node.innerHTML = '<div class="msg-body">live answer</div>'; document.getElementById('msgInner').appendChild(node); return node; };
+                  const owner = {sessionId:sid, streamId:'issue6504-stream', ownerToken:71, transportGeneration:9};
+                  const clearCanonical = () => inner.querySelectorAll('[data-anchor-settled-scene-owner="1"]').forEach(node => node.closest('.assistant-turn')?.remove() || node.remove());
+                  inner.querySelectorAll('[data-anchor-settled-scene-owner="1"]').forEach(node => node.closest('.assistant-turn')?.remove() || node.remove());
+                  const publish = key => { window._liveTurnSettlementOwnerKeys = {[sid]:key}; window._liveTurnSettlementArmedOwnerKeys = {}; window._liveTurnSettlementHandoff = null; delete INFLIGHT[sid]; S.activeStreamId = null; S.busy = false; };
+                  S.messages = [{role:'assistant', content:'settled plain answer'}]; publish(owner); cacheClear();
+                  const exact = live(); armLiveTurnSettlementHandoff(owner);
+                  renderMessages();
+                  const exactFirst = {connected:exact.isConnected, armed:Boolean(window._liveTurnSettlementArmedOwnerKeys[sid]), handoff:Boolean(window._liveTurnSettlementHandoff)};
+                  renderMessages(); const exactSecond = exact.isConnected;
+                  const mismatches = [];
+                  for (const [label, oldKey] of [['stream',{...owner,streamId:'replacement-stream'}],['owner',{...owner,ownerToken:72}],['generation',{...owner,transportGeneration:10}]]) {
+                    clearCanonical(); S.messages = savedMessages; publish(owner); cacheClear(); renderMessages(); const stale = live(); armLiveTurnSettlementHandoff(oldKey); renderMessages();
+                    mismatches.push({label, stale:stale.isConnected, canonical:document.querySelectorAll('[data-anchor-settled-scene-owner="1"]').length});
+                  }
+                  clearCanonical(); S.messages = savedMessages; publish(owner); cacheClear(); renderMessages();
+                  const canonicalLive = live(); armLiveTurnSettlementHandoff(owner); renderMessages();
+                  const canonicalCase = {live:canonicalLive.isConnected,
+                    canonical:document.querySelectorAll('[data-anchor-settled-scene-owner="1"]').length};
+                  S.messages = savedMessages;
+                  inner.innerHTML = savedInnerHTML;
+                  window._liveTurnSettlementOwnerKeys = savedOwnerKeys;
+                  window._liveTurnSettlementArmedOwnerKeys = savedArmedKeys;
+                  window._liveTurnSettlementHandoff = savedHandoff;
+                  if (savedInflight === undefined) delete INFLIGHT[sid]; else INFLIGHT[sid] = savedInflight;
+                  S.activeStreamId = savedActiveStreamId;
+                  S.busy = savedBusy;
+                  cacheClear();
+                  return {exactFirst, exactSecond, mismatches, canonicalCase,
+                    canonical:document.querySelectorAll('[data-anchor-settled-scene-owner="1"]').length,
+                    live:Boolean(document.getElementById('liveAssistantTurn'))};
+                }""",
+            )
+            mutation_marker = f"ISSUE6504 MUTATION FAIL {UI_MUTATION}" if UI_MUTATION else ""
+            if UI_MUTATION == "drop-valid-handoff-preserve":
+                assert renderer_cases["exactFirst"]["connected"], mutation_marker
+            elif UI_MUTATION == "drop-canonical-scene-suppression":
+                assert renderer_cases["canonicalCase"] == {"live": False, "canonical": 1}, mutation_marker
+            else:
+                assert renderer_cases["exactFirst"]["connected"] and not renderer_cases["exactFirst"]["armed"] and not renderer_cases["exactFirst"]["handoff"], {"case": "exact-first", "renderer": renderer_cases}
+                assert renderer_cases["exactSecond"] is False, {"case": "exact-second", "renderer": renderer_cases}
+                assert all(not item["stale"] and item["canonical"] == 1 for item in renderer_cases["mismatches"]), {"case": "replacement-mismatch", "renderer": renderer_cases}
+                assert renderer_cases["canonicalCase"] == {"live": False, "canonical": 1}, {"case": "canonical-scene", "renderer": renderer_cases}
+                print("ISSUE6504 DOM ORACLE PASS")
         if TEST_BITE == "settle-worklog-frame-proof":
             page.wait_for_timeout(100)
             settle_proof = page.evaluate(
@@ -1100,58 +1577,89 @@ def main() -> int:
         else:
             print("OK  settled: final prose and the same semantic activity coexist without duplication")
 
-        page.reload(wait_until="domcontentloaded")
-        page.wait_for_function(
-            "text => (document.querySelector('#msgInner') || {}).innerText?.includes(text)",
-            arg=TERMINAL_ERROR_TEXT if scenario == "terminal-error" else FINAL_TEXT,
-            timeout=15000,
-        )
-        _expand_settled_worklog(page)
-        page.wait_for_selector(
-            '.assistant-turn [data-anchor-settled-scene-owner="1"] [data-anchor-scene-row="1"]',
-            timeout=2000 if TEST_BITE else 10000,
-        )
-        reloaded_snapshot = _activity_snapshot(page)
-        _assert_settled(reloaded_snapshot, scenario)
-        if scenario == "terminal-error":
-            _assert_process_row_present(reloaded_snapshot)
-        assert _semantic_activity(reloaded_snapshot) == _semantic_activity(settled_snapshot), {
-            "settled": _semantic_activity(settled_snapshot),
-            "reloaded": _semantic_activity(reloaded_snapshot),
-        }
-        if scenario == "terminal-error":
-            settled_terminal = _terminal_rows(settled_snapshot)
-            reloaded_terminal = _terminal_rows(reloaded_snapshot)
-            settled_process = _process_rows(settled_snapshot)
-            reloaded_process = _process_rows(reloaded_snapshot)
-            assert len(settled_process) == len(reloaded_process) == 1, {
-                "settled_process": settled_process,
-                "reloaded_process": reloaded_process,
+        if TEST_BITE != "issue6504-settlement-dom-oracle":
+            page.reload(wait_until="domcontentloaded")
+            try:
+                page.wait_for_function(
+                    "text => (document.querySelector('#msgInner') || {}).innerText?.includes(text)",
+                    arg=TERMINAL_ERROR_TEXT if scenario == "terminal-error" else FINAL_TEXT,
+                    timeout=15000,
+                )
+            except Exception as error:
+                raise AssertionError(
+                    f"common-reload-final-text wait failed: {_wait_diagnostic('common-reload-final-text')}"
+                ) from error
+            _expand_settled_worklog(page)
+            page.wait_for_selector(
+                '.assistant-turn [data-anchor-settled-scene-owner="1"] [data-anchor-scene-row="1"]',
+                timeout=2000 if TEST_BITE else 10000,
+            )
+            reloaded_snapshot = _activity_snapshot(page)
+            _assert_settled(reloaded_snapshot, scenario)
+            if scenario == "terminal-error":
+                _assert_process_row_present(reloaded_snapshot)
+            assert _semantic_activity(reloaded_snapshot) == _semantic_activity(settled_snapshot), {
+                "settled": _semantic_activity(settled_snapshot),
+                "reloaded": _semantic_activity(reloaded_snapshot),
             }
-            assert settled_process[0]["text"] == reloaded_process[0]["text"], {
-                "settled_process": settled_process,
-                "reloaded_process": reloaded_process,
-            }
-            assert len(settled_terminal) == len(reloaded_terminal) == 1, {
-                "settled_terminal": settled_terminal,
-                "reloaded_terminal": reloaded_terminal,
-            }
-            assert settled_terminal[0]["text"] == reloaded_terminal[0]["text"], {
-                "settled_terminal": settled_terminal[0],
-                "reloaded_terminal": reloaded_terminal[0],
-            }
-        print("OK  hard reload: transcript-backed Anchor scene preserves settled parity")
+            if scenario == "terminal-error":
+                settled_terminal = _terminal_rows(settled_snapshot)
+                reloaded_terminal = _terminal_rows(reloaded_snapshot)
+                settled_process = _process_rows(settled_snapshot)
+                reloaded_process = _process_rows(reloaded_snapshot)
+                assert len(settled_process) == len(reloaded_process) == 1, {
+                    "settled_process": settled_process,
+                    "reloaded_process": reloaded_process,
+                }
+                assert settled_process[0]["text"] == reloaded_process[0]["text"], {
+                    "settled_process": settled_process,
+                    "reloaded_process": reloaded_process,
+                }
+                assert len(settled_terminal) == len(reloaded_terminal) == 1, {
+                    "settled_terminal": settled_terminal,
+                    "reloaded_terminal": reloaded_terminal,
+                }
+                assert settled_terminal[0]["text"] == reloaded_terminal[0]["text"], {
+                    "settled_terminal": settled_terminal[0],
+                    "reloaded_terminal": reloaded_terminal[0],
+                }
+            print("OK  hard reload: transcript-backed Anchor scene preserves settled parity")
 
         assert gateway.request_body and gateway.request_body.get("input") == PROMPT, gateway.request_body
-        if errors:
-            raise AssertionError(f"unexpected browser errors: {errors!r}")
+        unexpected_errors = errors + renderer_page_errors
+        if TEST_BITE == "issue6504-settlement-dom-oracle":
+            anchor_404 = any(
+                event.get("type") == "response"
+                and event.get("status") == 404
+                for event in anchor_scene_requests
+            )
+            expected_anchor_error = (
+                "Failed to load resource: the server responded with a status of 404 (Not Found)"
+            )
+            if anchor_404:
+                unexpected_errors = [
+                    error for error in unexpected_errors
+                    if not (
+                        len(error) >= 3
+                        and error[0] == "console"
+                        and error[1] == expected_anchor_error
+                        and urlsplit(error[2]).path == "/api/session/anchor-scene"
+                    )
+                ]
+        if unexpected_errors:
+            raise AssertionError(f"unexpected browser errors: {unexpected_errors!r}")
         context.close()
+        if mutation_context is not None:
+            mutation_context.close()
+            mutation_context = None
         browser.close()
         browser = None
         print("\nCONVERSATION LIFECYCLE GATE PASSED")
         exit_code = 0
         return 0
     except Exception as error:
+        if UI_MUTATION and f"ISSUE6504 MUTATION FAIL {UI_MUTATION}" in str(error):
+            print(f"ISSUE6504 MUTATION FAIL {UI_MUTATION}")
         print(f"\nCONVERSATION LIFECYCLE GATE FAILED: {error}", file=sys.stderr)
         try:
             if page is not None:
@@ -1175,6 +1683,8 @@ def main() -> int:
         return 1
     finally:
         gateway.close()
+        if mutation_context is not None:
+            mutation_context.close()
         if browser is not None:
             browser.close()
         if playwright is not None:

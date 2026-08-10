@@ -15923,6 +15923,33 @@ function _processWakeupCardHtml(info, rawText, extras){
   return `<details class="process-wakeup-card"><summary class="process-wakeup-summary"><span class="process-wakeup-toggle">${li('chevron-right',12)}</span><span class="process-wakeup-label">${li('terminal',13)}<span>${esc(t('process_wakeup_label'))}</span></span>${cmdHtml}${chip}${extras.timeHtml||''}</summary><div class="process-wakeup-detail">${extras.filesHtml||''}${patternRow}${cmdRow}<div class="msg-body process-wakeup-body">${outHtml}</div>${extras.footHtml||''}</div></details>`;
 }
 
+let _liveTurnSettlementHandoff=null;
+function armLiveTurnSettlementHandoff(key){
+  _liveTurnSettlementHandoff=key||null;
+  if(!key||typeof window==='undefined') return;
+  const _armedKeys=window._liveTurnSettlementArmedOwnerKeys||(window._liveTurnSettlementArmedOwnerKeys={});
+  _armedKeys[key.sessionId]=key;
+}
+function _settlementHandoffMatchesOwner(handoff,sid){
+  if(!handoff||handoff.sessionId!==sid||typeof window==='undefined') return false;
+  const owners=window._liveTurnSettlementOwnerKeys;
+  const owner=owners&&owners[sid];
+  return !!(owner&&owner.sessionId===handoff.sessionId&&owner.streamId===handoff.streamId&&
+    owner.ownerToken===handoff.ownerToken&&owner.transportGeneration===handoff.transportGeneration);
+}
+function _settlementHandoffKeysEqual(a,b){
+  return !!(a&&b&&a.sessionId===b.sessionId&&a.streamId===b.streamId&&
+    a.ownerToken===b.ownerToken&&a.transportGeneration===b.transportGeneration);
+}
+function _consumeSettlementHandoff(handoff){
+  if(!handoff||typeof window==='undefined') return;
+  const _armedKeys=window._liveTurnSettlementArmedOwnerKeys;
+  const _ownerKeys=window._liveTurnSettlementOwnerKeys;
+  if(_armedKeys&&_settlementHandoffKeysEqual(_armedKeys[handoff.sessionId],handoff)) delete _armedKeys[handoff.sessionId];
+  if(_ownerKeys&&_settlementHandoffKeysEqual(_ownerKeys[handoff.sessionId],handoff)) delete _ownerKeys[handoff.sessionId];
+}
+if(typeof window!=='undefined') window.armLiveTurnSettlementHandoff=armLiveTurnSettlementHandoff;
+
 function renderMessages(options){
   _lastMessageRenderAt=performance.now();
   const preserveScroll=!!(options&&options.preserveScroll);
@@ -15933,16 +15960,23 @@ function renderMessages(options){
   const scrollSnapshot=(preserveScroll||_messageUserUnpinned)?_captureMessageScrollSnapshot():null;
   const inner=$('msgInner');
   const sid=S.session?S.session.session_id:null;
+  const msgCount=S.messages.length;
+  if(_loadingSessionId===sid&&msgCount===0&&inner)return;
+  if(sid!==_messageRenderWindowSid) _resetMessageRenderWindow(sid);
+  const _settlementHandoff=typeof _liveTurnSettlementHandoff==='undefined'
+    ? null
+    : _liveTurnSettlementHandoff;
+  const _settlementHandoffValid=typeof _settlementHandoffMatchesOwner==='function'&&
+    _settlementHandoffMatchesOwner(_settlementHandoff,sid);
+  if(typeof _liveTurnSettlementHandoff!=='undefined') _liveTurnSettlementHandoff=null;
+  if(typeof _consumeSettlementHandoff==='function') _consumeSettlementHandoff(_settlementHandoff);
   if(!S.busy&&Array.isArray(S.messages)&&typeof _hydrateIdLinkedHistoricalToolScenes==='function'){
     const activityMode=typeof chatActivityMode==='function'?chatActivityMode():'compact_worklog';
     _hydrateIdLinkedHistoricalToolScenes(S.messages,{sessionId:sid,mode:activityMode});
   }
-  const msgCount=S.messages.length;
   // During session switch, S.messages is intentionally cleared while the full
   // message fetch is still in flight. Other async updates can still call
   // renderMessages() in this window. Keep the existing loading placeholder.
-  if(_loadingSessionId===sid&&msgCount===0&&inner) return;
-  if(sid!==_messageRenderWindowSid) _resetMessageRenderWindow(sid);
   let cachedRenderSignature=null;
   const hasTransientTranscriptUi=!!(
     (window._compressionUi&&(!window._compressionUi.sessionId||window._compressionUi.sessionId===sid)) ||
@@ -16010,7 +16044,7 @@ function renderMessages(options){
   // connected and the streamed text visible. Only for the streaming session's own
   // live turn; never affects settled transcripts.
   let _preservedLiveTurn=null;
-  if(sid&&INFLIGHT[sid]){
+  if(sid&&(INFLIGHT[sid]||_settlementHandoffValid)){
     const _lt=document.getElementById('liveAssistantTurn');
     if(_lt&&(!_lt.dataset||!_lt.dataset.sessionId||_lt.dataset.sessionId===sid)){
       // Blank-turn fix (对话消失): only preserve the live turn across the DOM
@@ -17439,6 +17473,14 @@ function renderMessages(options){
   // those segments. Fall back to whole-turn replace only when the rebuilt turn has
   // no live segment to swap into. No-op for a settled turn or when nothing was
   // streaming.
+  if(_preservedLiveTurn){
+    const _rebuilt=document.getElementById('liveAssistantTurn');
+    // A settled Anchor scene is canonical; preserving the pre-settlement live
+    // shell here would hide its worklog rows from the lifecycle renderer.
+    if(_settlementHandoffValid&&inner&&inner.querySelector('[data-anchor-settled-scene-owner="1"]')){
+      _preservedLiveTurn=null;
+    }
+  }
   if(_preservedLiveTurn){
     const _rebuilt=document.getElementById('liveAssistantTurn');
     // Pick the PARSER-OWNED live segment, not just the first one. On reconnect /

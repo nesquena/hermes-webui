@@ -59,29 +59,32 @@ def test_stream_end_defers_settlement_when_live_assistant_still_present():
     assert "if(S.activeStreamId===streamId && _liveStreamEndScenePresent())" in body, (
         "stream_end should defer terminal cleanup while active live scene content is still present"
     )
-    assert "_scheduleStreamEndRecovery(source);" in body, (
+    assert "_scheduleStreamEndRecovery(source,180,transportGeneration);" in body, (
         "stream_end should schedule the deferred recovery timer before returning"
     )
-    assert "_scheduleStreamEndRecovery(source)" in body, (
-        "stream_end must delegate deferred cleanup to helper"
-    )
+    assert "transportGeneration" in body, "stream_end must carry its issued generation"
 
 
 def test_stream_end_fallback_does_not_finalize_when_session_is_still_active():
     body = _event_block("stream_end")
-    assert "const status=await _restoreSettledSession(source,{status:true});" in body
+    assert "const status=await _restoreSettledSession(source,{status:true,transportGeneration});" in body
     assert "if(status==='active'&&S.activeStreamId===streamId)" in body
-    assert "_scheduleStreamEndRecovery(source,200);" in body
-    assert "_finalizeStreamEndFallback(source);" in body
+    assert "_scheduleStreamEndRecovery(source,200,transportGeneration);" in body
+    assert "_finalizeStreamEndFallback(source,{transportGeneration,outcome:'interrupted'});" in body
 
 
 def test_stream_end_recovery_helper_retries_while_session_is_still_active():
     fn = _function_body("_runStreamEndRecovery")
-    assert "if(_streamFinalized || _terminalStateReached || !_pendingStreamEndRecovery)" in fn
-    assert "_restoreSettledSession(source,{status:true})" in fn
-    assert "if(status==='active'&&_streamEndRecoveryAttempts<10)" in fn
-    assert "_scheduleStreamEndRecovery(source,200);" in fn
-    assert "_finalizeStreamEndFallback(source);" in fn
+    assert "_streamEndRecoveryLease" in fn
+    assert "_restoreSettledSession(source,{status:true,transportGeneration})" in fn
+    assert "status==='stale'" in fn
+    assert "if(status==='active'){" in fn
+    assert "recovery.attempts<16" in fn
+    assert "_scheduleStreamEndRecovery(" in fn
+    assert "nextRecoveryTransportGeneration" in fn
+    assert "await _reconcileStreamEndRecoveryExhaustion(nextRecoverySource,nextRecoveryTransportGeneration);" in fn
+    assert "_finalizeStreamEndFallback(source,{transportGeneration,outcome:'interrupted'});" in fn
+    assert "_streamEndRecoveryAttempts" not in fn
 
 
 def test_stream_end_fallback_helper_clears_owner_state_before_closing():
@@ -91,9 +94,28 @@ def test_stream_end_fallback_helper_clears_owner_state_before_closing():
     assert "_clearOwnerInflightState();" in fn
     assert "_clearApprovalForOwner();" in fn
     assert "_clearClarifyForOwner('terminal');" in fn
+    assert "const settled=options&&options.outcome==='settled'&&_settlementAdmitted(transportGeneration);" in fn
+    assert "_visibleLiveAssistantAnswerPresent" not in fn
     assert "renderMessages({preserveScroll:true});" in fn
     assert "_setActivePaneIdleIfOwner();" in fn
-    assert "_closeSource(source)" in fn
+    assert "_closeSource(source,{transportGeneration})" in fn
+
+
+def test_stream_end_recovery_closes_dead_chat_stream_owner_before_slow_polling():
+    fn = _function_body("_runStreamEndRecovery")
+    assert "if(recovery.attempts===10){" in fn
+    assert "_closeSource(source,{retainOwner:true,transportGeneration});" in fn
+
+
+def test_stream_end_recovery_exhaustion_reconciles_stream_status_before_terminal_escape():
+    fn = _function_body("_reconcileStreamEndRecoveryExhaustion")
+    assert "api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`)" in fn
+    assert "_currentPaneRecoveryOwnerLost()" in fn
+    assert "_wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`" in fn
+    assert "if(await _restoreSettledSession(source,{preserveVisibleOnShorterTerminalSnapshot:true,transportGeneration})) return true;" in fn
+    assert "_closeSource(source,{retainOwner:true,transportGeneration});" in fn
+    assert "_closeSource(source,{retainOwner:true});" not in fn
+    assert "_finalizeStreamEndFallback(source,{transportGeneration,outcome:'interrupted'});" in fn
 
 
 def test_stream_end_live_scene_detection_includes_empty_text_activity():
@@ -110,12 +132,22 @@ def test_restore_settled_session_can_report_active_pending_status():
     assert "async function _restoreSettledSession(source, options=null)" in MESSAGES_JS
     assert "arguments[1]" not in fn
     assert "const returnStatus=!!(options&&options.status);" in fn
+    assert "const _restoreStartedAsCurrentPane=_isSessionCurrentPane(activeSid);" in fn
+    assert "const _restoreOwnerLost=()=>(" in fn
+    assert "const _restoreBackgroundOwnerLost=()=>(" in fn
+    assert "return returnStatus?'stale':true;" in fn
     assert "return returnStatus?'active':false;" in fn
     assert "return returnStatus?'restored':true;" in fn
 
 
+def test_recovery_owner_guard_uses_current_pane_and_stream_owner_signals():
+    fn = _function_body("_currentPaneRecoveryOwnerLost")
+    assert "_isSessionCurrentPane(activeSid)" in fn
+    assert "_ownsActiveStreamOrBackground()" in fn
+
+
 def test_stream_end_recovery_state_is_cleared_on_done_and_terminal_events():
-    assert "_clearStreamEndRecovery();" in _event_block("done")
-    assert "_clearStreamEndRecovery();" in _event_block("stream_end")
-    assert "_clearStreamEndRecovery();" in _event_block("cancel")
-    assert "_clearStreamEndRecovery();" in _event_block("apperror")
+    assert "_clearStreamEndRecovery(transportGeneration);" in _event_block("done")
+    assert "_clearStreamEndRecovery(transportGeneration);" in _event_block("stream_end")
+    assert "_clearStreamEndRecovery(transportGeneration);" in _event_block("cancel")
+    assert "_clearStreamEndRecovery(transportGeneration);" in _event_block("apperror")

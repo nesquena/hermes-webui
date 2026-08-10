@@ -91,6 +91,7 @@ def test_reconnect_settled_and_error_paths_keep_cleanup_session_scoped():
     assert "stopApprovalPolling();stopClarifyPolling();" not in combined
     assert "renderSessionList();setBusy(false)" not in combined
     assert "_setActivePaneIdleIfOwner" in combined
+    assert "_currentPaneRecoveryOwnerLost()" in error_body
 
 def test_stream_end_without_done_restores_settled_session_before_closing():
     """If a journal/replay emits stream_end without done, the UI must settle from /api/session.
@@ -99,15 +100,16 @@ def test_stream_end_without_done_restores_settled_session_before_closing():
     never replaces the pane with the persisted transcript when done is missing.
     """
     body = _event_body("stream_end")
-    restore_idx = body.find("_restoreSettledSession(source,{status:true})")
+    restore_idx = body.find("_restoreSettledSession(source,{status:true,transportGeneration})")
     if restore_idx == -1:
         restore_idx = body.find("_restoreSettledSession(source)")
-    close_idx = body.find("_closeSource(source)", restore_idx)
+    close_idx = body.find("_closeSource(source", restore_idx)
+    fallback_idx = body.find("_finalizeStreamEndFallback(source,{transportGeneration,outcome:'interrupted'});", restore_idx)
     if close_idx == -1:
-        close_idx = body.find("_finalizeStreamEndFallback(source)", restore_idx)
+        close_idx = fallback_idx
     finalized_idx = body.find("_streamFinalized=true", restore_idx)
     if finalized_idx == -1:
-        finalized_idx = body.find("_finalizeStreamEndFallback(source)", restore_idx)
+        finalized_idx = fallback_idx
     assert restore_idx != -1, "stream_end handler must restore settled session when done is absent"
     assert close_idx != -1, "stream_end handler must still close the owning EventSource"
     assert restore_idx < close_idx, "restore must be attempted before closing the stream"
@@ -120,13 +122,14 @@ def test_settled_restore_and_error_close_only_the_event_source_owner():
     error_body = _function_body("_handleStreamError")
     event_body = _event_body("error")
     assert "async function _restoreSettledSession(source, options=null)" in MESSAGES_JS
-    assert "function _handleStreamError(source)" in MESSAGES_JS
-    assert "_closeSource(source);" in restore_body
-    assert "_closeSource(source);" in error_body
-    assert "_restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})" in event_body
-    assert "_handleStreamError(source)" in event_body
+    assert "function _handleStreamError(source,activeTransportGeneration)" in MESSAGES_JS
+    assert "_closeSource(source,{transportGeneration});" in restore_body
+    assert "_closeSource(source,{transportGeneration:activeTransportGeneration});" in error_body
+    assert "_restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true,transportGeneration:retainedTransportGeneration})" in event_body
+    assert "_handleStreamError(source,retainedTransportGeneration)" in event_body
     assert "_restoreSettledSession())" not in event_body
     assert "_handleStreamError();" not in event_body
+    assert "_closeSource(source,{retainOwner:true,transportGeneration});" in event_body
 
 def test_done_handler_is_idempotent_for_replay_or_duplicate_done_events():
     """Duplicate/replayed done events must not replay completion sound or duplicate render."""
@@ -200,8 +203,31 @@ def test_attach_live_stream_registers_one_source_per_session_stream():
     error_body = _event_body("error")
 
     assert "const LIVE_STREAMS={};" in MESSAGES_JS
-    assert "LIVE_STREAMS[activeSid]={streamId,source};" in wire_body
-    assert "existingLive.source.close();" in wire_body
+    assert "function _currentLiveEventSourceOwnsStream(source,transportGeneration)" in attach_body
+    helper_body = _function_body("_currentLiveEventSourceOwnsStream")
+    assert "live.source===source" in helper_body
+    assert "_ownsActiveStreamOrBackground()" in helper_body
+    assert "live.transportGeneration!==expectedGeneration" in wire_body
+    assert "live.transportGeneration!==expectedGeneration" in wire_body
+    assert "LIVE_STREAMS[activeSid]={...existingLive,streamId,source:candidate,transportGeneration};" in wire_body
+    assert "candidate.close();" in wire_body
     assert "if(source&&live.source!==source) return;" in close_body
     assert "existingLive&&existingLive.streamId===streamId" in attach_body
-    assert "_closeSource(source);" in error_body
+    assert "_closeSource(source,{transportGeneration:retainedTransportGeneration});" in error_body
+
+
+def test_reconnecting_attach_registers_owner_before_preflight_status_check():
+    """Reconnect preflight must not self-classify as stale before _wireSSE runs."""
+    attach_body = _function_body("attachLiveStream")
+    owner_idx = attach_body.find("LIVE_STREAMS[activeSid]={streamId,source:null,ownerToken:_liveOwnerToken};")
+    if owner_idx == -1:
+        owner_idx = attach_body.find("LIVE_STREAMS[activeSid]={streamId,source:null,ownerToken:_liveOwnerToken}")
+    reconnect_idx = attach_body.find("if(reconnecting){")
+    owner_lost_idx = attach_body.find("if(_currentPaneRecoveryOwnerLost()){", reconnect_idx)
+    assert owner_idx != -1, "attachLiveStream should publish a placeholder owner before reconnect preflight"
+    assert reconnect_idx != -1, "reconnect preflight block not found"
+    assert owner_idx < reconnect_idx, "placeholder owner must exist before reconnect status probes run"
+    assert owner_lost_idx != -1, "reconnect preflight should still check for real ownership loss"
+    assert "_closeSource(null);" in attach_body[owner_lost_idx:owner_lost_idx + 120], (
+        "preflight owner-loss exit should retire the placeholder owner"
+    )
