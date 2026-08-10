@@ -247,6 +247,7 @@ def _cleanup_stale_tmp_files() -> None:
 
 
 _PERSISTED_SESSION_IDS_CACHE: tuple[Path | None, int | None, frozenset[str]] = (None, None, frozenset())
+_PERSISTED_SESSION_IDS_CACHE_LOCK = threading.Lock()
 
 
 def _persisted_session_ids_snapshot() -> frozenset[str]:
@@ -260,23 +261,24 @@ def _persisted_session_ids_snapshot() -> frozenset[str]:
     entering critical sections.
     """
     global _PERSISTED_SESSION_IDS_CACHE
-    try:
-        dir_mtime_ns = SESSION_DIR.stat().st_mtime_ns
-    except Exception:
-        dir_mtime_ns = None
-    cached_dir, cached_mtime_ns, cached_ids = _PERSISTED_SESSION_IDS_CACHE
-    if cached_dir == SESSION_DIR and cached_mtime_ns == dir_mtime_ns:
-        return cached_ids
-    try:
-        ids = frozenset(
-            p.stem
-            for p in SESSION_DIR.glob('*.json')
-            if not p.name.startswith('_')
-        )
-    except Exception:
-        ids = frozenset()
-    _PERSISTED_SESSION_IDS_CACHE = (SESSION_DIR, dir_mtime_ns, ids)
-    return ids
+    with _PERSISTED_SESSION_IDS_CACHE_LOCK:
+        try:
+            dir_mtime_ns = SESSION_DIR.stat().st_mtime_ns
+        except Exception:
+            dir_mtime_ns = None
+        cached_dir, cached_mtime_ns, cached_ids = _PERSISTED_SESSION_IDS_CACHE
+        if cached_dir == SESSION_DIR and cached_mtime_ns == dir_mtime_ns:
+            return cached_ids
+        try:
+            ids = frozenset(
+                p.stem
+                for p in SESSION_DIR.glob('*.json')
+                if not p.name.startswith('_')
+            )
+        except Exception:
+            ids = frozenset()
+        _PERSISTED_SESSION_IDS_CACHE = (SESSION_DIR, dir_mtime_ns, ids)
+        return ids
 
 
 def _invalidate_persisted_session_ids_snapshot() -> None:
@@ -287,7 +289,8 @@ def _invalidate_persisted_session_ids_snapshot() -> None:
     unrelated write advances the clock.
     """
     global _PERSISTED_SESSION_IDS_CACHE
-    _PERSISTED_SESSION_IDS_CACHE = (None, None, frozenset())
+    with _PERSISTED_SESSION_IDS_CACHE_LOCK:
+        _PERSISTED_SESSION_IDS_CACHE = (None, None, frozenset())
 
 
 def _session_dir_has_persisted_session_files() -> bool:

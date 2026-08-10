@@ -70,6 +70,7 @@ from api.todo_state import attach_todo_state, emit_todo_state
 from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
 from api.models import (
+    _invalidate_persisted_session_ids_snapshot,
     _is_empty_partial_activity_message,
     _evict_sessions_over_cap,
     clear_process_wakeup_pause,
@@ -2019,6 +2020,7 @@ def _cleanup_ephemeral_cancelled_turn(session) -> None:
     try:
         import pathlib
         pathlib.Path(session.path).unlink(missing_ok=True)
+        _invalidate_persisted_session_ids_snapshot()
     except Exception:
         logger.debug("Failed to clean up ephemeral cancelled session", exc_info=True)
 
@@ -10205,6 +10207,7 @@ def _run_agent_streaming_core(
                 try:
                     import pathlib
                     pathlib.Path(s.path).unlink(missing_ok=True)
+                    _invalidate_persisted_session_ids_snapshot()
                 except Exception:
                     pass
                 return  # skip all normal persistence for ephemeral sessions

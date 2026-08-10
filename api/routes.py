@@ -9603,6 +9603,7 @@ def _keep_latest_messaging_session_per_source(
 
 from api.models import (
     Session,
+    _invalidate_persisted_session_ids_snapshot,
     get_session,
     get_session_for_scan,
     find_compression_recovery_session,
@@ -20969,6 +20970,7 @@ def _discard_hidden_session(session) -> None:
         SESSIONS.pop(hidden_session_id, None)
     try:
         (SESSION_DIR / f"{hidden_session_id}.json").unlink(missing_ok=True)
+        _invalidate_persisted_session_ids_snapshot()
     except Exception:
         logger.debug("failed to remove hidden session %s", hidden_session_id, exc_info=True)
 
@@ -21177,6 +21179,7 @@ def _handle_background(handler, body):
             # next rebuild via _index_entry_exists().
             try:
                 (SESSION_DIR / f"{bg_sid}.json").unlink(missing_ok=True)
+                _invalidate_persisted_session_ids_snapshot()
             except Exception:
                 pass
         except Exception:
