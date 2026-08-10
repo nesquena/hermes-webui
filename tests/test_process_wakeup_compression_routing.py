@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 
 def _build_real_compression_chain(tmp_path):
     import pytest
@@ -87,6 +89,56 @@ def test_wakeup_target_uses_full_chain_resolver_without_agent_install(monkeypatc
 
     assert background_process._canonical_wakeup_session_id("parent") == "live-webui"
     assert db.tip_calls == ["parent"]
+    assert db.closed is True
+
+
+@pytest.mark.parametrize(
+    ("session_profile", "expected_owner"),
+    [(None, "default"), ("", "default"), ("named-profile", "named-profile")],
+)
+def test_wakeup_target_pins_explicit_profile_owner(
+    monkeypatch, session_profile, expected_owner
+):
+    """Background routing never resolves an archived origin through TLS state."""
+    import api.background_process as background_process
+    import api.routes as routes
+    import api.state_sync as state_sync
+
+    class OwnedDB:
+        def __init__(self):
+            self.closed = False
+
+        def get_compression_tip(self, session_id):
+            assert session_id == "parent"
+            return "owned-live-tip"
+
+        def get_session(self, session_id):
+            assert session_id == "owned-live-tip"
+            return {"id": session_id, "ended_at": None}
+
+        def close(self):
+            self.closed = True
+
+    db = OwnedDB()
+    requested_profiles = []
+    monkeypatch.setattr(
+        routes,
+        "_get_or_materialize_session",
+        lambda session_id, **kwargs: SimpleNamespace(
+            session_id=session_id,
+            profile=session_profile,
+            pre_compression_snapshot=True,
+        ),
+    )
+
+    def get_owned_db(profile=None):
+        requested_profiles.append(profile)
+        return db
+
+    monkeypatch.setattr(state_sync, "_get_state_db", get_owned_db)
+
+    assert background_process._canonical_wakeup_session_id("parent") == "owned-live-tip"
+    assert requested_profiles == [expected_owner]
     assert db.closed is True
 
 
