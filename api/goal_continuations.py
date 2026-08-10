@@ -1129,29 +1129,32 @@ def wake_goal_continuation_worker() -> None:
 
 
 def _worker_loop() -> None:
-    while not _WORKER_STOP.is_set():
-        if _WORKER_LEADER_FD is None:
-            if not _try_acquire_worker_leadership():
-                _WORKER_WAKE.wait(_IDLE_POLL_SECONDS)
-                _WORKER_WAKE.clear()
-                continue
+    try:
+        while not _WORKER_STOP.is_set():
+            if _WORKER_LEADER_FD is None:
+                if not _try_acquire_worker_leadership():
+                    _WORKER_WAKE.wait(_IDLE_POLL_SECONDS)
+                    _WORKER_WAKE.clear()
+                    continue
+                try:
+                    recover_goal_continuations()
+                except Exception:
+                    logger.warning("Goal continuation startup recovery failed", exc_info=True)
             try:
-                recover_goal_continuations()
+                reconcile_goal_continuations_once()
             except Exception:
-                logger.warning("Goal continuation startup recovery failed", exc_info=True)
-        try:
-            reconcile_goal_continuations_once()
-        except Exception:
-            logger.warning("Goal continuation reconciliation failed", exc_info=True)
-        try:
-            started = drain_goal_continuations_once()
-        except Exception:
-            logger.warning("Goal continuation drain failed", exc_info=True)
-            started = 0
-        if started:
-            continue
-        _WORKER_WAKE.wait(_IDLE_POLL_SECONDS)
-        _WORKER_WAKE.clear()
+                logger.warning("Goal continuation reconciliation failed", exc_info=True)
+            try:
+                started = drain_goal_continuations_once()
+            except Exception:
+                logger.warning("Goal continuation drain failed", exc_info=True)
+                started = 0
+            if started:
+                continue
+            _WORKER_WAKE.wait(_IDLE_POLL_SECONDS)
+            _WORKER_WAKE.clear()
+    finally:
+        _release_worker_leadership()
 
 
 def start_goal_continuation_worker() -> bool:
