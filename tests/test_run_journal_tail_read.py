@@ -2346,3 +2346,91 @@ def test_transient_oserror_not_cached_retry_recovers(tmp_path, monkeypatch):
         f"the validity helper was called {calls['n']} time(s) across both calls "
         f"(expected >= 2); the second call did not retry the read"
     )
+
+
+def test_transient_oserror_in_unguarded_tail_read_not_cached(tmp_path, monkeypatch):
+    """#6139 r14 finding 3 follow-up: a transient OSError from the UNGUARDed
+    tail-window ``fh.read``/``fh.seek`` (not a boundary helper) must still
+    propagate ``ok=False`` so the failed read is not cached.
+
+    The r14 ``ok`` flag is computed as ``not fault[0]``, and ``fault[0]`` is
+    set only by the boundary helpers. The tail-window ``fh.seek``/``fh.read``
+    at the top of ``_read_jsonl_tail``'s try body have no individual
+    try/except, so an OSError there escapes to the outer except with
+    ``fault[0]`` still False -> ``ok=True`` -> the degenerate ``unknown``
+    summary is cached permanently for a completed run. The outer except must
+    mark the fault so callers don't cache the transient failure.
+
+    This uses a SMALL journal (no boundary scan) so the OSError hits the
+    unguarded read, not a helper."""
+    import pathlib
+    from api import run_journal
+    from api.run_journal import latest_run_summary
+
+    # Small completed journal — well under the cap, so NO boundary scan runs
+    # and the OSError reaches the UNGUARDed tail-window fh.read.
+    token = '{"seq":1,"event":"token","payload":{"t":"hi"}}\n'
+    done = (
+        '{"seq":2,"event":"done","terminal":true,'
+        '"terminal_state":"completed","payload":{"session":{}}}\n'
+    )
+    path = tmp_path / "_run_journal" / "s1" / "r1.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(token + done, encoding="utf-8")
+
+    # Baseline: the run is completed.
+    run_journal._SUMMARY_CACHE.clear()
+    baseline = latest_run_summary("s1", "r1", session_dir=tmp_path)
+    assert baseline["terminal_state"] == "completed", (
+        f"baseline sanity: expected completed, got {baseline['terminal_state']!r}"
+    )
+
+    # Inject a one-shot OSError on the FIRST fh.read of this journal (the
+    # UNGUARDed tail-window read), WITHOUT touching fault[0] — mimicking a
+    # real unguarded I/O failure that the helpers never see.
+    run_journal._SUMMARY_CACHE.clear()
+    real_path_open = pathlib.Path.open
+    reads = {"n": 0}
+
+    def patched_open(self, *args, **kwargs):
+        fh = real_path_open(self, *args, **kwargs)
+        if str(self) != str(path):
+            return fh
+        real_read = fh.read
+
+        def guarded_read(n=-1):
+            reads["n"] += 1
+            if reads["n"] == 1:
+                raise OSError("simulated EIO in unguarded tail-window read")
+            return real_read(n)
+
+        fh.read = guarded_read
+        return fh
+
+    monkeypatch.setattr(pathlib.Path, "open", patched_open)
+
+    # First call (unguarded read faults): best-effort result, NOT cached.
+    first = latest_run_summary("s1", "r1", session_dir=tmp_path)
+    assert first["terminal_state"] != "completed", (
+        f"first call (during unguarded-read fault) reported "
+        f"{first['terminal_state']!r}; the transient OSError should have "
+        f"produced a best-effort non-completed result"
+    )
+    assert str(path) not in run_journal._SUMMARY_CACHE, (
+        "the transient-OSError failed summary (from an UNGUARDed read) was "
+        "cached as authoritative; the next call would return the stale "
+        "failure instead of retrying (#6139 r14 finding 3 follow-up)"
+    )
+
+    # Second call (no fault): the read is retried and recovers completed.
+    second = latest_run_summary("s1", "r1", session_dir=tmp_path)
+    assert second["terminal_state"] == "completed", (
+        f"second call (no fault) reported {second['terminal_state']!r} "
+        f"(expected 'completed'); the transient OSError from the unguarded "
+        f"read was cached and the retry did not happen "
+        f"(#6139 r14 finding 3 follow-up)"
+    )
+    assert reads["n"] >= 2, (
+        f"fh.read was called {reads['n']} time(s) across both calls "
+        f"(expected >= 2); the second call did not retry the read"
+    )

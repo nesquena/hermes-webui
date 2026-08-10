@@ -1209,7 +1209,15 @@ def _read_jsonl_tail(
                 malformed.append({"line": line_no, "raw": raw_line})
         return events, malformed, not fault[0]
     except (FileNotFoundError, OSError):
-        # A read failure mid-recovery: return what we have (best-effort).
+        # A read failure mid-recovery: return what we have (best-effort), but
+        # mark the fault so callers (summary readers) don't cache a transient
+        # failure as authoritative. fault[0] may still be False when the
+        # OSError came from an UNGUARDed direct I/O call (the tail-window
+        # fh.seek/fh.read near the top of the try body have no individual
+        # try/except, so the boundary helpers never got to set fault[0]).
+        # Set it here as the single chokepoint covering ALL escape paths.
+        # (#6139 r14 finding 3 follow-up.)
+        fault[0] = True
         return events, malformed, not fault[0]
     finally:
         fh.close()
