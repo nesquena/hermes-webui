@@ -100,7 +100,7 @@ class TestBootJsThemeColorSync:
         assert "if(!link){ _syncThemeColorMeta(); return; }" in src
         # Path 2 — the trailing call must follow the link-href update.
         assert (
-            "if(link.href!==want){ link.integrity=''; link.href=want; }\n"
+            "if(link.getAttribute('href')!==want){ link.integrity=''; link.href=want; }\n"
             "  _syncThemeColorMeta();"
         ) in src
 
