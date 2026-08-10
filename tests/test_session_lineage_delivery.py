@@ -436,6 +436,135 @@ def test_malformed_completion_receipt_fails_closed_and_remains_visible(tmp_path)
     assert receipt_path.read_text(encoding="utf-8") == "not-json"
 
 
+@pytest.mark.parametrize(
+    "scanner_name",
+    ["accepted_completion_delivery_contexts", "pending_completion_delivery_contexts"],
+)
+def test_restart_scan_keeps_malformed_document_globally_fail_closed(
+    tmp_path,
+    scanner_name,
+):
+    lineage = _lineage_module()
+    receipt_path = tmp_path / "_completion_delivery_receipts.json"
+    receipt_path.write_text("not-json", encoding="utf-8")
+
+    scanner = getattr(lineage, scanner_name)
+    with pytest.raises(lineage.CompletionDeliveryReceiptError, match="malformed"):
+        scanner(session_dir=tmp_path, diagnostics=[])
+    assert receipt_path.read_text(encoding="utf-8") == "not-json"
+
+
+@pytest.mark.parametrize("receipt_state", ["accepted", "pending"])
+@pytest.mark.parametrize("poison_id", ["000-poison", "zzz-poison"])
+def test_restart_scan_isolates_nonobject_row_and_preserves_raw_poison(
+    tmp_path,
+    receipt_state,
+    poison_id,
+):
+    """T2: non-object rows before/after healthy work never own the whole scan."""
+    lineage = _lineage_module()
+    _write_two_segment_completion_lineage(tmp_path)
+    healthy = lineage.build_completion_delivery_context(
+        _completion_event("process", f"healthy-{receipt_state}"),
+        "root",
+        session_dir=tmp_path,
+    )
+    claim = lineage.claim_completion_delivery(healthy, session_dir=tmp_path)
+    assert claim is not None
+    if receipt_state == "pending":
+        lineage.mark_completion_incorporated(
+            claim,
+            session_dir=tmp_path,
+            execution_pending=True,
+        )
+    receipt_path = claim.receipt_path
+    lineage.release_completion_delivery_claim(claim)
+    document = json.loads(receipt_path.read_text(encoding="utf-8"))
+    poison_key = f"process:{poison_id}"
+    document["receipts"][poison_key] = None
+    receipt_path.write_text(json.dumps(document, sort_keys=True), encoding="utf-8")
+    before = receipt_path.read_bytes()
+
+    diagnostics = []
+    if receipt_state == "accepted":
+        candidates = lineage.accepted_completion_delivery_contexts(
+            session_dir=tmp_path,
+            diagnostics=diagnostics,
+        )
+    else:
+        candidates = lineage.pending_completion_delivery_contexts(
+            session_dir=tmp_path,
+            diagnostics=diagnostics,
+        )
+
+    assert [candidate.completion_key for candidate in candidates] == [
+        healthy.completion_key
+    ]
+    assert diagnostics == [
+        {
+            "completion_key": poison_key,
+            "code": "receipt_invalid",
+            "newly_recorded": False,
+        }
+    ]
+    assert receipt_path.read_bytes() == before
+    assert json.loads(before)["receipts"][poison_key] is None
+
+
+def test_pending_resume_claim_never_downgrades_and_started_never_replays(tmp_path):
+    """T3: reclaim rotates ownership while retaining incorporated/pending."""
+    lineage = _lineage_module()
+    _write_two_segment_completion_lineage(tmp_path)
+    context = lineage.build_completion_delivery_context(
+        _completion_event("process", "pending-resume-state"),
+        "root",
+        session_dir=tmp_path,
+    )
+    first = lineage.claim_completion_delivery(
+        context,
+        session_dir=tmp_path,
+        reservation_id="first-reservation",
+    )
+    assert first is not None
+    lineage.mark_completion_incorporated(
+        first,
+        session_dir=tmp_path,
+        execution_pending=True,
+    )
+    lineage.release_completion_delivery_claim(first)
+
+    resumed = lineage.claim_completion_delivery(
+        context,
+        session_dir=tmp_path,
+        reservation_id="restart-reservation",
+        resume_incorporated=True,
+    )
+    assert resumed is not None
+    assert resumed.state == "incorporated"
+    receipt = lineage.read_completion_delivery_receipt(
+        context,
+        session_dir=tmp_path,
+    )
+    assert receipt is not None
+    assert (receipt["state"], receipt["execution_state"], receipt["attempt"]) == (
+        "incorporated",
+        "pending",
+        2,
+    )
+    lineage.release_completion_delivery_claim(resumed)
+    lineage.mark_completion_execution_started(
+        context,
+        reservation_id="restart-reservation",
+        session_dir=tmp_path,
+    )
+    assert lineage.claim_completion_delivery(
+        context,
+        session_dir=tmp_path,
+        reservation_id="forbidden-replay",
+        resume_incorporated=True,
+    ) is None
+
+
 def test_conflicting_completion_receipt_identity_fails_closed(tmp_path):
     lineage = _lineage_module()
     _write_two_segment_completion_lineage(tmp_path)

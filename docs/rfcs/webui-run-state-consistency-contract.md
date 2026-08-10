@@ -121,6 +121,22 @@ and 5; it does not mark every run-state boundary implemented.
 8. **Every mutation names its layer.** A PR touching streaming, recovery,
    context reconstruction, compression, replay, or sidebar metadata should state
    which layer it changes and what regression proves the invariant still holds.
+9. **Persisted-session discovery is coherently fenced.** The directory-mtime
+   snapshot used by lineage and recovery scanners is an optimization, not a
+   second source of truth. Snapshot validation, scanning, and publication must
+   share one process-local fence with successful sidecar-save and sidecar-delete
+   invalidation. A failed atomic replace must leave the prior snapshot valid;
+   a successful save or deletion must make an overlapping scan unable to
+   republish stale membership even when the filesystem reports a frozen or
+   coarse directory mtime.
+10. **Autonomous completion restart is row-isolated and tip-stable.** A malformed
+    or foreign completion receipt row remains visible and quarantined, but must
+    not starve unrelated valid pending rows in the same receipt store. Before a
+    pending incorporated turn reclaims execution, it must resolve the expected
+    delivery tip, acquire the stable-root permit, and re-resolve under that
+    permit. A moved tip is a typed `delivery_tip_moved` rejection: the old
+    receipt, source sidecar, and replacement tip remain untouched and no worker
+    is started.
 
 ## Review Checklist
 
@@ -139,6 +155,10 @@ context reconstruction, or session metadata:
 - Can this change move a session in the sidebar without meaningful user or
   assistant activity?
 - Can automatic compression or recovery text become visible active-turn content?
+- Can one malformed completion receipt starve unrelated restart work, or can a
+  pending completion mutate its receipt after its delivery tip moves?
+- Can a concurrent save/delete race republish stale persisted-session IDs when
+  directory mtime does not advance?
 - What test or manual evidence proves the invariant?
 
 ## Existing Issue Map

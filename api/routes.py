@@ -21328,8 +21328,13 @@ class PreparedChatTurn:
     completion_context: object | None = None
 
 
-def _reserve_turn_admission(s, stream_id: str):
-    """Acquire and publish one exact server-owned lineage reservation."""
+def _reserve_turn_admission(
+    s,
+    stream_id: str,
+    *,
+    expected_delivery_session_id: str | None = None,
+):
+    """Acquire and publish one exact, tip-stable lineage reservation."""
     from threading import Event
     from api import config as live_config
     from api.session_lineage import (
@@ -21342,24 +21347,56 @@ def _reserve_turn_admission(s, stream_id: str):
         s.session_id,
         expected_profile=getattr(s, "profile", None),
     )
+    expected_tip = str(expected_delivery_session_id or "").strip()
+    if expected_tip and resolution.delivery_session_id != expected_tip:
+        from api.session_lineage import CompletionDeliveryRestartError
+
+        raise CompletionDeliveryRestartError(
+            "delivery_tip_moved",
+            "pending completion delivery moved compression tips",
+        )
     permit = acquire_lineage_turn_permit(resolution.root_session_id)
-    admission = TurnAdmission(
-        reservation_id=stream_id,
-        stream_id=stream_id,
-        owner_token=uuid.uuid4().hex,
-        root_session_id=resolution.root_session_id,
-        delivery_session_id=resolution.delivery_session_id,
-        permit=permit,
-        admitted=Event(),
-        gate=Event(),
-        abort=Event(),
-    )
     try:
-        register_stream_owner(stream_id, resolution.delivery_session_id)
+        locked_resolution = resolve_session_lineage(
+            s.session_id,
+            expected_profile=getattr(s, "profile", None),
+        )
+        if (
+            locked_resolution.root_session_id != resolution.root_session_id
+            or locked_resolution.delivery_session_id != resolution.delivery_session_id
+            or locked_resolution.profile != resolution.profile
+        ):
+            if expected_tip:
+                from api.session_lineage import CompletionDeliveryRestartError
+
+                raise CompletionDeliveryRestartError(
+                    "delivery_tip_moved",
+                    "pending completion delivery moved compression tips",
+                )
+            raise RuntimeError("session lineage changed while reserving turn")
+        if expected_tip and locked_resolution.delivery_session_id != expected_tip:
+            from api.session_lineage import CompletionDeliveryRestartError
+
+            raise CompletionDeliveryRestartError(
+                "delivery_tip_moved",
+                "pending completion delivery moved compression tips",
+            )
+        admission = TurnAdmission(
+            reservation_id=stream_id,
+            stream_id=stream_id,
+            owner_token=uuid.uuid4().hex,
+            root_session_id=locked_resolution.root_session_id,
+            delivery_session_id=locked_resolution.delivery_session_id,
+            permit=permit,
+            admitted=Event(),
+            gate=Event(),
+            abort=Event(),
+        )
+        register_stream_owner(stream_id, locked_resolution.delivery_session_id)
         live_config.register_active_run(
             stream_id,
-            lineage_id=resolution.root_session_id,
-            delivery_session_id=resolution.delivery_session_id,
+            lineage_id=locked_resolution.root_session_id,
+            delivery_session_id=locked_resolution.delivery_session_id,
             admission=admission,
             reservation_create=True,
             session_id=s.session_id,
@@ -21897,6 +21934,12 @@ def _start_chat_stream_for_session(
 
             release_completion_delivery_claim(completion_claim)
 
+    def preserve_pending_completion_replay() -> bool:
+        return bool(
+            completion_claim is not None
+            and getattr(completion_claim, "state", None) == "incorporated"
+        )
+
     session_lock = _get_session_agent_lock(s.session_id)
     diag.stage("session_lock_wait") if diag else None
     admission = None
@@ -21933,7 +21976,15 @@ def _start_chat_stream_for_session(
                 diag.stage("save_pending_state") if diag else None
                 was_hidden_empty_session = _is_hidden_empty_session(s)
                 try:
-                    admission = _reserve_turn_admission(s, stream_id)
+                    admission = _reserve_turn_admission(
+                        s,
+                        stream_id,
+                        expected_delivery_session_id=(
+                            getattr(completion_context, "delivery_session_id", None)
+                            if completion_context is not None
+                            else None
+                        ),
+                    )
                     if completion_context is not None:
                         from api.session_lineage import (
                             CompletionDeliveryBusyError,
@@ -21997,8 +22048,22 @@ def _start_chat_stream_for_session(
                         completion_context=completion_context,
                     )
                 except Exception as exc:
-                    _abort_prepared_chat_turn(s, stream_id, admission)
-                    from api.session_lineage import LineageTurnBusyError
+                    _abort_prepared_chat_turn(
+                        s,
+                        stream_id,
+                        admission,
+                        preserve_pending_completion_replay=(
+                            preserve_pending_completion_replay()
+                        ),
+                    )
+                    from api.session_lineage import (
+                        CompletionDeliveryRestartError,
+                        LineageTurnBusyError,
+                    )
+
+                    if isinstance(exc, CompletionDeliveryRestartError):
+                        release_completion_claim()
+                        raise
 
                     if isinstance(exc, LineageTurnBusyError):
                         release_completion_claim()
@@ -22040,7 +22105,12 @@ def _start_chat_stream_for_session(
             model_provider=model_provider,
         )
     except Exception:
-        _abort_prepared_chat_turn(s, stream_id, admission)
+        _abort_prepared_chat_turn(
+            s,
+            stream_id,
+            admission,
+            preserve_pending_completion_replay=preserve_pending_completion_replay(),
+        )
         release_completion_claim()
         return {"error": "failed to prepare chat turn", "_status": 500}
     diag.stage("set_last_workspace") if diag else None
@@ -22083,6 +22153,7 @@ def _start_chat_stream_for_session(
             stream_id,
             admission,
             gateway=backend_is_gateway,
+            preserve_pending_completion_replay=preserve_pending_completion_replay(),
         )
         release_completion_claim()
         raise
@@ -22092,6 +22163,7 @@ def _start_chat_stream_for_session(
             stream_id,
             admission,
             gateway=backend_is_gateway,
+            preserve_pending_completion_replay=preserve_pending_completion_replay(),
         )
         release_completion_claim()
         return {"error": "agent worker failed to park", "_status": 500}
@@ -22101,6 +22173,7 @@ def _start_chat_stream_for_session(
             stream_id,
             admission,
             gateway=backend_is_gateway,
+            preserve_pending_completion_replay=preserve_pending_completion_replay(),
         )
         release_completion_claim()
         return {"error": "agent worker aborted before gate", "_status": 500}
@@ -22116,10 +22189,13 @@ def _start_chat_stream_for_session(
                 turn_admission=admission,
                 message=msg,
             )
-            mark_completion_incorporated(
-                completion_claim,
-                execution_pending=True,
-            )
+            if completion_claim.state == "accepted":
+                mark_completion_incorporated(
+                    completion_claim,
+                    execution_pending=True,
+                )
+            elif completion_claim.state != "incorporated":
+                raise RuntimeError("completion claim is not resumable")
             if callable(completion_acceptance):
                 completion_acceptance()
         except Exception:

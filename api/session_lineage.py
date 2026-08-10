@@ -1187,25 +1187,29 @@ def _restart_completion_delivery_contexts(
                 raise CompletionDeliveryReceiptError(
                     "conflicting completion receipt remains visible"
                 ) from exc
-            if not isinstance(record, dict):
-                # A non-object row has nowhere to carry bounded diagnostic
-                # metadata, so fail closed rather than rewriting raw evidence.
-                raise CompletionDeliveryReceiptError(
-                    "malformed completion receipt remains visible"
-                ) from exc
-            newly_recorded = record_completion_restart_diagnostic(
-                completion_key,
-                diagnostic_code,
-                session_dir=directory,
-            )
-            if diagnostics is not None:
-                diagnostics.append(
-                    {
-                        "completion_key": completion_key,
-                        "code": diagnostic_code,
-                        "newly_recorded": newly_recorded,
-                    }
+            if isinstance(record, dict):
+                newly_recorded = record_completion_restart_diagnostic(
+                    completion_key,
+                    diagnostic_code,
+                    session_dir=directory,
                 )
+            else:
+                # Non-object rows cannot safely carry diagnostic metadata. Keep
+                # the raw evidence byte-for-byte and quarantine it in the
+                # bounded aggregate restart diagnostic instead.
+                newly_recorded = False
+            if diagnostics is not None:
+                diagnostic = {
+                    "completion_key": completion_key,
+                    "code": diagnostic_code,
+                    "newly_recorded": newly_recorded,
+                }
+                if not any(
+                    row.get("completion_key") == completion_key
+                    and row.get("code") == diagnostic_code
+                    for row in diagnostics
+                ):
+                    diagnostics.append(diagnostic)
             continue
     return candidates
 
@@ -1213,11 +1217,14 @@ def _restart_completion_delivery_contexts(
 def accepted_completion_delivery_contexts(
     *,
     session_dir: Path | str | None = None,
+    diagnostics: list[dict] | None = None,
 ) -> list[CompletionDeliveryContext]:
     """Return validated accepted-only receipts for source-row repair."""
     return _restart_completion_delivery_contexts(
         receipt_state="accepted",
         session_dir=session_dir,
+        diagnostics=diagnostics,
+        isolate_row_failures=diagnostics is not None,
     )
 
 
@@ -1366,22 +1373,39 @@ def claim_completion_delivery(
         try:
             document = _read_completion_receipt_document(receipt_path)
             current = _read_completion_receipt_from_document(document, context)
-            if current is not None and current["state"] == "incorporated":
-                if not (
-                    resume_incorporated
-                    and current.get("execution_state") == "pending"
-                ):
-                    _unlock_completion_file(backend, handle, lock_module)
-                    return None
+            resuming_pending = bool(
+                current is not None
+                and current["state"] == "incorporated"
+                and resume_incorporated
+                and current.get("execution_state") == "pending"
+            )
+            if (
+                current is not None
+                and current["state"] == "incorporated"
+                and not resuming_pending
+            ):
+                _unlock_completion_file(backend, handle, lock_module)
+                return None
             attempt = int(current["attempt"]) + 1 if current is not None else 1
             accepted_at = float(current["accepted_at"]) if current is not None else time.time()
-            record = _new_completion_receipt_record(
-                context,
-                owner_token=owner_token,
-                attempt=attempt,
-                reservation_id=selected_reservation,
-                accepted_at=accepted_at,
-            )
+            if resuming_pending:
+                assert current is not None
+                record = dict(current)
+                record.update(
+                    {
+                        "owner_token": owner_token,
+                        "attempt": attempt,
+                        "reservation_id": selected_reservation,
+                    }
+                )
+            else:
+                record = _new_completion_receipt_record(
+                    context,
+                    owner_token=owner_token,
+                    attempt=attempt,
+                    reservation_id=selected_reservation,
+                    accepted_at=accepted_at,
+                )
             document["receipts"][context.completion_key] = record
             _write_completion_receipt(receipt_path, document)
             durable_document = _read_completion_receipt_document(receipt_path)
@@ -1394,7 +1418,7 @@ def claim_completion_delivery(
             context=context,
             receipt_path=receipt_path,
             lock_path=claim_lock_path,
-            state="accepted",
+            state=("incorporated" if resuming_pending else "accepted"),
             backend=backend,
             handle=handle,
             lock_module=lock_module,
@@ -1572,14 +1596,21 @@ def verify_completion_incorporation_artifacts(
         raise CompletionDeliveryReceiptError("completion admission is invalid")
     context = claim.context
     receipt = read_completion_delivery_receipt(context, session_dir=session_dir)
+    expected_receipt_state = claim.state
+    if expected_receipt_state not in {"accepted", "incorporated"}:
+        raise CompletionDeliveryReceiptError("completion claim state is invalid")
     if (
         receipt is None
-        or receipt.get("state") != "accepted"
+        or receipt.get("state") != expected_receipt_state
         or receipt.get("owner_token") != claim.owner_token
         or receipt.get("attempt") != claim.attempt
         or receipt.get("reservation_id") != claim.reservation_id
+        or (
+            expected_receipt_state == "incorporated"
+            and receipt.get("execution_state") != "pending"
+        )
     ):
-        raise CompletionDeliveryReceiptError("completion receipt owner is not accepted")
+        raise CompletionDeliveryReceiptError("completion receipt owner is not resumable")
     if (
         not turn_admission.admitted.is_set()
         or turn_admission.gate.is_set()

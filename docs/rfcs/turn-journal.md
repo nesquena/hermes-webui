@@ -141,6 +141,27 @@ On startup, for each journal file:
   - add a visible interruption marker, not a fake assistant answer.
 - Existing `.json.bak` and `state.db` recovery still run first so the sidecar is as complete as possible before journal reconciliation.
 
+### Autonomous completion restart boundary
+
+Autonomous process/delegation completions additionally use a durable receipt.
+Restart scanning treats each receipt row as an independent recovery domain: a
+malformed or foreign-identity row is preserved and reported with one bounded
+diagnostic, while unrelated validated rows continue. A malformed document
+envelope remains a store-wide fail-closed error because row boundaries cannot
+be established safely.
+
+An `incorporated` receipt with `execution_state: pending` may resume only at the
+exact delivery tip recorded when it was incorporated. Recovery carries that tip
+from enumeration into admission, resolves the lineage, acquires the stable-root
+permit, and re-resolves before any receipt, sidecar, journal, or worker mutation.
+The restart claim rotates ownership metadata without downgrading the durable
+receipt from `incorporated/pending`, and every pre-gate abort preserves the exact
+pending replay source for a later fresh restart.
+If the tip changed, recovery raises the typed `delivery_tip_moved` disposition;
+it does not rebind executable work to the new tip. Repeated restart scans keep
+the pending receipt visible with bounded diagnostic metadata and do not create a
+retry loop or duplicate provider execution.
+
 ## Audit additions
 
 `audit_session_recovery()` can report:
