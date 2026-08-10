@@ -350,12 +350,23 @@ Only an exact owner-token/attempt/reservation CAS may advance the receipt to
 follow that CAS; neither is allowed before it.
 
 An `accepted` receipt can be repaired once from its exact pending sidecar and
-journal checkpoint without starting a worker. An `incorporated` receipt is
-terminal no-replay evidence: restart recovery never invokes the provider or
-tools again. Malformed, duplicate, cross-lineage, or conflicting receipt/journal
-evidence fails closed. Receipt/lock files are private (`0600`), atomically
-replaced where applicable, and never contain prompts, tool output, provider
-payloads, credentials, or admission owner tokens in transcript/journal rows.
+journal checkpoint without starting a worker. Incorporation adds a durable
+execution fence: only `incorporated/pending` may resume after restart, and only
+from the exact pending prompt, attachments, completion identity, correlation,
+and delivery-tip checkpoint. `started` is terminal no-replay evidence even when
+the process died before recording `delivered`. A post-incorporation acceptance
+failure releases all live stream/admission owners but retains that exact durable
+replay input.
+
+Malformed, duplicate, cross-lineage, moved-tip, or conflicting receipt/journal
+evidence fails closed for that receipt. Pending-receipt startup enumeration
+isolates those failures per row so one poison receipt cannot starve a distinct
+validated receipt. The poison row stays in its original lifecycle state and gets
+one bounded, prompt-free `restart_diagnostic` disposition; repeated restarts do
+not append duplicate diagnostics or rebind work to a newer compression tip.
+Receipt/lock files are private (`0600`), atomically replaced where applicable,
+and never contain prompts, tool output, provider payloads, credentials, or
+admission owner tokens in transcript/journal rows.
 
 ### 4.4 Agent Invocation (`_run_agent_streaming_core`)
 

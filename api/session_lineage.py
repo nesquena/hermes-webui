@@ -29,6 +29,18 @@ _COMPLETION_RECEIPT_LOCK_NAME = "_completion_delivery_receipts.lock"
 _COMPLETION_RECEIPT_VERSION = 2
 _COMPLETION_RECEIPT_STATES = frozenset({"accepted", "incorporated"})
 _COMPLETION_EXECUTION_STATES = frozenset({"pending", "started", "delivered"})
+_COMPLETION_RESTART_DIAGNOSTIC_CODES = frozenset(
+    {
+        "delivery_tip_moved",
+        "lineage_crossed",
+        "lineage_unrecoverable",
+        "receipt_invalid",
+        "restart_resume_declined",
+        "restart_resume_failed",
+        "source_identity_mismatch",
+        "source_prompt_missing",
+    }
+)
 _SAFE_SESSION_ID_CHARS = frozenset(
     "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-"
 )
@@ -53,6 +65,16 @@ class CompletionDeliveryBusyError(RuntimeError):
 
 class CompletionDeliveryReceiptError(RuntimeError):
     """Raised when a durable completion receipt is malformed or conflicting."""
+
+
+class CompletionDeliveryRestartError(CompletionDeliveryReceiptError):
+    """Fail-closed restart anomaly with a bounded durable disposition code."""
+
+    def __init__(self, diagnostic_code: str, message: str) -> None:
+        if diagnostic_code not in _COMPLETION_RESTART_DIAGNOSTIC_CODES:
+            raise ValueError("unknown completion restart diagnostic code")
+        super().__init__(message)
+        self.diagnostic_code = diagnostic_code
 
 
 @dataclass(frozen=True)
@@ -1017,6 +1039,19 @@ def _validated_completion_receipt_record(
         raise CompletionDeliveryReceiptError("accepted completion has incorporated timestamp")
     elif execution_state is not None or execution_started_at is not None or delivered_at is not None:
         raise CompletionDeliveryReceiptError("accepted completion has execution state")
+    restart_diagnostic = record.get("restart_diagnostic")
+    if restart_diagnostic is not None:
+        if (
+            not isinstance(restart_diagnostic, dict)
+            or set(restart_diagnostic) != {"code", "observed_at"}
+            or restart_diagnostic.get("code")
+            not in _COMPLETION_RESTART_DIAGNOSTIC_CODES
+            or not isinstance(restart_diagnostic.get("observed_at"), (int, float))
+            or isinstance(restart_diagnostic.get("observed_at"), bool)
+        ):
+            raise CompletionDeliveryReceiptError(
+                "malformed completion restart diagnostic"
+            )
     for forbidden in ("prompt", "wakeup_prompt", "output", "tool_output"):
         if forbidden in record:
             raise CompletionDeliveryReceiptError("completion receipt contains prompt payload")
@@ -1051,6 +1086,8 @@ def _restart_completion_delivery_contexts(
     receipt_state: str,
     execution_state: str | None = None,
     session_dir: Path | str | None = None,
+    diagnostics: list[dict] | None = None,
+    isolate_row_failures: bool = False,
 ) -> list[CompletionDeliveryContext]:
     """Return validated restart candidates without weakening legacy terminality."""
     directory = _resolved_session_dir(session_dir)
@@ -1058,19 +1095,24 @@ def _restart_completion_delivery_contexts(
     document = _read_completion_receipt_document(path)
     candidates: list[CompletionDeliveryContext] = []
     for completion_key, record in sorted(document["receipts"].items()):
-        if not isinstance(record, dict):
-            raise CompletionDeliveryReceiptError("malformed completion receipt remains visible")
-        completion_kind = record.get("completion_kind")
-        completion_id = record.get("completion_id")
-        if (
-            not isinstance(completion_kind, str)
-            or not isinstance(completion_id, str)
-            or not completion_id
-            or completion_kind not in {"process", "async_delegation"}
-            or completion_key != f"{completion_kind}:{completion_id}"
-        ):
-            raise CompletionDeliveryReceiptError("conflicting completion receipt remains visible")
+        diagnostic_code = "receipt_invalid"
         try:
+            if not isinstance(record, dict):
+                raise CompletionDeliveryReceiptError(
+                    "malformed completion receipt remains visible"
+                )
+            completion_kind = record.get("completion_kind")
+            completion_id = record.get("completion_id")
+            if (
+                not isinstance(completion_kind, str)
+                or not isinstance(completion_id, str)
+                or not completion_id
+                or completion_kind not in {"process", "async_delegation"}
+                or completion_key != f"{completion_kind}:{completion_id}"
+            ):
+                raise CompletionDeliveryReceiptError(
+                    "conflicting completion receipt remains visible"
+                )
             lineage_id = _safe_session_id(record.get("lineage_id"))
             origin_session_id = _safe_session_id(record.get("origin_session_id"))
             receipt_delivery_session_id = _safe_session_id(
@@ -1095,55 +1137,76 @@ def _restart_completion_delivery_contexts(
                 receipt_delivery_session_id=receipt_delivery_session_id,
             )
             validated = _validated_completion_receipt_record(receipt_context, record)
-        except Exception as exc:
-            raise CompletionDeliveryReceiptError(
-                "conflicting completion receipt remains visible"
-            ) from exc
-        if validated["state"] != receipt_state:
-            continue
-        if validated.get("execution_state") != execution_state:
-            continue
-        try:
+            if validated["state"] != receipt_state:
+                continue
+            if validated.get("execution_state") != execution_state:
+                continue
+            diagnostic_code = "lineage_unrecoverable"
             target = resolve_session_lineage(
                 receipt_delivery_session_id,
                 session_dir=directory,
             )
+            if target.root_session_id != lineage_id:
+                diagnostic_code = "lineage_crossed"
+                raise CompletionDeliveryReceiptError(
+                    f"{receipt_state} completion delivery crossed lineage"
+                )
+            if (
+                receipt_state == "incorporated"
+                and target.delivery_session_id != receipt_delivery_session_id
+            ):
+                # The exact checkpoint is part of the incorporated identity. Do
+                # not rebind executable work to a newer compression tip.
+                diagnostic_code = "delivery_tip_moved"
+                raise CompletionDeliveryReceiptError(
+                    "pending completion delivery moved compression tips"
+                )
+            candidates.append(
+                CompletionDeliveryContext(
+                    kind=completion_kind,
+                    completion_id=completion_id,
+                    completion_key=completion_key,
+                    session_key=f"ui:{lineage_id}",
+                    origin_ui_session_id=origin_session_id,
+                    root_session_id=lineage_id,
+                    delivery_session_id=(
+                        receipt_delivery_session_id
+                        if receipt_state == "incorporated"
+                        else target.delivery_session_id
+                    ),
+                    profile=target.profile,
+                    correlation_sha256=receipt_context.correlation_sha256,
+                    turn_id=receipt_context.turn_id,
+                    receipt_delivery_session_id=receipt_delivery_session_id,
+                )
+            )
         except Exception as exc:
-            raise CompletionDeliveryReceiptError(
-                "accepted completion delivery lineage is not recoverable"
-            ) from exc
-        if target.root_session_id != lineage_id:
-            raise CompletionDeliveryReceiptError(
-                f"{receipt_state} completion delivery crossed lineage"
+            if not isolate_row_failures:
+                if isinstance(exc, CompletionDeliveryReceiptError):
+                    raise
+                raise CompletionDeliveryReceiptError(
+                    "conflicting completion receipt remains visible"
+                ) from exc
+            if not isinstance(record, dict):
+                # A non-object row has nowhere to carry bounded diagnostic
+                # metadata, so fail closed rather than rewriting raw evidence.
+                raise CompletionDeliveryReceiptError(
+                    "malformed completion receipt remains visible"
+                ) from exc
+            newly_recorded = record_completion_restart_diagnostic(
+                completion_key,
+                diagnostic_code,
+                session_dir=directory,
             )
-        if (
-            receipt_state == "incorporated"
-            and target.delivery_session_id != receipt_delivery_session_id
-        ):
-            # The exact checkpoint is part of the incorporated identity.  Do
-            # not rebind executable work to a newer compression tip.
-            raise CompletionDeliveryReceiptError(
-                "pending completion delivery moved compression tips"
-            )
-        candidates.append(
-            CompletionDeliveryContext(
-                kind=completion_kind,
-                completion_id=completion_id,
-                completion_key=completion_key,
-                session_key=f"ui:{lineage_id}",
-                origin_ui_session_id=origin_session_id,
-                root_session_id=lineage_id,
-                delivery_session_id=(
-                    receipt_delivery_session_id
-                    if receipt_state == "incorporated"
-                    else target.delivery_session_id
-                ),
-                profile=target.profile,
-                correlation_sha256=receipt_context.correlation_sha256,
-                turn_id=receipt_context.turn_id,
-                receipt_delivery_session_id=receipt_delivery_session_id,
-            )
-        )
+            if diagnostics is not None:
+                diagnostics.append(
+                    {
+                        "completion_key": completion_key,
+                        "code": diagnostic_code,
+                        "newly_recorded": newly_recorded,
+                    }
+                )
+            continue
     return candidates
 
 
@@ -1161,12 +1224,15 @@ def accepted_completion_delivery_contexts(
 def pending_completion_delivery_contexts(
     *,
     session_dir: Path | str | None = None,
+    diagnostics: list[dict] | None = None,
 ) -> list[CompletionDeliveryContext]:
     """Return incorporated workers that never crossed their execution gate."""
     return _restart_completion_delivery_contexts(
         receipt_state="incorporated",
         execution_state="pending",
         session_dir=session_dir,
+        diagnostics=diagnostics,
+        isolate_row_failures=True,
     )
 
 
@@ -1214,6 +1280,62 @@ def _unlock_completion_file(backend: str, handle: BinaryIO, lock_module) -> None
             lock_module.locking(handle.fileno(), lock_module.LK_UNLCK, 1)
     finally:
         handle.close()
+
+
+def record_completion_restart_diagnostic(
+    completion_key: str,
+    diagnostic_code: str,
+    *,
+    session_dir: Path | str | None = None,
+) -> bool:
+    """Persist one bounded per-receipt restart disposition.
+
+    Re-observing the same condition is a no-op: repeated server restarts neither
+    grow metadata nor rewrite a new diagnostic record. The receipt remains in its
+    original lifecycle state so ACK/retention ownership is unchanged.
+    """
+    selected_key = str(completion_key or "").strip()
+    if not selected_key or diagnostic_code not in _COMPLETION_RESTART_DIAGNOSTIC_CODES:
+        raise CompletionDeliveryReceiptError(
+            "completion restart diagnostic identity is invalid"
+        )
+    directory = _resolved_session_dir(session_dir)
+    receipt_path = directory / _COMPLETION_RECEIPT_FILE_NAME
+    store_backend, store_handle, store_module = _lock_completion_receipt(
+        _completion_receipt_store_lock_path(directory),
+        nonblocking=False,
+    )
+    try:
+        document = _read_completion_receipt_document(receipt_path)
+        current = document["receipts"].get(selected_key)
+        if not isinstance(current, dict):
+            raise CompletionDeliveryReceiptError(
+                "completion restart diagnostic row is unavailable"
+            )
+        existing = current.get("restart_diagnostic")
+        if (
+            isinstance(existing, dict)
+            and existing.get("code") == diagnostic_code
+            and set(existing) == {"code", "observed_at"}
+        ):
+            return False
+        diagnostic = {
+            "code": diagnostic_code,
+            "observed_at": time.time(),
+        }
+        updated = dict(current)
+        updated["restart_diagnostic"] = diagnostic
+        document["receipts"][selected_key] = updated
+        _write_completion_receipt(receipt_path, document)
+        durable_document = _read_completion_receipt_document(receipt_path)
+        durable = durable_document["receipts"].get(selected_key)
+        if not isinstance(durable, dict) or durable.get("restart_diagnostic") != diagnostic:
+            raise CompletionDeliveryReceiptError(
+                "completion restart diagnostic read-back failed"
+            )
+        return True
+    finally:
+        _unlock_completion_file(store_backend, store_handle, store_module)
 
 
 def claim_completion_delivery(

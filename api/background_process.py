@@ -1982,6 +1982,7 @@ def recover_processes_for_webui(process_registry=None, get_session_fn=None) -> i
         from api.session_lineage import (
             accepted_completion_delivery_contexts,
             pending_completion_delivery_contexts,
+            record_completion_restart_diagnostic,
         )
 
         repaired_receipts = 0
@@ -2001,7 +2002,10 @@ def recover_processes_for_webui(process_registry=None, get_session_fn=None) -> i
                     exc_info=True,
                 )
         resumed_receipts = 0
-        for completion_context in pending_completion_delivery_contexts():
+        restart_diagnostics = []
+        for completion_context in pending_completion_delivery_contexts(
+            diagnostics=restart_diagnostics,
+        ):
             try:
                 if not recover_incorporated_completion_delivery(completion_context):
                     continue
@@ -2010,12 +2014,36 @@ def recover_processes_for_webui(process_registry=None, get_session_fn=None) -> i
                     _mark_registry_completion_consumed(
                         completion_context.completion_id
                     )
-            except Exception:
+            except Exception as exc:
+                diagnostic_code = str(
+                    getattr(exc, "diagnostic_code", "restart_resume_failed")
+                    or "restart_resume_failed"
+                )
+                newly_recorded = record_completion_restart_diagnostic(
+                    completion_context.completion_key,
+                    diagnostic_code,
+                )
+                restart_diagnostics.append(
+                    {
+                        "completion_key": completion_context.completion_key,
+                        "code": diagnostic_code,
+                        "newly_recorded": newly_recorded,
+                    }
+                )
                 logger.error(
                     "Incorporated completion receipt remains unexecuted: %s",
                     completion_context.completion_key,
                     exc_info=True,
                 )
+        if restart_diagnostics:
+            logger.error(
+                "Completion restart recovery quarantined %d receipt(s): %s",
+                len(restart_diagnostics),
+                ", ".join(
+                    f"{row['completion_key']}={row['code']}"
+                    for row in restart_diagnostics
+                ),
+            )
         _PROCESS_RECOVERY_DONE = True
         if recovered:
             logger.info("Recovered %d background process(es) for WebUI", recovered)

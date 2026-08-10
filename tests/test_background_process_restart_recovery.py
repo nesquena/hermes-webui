@@ -16,6 +16,7 @@ from api.session_lineage import (
     mark_completion_incorporated,
     pending_completion_delivery_contexts,
     read_completion_delivery_receipt,
+    record_lineage_transition,
     release_completion_delivery_claim,
     release_turn_admission,
     verify_completion_incorporation_artifacts,
@@ -669,7 +670,13 @@ def _persist_accepted_prompt(session, context, prompt):
     session.save()
 
 
-def _install_counting_completion_core(monkeypatch, calls, finished):
+def _install_counting_completion_core(
+    monkeypatch,
+    calls,
+    finished,
+    *,
+    attachment_calls=None,
+):
     """Run admission normally but replace provider execution with one durable turn."""
     from api import streaming
 
@@ -683,6 +690,8 @@ def _install_counting_completion_core(monkeypatch, calls, finished):
         **_kwargs,
     ):
         calls.append((session_id, msg_text, stream_id))
+        if attachment_calls is not None:
+            attachment_calls.append(list(_attachments or []))
         current = Session.load(session_id)
         assert current is not None
         setattr(current, "active_stream_id", None)
@@ -699,6 +708,46 @@ def _install_counting_completion_core(monkeypatch, calls, finished):
         return {"executed": True}
 
     monkeypatch.setattr(streaming, "_run_agent_streaming_core", counting_core)
+
+
+def _leave_completion_pending_after_acceptance_failure(
+    monkeypatch,
+    session,
+    context,
+    *,
+    prompt,
+    attachments=None,
+):
+    """Drive the production pre-gate failure without leaving a real worker thread."""
+    captured = {}
+
+    class ParkedThread:
+        def __init__(self, *_args, **kwargs):
+            captured["admission"] = kwargs["kwargs"]["admission"]
+
+        def start(self):
+            captured["admission"].admitted.set()
+
+    with monkeypatch.context() as isolated:
+        isolated.setattr(routes.threading, "Thread", ParkedThread)
+        response = routes._start_chat_stream_for_session(
+            session,
+            msg=prompt,
+            attachments=list(attachments or []),
+            workspace=str(models.SESSION_DIR),
+            model="test-model",
+            model_provider="test-provider",
+            source="process_wakeup",
+            external_runtime_owned=False,
+            completion_context=context,
+            completion_acceptance=lambda: (_ for _ in ()).throw(
+                OSError("synthetic acceptance failure")
+            ),
+        )
+
+    assert response["_status"] == 503
+    assert response["type"] == "completion_incorporation_failed"
+    return captured["admission"]
 
 
 def test_incorporated_acceptance_exception_retries_and_executes_once(monkeypatch, tmp_path):
@@ -984,3 +1033,382 @@ def test_incorporated_restart_resumes_exact_turn_once(monkeypatch, tmp_path):
         (tmp_path / "_completion_delivery_receipts.json").read_text(encoding="utf-8")
     )
     assert list(document["receipts"]) == [context.completion_key]
+
+
+def test_acceptance_failure_restart_preserves_and_executes_exact_turn_once(
+    monkeypatch,
+    tmp_path,
+):
+    """F1-A: abort live owners without deleting an incorporated replay source."""
+    _configure_completion_recovery(monkeypatch, tmp_path)
+    session = Session(session_id="acceptance-restart", title="restart", profile="default")
+    session.save()
+    context = _completion_context(
+        "acceptance-restart",
+        "proc-acceptance-restart",
+        tmp_path,
+    )
+    prompt = "resume this exact completion after restart"
+    attachments = [{"name": "result.txt", "path": "/tmp/result.txt"}]
+    captured = []
+    original_reserve = routes._reserve_turn_admission
+
+    def capture_reservation(*args, **kwargs):
+        admission = original_reserve(*args, **kwargs)
+        captured.append(admission)
+        return admission
+
+    monkeypatch.setattr(routes, "_reserve_turn_admission", capture_reservation)
+    monkeypatch.setattr(routes, "set_last_workspace", lambda _workspace: None)
+    monkeypatch.setattr(routes, "publish_session_list_changed", lambda *_a, **_k: None)
+
+    response = routes._start_chat_stream_for_session(
+        session,
+        msg=prompt,
+        attachments=attachments,
+        workspace=str(tmp_path),
+        model="test-model",
+        model_provider="test-provider",
+        source="process_wakeup",
+        external_runtime_owned=False,
+        completion_context=context,
+        completion_acceptance=lambda: (_ for _ in ()).throw(
+            OSError("synthetic acceptance failure")
+        ),
+    )
+
+    assert response["_status"] == 503
+    assert response["type"] == "completion_incorporation_failed"
+    assert len(captured) == 1
+    failed_admission = captured[0]
+    assert failed_admission.abort.is_set()
+    assert failed_admission.gate.is_set()
+    assert failed_admission.permit.acquired is False
+    assert _wait_until(lambda: not config.ACTIVE_RUNS)
+    with routes.STREAMS_LOCK:
+        assert context.correlation_id[:32] not in routes.STREAMS
+
+    receipt = read_completion_delivery_receipt(context, session_dir=tmp_path)
+    assert receipt is not None
+    assert (receipt["state"], receipt["execution_state"]) == (
+        "incorporated",
+        "pending",
+    )
+    persisted = json.loads(
+        (tmp_path / "acceptance-restart.json").read_text(encoding="utf-8")
+    )
+    assert persisted["active_stream_id"] is None
+    assert persisted["pending_user_message"] == prompt
+    assert persisted["pending_attachments"] == attachments
+    assert persisted["pending_turn_id"] == context.turn_id
+    assert persisted["pending_completion_key"] == context.completion_key
+    assert (
+        persisted["pending_completion_correlation_sha256"]
+        == context.correlation_id
+    )
+    submitted = [
+        event
+        for event in read_turn_journal(
+            "acceptance-restart",
+            session_dir=tmp_path,
+        )["events"]
+        if event.get("event") == "submitted"
+    ]
+    assert len(submitted) == 1
+    assert submitted[0]["content"] == prompt
+    assert submitted[0]["attachments"] == attachments
+    assert submitted[0]["completion_key"] == context.completion_key
+
+    with config.LOCK:
+        config.SESSIONS.clear()
+    with config.ACTIVE_RUNS_LOCK:
+        config.ACTIVE_RUNS.clear()
+    with routes.STREAMS_LOCK:
+        routes.STREAMS.clear()
+    monkeypatch.setattr(bp, "_PROCESS_CHECKPOINT_RECOVERED", False)
+    monkeypatch.setattr(bp, "_PROCESS_RECOVERY_DONE", False)
+    executions = []
+    replayed_attachments = []
+    finished = threading.Event()
+    _install_counting_completion_core(
+        monkeypatch,
+        executions,
+        finished,
+        attachment_calls=replayed_attachments,
+    )
+
+    class RecoveryRegistry(FakeProcessRegistry):
+        def recover_from_checkpoint(self):
+            return 0
+
+        def list_sessions(self):
+            return []
+
+    registry = RecoveryRegistry()
+    install_fake_registry(monkeypatch, registry)
+
+    assert bp.recover_processes_for_webui(
+        registry,
+        lambda *_args, **_kwargs: None,
+    ) == 0
+    assert finished.wait(timeout=2)
+    assert executions == [
+        (
+            "acceptance-restart",
+            prompt,
+            context.correlation_id[:32],
+        )
+    ]
+    assert replayed_attachments == [attachments]
+    assert _wait_until(
+        lambda: (
+            read_completion_delivery_receipt(context, session_dir=tmp_path) or {}
+        ).get("execution_state")
+        == "delivered"
+    )
+
+    with config.LOCK:
+        config.SESSIONS.clear()
+    with config.ACTIVE_RUNS_LOCK:
+        config.ACTIVE_RUNS.clear()
+    with routes.STREAMS_LOCK:
+        routes.STREAMS.clear()
+    monkeypatch.setattr(bp, "_PROCESS_CHECKPOINT_RECOVERED", False)
+    monkeypatch.setattr(bp, "_PROCESS_RECOVERY_DONE", False)
+    assert bp.recover_processes_for_webui(
+        registry,
+        lambda *_args, **_kwargs: None,
+    ) == 0
+    assert executions == [
+        (
+            "acceptance-restart",
+            prompt,
+            context.correlation_id[:32],
+        )
+    ]
+
+
+def test_moved_pending_receipt_is_quarantined_without_starving_healthy_restart(
+    monkeypatch,
+    tmp_path,
+    caplog,
+):
+    """F1-B: one poison receipt cannot abort a distinct healthy pending turn."""
+    _configure_completion_recovery(monkeypatch, tmp_path)
+    monkeypatch.setattr(routes, "set_last_workspace", lambda _workspace: None)
+    monkeypatch.setattr(routes, "publish_session_list_changed", lambda *_a, **_k: None)
+
+    stale = Session(session_id="poison-root", title="poison", profile="default")
+    stale.save()
+    stale_context = _completion_context(
+        "poison-root",
+        "proc-poison",
+        tmp_path,
+    )
+    stale_admission = _leave_completion_pending_after_acceptance_failure(
+        monkeypatch,
+        stale,
+        stale_context,
+        prompt="poison prompt must never execute",
+    )
+    assert stale_admission.permit.acquired is False
+    stale_payload = json.loads(
+        (tmp_path / "poison-root.json").read_text(encoding="utf-8")
+    )
+    stale_payload["pre_compression_snapshot"] = True
+    (tmp_path / "poison-root.json").write_text(
+        json.dumps(stale_payload),
+        encoding="utf-8",
+    )
+    continuation_payload = dict(stale_payload)
+    continuation_payload["session_id"] = "poison-tip"
+    continuation_payload["parent_session_id"] = "poison-root"
+    continuation_payload["pre_compression_snapshot"] = False
+    (tmp_path / "poison-tip.json").write_text(
+        json.dumps(continuation_payload),
+        encoding="utf-8",
+    )
+    record_lineage_transition(
+        root_session_id="poison-root",
+        previous_tip_session_id="poison-root",
+        delivery_session_id="poison-tip",
+        profile="default",
+        state="committed",
+        session_dir=tmp_path,
+    )
+
+    healthy = Session(session_id="healthy-root", title="healthy", profile="default")
+    healthy.save()
+    healthy_context = _completion_context(
+        "healthy-root",
+        "proc-healthy",
+        tmp_path,
+    )
+    healthy_admission = _leave_completion_pending_after_acceptance_failure(
+        monkeypatch,
+        healthy,
+        healthy_context,
+        prompt="healthy prompt executes exactly once",
+    )
+    assert healthy_admission.permit.acquired is False
+
+    executions = []
+    finished = threading.Event()
+    _install_counting_completion_core(monkeypatch, executions, finished)
+
+    class RecoveryRegistry(FakeProcessRegistry):
+        def recover_from_checkpoint(self):
+            return 0
+
+        def list_sessions(self):
+            return []
+
+    registry = RecoveryRegistry()
+    install_fake_registry(monkeypatch, registry)
+    first_diagnostic = None
+    for round_index in range(4):
+        with config.LOCK:
+            config.SESSIONS.clear()
+        with config.ACTIVE_RUNS_LOCK:
+            config.ACTIVE_RUNS.clear()
+        with routes.STREAMS_LOCK:
+            routes.STREAMS.clear()
+        monkeypatch.setattr(bp, "_PROCESS_CHECKPOINT_RECOVERED", False)
+        monkeypatch.setattr(bp, "_PROCESS_RECOVERY_DONE", False)
+
+        assert bp.recover_processes_for_webui(
+            registry,
+            lambda *_args, **_kwargs: None,
+        ) == 0
+        assert bp._PROCESS_RECOVERY_DONE is True
+        if round_index == 0:
+            assert finished.wait(timeout=2)
+            assert _wait_until(
+                lambda: (
+                    read_completion_delivery_receipt(
+                        healthy_context,
+                        session_dir=tmp_path,
+                    )
+                    or {}
+                ).get("execution_state")
+                == "delivered"
+            )
+        document = json.loads(
+            (tmp_path / "_completion_delivery_receipts.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        diagnostic = document["receipts"][stale_context.completion_key].get(
+            "restart_diagnostic"
+        )
+        assert diagnostic is not None
+        assert diagnostic["code"] == "delivery_tip_moved"
+        if first_diagnostic is None:
+            first_diagnostic = diagnostic
+        else:
+            assert diagnostic == first_diagnostic
+
+    assert executions == [
+        (
+            "healthy-root",
+            "healthy prompt executes exactly once",
+            healthy_context.correlation_id[:32],
+        )
+    ]
+    stale_receipt = read_completion_delivery_receipt(
+        stale_context,
+        session_dir=tmp_path,
+    )
+    assert stale_receipt is not None
+    assert (stale_receipt["state"], stale_receipt["execution_state"]) == (
+        "incorporated",
+        "pending",
+    )
+    assert "poison prompt must never execute" not in [row[1] for row in executions]
+    assert any(
+        stale_context.completion_key in record.getMessage()
+        and "quarantined" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_code"),
+    [
+        ("no_prompt", "source_prompt_missing"),
+        ("identity_drift", "source_identity_mismatch"),
+    ],
+)
+def test_stale_pending_receipt_diagnostic_is_bounded_across_restarts(
+    monkeypatch,
+    tmp_path,
+    case,
+    expected_code,
+):
+    """F1-C: stale pending rows stay fail-closed with one bounded disposition."""
+    _configure_completion_recovery(monkeypatch, tmp_path)
+    monkeypatch.setattr(routes, "set_last_workspace", lambda _workspace: None)
+    monkeypatch.setattr(routes, "publish_session_list_changed", lambda *_a, **_k: None)
+    session = Session(session_id="stale-source", title="stale", profile="default")
+    session.save()
+    context = _completion_context("stale-source", f"proc-{case}", tmp_path)
+    _leave_completion_pending_after_acceptance_failure(
+        monkeypatch,
+        session,
+        context,
+        prompt="stale prompt",
+    )
+    persisted = Session.load("stale-source")
+    assert persisted is not None
+    if case == "no_prompt":
+        setattr(persisted, "pending_user_message", None)
+        persisted.pending_attachments = []
+    else:
+        persisted.active_stream_id = "different-stream-owner"
+    persisted.save(touch_updated_at=False)
+
+    class RecoveryRegistry(FakeProcessRegistry):
+        def recover_from_checkpoint(self):
+            return 0
+
+        def list_sessions(self):
+            return []
+
+    registry = RecoveryRegistry()
+    install_fake_registry(monkeypatch, registry)
+    first_document = None
+    for _ in range(4):
+        with config.LOCK:
+            config.SESSIONS.clear()
+        with config.ACTIVE_RUNS_LOCK:
+            config.ACTIVE_RUNS.clear()
+        with routes.STREAMS_LOCK:
+            routes.STREAMS.clear()
+        monkeypatch.setattr(bp, "_PROCESS_CHECKPOINT_RECOVERED", False)
+        monkeypatch.setattr(bp, "_PROCESS_RECOVERY_DONE", False)
+        assert bp.recover_processes_for_webui(
+            registry,
+            lambda *_args, **_kwargs: None,
+        ) == 0
+        assert bp._PROCESS_RECOVERY_DONE is True
+        document = json.loads(
+            (tmp_path / "_completion_delivery_receipts.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        diagnostic = document["receipts"][context.completion_key].get(
+            "restart_diagnostic"
+        )
+        assert diagnostic is not None
+        assert diagnostic["code"] == expected_code
+        if first_document is None:
+            first_document = document
+        else:
+            assert document == first_document
+
+    receipt = read_completion_delivery_receipt(context, session_dir=tmp_path)
+    assert receipt is not None
+    assert (receipt["state"], receipt["execution_state"]) == (
+        "incorporated",
+        "pending",
+    )

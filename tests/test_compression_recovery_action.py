@@ -275,6 +275,21 @@ def test_recovery_start_reuses_existing_focused_session(monkeypatch, tmp_path):
     models.SESSIONS[sid] = session
     routes.SESSIONS[sid] = session
 
+    # Deterministically reproduce the full-suite failure: the persisted-id
+    # snapshot is primed before a same-tick atomic sidecar create, while the
+    # directory mtime remains unchanged. The child must still become discoverable
+    # after the in-memory LRU is cleared.
+    assert models._persisted_session_ids_snapshot() == frozenset({sid})
+    session_dir_stat = session_dir.stat()
+    original_stat = Path.stat
+
+    def stat_with_stalled_directory_mtime(path, *args, **kwargs):
+        if path == session_dir:
+            return session_dir_stat
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat_with_stalled_directory_mtime)
+
     first_handler = _JSONHandler()
     routes._handle_session_compression_recovery_start(first_handler, {"session_id": sid})
     first_payload = _payload(first_handler)

@@ -279,6 +279,17 @@ def _persisted_session_ids_snapshot() -> frozenset[str]:
     return ids
 
 
+def _invalidate_persisted_session_ids_snapshot() -> None:
+    """Forget the listing after this process publishes a session sidecar.
+
+    Some filesystems coalesce directory mtime updates for rapid atomic replaces.
+    Relying on that timestamp alone can hide a just-created session until a later
+    unrelated write advances the clock.
+    """
+    global _PERSISTED_SESSION_IDS_CACHE
+    _PERSISTED_SESSION_IDS_CACHE = (None, None, frozenset())
+
+
 def _session_dir_has_persisted_session_files() -> bool:
     """Return True when the current session dir has at least one session JSON file."""
     try:
@@ -1532,6 +1543,7 @@ class Session:
                 f.flush()
                 os.fsync(f.fileno())
             _safe_replace(tmp, self.path)
+            _invalidate_persisted_session_ids_snapshot()
         except Exception:
             try:
                 tmp.unlink(missing_ok=True)

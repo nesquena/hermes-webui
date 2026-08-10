@@ -21376,8 +21376,9 @@ def _abort_prepared_chat_turn(
     *,
     gateway: bool = False,
     delete_hidden: bool = False,
+    preserve_pending_completion_replay: bool = False,
 ) -> None:
-    """Abort and retire every owner published before a worker gate opens."""
+    """Abort every live owner while optionally retaining durable replay input."""
     from api.session_lineage import release_turn_admission
 
     if admission is not None:
@@ -21405,10 +21406,11 @@ def _abort_prepared_chat_turn(
     try:
         if getattr(session, "active_stream_id", None) == stream_id:
             session.active_stream_id = None
-            session.pending_user_message = None
-            session.pending_attachments = []
-            session.pending_started_at = None
-            session.pending_user_source = None
+            if not preserve_pending_completion_replay:
+                session.pending_user_message = None
+                session.pending_attachments = []
+                session.pending_started_at = None
+                session.pending_user_source = None
             session.save(touch_updated_at=False)
     except Exception:
         logger.debug("failed to roll back prepared turn %s", stream_id, exc_info=True)
@@ -22124,6 +22126,7 @@ def _start_chat_stream_for_session(
                 stream_id,
                 admission,
                 gateway=backend_is_gateway,
+                preserve_pending_completion_replay=True,
             )
             release_completion_claim()
             return {
@@ -22339,7 +22342,10 @@ def recover_accepted_completion_delivery(completion_context) -> bool:
 
 def recover_incorporated_completion_delivery(completion_context) -> bool:
     """Restart one exactly checkpointed worker that never crossed its gate."""
-    from api.session_lineage import read_completion_delivery_receipt
+    from api.session_lineage import (
+        CompletionDeliveryRestartError,
+        read_completion_delivery_receipt,
+    )
 
     receipt = read_completion_delivery_receipt(completion_context)
     if (
@@ -22357,7 +22363,10 @@ def recover_incorporated_completion_delivery(completion_context) -> bool:
         getattr(session, "pending_user_source", "") or "process_wakeup"
     )
     if not recovery_message:
-        raise RuntimeError("incorporated completion has no recoverable source prompt")
+        raise CompletionDeliveryRestartError(
+            "source_prompt_missing",
+            "incorporated completion has no recoverable source prompt",
+        )
     session_lock = _get_session_agent_lock(session.session_id)
     with session_lock:
         active_stream_id = getattr(session, "active_stream_id", None)
@@ -22370,16 +22379,27 @@ def recover_incorporated_completion_delivery(completion_context) -> bool:
                 active_owner = bool(
                     active_owner or active_stream_id in (live_config.ACTIVE_RUNS or {})
                 )
-            if (
-                active_owner
-                or active_stream_id != completion_context.correlation_sha256[:32]
-                or getattr(session, "pending_completion_key", None)
-                != completion_context.completion_key
-            ):
+            if active_owner:
                 return False
+            if active_stream_id != completion_context.correlation_sha256[:32]:
+                raise CompletionDeliveryRestartError(
+                    "source_identity_mismatch",
+                    "incorporated completion replay stream identity changed",
+                )
             # The pending receipt plus exact sidecar identity supersedes generic
             # young-pending grace after a fresh process has no live owner.
             setattr(session, "active_stream_id", None)
+        if (
+            getattr(session, "pending_turn_id", None) != completion_context.turn_id
+            or getattr(session, "pending_completion_key", None)
+            != completion_context.completion_key
+            or getattr(session, "pending_completion_correlation_sha256", None)
+            != completion_context.correlation_sha256
+        ):
+            raise CompletionDeliveryRestartError(
+                "source_identity_mismatch",
+                "incorporated completion replay identity changed",
+            )
     result = _start_chat_stream_for_session(
         session,
         msg=recovery_message,
