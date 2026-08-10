@@ -175,6 +175,97 @@ def build_active_turn_token(stream_id: Any, started_at: Any) -> str | None:
     return f"{str(stream_id).strip()}:{started:.17g}"
 
 
+_WORKSPACE_TAG_RE = re.compile(r"\A\[Workspace::v1: [^\n]*\]\n{0,2}")
+_INTERNAL_WAKEUP_PREFIX = "[INTERNAL BACKGROUND EVENT"
+
+
+def _strip_workspace_tag(text: Any) -> str:
+    """Remove a leading ``[Workspace::v1: ...]`` tag line, if present."""
+    return _WORKSPACE_TAG_RE.sub("", str(text or ""), count=1)
+
+
+def is_wakeup_user_text(text: Any) -> bool:
+    """Whether *text* is a process-wakeup payload in any delivery shape.
+
+    Matches the raw agent-side formatter envelope (optionally preceded by a
+    workspace tag line) and the WebUI-internal wrapped prompt
+    (``[INTERNAL BACKGROUND EVENT ...``). This is the ONLY signal available
+    on delivery paths that carry no durable source metadata — e.g. the
+    api_server adapter's self-POSTed wake turns, which arrive as ordinary
+    user messages (``deliver_wake`` → ``/v1/chat/completions``).
+    """
+    body = _strip_workspace_tag(text)
+    if body.startswith(_INTERNAL_WAKEUP_PREFIX):
+        return True
+    return bool(
+        _WAKEUP_COMPLETION_RE.match(body)
+        or _WAKEUP_WATCH_MATCH_RE.match(body)
+        or _ASYNC_DELEGATION_HEADER_RE.match(body)
+    )
+
+
+def wakeup_event_key(text: Any) -> tuple | None:
+    """Return a dedup key ``("completion", sid, exit_code)`` for a completion
+    wakeup text, else None.
+
+    A process completes exactly once, so two rows with the same key are the
+    same event delivered twice (eager row + state.db merge row, or a stale
+    post-restart redelivery). Watch-match wakeups deliberately return None:
+    they can legitimately fire several times for one process and must never
+    be deduplicated.
+    """
+    body = _strip_workspace_tag(text)
+    async_match = _ASYNC_DELEGATION_HEADER_RE.match(body)
+    if async_match is not None:
+        return ("async_delegation", async_match.group("id"))
+    m = _WAKEUP_COMPLETION_RE.match(body)
+    if m is None and body.startswith(_INTERNAL_WAKEUP_PREFIX):
+        # The wrapper wraps the raw envelope; ``\A`` anchors make ``search``
+        # useless, so re-match on the sliced inner block.
+        inner = body.find("[IMPORTANT: Background process ")
+        if inner >= 0:
+            m = _WAKEUP_COMPLETION_RE.match(body[inner:])
+    if m is None:
+        return None
+    return ("completion", m.group("sid"), m.group("exit_code"))
+
+
+def stamp_wakeup_source_if_untagged(msg: Any) -> bool:
+    """Backstop: stamp ``_source='process_wakeup'`` on a wakeup-shaped user
+    message that carries no explicit source.
+
+    Wakeup rows are never renderable (the UI contract), and the ``[[SILENT]]``
+    collapse keys on this marker — both break when a delivery path (self-POST
+    wake, state.db merge of a gateway-run turn) persists the row untagged.
+    Only user-role messages without an existing ``_source`` are touched, so
+    human turns stay untouched even in the pathological case of a user
+    pasting the exact envelope. Never raises.
+    """
+    try:
+        if not isinstance(msg, dict) or msg.get("role") != "user":
+            return False
+        if msg.get("_source"):
+            return False
+        content = msg.get("content")
+        # isinstance guard first: never coerce exotic content objects (the
+        # merge key-cache perf contract counts str() calls on message rows).
+        if not isinstance(content, str) or not is_wakeup_user_text(content):
+            return False
+        body = _strip_workspace_tag(content)
+        source = (
+            "async_delegation"
+            if _ASYNC_DELEGATION_HEADER_RE.match(body)
+            else "process_wakeup"
+        )
+        msg["_source"] = source
+        attach_wakeup_display_meta(msg, source)
+        attach_internal_event_meta(msg, source)
+        return True
+    except Exception:
+        logger.debug("wakeup source backstop failed", exc_info=True)
+        return False
+
+
 def stamp_message_source(
     msg: Any,
     source: Any,
@@ -193,6 +284,11 @@ def stamp_message_source(
     if isinstance(msg, dict) and active_turn_token:
         msg["_active_turn_token"] = str(active_turn_token)
     if not isinstance(msg, dict) or not source or source == "webui":
+        # No explicit source: fall back to the content-shape backstop so
+        # wakeup deliveries that arrive untagged (self-POST wake turns,
+        # gateway-side turns merged from state.db) still carry the durable
+        # marker the UI hide/collapse contract needs.
+        stamp_wakeup_source_if_untagged(msg)
         return
     msg["_source"] = source
     attach_wakeup_display_meta(msg, source)
