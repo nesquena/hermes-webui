@@ -5,6 +5,8 @@
 
 ### Changed
 
+- **Kanban boards can now set a default workspace path.** The board settings modal gains a "Default workspace path" field (a type-or-pick combobox sourced from your saved workspaces, so you can choose a known path or type a custom one — validated server-side). Tasks on the board without an explicit workspace path inherit this default. The board switcher chip is now always shown (even with a single board) and its menu item is now "Board settings…", enabled for the default board. Thanks @rodboev. (#6055, #5932)
+
 - **The workspace file tree can now be sorted, and the "Show hidden files" toggle moved into a menu.** The workspace pane's ⋮ options menu gains a "Sort by" group — Name (A→Z), Name (Z→A), Date created, Date modified — and your choice persists across sessions. "Date created" is disabled with an inline note on platforms/servers that don't report creation time. The pre-existing "Show hidden files" toggle moves from a permanent inline row into that same menu, reclaiming vertical space on every workspace view; a small indicator on the heading still reflects when hidden files are shown. Thanks @rodboev. (#6091, #6066)
 
 - **Kanban worker sessions can now be hidden from the default sidebar.** A new "Show kanban sessions" toggle (nested under "Show non-WebUI sessions", default off) keeps automated kanban worker runs — which can flood the list — out of the default sidebar, extending the same background-session hide already used for cron and webhook sessions. Turning it on shows them; an explicit kanban source filter always reveals them regardless of the toggle, and a project-assigned kanban session still surfaces under its project chip. Thanks @vduke. (#6780)
