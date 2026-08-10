@@ -54,41 +54,41 @@ class TestTouchPinchZoom:
         """touchstart/touchmove need {passive:false} so preventDefault works
         (same requirement as the Mermaid viewer)."""
         src = UI.read_text(encoding="utf-8")
-        assert "viewport.addEventListener('touchstart', _onTouchStart, {passive: false});" in src
-        assert "viewport.addEventListener('touchmove', _onTouchMove, {passive: false});" in src
+        assert "viewport.addEventListener('touchstart', _imgOnTouchStart, {passive: false});" in src
+        assert "viewport.addEventListener('touchmove', _imgOnTouchMove, {passive: false});" in src
 
     def test_pinch_state_machinery_present(self):
         src = UI.read_text(encoding="utf-8")
         for marker in (
-            "state.pinchStartDist = _touchDist(e.touches);",
+            "state.pinchStartDist = _imgTouchDist(e.touches);",
             "state.pinchStartScale = state.scale;",
             "state.pinchStartCX",
             "state.pinchStartCY",
-            "const currDist = _touchDist(e.touches);",
+            "const currDist = _imgTouchDist(e.touches);",
         ):
             assert marker in src, f"missing pinch marker: {marker}"
 
     def test_two_finger_start_ends_pointer_drag(self):
         src = UI.read_text(encoding="utf-8")
         assert "state.pinching = true;" in src
-        assert "_endPointerDrag();" in src
+        assert "_imgEndPointerDrag();" in src
 
     def test_touchcancel_resets_pinching(self):
         """Without touchcancel, pinching could stay true and block Pointer
         events permanently after a system interrupt."""
         src = UI.read_text(encoding="utf-8")
-        assert "touchcancel', function _onTouchCancel(){ state.pinching = false; })" in src
+        assert "touchcancel', function _imgOnTouchCancel(){ state.pinching = false; })" in src
 
 
 class TestPointerPanAndGuards:
     def test_pointer_handlers_declared(self):
         src = UI.read_text(encoding="utf-8")
         for marker in (
-            "viewport.onpointerdown = _onPointerDown;",
-            "viewport.onpointermove = _onPointerMove;",
-            "viewport.onpointerup = _endPointerDrag;",
-            "viewport.onpointercancel = _endPointerDrag;",
-            "viewport.onpointerleave = _endPointerDrag;",
+            "viewport.onpointerdown = _imgOnPointerDown;",
+            "viewport.onpointermove = _imgOnPointerMove;",
+            "viewport.onpointerup = _imgEndPointerDrag;",
+            "viewport.onpointercancel = _imgEndPointerDrag;",
+            "viewport.onpointerleave = _imgEndPointerDrag;",
         ):
             assert marker in src, f"missing pointer handler: {marker}"
 
@@ -106,7 +106,7 @@ class TestPointerPanAndGuards:
 class TestWheelZoom:
     def test_wheel_zooms_anchored_at_cursor(self):
         src = UI.read_text(encoding="utf-8")
-        assert "viewport.onwheel = _zoomFromWheel;" in src
+        assert "viewport.onwheel = _imgZoomFromWheel;" in src
         assert "const factor = Math.exp((-(Number(e.deltaY) || 0)) * 0.0015);" in src
 
 

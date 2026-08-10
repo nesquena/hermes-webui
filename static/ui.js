@@ -2508,7 +2508,7 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
     y: 0,
   };
 
-  function _viewportSize() {
+  function _imgViewportSize() {
     const rect = viewport.getBoundingClientRect ? viewport.getBoundingClientRect() : null;
     return {
       width: Math.max(1, (rect && rect.width) || viewport.clientWidth || 1),
@@ -2516,19 +2516,19 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
     };
   }
 
-  function _applyTransform() {
+  function _imgApplyTransform() {
     canvas.style.transform = 'translate(' + Math.round(state.x) + 'px,' + Math.round(state.y) + 'px) scale(' + state.scale + ')';
     canvas.style.transformOrigin = '0 0';
   }
 
-  function _minScale() {
+  function _imgMinScale() {
     return Math.min(0.25, state.fitScale);
   }
 
-  function _setScale(nextScale, anchorX, anchorY) {
-    const bounded = Math.max(_minScale(), Math.min(8, nextScale));
+  function _imgSetScale(nextScale, anchorX, anchorY) {
+    const bounded = Math.max(_imgMinScale(), Math.min(8, nextScale));
     if(!Number.isFinite(bounded) || !state.boxW || !state.boxH) return;
-    const size = _viewportSize();
+    const size = _imgViewportSize();
     const focusX = Number.isFinite(anchorX) ? anchorX : size.width / 2;
     const focusY = Number.isFinite(anchorY) ? anchorY : size.height / 2;
     if(state.scale){
@@ -2537,25 +2537,25 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
       state.y = focusY - (focusY - state.y) * ratio;
     }
     state.scale = bounded;
-    _applyTransform();
+    _imgApplyTransform();
   }
 
   function _fit() {
-    const size = _viewportSize();
+    const size = _imgViewportSize();
     if(!state.boxW || !state.boxH) return;
     const fitScale = Math.min(size.width / state.boxW, size.height / state.boxH);
     state.fitScale = fitScale;
     state.scale = fitScale;
     state.x = (size.width - state.boxW * fitScale) / 2;
     state.y = (size.height - state.boxH * fitScale) / 2;
-    _applyTransform();
+    _imgApplyTransform();
   }
 
   function _centerPan() {
-    const size = _viewportSize();
+    const size = _imgViewportSize();
     state.x = (size.width - state.boxW * state.scale) / 2;
     state.y = (size.height - state.boxH * state.scale) / 2;
-    _applyTransform();
+    _imgApplyTransform();
   }
 
   function _onImgLoad() {
@@ -2573,7 +2573,7 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
     }
   }
 
-  function _onPointerDown(e) {
+  function _imgOnPointerDown(e) {
     if(state.pinching) return;
     if(e.button != null && e.button !== 0) return;
     state.dragging = true;
@@ -2589,17 +2589,17 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
     if(e.preventDefault) e.preventDefault();
   }
 
-  function _onPointerMove(e) {
+  function _imgOnPointerMove(e) {
     if(state.pinching || !state.dragging) return;
     const dx = (Number(e.clientX) || 0) - state.dragOriginX;
     const dy = (Number(e.clientY) || 0) - state.dragOriginY;
     if(Math.abs(dx) + Math.abs(dy) > 3) state.dragged = true;
     state.x = state.dragStartX + dx;
     state.y = state.dragStartY + dy;
-    _applyTransform();
+    _imgApplyTransform();
   }
 
-  function _endPointerDrag() {
+  function _imgEndPointerDrag() {
     if(!state.dragging) return;
     state.dragging = false;
     viewport.classList.remove('is-panning');
@@ -2620,60 +2620,60 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
     }
   }
 
-  function _touchDist(touches) {
+  function _imgTouchDist(touches) {
     if(!touches || touches.length < 2) return 0;
     const dx = touches[0].clientX - touches[1].clientX;
     const dy = touches[0].clientY - touches[1].clientY;
     return Math.sqrt(dx * dx + dy * dy);
   }
 
-  function _onTouchStart(e) {
+  function _imgOnTouchStart(e) {
     if(e.touches.length === 2){
       state.pinching = true;
-      state.pinchStartDist = _touchDist(e.touches);
+      state.pinchStartDist = _imgTouchDist(e.touches);
       state.pinchStartScale = state.scale;
       state.pinchStartX = state.x;
       state.pinchStartY = state.y;
       const rect = viewport.getBoundingClientRect();
       state.pinchStartCX = (e.touches[0].clientX + e.touches[1].clientX) / 2 - (rect.left || 0);
       state.pinchStartCY = (e.touches[0].clientY + e.touches[1].clientY) / 2 - (rect.top || 0);
-      _endPointerDrag();
+      _imgEndPointerDrag();
       if(e.preventDefault) e.preventDefault();
     }
   }
 
-  function _onTouchMove(e) {
+  function _imgOnTouchMove(e) {
     if(!state.pinching || e.touches.length < 2) return;
     const rect = viewport.getBoundingClientRect();
     const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - (rect.left || 0);
     const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - (rect.top || 0);
-    const currDist = _touchDist(e.touches);
+    const currDist = _imgTouchDist(e.touches);
     if(state.pinchStartDist > 0 && state.pinchStartScale > 0){
       const rawScale = state.pinchStartScale * (currDist / state.pinchStartDist);
-      const boundedScale = Math.max(_minScale(), Math.min(8, rawScale));
+      const boundedScale = Math.max(_imgMinScale(), Math.min(8, rawScale));
       const ratio = boundedScale / state.pinchStartScale;
       state.scale = boundedScale;
       state.x = cx - (state.pinchStartCX - state.pinchStartX) * ratio;
       state.y = cy - (state.pinchStartCY - state.pinchStartY) * ratio;
-      _applyTransform();
+      _imgApplyTransform();
     }
     if(e.preventDefault) e.preventDefault();
   }
 
-  function _onTouchEnd(e) {
+  function _imgOnTouchEnd(e) {
     if(e.touches.length < 2 && state.pinching){
       state.pinching = false;
       state.dragged = true;
     }
   }
 
-  function _zoomFromWheel(e) {
+  function _imgZoomFromWheel(e) {
     if(e.preventDefault) e.preventDefault();
     const rect = viewport.getBoundingClientRect();
     const anchorX = Number.isFinite(e.clientX) ? e.clientX - rect.left : undefined;
     const anchorY = Number.isFinite(e.clientY) ? e.clientY - rect.top : undefined;
     const factor = Math.exp((-(Number(e.deltaY) || 0)) * 0.0015);
-    _setScale(state.scale * factor, anchorX, anchorY);
+    _imgSetScale(state.scale * factor, anchorX, anchorY);
   }
 
   function _onResize() {
@@ -2689,17 +2689,17 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
     }, 120);
   }
 
-  viewport.onpointerdown = _onPointerDown;
-  viewport.onpointermove = _onPointerMove;
-  viewport.onpointerup = _endPointerDrag;
-  viewport.onpointercancel = _endPointerDrag;
-  viewport.onpointerleave = _endPointerDrag;
-  viewport.onwheel = _zoomFromWheel;
+  viewport.onpointerdown = _imgOnPointerDown;
+  viewport.onpointermove = _imgOnPointerMove;
+  viewport.onpointerup = _imgEndPointerDrag;
+  viewport.onpointercancel = _imgEndPointerDrag;
+  viewport.onpointerleave = _imgEndPointerDrag;
+  viewport.onwheel = _imgZoomFromWheel;
   viewport.onclick = _onViewportClick;
-  viewport.addEventListener('touchstart', _onTouchStart, {passive: false});
-  viewport.addEventListener('touchmove', _onTouchMove, {passive: false});
-  viewport.addEventListener('touchend', _onTouchEnd);
-  viewport.addEventListener('touchcancel', function _onTouchCancel(){ state.pinching = false; });
+  viewport.addEventListener('touchstart', _imgOnTouchStart, {passive: false});
+  viewport.addEventListener('touchmove', _imgOnTouchMove, {passive: false});
+  viewport.addEventListener('touchend', _imgOnTouchEnd);
+  viewport.addEventListener('touchcancel', function _imgOnTouchCancel(){ state.pinching = false; });
 
   if(window && typeof window.addEventListener === 'function'){
     window.addEventListener('resize', _onResize);
