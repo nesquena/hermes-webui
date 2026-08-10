@@ -88,6 +88,10 @@
     compressed:Object.freeze({classification:'activity',kind:'lifecycle_status',source:'sse'}),
     approval:Object.freeze({classification:'activity',kind:'control_boundary',source:'sse'}),
     clarify:Object.freeze({classification:'activity',kind:'control_boundary',source:'sse'}),
+    // Accepted mid-run Steer is durable run-journal activity.  Live SSE and
+    // journal replay carry the same event_id, so both paths must classify it as
+    // the same control row rather than dropping it as an unknown event.
+    steer_delivered:Object.freeze({classification:'activity',kind:'control_boundary',source:'sse'}),
     pending_steer_leftover:Object.freeze({classification:'activity',kind:'control_boundary',source:'sse'}),
     goal_continue:Object.freeze({classification:'activity',kind:'control_boundary',source:'sse'}),
     artifact_reference:Object.freeze({classification:'artifact',kind:'artifact_reference',source:'derived'}),

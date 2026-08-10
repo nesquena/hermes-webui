@@ -3343,6 +3343,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     reasoning_text = ""
     messages: list[dict] = []
     tool_calls: list[dict] = []
+    delivered_steer_events: list[dict] = []
     activity_burst_anchors: list[dict] = []
     current_activity_burst_id = 0
     fresh_segment = True
@@ -3485,6 +3486,23 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         if event_name == "tool_complete":
             update_completed_tool(payload)
             fresh_segment = True
+            continue
+        if event_name == "steer_delivered":
+            text = str(payload.get("text") or "").strip()
+            if text:
+                event_seq = int(event.get("seq") or 0)
+                delivered_steer_events.append(
+                    {
+                        "event_id": _run_journal_snapshot_event_id_for_run(
+                            event, run_id, event_seq
+                        ),
+                        "seq": event_seq or None,
+                        "created_at": event.get("created_at"),
+                        "text": text,
+                        "status": str(payload.get("status") or "delivered"),
+                        "payload": dict(payload),
+                    }
+                )
 
     if assistant_text or reasoning_text:
         message = {
@@ -3757,6 +3775,48 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
 
     append_thinking_row(force=True)
 
+    # Steer delivery is a durable control boundary, not assistant prose.  It
+    # must be rebuilt from the journal independently of token/tool projection so
+    # a refresh sees the same row that live SSE displayed.
+    for control in delivered_steer_events:
+        event_id = control.get("event_id")
+        event_seq = control.get("seq")
+        row_id = event_id or f"steer:{stream_id}:{event_seq or len(anchor_activity_rows)}"
+        anchor_activity_rows.append(
+            {
+                "row_id": row_id,
+                "order_index": len(anchor_activity_rows),
+                "kind": "control_boundary",
+                "role": "control",
+                "display_hint": "control_boundary_row",
+                "display_hints": {
+                    "compact_worklog": "control_boundary_row",
+                    "transparent_stream": "chronological_activity",
+                },
+                "source_event_type": "steer_delivered",
+                "event_id": event_id,
+                "local_id": row_id,
+                "run_id": run_id,
+                "stream_id": stream_id,
+                "seq": event_seq,
+                "status": control.get("status") or "delivered",
+                "created_at": control.get("created_at"),
+                "identity": {
+                    "event_id": event_id,
+                    "local_id": row_id,
+                    "run_id": run_id,
+                    "stream_id": stream_id,
+                    "seq": event_seq,
+                },
+                "group": scene_group(),
+                "text": control.get("text") or "",
+                "thinking": None,
+                "tool_call_id": "",
+                "tool": None,
+                "payload": control.get("payload") or {},
+            }
+        )
+
     # Keep a live anchor shell during session-switch replay even before the
     # journal has projected visible prose or tool rows from the first events.
     if not anchor_activity_rows and events:
@@ -3907,7 +3967,8 @@ def _runtime_journal_snapshot_for_session_payload(snapshot: dict | None) -> dict
     compact_rows = []
     row_keys = (
         "row_id", "local_id", "kind", "role", "source_event_type", "status",
-        "created_at", "group", "text", "thinking", "tool_call_id", "tool",
+        "event_id", "run_id", "stream_id", "seq", "created_at", "group", "text",
+        "thinking", "tool_call_id", "tool",
     )
     for raw_row in scene.get("activity_rows") or []:
         if not isinstance(raw_row, dict):
