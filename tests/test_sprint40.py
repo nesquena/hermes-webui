@@ -14,9 +14,10 @@ import unittest
 from unittest.mock import patch
 
 import api.onboarding as mod
+from tests._i18n_bundles import read_i18n_bundles
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
-I18N_JS = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_JS = read_i18n_bundles(REPO_ROOT)
 ONBOARDING_JS = (REPO_ROOT / "static" / "onboarding.js").read_text(encoding="utf-8")
 
 

@@ -32,7 +32,6 @@ REPO = pathlib.Path(__file__).parent.parent
 def read(rel):
     return (REPO / rel).read_text(encoding='utf-8')
 
-
 def extract_js_function(src: str, name: str) -> str:
     match = re.search(rf'(async\s+)?function\s+{re.escape(name)}\b', src)
     assert match, f"{name}() not found"
@@ -3262,7 +3261,7 @@ class TestCheckForUpdatesButton:
 
     def test_check_now_i18n_key_exists(self):
         """settings_check_now i18n key must exist in all locale blocks."""
-        src = read('static/i18n.js')
+        src = read_i18n_bundles(REPO)
         count = src.count('settings_check_now')
         assert count >= 5, (
             f"settings_check_now found in only {count} locale blocks (expected ≥5: en, ru, es, zh, zh-Hant)"

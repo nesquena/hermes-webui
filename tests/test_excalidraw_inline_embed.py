@@ -1,5 +1,6 @@
 """Test: Excalidraw inline embed (#479)"""
 import re
+from tests._i18n_bundles import read_i18n_bundles
 
 
 def test_excalidraw_extension_regex():
@@ -148,8 +149,7 @@ def test_excalidraw_embed_wrap_structure():
 
 def test_excalidraw_i18n_keys():
     """Verify Excalidraw i18n keys exist in all 7 locales."""
-    with open('static/i18n.js', encoding="utf-8") as f:
-        src = f.read()
+    src = read_i18n_bundles(Path(__file__).resolve().parents[1])
     required_keys = [
         'excalidraw_loading', 'excalidraw_too_large', 'excalidraw_invalid',
         'excalidraw_error', 'excalidraw_label', 'excalidraw_download',

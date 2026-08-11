@@ -25,12 +25,12 @@ import re
 import sys
 import urllib.error
 import urllib.request
+from tests._i18n_bundles import read_i18n_bundles
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 ROUTES = ROOT / "api" / "routes.py"
 UI = ROOT / "static" / "ui.js"
-I18N = ROOT / "static" / "i18n.js"
-
+I18N = read_i18n_bundles(ROOT)
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 from conftest import TEST_BASE  # noqa: E402
 
@@ -227,7 +227,7 @@ class TestOpenInVsCodeI18n:
 
     def test_open_in_vscode_key_count(self):
         """open_in_vscode key must appear exactly once per locale (14 total)."""
-        src = I18N.read_text(encoding="utf-8")
+        src = I18N
         count = src.count("open_in_vscode:")
         assert count == 15, (
             f"Expected 14 open_in_vscode: entries (one per locale), found {count}"
@@ -235,7 +235,7 @@ class TestOpenInVsCodeI18n:
 
     def test_open_in_vscode_failed_key_count(self):
         """open_in_vscode_failed key must appear exactly once per locale (14 total)."""
-        src = I18N.read_text(encoding="utf-8")
+        src = I18N
         count = src.count("open_in_vscode_failed:")
         assert count == 15, (
             f"Expected 14 open_in_vscode_failed: entries (one per locale), found {count}"
@@ -243,13 +243,13 @@ class TestOpenInVsCodeI18n:
 
     def test_english_translation_not_a_placeholder(self):
         """English locale must have a human-readable string, not a TODO."""
-        src = I18N.read_text(encoding="utf-8")
+        src = I18N
         assert "open_in_vscode: 'Open in VS Code'" in src
         assert "open_in_vscode_failed: 'Failed to open in VS Code: '" in src
 
     def test_non_english_locales_translated(self):
         """Non-English locales must have real translations, not TODO stubs."""
-        src = I18N.read_text(encoding="utf-8")
+        src = I18N
         # Spot-check a selection of locales — none of these should be TODO stubs.
         assert "open_in_vscode: 'Apri in VS Code'" in src       # it
         assert "open_in_vscode: 'VS Codeで開く'" in src          # ja
@@ -261,7 +261,7 @@ class TestOpenInVsCodeI18n:
     def test_keys_adjacent_to_reveal_block(self):
         """New keys must appear near the reveal/copy block so locale coverage
         is easy to spot in code review."""
-        src = I18N.read_text(encoding="utf-8")
+        src = I18N
         # In the English block, open_in_vscode must appear between
         # copy_file_path and download_folder.
         copy_idx = src.index("copy_file_path: 'Copy file path'")

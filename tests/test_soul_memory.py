@@ -11,6 +11,7 @@ This test file verifies:
 import json, pathlib, urllib.error, urllib.parse, urllib.request
 
 from tests._pytest_port import BASE
+from tests._i18n_bundles import read_i18n_bundles
 
 
 def get(path):
@@ -112,7 +113,7 @@ def test_agent_soul_i18n_key_present_in_all_locales():
     the entire module, which silently disables i18n for every language. The
     PR's initial commit failed CI for exactly this reason (it / fr).
     """
-    i18n = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+    i18n = read_i18n_bundles(REPO_ROOT)
     # i18n.js currently exposes 11 locales (en, it, ja, ru, es, de, zh-CN,
     # zh-TW, pt, ko, fr). Lock that both new keys are present at least 10
     # times — that's enough to catch a missing locale without coupling the

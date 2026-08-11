@@ -1,5 +1,7 @@
 """Tests for #1096 — copy buttons work via Permissions-Policy + fallback."""
+from pathlib import Path
 import re
+from tests._i18n_bundles import read_i18n_bundles
 
 
 def _src(name: str) -> str:
@@ -114,6 +116,6 @@ class TestCopyFailedI18n:
 
     def test_copy_failed_in_all_locales(self):
         """copy_failed key must exist in all locale blocks (currently 7 with Korean)."""
-        i18n = _src('i18n.js')
+        i18n = read_i18n_bundles(Path(__file__).resolve().parents[1])
         count = i18n.count('copy_failed')
         assert count >= 6, f'Expected copy_failed in at least 6 locale blocks, found {count}'

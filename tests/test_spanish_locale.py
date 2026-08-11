@@ -1,6 +1,7 @@
 from pathlib import Path
 import re
 from tests.test_issue2147_profile_concept_help import PROFILE_CONCEPT_KEYS
+from tests._i18n_bundles import read_i18n_bundles
 
 
 REPO = Path(__file__).resolve().parent.parent
@@ -15,14 +16,14 @@ def read(path: Path) -> str:
 
 
 def test_spanish_locale_block_exists():
-    src = read(REPO / "static" / "i18n.js")
+    src = read_i18n_bundles(REPO)
     assert "\n  es: {" in src
     assert "_label: 'Español'" in src
     assert "_speech: 'es-ES'" in src
 
 
 def test_spanish_locale_includes_representative_translations():
-    src = read(REPO / "static" / "i18n.js")
+    src = read_i18n_bundles(REPO)
     expected = [
         "settings_title: 'Configuración'",
         "login_title: 'Iniciar sesión'",
@@ -36,7 +37,7 @@ def test_spanish_locale_includes_representative_translations():
 
 
 def test_spanish_locale_covers_english_keys():
-    src = read(REPO / "static" / "i18n.js")
+    src = read_i18n_bundles(REPO)
     en_match = re.search(r"\n  en: \{([\s\S]*?)\n  \},\n\n  es: \{", src)
     es_match = re.search(r"\n  es: \{([\s\S]*?)\n  \},\n\n  de: \{", src)
     assert en_match, "English locale block not found"
