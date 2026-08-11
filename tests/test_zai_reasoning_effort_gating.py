@@ -453,7 +453,7 @@ def test_set_reasoning_effort_still_rejects_invalid():
             cfg.set_reasoning_effort("banana", model_id="glm-4.6", provider_id="zai")
 
 
-@pytest.mark.parametrize("effort", ["none", "minimal", "low", "medium", "high", "xhigh", "max"])
+@pytest.mark.parametrize("effort", ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"])
 def test_set_reasoning_effort_still_accepts_valid_levels(effort):
     """Regression guard: all valid levels + none must still save correctly."""
     import unittest.mock as mock
