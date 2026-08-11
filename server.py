@@ -109,7 +109,7 @@ from api.helpers import (
 )
 from api.profiles import set_request_profile, clear_request_profile
 from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put, apply_cors_preflight_headers
-from api.startup import auto_install_agent_deps, fix_credential_permissions
+from api.startup import auto_install_agent_deps, fix_credential_permissions, recover_session_queues
 from api.updates import WEBUI_VERSION
 from api.crash_visibility import install_crash_visibility
 
@@ -670,16 +670,7 @@ def main() -> None:
 
     _abort_if_already_serving(HOST, PORT)
     httpd = QuietHTTPServer((HOST, PORT), Handler)
-
-    try:
-        from api.session_queue import recover_all_queues
-
-        queue_recovery = recover_all_queues(schedule=True)
-        if queue_recovery.get("sessions") or queue_recovery.get("errors"):
-            print(f'[ok] Session queue recovery: {queue_recovery}', flush=True)
-    except Exception as e:
-        print(f'[!!] WARNING: Session queue recovery failed: {e}', flush=True)
-
+    recover_session_queues()
     from api.config import TLS_ENABLED, TLS_CERT, TLS_KEY
     scheme = 'https' if TLS_ENABLED else 'http'
     if TLS_ENABLED:

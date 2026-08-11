@@ -126,3 +126,15 @@ def auto_install_agent_deps() -> bool:
     except Exception as e:
         print(f'[!!] Auto-install error: {e}', flush=True)
         return False
+
+
+def recover_session_queues() -> None:
+    """Repair persisted queue ownership before the HTTP server accepts work."""
+    try:
+        from api.session_queue import recover_all_queues
+
+        result = recover_all_queues(schedule=True)
+        if result.get("sessions") or result.get("errors"):
+            print(f'[ok] Session queue recovery: {result}', flush=True)
+    except Exception as e:
+        print(f'[!!] WARNING: Session queue recovery failed: {e}', flush=True)

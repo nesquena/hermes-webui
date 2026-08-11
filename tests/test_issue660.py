@@ -54,11 +54,11 @@ class TestQueuePersistence:
 
 
 class TestQueueRestore:
-    """Queue is restored from the shared storage helper on idle session load."""
+    """Persisted optimistic state is reconciled with backend queue authority."""
 
     def test_restore_reads_shared_helper(self):
-        """sessions.js must use the shared helper so localStorage fallback is reachable."""
-        assert "_readPersistedSessionQueue(sid)" in sess_src
+        """Session load must invoke the authoritative backend reconciliation helper."""
+        assert "syncBackendSessionQueue(S.session.session_id)" in sess_src
 
     def test_read_helper_falls_back_to_local_storage(self):
         """The helper must fall back to localStorage and re-mirror sessionStorage."""
@@ -73,25 +73,35 @@ class TestQueueRestore:
         assert "sessionStorage.setItem(key,JSON.stringify(localValue))" in body
 
     def test_restore_uses_timestamp_guard(self):
-        """Stale entries (created before last assistant response) must be dropped."""
-        assert '_queued_at' in sess_src
-        assert '_lastAsst' in sess_src
+        """Reconciliation hydrates the persisted ACK-in-flight cache before matching IDs."""
+        start = ui_src.find("async function syncBackendSessionQueue(sid)")
+        end = ui_src.find("function _compressionSessionLock()", start)
+        assert start != -1 and end != -1
+        body = ui_src[start:end]
+        assert "const persisted=_readPersistedSessionQueue(sid)" in body
+        assert "byClientId" in body
 
     def test_restore_shows_toast(self):
-        """User must see a toast notification when a queue is restored."""
-        assert 'queued message' in sess_src.lower() and 'restored' in sess_src.lower()
+        """A failed authoritative reconciliation must remain visible to the user."""
+        assert "Could not reconcile queued messages" in sess_src
 
     def test_restore_puts_text_in_composer(self):
-        """First queued message goes into the composer input, not auto-sent."""
-        assert "_msg.value=_first.text" in sess_src
+        """Recovered queue intent remains a queue chip and is never duplicated as a draft."""
+        assert "_msg.value=_first.text" not in sess_src
+        assert "syncBackendSessionQueue(S.session.session_id)" in sess_src
 
     def test_restore_clears_stale_storage(self):
-        """On timestamp mismatch, stale queue state is removed from both storage layers."""
-        assert "_clearPersistedSessionQueue(sid)" in sess_src
+        """An empty authoritative snapshot clears the optimistic recovery cache."""
+        start = ui_src.find("async function syncBackendSessionQueue(sid)")
+        end = ui_src.find("function _compressionSessionLock()", start)
+        body = ui_src[start:end]
+        assert "_clearPersistedSessionQueue(sid)" in body
 
     def test_restore_wrapped_in_try_catch(self):
-        """Storage access must be wrapped in try/catch (private browsing may block it)."""
-        assert "catch(_){if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);}" in sess_src
+        """Session load contains reconciliation failure without discarding the cache."""
+        sync_pos = sess_src.find("await syncBackendSessionQueue(S.session.session_id)")
+        catch_pos = sess_src.find("catch(err){", sync_pos)
+        assert sync_pos != -1 and catch_pos > sync_pos
 
     def test_delete_session_clears_persisted_queue_after_success(self):
         """Deleting a session must clear localStorage-backed queue state after the API succeeds."""
@@ -106,10 +116,11 @@ class TestQueueRestore:
         assert success_pos < clear_pos, "queue cleanup should run only after delete success"
 
     def test_active_session_not_restored_as_draft(self):
-        """When agent is active (INFLIGHT), queue restore must NOT run."""
-        # The restore block must be inside the else branch (idle path), not the INFLIGHT branch
-        inflight_pos = sess_src.find("if(INFLIGHT[sid]){")
-        restore_pos = sess_src.find("_readPersistedSessionQueue(sid)")
-        else_pos = sess_src.find("}else{", inflight_pos)
-        assert restore_pos > else_pos, \
-            "Queue restore must be inside the else (idle) branch, not the INFLIGHT branch"
+        """Active sessions reconcile queue chips without restoring intent into Composer."""
+        load_start = sess_src.find("async function loadSession(")
+        load_end = sess_src.find("// ── Handoff hint logic", load_start)
+        load_body = sess_src[load_start:load_end]
+        active_stream_pos = load_body.find("let activeStreamId=S.session.active_stream_id")
+        sync_pos = load_body.find("syncBackendSessionQueue(S.session.session_id)")
+        assert active_stream_pos != -1 and sync_pos > active_stream_pos
+        assert "_msg.value=_first.text" not in load_body
