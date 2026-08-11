@@ -44,15 +44,16 @@ def test_streaming_finally_does_not_discard_pending_goal_continuation():
     )
 
 
-def test_routes_consumer_discards_only_after_matching_adoption():
-    """Unrelated user turns retain priority; matching legacy replays are single-use."""
+def test_routes_consumer_consults_durable_tombstone_without_parent_marker():
+    """A delayed old-tab parent replay is rejected even when the marker moved to the child."""
     src = _read_routes()
 
-    gate_idx = src.index("if not goal_related and s.session_id in PENDING_GOAL_CONTINUATION:")
+    gate_idx = src.index("if not goal_related:")
     adopt_idx = src.index("elif legacy_goal_marker_consumed:", gate_idx)
     lock_idx = src.index("session_lock =", gate_idx)
     gate_block = src[gate_idx:lock_idx]
     assert "legacy_browser_goal_prompt_matches" in gate_block
+    assert "s.session_id in PENDING_GOAL_CONTINUATION" not in gate_block
     assert "PENDING_GOAL_CONTINUATION.discard" not in gate_block
 
     server_branch = src[

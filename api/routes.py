@@ -21748,7 +21748,7 @@ def _start_chat_stream_for_session(
     # the current durable intent is goal-related.  An ordinary user turn keeps
     # normal priority even while a continuation marker exists.
     legacy_goal_marker_consumed = False
-    if not goal_related and s.session_id in PENDING_GOAL_CONTINUATION:
+    if not goal_related:
         from api.goal_continuations import legacy_browser_goal_prompt_matches
 
         legacy_goal_marker_consumed = legacy_browser_goal_prompt_matches(
@@ -21757,6 +21757,13 @@ def _start_chat_stream_for_session(
         )
         if legacy_goal_marker_consumed:
             goal_related = True
+
+    goal_producer_kind = None
+    if goal_related:
+        if source == "goal_continuation" or legacy_goal_marker_consumed:
+            goal_producer_kind = "continuation"
+        else:
+            goal_producer_kind = "initial_goal"
 
     # process_complete wakeup (ours-original, Option B): if this session has a
     # pending process_complete marker (set by api/background_process.py drain),
@@ -21874,7 +21881,11 @@ def _start_chat_stream_for_session(
         STREAM_GOAL_RELATED[stream_id] = True
     diag.stage("worker_thread_start") if diag else None
     worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
-    worker_kwargs = {"model_provider": model_provider, "goal_related": goal_related}
+    worker_kwargs = {
+        "model_provider": model_provider,
+        "goal_related": goal_related,
+        "goal_producer_kind": goal_producer_kind,
+    }
     if moa_config and not backend_is_gateway:
         worker_kwargs["moa_config"] = moa_config
     if backend_is_gateway:

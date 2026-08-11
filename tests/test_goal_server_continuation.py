@@ -71,6 +71,7 @@ def test_schedule_after_compression_atomically_completes_parent_intent(continuat
         profile_home="/profiles/default",
         goal_turns_used=2,
         predecessor_session_id="session-parent",
+        producer_kind="continuation",
     )
 
     settled_parent = gc.get_goal_continuation("session-parent")
@@ -87,6 +88,7 @@ def test_schedule_after_compression_atomically_completes_parent_intent(continuat
         profile_home="/profiles/default",
         goal_turns_used=2,
         predecessor_session_id="session-parent",
+        producer_kind="continuation",
     )
     assert duplicate["continuation_id"] == child["continuation_id"]
     assert gc.get_goal_continuation("session-parent")["status"] == "completed"
@@ -106,10 +108,143 @@ def test_schedule_after_compression_refuses_foreign_parent_stream(continuation_s
             profile_home="/profiles/default",
             goal_turns_used=2,
             predecessor_session_id="session-parent",
+            producer_kind="continuation",
         )
 
     assert gc.get_goal_continuation("session-parent")["status"] == "running"
     assert gc.get_goal_continuation("session-child") is None
+
+
+def test_schedule_after_compression_rejects_completed_foreign_predecessor(continuation_store):
+    gc, _path = continuation_store
+    parent = _schedule(gc, sid="session-parent", stream="judge-parent")
+    parent.update(status="completed", stream_id="relay-A", completed_at=10.0)
+    gc._replace_goal_continuation_for_test(parent)
+
+    with pytest.raises(RuntimeError, match="completed predecessor"):
+        gc.schedule_goal_continuation(
+            "session-child",
+            "continue on the compression child",
+            source_stream_id="relay-B",
+            profile_home="/profiles/default",
+            goal_turns_used=2,
+            predecessor_session_id="session-parent",
+            producer_kind="continuation",
+        )
+
+    assert gc.get_goal_continuation("session-child") is None
+
+
+def test_schedule_after_compression_rejects_completed_predecessor_without_child_receipt(
+    continuation_store,
+):
+    gc, _path = continuation_store
+    parent = _schedule(gc, sid="session-parent", stream="judge-parent")
+    parent.update(status="completed", stream_id="relay-A", completed_at=10.0)
+    gc._replace_goal_continuation_for_test(parent)
+
+    with pytest.raises(RuntimeError, match="completed predecessor"):
+        gc.schedule_goal_continuation(
+            "session-child",
+            "continue on the compression child",
+            source_stream_id="relay-A",
+            profile_home="/profiles/default",
+            goal_turns_used=2,
+            predecessor_session_id="session-parent",
+            producer_kind="continuation",
+        )
+
+    assert gc.get_goal_continuation("session-child") is None
+
+
+def test_schedule_after_compression_rejects_foreign_live_child(continuation_store):
+    gc, _path = continuation_store
+    parent = _schedule(gc, sid="session-parent", stream="judge-parent")
+    parent.update(status="running", stream_id="relay-A")
+    gc._replace_goal_continuation_for_test(parent)
+    child = _schedule(gc, sid="session-child", stream="foreign-judge")
+    child.update(status="running", stream_id="child-live", claim_id="child-claim")
+    gc._replace_goal_continuation_for_test(child)
+    child_before = gc.get_goal_continuation("session-child")
+
+    with pytest.raises(RuntimeError, match="target child"):
+        gc.schedule_goal_continuation(
+            "session-child",
+            "continue on the compression child",
+            source_stream_id="relay-A",
+            profile_home="/profiles/default",
+            goal_turns_used=2,
+            predecessor_session_id="session-parent",
+            producer_kind="continuation",
+        )
+
+    assert gc.get_goal_continuation("session-parent")["status"] == "running"
+    assert gc.get_goal_continuation("session-child") == child_before
+
+
+def test_cross_lineage_missing_predecessor_requires_explicit_initial_producer(continuation_store):
+    gc, _path = continuation_store
+
+    with pytest.raises(RuntimeError, match="missing predecessor"):
+        gc.schedule_goal_continuation(
+            "session-child",
+            "continue on the compression child",
+            source_stream_id="relay-A",
+            profile_home="/profiles/default",
+            goal_turns_used=1,
+            predecessor_session_id="session-parent",
+            producer_kind="continuation",
+        )
+
+    child = gc.schedule_goal_continuation(
+        "session-child",
+        "continue on the compression child",
+        source_stream_id="relay-A",
+        profile_home="/profiles/default",
+        goal_turns_used=1,
+        predecessor_session_id="session-parent",
+        producer_kind="initial_goal",
+    )
+    assert child["status"] == "pending"
+    assert child["producer_kind"] == "initial_goal"
+    assert child["predecessor_session_id"] == "session-parent"
+    assert child["predecessor_stream_id"] == "relay-A"
+
+
+def test_old_tab_parent_replay_hits_durable_tombstone_without_parent_marker(
+    continuation_store,
+    monkeypatch,
+):
+    gc, _path = continuation_store
+    from api import routes
+
+    prompt = "continue the approved goal"
+    parent = _schedule(gc, sid="session-parent", stream="judge-parent")
+    parent.update(status="completed", stream_id="relay-A", completed_at=10.0)
+    gc._replace_goal_continuation_for_test(parent)
+    routes.PENDING_GOAL_CONTINUATION.clear()
+    routes.PENDING_GOAL_CONTINUATION.add("session-child")
+    monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda **_kwargs: None)
+
+    def unexpected_prepare(*_args, **_kwargs):
+        raise AssertionError("old parent replay bypassed its durable tombstone")
+
+    monkeypatch.setattr(routes, "_prepare_chat_start_session_for_stream", unexpected_prepare)
+    session = SimpleNamespace(session_id="session-parent", active_stream_id=None)
+    try:
+        result = routes._start_chat_stream_for_session(
+            session,
+            msg=prompt,
+            attachments=[],
+            workspace="/tmp",
+            model="test-model",
+            external_runtime_owned=False,
+        )
+    finally:
+        routes.PENDING_GOAL_CONTINUATION.clear()
+
+    assert result["_status"] == 409
+    assert result["error"] == "server already owns this goal continuation"
 
 
 def test_corrupt_registry_is_quarantined_before_new_state_is_written(continuation_store):
@@ -149,6 +284,36 @@ def test_failed_atomic_replace_does_not_leave_phantom_cached_intent(continuation
 
     assert gc.get_goal_continuation("session-a") is not None
     assert gc.get_goal_continuation("session-b") is None
+
+
+def test_cross_lineage_save_failure_rolls_back_parent_and_child(continuation_store, monkeypatch):
+    gc, path = continuation_store
+    parent = _schedule(gc, sid="session-parent", stream="judge-parent")
+    parent.update(status="running", stream_id="relay-A", claim_id="parent-claim")
+    gc._replace_goal_continuation_for_test(parent)
+    original_replace = gc.os.replace
+
+    def fail_registry_replace(src, dst):
+        if str(dst) == str(path):
+            raise OSError("simulated lineage replace failure")
+        return original_replace(src, dst)
+
+    monkeypatch.setattr(gc.os, "replace", fail_registry_replace)
+    with pytest.raises(OSError, match="simulated lineage replace failure"):
+        gc.schedule_goal_continuation(
+            "session-child",
+            "continue on the compression child",
+            source_stream_id="relay-A",
+            profile_home="/profiles/default",
+            goal_turns_used=2,
+            predecessor_session_id="session-parent",
+            producer_kind="continuation",
+        )
+    monkeypatch.setattr(gc.os, "replace", original_replace)
+
+    gc._REGISTRY = None
+    assert gc.get_goal_continuation("session-parent")["status"] == "running"
+    assert gc.get_goal_continuation("session-child") is None
 
 
 def test_reconcile_expired_starting_claim_requeues_without_burning_attempt(continuation_store):

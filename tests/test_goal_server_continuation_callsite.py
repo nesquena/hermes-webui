@@ -85,4 +85,48 @@ def test_goal_hook_uses_child_for_state_and_next_intent_after_compression():
     assert "goal_state_snapshot(_goal_session_id" in hook
     assert "schedule_goal_continuation(\n                            _goal_session_id," in hook
     assert "predecessor_session_id=session_id" in hook
+    assert "producer_kind=goal_producer_kind" in hook
+    assert "if _continuation_record.get('status') == 'pending':" in hook
     assert "PENDING_GOAL_CONTINUATION.add(_goal_session_id)" in hook
+
+
+def test_route_passes_explicit_goal_producer_kind_to_stream_worker():
+    routes = (ROOT / "api" / "routes.py").read_text()
+    assert 'goal_producer_kind = "continuation"' in routes
+    assert 'goal_producer_kind = "initial_goal"' in routes
+    assert '"goal_producer_kind": goal_producer_kind' in routes
+
+
+def test_background_title_keeps_parent_relay_after_child_rotation(monkeypatch):
+    from api import streaming
+
+    source = (ROOT / "api" / "streaming.py").read_text()
+    caller = source[source.index("target=_run_background_title_update") - 200:source.index("target=_run_background_title_update") + 600]
+    assert '"relay_session_id": session_id' in caller
+
+    requested = []
+    events = []
+    session = SimpleNamespace(
+        session_id="session-child",
+        title="Stable title",
+        llm_title_generated=True,
+    )
+
+    def get_session(session_id):
+        requested.append(session_id)
+        return session
+
+    monkeypatch.setattr(streaming, "get_session", get_session)
+    streaming._run_background_title_update(
+        "session-child",
+        "user text",
+        "assistant text",
+        "Stable title",
+        lambda event, payload: events.append((event, payload)),
+        relay_session_id="session-parent",
+    )
+
+    assert requested == ["session-child"]
+    assert events
+    assert events[-1] == ("stream_end", {"session_id": "session-parent"})
+    assert all(payload.get("session_id") == "session-parent" for _event, payload in events)

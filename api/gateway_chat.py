@@ -904,6 +904,7 @@ def _run_gateway_chat_streaming(
     *,
     model_provider=None,
     goal_related=False,
+    goal_producer_kind=None,
 ):
     """Bridge a WebUI chat turn through Hermes Gateway's API server.
 
@@ -1466,19 +1467,21 @@ def _run_gateway_chat_streaming(
                             source_stream_id=stream_id,
                             profile_home=profile_home,
                             goal_turns_used=int(getattr(goal_state, "turns_used", 0) or 0),
+                            producer_kind=goal_producer_kind,
                         )
-                        PENDING_GOAL_CONTINUATION.add(session_id)
-                        put_gateway_event("goal_continue", {
-                            "session_id": session_id,
-                            "continuation_prompt": continuation_prompt,
-                            "text": continuation_prompt,
-                            "message": goal_message,
-                            "message_key": decision.get("message_key") or "goal_continuing",
-                            "message_args": decision.get("message_args") or [],
-                            "decision": decision,
-                            "server_scheduled": True,
-                            "continuation_id": continuation_record.get("continuation_id"),
-                        })
+                        if continuation_record.get("status") == "pending":
+                            PENDING_GOAL_CONTINUATION.add(session_id)
+                            put_gateway_event("goal_continue", {
+                                "session_id": session_id,
+                                "continuation_prompt": continuation_prompt,
+                                "text": continuation_prompt,
+                                "message": goal_message,
+                                "message_key": decision.get("message_key") or "goal_continuing",
+                                "message_args": decision.get("message_args") or [],
+                                "decision": decision,
+                                "server_scheduled": True,
+                                "continuation_id": continuation_record.get("continuation_id"),
+                            })
                 elif goal_related:
                     from api.goal_continuations import complete_goal_continuation
 

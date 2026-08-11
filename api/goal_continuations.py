@@ -331,6 +331,7 @@ def schedule_goal_continuation(
     profile_home: str | Path | None,
     goal_turns_used: int,
     predecessor_session_id: str | None = None,
+    producer_kind: str | None = None,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     now: float | None = None,
 ) -> dict[str, Any]:
@@ -340,24 +341,60 @@ def schedule_goal_continuation(
     judged stream replaces the preceding running record with the next logical
     continuation. When compression rotated the session id during that stream,
     the predecessor record is completed in the same durable transaction that
-    creates the child's next intent.
+    creates the child's next intent. Cross-lineage retries require both the
+    predecessor stream fence and a matching child receipt; absence is allowed
+    only for an explicitly identified initial Goal producer.
     """
     sid = str(session_id or "").strip()
     text = str(prompt or "").strip()
     source_stream = str(source_stream_id or "").strip()
     predecessor_sid = str(predecessor_session_id or "").strip()
+    producer = str(producer_kind or "").strip()
     if not sid or not text or not source_stream:
         raise ValueError("session_id, prompt, and source_stream_id are required")
+    cross_lineage = bool(predecessor_sid and predecessor_sid != sid)
+    if cross_lineage and producer not in {"continuation", "initial_goal"}:
+        raise ValueError("cross-lineage scheduling requires an explicit producer_kind")
     timestamp = float(time.time() if now is None else now)
     attempts_limit = max(1, int(max_attempts or DEFAULT_MAX_ATTEMPTS))
     with _registry_transaction() as registry:
+        existing = registry["intents"].get(sid)
+        exact_child_receipt = bool(
+            cross_lineage
+            and isinstance(existing, dict)
+            and existing.get("source_stream_id") == source_stream
+            and existing.get("prompt") == text
+            and existing.get("predecessor_session_id") == predecessor_sid
+            and existing.get("predecessor_stream_id") == source_stream
+            and existing.get("producer_kind") == producer
+        )
         predecessor_changed = False
-        if predecessor_sid and predecessor_sid != sid:
+        if cross_lineage:
+            if isinstance(existing, dict) and not exact_child_receipt:
+                raise RuntimeError(
+                    "target child continuation is already owned by another intent"
+                )
             predecessor = registry["intents"].get(predecessor_sid)
-            if isinstance(predecessor, dict):
+            if not isinstance(predecessor, dict):
+                if producer != "initial_goal":
+                    raise RuntimeError(
+                        "missing predecessor continuation for non-initial producer"
+                    )
+                if exact_child_receipt:
+                    return copy.deepcopy(existing)
+            else:
+                if producer != "continuation":
+                    raise RuntimeError(
+                        "initial Goal producer cannot replace a durable predecessor"
+                    )
                 predecessor_status = str(predecessor.get("status") or "").strip()
                 predecessor_stream = str(predecessor.get("stream_id") or "").strip()
-                if predecessor_status == "running" and predecessor_stream == source_stream:
+                if predecessor_status == "running":
+                    if predecessor_stream != source_stream:
+                        raise RuntimeError(
+                            "predecessor continuation stream transition refused: "
+                            f"status=running stream={predecessor_stream or 'none'}"
+                        )
                     predecessor["status"] = "completed"
                     predecessor["claim_id"] = None
                     predecessor["claim_started_at"] = None
@@ -365,14 +402,22 @@ def schedule_goal_continuation(
                     predecessor["last_error"] = None
                     _record_now(predecessor, timestamp)
                     predecessor_changed = True
-                elif predecessor_status != "completed":
+                    if exact_child_receipt:
+                        _save_locked()
+                        return copy.deepcopy(existing)
+                elif predecessor_status == "completed":
+                    if predecessor_stream != source_stream or not exact_child_receipt:
+                        raise RuntimeError(
+                            "completed predecessor has no matching child receipt"
+                        )
+                    return copy.deepcopy(existing)
+                else:
                     raise RuntimeError(
                         "predecessor continuation stream transition refused: "
                         f"status={predecessor_status or 'unknown'} "
                         f"stream={predecessor_stream or 'none'}"
                     )
-        existing = registry["intents"].get(sid)
-        if (
+        elif (
             isinstance(existing, dict)
             and existing.get("source_stream_id") == source_stream
             and existing.get("prompt") == text
@@ -389,6 +434,9 @@ def schedule_goal_continuation(
             "prompt": text,
             "profile_home": str(Path(profile_home).expanduser().resolve()) if profile_home else None,
             "goal_turns_used": max(0, int(goal_turns_used or 0)),
+            "predecessor_session_id": predecessor_sid or None,
+            "predecessor_stream_id": source_stream if cross_lineage else None,
+            "producer_kind": producer or None,
             "status": "pending",
             "owner_id": _current_owner_id(),
             "claim_id": None,

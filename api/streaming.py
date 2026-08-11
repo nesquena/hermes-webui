@@ -4398,8 +4398,26 @@ def _is_generic_fallback_title(title: str) -> bool:
     return str(title or '').strip().lower() in {'conversation topic'}
 
 
-def _run_background_title_update(session_id: str, user_text: str, assistant_text: str, placeholder_title: str, put_event, agent=None):
-    """Generate and publish a better title after `done`, then end the stream."""
+def _run_background_title_update(
+    session_id: str,
+    user_text: str,
+    assistant_text: str,
+    placeholder_title: str,
+    emit_event,
+    agent=None,
+    *,
+    relay_session_id: str | None = None,
+):
+    """Update durable child title state while closing the original relay stream."""
+    relay_sid = str(relay_session_id or session_id)
+    relay_put_event = emit_event
+
+    def put_event(event, payload):
+        if isinstance(payload, dict) and "session_id" in payload:
+            payload = dict(payload)
+            payload["session_id"] = relay_sid
+        relay_put_event(event, payload)
+
     try:
         try:
             s = get_session(session_id)
@@ -7995,6 +8013,7 @@ def _run_agent_streaming(
     ephemeral=False,
     model_provider=None,
     goal_related=False,
+    goal_producer_kind=None,
     moa_config=None,
 ):
     """Run agent in background thread, writing SSE events to STREAMS[stream_id].
@@ -11596,21 +11615,23 @@ def _run_agent_streaming(
                             profile_home=_profile_home,
                             goal_turns_used=int(getattr(_goal_state, 'turns_used', 0) or 0),
                             predecessor_session_id=session_id,
+                            producer_kind=goal_producer_kind,
                         )
-                        # Retain the in-memory marker only for mixed-version tabs;
-                        # the server registry above is the execution authority.
-                        PENDING_GOAL_CONTINUATION.add(_goal_session_id)
-                        put('goal_continue', {
-                            'session_id': session_id,
-                            'continuation_prompt': continuation_prompt,
-                            'text': continuation_prompt,
-                            'message': _goal_message,
-                            'message_key': decision.get('message_key') or 'goal_continuing',
-                            'message_args': decision.get('message_args') or [],
-                            'decision': decision,
-                            'server_scheduled': True,
-                            'continuation_id': _continuation_record.get('continuation_id'),
-                        })
+                        if _continuation_record.get('status') == 'pending':
+                            # Retain the marker only for mixed-version tabs; a stale
+                            # retry that finds an admitted/terminal child emits nothing.
+                            PENDING_GOAL_CONTINUATION.add(_goal_session_id)
+                            put('goal_continue', {
+                                'session_id': session_id,
+                                'continuation_prompt': continuation_prompt,
+                                'text': continuation_prompt,
+                                'message': _goal_message,
+                                'message_key': decision.get('message_key') or 'goal_continuing',
+                                'message_args': decision.get('message_args') or [],
+                                'decision': decision,
+                                'server_scheduled': True,
+                                'continuation_id': _continuation_record.get('continuation_id'),
+                            })
                 elif goal_related:
                     from api.goal_continuations import complete_goal_continuation
 
@@ -11646,6 +11667,7 @@ def _run_agent_streaming(
                 threading.Thread(
                     target=_run_background_title_update,
                     args=(s.session_id, _u0, _a0, str(s.title or '').strip(), put, agent),
+                    kwargs={"relay_session_id": session_id},
                     daemon=True,
                 ).start()
             else:
