@@ -1038,6 +1038,7 @@ def test_grouped_drag_affordance_is_hover_revealed_and_unassigned_header_is_styl
     assert "visibility:hidden;opacity:0;pointer-events:none;" in (ROOT / "static" / "style.css").read_text(encoding="utf-8")
     assert "session-project-group-header" in SESSIONS_JS
     assert ".project-session-header.drag-over" in (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+    assert ".project-chip.drag-over{background:var(--accent-bg-strong);outline:1px solid var(--accent);}" in (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 
 
 def test_grouped_drag_playwright_keeps_title_geometry_stable_on_hover():
