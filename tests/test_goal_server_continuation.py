@@ -141,6 +141,55 @@ def test_reconcile_admitted_run_without_worker_or_activity_requeues(continuation
     assert "no live worker" in current["last_error"]
 
 
+def test_reconcile_rechecks_liveness_inside_settlement_transaction(continuation_store):
+    gc, _path = continuation_store
+    _schedule(gc, now=100.0)
+    gc.drain_goal_continuations_once(
+        start_turn=lambda *_args, **_kwargs: {"_status": 200, "stream_id": "late-stream"},
+        is_goal_active=lambda *_args, **_kwargs: True,
+        now=100.0,
+    )
+    checks = iter([False, True])
+
+    assert gc.reconcile_goal_continuations_once(
+        active_run_check=lambda _sid, _stream: next(checks),
+        run_summary_loader=lambda _sid, _stream: {
+            "terminal_state": "unknown",
+            "observable_activity": False,
+        },
+        now=131.0,
+    ) == 1
+
+    current = gc.get_goal_continuation("session-a")
+    assert current["status"] == "running"
+    assert current["stream_id"] == "late-stream"
+    assert current["last_heartbeat_at"] == 131.0
+
+
+def test_reconcile_rechecks_journal_inside_settlement_transaction(continuation_store):
+    gc, _path = continuation_store
+    _schedule(gc, now=100.0)
+    gc.drain_goal_continuations_once(
+        start_turn=lambda *_args, **_kwargs: {"_status": 200, "stream_id": "late-effect"},
+        is_goal_active=lambda *_args, **_kwargs: True,
+        now=100.0,
+    )
+    summaries = iter([
+        {"terminal_state": "unknown", "observable_activity": False},
+        {"terminal_state": "interrupted", "observable_activity": True},
+    ])
+
+    assert gc.reconcile_goal_continuations_once(
+        active_run_check=lambda _sid, _stream: False,
+        run_summary_loader=lambda _sid, _stream: next(summaries),
+        now=131.0,
+    ) == 1
+
+    current = gc.get_goal_continuation("session-a")
+    assert current["status"] == "failed"
+    assert "observable activity" in current["last_error"]
+
+
 def test_reconcile_live_run_refreshes_durable_heartbeat(continuation_store):
     gc, _path = continuation_store
     _schedule(gc, now=100.0)

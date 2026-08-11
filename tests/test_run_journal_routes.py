@@ -78,6 +78,56 @@ def test_gateway_terminal_error_successful_save_is_marked_persisted(monkeypatch,
     assert payload["terminal_session_persisted_session_id"] == session.session_id
 
 
+def test_gateway_empty_response_is_persisted_before_terminal_sse(monkeypatch, tmp_path):
+    import api.gateway_chat as gateway_chat
+    import api.models as models
+    import api.streaming as streaming
+
+    session = models.Session(
+        session_id="gateway_empty_response",
+        workspace=str(tmp_path),
+        model="gpt-4o",
+        model_provider="openai",
+        messages=[],
+        context_messages=[],
+    )
+    session.active_stream_id = "gateway-empty-stream"
+    session.pending_user_message = "continue the durable goal"
+    session.pending_user_source = "goal_continuation"
+    session.pending_attachments = []
+    session.pending_started_at = 100.0
+    saved = []
+    session.save = lambda: saved.append(True)
+    monkeypatch.setattr(gateway_chat, "get_session", lambda _sid: session)
+    monkeypatch.setattr(gateway_chat, "_stream_writeback_is_current", lambda *_args: True)
+    monkeypatch.setattr(streaming, "_snapshot_and_append_partial_on_error", lambda *_args: None)
+
+    payload = gateway_chat._settle_gateway_empty_response(
+        session.session_id,
+        session.active_stream_id,
+        str(tmp_path),
+        "gpt-4o",
+        "openai",
+    )
+
+    assert saved
+    assert payload["type"] == "gateway_empty_response"
+    assert payload["terminal_session_persisted"] is True
+    assert session.active_stream_id is None
+    assert session.pending_user_message is None
+    assert any(m.get("role") == "user" for m in session.messages)
+    assert any(m.get("role") == "assistant" and m.get("_error") for m in session.messages)
+
+    events = []
+    gateway_chat._emit_gateway_empty_response_events(
+        lambda name, data: events.append((name, data)),
+        payload,
+        session.session_id,
+    )
+    assert [name for name, _data in events] == ["apperror", "done", "stream_end"]
+    assert events[1][1]["session"]["session_id"] == session.session_id
+
+
 def test_stream_status_exposes_replay_summary():
     status_pos = ROUTES_SRC.index('parsed.path == "/api/chat/stream/status"')
     block = ROUTES_SRC[status_pos : status_pos + 900]
