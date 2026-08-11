@@ -1311,6 +1311,10 @@ def _resolve_provider_alias(name: str) -> str:
             return _agent_aliases[raw]
     except Exception:
         pass
+    # Keep Agent-owned Azure Foundry aliases available in standalone WebUI
+    # installs where hermes_cli is intentionally absent (including CI).
+    if raw in {"azure", "azure-ai-foundry", "azure-ai"}:
+        return "azure-foundry"
     return _PROVIDER_ALIASES.get(raw, name)
 
 
@@ -3541,6 +3545,18 @@ def _filter_reasoning_efforts_for_provider(
     if bare.startswith(("o1", "o3", "o4")):
         return [eff for eff in normalized if eff in {"low", "medium", "high"}]
     if bare.startswith("gpt-5") and not _is_gpt_5_6_family(bare):
+        return [eff for eff in normalized if eff not in {"max", "ultra"}]
+    # First-party GPT-5.6 lookalikes must not regain a top tier merely because
+    # their authoritative capability result is empty. Keep genuinely unknown
+    # custom/future models on the historical preserve-verbatim path.
+    if (
+        provider in {
+            "openai-codex", "openai", "openai-api",
+            "azure-openai", "azure-foundry",
+        }
+        and "gpt-5.6" in bare
+        and not _is_gpt_5_6_family(bare)
+    ):
         return [eff for eff in normalized if eff not in {"max", "ultra"}]
 
     # Generic top tiers must not be advertised to providers whose native ladder

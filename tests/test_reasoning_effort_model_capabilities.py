@@ -678,13 +678,62 @@ def test_custom_provider_default_denies_max_ultra_for_recognized_models():
 
 def test_gpt_5_6_first_party_fallback_is_exact_and_includes_azure_foundry(monkeypatch):
     monkeypatch.setattr(cfg, "_models_dev_reasoning_efforts", lambda *_args: [])
-    for provider in ("openai-codex", "openai", "azure-foundry"):
+    for provider in (
+        "openai-codex", "openai", "azure-foundry",
+        "azure", "azure-ai-foundry", "azure-ai",
+    ):
+        assert cfg._resolve_provider_alias(provider) in {
+            "openai-codex", "openai", "azure-foundry"
+        }
         for model in ("gpt-5.6", "gpt-5.6-sol"):
-            efforts = cfg.resolve_model_reasoning_efforts(model, provider_id=provider)
-            assert "max" in efforts and "ultra" in efforts
+            for candidate in (model, f"@{provider}:{model}"):
+                efforts = cfg.resolve_model_reasoning_efforts(candidate, provider_id=provider)
+                assert "max" in efforts and "ultra" in efforts
+                assert cfg.coerce_reasoning_effort_for_model(
+                    "ultra", candidate, provider_id=provider
+                ) == "ultra"
         for lookalike in ("not-gpt-5.6", "gpt-5.60"):
-            efforts = cfg.resolve_model_reasoning_efforts(lookalike, provider_id=provider)
-            assert "max" not in efforts and "ultra" not in efforts
+            for candidate in (lookalike, f"@{provider}:{lookalike}"):
+                efforts = cfg.resolve_model_reasoning_efforts(candidate, provider_id=provider)
+                assert "max" not in efforts and "ultra" not in efforts
+                assert cfg.coerce_reasoning_effort_for_model(
+                    "ultra", candidate, provider_id=provider
+                ) not in {"max", "ultra"}
+
+
+def test_gpt_5_6_status_matches_resolver_and_coercer_for_azure_aliases(monkeypatch):
+    monkeypatch.setattr(cfg, "_models_dev_reasoning_efforts", lambda *_args: [])
+    monkeypatch.setattr(cfg, "_load_yaml_config_file", lambda *_args: {
+        "agent": {"reasoning_effort": "ultra"},
+    })
+    for provider in ("azure-foundry", "azure", "azure-ai-foundry", "azure-ai"):
+        positive = cfg.get_reasoning_status(
+            model_id="gpt-5.6-sol", provider_id=provider
+        )
+        assert "ultra" in positive["supported_efforts"]
+        assert positive["reasoning_effort"] == "ultra"
+
+        for lookalike in ("not-gpt-5.6", "gpt-5.60"):
+            rejected = cfg.get_reasoning_status(
+                model_id=lookalike, provider_id=provider
+            )
+            assert "max" not in rejected["supported_efforts"]
+            assert "ultra" not in rejected["supported_efforts"]
+            assert rejected["reasoning_effort"] not in {"max", "ultra"}
+
+
+def test_azure_aliases_keep_lower_model_ceilings(monkeypatch):
+    monkeypatch.setattr(
+        cfg, "_models_dev_reasoning_efforts",
+        lambda *_args: list(cfg.VALID_REASONING_EFFORTS),
+    )
+    for provider in ("azure-foundry", "azure", "azure-ai-foundry", "azure-ai"):
+        assert cfg.coerce_reasoning_effort_for_model(
+            "ultra", "gpt-5.5", provider_id=provider
+        ) == "xhigh"
+        assert cfg.coerce_reasoning_effort_for_model(
+            "ultra", "o3", provider_id=provider
+        ) == "high"
 
 
 def test_reasoning_context_fallback_accepts_legacy_string_model_config(monkeypatch):
