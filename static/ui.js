@@ -16677,7 +16677,7 @@ function renderMessages(options){
     if(recoveryHtml) bodyHtml += recoveryHtml;
     const statusHtml = (!isUser&&m._statusCard) ? _statusCardHtml(m._statusCard) : '';
     const isEditableUser=isUser&&rawIdx===lastUserRawIdx;
-    const followsInternalTransport=!isUser&&_assistantFollowsInternalTransport(S.messages,rawIdx);
+    const followsInternalTransport=!isUser&&typeof _assistantFollowsInternalTransport==='function'&&_assistantFollowsInternalTransport(S.messages,rawIdx);
     const editBtn  = isEditableUser ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
     const undoBtn  = isLastAssistant ? `<button class="msg-action-btn" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo',13)}</button>` : '';
     const retryBtn = isLastAssistant&&!followsInternalTransport ? `<button class="msg-action-btn" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}</button>` : '';
