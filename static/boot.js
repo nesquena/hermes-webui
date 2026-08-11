@@ -17,7 +17,7 @@
 async function cancelStream(reason){
   const sid = S.session && S.session.session_id;
   const streamId = S.activeStreamId;
-  if(!streamId) return;
+  if(!streamId) return false;
   // Interrupt provenance: log WHY the active run is being cancelled so operators
   // can tell an explicit Stop / interrupt from any other trigger when they see a
   // SIGINT/exit-code-130 in the backend logs. Only explicit user paths reach
@@ -30,8 +30,10 @@ async function cancelStream(reason){
     console.info('[stream] cancel requested', {reason:_reason, streamId, sessionId:sid});
   }
   let respBody=null;
+  let respOk=false;
   try{
     const r=await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
+    respOk=!!(r&&r.ok);
     try{respBody=await r.json();}catch(_){}
   }catch(e){
     if(typeof console !== 'undefined' && console.warn){
@@ -50,7 +52,7 @@ async function cancelStream(reason){
   // `cancel` event can clear INFLIGHT, render "Task cancelled", and refresh
   // the sidebar. Only clear locally when the backend says there is no active
   // stream left to settle.
-  if(respBody && respBody.cancelled===false && S.activeStreamId===streamId){
+  if(respOk && respBody && respBody.cancelled===false && S.activeStreamId===streamId){
     S.activeStreamId=null;
     setBusy(false);
     if(typeof setComposerStatus==='function') setComposerStatus('');
@@ -59,20 +61,24 @@ async function cancelStream(reason){
     // distinguish reasons — keep the toast generic and short.
     if(typeof showToast==='function') showToast('Stream is no longer active',2000);
   }
+  return respOk;
 }
 
 async function cancelSessionStream(session){
   const streamId = session&&session.active_stream_id;
   const sid = session&&session.session_id;
-  if(!streamId||!sid) return;
+  if(!streamId||!sid) return false;
   // Explicit sidebar "Stop response" — log provenance for the same reason as
   // cancelStream(). (#5345)
   if(typeof console !== 'undefined' && console.info){
     console.info('[stream] cancel requested', {reason:'sidebar-stop', streamId, sessionId:sid});
   }
+  let respOk=false;
   try{
-    await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
+    const r=await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
+    respOk=!!(r&&r.ok);
   }catch(e){/* close local stream; keep UI state honest below */}
+  if(!respOk) return false;
   if(typeof closeLiveStream==='function') closeLiveStream(sid, streamId);
   session.active_stream_id=null;
   delete INFLIGHT[sid];
@@ -94,6 +100,7 @@ async function cancelSessionStream(session){
     hideClarifyCard(true, 'cancelled');
   }
   if(typeof renderSessionList==='function') renderSessionList();
+  return true;
 }
 
 async function _savedSessionShouldStaySidebarOnly(sid){
@@ -124,6 +131,9 @@ function _rootPrefillNeedsFreshComposer(urlSession, savedLocal, prefillIntent){
 }
 function _profileQueryBlocksSavedLocalRestore(profileIntent, urlSession){
   return !!(profileIntent&&profileIntent.hasParam&&profileIntent.valid&&!urlSession);
+}
+function _shouldStartFreshPwaChat(action,urlSession){
+  return action==='new-chat'&&!urlSession;
 }
 async function _applyComposerPrefillOnBoot(prefillIntent){
   if(!prefillIntent||!prefillIntent.hasText) return;
@@ -519,6 +529,12 @@ function _isSidebarCollapsed(){
 function _syncSidebarAria(){
   // Mirror the open/collapsed state on the active rail button via aria-expanded
   // so screen readers announce the toggle. Open=true, collapsed=false.
+  // Clear the others first: only one panel owns the sidebar, but this used to set
+  // aria-expanded on the newly-active button without unsetting the previous one,
+  // so chat -> kanban -> skills left three buttons claiming aria-expanded=true
+  // and a screen reader announced three open disclosures.
+  document.querySelectorAll('.rail .rail-btn.nav-tab[data-panel][aria-expanded]')
+    .forEach(function(btn){ btn.setAttribute('aria-expanded','false'); });
   const active=document.querySelector('.rail .rail-btn.nav-tab.active[data-panel]');
   if(active)active.setAttribute('aria-expanded',!_isSidebarCollapsed());
 }
@@ -1326,6 +1342,47 @@ const _DEFAULT_MESSAGE_MODES=['queue','interrupt','steer'];
 // existing user's persisted busy-input-mode preference survives the rename.
 const _LEGACY_DEFAULT_MESSAGE_MODE_KEY='hermes-busy-input-mode';
 const _DEFAULT_MESSAGE_MODE_KEY='hermes-default-message-mode';
+// ── Auto-follow eager mirror (#6819) ────────────────────────────────────────
+// PERSISTENCE CONTRACT (client-side mirror of the Auto-follow new content
+// setting, `auto_scroll_follow`):
+//
+// * Why: the boot settings-fetch-failure path used to hardcode
+//   `window._autoScrollFollow=true`, silently clobbering an explicit OFF for
+//   the whole session (post-turn scroll yanks until the next refresh).
+// * Storage: ONE global localStorage value (`'1'`/`'0'`) under
+//   `_AUTO_SCROLL_FOLLOW_KEY` — NOT profile-keyed. The backend authority is
+//   global: `SETTINGS_FILE = STATE_DIR / "settings.json"` (api/config.py)
+//   and `/api/settings` calls `load_settings()` with no profile-specific
+//   file, so the mirror must match that single global contract. A
+//   profile-keyed map would leave a freshly-opened profile with no entry and
+//   wrongly fall back to ON despite the global OFF (maintainer review on
+//   #6856).
+// * Write semantics: written ONLY when a settings response (or the boot
+//   settings path) actually resolves the setting; the fallback path never
+//   writes.
+// * Read semantics: `_readPersistedAutoScrollFollow()` returns the stored
+//   value if present, else `true` (the config.py default). The boot-failure
+//   path reads it directly (no profile resolution needed — the mirror is
+//   global, so it can be read synchronously in the fallback). Fresh users
+//   (no mirror) get ON.
+// * Upgrade: there is no legacy key; the mirror is created on first settings
+//   resolve, so older sessions simply default to ON until the next settings
+//   round-trip writes it.
+const _AUTO_SCROLL_FOLLOW_KEY='hermes-auto-scroll-follow';
+function _persistAutoScrollFollow(enabled){
+  try{localStorage.setItem(_AUTO_SCROLL_FOLLOW_KEY,enabled?'1':'0');}catch(_){}
+  return enabled;
+}
+function _readPersistedAutoScrollFollow(){
+  try{
+    const raw=localStorage.getItem(_AUTO_SCROLL_FOLLOW_KEY);
+    if(raw==='1') return true;
+    if(raw==='0') return false;
+  }catch(_){}
+  return true;  // default: follow ON (matches config.py default)
+}
+window._persistAutoScrollFollow=_persistAutoScrollFollow;
+window._readPersistedAutoScrollFollow=_readPersistedAutoScrollFollow;
 function _normalizeDefaultMessageMode(mode){
   return _DEFAULT_MESSAGE_MODES.includes(mode)?mode:'steer';
 }
@@ -3276,7 +3333,11 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._showBusyPlaceholderHint=!!s.show_busy_placeholder_hint;
     window._newChatOnWorkspaceSwitch=!!s.new_chat_on_workspace_switch;  // #5473 opt-in
     window._sessionEndlessScrollEnabled=!!s.session_endless_scroll;
-    window._autoScrollFollow=s.auto_scroll_follow!==false;
+    // #6819: persist the resolved auto-follow value into the global mirror.
+    // The mirror is NOT profile-keyed (the backend setting is one global
+    // settings.json), so it can be written synchronously here — no deferred
+    // write needed.
+    window._autoScrollFollow=_persistAutoScrollFollow(s.auto_scroll_follow!==false);
     window._largeTextPasteAsAttachment=s.large_text_paste_as_attachment!==false;
     window._projectQuickCreate=!!s.project_quick_create_buttons;
     window._composerControlVisibility=_composerControlVisibilityFromSettings(s);
@@ -3418,7 +3479,12 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._defaultMessageMode=_readPersistedDefaultMessageMode();
     window._showBusyPlaceholderHint=false;
     window._sessionEndlessScrollEnabled=false;
-    window._autoScrollFollow=true;
+    // #6819: honor the persisted auto-follow preference on settings-fetch
+    // failure instead of hardcoding ON (which silently clobbered an explicit
+    // OFF and caused post-turn scroll yanks until the next refresh). The
+    // mirror is global (matches the one global settings.json), so it is read
+    // synchronously here — no profile resolution or deferral needed.
+    window._autoScrollFollow=_readPersistedAutoScrollFollow();
     window._composerControlVisibility=_composerControlVisibilityFromSettings(null);
     window._composerControlOrder=[];
     _applyComposerControlOrder(window._composerControlOrder);
@@ -3669,7 +3735,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   const pwaLaunchAction=(window.HermesPWA&&typeof window.HermesPWA.launchAction==='function')
     ? window.HermesPWA.launchAction()
     : null;
-  if(pwaLaunchAction==='new-chat'){
+  if(_shouldStartFreshPwaChat(pwaLaunchAction,urlSession)){
     try{
       await newSession(true);
       // New-chat PWA launches need the empty conversation visible immediately.
@@ -3861,5 +3927,5 @@ async function shutdownServer() {
 
 function _showServerStopped() {
   var stoppedMsg = (typeof t === 'function' ? t('settings_shutdown_stopped_message') : 'Server stopped. You can close this tab.');
-  document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:var(--muted);font-family:system-ui,ui-sans-serif;font-size:14px"><p>' + stoppedMsg + '</p></div>';
+  document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:var(--muted);font-family:var(--font-ui);font-size:14px"><p>' + stoppedMsg + '</p></div>';
 }

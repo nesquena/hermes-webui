@@ -142,6 +142,11 @@ gate rather than inventing values without source support.
 
 ## Event taxonomy (Phase 1 draft)
 
+> **Semantic names below are aspirational for the per-session endpoint.** Live
+> `/api/chat/stream` wire names are listed in **Authoritative emitted events**
+> immediately after this table — use those when writing clients against current
+> source.
+
 | event_type | Source | Description |
 |---|---|---|
 | `chat_delta` | run journal / live stream | Token or chunk from an assistant reply. |
@@ -154,8 +159,45 @@ gate rather than inventing values without source support.
 | `session_snapshot` | server fallback | Current session projection; emitted when replay is unavailable. |
 | `heartbeat` | server | Keepalive emitted on the `_SSE_HEARTBEAT_INTERVAL_SECONDS` cadence. |
 
-The event-type table is a draft. The final table must be confirmed during
-maintainer review before implementation.
+## Authoritative emitted events (`/api/chat/stream`)
+
+These are the **real wire `event:` names** emitted by `api/streaming.py` today
+(23 names). Clients and docs must use this table — not the semantic draft above —
+when integrating with the live chat SSE relay.
+
+| Wire name | Role |
+|---|---|
+| `token` | Assistant text delta |
+| `reasoning` | Model reasoning / thinking delta |
+| `tool` | Tool call started |
+| `tool_complete` | Tool call finished (result or error) |
+| `interim_assistant` | Mid-turn assistant prose (pre-final) |
+| `approval` | Destructive-command approval prompt |
+| `clarify` | Structured clarification prompt |
+| `compressing` | Context compression started |
+| `compressed` | Context compression finished |
+| `title` | Session title update (often after `done`) |
+| `title_status` | Title generation status / skip reason |
+| `warning` | Non-fatal provider/fallback warning |
+| `apperror` | Terminal application error (no trailing `stream_end`) |
+| `cancel` | Run cancelled |
+| `done` | Turn finalized (session payload); title/`stream_end` may follow |
+| `stream_end` | SSE fence — close the client EventSource |
+| `metering` | Token/cost metering snapshot |
+| `context_status` | Context window / usage status |
+| `goal` | Goal / plan card update |
+| `goal_continue` | Goal continuation signal |
+| `pending_steer_leftover` | Leftover steer text after interrupt |
+| `state_saved` | Durable state write acknowledgment |
+| `todo_state` | Todo / checklist panel update |
+
+Relay close set (stop draining the live queue): `stream_end`, `cancel`,
+`apperror`, and legacy `error` — see `api.run_journal.SSE_RELAY_CLOSE_EVENTS`.
+`done` is **not** a relay-close event because `title` and `stream_end` follow it.
+
+The semantic taxonomy table remains a draft for the proposed per-session
+endpoint vocabulary and must be confirmed during maintainer review before that
+endpoint claims parity.
 
 ## Cursor and resume semantics
 

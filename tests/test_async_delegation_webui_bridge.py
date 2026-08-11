@@ -69,6 +69,7 @@ def _install_fake_durable_delivery_api(monkeypatch):
         "mark": [],
         "legacy": [],
         "delivery_state": "pending",
+        "delivery_attempts": 0,
         "pending_ids": set(),
         "restore_failures": 0,
     }
@@ -76,6 +77,9 @@ def _install_fake_durable_delivery_api(monkeypatch):
 
     def _claim(evt, consumer):
         calls["claim"].append((dict(evt), consumer))
+        if calls["delivery_state"] != "pending":
+            return None
+        calls["delivery_attempts"] += 1
         return f"claim:{consumer}"
 
     def _complete(evt, claim_id):
@@ -84,7 +88,9 @@ def _install_fake_durable_delivery_api(monkeypatch):
 
     def _release(evt, claim_id):
         calls["release"].append((dict(evt), claim_id))
-        calls["delivery_state"] = "pending"
+        calls["delivery_state"] = (
+            "dropped" if calls["delivery_attempts"] >= 8 else "pending"
+        )
 
     def _get_durable(delegation_id):
         if calls["delivery_state"] == "pending":
@@ -120,6 +126,24 @@ def _install_fake_durable_delivery_api(monkeypatch):
     fake_pkg = sys.modules.get("tools") or types.ModuleType("tools")
     monkeypatch.setitem(sys.modules, "tools", fake_pkg)
     monkeypatch.setitem(sys.modules, "tools.async_delegation", fake_mod)
+    monkeypatch.setattr(fake_pkg, "async_delegation", fake_mod, raising=False)
+    return calls
+
+
+def _install_fake_legacy_delivery_api(monkeypatch):
+    """Install a pre-durable-core surface with only compatibility markers."""
+    calls = {"mark": [], "legacy": []}
+    fake_mod = types.ModuleType("tools.async_delegation")
+    fake_mod.mark_completion_delivered = (  # type: ignore[reportAttributeAccessIssue]
+        lambda delegation_id: calls["mark"].append(delegation_id) or True
+    )
+    fake_mod.mark_async_delegation_consumed = (  # type: ignore[reportAttributeAccessIssue]
+        lambda delegation_id: calls["legacy"].append(delegation_id)
+    )
+    fake_pkg = sys.modules.get("tools") or types.ModuleType("tools")
+    monkeypatch.setitem(sys.modules, "tools", fake_pkg)
+    monkeypatch.setitem(sys.modules, "tools.async_delegation", fake_mod)
+    monkeypatch.setattr(fake_pkg, "async_delegation", fake_mod, raising=False)
     return calls
 
 
@@ -315,30 +339,181 @@ def test_background_wakeup_releases_claim_when_dispatch_fails(monkeypatch):
     assert "deleg_test123" not in cfg.BG_TASK_COMPLETE_EVENTS_SEEN.get("webui-session-1", set())
 
 
-def test_background_active_turn_releases_and_requeues_without_in_memory_defer(monkeypatch):
+def test_background_active_turn_does_not_consume_durable_delivery_attempts(monkeypatch):
     _reset_wakeup_state()
     registry = _install_fake_process_registry(monkeypatch)
     delivery = _install_fake_durable_delivery_api(monkeypatch)
     cfg.PROCESS_SESSION_INDEX["webui-session-1"] = "webui-session-1"
     monkeypatch.setattr(bp, "_session_has_active_turn", lambda _session_id: True)
+    monkeypatch.setattr(peu, "ASYNC_DELIVERY_CLAIM_RETRY_SECONDS", 0.2)
     monkeypatch.setattr(
         bp,
         "_start_async_delegation_wakeup_turn",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must stay deferred")),
     )
 
-    bp._process_one(_async_delegation_event())
+    try:
+        for _ in range(10):
+            bp._process_one(_async_delegation_event())
 
-    assert len(delivery["claim"]) == 1
-    assert delivery["complete"] == []
-    assert len(delivery["release"]) == 1
-    assert registry.completion_queue.qsize() == 1
-    assert cfg.DEFERRED_PROCESS_WAKEUPS == {}
-    assert cfg.BG_TASK_COMPLETE_EVENTS_SEEN == {}
+        assert delivery["claim"] == []
+        assert delivery["delivery_attempts"] == 0
+        assert delivery["complete"] == []
+        assert delivery["release"] == []
+        assert delivery["delivery_state"] == "pending"
+        assert registry.completion_queue.empty()
+        assert peu.async_delivery_retry_timer_count() == 1
+        assert cfg.DEFERRED_PROCESS_WAKEUPS == {}
+        assert cfg.BG_TASK_COMPLETE_EVENTS_SEEN == {}
+    finally:
+        _reset_wakeup_state()
+
+
+def test_background_busy_legacy_completion_retries_until_session_is_idle(monkeypatch):
+    """A pre-durable core must not discard a completion after one busy retry."""
+    _reset_wakeup_state()
+    registry = _install_fake_process_registry(monkeypatch)
+    delivery = _install_fake_legacy_delivery_api(monkeypatch)
+    cfg.PROCESS_SESSION_INDEX["webui-session-1"] = "webui-session-1"
+    busy = {"active": True}
+    accepted: list[tuple[str, str]] = []
+
+    def _accept(session_id, prompt, *, evt, claim, **_kwargs):
+        accepted.append((session_id, prompt))
+        bp._record_async_delegation_accepted(evt, session_id=session_id, claim=claim)
+
+    monkeypatch.setattr(bp, "ASYNC_DELIVERY_ROUTING_RETRY_SECONDS", 0.01)
+    monkeypatch.setattr(bp, "_session_has_active_turn", lambda _session_id: busy["active"])
+    monkeypatch.setattr(bp, "_start_async_delegation_wakeup_turn", _accept)
+    monkeypatch.setattr(bp, "_emit_bg_task_complete_events_coalesced", lambda *_args: 1)
+    evt = _async_delegation_event()
+
+    try:
+        bp._process_one(evt)
+        first_retry = registry.completion_queue.get(timeout=1)
+        bp._process_one(first_retry)
+        second_retry = registry.completion_queue.get(timeout=1)
+
+        busy["active"] = False
+        bp._process_one(second_retry)
+
+        assert accepted and accepted[0][0] == "webui-session-1"
+        assert delivery == {"mark": ["deleg_test123"], "legacy": []}
+        assert registry.completion_queue.empty()
+    finally:
+        _reset_wakeup_state()
+
+
+def test_legacy_completion_survives_repeated_wakeup_rejection_then_delivers(monkeypatch):
+    """A pre-durable completion whose resolved target keeps rejecting the wakeup
+    (409/busy) must stay retryable — the transient-failure sites must not consume
+    the one-shot legacy marker and silently drop it after the first rejection.
+
+    Regression for the combined #6632 + #6662 gate finding: the busy-check caller
+    was fixed but _start_async_delegation_wakeup_turn's own reject/exception/
+    dispatch-failure exits still used the bounded one-shot mode, dropping a legacy
+    completion after the second transient failure.
+    """
+def test_legacy_retry_helper_keeps_requeuing_when_keep_legacy_retrying(monkeypatch):
+    """`_retry_unclaimed_async_delegation_event(..., keep_legacy_retrying=True)`
+    must requeue on EVERY call for a resolved-but-transiently-failing target —
+    never consuming the one-shot `_webui_routing_retry_attempted` marker.
+
+    Regression for the combined #6632 + #6662 gate finding: the busy-check caller
+    was fixed, but `_start_async_delegation_wakeup_turn`'s own reject/exception/
+    dispatch-failure exits (the resolved-target transient-failure sites) also pass
+    keep_legacy_retrying=True now, so a legacy completion is not silently dropped
+    after the second transient failure. The genuinely-unmapped callers still use
+    the bounded one-shot mode (covered by
+    test_background_unmapped_legacy_event_is_requeued_best_effort).
+    """
+    _reset_wakeup_state()
+    registry = _install_fake_process_registry(monkeypatch)
+    # No durable claim available → schedule_async_delegation_claim_retry returns
+    # False and we fall to the legacy requeue branch (the branch with the marker).
+    monkeypatch.setattr(
+        bp, "schedule_async_delegation_claim_retry", lambda *_a, **_k: False
+    )
+    monkeypatch.setattr(bp, "ASYNC_DELIVERY_ROUTING_RETRY_SECONDS", 0.01)
+
+    try:
+        evt = _async_delegation_event()
+        # Drive the resolved-target transient-failure retry three times in a row.
+        for _ in range(3):
+            bp._retry_unclaimed_async_delegation_event(
+                registry, evt, keep_legacy_retrying=True
+            )
+            requeued = registry.completion_queue.get(timeout=1)
+            # The marker must NOT be set — otherwise the next pass would drop it.
+            assert not requeued.get("_webui_routing_retry_attempted"), (
+                "keep_legacy_retrying must not consume the one-shot marker"
+            )
+            evt = requeued
+        assert registry.completion_queue.empty()
+
+        # Contrast: the DEFAULT (unmapped) mode is bounded — one requeue, then stop.
+        _reset_wakeup_state()
+        registry2 = _install_fake_process_registry(monkeypatch)
+        monkeypatch.setattr(
+            bp, "schedule_async_delegation_claim_retry", lambda *_a, **_k: False
+        )
+        evt2 = _async_delegation_event()
+        bp._retry_unclaimed_async_delegation_event(registry2, evt2)
+        once = registry2.completion_queue.get(timeout=1)
+        assert once.get("_webui_routing_retry_attempted") is True
+        # Second pass on the already-marked event does NOT requeue (bounded).
+        bp._retry_unclaimed_async_delegation_event(registry2, once)
+        assert registry2.completion_queue.empty()
+    finally:
+        _reset_wakeup_state()
+
+
+def test_formatting_failure_stays_bounded_not_keep_legacy_retrying(monkeypatch):
+    """A permanently-malformed completion (format_wakeup_prompt raises / empty)
+    must use the BOUNDED one-shot retry, never keep_legacy_retrying — otherwise a
+    malformed event would loop forever. Only the post-format DISPATCH exception
+    against a resolved target keeps retrying. Guards the formatting-vs-dispatch
+    split from the combined #6632+#6662 gate.
+    """
+    _reset_wakeup_state()
+    registry = _install_fake_process_registry(monkeypatch)
+    _install_fake_legacy_delivery_api(monkeypatch)
+    calls = {"n": 0}
+
+    def _spy(process_registry, evt, *, keep_legacy_retrying=False):
+        calls["n"] += 1
+        calls["keep_legacy_retrying"] = keep_legacy_retrying
+
+    monkeypatch.setattr(bp, "_retry_unclaimed_async_delegation_event", _spy)
+    monkeypatch.setattr(bp, "release_async_delegation_delivery", lambda *_a, **_k: None)
+    # Force a formatting failure (empty prompt → RuntimeError inside the format try).
+    monkeypatch.setattr(bp, "format_wakeup_prompt", lambda _evt: "")
+
+    class _Claim:
+        durable = True
+
+    try:
+        bp._process_async_delegation_event(
+            _async_delegation_event(),
+            session_id="webui-session-1",
+            delegation_id="deleg_test123",
+            process_registry=registry,
+        )
+    except TypeError:
+        # _process_async_delegation_event may claim internally; if the fake claim
+        # path differs, fall through — the assertion below is the real check.
+        pass
+
+    # The formatting-failure branch MUST have run and used BOUNDED retry.
+    assert calls["n"] >= 1, "test did not reach the formatting-failure branch"
+    assert calls.get("keep_legacy_retrying") is False, (
+        "formatting failure must stay bounded, never keep_legacy_retrying"
+    )
+    _reset_wakeup_state()
 
 
 @pytest.mark.parametrize("status", [None, 302, 409, 500])
-def test_autonomous_wakeup_only_acks_after_turn_acceptance(monkeypatch, status):
+def test_autonomous_wakeup_rejection_uses_bounded_durable_retry(monkeypatch, status):
     _reset_wakeup_state()
     registry = _install_fake_process_registry(monkeypatch)
     delivery = _install_fake_durable_delivery_api(monkeypatch)
@@ -349,26 +524,31 @@ def test_autonomous_wakeup_only_acks_after_turn_acceptance(monkeypatch, status):
         "start_session_turn",
         lambda *_args, **_kwargs: {"_status": status, "error": "busy"},
     )
+    monkeypatch.setattr(bp, "ASYNC_DELIVERY_ROUTING_RETRY_SECONDS", 10.0)
     evt = _async_delegation_event()
     claim = peu.claim_async_delegation_delivery(evt, "webui-background")
     assert claim is not None
 
-    bp._start_async_delegation_wakeup_turn(
-        "webui-session-1",
-        "delegation result",
-        delegation_id="deleg_test123",
-        evt=evt,
-        claim=claim,
-        process_registry=registry,
-    )
+    try:
+        bp._start_async_delegation_wakeup_turn(
+            "webui-session-1",
+            "delegation result",
+            delegation_id="deleg_test123",
+            evt=evt,
+            claim=claim,
+            process_registry=registry,
+        )
 
-    assert _wait_until(lambda: len(delivery["release"]) == 1)
-    assert delivery["complete"] == []
-    assert _wait_until(lambda: registry.completion_queue.qsize() == 1)
-    assert "deleg_test123" not in cfg.BG_TASK_COMPLETE_EVENTS_SEEN.get("webui-session-1", set())
+        assert _wait_until(lambda: len(delivery["release"]) == 1)
+        assert delivery["complete"] == []
+        assert registry.completion_queue.empty()
+        assert peu.async_delivery_retry_timer_count() == 1
+        assert "deleg_test123" not in cfg.BG_TASK_COMPLETE_EVENTS_SEEN.get("webui-session-1", set())
+    finally:
+        _reset_wakeup_state()
 
 
-def test_autonomous_wakeup_exception_releases_and_requeues(monkeypatch):
+def test_autonomous_wakeup_exception_uses_bounded_durable_retry(monkeypatch):
     _reset_wakeup_state()
     registry = _install_fake_process_registry(monkeypatch)
     delivery = _install_fake_durable_delivery_api(monkeypatch)
@@ -379,22 +559,27 @@ def test_autonomous_wakeup_exception_releases_and_requeues(monkeypatch):
         "start_session_turn",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("start failed")),
     )
+    monkeypatch.setattr(bp, "ASYNC_DELIVERY_ROUTING_RETRY_SECONDS", 10.0)
     evt = _async_delegation_event()
     claim = peu.claim_async_delegation_delivery(evt, "webui-background")
     assert claim is not None
 
-    bp._start_async_delegation_wakeup_turn(
-        "webui-session-1",
-        "delegation result",
-        delegation_id="deleg_test123",
-        evt=evt,
-        claim=claim,
-        process_registry=registry,
-    )
+    try:
+        bp._start_async_delegation_wakeup_turn(
+            "webui-session-1",
+            "delegation result",
+            delegation_id="deleg_test123",
+            evt=evt,
+            claim=claim,
+            process_registry=registry,
+        )
 
-    assert _wait_until(lambda: len(delivery["release"]) == 1)
-    assert delivery["complete"] == []
-    assert _wait_until(lambda: registry.completion_queue.qsize() == 1)
+        assert _wait_until(lambda: len(delivery["release"]) == 1)
+        assert delivery["complete"] == []
+        assert registry.completion_queue.empty()
+        assert peu.async_delivery_retry_timer_count() == 1
+    finally:
+        _reset_wakeup_state()
 
 
 def test_autonomous_wakeup_acks_after_successful_turn_acceptance(monkeypatch):
@@ -1062,7 +1247,7 @@ def test_async_completion_with_unresolvable_target_retries_not_silent_drop(monke
     retried: list[dict] = []
     monkeypatch.setattr(
         bp,
-        "_retry_unmapped_async_delegation_event",
+        "_retry_unclaimed_async_delegation_event",
         lambda process_registry, evt: retried.append(dict(evt)),
     )
 

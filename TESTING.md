@@ -111,6 +111,9 @@ python tests/browser_conversation_lifecycle.py
 
 # Terminal-error lifecycle gate (new row in the proof matrix).
 LIFECYCLE_SCENARIO=terminal-error python tests/browser_conversation_lifecycle.py
+
+# Historical ID-linked transcript hydration row.
+python tests/browser_historical_transcript_hydration.py
 ```
 
 To certify that the gate catches its target failure, the test owns an opt-in
@@ -126,13 +129,27 @@ LIFECYCLE_TEST_BITE=drop-anchor-persistence \
 LIFECYCLE_SCENARIO=terminal-error \
 LIFECYCLE_TEST_BITE=drop-terminal-anchor-row \
   python tests/browser_conversation_lifecycle.py
+
+# Historical-hydration mutation: corrupt one persisted tool-result link so the
+# strict Anchor projection must fail instead of claiming the legacy transcript.
+HISTORICAL_HYDRATION_TEST_BITE=break-tool-link \
+  python tests/browser_historical_transcript_hydration.py
 ```
 
-The dedicated `Conversation lifecycle (informational)` workflow runs both current
-proof rows (`normal` and `terminal-error`) and stays non-blocking while the public
+The dedicated `Conversation lifecycle (informational)` workflow runs the current
+proof rows (`normal`, `terminal-error`, and `historical-transcript-hydration`) and
+stays non-blocking while the public
 matrix expands to additional behavior rows. The maintainer's private QA harness
 remains broader; later public slices will add session switching, reconnect/replay,
 cancellation, compression, and recovery.
+
+### Streaming reader intent
+
+While a response is still streaming, scroll upward with a trackpad or wheel to
+read earlier content, including a small scroll gesture immediately after a live
+render. Subsequent streamed content must not pull the reader back to the bottom.
+Use the jump-to-latest control to resume following the live tail; after that,
+new streamed content should remain visible at the bottom.
 
 
 `tests/test_static_js_runtime_lint.py` runs this automatically when eslint is present

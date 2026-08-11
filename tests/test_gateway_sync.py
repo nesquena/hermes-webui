@@ -1019,6 +1019,7 @@ def test_agent_session_source_normalization_contract():
         'telegram': ('messaging', 'Telegram'),
         'discord': ('messaging', 'Discord'),
         'slack': ('messaging', 'Slack'),
+        'matrix': ('messaging', 'Matrix'),
         'cron': ('cron', 'Cron'),
         'webhook': ('webhook', 'Webhook'),
         'tool': ('tool', 'Tool'),
@@ -1044,16 +1045,17 @@ def test_sessions_js_treats_email_as_messaging_source():
     raw_section = src[src.find("_MESSAGING_RAW_SOURCES"):src.find("function _isMessagingSession")]
     label_section = src[src.find("_MESSAGING_SOURCE_LABELS"):src.find("function _isMessagingSession")]
 
-    for raw_source in ("email", "wecom", "wecom_callback"):
+    for raw_source in ("email", "wecom", "wecom_callback", "matrix"):
         assert f"'{raw_source}'" in raw_section, f"Missing raw source {raw_source!r} in _MESSAGING_RAW_SOURCES"
 
     assert "email: 'Email'" in label_section
     assert "wecom: 'WeCom'" in label_section
     assert "wecom_callback: 'WeCom Callback'" in label_section
+    assert "matrix: 'Matrix'" in label_section
 
 
-def test_sessions_js_treats_wecom_sidecars_as_messaging_behaviorally():
-    """Stale WeCom sidecars with session_source=other should still route as messaging."""
+def test_sessions_js_treats_messaging_sidecars_behaviorally():
+    """Stale messaging sidecars with session_source=other should still route as messaging."""
     src = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
     start = src.index("const _MESSAGING_RAW_SOURCES")
     end = src.index("/**", start)
@@ -1064,6 +1066,7 @@ const cases = [
   {{ session_source: 'other', source: 'wecom' }},
   {{ session_source: 'other', raw_source: 'wecom_callback' }},
   {{ session_source: 'other', source_tag: 'wecom' }},
+  {{ session_source: 'other', source: 'matrix' }},
   {{ session_source: 'messaging', source: 'anything' }},
 ];
 for (const c of cases) {{

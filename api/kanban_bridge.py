@@ -20,6 +20,7 @@ from dataclasses import asdict, is_dataclass
 from urllib.parse import parse_qs, unquote
 
 from api.helpers import bad, j
+from api.workspace import resolve_trusted_workspace
 
 BOARD_COLUMNS = ["triage", "todo", "ready", "running", "blocked", "done"]
 _TASK_PREFIX = "/api/kanban/tasks/"
@@ -855,6 +856,13 @@ def _create_board_payload(body):
     slug = str(body.get("slug") or "").strip()
     if not slug:
         raise ValueError("slug is required")
+    board_kwargs = {}
+    if "default_workdir" in body:
+        raw_workdir = str(body.get("default_workdir") or "").strip()
+        if raw_workdir:
+            board_kwargs["default_workdir"] = str(resolve_trusted_workspace(raw_workdir))
+        else:
+            board_kwargs["default_workdir"] = ""
     try:
         meta = kb.create_board(
             slug,
@@ -862,6 +870,7 @@ def _create_board_payload(body):
             description=body.get("description") or None,
             icon=body.get("icon") or None,
             color=body.get("color") or None,
+            **board_kwargs,
         )
     except (ValueError, AttributeError) as exc:
         raise ValueError(str(exc)) from exc
@@ -894,6 +903,10 @@ def _update_board_payload(slug, body):
         raise ValueError(f"invalid board slug: {slug!r}") from exc
     if not normed or not kb.board_exists(normed):
         raise LookupError(f"board {slug!r} does not exist")
+    board_kwargs = {}
+    if "default_workdir" in body:
+        raw_workdir = str(body.get("default_workdir") or "").strip()
+        board_kwargs["default_workdir"] = str(resolve_trusted_workspace(raw_workdir)) if raw_workdir else ""
     archived = body.get("archived")
     if isinstance(archived, str):
         archived = archived.strip().lower() in {"1", "true", "yes", "on"}
@@ -904,6 +917,7 @@ def _update_board_payload(slug, body):
         icon=body.get("icon"),
         color=body.get("color"),
         archived=archived if isinstance(archived, bool) else None,
+        **board_kwargs,
     )
     return {"board": _board_meta_dict(meta), "read_only": False}
 

@@ -3335,6 +3335,13 @@ def test_revalidation_compression_same_object_migration_during_wait(
     monkeypatch.setattr(routes, "SESSION_DIR", tmp_path / "sessions")
     monkeypatch.setattr(routes, "SESSION_INDEX_FILE", tmp_path / "sessions" / "_index.json")
     try:
+        # Upstream's per-session lock registry is weak (WeakValueDictionary,
+        # api/config.py): the entry survives only while a strong reference
+        # exists.  The production contract is that the streaming turn keeps
+        # the lock referenced across compression, so hold one here — the
+        # writer below aliases the SAME lock to the rotated sid and the
+        # registry assertions after it observe it.
+        turn_lock = routes._get_session_agent_lock(old_sid)
         token, owner, revalidation = _build_token_and_revalidate(routes, old_sid)
         assert owner is session
 
