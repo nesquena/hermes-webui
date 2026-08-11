@@ -265,9 +265,15 @@ class TestQuickCreateMobileDrawer:
         block = self._quick_create_block()
         render_idx = block.find("renderSessionList({deferWhileInteracting:false})")
         close_idx = block.find("closeMobileSidebar")
+        catch_idx = block.find("catch(err)")
         assert render_idx != -1, "sidebar repaint call not found in quick-create handler"
         assert close_idx != -1, "closeMobileSidebar not found in quick-create handler"
+        assert catch_idx != -1, "success-path try/catch not found in quick-create handler"
         assert close_idx > render_idx, (
             "closeMobileSidebar must run after the sidebar repaint in the success path"
+        )
+        assert close_idx < catch_idx, (
+            "closeMobileSidebar must stay in the success path (try block) — moving it "
+            "into the catch branch would keep the drawer open over the error toast"
         )
 
