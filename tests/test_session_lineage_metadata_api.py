@@ -1,13 +1,42 @@
 """Regression tests for /api/sessions lineage metadata used by sidebar collapse."""
 
+import json
 import sqlite3
 import time
+from io import BytesIO
+from urllib.parse import urlparse
 
 import pytest
 
 import api.models as models
 import api.routes as routes
 from api.models import SESSIONS, STREAMS, Session, all_sessions
+
+
+class _GetHandler:
+    def __init__(self, path):
+        self.path = path
+        self.headers = {}
+        self.client_address = ("127.0.0.1", 12345)
+        self.status = None
+        self.wfile = BytesIO()
+        self.response_headers = []
+
+    def send_response(self, status):
+        self.status = status
+
+    def send_header(self, key, value):
+        self.response_headers.append((key, value))
+
+    def end_headers(self):
+        pass
+
+    def log_message(self, *args, **kwargs):
+        pass
+
+    @property
+    def response_json(self):
+        return json.loads(self.wfile.getvalue().decode("utf-8"))
 
 
 @pytest.fixture(autouse=True)
@@ -694,3 +723,198 @@ def test_sessions_route_preserves_visible_child_lineage_when_archived_parent_fil
         ]
     finally:
         conn.close()
+
+
+def test_sessions_route_dedupes_validated_compression_lineage_after_projection_merge(
+    _isolate,
+    monkeypatch,
+):
+    """Two materialized sidecars for one validated lineage return one canonical tip."""
+    conn = _ensure_state_db(_isolate)
+    _ensure_messages_table(conn)
+    t0 = time.time() - 100
+    try:
+        root = Session(
+            session_id="lineage_api_duplicate_root",
+            title="Old title must not split the lineage",
+            messages=[{"role": "user", "content": "old", "timestamp": t0 + 1}],
+            updated_at=t0 + 1,
+        )
+        root.save(touch_updated_at=False)
+        tip = Session(
+            session_id="lineage_api_duplicate_tip",
+            title="Current independent title",
+            messages=[
+                {"role": "user", "content": "new", "timestamp": t0 + 8},
+                {"role": "assistant", "content": "answer", "timestamp": t0 + 9},
+            ],
+            updated_at=t0 + 9,
+        )
+        tip.save(touch_updated_at=False)
+        _insert_state_row(
+            conn,
+            root.session_id,
+            started_at=t0,
+            ended_at=t0 + 5.02,
+            end_reason="compression",
+        )
+        _insert_state_row(
+            conn,
+            tip.session_id,
+            parent=root.session_id,
+            started_at=t0 + 5,
+        )
+        _insert_state_message(
+            conn,
+            root.session_id,
+            role="user",
+            content="old",
+            timestamp=t0 + 1,
+        )
+        _insert_state_message(
+            conn,
+            tip.session_id,
+            role="assistant",
+            content="answer",
+            timestamp=t0 + 9,
+        )
+
+        monkeypatch.setattr(routes, "all_sessions", models.all_sessions)
+        monkeypatch.setattr(
+            routes,
+            "_enrich_sidebar_lineage_metadata",
+            models._enrich_sidebar_lineage_metadata,
+        )
+        monkeypatch.setattr(
+            routes,
+            "_reconcile_stale_stream_state_for_session_rows",
+            lambda _sessions: False,
+        )
+
+        payload = routes._build_session_list_cache_payload(
+            active_profile="default",
+            all_profiles=False,
+            show_cli_sessions=False,
+            show_previous_messaging_sessions=False,
+            show_cron_sessions=False,
+            include_archived=False,
+        )
+
+        assert [row["session_id"] for row in payload["sessions"]] == [tip.session_id]
+        row = payload["sessions"][0]
+        assert row["_lineage_root_id"] == root.session_id
+        assert row["_lineage_tip_id"] == tip.session_id
+        assert row["_compression_segment_count"] == 2
+        assert row["message_count"] == 2
+        assert row["last_message_at"] == t0 + 9
+        assert row["updated_at"] == t0 + 9
+        assert row["title"] == "Current independent title"
+    finally:
+        conn.close()
+
+
+def test_stale_compression_detail_request_returns_canonical_tip(_isolate, monkeypatch):
+    conn = _ensure_state_db(_isolate)
+    _ensure_messages_table(conn)
+    t0 = time.time() - 100
+    try:
+        root = _save_webui_session(
+            "lineage_api_stale_detail_root",
+            title="Old route",
+            updated_at=t0 + 1,
+        )
+        tip = _save_webui_session(
+            "lineage_api_stale_detail_tip",
+            title="Canonical route",
+            updated_at=t0 + 9,
+        )
+        root.messages = [{"role": "user", "content": "root turn", "timestamp": t0 + 1}]
+        root.save(touch_updated_at=False)
+        tip.messages = [{"role": "assistant", "content": "tip turn", "timestamp": t0 + 9}]
+        tip.parent_session_id = root.session_id
+        tip.save(touch_updated_at=False)
+        _insert_state_row(
+            conn,
+            root.session_id,
+            started_at=t0,
+            ended_at=t0 + 5.02,
+            end_reason="compression",
+        )
+        _insert_state_row(
+            conn,
+            tip.session_id,
+            parent=root.session_id,
+            started_at=t0 + 5,
+        )
+        _insert_state_message(
+            conn,
+            root.session_id,
+            role="user",
+            content="root turn",
+            timestamp=t0 + 1,
+        )
+        _insert_state_message(
+            conn,
+            tip.session_id,
+            role="assistant",
+            content="tip turn",
+            timestamp=t0 + 9,
+        )
+        monkeypatch.setattr(models, "_active_state_db_path", lambda: _isolate)
+        monkeypatch.setattr(models, "_agent_state_db_path", lambda profile=None: _isolate)
+        monkeypatch.setattr(routes, "_agent_state_db_path", lambda profile=None: _isolate)
+
+        handler = _GetHandler(
+            f"/api/session?session_id={root.session_id}&messages=1&resolve_model=0"
+        )
+        routes.handle_get(handler, urlparse(handler.path))
+
+        assert handler.status == 200
+        session = handler.response_json["session"]
+        assert session["session_id"] == tip.session_id
+        assert [message["content"] for message in session["messages"]] == [
+            "root turn",
+            "tip turn",
+        ]
+    finally:
+        conn.close()
+
+
+def test_final_sidebar_lineage_dedupe_preserves_forks_delegates_and_subagents():
+    lineage = {
+        "_lineage_root_id": "root",
+        "_lineage_tip_id": "tip",
+        "_compression_segment_count": 2,
+        "profile": "default",
+    }
+    rows = routes._dedupe_canonical_sidebar_lineages(
+        [
+            {"session_id": "root", "updated_at": 1, **lineage},
+            {"session_id": "tip", "updated_at": 2, **lineage},
+            {
+                "session_id": "fork",
+                "session_source": "fork",
+                "updated_at": 3,
+                **lineage,
+            },
+            {
+                "session_id": "delegate",
+                "relationship_type": "child_session",
+                "updated_at": 4,
+                **lineage,
+            },
+            {
+                "session_id": "subagent",
+                "raw_source": "subagent",
+                "updated_at": 5,
+                **lineage,
+            },
+        ]
+    )
+
+    assert {row["session_id"] for row in rows} == {
+        "tip",
+        "fork",
+        "delegate",
+        "subagent",
+    }
