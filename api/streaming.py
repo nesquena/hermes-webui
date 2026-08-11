@@ -7956,6 +7956,22 @@ def _refresh_cached_agent_primary_runtime_snapshot(agent) -> None:
             rt['is_anthropic_oauth'] = getattr(agent, '_is_anthropic_oauth')
 
 
+def _goal_retry_event_has_observable_activity(event: str) -> bool:
+    """Return whether an emitted local SSE event makes replay unsafe."""
+    normalized = str(event or '').strip().lower()
+    return normalized.startswith((
+        'token',
+        'reason',
+        'tool',
+        'approval',
+        'clarify',
+        'process',
+        'bg_',
+        'assistant',
+        'intermediate',
+    ))
+
+
 def _run_agent_streaming(
     session_id,
     msg_text,
@@ -8338,11 +8354,15 @@ def _run_agent_streaming(
     _metering_thread = threading.Thread(target=_metering_ticker, daemon=True)
 
     _success_writeback_committed = False
+    _goal_retry_observable_activity = False
 
     def put(event, data):
+        nonlocal _goal_retry_observable_activity
         # If cancelled, drop all further events except the cancel event itself
         if cancel_event.is_set() and not _success_writeback_committed and event not in ('cancel', 'apperror'):
             return
+        if _goal_retry_event_has_observable_activity(event):
+            _goal_retry_observable_activity = True
         event_id = None
         if run_journal is not None:
             try:
@@ -10405,7 +10425,8 @@ def _run_agent_streaming(
                         )
 
                         _goal_retry_had_activity = bool(
-                            _token_sent
+                            _goal_retry_observable_activity
+                            or _token_sent
                             or STREAM_PARTIAL_TEXT.get(stream_id)
                             or STREAM_REASONING_TEXT.get(stream_id)
                             or STREAM_LIVE_TOOL_CALLS.get(stream_id)
@@ -10424,6 +10445,7 @@ def _run_agent_streaming(
                             session_id,
                             stream_id,
                             had_activity=_goal_retry_had_activity,
+                            cancellation_check=cancel_event.is_set,
                         ):
                             _goal_retry_record = get_goal_continuation(session_id) or {}
                             _goal_retry_attempts = int(_goal_retry_record.get('attempts') or 0)
@@ -10464,6 +10486,11 @@ def _run_agent_streaming(
                                 'session': redact_session_data(
                                     _session_payload_with_full_messages(s, tool_calls=s.tool_calls)
                                 ),
+                                'goal_retry_scheduled': True,
+                            })
+                            put('stream_end', {
+                                'session_id': session_id,
+                                'stream_id': stream_id,
                                 'goal_retry_scheduled': True,
                             })
                             return
@@ -12425,6 +12452,21 @@ def cancel_stream(stream_id: str) -> bool:
     # would race that teardown and return None.
     if not _cancel_session_id and _snap_owner_session_id:
         _cancel_session_id = _snap_owner_session_id
+    if _cancel_session_id:
+        try:
+            from api.goal_continuations import cancel_goal_continuation
+
+            cancel_goal_continuation(
+                _cancel_session_id,
+                stream_id,
+                reason="stream cancelled by user",
+            )
+        except Exception:
+            logger.warning(
+                "Failed to durably cancel goal continuation for stream %s",
+                stream_id,
+                exc_info=True,
+            )
     # Use the snapshots captured under streams_lock above (the worker's finally
     # may have popped the live buffers by now via agent.interrupt()). For the
     # ACTIVE_RUNS-only path (stream absent) the snapshots are None → fall back to

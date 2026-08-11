@@ -36,7 +36,15 @@ def test_gateway_chat_backend_is_default_off_for_truthy_values():
 
 
 def test_gateway_approval_and_tool_activity_block_automatic_empty_retry():
-    for event in ("approval", "clarify", "tool_call", "tool_result", "tool_progress"):
+    for event in (
+        "approval",
+        "clarify",
+        "tool_call",
+        "tool_result",
+        "tool_progress",
+        "tool",
+        "tool_complete",
+    ):
         assert gateway_chat._gateway_event_blocks_empty_retry(event) is True
     for event in ("warning", "status", "goal_status", "done", ""):
         assert gateway_chat._gateway_event_blocks_empty_retry(event) is False
@@ -863,6 +871,75 @@ def test_gateway_chat_worker_emits_goal_continue_for_goal_related_turn(tmp_path,
     assert goal_continue_event[1]["message_key"] == "goal_continuing"
     assert saved.messages[-1]["role"] == "assistant"
     assert saved.messages[-1]["content"] == "goal reply"
+
+
+def test_gateway_empty_goal_retry_closes_old_sse_before_next_turn(tmp_path, monkeypatch):
+    from api import goal_continuations as gc
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setattr(gc, "REGISTRY_PATH", tmp_path / "goal-continuations.json")
+    monkeypatch.setattr(gc, "_REGISTRY", None)
+    monkeypatch.setattr(gc, "OWNER_ID", "gateway-test-owner")
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: [DONE]\n\n'
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda req, timeout=0: FakeResponse())
+    s = new_session()
+    stream_id = "stream-gateway-empty-goal-retry"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "continue"
+    s.pending_user_source = "goal_continuation"
+    s.pending_attachments = []
+    s.pending_started_at = 123
+    s.save()
+    gc.schedule_goal_continuation(
+        s.session_id,
+        "continue",
+        source_stream_id="prior-judge-stream",
+        profile_home=tmp_path,
+        goal_turns_used=1,
+        now=100.0,
+    )
+    gc.drain_goal_continuations_once(
+        start_turn=lambda *_args, **_kwargs: {"stream_id": stream_id, "_status": 200},
+        is_goal_active=lambda *_args, **_kwargs: True,
+        now=101.0,
+    )
+    channel = create_stream_channel()
+    subscriber = channel.subscribe()
+    STREAMS[stream_id] = channel
+
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "continue",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+        goal_related=True,
+    )
+
+    events = []
+    while not subscriber.empty():
+        events.append(subscriber.get_nowait())
+    event_names = [item[0] for item in events]
+    assert "done" in event_names
+    assert "stream_end" in event_names
+    assert event_names.index("done") < event_names.index("stream_end")
+    assert gc.get_goal_continuation(s.session_id)["status"] == "pending"
 
 
 def test_gateway_chat_worker_skips_goal_judge_for_non_goal_turn(tmp_path, monkeypatch):

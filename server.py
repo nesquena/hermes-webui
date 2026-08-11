@@ -646,8 +646,6 @@ def main() -> None:
 
     try:
         from api.background_process import start_drain_thread
-        from api.goal_continuations import start_goal_continuation_worker
-        start_goal_continuation_worker()
         if start_drain_thread():
             print('[ok] bg_task_complete drain thread started', flush=True)
     except Exception as e:
@@ -668,6 +666,8 @@ def main() -> None:
 
     _abort_if_already_serving(HOST, PORT)
     httpd = QuietHTTPServer((HOST, PORT), Handler)
+    from api.goal_continuations import start_goal_continuation_worker
+    start_goal_continuation_worker()
 
     from api.config import TLS_ENABLED, TLS_CERT, TLS_KEY
     scheme = 'https' if TLS_ENABLED else 'http'
@@ -725,21 +725,19 @@ def main() -> None:
         _log_shutdown_audit()
         try:
             from api.gateway_watcher import stop_watcher
-            from api.goal_continuations import stop_goal_continuation_worker
-            stop_goal_continuation_worker()
             stop_watcher()
         except Exception:
             logger.debug("Failed to stop gateway watcher during shutdown")
-        try:
-            from api.session_lifecycle import drain_all_on_shutdown
-            drain_all_on_shutdown()
-        except Exception:
-            logger.debug("Failed to drain lifecycle on shutdown", exc_info=True)
         try:
             from api.background_process import stop_drain_thread
             stop_drain_thread()
         except Exception:
             logger.debug("Failed to stop bg_task_complete drain thread during shutdown", exc_info=True)
+        try:
+            from api.session_lifecycle import drain_all_on_shutdown
+            drain_all_on_shutdown()
+        except Exception:
+            logger.debug("Failed to drain lifecycle on shutdown", exc_info=True)
         try:
             from api.background_process import stop_session_channel_reaper
             stop_session_channel_reaper()

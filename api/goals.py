@@ -93,12 +93,20 @@ def _profile_db(profile_home: str | Path):
 class _ProfileGoalManager:
     """Small WebUI-local GoalManager adapter with explicit profile persistence."""
 
-    def __init__(self, session_id: str, *, profile_home: str | Path, default_max_turns: int = 20):
+    def __init__(
+        self,
+        session_id: str,
+        *,
+        profile_home: str | Path,
+        default_max_turns: int = 20,
+        strict_load: bool = False,
+    ):
         if GoalState is None:
             raise RuntimeError("Hermes goal state unavailable")
         self.session_id = session_id
         self.profile_home = Path(profile_home).expanduser().resolve()
         self.default_max_turns = int(default_max_turns or DEFAULT_MAX_TURNS or 20)
+        self.strict_load = bool(strict_load)
         self._state = self._load()
 
     @property
@@ -108,11 +116,15 @@ class _ProfileGoalManager:
     def _load(self):
         db = _profile_db(self.profile_home)
         if db is None or not self.session_id:
+            if self.strict_load:
+                raise RuntimeError("profile goal database unavailable")
             return None
         try:
             raw = db.get_meta(_meta_key(self.session_id))
         except Exception as exc:
             logger.debug("GoalManager profile get_meta failed: %s", exc)
+            if self.strict_load:
+                raise
             return None
         if not raw:
             return None
@@ -120,6 +132,8 @@ class _ProfileGoalManager:
             return GoalState.from_json(raw)  # type: ignore[union-attr]
         except Exception as exc:
             logger.warning("GoalManager profile state parse failed for %s: %s", self.session_id, exc)
+            if self.strict_load:
+                raise
             return None
 
     def _save(self, state) -> None:
@@ -626,6 +640,26 @@ def goal_state_snapshot(session_id: str, *, profile_home: str | Path | None = No
     return copy.deepcopy(getattr(mgr, "state", None))
 
 
+def goal_state_snapshot_strict(
+    session_id: str,
+    *,
+    profile_home: str | Path | None = None,
+) -> Any:
+    """Load goal state without converting I/O or parse failures to absence."""
+    if profile_home:
+        sid = str(session_id or "")
+        db = _profile_db(profile_home)
+        if db is None:
+            raise RuntimeError("profile goal database unavailable")
+        raw = db.get_meta(_meta_key(sid))
+        if not raw:
+            return None
+        if GoalState is None:
+            raise RuntimeError("Hermes goal state unavailable")
+        return copy.deepcopy(GoalState.from_json(raw))
+    return goal_state_snapshot(session_id, profile_home=profile_home)
+
+
 def restore_goal_state(session_id: str, snapshot: Any, *, profile_home: str | Path | None = None) -> None:
     """Restore a prior goal state after kickoff stream creation fails."""
     mgr = _manager(str(session_id or ""), profile_home=profile_home)
@@ -677,12 +711,25 @@ def goal_command_payload(
     text = str(args or "").strip()
     lower = text.lower()
 
+    def _cancel_durable_continuation(reason: str) -> None:
+        try:
+            from api.goal_continuations import cancel_goal_continuation
+
+            cancel_goal_continuation(sid, reason=reason)
+        except Exception:
+            logger.warning(
+                "Failed to durably cancel goal continuation for %s",
+                sid,
+                exc_info=True,
+            )
+
     if not text or lower == "status":
         state = getattr(mgr, "state", None)
         status_payload = _goal_status_payload(state)
         return _payload(action="status", state=state, **status_payload)
 
     if lower == "pause":
+        _cancel_durable_continuation("goal paused by user")
         state = mgr.pause(reason="user-paused")
         if state is None:
             return _payload(
@@ -723,6 +770,7 @@ def goal_command_payload(
 
     if lower in ("clear", "stop", "done"):
         had = bool(mgr.has_goal())
+        _cancel_durable_continuation("goal cleared by user")
         mgr.clear()
         return _payload(
             action="clear",

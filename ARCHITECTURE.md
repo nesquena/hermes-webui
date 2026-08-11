@@ -290,22 +290,27 @@ the server worker claims the intent and enters the ordinary `start_session_turn(
 The record carries a stable continuation id, originating stream, profile home, goal
 turn number, bounded attempt count, and claim owner. Every read-modify-write transaction
 holds a process-local lock **and** an OS file lock; durable replacement is atomic, fsynced,
-and mode `0600`. The owner id is regenerated after `fork()`, failed replacements invalidate
-the in-memory cache, and unreadable registries are quarantined with mode `0600`. Together
-these rules prevent lost updates and double dispatch across overlapping WebUI processes.
+and mode `0600`. One process also holds a lifetime worker-leadership lock, acquired only
+after the HTTP server owns its port. The owner id and process-local locks are regenerated
+after `fork()`, and each stream bind must match both the current owner and exact claim id.
+Invalid JSON is quarantined with mode `0600`; operating-system read errors propagate and
+fail closed instead of replacing temporarily inaccessible state. Together these rules
+prevent lost updates, stale binds, and double dispatch across overlapping WebUI processes.
 Repeated judge callbacks for the same source stream are idempotent, competing worker
 claims start at most one turn, and a restarted worker only requeues an active,
 unjudged goal intent. If the persisted goal counter already advanced, recovery derives a
 fresh prompt from the current goal state rather than replaying the stale attempted prompt.
 Completed or inactive goals are never resurrected.
 
-A provider result with no final answer, no token/reasoning/tool activity, and no
-explicit error is retryable only for a server-owned goal continuation. The current
-attempt is settled visibly as an automatic retry and the same intent is requeued with
-bounded exponential backoff. Any observed activity disables replay to avoid duplicate
-tool or external side effects. This mechanism persists the *next-turn intent*; it does
-not keep an in-process agent run alive across a WebUI service restart and is not a
-general-purpose browser queue.
+A provider result with no final answer, no token/reasoning/tool/approval/clarify/process
+activity, no cancellation, and no explicit error is retryable only for a server-owned
+goal continuation. The current attempt is settled visibly as an automatic retry, its SSE
+stream is explicitly closed, and the same intent is requeued with bounded exponential
+backoff. Any observed activity disables replay to avoid duplicate tool or external side
+effects. A WebUI-owned durable intent remains on the WebUI local/Gateway settlement path;
+it is never handed to `runner-local`, whose adapter contract owns its own post-turn goal
+evaluation. This mechanism persists the *next-turn intent*; it does not keep an in-process
+agent run alive across a WebUI service restart and is not a general-purpose browser queue.
 
 ### 4.4 Agent Invocation (_run_agent_streaming)
 

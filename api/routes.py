@@ -2894,6 +2894,7 @@ from api.config import (
     ACTIVE_RUNS_LOCK,
     register_stream_owner,
     register_session_writeback_owner,
+    clear_session_writeback_owner_if_owned,
     stream_owner_session_id,
     unregister_stream_owner,
     CHAT_LOCK,
@@ -21708,6 +21709,7 @@ def _start_chat_stream_for_session(
     source: str = "webui",
     moa_config=None,
     external_runtime_owned: bool | None = None,
+    continuation_claim_id: str | None = None,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn."""
     if external_runtime_owned is None:
@@ -21792,7 +21794,11 @@ def _start_chat_stream_for_session(
                 if source == "goal_continuation":
                     from api.goal_continuations import bind_goal_continuation_stream
 
-                    if not bind_goal_continuation_stream(s.session_id, stream_id):
+                    if not bind_goal_continuation_stream(
+                        s.session_id,
+                        stream_id,
+                        claim_id=continuation_claim_id,
+                    ):
                         return {
                             "error": "durable goal continuation claim is no longer current",
                             "_status": 409,
@@ -21891,6 +21897,27 @@ def _start_chat_stream_for_session(
                 _clear_gateway_run_starting(stream_id)
             except Exception:
                 logger.debug("Failed to record gateway run-start failure for stream %s", stream_id, exc_info=True)
+        with STREAMS_LOCK:
+            STREAMS.pop(stream_id, None)
+            STREAM_GOAL_RELATED.pop(stream_id, None)
+        unregister_stream_owner(stream_id)
+        clear_session_writeback_owner_if_owned(s.session_id, stream_id)
+        if getattr(s, "active_stream_id", None) == stream_id:
+            s.active_stream_id = None
+            s.pending_user_message = None
+            s.pending_attachments = []
+            s.pending_started_at = None
+            s.pending_user_source = None
+            try:
+                save_session = getattr(s, "save", None)
+                if callable(save_session):
+                    save_session()
+            except Exception:
+                logger.warning(
+                    "Failed to persist stream-start rollback for session %s",
+                    s.session_id,
+                    exc_info=True,
+                )
         raise
     response = {
         "stream_id": stream_id,
@@ -21973,6 +22000,7 @@ def _start_run(
     moa_config=None,
     gateway_chat_enabled: bool | None = None,
     goal_related: bool = False,
+    continuation_claim_id: str | None = None,
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
 
@@ -22000,6 +22028,32 @@ def _start_run(
         runtime_adapter_runner_enabled,
     )
 
+    def _direct_start():
+        return _start_chat_stream_for_session(
+            s,
+            msg=msg,
+            attachments=attachments,
+            workspace=workspace,
+            model=model,
+            model_provider=model_provider,
+            normalized_model=normalized_model,
+            diag=diag,
+            source=source,
+            moa_config=moa_config,
+            external_runtime_owned=gateway_chat_enabled,
+            goal_related=goal_related,
+            continuation_claim_id=continuation_claim_id,
+        )
+
+    # A runner-owned continuation must stay with the WebUI scheduler.  The
+    # legacy adapter remains valid when it is explicitly enabled.
+    if (
+        source == "goal_continuation"
+        and runtime_adapter_runner_enabled()
+        and not runtime_adapter_enabled()
+    ):
+        return _direct_start()
+
     if runtime_adapter_enabled() or runtime_adapter_runner_enabled():
         def _legacy_start_run(request: StartRunRequest) -> dict:
             request_source = request.source or source
@@ -22018,6 +22072,7 @@ def _start_run(
                 source=request_source,
                 moa_config=moa_config,
                 external_runtime_owned=gateway_chat_enabled,
+                continuation_claim_id=continuation_claim_id,
             )
 
         def _legacy_adapter_factory():
@@ -22063,6 +22118,7 @@ def _start_run(
         source=source,
         moa_config=moa_config,
         external_runtime_owned=gateway_chat_enabled,
+        continuation_claim_id=continuation_claim_id,
     )
 
 
@@ -22122,6 +22178,7 @@ def start_session_turn(
     message: str,
     *,
     source: str = "process_wakeup",
+    continuation_claim_id: str | None = None,
 ):
     """Start a server-side agent turn for ``session_id`` with ``message``.
 
@@ -22314,6 +22371,7 @@ def start_session_turn(
         source=turn_source,
         route="start_session_turn",
         goal_related=(turn_source == "goal_continuation"),
+        continuation_claim_id=continuation_claim_id,
     )
 
     # ── Defect B: live-view of server-initiated turns ──────────────────────
