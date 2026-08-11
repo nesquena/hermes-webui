@@ -1775,16 +1775,16 @@ def test_start_chat_stream_clears_gateway_run_state_when_thread_start_fails(monk
     monkeypatch.setattr(routes, "threading", SimpleNamespace(Thread=_BoomThread))
 
     with patch("api.turn_journal.append_turn_journal_event", return_value={}):
-        with pytest.raises(RuntimeError, match="thread start failed"):
-            routes._start_chat_stream_for_session(
-                session,
-                msg="hi",
-                attachments=[],
-                workspace="/tmp",
-                model="test-model",
-                external_runtime_owned=True,
-            )
+        response = routes._start_chat_stream_for_session(
+            session,
+            msg="hi",
+            attachments=[],
+            workspace="/tmp",
+            model="test-model",
+            external_runtime_owned=True,
+        )
 
+    assert response == {"error": "failed to start agent worker", "_status": 500}
     assert gateway_chat.gateway_run_id_pending(recorded["stream_id"]) is False
     assert recorded["stream_id"] not in getattr(gateway_chat, "_STREAM_RUN_LIFECYCLE", {})
 

@@ -2038,7 +2038,12 @@ async function loadSession(sid){
   try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
   _setActiveSessionUrl(S.session.session_id);
   if(typeof startSessionStream==='function') startSessionStream(S.session.session_id);
-  if(typeof syncBackendSessionQueue==='function') syncBackendSessionQueue(S.session.session_id);
+  if(typeof syncBackendSessionQueue==='function'){
+    try{await syncBackendSessionQueue(S.session.session_id);}
+    catch(err){
+      if(typeof showToast==='function')showToast('Could not reconcile queued messages: '+(err&&err.message||err),null,'error');
+    }
+  }
 
 
   // _mergePendingSessionMessage is the global identity-aware helper shared by
@@ -2235,31 +2240,6 @@ async function loadSession(sid){
     }
     // Stale? A newer loadSession() call has already started (#1060).
     if (!_isCurrentLoad()) return;
-
-    // Restore any queued message that survived page refresh or tab restore.
-    if(typeof queueSessionMessage==='function'){
-      try{
-        const _entries=typeof _readPersistedSessionQueue==='function'
-          ? _readPersistedSessionQueue(sid)
-          : [];
-        if(Array.isArray(_entries)&&_entries.length){
-          const _lastMsg=S.messages.slice().reverse()
-            .find(m=>m&&m.role==='assistant');
-          const _lastAsst=_lastMsg?(_lastMsg.timestamp||_lastMsg._ts||0)*1000:0;
-          const _fresh=_entries.filter(e=>!e._queued_at||e._queued_at>_lastAsst);
-          if(_fresh.length){
-            const _first=_fresh[0];
-            const _msg=$&&$('msg');
-            if(_msg&&_first.text&&!_msg.value){
-              _msg.value=_first.text||'';
-              if(typeof autoResize==='function') autoResize();
-              if(typeof showToast==='function') showToast((_fresh.length>1?`${_fresh.length} queued messages restored (showing first)`:'Queued message restored')+' — review and send when ready');
-            }
-          }
-          if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);
-        }
-      }catch(_){if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);}
-    }
 
     // Reconstruct tool calls from message metadata, or fall back to session-level summary.
     // (hasMessageToolMetadata already computed inside _ensureMessagesLoaded; S.toolCalls set there.)

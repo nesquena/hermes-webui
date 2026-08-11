@@ -13705,8 +13705,12 @@ def handle_get(handler, parsed) -> bool:
             get_session(sid)
         except KeyError:
             return bad(handler, "Session not found", 404)
-        from api.session_queue import list_queue
-        return j(handler, {"ok": True, "session_id": sid, "items": list_queue(sid)})
+        from api.session_queue import QueueStorageError, list_queue
+        try:
+            items = list_queue(sid)
+        except QueueStorageError as exc:
+            return bad(handler, str(exc), 503)
+        return j(handler, {"ok": True, "session_id": sid, "items": items})
 
     if parsed.path == "/api/session/stream":
         return _handle_session_sse_stream(handler, parsed)
@@ -15641,6 +15645,15 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/session/queue/delete":
         return _handle_session_queue_delete(handler, body)
+
+    if parsed.path == "/api/session/queue/reorder":
+        return _handle_session_queue_reorder(handler, body)
+
+    if parsed.path == "/api/session/queue/combine":
+        return _handle_session_queue_combine(handler, body)
+
+    if parsed.path == "/api/session/queue/clear":
+        return _handle_session_queue_clear(handler, body)
 
     if parsed.path == "/api/chat/start":
         return _handle_chat_start(handler, body, diag=diag)
@@ -21331,6 +21344,8 @@ def _prepare_chat_start_session_for_stream(
     stream_id: str,
     started_at: float | None = None,
     source: str = "webui",
+    queue_item_id: str | None = None,
+    queue_client_id: str | None = None,
 ):
     """Persist chat-start state according to webui.session_save_mode.
 
@@ -21351,6 +21366,8 @@ def _prepare_chat_start_session_for_stream(
     s.pending_attachments = attachments
     s.pending_started_at = started_at if started_at is not None else time.time()
     s.pending_user_source = source
+    s.pending_queue_item_id = str(queue_item_id or "").strip() or None
+    s.pending_queue_client_id = str(queue_client_id or "").strip() or None
     current_title = getattr(s, "title", None)
     if _is_default_or_empty_session_title(current_title):
         provisional_title = _provisional_title_from_prompt(msg, current_title or "Untitled")
@@ -21545,6 +21562,8 @@ def _start_chat_stream_for_session(
     source: str = "webui",
     moa_config=None,
     external_runtime_owned: bool | None = None,
+    queue_item_id: str | None = None,
+    queue_client_id: str | None = None,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn."""
     if external_runtime_owned is None:
@@ -21625,6 +21644,8 @@ def _start_chat_stream_for_session(
                     model_provider=model_provider,
                     stream_id=stream_id,
                     source=source,
+                    queue_item_id=queue_item_id,
+                    queue_client_id=queue_client_id,
                 )
                 break
         if needs_stale_cleanup:
@@ -21659,6 +21680,8 @@ def _start_chat_stream_for_session(
                 "model": model,
                 "model_provider": model_provider,
                 "created_at": s.pending_started_at,
+                **({"queue_item_id": str(queue_item_id)} if queue_item_id else {}),
+                **({"queue_client_id": str(queue_client_id)} if queue_client_id else {}),
             },
         )
     except Exception:
@@ -21698,7 +21721,29 @@ def _start_chat_stream_for_session(
                 _clear_gateway_run_starting(stream_id)
             except Exception:
                 logger.debug("Failed to record gateway run-start failure for stream %s", stream_id, exc_info=True)
-        raise
+        with STREAMS_LOCK:
+            STREAMS.pop(stream_id, None)
+        unregister_stream_owner(stream_id)
+        try:
+            from api.config import clear_session_writeback_owner_if_owned
+
+            clear_session_writeback_owner_if_owned(s.session_id, stream_id)
+        except Exception:
+            logger.debug("Failed to clear writeback owner after worker start failure", exc_info=True)
+        with session_lock:
+            if getattr(s, "active_stream_id", None) == stream_id:
+                s.active_stream_id = None
+                s.pending_user_message = None
+                s.pending_attachments = []
+                s.pending_started_at = None
+                s.pending_user_source = None
+                s.pending_queue_item_id = None
+                s.pending_queue_client_id = None
+                try:
+                    s.save(touch_updated_at=False)
+                except Exception:
+                    logger.exception("Failed to persist worker start failure cleanup for %s", s.session_id)
+        return {"error": "failed to start agent worker", "_status": 500}
     response = {
         "stream_id": stream_id,
         "session_id": s.session_id,
@@ -21779,6 +21824,8 @@ def _start_run(
     diag=None,
     moa_config=None,
     gateway_chat_enabled: bool | None = None,
+    queue_item_id: str | None = None,
+    queue_client_id: str | None = None,
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
 
@@ -21820,6 +21867,8 @@ def _start_run(
                 source=request.source or source,
                 moa_config=moa_config,
                 external_runtime_owned=gateway_chat_enabled,
+                queue_item_id=queue_item_id,
+                queue_client_id=queue_client_id,
             )
 
         def _legacy_adapter_factory():
@@ -21842,7 +21891,11 @@ def _start_run(
                     provider=model_provider,
                     model=model,
                     source=source,
-                    metadata={"route": route},
+                    metadata={
+                        "route": route,
+                        **({"queue_item_id": str(queue_item_id)} if queue_item_id else {}),
+                        **({"queue_client_id": str(queue_client_id)} if queue_client_id else {}),
+                    },
                 )
             )
         except NotImplementedError as exc:
@@ -21861,6 +21914,8 @@ def _start_run(
         source=source,
         moa_config=moa_config,
         external_runtime_owned=gateway_chat_enabled,
+        queue_item_id=queue_item_id,
+        queue_client_id=queue_client_id,
     )
 
 
@@ -21924,6 +21979,7 @@ def start_session_turn(
     requested_model=None,
     requested_provider=None,
     queue_item_id: str | None = None,
+    queue_client_id: str | None = None,
 ):
     """Start a server-side agent turn for ``session_id`` with ``message``.
 
@@ -22120,6 +22176,8 @@ def start_session_turn(
         normalized_model=normalized_model,
         source=turn_source,
         route="start_session_turn",
+        queue_item_id=queue_item_id,
+        queue_client_id=queue_client_id,
     )
 
     # ── Defect B: live-view of server-initiated turns ──────────────────────
@@ -22153,6 +22211,7 @@ def start_session_turn(
                         "pending_started_at": (resp or {}).get("pending_started_at"),
                         "source": source,
                         **({"queue_item_id": str(queue_item_id)} if queue_item_id else {}),
+                        **({"queue_client_id": str(queue_client_id)} if queue_client_id else {}),
                     },
                 )
     except Exception:
@@ -22173,10 +22232,21 @@ def _handle_session_queue_enqueue(handler, body):
         get_session(sid)
     except KeyError:
         return bad(handler, "Session not found", 404)
-    from api.session_queue import drain_for_session, enqueue, list_queue
+    from api.session_queue import (
+        QueueCapacityError,
+        QueueItemConflictError,
+        QueueStorageError,
+        drain_for_session,
+        enqueue,
+        list_queue,
+    )
 
     try:
         item = enqueue(sid, body)
+    except QueueStorageError as e:
+        return bad(handler, str(e), 503)
+    except (QueueCapacityError, QueueItemConflictError) as e:
+        return bad(handler, str(e), 409)
     except ValueError as e:
         return bad(handler, str(e), 400)
     drain_for_session(sid)
@@ -22194,9 +22264,14 @@ def _handle_session_queue_update(handler, body):
         get_session(sid)
     except KeyError:
         return bad(handler, "Session not found", 404)
-    from api.session_queue import list_queue, update_item
+    from api.session_queue import QueueItemConflictError, QueueStorageError, list_queue, update_item
 
-    item = update_item(sid, str(body.get("id") or ""), body)
+    try:
+        item = update_item(sid, str(body.get("id") or ""), body)
+    except QueueStorageError as e:
+        return bad(handler, str(e), 503)
+    except QueueItemConflictError as e:
+        return bad(handler, str(e), 409)
     if item is None:
         return bad(handler, "Queued item not found", 404)
     return j(handler, {"ok": True, "session_id": sid, "item": item, "items": list_queue(sid)})
@@ -22213,12 +22288,78 @@ def _handle_session_queue_delete(handler, body):
         get_session(sid)
     except KeyError:
         return bad(handler, "Session not found", 404)
-    from api.session_queue import delete_item, list_queue
+    from api.session_queue import QueueItemConflictError, QueueStorageError, delete_item, list_queue
 
-    deleted = delete_item(sid, str(body.get("id") or ""))
+    try:
+        deleted = delete_item(sid, str(body.get("id") or ""))
+    except QueueStorageError as e:
+        return bad(handler, str(e), 503)
+    except QueueItemConflictError as e:
+        return bad(handler, str(e), 409)
     if not deleted:
         return bad(handler, "Queued item not found", 404)
     return j(handler, {"ok": True, "session_id": sid, "deleted": True, "items": list_queue(sid)})
+
+
+def _handle_session_queue_reorder(handler, body):
+    return _handle_session_queue_order_mutation(handler, body, operation="reorder")
+
+
+def _handle_session_queue_combine(handler, body):
+    return _handle_session_queue_order_mutation(handler, body, operation="combine")
+
+
+def _handle_session_queue_order_mutation(handler, body, *, operation: str):
+    try:
+        require(body, "session_id")
+        require(body, "ordered_ids")
+    except ValueError as e:
+        return bad(handler, str(e))
+    sid = str(body.get("session_id") or "").strip()
+    try:
+        get_session(sid)
+    except KeyError:
+        return bad(handler, "Session not found", 404)
+    from api.session_queue import (
+        QueueItemConflictError,
+        QueueStorageError,
+        combine_items,
+        reorder_items,
+    )
+
+    try:
+        if operation == "combine":
+            items = combine_items(sid, body.get("ordered_ids") or [])
+        else:
+            items = reorder_items(sid, body.get("ordered_ids") or [])
+    except ValueError as e:
+        return bad(handler, str(e), 400)
+    except QueueItemConflictError as e:
+        return bad(handler, str(e), 409)
+    except QueueStorageError as e:
+        return bad(handler, str(e), 503)
+    return j(handler, {"ok": True, "session_id": sid, "items": items})
+
+
+def _handle_session_queue_clear(handler, body):
+    try:
+        require(body, "session_id")
+    except ValueError as e:
+        return bad(handler, str(e))
+    sid = str(body.get("session_id") or "").strip()
+    try:
+        get_session(sid)
+    except KeyError:
+        return bad(handler, "Session not found", 404)
+    from api.session_queue import QueueItemConflictError, QueueStorageError, clear_queue
+
+    try:
+        deleted = clear_queue(sid)
+    except QueueItemConflictError as e:
+        return bad(handler, str(e), 409)
+    except QueueStorageError as e:
+        return bad(handler, str(e), 503)
+    return j(handler, {"ok": True, "session_id": sid, "deleted": deleted, "items": []})
 
 
 

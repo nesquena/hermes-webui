@@ -277,6 +277,20 @@ Queue requirements:
 - drains only into its original session
 - respects Edit/Delete after recovery
 - protects zero-message sessions that still contain draft or queued intent
+- backend persistence is authoritative once enqueue is acknowledged; browser
+  storage is only a recovery cache for an acknowledgement still in flight
+- every enqueue carries a stable `client_queue_id`, and retrying that key is
+  idempotent rather than creating a second queue owner
+- queue order and edit/delete/reorder/combine/clear mutations are committed by
+  the backend before WebUI changes the visible authoritative state
+- dispatch follows durable `queued -> starting -> started` transitions;
+  exhausted start retries become visible `blocked` items
+- only one dispatcher may claim the FIFO head for a session at a time
+- the durable item is retired only after the correlated stream has settled;
+  startup recovery repairs a crash-interrupted `starting` transition and does
+  not resubmit an item already correlated to a live stream
+- corrupt or unwritable queue storage fails closed; capacity never evicts an
+  older acknowledged intent
 
 Steer requirements:
 

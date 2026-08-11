@@ -671,6 +671,15 @@ def main() -> None:
     _abort_if_already_serving(HOST, PORT)
     httpd = QuietHTTPServer((HOST, PORT), Handler)
 
+    try:
+        from api.session_queue import recover_all_queues
+
+        queue_recovery = recover_all_queues(schedule=True)
+        if queue_recovery.get("sessions") or queue_recovery.get("errors"):
+            print(f'[ok] Session queue recovery: {queue_recovery}', flush=True)
+    except Exception as e:
+        print(f'[!!] WARNING: Session queue recovery failed: {e}', flush=True)
+
     from api.config import TLS_ENABLED, TLS_CERT, TLS_KEY
     scheme = 'https' if TLS_ENABLED else 'http'
     if TLS_ENABLED:

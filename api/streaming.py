@@ -11917,8 +11917,9 @@ def _run_agent_streaming(
         # every WebUI tab is disconnected. The queue drain has the same active
         # run guard and 409 requeue behavior as process wakeups.
         try:
-            from api.session_queue import drain_for_session
+            from api.session_queue import complete_started, drain_for_session
 
+            complete_started(session_id, stream_id)
             drain_for_session(session_id)
         except Exception:
             logger.debug(
