@@ -801,3 +801,40 @@ def test_standby_worker_retries_leadership(continuation_store, monkeypatch):
     assert gc.start_goal_continuation_worker() is True
     assert acquired.wait(1)
     assert gc.stop_goal_continuation_worker(timeout=1) is True
+
+
+def test_profile_goal_manager_accepts_current_five_field_judge_result(monkeypatch):
+    import api.goals as goals
+
+    state = SimpleNamespace(
+        goal="finish the durable workflow",
+        status="active",
+        turns_used=0,
+        max_turns=4,
+        last_turn_at=0.0,
+        last_verdict=None,
+        last_reason=None,
+        paused_reason=None,
+    )
+    manager = object.__new__(goals._ProfileGoalManager)
+    manager.session_id = "session-a"
+    manager.profile_home = Path("/profiles/default")
+    manager.default_max_turns = 4
+    manager.strict_load = False
+    manager._state = state
+    manager._save = lambda _state: None
+
+    monkeypatch.setattr(
+        goals,
+        "judge_goal",
+        lambda *_args, **_kwargs: ("continue", "result missing", False, None, False),
+    )
+    monkeypatch.setattr(goals, "CONTINUATION_PROMPT_TEMPLATE", "Continue: {goal}")
+
+    decision = manager.evaluate_after_turn("INCOMPLETE", user_initiated=True)
+
+    assert state.turns_used == 1
+    assert state.last_verdict == "continue"
+    assert state.last_reason == "result missing"
+    assert decision["should_continue"] is True
+    assert decision["continuation_prompt"] == "Continue: finish the durable workflow"
