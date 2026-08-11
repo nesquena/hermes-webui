@@ -7581,6 +7581,13 @@ def _run_agent_streaming(
     _checkpoint_stop = None
     _ckpt_thread = None
     _agent_lock = None
+    # #6327 ownership-loss settlement: set when this worker refused the owner
+    # at its sink (claim refused).  The outer finally must NEVER repair/save a
+    # non-canonical owner — on ownership loss the provisional pending state is
+    # retired/redelivered by the claim path, and the stale-finalizer
+    # (_last_resort_sync_from_core) is skipped so a stale session is never
+    # mutated or saved.
+    _ownership_loss_settled = False
     try:
         # Register this stream with the global streaming meter and start the 1 Hz
         # metering ticker. Kept INSIDE the outer try so the outer `finally`'s
@@ -7621,6 +7628,12 @@ def _run_agent_streaming(
                 requeue_wakeup=(_turn_pending_source == "process_wakeup"),
             )
             if _worker_mismatch is not None:
+                # #6327 ownership-loss settlement: the canonical owner moved
+                # before this worker's first side effect.  Mark the loss so the
+                # outer finally never runs the stale-finalizer on the
+                # non-canonical object (its provisional state was already
+                # retired/redelivered by the claim path).
+                _ownership_loss_settled = True
                 logger.warning(
                     "stream worker %s refused owner for session %s: %s",
                     stream_id,
@@ -9174,10 +9187,31 @@ def _run_agent_streaming(
             # the sink and refuse with an apperror (retire + re-defer) instead
             # of calling the provider on a replaced session.
             if owner_token is not None:
-                from api.routes import _worker_retire_pending_state, _worker_sink_owner_fence
+                from api.routes import (
+                    _worker_retire_pending_state,
+                    _worker_sink_accept_call,
+                )
 
-                _sink_mismatch = _worker_sink_owner_fence(owner_token, s)
+                # #6327 accepted-claim rule: instead of a check-return-call
+                # fence (re-verify the owner under AGENT, return, then call
+                # the provider later — leaving a same-SID replacement window
+                # before the sink), the versioned sink claim installed at
+                # worker start is compare-and-accepted and held across the
+                # actual provider call.  Replacement/compression invalidates
+                # the claim, so a stale worker is refused HERE and never
+                # reaches the provider.
+                _sink_mismatch, _sink_result = _worker_sink_accept_call(
+                    owner_token,
+                    s,
+                    stream_id,
+                    lambda: agent.run_conversation(**_run_conversation_kwargs),
+                )
                 if _sink_mismatch is not None:
+                    # #6327 ownership-loss settlement: mark the loss so the
+                    # outer finally NEVER calls _last_resort_sync_from_core on
+                    # the non-canonical owner (it can append rows, clear
+                    # pending state, and save the stale session).
+                    _ownership_loss_settled = True
                     logger.warning(
                         "stream worker %s refused owner at provider sink for session %s: %s",
                         stream_id,
@@ -9200,7 +9234,9 @@ def _run_agent_streaming(
                         "_status": 409,
                     })
                     return  # apperror closes the stream on the client side
-            result = agent.run_conversation(**_run_conversation_kwargs)
+                result = _sink_result
+            else:
+                result = agent.run_conversation(**_run_conversation_kwargs)
             # #4729: the run is done — flush any reasoning tail still in the coalescing
             # buffer (the agent never calls reasoning_callback(None), and a turn can end on
             # reasoning with no trailing token/tool boundary to trigger a flush) so the last
@@ -11092,9 +11128,24 @@ def _run_agent_streaming(
             _ckpt_thread.join(timeout=15)
         if (s is not None
                 and getattr(s, 'active_stream_id', None) == stream_id
-                and getattr(s, 'pending_user_message', None)):
+                and getattr(s, 'pending_user_message', None)
+                and not _ownership_loss_settled):
             update_active_run(stream_id, phase="finalizing")
             _last_resort_sync_from_core(s, stream_id, _agent_lock)
+        # #6327 accepted-claim cleanup: drop the sink claim this worker
+        # installed so a refused/normal exit never leaks a claim registry
+        # entry for (session_id, stream_id).
+        try:
+            from api.routes import _worker_clear_sink_claim
+
+            _worker_clear_sink_claim(session_id, stream_id)
+        except Exception:
+            logger.debug(
+                "failed to clear worker sink claim for session %s stream %s",
+                session_id,
+                stream_id,
+                exc_info=True,
+            )
         _clear_thread_env()  # TD1: always clear thread-local context
         if _streaming_cron_profile_home_token is not None:
             _STREAMING_CRON_PROFILE_HOME.reset(_streaming_cron_profile_home_token)

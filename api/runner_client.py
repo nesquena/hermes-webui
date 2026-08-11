@@ -28,6 +28,28 @@ def runner_client_configured(environ: dict[str, str] | None = None) -> bool:
     return bool(str(source.get(_RUNNER_BASE_URL_ENV) or "").strip())
 
 
+def _runner_owner_fence_schema_error(fence) -> str | None:
+    """Return an error string when *fence* is not a COMPLETE owner claim.
+
+    #6327: transport (a non-empty dict) is not acceptance — every field the
+    receiver needs to compare-and-accept the run under owner authority must
+    be present: the exact SID, profile + home generation, the credential-state
+    generation, the full route lane, and the run claim version.
+    """
+    if not isinstance(fence, dict) or not fence:
+        return "owner_fence must be a non-empty generation/route claim"
+    for field in ("session_id", "profile", "profile_home", "generation", "version"):
+        if not str(fence.get(field) or "").strip():
+            return f"owner_fence missing required field '{field}'"
+    route = fence.get("route")
+    if not isinstance(route, dict):
+        return "owner_fence missing required 'route' object"
+    for field in ("workspace", "model", "provider"):
+        if not str(route.get(field) or "").strip():
+            return f"owner_fence.route missing required field '{field}'"
+    return None
+
+
 class HttpRunnerClient:
     """Small JSON HTTP client for the external/supervised runner boundary."""
 
@@ -57,19 +79,18 @@ class HttpRunnerClient:
         # #6327 runner acceptance (fail closed): the owner fence is claimed
         # under the WebUI per-session AGENT lock right before this call; the
         # runner validates/records the generation so an unowned run is never
-        # acknowledged.  Refuse to even POST a run that carries no non-empty
-        # fence — a run without owner authority must never reach the runner.
+        # acknowledged.  A non-empty JSON dictionary is TRANSPORT, not
+        # acceptance: the fence must carry the complete generation/route
+        # schema (SID + profile/home + generation + route lane + claim
+        # version), and the runner must echo the accepted fence back in its
+        # response before the run is treated as started.
         fence = request.owner_fence
-        if (
-            not isinstance(fence, dict)
-            or not fence
-            or not str(fence.get("session_id") or "").strip()
-        ):
+        schema_error = _runner_owner_fence_schema_error(fence)
+        if schema_error is not None:
             raise RunnerClientError(
-                "refusing to start an unowned run: owner_fence must be a non-empty "
-                "generation/route fence claimed under the session owner's lock"
+                f"refusing to start an unowned run: {schema_error}"
             )
-        return self._post("/v1/runs", {
+        payload = self._post("/v1/runs", {
             "session_id": request.session_id,
             "message": request.message,
             "attachments": list(request.attachments or []),
@@ -82,6 +103,19 @@ class HttpRunnerClient:
             "metadata": dict(request.metadata or {}),
             "owner_fence": dict(fence),
         })
+        # Receiver compare-and-accept: without the runner echoing the claimed
+        # SID + generation the run is NOT started — never acknowledge a run
+        # the receiver did not explicitly accept under owner authority.
+        accepted = payload.get("owner_fence") if isinstance(payload, dict) else None
+        if (
+            not isinstance(accepted, dict)
+            or str(accepted.get("session_id") or "") != str(fence.get("session_id") or "")
+            or str(accepted.get("generation") or "") != str(fence.get("generation") or "")
+        ):
+            raise RunnerClientError(
+                "runner did not compare-and-accept the owner fence; run not started"
+            )
+        return payload
 
     def observe_run(self, run_id: str, *, cursor: str | None = None) -> dict[str, Any]:
         query = ""

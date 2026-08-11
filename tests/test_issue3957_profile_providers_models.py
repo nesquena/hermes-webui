@@ -3610,19 +3610,31 @@ def _register_stream_owner(session_id, stream_id):
 
 
 class _FakeRunnerClient:
-    """Runner-client stand-in recording the owner fence of every start_run."""
+    """Runner-client stand-in recording the owner fence of every start_run
+    and simulating the receiver compare-and-accept (echo of SID + generation)."""
 
     def __init__(self, posts):
         self._posts = posts
 
     def start_run(self, request):
-        self._posts.append(dict(request.owner_fence or {}))
+        fence = request.owner_fence
+        assert isinstance(fence, dict) and fence, (
+            "runner must receive a complete owner fence"
+        )
+        assert fence.get("session_id") and fence.get("generation")
+        self._posts.append(dict(fence))
         return {
             "run_id": "run-1",
             "stream_id": "run-1",
             "session_id": request.session_id,
             "status": "started",
             "_status": 200,
+            # #6327 receiver compare-and-accept echo.
+            "owner_fence": {
+                "session_id": fence["session_id"],
+                "generation": fence["generation"],
+                "accepted": True,
+            },
         }
 
 
@@ -4033,9 +4045,490 @@ def test_runner_local_replacement_before_runner_call_refuses_with_fence(
         assert fence["session_id"] == sid
         assert fence["profile"] == "alpha"
         assert fence["generation"]
+        assert fence.get("version"), "runner fence must carry the run claim version"
         assert fence["route"]["provider"] == "test-provider"
         assert deferred == []
         _assert_no_ownership_lock_leak(proxy)
     finally:
         with config.LOCK:
             config.SESSIONS.pop(sid, None)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# #6327 — B6: accepted-claim sink barriers, stale-finalizer settlement, and
+# validate-before-mutate
+#
+# The review (2026-08-10) requires: (1) replace check-return-call sink fences
+# with versioned accepted claims for direct, Gateway runs, legacy Gateway chat
+# completions, and runner-local; (2) an ownership-loss settlement state so the
+# outer finalizer never repairs/saves a non-canonical owner after a sink
+# refusal; (3) owner-fence validation BEFORE any pending-state/marker mutation.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_start_chat_stream_fence_before_pending_mutation(monkeypatch, tmp_path):
+    """#6327 validate-before-mutate: _start_chat_stream_for_session must run
+    the owner fence BEFORE clearing stale stream state or consuming pending
+    goal/background markers.  On mismatch it returns 409 with the stale object
+    completely untouched — no stale-state cleanup, no marker consumption, no
+    pending write, no save."""
+    import api.routes as routes
+    import api.streaming as streaming
+
+    session, calls, proxy = _install_immutable_owner_token_fixture(
+        monkeypatch, tmp_path, recovered=True
+    )
+    sid = session.session_id
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda *a, **k: False)
+    _ok_stream_id = None
+    try:
+        token, owner, _revalidation = _build_token_and_revalidate(routes, sid)
+        assert owner is session
+
+        # Stale stream state + pending markers that MUST survive a fence miss.
+        session.active_stream_id = "stale-stream"
+        session.pending_user_message = "hello"
+        config.PENDING_GOAL_CONTINUATION.add(sid)
+        config.PENDING_BG_TASK_COMPLETIONS.add(sid)
+
+        prepared = []
+        monkeypatch.setattr(
+            routes,
+            "_prepare_chat_start_session_for_stream",
+            lambda *a, **k: prepared.append(k),
+        )
+
+        replacement = _StreamingFakeSession(sid, "beta", tmp_path, "stale-stream")
+        with config.LOCK:
+            config.SESSIONS[sid] = replacement
+
+        resp = routes._start_chat_stream_for_session(
+            session,
+            msg="hello",
+            attachments=[],
+            workspace=str(tmp_path),
+            model="test-model",
+            model_provider="test-provider",
+            normalized_model=False,
+            owner_token=token,
+        )
+        assert resp["_status"] == 409, resp
+        assert resp["owner_fence"] == "owner_replaced", resp
+        # No mutation happened: stale stream state intact, markers NOT
+        # consumed, pending state NOT written, nothing saved.
+        assert session.active_stream_id == "stale-stream"
+        assert session.pending_user_message == "hello"
+        assert sid in config.PENDING_GOAL_CONTINUATION, (
+            "pending goal marker must not be consumed on a fence miss"
+        )
+        assert sid in config.PENDING_BG_TASK_COMPLETIONS, (
+            "pending background marker must not be consumed on a fence miss"
+        )
+        assert prepared == []
+        assert calls["save"] == []
+
+        # Current-owner success control: with the canonical owner restored the
+        # same call proceeds past the fence (markers consumed only then).  The
+        # worker spawn is stubbed — this control only proves the fence passes
+        # and the pending write + marker consumption happen for the current
+        # owner.
+        worker_calls = []
+        monkeypatch.setattr(
+            routes,
+            "_run_agent_streaming",
+            lambda *a, **k: worker_calls.append(k) or None,
+        )
+        with config.LOCK:
+            config.SESSIONS[sid] = session
+        resp_ok = routes._start_chat_stream_for_session(
+            session,
+            msg="hello",
+            attachments=[],
+            workspace=str(tmp_path),
+            model="test-model",
+            model_provider="test-provider",
+            normalized_model=False,
+            owner_token=token,
+        )
+        assert resp_ok.get("stream_id"), resp_ok
+        assert "error" not in resp_ok, resp_ok
+        assert worker_calls, "current-owner start must dispatch the worker"
+        assert sid not in config.PENDING_GOAL_CONTINUATION
+        assert sid not in config.PENDING_BG_TASK_COMPLETIONS
+        _ok_stream_id = resp_ok.get("stream_id")
+        _assert_no_ownership_lock_leak(proxy)
+    finally:
+        config.PENDING_GOAL_CONTINUATION.discard(sid)
+        config.PENDING_BG_TASK_COMPLETIONS.discard(sid)
+        if _ok_stream_id:
+            with config.LOCK:
+                streaming.STREAMS.pop(_ok_stream_id, None)
+            config.STREAM_SESSION_OWNERS.pop(_ok_stream_id, None)
+        with config.LOCK:
+            config.SESSIONS.pop(sid, None)
+
+
+def test_direct_worker_sink_refusal_skips_stale_finalizer(monkeypatch, tmp_path):
+    """#6327 ownership-loss settlement: on sink refusal the worker's outer
+    finally must NOT call _last_resort_sync_from_core nor save the stale
+    non-canonical object; wakeup redelivery stays durable and the current
+    owner's success path still works."""
+    import api.background_process as bg
+    import api.routes as routes
+    import api.streaming as streaming
+
+    session, calls, proxy = _install_immutable_owner_token_fixture(
+        monkeypatch, tmp_path, recovered=True
+    )
+    sid = session.session_id
+    stream_id = session.active_stream_id
+    deferred = []
+    monkeypatch.setattr(
+        bg, "record_deferred_wakeup", lambda s, _c, p: deferred.append((s, p))
+    )
+    last_resort_calls = []
+    monkeypatch.setattr(
+        streaming,
+        "_last_resort_sync_from_core",
+        lambda *a, **k: last_resort_calls.append((a, k)),
+    )
+    sink_calls = []
+
+    class _RefusingAgent(_StreamingFakeAgent):
+        def run_conversation(self, **kwargs):
+            sink_calls.append(kwargs)
+            raise AssertionError(
+                "provider sink must never be reached for a replaced owner"
+            )
+
+    monkeypatch.setattr(streaming, "_get_ai_agent", lambda: _RefusingAgent)
+    monkeypatch.setattr(
+        streaming, "append_turn_journal_event_for_stream", lambda *a, **k: None
+    )
+    monkeypatch.setattr(streaming, "_finalize_cancelled_turn", lambda *a, **k: None)
+    try:
+        token, owner, _revalidation = _build_token_and_revalidate(routes, sid)
+        assert owner is session
+
+        replacement = _StreamingFakeSession(sid, "beta", tmp_path, stream_id)
+        session.pending_user_source = "process_wakeup"
+        session.pending_user_message = "hello"
+        session.active_stream_id = stream_id
+        _register_stream_owner(sid, stream_id)
+        replaced = _install_b5_claim_replace(monkeypatch, routes, sid, replacement)
+
+        stream_exc = []
+        done = threading.Event()
+        q = streaming.STREAMS[stream_id]  # captured: teardown pops the entry
+
+        def run_worker():
+            try:
+                streaming._run_agent_streaming(
+                    session_id=sid,
+                    msg_text="hello",
+                    model="test-model",
+                    model_provider="test-provider",
+                    workspace=str(tmp_path),
+                    stream_id=stream_id,
+                    owner_token=token,
+                )
+            except BaseException as exc:  # pragma: no cover - failure path
+                stream_exc.append(exc)
+            finally:
+                done.set()
+
+        t = threading.Thread(target=run_worker, daemon=True)
+        t.start()
+        assert replaced.wait(15), "replacement after claim never ran"
+        assert done.wait(25), "direct worker never settled"
+        t.join(25)
+        assert not t.is_alive(), "direct worker deadlocked"
+        if stream_exc:
+            raise stream_exc[0]
+        assert sink_calls == [], "zero unauthorized provider calls expected"
+
+        events = []
+        while True:
+            try:
+                events.append(q.get_nowait())
+            except Exception:
+                break
+        apperrors = [
+            ev for ev in events if isinstance(ev, tuple) and ev and ev[0] == "apperror"
+        ]
+        assert apperrors, f"no apperror emitted: {events!r}"
+        payload = apperrors[0][1]
+        assert payload["owner_fence"] == "owner_replaced", payload
+        assert payload["retryable"] is True
+        # Ownership-loss settlement: the stale finalizer must NEVER run for a
+        # non-canonical owner, and the stale object must never be saved.
+        assert last_resort_calls == [], (
+            "_last_resort_sync_from_core must not run after a sink refusal"
+        )
+        assert session.pending_user_message == "hello"
+        assert session.active_stream_id == stream_id
+        assert calls["save"] == []
+        assert deferred == [(sid, "hello")], deferred
+        assert config.STREAM_SESSION_OWNERS.get(stream_id) is None
+        assert routes._worker_sink_claim_for(sid, stream_id) is None
+        _assert_no_ownership_lock_leak(proxy)
+
+        # Current-owner success control: restore the canonical owner, re-claim,
+        # and the same sink accept runs the provider and releases the claim.
+        with config.LOCK:
+            config.SESSIONS[sid] = session
+        assert (
+            routes._worker_atomic_owner_claim(
+                token,
+                session,
+                stream_id=stream_id,
+                session_id=sid,
+                wakeup_prompt="hello",
+                requeue_wakeup=True,
+            )
+            is None
+        )
+        # The claim-then-replace wrapper re-installs the replacement right
+        # after every claim; restore the canonical owner for the sink accept.
+        with config.LOCK:
+            config.SESSIONS[sid] = session
+        sink_calls.clear()
+        assert routes._worker_sink_accept_call(
+            token, session, stream_id, lambda: sink_calls.append("sink") or "ok"
+        ) == (None, "ok")
+        assert sink_calls == ["sink"]
+        assert routes._worker_sink_claim_for(sid, stream_id) is None
+        _assert_no_ownership_lock_leak(proxy)
+    finally:
+        with config.LOCK:
+            config.SESSIONS.pop(sid, None)
+        config.STREAM_SESSION_OWNERS.pop(stream_id, None)
+
+
+def test_gateway_legacy_chat_completions_sink_fence(monkeypatch, tmp_path):
+    """#6327: the legacy Gateway /v1/chat/completions path (no runs API) must
+    apply the same accepted-claim sink fence — a replacement after the worker
+    claim is refused before the POST, zero network calls, apperror, durable
+    wakeup redelivery, no deadlock."""
+    import api.background_process as bg
+    import api.gateway_chat as gateway_chat
+    import api.routes as routes
+    import api.streaming as streaming
+
+    session, calls, proxy = _install_immutable_owner_token_fixture(
+        monkeypatch, tmp_path, recovered=True
+    )
+    sid = session.session_id
+    stream_id = session.active_stream_id
+    deferred = []
+    monkeypatch.setattr(
+        bg, "record_deferred_wakeup", lambda s, _c, p: deferred.append((s, p))
+    )
+    urlopen_calls = []
+
+    def _refuse_urlopen(*a, **k):
+        urlopen_calls.append((a, k))
+        raise AssertionError(
+            "legacy gateway POST must never fire for a replaced owner"
+        )
+
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", _refuse_urlopen)
+    monkeypatch.setattr(gateway_chat, "get_session", lambda _sid: session)
+    monkeypatch.setattr(
+        gateway_chat, "_gateway_use_runs_api_enabled", lambda *a, **k: False
+    )
+    monkeypatch.setattr(
+        gateway_chat, "gateway_approval_unavailable_reason", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        gateway_chat, "_gateway_base_url", lambda *a, **k: "http://gateway.local"
+    )
+    monkeypatch.setattr(gateway_chat, "_gateway_api_key", lambda *a, **k: "")
+    monkeypatch.setattr(
+        gateway_chat,
+        "_gateway_reasoning_effort_for_request",
+        lambda *a, **k: None,
+    )
+    monkeypatch.setattr(
+        config, "_main_model_request_overrides", lambda *a, **k: {}
+    )
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {})
+    monkeypatch.setattr(
+        streaming, "_prefill_messages_with_webui_context", lambda *a, **k: []
+    )
+    monkeypatch.setattr(
+        streaming,
+        "_normalize_prefill_messages_before_user_turn",
+        lambda *a, **k: [],
+    )
+    monkeypatch.setattr(
+        streaming, "_public_prefill_context_status", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        streaming, "_webui_ephemeral_system_prompt", lambda *a, **k: ""
+    )
+    try:
+        token, owner, _revalidation = _build_token_and_revalidate(routes, sid)
+        assert owner is session
+
+        replacement = _StreamingFakeSession(sid, "beta", tmp_path, stream_id)
+        session.pending_user_source = "process_wakeup"
+        session.pending_user_message = "hello"
+        session.active_stream_id = stream_id
+        _register_stream_owner(sid, stream_id)
+        replaced = _install_b5_claim_replace(monkeypatch, routes, sid, replacement)
+
+        worker_exc = []
+        done = threading.Event()
+        q = streaming.STREAMS[stream_id]  # captured: teardown pops the entry
+
+        def run_worker():
+            try:
+                gateway_chat._run_gateway_chat_streaming(
+                    sid,
+                    "hello",
+                    "test-model",
+                    str(tmp_path),
+                    stream_id,
+                    model_provider="test-provider",
+                    owner_token=token,
+                )
+            except BaseException as exc:  # pragma: no cover - failure path
+                worker_exc.append(exc)
+            finally:
+                done.set()
+
+        t = threading.Thread(target=run_worker, daemon=True)
+        t.start()
+        assert replaced.wait(15), "replacement after claim never ran"
+        assert done.wait(25), "legacy gateway worker never settled"
+        t.join(25)
+        assert not t.is_alive(), "legacy gateway worker deadlocked"
+        if worker_exc:
+            raise worker_exc[0]
+        assert urlopen_calls == [], "zero unauthorized legacy gateway POSTs expected"
+
+        events = []
+        while True:
+            try:
+                events.append(q.get_nowait())
+            except Exception:
+                break
+        apperrors = [
+            ev for ev in events if isinstance(ev, tuple) and ev and ev[0] == "apperror"
+        ]
+        assert apperrors, f"no gateway apperror emitted: {events!r}"
+        payload = apperrors[0][1]
+        assert payload["owner_fence"] == "owner_replaced", payload
+        assert payload["retryable"] is True
+        assert deferred == [(sid, "hello")], deferred
+        assert config.STREAM_SESSION_OWNERS.get(stream_id) is None
+        _assert_no_ownership_lock_leak(proxy)
+    finally:
+        with config.LOCK:
+            config.SESSIONS.pop(sid, None)
+        config.STREAM_SESSION_OWNERS.pop(stream_id, None)
+
+
+def test_direct_worker_post_accept_replacement_cannot_invalidate_mid_sink(
+    monkeypatch, tmp_path
+):
+    """#6327 accepted-claim atomicity: once the versioned claim is accepted,
+    a replacement/invalidation landing while the provider sink is in flight
+    serializes AFTER the sink (claim lock held across the sink) — the newer
+    owner can never supersede the old one mid-call, and the claim registry is
+    clean afterwards."""
+    import api.routes as routes
+
+    session, calls, proxy = _install_immutable_owner_token_fixture(
+        monkeypatch, tmp_path, recovered=True
+    )
+    sid = session.session_id
+    stream_id = session.active_stream_id
+    try:
+        token, owner, _revalidation = _build_token_and_revalidate(routes, sid)
+        assert owner is session
+        session.pending_user_source = "process_wakeup"
+        session.pending_user_message = "hello"
+        session.active_stream_id = stream_id
+        _register_stream_owner(sid, stream_id)
+
+        # Install the claim exactly like the worker does at its side-effect
+        # boundary.
+        assert (
+            routes._worker_atomic_owner_claim(
+                token,
+                session,
+                stream_id=stream_id,
+                session_id=sid,
+                wakeup_prompt="hello",
+                requeue_wakeup=True,
+            )
+            is None
+        )
+        claim = routes._worker_sink_claim_for(sid, stream_id)
+        assert claim is not None and claim["session_id"] == sid
+        assert claim.get("version")
+
+        sink_entered = threading.Event()
+        release_sink = threading.Event()
+        sink_finished = threading.Event()
+        sink_calls = []
+
+        def _sink():
+            sink_calls.append("sink")
+            sink_entered.set()
+            assert release_sink.wait(15)
+            sink_finished.set()
+            return "ok"
+
+        invalidation_done = threading.Event()
+        invalidation_exc: list[BaseException] = []
+
+        def _invalidate():
+            try:
+                # Same-SID replacement + claim invalidation (the production
+                # replacement path) attempted WHILE the sink is in flight.
+                with config.LOCK:
+                    config.SESSIONS[sid] = _StreamingFakeSession(
+                        sid, "beta", tmp_path, stream_id
+                    )
+                routes._invalidate_owner_sink_claims(sid)
+            except BaseException as exc:  # pragma: no cover - failure path
+                invalidation_exc.append(exc)
+            finally:
+                invalidation_done.set()
+
+        t_sink = threading.Thread(
+            target=lambda: routes._worker_sink_accept_call(
+                token, session, stream_id, _sink
+            ),
+            daemon=True,
+        )
+        t_sink.start()
+        assert sink_entered.wait(15), "sink never entered"
+
+        t_inv = threading.Thread(target=_invalidate, daemon=True)
+        t_inv.start()
+        # The invalidation must NOT complete while the sink holds the claim.
+        assert not invalidation_done.wait(0.5), (
+            "replacement invalidated the claim while the sink was in flight"
+        )
+        release_sink.set()
+        assert sink_finished.wait(10), "sink never finished"
+        t_sink.join(10)
+        assert not t_sink.is_alive(), "sink thread deadlocked"
+        assert invalidation_done.wait(10), (
+            "invalidation never completed after the sink"
+        )
+        t_inv.join(10)
+        assert not t_inv.is_alive(), "invalidation thread deadlocked"
+        if invalidation_exc:
+            raise invalidation_exc[0]
+        assert sink_calls == ["sink"]
+        assert routes._worker_sink_claim_for(sid, stream_id) is None
+        _assert_no_ownership_lock_leak(proxy)
+    finally:
+        with config.LOCK:
+            config.SESSIONS.pop(sid, None)
+        config.STREAM_SESSION_OWNERS.pop(stream_id, None)

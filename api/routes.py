@@ -30,7 +30,7 @@ import http.client
 import socket as _socket
 from collections import defaultdict, deque
 from pathlib import Path
-from contextlib import closing
+from contextlib import closing, contextmanager
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
@@ -21330,6 +21330,27 @@ def _start_chat_stream_for_session(
         stale_response["_status"] = 409
         return stale_response
     attachments = attachments or []
+    session_lock = _get_session_agent_lock(s.session_id)
+    diag.stage("session_lock_wait") if diag else None
+    # #6327 validate-before-mutate: the owner fence must run BEFORE every
+    # owner/marker mutation below (stale-stream cleanup, pending
+    # goal/background marker consumption).  On mismatch return without
+    # touching the stale object — never clear state or consume markers for a
+    # session whose owner moved while the out-of-AGENT revalidation waited.
+    if owner_token is not None:
+        with session_lock:
+            _fence_error = _validate_start_owner_fence(owner_token, session_lock)
+        if _fence_error is not None:
+            diag.stage("owner_fence") if diag else None
+            return {
+                "error": "session owner changed during revalidation",
+                "owner_fence": _fence_error,
+                "retryable": True,
+                "session_id": str(
+                    getattr(owner_token.get("owner"), "session_id", None) or s.session_id
+                ),
+                "_status": 409,
+            }
     # Prevent duplicate runs in the same session while a stream is still active.
     # This commonly happens after page refresh/reconnect races and can produce
     # duplicated clarify cards for what appears to be a single user request.
@@ -21362,8 +21383,6 @@ def _start_chat_stream_for_session(
     if s.session_id in PENDING_BG_TASK_COMPLETIONS:
         PENDING_BG_TASK_COMPLETIONS.discard(s.session_id)
 
-    session_lock = _get_session_agent_lock(s.session_id)
-    diag.stage("session_lock_wait") if diag else None
     while True:
         with session_lock:
             # #6327 validation-to-start fence: when an immutable owner token
@@ -22422,46 +22441,191 @@ def _worker_atomic_owner_claim(
             requeue_wakeup=requeue_wakeup,
             reason=reason,
         )
+    # #6327 accepted-claim rule: on success install the versioned sink claim
+    # under the canonical AGENT lock so the worker's first provider/network
+    # sink can compare-and-accept it (and replacement/compression can
+    # invalidate it) instead of a bare check-return-call fence.
+    _install_worker_sink_claim(owner_token, owner, stream_id)
     return None
 
 
-def _worker_sink_owner_fence(owner_token, s) -> str | None:
-    """Re-verify the canonical owner at the worker's first provider/network sink.
+# ── #6327 accepted-claim registry ─────────────────────────────────────────
+# The old sink fence (``_worker_sink_owner_fence``) re-verified the owner
+# under the AGENT lock, RETURNED, and then let the provider/network call
+# happen later — a same-SID replacement landing between the check and the
+# sink still reached the provider under stale ownership.  The accepted-claim
+# rule replaces that check-return-call pattern: the worker installs a
+# VERSIONED claim (bound to the exact owner identity, SID, generation, route,
+# and stream/run ID) under the canonical AGENT lock at worker start, and the
+# first provider/network sink compare-and-accepts that claim under the same
+# authority.  The claim lock is held ACROSS the sink (never AGENT across
+# network I/O), so an owner replacement/compression that invalidates claims
+# can never interleave between acceptance and the actual sink.
+_WORKER_SINK_CLAIMS_LOCK = threading.Lock()
+_WORKER_SINK_CLAIMS: dict[tuple[str, str], dict] = {}
 
-    #6327 required shape: the route-to-worker claim
-    (``_worker_atomic_owner_claim``) releases the per-session AGENT lock
-    before the worker's first actual sink (the provider call for the direct
-    worker, the /v1/runs POST for the gateway worker), so a same-SID
-    replacement in that window would otherwise reach the sink unowned.  This
-    check re-acquires the canonical lock immediately before the sink and
-    returns the mismatch reason when the owner moved — the worker emits an
-    apperror and retires/requeues instead of making an unauthorized
-    provider/network call.  Returns None when the owner still matches.
-    Never acquires PROCESS; never raises.
+
+class _SinkClaimRefused(Exception):
+    """Raised when a versioned sink claim cannot be accepted.
+
+    ``reason`` carries the machine-readable mismatch (owner_replaced,
+    lock_migrated, claim_invalidated, ...) for the apperror + retire path.
     """
-    if not isinstance(owner_token, dict):
-        return None
-    owner = owner_token.get("owner")
-    if owner is None:
-        return "missing_owner"
-    if s is not owner:
-        return "owner_replaced"
+
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _install_worker_sink_claim(owner_token, owner, stream_id):
+    """Install the versioned sink claim under canonical owner authority.
+
+    Called from ``_worker_atomic_owner_claim``'s success path while still
+    holding the canonical per-session AGENT lock: the claim is bound to the
+    exact owner identity/SID/generation/route plus this worker's stream id,
+    so a replacement either changes the canonical cache (the owner
+    re-verification refuses) or rotation/compression moves the SID (the
+    claim key becomes unreachable and the token ``session_id_rotated`` check
+    refuses).  Never acquires PROCESS.
+    """
     live_sid = str(getattr(owner, "session_id", "") or "")
-    if not live_sid:
-        return "empty_sid"
-    lock = _get_session_agent_lock(live_sid)
-    with lock:
-        with SESSION_AGENT_LOCKS_LOCK:
-            canonical = SESSION_AGENT_LOCKS.get(live_sid)
-        if canonical is not lock:
-            return "lock_migrated"
-        try:
-            resolved = get_session(live_sid)
-        except KeyError:
-            resolved = None
-        if resolved is None or resolved is not owner:
-            return "owner_replaced"
-        return _process_wakeup_owner_token_mismatch(owner_token, owner)
+    claim = {
+        "session_id": live_sid,
+        "stream_id": str(stream_id or ""),
+        "version": uuid.uuid4().hex,
+        "owner_generation": str(owner_token.get("credential_state_fingerprint") or ""),
+        "profile": str(getattr(owner, "profile", "") or ""),
+        "profile_home": str(owner_token.get("profile_home") or ""),
+        "route": {
+            "workspace": str(owner_token.get("workspace") or ""),
+            "model": str(owner_token.get("model") or ""),
+            "provider": str(owner_token.get("provider") or ""),
+            "normalized_model": bool(owner_token.get("normalized_model")),
+        },
+        "accepted": False,
+    }
+    with _WORKER_SINK_CLAIMS_LOCK:
+        _WORKER_SINK_CLAIMS[(live_sid, claim["stream_id"])] = claim
+
+
+def _worker_sink_claim_for(session_id, stream_id):
+    """Return a copy of the installed claim for (session_id, stream_id)."""
+    with _WORKER_SINK_CLAIMS_LOCK:
+        entry = _WORKER_SINK_CLAIMS.get((str(session_id or ""), str(stream_id or "")))
+    return dict(entry) if entry is not None else None
+
+
+def _worker_clear_sink_claim(session_id, stream_id):
+    """Drop the sink claim for exactly (session_id, stream_id)."""
+    with _WORKER_SINK_CLAIMS_LOCK:
+        _WORKER_SINK_CLAIMS.pop((str(session_id or ""), str(stream_id or "")), None)
+
+
+def _invalidate_owner_sink_claims(session_id):
+    """Invalidate every outstanding sink claim bound to *session_id*.
+
+    Called by owner-replacement/compression/retire paths so a stale worker's
+    next sink compare-and-accept fails with ``claim_invalidated`` and the
+    provider/network call is never reached.  Runs under the claim lock, so
+    when a worker is currently sinking (claim lock held across the sink) the
+    invalidation serializes AFTER that sink completes — a newer owner can
+    never supersede the old one while its sink is in flight.
+    """
+    sid = str(session_id or "")
+    with _WORKER_SINK_CLAIMS_LOCK:
+        for key in [k for k in _WORKER_SINK_CLAIMS if k[0] == sid]:
+            _WORKER_SINK_CLAIMS.pop(key, None)
+
+
+@contextmanager
+def _worker_sink_claim_guard(claim, owner_token, s, stream_id):
+    """Compare-and-accept the versioned sink claim and hold it across the sink.
+
+    Replaces the old check-return-call sink fence: under the canonical
+    per-session AGENT lock the exact owner identity/SID/generation/route are
+    re-verified, then the versioned claim installed at worker start is
+    compare-and-accepted under ``_WORKER_SINK_CLAIMS_LOCK``.  The claim lock
+    is held for the whole ``with`` body — the actual provider/network sink —
+    so a concurrent replacement/compression cannot invalidate the claim
+    between acceptance and the sink.  Never holds AGENT across network I/O;
+    never acquires PROCESS.
+
+    Raises ``_SinkClaimRefused`` (the worker retires/requeues and emits an
+    apperror instead of sinking on a stale owner).
+    """
+    reason = None
+    if claim is None or not isinstance(owner_token, dict):
+        reason = "claim_missing"
+    else:
+        owner = owner_token.get("owner")
+        if owner is None:
+            reason = "missing_owner"
+        elif s is not owner:
+            reason = "owner_replaced"
+        else:
+            live_sid = str(getattr(owner, "session_id", "") or "")
+            if not live_sid:
+                reason = "empty_sid"
+            else:
+                lock = _get_session_agent_lock(live_sid)
+                with lock:
+                    with SESSION_AGENT_LOCKS_LOCK:
+                        canonical = SESSION_AGENT_LOCKS.get(live_sid)
+                    if canonical is not lock:
+                        reason = "lock_migrated"
+                    else:
+                        try:
+                            resolved = get_session(live_sid)
+                        except KeyError:
+                            resolved = None
+                        if resolved is None or resolved is not owner:
+                            reason = "owner_replaced"
+                        else:
+                            reason = _process_wakeup_owner_token_mismatch(owner_token, owner)
+    key = (
+        str(claim.get("session_id") or "") if isinstance(claim, dict) else "",
+        str(stream_id or ""),
+    )
+    # Compare-and-accept under the claim lock, then hold the lock ACROSS the
+    # sink (the ``with`` body): a concurrent replacement/compression that
+    # invalidates claims blocks until the sink completes, so a newer owner can
+    # never supersede the old one between acceptance and the provider call.
+    if reason is None:
+        with _WORKER_SINK_CLAIMS_LOCK:
+            installed = _WORKER_SINK_CLAIMS.get(key)
+            if installed is None or str(installed.get("version") or "") != str(
+                claim.get("version") or ""
+            ):
+                reason = "claim_invalidated"
+            else:
+                installed["accepted"] = True
+                try:
+                    yield None
+                finally:
+                    _WORKER_SINK_CLAIMS.pop(key, None)
+    if reason is not None:
+        with _WORKER_SINK_CLAIMS_LOCK:
+            _WORKER_SINK_CLAIMS.pop(key, None)
+        raise _SinkClaimRefused(reason)
+
+
+def _worker_sink_accept_call(owner_token, s, stream_id, sink):
+    """Accept the versioned sink claim and run ``sink()`` under it.
+
+    Returns ``(None, sink_result)`` on success or ``(reason, None)`` when the
+    claim could not be accepted — the sink (provider call / gateway POST /
+    legacy chat-completions POST) is NEVER invoked on a stale owner.
+    Exceptions raised by ``sink()`` propagate (the claim is released first).
+    Never acquires PROCESS.
+    """
+    if owner_token is None:
+        return None, sink()
+    claim = _worker_sink_claim_for(str(getattr(s, "session_id", "") or ""), stream_id)
+    try:
+        with _worker_sink_claim_guard(claim, owner_token, s, stream_id):
+            return None, sink()
+    except _SinkClaimRefused as exc:
+        return exc.reason, None
 
 
 def _claim_runner_owner_fence(owner_token, s):
@@ -22521,6 +22685,11 @@ def _claim_runner_owner_fence(owner_token, s):
                 "provider": str(owner_token.get("provider") or ""),
                 "normalized_model": bool(owner_token.get("normalized_model")),
             },
+            # #6327 accepted-claim rule (runner-local): the run claim version.
+            # Transport is not acceptance — the runner must echo SID +
+            # generation (compare-and-accept) before the run is treated as
+            # started, so the claim carries this per-run nonce too.
+            "version": uuid.uuid4().hex,
         }
     return fence, None
 
@@ -22565,12 +22734,21 @@ def _worker_retire_pending_state(
                     except KeyError:
                         resolved = None
                     # Only retire the provisional sidecar when the canonical
-                    # cache still maps the tokenized owner: a moved owner must
-                    # never be clobbered, but redelivery/cleanup below still
+                    # cache still maps the tokenized owner AND the versioned
+                    # owner generation (identity + SID + profile/home +
+                    # credential fingerprint + route lane) still matches: a
+                    # moved owner must never be clobbered, and a
+                    # profile/home/credential-generation movement on the same
+                    # object must not let a stale generation clear fields the
+                    # current owner owns — but redelivery/cleanup below still
                     # run so the replacement cannot be skipped (#6327 review:
-                    # \"ensure an owner replacement cannot return before wakeup
-                    # redelivery and stream-owner cleanup\").
-                    if resolved is not None and resolved is owner:
+                    # "ensure an owner replacement cannot return before wakeup
+                    # redelivery and stream-owner cleanup").
+                    if (
+                        resolved is not None
+                        and resolved is owner
+                        and _process_wakeup_owner_token_mismatch(owner_token, resolved) is None
+                    ):
                         _retire_provisional_pending_state(owner, stream_id=stream_id)
         except Exception:
             logger.debug(
@@ -22595,6 +22773,14 @@ def _worker_retire_pending_state(
         unregister_stream_owner(stream_id)
     except Exception:
         logger.debug("failed to unregister stream owner for stream %s", stream_id, exc_info=True)
+    # #6327 accepted-claim rule: invalidate any sink claim bound to this
+    # session so a stale worker's next sink compare-and-accept is refused.
+    try:
+        _invalidate_owner_sink_claims(str(session_id or ""))
+    except Exception:
+        logger.debug(
+            "failed to invalidate sink claims for session %s", session_id, exc_info=True
+        )
     return reason
 
 

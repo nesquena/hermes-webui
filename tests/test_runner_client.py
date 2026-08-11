@@ -51,7 +51,18 @@ def test_runner_client_start_run_posts_explicit_boundary_payload(monkeypatch):
         captured["method"] = req.get_method()
         captured["headers"] = dict(req.header_items())
         captured["body"] = json.loads(req.data.decode("utf-8"))
-        return FakeResponse({"run_id": "run-1", "stream_id": "run-1", "status": "running"})
+        return FakeResponse({
+            "run_id": "run-1",
+            "stream_id": "run-1",
+            "status": "running",
+            # #6327 receiver compare-and-accept: the runner echoes the claimed
+            # SID + generation to acknowledge the owner fence.
+            "owner_fence": {
+                "session_id": "s1",
+                "generation": "fingerprint-1",
+                "accepted": True,
+            },
+        })
 
     _patch_opener(monkeypatch, fake_urlopen)
     client = HttpRunnerClient(base_url="http://runner.local/", api_key="secret")
@@ -68,13 +79,14 @@ def test_runner_client_start_run_posts_explicit_boundary_payload(monkeypatch):
             toolsets=["terminal"],
             source="webui",
             metadata={"route": "/api/chat/start"},
-            # #6327: non-empty JSON-safe generation/route fence claimed under
+            # #6327: complete JSON-safe generation/route fence claimed under
             # the canonical owner's AGENT lock immediately before the call.
             owner_fence={
                 "session_id": "s1",
                 "profile": "default",
                 "profile_home": "/home/test/.hermes",
                 "generation": "fingerprint-1",
+                "version": "claim-1",
                 "route": {
                     "workspace": "/workspace",
                     "model": "gpt-5.5",
@@ -105,6 +117,7 @@ def test_runner_client_start_run_posts_explicit_boundary_payload(monkeypatch):
             "profile": "default",
             "profile_home": "/home/test/.hermes",
             "generation": "fingerprint-1",
+            "version": "claim-1",
             "route": {
                 "workspace": "/workspace",
                 "model": "gpt-5.5",
@@ -113,6 +126,82 @@ def test_runner_client_start_run_posts_explicit_boundary_payload(monkeypatch):
             },
         },
     }
+
+
+def test_runner_client_refuses_run_without_fence_acceptance(monkeypatch):
+    """#6327: a runner response without the owner-fence echo is NOT an
+    accepted run — the run must never be treated as started until the
+    receiver compare-and-accepts the claimed SID + generation."""
+
+    def fake_urlopen(req, timeout=0):
+        return FakeResponse({
+            "run_id": "run-1",
+            "stream_id": "run-1",
+            "status": "running",
+        })
+
+    _patch_opener(monkeypatch, fake_urlopen)
+    client = HttpRunnerClient(base_url="http://runner.local/", api_key="secret")
+
+    with pytest.raises(RunnerClientError, match="compare-and-accept"):
+        client.start_run(
+            StartRunRequest(
+                session_id="s1",
+                message="hello",
+                workspace="/workspace",
+                profile="default",
+                provider="openai-codex",
+                model="gpt-5.5",
+                owner_fence={
+                    "session_id": "s1",
+                    "profile": "default",
+                    "profile_home": "/home/test/.hermes",
+                    "generation": "fingerprint-1",
+                    "version": "claim-1",
+                    "route": {
+                        "workspace": "/workspace",
+                        "model": "gpt-5.5",
+                        "provider": "openai-codex",
+                        "normalized_model": False,
+                    },
+                },
+            )
+        )
+
+
+def test_runner_client_refuses_run_with_partial_fence_schema(monkeypatch):
+    """#6327: a non-empty dict is transport, not acceptance — an incomplete
+    fence schema (missing generation / route lane / claim version) is refused
+    before any POST."""
+
+    def fake_urlopen(req, timeout=0):
+        raise AssertionError("start_run must not POST an incomplete owner fence")
+
+    _patch_opener(monkeypatch, fake_urlopen)
+    client = HttpRunnerClient(base_url="http://runner.local/", api_key="secret")
+
+    for bad_fence in (
+        {"session_id": "s1"},
+        {"session_id": "s1", "generation": "g1"},
+        {
+            "session_id": "s1",
+            "profile": "default",
+            "profile_home": "/home/test/.hermes",
+            "generation": "g1",
+            "version": "v1",
+            "route": {"workspace": "/workspace"},
+        },
+    ):
+        with pytest.raises(RunnerClientError, match="owner_fence"):
+            client.start_run(
+                StartRunRequest(
+                    session_id="s1",
+                    message="hello",
+                    workspace="/workspace",
+                    profile="default",
+                    owner_fence=bad_fence,
+                )
+            )
 
 
 def test_runner_client_start_run_refuses_empty_owner_fence(monkeypatch):
