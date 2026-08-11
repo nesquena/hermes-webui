@@ -54,6 +54,64 @@ def test_schedule_is_atomic_durable_and_idempotent(continuation_store):
     assert payload["intents"]["session-a"]["prompt"] == "continue the approved goal"
 
 
+def test_schedule_after_compression_atomically_completes_parent_intent(continuation_store):
+    gc, _path = continuation_store
+    parent = _schedule(gc, sid="session-parent", stream="judge-parent")
+    parent.update(
+        status="running",
+        stream_id="continuation-stream",
+        claim_id="claim-parent",
+    )
+    gc._replace_goal_continuation_for_test(parent)
+
+    child = gc.schedule_goal_continuation(
+        "session-child",
+        "continue on the compression child",
+        source_stream_id="continuation-stream",
+        profile_home="/profiles/default",
+        goal_turns_used=2,
+        predecessor_session_id="session-parent",
+    )
+
+    settled_parent = gc.get_goal_continuation("session-parent")
+    assert settled_parent["status"] == "completed"
+    assert settled_parent["claim_id"] is None
+    assert settled_parent["completed_at"] > 0
+    assert child["session_id"] == "session-child"
+    assert child["status"] == "pending"
+
+    duplicate = gc.schedule_goal_continuation(
+        "session-child",
+        "continue on the compression child",
+        source_stream_id="continuation-stream",
+        profile_home="/profiles/default",
+        goal_turns_used=2,
+        predecessor_session_id="session-parent",
+    )
+    assert duplicate["continuation_id"] == child["continuation_id"]
+    assert gc.get_goal_continuation("session-parent")["status"] == "completed"
+
+
+def test_schedule_after_compression_refuses_foreign_parent_stream(continuation_store):
+    gc, _path = continuation_store
+    parent = _schedule(gc, sid="session-parent", stream="judge-parent")
+    parent.update(status="running", stream_id="other-stream")
+    gc._replace_goal_continuation_for_test(parent)
+
+    with pytest.raises(RuntimeError, match="predecessor.*stream"):
+        gc.schedule_goal_continuation(
+            "session-child",
+            "continue on the compression child",
+            source_stream_id="continuation-stream",
+            profile_home="/profiles/default",
+            goal_turns_used=2,
+            predecessor_session_id="session-parent",
+        )
+
+    assert gc.get_goal_continuation("session-parent")["status"] == "running"
+    assert gc.get_goal_continuation("session-child") is None
+
+
 def test_corrupt_registry_is_quarantined_before_new_state_is_written(continuation_store):
     gc, path = continuation_store
     path.write_text("{not-json", encoding="utf-8")
@@ -864,6 +922,13 @@ def test_profile_goal_manager_accepts_current_five_field_judge_result(monkeypatc
         last_verdict=None,
         last_reason=None,
         paused_reason=None,
+        waiting_on_session=None,
+        waiting_on_pid=None,
+        waiting_until=0.0,
+        waiting_reason=None,
+        waiting_since=0.0,
+        consecutive_parse_failures=0,
+        consecutive_transport_failures=0,
     )
     manager = object.__new__(goals._ProfileGoalManager)
     manager.session_id = "session-a"

@@ -7972,6 +7972,18 @@ def _goal_retry_event_has_observable_activity(event: str) -> bool:
     ))
 
 
+def _goal_state_session_id(requested_session_id: str, session: object) -> str:
+    """Resolve the durable Goal owner without changing the current SSE owner.
+
+    Automatic compression rotates ``session.session_id`` to the continuation
+    child, while the in-flight browser stream remains keyed by the requested
+    parent id until ``stream_end``. Goal state and the next durable intent must
+    follow the child; stream lifecycle events must keep the original id.
+    """
+    continuation_id = str(getattr(session, 'session_id', '') or '').strip()
+    return continuation_id or str(requested_session_id or '').strip()
+
+
 def _run_agent_streaming(
     session_id,
     msg_text,
@@ -11518,8 +11530,9 @@ def _run_agent_streaming(
             try:
                 from api.goals import evaluate_goal_after_turn, has_active_goal
 
+                _goal_session_id = _goal_state_session_id(session_id, s)
                 _goal_is_active = (
-                    has_active_goal(session_id, profile_home=_profile_home)
+                    has_active_goal(_goal_session_id, profile_home=_profile_home)
                     if goal_related
                     else False
                 )
@@ -11553,7 +11566,7 @@ def _run_agent_streaming(
                         'message_key': 'goal_evaluating_progress',
                     })
                     _goal_decision = evaluate_goal_after_turn(
-                        session_id,
+                        _goal_session_id,
                         _last_goal_response,
                         user_initiated=True,
                         profile_home=_profile_home,
@@ -11575,17 +11588,18 @@ def _run_agent_streaming(
                         from api.goal_continuations import schedule_goal_continuation
                         from api.goals import goal_state_snapshot
 
-                        _goal_state = goal_state_snapshot(session_id, profile_home=_profile_home)
+                        _goal_state = goal_state_snapshot(_goal_session_id, profile_home=_profile_home)
                         _continuation_record = schedule_goal_continuation(
-                            session_id,
+                            _goal_session_id,
                             continuation_prompt,
                             source_stream_id=stream_id,
                             profile_home=_profile_home,
                             goal_turns_used=int(getattr(_goal_state, 'turns_used', 0) or 0),
+                            predecessor_session_id=session_id,
                         )
                         # Retain the in-memory marker only for mixed-version tabs;
                         # the server registry above is the execution authority.
-                        PENDING_GOAL_CONTINUATION.add(session_id)
+                        PENDING_GOAL_CONTINUATION.add(_goal_session_id)
                         put('goal_continue', {
                             'session_id': session_id,
                             'continuation_prompt': continuation_prompt,

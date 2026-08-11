@@ -330,29 +330,55 @@ def schedule_goal_continuation(
     source_stream_id: str,
     profile_home: str | Path | None,
     goal_turns_used: int,
+    predecessor_session_id: str | None = None,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     now: float | None = None,
 ) -> dict[str, Any]:
     """Persist one logical continuation before emitting ``goal_continue``.
 
-    Repeated scheduling from the same judged stream is idempotent.  A later
+    Repeated scheduling from the same judged stream is idempotent. A later
     judged stream replaces the preceding running record with the next logical
-    continuation.
+    continuation. When compression rotated the session id during that stream,
+    the predecessor record is completed in the same durable transaction that
+    creates the child's next intent.
     """
     sid = str(session_id or "").strip()
     text = str(prompt or "").strip()
     source_stream = str(source_stream_id or "").strip()
+    predecessor_sid = str(predecessor_session_id or "").strip()
     if not sid or not text or not source_stream:
         raise ValueError("session_id, prompt, and source_stream_id are required")
     timestamp = float(time.time() if now is None else now)
     attempts_limit = max(1, int(max_attempts or DEFAULT_MAX_ATTEMPTS))
     with _registry_transaction() as registry:
+        predecessor_changed = False
+        if predecessor_sid and predecessor_sid != sid:
+            predecessor = registry["intents"].get(predecessor_sid)
+            if isinstance(predecessor, dict):
+                predecessor_status = str(predecessor.get("status") or "").strip()
+                predecessor_stream = str(predecessor.get("stream_id") or "").strip()
+                if predecessor_status == "running" and predecessor_stream == source_stream:
+                    predecessor["status"] = "completed"
+                    predecessor["claim_id"] = None
+                    predecessor["claim_started_at"] = None
+                    predecessor["completed_at"] = timestamp
+                    predecessor["last_error"] = None
+                    _record_now(predecessor, timestamp)
+                    predecessor_changed = True
+                elif predecessor_status != "completed":
+                    raise RuntimeError(
+                        "predecessor continuation stream transition refused: "
+                        f"status={predecessor_status or 'unknown'} "
+                        f"stream={predecessor_stream or 'none'}"
+                    )
         existing = registry["intents"].get(sid)
         if (
             isinstance(existing, dict)
             and existing.get("source_stream_id") == source_stream
             and existing.get("prompt") == text
         ):
+            if predecessor_changed:
+                _save_locked()
             return copy.deepcopy(existing)
         record = {
             "version": REGISTRY_VERSION,

@@ -1,6 +1,7 @@
 """Call-surface regressions for server-owned goal continuation delivery."""
 
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -60,3 +61,28 @@ def test_empty_response_retry_is_limited_to_server_goal_continuations():
     assert "requeue_goal_continuation_after_no_response" in gateway
     assert "had_activity=" in streaming
     assert "had_activity=" in gateway
+
+
+def test_goal_state_session_id_follows_compression_child():
+    from api.streaming import _goal_state_session_id
+
+    assert _goal_state_session_id(
+        "session-parent",
+        SimpleNamespace(session_id="session-child"),
+    ) == "session-child"
+    assert _goal_state_session_id("session-parent", SimpleNamespace(session_id=None)) == "session-parent"
+
+
+def test_goal_hook_uses_child_for_state_and_next_intent_after_compression():
+    streaming = (ROOT / "api/streaming.py").read_text()
+    start = streaming.index("# /goal parity: after a successful assistant turn")
+    end = streaming.index("with _stream_writeback_stage(_writeback_timings, \"done_payload\")", start)
+    hook = streaming[start:end]
+
+    assert "_goal_session_id = _goal_state_session_id(session_id, s)" in hook
+    assert "has_active_goal(_goal_session_id" in hook
+    assert "evaluate_goal_after_turn(\n                        _goal_session_id," in hook
+    assert "goal_state_snapshot(_goal_session_id" in hook
+    assert "schedule_goal_continuation(\n                            _goal_session_id," in hook
+    assert "predecessor_session_id=session_id" in hook
+    assert "PENDING_GOAL_CONTINUATION.add(_goal_session_id)" in hook
