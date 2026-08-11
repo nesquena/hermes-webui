@@ -3659,13 +3659,17 @@ def test_full_ownership_revalidation_before_append():
     Promise microtask) and verifies that each stale schedule is rejected:
 
       1. Positive control: unchanged owner → append succeeds (60→100)
-      2. Geometry change (scroll away from bottom) → no append
-      3. Owner/list replacement → no append
-      4. Token supersession → no append
-      5. Loaded>=total terminal state → no append
+      2. Geometry change (scroll away from bottom AFTER RAF drains) → no append
+      3. Owner/list replacement (AFTER RAF drains) → no append
+      4. Token supersession (AFTER RAF drains) → no append
+      5. Loaded>=total terminal state (AFTER RAF drains) → no append
 
-    The prior version was source-string-only — it checked that the check
-    strings exist in the function body but never executed the schedule.
+    The prior version mutated state BEFORE draining the RAF callback, so
+    production bailed at the RAF stage (before queuing the Promise microtask)
+    and the tests stayed green even if the microtask revalidation checks were
+    removed — i.e. they were false-green oracles. This version ensures the
+    Promise continuation is actually queued (RAF drains with all preconditions
+    valid) and THEN mutates state before yielding to microtasks.
     """
     total = 140  # 60 initial + one batch of 40 = 100, leaving room for more
     flat_rows = []
@@ -3737,6 +3741,24 @@ async function fireScrollAndDrain() {{
   for (let i = 0; i < 10; i++) await Promise.resolve();
 }}
 
+// Helper: fire the scroll handler, drain ONLY the RAF (so the Promise
+// microtask is queued), then call a mutator function that changes state
+// BEFORE microtasks drain. This is the adversarial schedule that proves the
+// microtask revalidation checks are real oracles, not false-greens.
+async function fireScrollDrainRAFMutateThenMicrotasks(mutator) {{
+  rafCallbacks = [];
+  rafSchedules = 0;
+  if (_touchScrollOwner && _touchScrollOwner.handler) _touchScrollOwner.handler();
+  // Drain ONLY the RAF — all RAF preconditions are valid at this point,
+  // so production queues the Promise.resolve().then(...) microtask.
+  const callbacks = rafCallbacks.splice(0);
+  for (const cb of callbacks) cb();
+  // NOW mutate state while the Promise microtask is pending but not yet run.
+  mutator();
+  // Drain microtasks — the microtask revalidation must catch the mutation.
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+}}
+
 (async function() {{
   const results = [];
 
@@ -3751,14 +3773,15 @@ async function fireScrollAndDrain() {{
     expectedLoaded: 100,
   }});
 
-  // ── 2. Geometry change: scroll away from bottom → no append ──
-  // Re-setup to get a fresh owner at loaded=100
+  // ── 2. Geometry change: scroll away from bottom AFTER RAF drains → no append ──
+  // Re-setup to get a fresh owner at loaded=100. Geometry is near-bottom at
+  // setup and during the RAF, so the RAF queues the Promise. Then we scroll
+  // away BEFORE microtasks drain — the microtask's nearBottom2 check fails.
   _setupTouchSentinel(list, {total}, flatRows, renderOne, null, 100);
   appendCount = 0;
-  // Change geometry AFTER setup but BEFORE firing the handler: scroll away
-  // from bottom so nearBottom2 check fails.
-  list.scrollTop = 0; // 20000 - 0 - 800 = 19200 >= 200 → not near bottom
-  await fireScrollAndDrain();
+  await fireScrollDrainRAFMutateThenMicrotasks(function() {{
+    list.scrollTop = 0; // 20000 - 0 - 800 = 19200 >= 200 → not near bottom
+  }});
   results.push({{
     name: 'geometry_change',
     appended: appendCount === 0,
@@ -3766,23 +3789,19 @@ async function fireScrollAndDrain() {{
     expectedLoaded: 100, // unchanged
   }});
 
-  // ── 3. Owner/list replacement: install new owner → old microtask rejected ──
-  // Reset geometry to near-bottom for this scenario
+  // ── 3. Owner/list replacement AFTER RAF drains → no append ──
+  // Reset geometry to near-bottom for this scenario.
   list.scrollTop = 19500;
   _setupTouchSentinel(list, {total}, flatRows, renderOne, null, 100);
   const ownerBeforeReplace = _touchScrollOwner;
   appendCount = 0;
-  // Fire the scroll handler to arm the RAF + microtask...
-  rafCallbacks = [];
-  rafSchedules = 0;
-  if (ownerBeforeReplace && ownerBeforeReplace.handler) ownerBeforeReplace.handler();
-  // ...but BEFORE draining the RAF callback, install a new owner (re-setup)
-  _setupTouchSentinel(list, {total}, flatRows, renderOne, null, 100);
+  await fireScrollDrainRAFMutateThenMicrotasks(function() {{
+    // Install a new owner via re-setup. This replaces _touchScrollOwner,
+    // _sessionTouchListEl (via _invalidateTouchRender inside _setupTouchSentinel),
+    // and bumps _sessionTouchGen + _touchBatchToken.
+    _setupTouchSentinel(list, {total}, flatRows, renderOne, null, 100);
+  }});
   const ownerAfterReplace = _touchScrollOwner;
-  // Now drain: the old owner's RAF callback fires, sees _touchScrollOwner !== owner, bails
-  const callbacks = rafCallbacks.splice(0);
-  for (const cb of callbacks) cb();
-  for (let i = 0; i < 10; i++) await Promise.resolve();
   results.push({{
     name: 'owner_replacement',
     appended: appendCount === 0,
@@ -3792,6 +3811,9 @@ async function fireScrollAndDrain() {{
   }});
 
   // ── 4. Token supersession: bump _touchBatchToken before microtask runs ──
+  // (This case was already correct — the RAF drains, token is set, then we
+  // bump it before microtasks. Kept as a valid positive control.)
+  list.scrollTop = 19500;
   _setupTouchSentinel(list, {total}, flatRows, renderOne, null, 100);
   appendCount = 0;
   // Fire the scroll handler to arm RAF + microtask
@@ -3811,17 +3833,22 @@ async function fireScrollAndDrain() {{
     expectedLoaded: 100, // unchanged
   }});
 
-  // ── 5. Loaded>=total terminal state → no append ──
-  // Set up with total=100 and loaded=100 (already fully loaded)
-  _setupTouchSentinel(list, 100, flatRows.slice(0, 100), renderOne, null, 100);
+  // ── 5. Loaded>=total terminal state AFTER RAF drains → no append ──
+  // Start with loaded=100, total=140 (so the RAF passes l<t and queues the
+  // Promise). Then advance loaded to equal total BEFORE microtasks drain —
+  // the microtask's l2>=t2 check fails.
+  list.scrollTop = 19500;
+  _setupTouchSentinel(list, {total}, flatRows, renderOne, null, 100);
   appendCount = 0;
-  // loaded (100) >= total (100) → microtask must bail on l2>=t2 check
-  await fireScrollAndDrain();
+  await fireScrollDrainRAFMutateThenMicrotasks(function() {{
+    // Advance loaded to total so the microtask sees l2>=t2 and bails.
+    _sessionTouchLoadedCount = _sessionTouchTotalCount;
+  }});
   results.push({{
     name: 'terminal_state',
     appended: appendCount === 0,
     loadedAfter: _sessionTouchLoadedCount,
-    expectedLoaded: 100,
+    expectedLoaded: 140, // we set it to total (140) in the mutator
   }});
 
   console.log(JSON.stringify({{
@@ -3871,8 +3898,8 @@ async function fireScrollAndDrain() {{
     s = scenarios["terminal_state"]
     assert s["appended"], \
         "Terminal state: must NOT append when loaded>=total — got appendCount=0 expected"
-    assert s["loadedAfter"] == 100, \
-        f"Terminal state: loaded must stay 100, got {s['loadedAfter']}"
+    assert s["loadedAfter"] == 140, \
+        f"Terminal state: loaded must be 140 (set to total by mutator), got {s['loadedAfter']}"
 
     assert result["innerHTMLWipes"] == 0, \
         f"No innerHTML wipes in any scenario, got {result['innerHTMLWipes']}"
