@@ -2525,6 +2525,11 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
     return Math.min(0.25, state.fitScale);
   }
 
+  function _imgFitScale() {
+    const size = _imgViewportSize();
+    return Math.min(size.width / state.boxW, size.height / state.boxH);
+  }
+
   function _imgSetScale(nextScale, anchorX, anchorY) {
     const bounded = Math.max(_imgMinScale(), Math.min(8, nextScale));
     if(!Number.isFinite(bounded) || !state.boxW || !state.boxH) return;
@@ -2543,7 +2548,7 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
   function _fit() {
     const size = _imgViewportSize();
     if(!state.boxW || !state.boxH) return;
-    const fitScale = Math.min(size.width / state.boxW, size.height / state.boxH);
+    const fitScale = _imgFitScale();
     state.fitScale = fitScale;
     state.scale = fitScale;
     state.x = (size.width - state.boxW * fitScale) / 2;
@@ -2567,6 +2572,15 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
     canvas.style.height = state.boxH + 'px';
     if(state.pendingNav){
       state.pendingNav = false;
+      // The new image has its own fit baseline. Navigation keeps the user's
+      // zoom level, but a stale fitScale from the previous image would skew
+      // _imgMinScale() (zoom-out clamp) and the at-fit resize comparison:
+      // e.g. a small first image (fit 1.0) followed by a huge one (fit 0.1)
+      // would clamp zoom-out at 0.25 and make the real fit unreachable.
+      // Recompute only the baseline and re-clamp the kept scale to the new
+      // image's constraints.
+      state.fitScale = _imgFitScale();
+      state.scale = Math.max(_imgMinScale(), Math.min(8, state.scale));
       _centerPan();
     } else {
       _fit();

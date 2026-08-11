@@ -119,6 +119,28 @@ class TestNavigationKeepsZoom:
         assert "state.pendingNav = false;" in src
         assert "if(state.pendingNav){" in src
 
+    def test_navigation_recomputes_fit_baseline_for_new_image(self):
+        """Navigation keeps the user's zoom level, but the fit baseline
+        belongs to the NEW image: a stale fitScale from the previous image
+        skews _imgMinScale() (zoom-out clamp) and the at-fit resize
+        comparison. A small first image (fit 1.0) followed by a huge one
+        (fit 0.1) would otherwise clamp zoom-out at 0.25 and make the real
+        fit unreachable. The pendingNav branch must recompute fitScale from
+        the new natural size and re-clamp the kept scale to the new bounds."""
+        src = UI.read_text(encoding="utf-8")
+        nav_idx = src.index("if(state.pendingNav){")
+        # fitScale must be recomputed inside the pendingNav branch, not only
+        # by _fit() on the very first load.
+        fit_idx = src.index("state.fitScale = _imgFitScale();")
+        assert nav_idx < fit_idx
+        # The kept scale must be re-clamped against the new image's bounds
+        # (min = _imgMinScale(), max = 8) before recentring.
+        assert "state.scale = Math.max(_imgMinScale(), Math.min(8, state.scale));" in src
+        # The fit formula must live in one shared helper so _fit() and the
+        # pendingNav branch can never drift apart.
+        assert "function _imgFitScale() {" in src
+        assert "state.fitScale = fitScale;" in src
+
 
 class TestCleanup:
     def test_close_removes_img_zoom_resize_listener(self):
