@@ -202,6 +202,67 @@ def test_internal_projection_never_crosses_a_real_user_boundary():
     assert result["projectedBeforeHumanBoundary"].startswith("# CONCLUSION")
 
 
+def test_regenerate_never_replays_an_internal_transport_as_human_input():
+    driver = r"""
+const fs=require('fs');
+const src=fs.readFileSync(process.argv[1],'utf8');
+function extractFunc(name){
+  let start=src.indexOf('function '+name);
+  if(start===-1) throw new Error(name+' not found');
+  if(src.slice(Math.max(0,start-6),start)==='async ') start-=6;
+  const params=src.indexOf('(',start);
+  let depth=0,close=-1;
+  for(let i=params;i<src.length;i++){
+    if(src[i]==='(') depth++;
+    else if(src[i]===')'&&--depth===0){close=i;break;}
+  }
+  const brace=src.indexOf('{',close); depth=0;
+  for(let i=brace;i<src.length;i++){
+    if(src[i]==='{') depth++;
+    else if(src[i]==='}'&&--depth===0) return src.slice(start,i+1);
+  }
+  throw new Error(name+' body did not close');
+}
+function msgContent(m){return String((m&&m.content)||'');}
+global._oldestIdx=0;
+global.S={busy:false,session:{session_id:'sid'},messages:[
+  {role:'user',content:'[ASYNC DELEGATION COMPLETE]',_source:'async_delegation',_user_originated:false},
+  {role:'assistant',content:'internal result'},
+]};
+let apiCalls=0,sends=0;
+global.api=async()=>{apiCalls++;};
+global.send=async()=>{sends++;};
+global.renderMessages=()=>{};
+global.setStatus=()=>{};
+global.t=(x)=>x;
+global.$=()=>({value:''});
+eval(extractFunc('_isInternalTransportMessage'));
+eval(extractFunc('_assistantFollowsInternalTransport'));
+eval(extractFunc('regenerateResponse'));
+(async()=>{
+  await regenerateResponse({closest:()=>({dataset:{msgIdx:'1'}})});
+  process.stdout.write(JSON.stringify({apiCalls,sends}));
+})().catch(err=>{console.error(err);process.exit(1);});
+"""
+    proc = subprocess.run(
+        [NODE, "-e", driver, str(UI_JS_PATH)],
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {"apiCalls": 0, "sends": 0}
+
+
+def test_internal_reply_does_not_offer_regenerate_action():
+    ui = UI_JS_PATH.read_text(encoding="utf-8")
+    render_start = ui.index("const isEditableUser=")
+    render_block = ui[render_start : render_start + 1200]
+    assert "_assistantFollowsInternalTransport(S.messages,rawIdx)" in render_block
+    assert "isLastAssistant&&!followsInternalTransport" in render_block
+
+
 def test_process_wakeup_uses_compact_status_row_not_normal_user_bubble():
     ui = UI_JS_PATH.read_text(encoding="utf-8")
     marker = "const isProcessWakeup="
