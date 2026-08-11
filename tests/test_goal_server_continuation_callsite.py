@@ -118,11 +118,11 @@ def test_background_title_keeps_parent_relay_after_child_rotation(monkeypatch):
 
     monkeypatch.setattr(streaming, "get_session", get_session)
     streaming._run_background_title_update(
-        "session-child",
-        "user text",
-        "assistant text",
-        "Stable title",
-        lambda event, payload: events.append((event, payload)),
+        session_id="session-child",
+        user_text="user",
+        assistant_text="assistant",
+        placeholder_title="placeholder",
+        put_event=lambda event, payload: events.append((event, payload)),
         relay_session_id="session-parent",
     )
 

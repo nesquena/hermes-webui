@@ -4403,35 +4403,35 @@ def _run_background_title_update(
     user_text: str,
     assistant_text: str,
     placeholder_title: str,
-    emit_event,
+    put_event,
     agent=None,
     *,
     relay_session_id: str | None = None,
 ):
     """Update durable child title state while closing the original relay stream."""
     relay_sid = str(relay_session_id or session_id)
-    relay_put_event = emit_event
+    raw_put_event = put_event
 
-    def put_event(event, payload):
+    def relay_put_event(event, payload):
         if isinstance(payload, dict) and "session_id" in payload:
             payload = dict(payload)
             payload["session_id"] = relay_sid
-        relay_put_event(event, payload)
+        raw_put_event(event, payload)
 
     try:
         try:
             s = get_session(session_id)
         except KeyError:
-            _put_title_status(put_event, session_id, 'skipped', 'missing_session')
+            _put_title_status(relay_put_event, session_id, 'skipped', 'missing_session')
             return
         # Allow self-heal when a previously generated title leaked thinking text.
         _invalid_existing = _looks_invalid_generated_title(s.title)
         if getattr(s, 'llm_title_generated', False) and not _invalid_existing:
-            _put_title_status(put_event, session_id, 'skipped', 'already_generated', str(s.title or ''))
+            _put_title_status(relay_put_event, session_id, 'skipped', 'already_generated', str(s.title or ''))
             return
         current = str(s.title or '').strip()
         if session_has_manual_title(s):
-            _put_title_status(put_event, session_id, 'skipped', 'manual_title', current)
+            _put_title_status(relay_put_event, session_id, 'skipped', 'manual_title', current)
             return
         still_auto = (
             current == placeholder_title
@@ -4440,13 +4440,13 @@ def _run_background_title_update(
             or _invalid_existing
         )
         if not still_auto:
-            _put_title_status(put_event, session_id, 'skipped', 'manual_title', current)
+            _put_title_status(relay_put_event, session_id, 'skipped', 'manual_title', current)
             return
         from api import profiles as profiles_api
 
         with profiles_api.profile_env_for_background_worker(s, "background title", logger_override=logger):
             if not _aux_title_generation_enabled():
-                _put_title_status(put_event, session_id, 'skipped', 'title_generation_disabled', current)
+                _put_title_status(relay_put_event, session_id, 'skipped', 'title_generation_disabled', current)
                 return
             aux_title_configured = _aux_title_configured()
             if agent and not aux_title_configured:
@@ -4489,7 +4489,7 @@ def _run_background_title_update(
                         or invalid_existing_now
                     )
                 if manual_title or not still_auto:
-                    _put_title_status(put_event, session_id, 'skipped', 'manual_title', effective_title)
+                    _put_title_status(relay_put_event, session_id, 'skipped', 'manual_title', effective_title)
                     return
                 if next_title != effective_title:
                     s.title = next_title
@@ -4501,14 +4501,14 @@ def _run_background_title_update(
 
         if wrote_title:
             if source == 'fallback':
-                _put_title_status(put_event, session_id, source, fallback_reason, effective_title, raw_preview)
+                _put_title_status(relay_put_event, session_id, source, fallback_reason, effective_title, raw_preview)
             else:
-                _put_title_status(put_event, session_id, source, llm_status, effective_title, raw_preview)
-            put_event('title', {'session_id': session_id, 'title': effective_title})
+                _put_title_status(relay_put_event, session_id, source, llm_status, effective_title, raw_preview)
+            relay_put_event('title', {'session_id': session_id, 'title': effective_title})
         else:
-            _put_title_status(put_event, session_id, 'skipped', source or 'unchanged', effective_title, raw_preview)
+            _put_title_status(relay_put_event, session_id, 'skipped', source or 'unchanged', effective_title, raw_preview)
     finally:
-        put_event('stream_end', {'session_id': session_id})
+        relay_put_event('stream_end', {'session_id': session_id})
 
 
 def _run_background_title_refresh(session_id: str, user_text: str, assistant_text: str, current_title: str, put_event, agent=None):
