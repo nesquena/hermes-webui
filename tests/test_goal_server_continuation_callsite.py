@@ -60,3 +60,30 @@ def test_empty_response_retry_is_limited_to_server_goal_continuations():
     assert "requeue_goal_continuation_after_no_response" in gateway
     assert "had_activity=" in streaming
     assert "had_activity=" in gateway
+
+
+def test_worker_entry_is_durably_fenced_before_active_run_registration():
+    for relative in ("api/streaming.py", "api/gateway_chat.py"):
+        source = (ROOT / relative).read_text()
+        fence = source.index("mark_goal_continuation_worker_started")
+        active = source.index("register_active_run(", fence)
+        assert fence < active
+
+
+def test_schedule_failure_is_visible_and_stops_before_done():
+    for relative in ("api/streaming.py", "api/gateway_chat.py"):
+        source = (ROOT / relative).read_text()
+        failed = source.index("goal_continuation_schedule_failed")
+        done = source.index("done", failed)
+        block = source[failed:done]
+        assert "apperror" in block
+        assert "stream_end" in block
+        assert "return" in block
+
+
+def test_thread_start_failure_requeues_modern_and_legacy_goal_streams():
+    routes = (ROOT / "api/routes.py").read_text()
+    start = routes.index("thr.start()")
+    block = routes[start : routes.index("raise", start) + len("raise")]
+    assert "if goal_related:" in block
+    assert "requeue_goal_continuation_after_no_response" in block

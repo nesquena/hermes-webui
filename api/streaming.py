@@ -19,6 +19,7 @@ import sys
 import subprocess
 import threading
 import time
+import uuid
 import traceback
 import copy
 from pathlib import Path
@@ -7963,6 +7964,16 @@ def _run_agent_streaming(
                 exc_info=True,
             )
         return
+    if goal_related:
+        from api.goal_continuations import mark_goal_continuation_worker_started
+
+        if not mark_goal_continuation_worker_started(session_id, stream_id):
+            with STREAMS_LOCK:
+                STREAMS.pop(stream_id, None)
+                STREAM_GOAL_RELATED.pop(stream_id, None)
+            unregister_stream_owner(stream_id)
+            clear_session_writeback_owner_if_owned(session_id, stream_id)
+            return
     register_active_run(
         stream_id,
         session_id=session_id,
@@ -11497,13 +11508,32 @@ def _run_agent_streaming(
                         from api.goals import goal_state_snapshot
 
                         _goal_state = goal_state_snapshot(session_id, profile_home=_profile_home)
-                        _continuation_record = schedule_goal_continuation(
-                            session_id,
-                            continuation_prompt,
-                            source_stream_id=stream_id,
-                            profile_home=_profile_home,
-                            goal_turns_used=int(getattr(_goal_state, 'turns_used', 0) or 0),
-                        )
+                        try:
+                            _continuation_record = schedule_goal_continuation(
+                                session_id,
+                                continuation_prompt,
+                                source_stream_id=stream_id,
+                                profile_home=_profile_home,
+                                goal_turns_used=int(getattr(_goal_state, 'turns_used', 0) or 0),
+                            )
+                        except Exception as _schedule_exc:
+                            logger.exception(
+                                "Failed to persist goal continuation for session %s",
+                                session_id,
+                            )
+                            put('goal', {
+                                'session_id': session_id,
+                                'state': 'needs_attention',
+                                'message': 'Goal continuation could not be persisted.',
+                                'message_key': 'goal_continuation_schedule_failed',
+                            })
+                            put('apperror', {
+                                'type': 'goal_continuation_schedule_failed',
+                                'label': 'Goal continuation stopped',
+                                'message': str(_schedule_exc)[:500],
+                            })
+                            put('stream_end', {'session_id': session_id})
+                            return
                         # Retain the in-memory marker only for mixed-version tabs;
                         # the server registry above is the execution authority.
                         PENDING_GOAL_CONTINUATION.add(session_id)
@@ -12556,14 +12586,34 @@ def cancel_stream(stream_id: str) -> bool:
                 logger.debug("Failed to clear session state on cancel for %s", _cancel_session_id)
 
     if _emit_cancel_event and q:
-        _cancel_event_id = STREAM_LAST_EVENT_ID.get(stream_id)
-        if _cancel_event_id and hasattr(q, "note_last_event_id"):
+        _payload = _cancel_event_payload(
+            'Cancelled by user',
+            session=_cancel_session_payload,
+        )
+        try:
+            from api.run_journal import append_run_event
+
+            _cancel_row = append_run_event(
+                _cancel_session_id,
+                stream_id,
+                'cancel',
+                _payload,
+            )
+            _cancel_event_id = str(_cancel_row.get('event_id') or '')
+        except Exception:
+            _cancel_event_id = f"{stream_id}:cancel:{uuid.uuid4().hex}"
+            logger.debug(
+                "Failed to journal cancel event for stream %s",
+                stream_id,
+                exc_info=True,
+            )
+        STREAM_LAST_EVENT_ID[stream_id] = _cancel_event_id
+        if hasattr(q, "note_last_event_id"):
             try:
                 q.note_last_event_id(_cancel_event_id)
             except Exception:
                 logger.debug("Failed to note cancel event_id %s for stream %s", _cancel_event_id, stream_id, exc_info=True)
         try:
-            _payload = _cancel_event_payload('Cancelled by user', session=_cancel_session_payload)
             q.put_nowait(('cancel', _payload))
         except Exception:
             logger.debug("Failed to put cancel event to queue")

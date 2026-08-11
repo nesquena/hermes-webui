@@ -509,9 +509,11 @@ def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp
         empty_stream_id,
         [],
     )
-    empty_errors = [item[1] for item in empty_events if item[0] == "apperror"]
-    assert empty_errors[-1]["type"] == "gateway_empty_response"
-    assert empty_errors[-1]["session_id"] == s.session_id
+    empty_event_names = [item[0] for item in empty_events]
+    assert "apperror" not in empty_event_names
+    assert empty_event_names[-2:] == ["done", "stream_end"]
+    empty_saved = models.get_session(s.session_id)
+    assert empty_saved.messages[-1].get("_error") is True
 
     response_error[0] = "Gateway provider failed without a known classification"
     unknown_stream_id = "stream-gateway-unknown-terminal-error-test"
@@ -827,6 +829,13 @@ def test_gateway_chat_worker_emits_goal_continue_for_goal_related_turn(tmp_path,
             "message_key": "goal_continuing",
             "message_args": ["one step remains"],
         },
+    )
+    from api import goal_continuations
+
+    monkeypatch.setattr(
+        goal_continuations,
+        "mark_goal_continuation_worker_started",
+        lambda *_args, **_kwargs: True,
     )
 
     s = new_session()

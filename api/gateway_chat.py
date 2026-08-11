@@ -836,7 +836,6 @@ def _settle_gateway_empty_response(
 
 def _emit_gateway_empty_response_events(put_gateway_event, error_payload, session_id):
     """Close an empty Gateway turn with a replayable terminal session payload."""
-    put_gateway_event("apperror", error_payload)
     try:
         from api.streaming import _session_payload_with_full_messages
 
@@ -925,6 +924,16 @@ def _run_gateway_chat_streaming(
         # path (the teardown finally below never runs when we early-return here).
         clear_session_writeback_owner_if_owned(session_id, stream_id)
         return
+    if goal_related:
+        from api.goal_continuations import mark_goal_continuation_worker_started
+
+        if not mark_goal_continuation_worker_started(session_id, stream_id):
+            with STREAMS_LOCK:
+                STREAMS.pop(stream_id, None)
+                STREAM_GOAL_RELATED.pop(stream_id, None)
+            unregister_stream_owner(stream_id)
+            clear_session_writeback_owner_if_owned(session_id, stream_id)
+            return
     register_active_run(
         stream_id,
         session_id=session_id,
@@ -1454,13 +1463,32 @@ def _run_gateway_chat_streaming(
                         from api.goals import goal_state_snapshot
 
                         goal_state = goal_state_snapshot(session_id, profile_home=profile_home)
-                        continuation_record = schedule_goal_continuation(
-                            session_id,
-                            continuation_prompt,
-                            source_stream_id=stream_id,
-                            profile_home=profile_home,
-                            goal_turns_used=int(getattr(goal_state, "turns_used", 0) or 0),
-                        )
+                        try:
+                            continuation_record = schedule_goal_continuation(
+                                session_id,
+                                continuation_prompt,
+                                source_stream_id=stream_id,
+                                profile_home=profile_home,
+                                goal_turns_used=int(getattr(goal_state, "turns_used", 0) or 0),
+                            )
+                        except Exception as schedule_exc:
+                            logger.exception(
+                                "Failed to persist Gateway goal continuation for session %s",
+                                session_id,
+                            )
+                            put_gateway_event("goal", {
+                                "session_id": session_id,
+                                "state": "needs_attention",
+                                "message": "Goal continuation could not be persisted.",
+                                "message_key": "goal_continuation_schedule_failed",
+                            })
+                            put_gateway_event("apperror", {
+                                "type": "goal_continuation_schedule_failed",
+                                "label": "Goal continuation stopped",
+                                "message": str(schedule_exc)[:500],
+                            })
+                            put_gateway_event("stream_end", {"session_id": session_id})
+                            return
                         PENDING_GOAL_CONTINUATION.add(session_id)
                         put_gateway_event("goal_continue", {
                             "session_id": session_id,

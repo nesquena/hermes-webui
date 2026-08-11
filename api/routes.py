@@ -21714,6 +21714,23 @@ def _start_chat_stream_for_session(
     try:
         thr.start()
     except Exception:
+        if goal_related:
+            try:
+                from api.goal_continuations import (
+                    requeue_goal_continuation_after_no_response,
+                )
+
+                if requeue_goal_continuation_after_no_response(
+                    s.session_id,
+                    stream_id,
+                    had_activity=False,
+                ):
+                    PENDING_GOAL_CONTINUATION.add(s.session_id)
+            except Exception:
+                logger.warning(
+                    "Failed to release goal continuation after thread-start failure",
+                    exc_info=True,
+                )
         if backend_is_gateway:
             try:
                 from api.gateway_chat import _finish_gateway_run_starting
