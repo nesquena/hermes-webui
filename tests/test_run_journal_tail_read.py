@@ -449,27 +449,28 @@ def test_bare_carriage_return_terminator_rejected(tmp_path):
 
 
 def test_preceding_event_recovery_is_bounded(tmp_path):
-    """Regression (reviewer round 5, updated r14): a VALID oversized predecessor
-    (complete, newline-terminated) is now READ and json.loads-ed DIRECTLY under
-    r14 finding 2, not blanket-skipped as under r9. The r9 invariant (never trust
-    an oversized record without full validation) is preserved by requiring json.loads
-    success — a malformed/invalid oversized predecessor still fails json.loads and
-    is skipped, continuing backward to the preceding valid event.
+    """Regression (reviewer round 5, updated r15): a VALID oversized predecessor
+    (complete, newline-terminated) is RECOVERED via compact prefix-summary + streaming
+    grammar validation, not blanket-skipped as under r9 and not full-line-materialized
+    as under r14. The r9 invariant (never trust an oversized record without full
+    validation) is preserved by the streaming JSON validator — a malformed/invalid
+    oversized predecessor fails the grammar scan and is skipped, continuing backward.
 
     This test pins the VALID oversized predecessor case (round 5 regression target):
     seq=2 is a valid JSON done record larger than _BOUNDARY_SUMMARY_PREFIX_BYTES.
-    Under r9 it was skipped (blanket fail-closed). Under r14 it is READ + json.loads-ed
-    and ACCEPTED as the last complete line (seq=2 recovered). The test budget is
-    sized to cover: 2 backward scans through seq=2 (~2x pred length), 1 full read of
-    seq=2 for json.loads (~1x pred length), and margin — so the scan can read the
-    oversized candidate and return it (not run out of budget before reaching it)."""
+    Under r9 it was skipped (blanket fail-closed). Under r15 it is recovered via a
+    bounded prefix (summary fields live before "payload") + a streaming grammar pass
+    over the whole line — so seq=2 is recovered and its summary fields are correct.
+    The payload is discarded (the recovery only needs summary fields), so the marker
+    _summary_extracted_from_oversized_record is set."""
     import os
     from api.run_journal import _SESSION_REPLAY_MAX_BYTES, _run_path, _read_last_complete_line_before
 
     writer = RunJournalWriter("session_1", "run_bounded_preceding", session_dir=tmp_path)
     # seq=1: a normal-sized token (the recoverable preceding event).
     writer.append_sse_event("token", {"text": "ok"})
-    # seq=2: an oversized but COMPLETE done (with newline) — VALID JSON, now READ directly.
+    # seq=2: an oversized but COMPLETE done (with newline) — VALID JSON, recovered
+    # via prefix-summary under r15 (summary fields extracted from the 8 KiB prefix).
     huge = {"text": "X" * (_SESSION_REPLAY_MAX_BYTES + 100_000)}
     writer.append_sse_event("done", {"session": {"session_id": "session_1"}, **huge})
     path = _run_path(writer.session_id, writer.run_id, session_dir=writer.session_dir)
@@ -486,29 +487,31 @@ def test_preceding_event_recovery_is_bounded(tmp_path):
         size_pinned = os.fstat(fh.fileno()).st_size
         seek = size_pinned - min(size_pinned, _SESSION_REPLAY_MAX_BYTES)
         record_start = __import__("api.run_journal", fromlist=["_find_record_start_before"])._find_record_start_before(fh, size_pinned, seek)
-        # Budget sized to cover: 2 backward scans through seq=2 (~2x pred length),
-        # 1 full read of seq=2 for json.loads (~1x pred length), plus margin.
-        # 3x the oversized predecessor length + margin ensures the scan can
-        # read the oversized candidate and return it without budget exhaustion.
+        # Budget generously covers: backward newline scans, the prefix read, and the
+        # streaming grammar pass over seq=2 (which scans the whole line but in bounded
+        # memory). r15 uses ONE shared budget for the whole predecessor scan.
         pred_size = _SESSION_REPLAY_MAX_BYTES + 100_000
         result = _read_last_complete_line_before(
             fh, size_pinned, record_start, budget=3 * pred_size + 500_000
         )
-    # The VALID oversized done (seq=2) is now READ and ACCEPTED (r14 finding 2).
+    # The VALID oversized done (seq=2) is RECOVERED via prefix-summary (r15).
     assert result is not None, "the valid oversized done (seq=2) must be recovered"
     assert result.get("seq") == 2, (
-        f"expected seq=2 (the valid oversized done is now read directly under r14); "
+        f"expected seq=2 (the valid oversized done is recovered under r15); "
         f"got seq={result.get('seq')}"
     )
     assert result.get("event") == "done", "the recovered event is the done (seq=2), not the token"
-    # The oversized payload IS read into memory for json.loads (r14 changed this),
-    # but is NOT fabricated via a prefix-extraction path — no fabricated-summary marker.
-    assert result.get("_summary_extracted_from_oversized_record") is None, (
-        "the valid oversized record was read directly (json.loads), not fabricated via prefix"
+    assert result.get("terminal_state") == "completed", (
+        "the recovered done's terminal_state must be correct (summary fields survive)"
     )
-    # The result carries the real session_id from the done, not a fabricated empty payload.
-    assert result.get("payload", {}).get("session", {}).get("session_id") == "session_1", (
-        "the recovered done carries its real payload — read directly, not fabricated"
+    # Under r15 the oversized payload is DISCARDED (recovery needs only summary
+    # fields); the marker is set to signal the payload was not materialized.
+    assert result.get("_summary_extracted_from_oversized_record") is True, (
+        "the valid oversized predecessor's payload was discarded via prefix-summary "
+        "extraction (r15); the marker must be set"
+    )
+    assert result.get("payload") == {}, (
+        "the oversized payload is replaced with {} under r15 prefix-summary recovery"
     )
 
 
@@ -1409,9 +1412,9 @@ def test_balanced_invalid_oversized_predecessor_skipped_malformed_nested_value(t
 
 
 def test_read_jsonl_tail_boundary_scan_uses_shared_budget_no_read_after_exhaustion(tmp_path, monkeypatch):
-    """Regression (reviewer round 10, item 1): the PRODUCTION boundary path in
-    ``_read_jsonl_tail`` must use ONE shared ``_ReadBudget`` across boundary
-    lookup, prefix extraction, validity proof, and the backward predecessor
+    """Regression (reviewer round 10, item 1, updated r15): the PRODUCTION boundary
+    path in ``_read_jsonl_tail`` must use ONE shared ``_ReadBudget`` across boundary
+    lookup, prefix extraction, streaming validity, and the backward predecessor
     scan — so physical I/O is bounded and NO read occurs after exhaustion.
 
     The r9 physical-budget test only covered ``_read_last_complete_line_before``
@@ -1420,21 +1423,28 @@ def test_read_jsonl_tail_boundary_scan_uses_shared_budget_no_read_after_exhausti
     the PRODUCTION reader end-to-end and asserts:
       (a) the boundary helpers are reached (the straddling seq=2 is recovered);
       (b) the SAME ``_ReadBudget`` instance is threaded through boundary lookup,
-          prefix extraction, validity proof, AND the predecessor scan (the
-          helpers receive a non-None budget, all with one shared id);
+          prefix extraction, AND the streaming validity proof (the helpers receive
+          a non-None budget, all with one shared id);
       (c) physical reads are bounded by the shared budget envelope.
 
     (b) is the discrimination the r9 test lacked: it proves the budget is
     SHARED, not just that the bytes happen to be bounded by a ceiling constant.
-    A mutation that passes ``budget=None`` to any helper (the r9 bug) fails (b)."""
+    A mutation that passes ``budget=None`` to any helper (the r9 bug) fails (b).
+
+    r15 note: the r13 design used SEPARATE meters (lookup+prefix shared, validity
+    distinct, predecessor distinct) to avoid starvation under a fixed validity
+    ceiling. r15 removes the ceiling entirely (streaming validation stops at the
+    record's actual end), so ONE shared budget is correct again — there is no
+    ceiling to starve against. This assertion was updated from "validity has its
+    OWN meter" (r13) to "validity shares the SAME meter" (r15)."""
     from pathlib import Path
     from api import run_journal
     from api.run_journal import _SESSION_REPLAY_MAX_BYTES, _read_jsonl_tail
 
     cap = _SESSION_REPLAY_MAX_BYTES
     token_line = '{"seq":1,"event":"token","payload":{"t":"valid"}}\n'
-    # A VALID oversized done: the validity proof returns True, exercising the
-    # boundary lookup + prefix extraction + validity helpers on the happy path.
+    # A VALID oversized done: the streaming validity returns True, exercising the
+    # boundary lookup + prefix extraction + streaming validity helpers on the happy path.
     oversized_done = (
         '{"seq":2,"event":"done","terminal":true,'
         '"terminal_state":"completed","payload":{"t":"'
@@ -1448,12 +1458,12 @@ def test_read_jsonl_tail_boundary_scan_uses_shared_budget_no_read_after_exhausti
         fh.write(oversized_done.encode("utf-8"))
     assert path.stat().st_size > cap
 
-    # Instrument the four boundary helpers to record whether a non-None budget
+    # Instrument the boundary helpers to record whether a non-None budget
     # was passed and its id(). The SAME id must appear across all of them.
     budget_ids_seen = {"find": [], "extract": [], "valid": []}
     real_find = run_journal._find_record_start_before
     real_extract = run_journal._extract_boundary_record_summary
-    real_valid = run_journal._record_is_valid_complete
+    real_valid = run_journal._record_is_valid_jsonl
 
     def patched_find(fh, size, seek_pos, *, budget=None, fault=None):
         if budget is not None:
@@ -1472,7 +1482,7 @@ def test_read_jsonl_tail_boundary_scan_uses_shared_budget_no_read_after_exhausti
 
     monkeypatch.setattr(run_journal, "_find_record_start_before", patched_find)
     monkeypatch.setattr(run_journal, "_extract_boundary_record_summary", patched_extract)
-    monkeypatch.setattr(run_journal, "_record_is_valid_complete", patched_valid)
+    monkeypatch.setattr(run_journal, "_record_is_valid_jsonl", patched_valid)
 
     # Also count physical reads via the handle.
     real_open = Path.open
@@ -1510,49 +1520,52 @@ def test_read_jsonl_tail_boundary_scan_uses_shared_budget_no_read_after_exhausti
         f"the boundary helpers must have run (seq=2 recovered); got {seqs}. "
         f"If absent the test is vacuous."
     )
-    # (b) The SAME shared _ReadBudget threads through find + extract (boundary
-    # lookup + prefix extraction). The validity proof has its OWN separate meter
-    # (#6139 r13): sharing the lookup+prefix meter let a valid ~1.75x cap record
-    # be starved (lookup + 8 KiB prefix consumed enough of the 2x cap allowance
-    # that the proof couldn't read the full record → fail-closed → valid terminal
-    # rejected → wrong terminal_state). find and extract still share one meter;
-    # valid has a distinct id. (The predecessor scan only runs on rejection; here
-    # the valid done is accepted so the predecessor helper is not reached. r11:
-    # the predecessor scan also gets its OWN reserve budget — covered by
+    # (b) find + extract (boundary lookup + prefix extraction) share ONE fixed
+    # recovery_budget. The streaming validity proof gets its OWN budget sized to
+    # the boundary record's actual extent (#6139 r15): there is no fixed validity
+    # ceiling — the validity budget is (size - record_start), so a valid record of
+    # ANY size is accepted (the r15 blocker 1: a 17 MiB valid done was discarded
+    # under a fixed budget). The validator self-terminates at the record's newline,
+    # so the validity budget is consumed exactly by the record's bytes, never more.
+    # (The predecessor scan shares the recovery_budget; it only runs on rejection —
+    # here the valid done is accepted so it is not reached. Covered separately by
     # test_predecessor_recovery_not_starved_by_validity_proof_budget and
     # test_backward_scan_budget_bounds_physical_descriptor_reads.)
     assert budget_ids_seen["find"], "boundary lookup received no budget (budget=None) — not shared"
     assert budget_ids_seen["extract"], "prefix extraction received no budget (budget=None) — not shared"
-    assert budget_ids_seen["valid"], "validity proof received no budget (budget=None) — not metered"
-    lookup_prefix_id = budget_ids_seen["find"][0]
-    assert all(bid == lookup_prefix_id for bid in budget_ids_seen["find"]), (
+    assert budget_ids_seen["valid"], "streaming validity received no budget (budget=None) — not metered"
+    recovery_id = budget_ids_seen["find"][0]
+    assert all(bid == recovery_id for bid in budget_ids_seen["find"]), (
         f"boundary lookup used multiple budget instances: {budget_ids_seen['find']}"
     )
-    assert all(bid == lookup_prefix_id for bid in budget_ids_seen["extract"]), (
+    assert all(bid == recovery_id for bid in budget_ids_seen["extract"]), (
         f"prefix extraction used a different budget instance from lookup: "
-        f"find={lookup_prefix_id} extract={budget_ids_seen['extract']} (find+extract must share one meter)"
+        f"find={recovery_id} extract={budget_ids_seen['extract']} (must share one meter)"
     )
-    assert all(bid != lookup_prefix_id for bid in budget_ids_seen["valid"]), (
-        f"validity proof shared the lookup+prefix meter (id={lookup_prefix_id}); "
-        f"it must have its OWN separate meter so a valid record near the 2x cap "
-        f"validity ceiling can pay for its own complete validation (#6139 r13). "
-        f"valid ids={budget_ids_seen['valid']}"
+    # Validity has its OWN budget (distinct id) — sized to the record's extent,
+    # not the fixed recovery_budget, so it is never starved by lookup+prefix and
+    # never imposes a correctness ceiling on valid large records.
+    assert all(bid != recovery_id for bid in budget_ids_seen["valid"]), (
+        f"streaming validity shared the lookup+prefix meter (id={recovery_id}); it "
+        f"must have its OWN budget (the record's extent) so a valid record of any "
+        f"size is accepted (#6139 r15). valid ids={budget_ids_seen['valid']}"
     )
-    # (c) Physical reads are bounded. The validity proof's own meter is sized at
-    # _VALIDITY_PROOF_MAX_BYTES (2x cap), but the incremental chunked read means
-    # a small record costs only one chunk — so total physical reads stay ~constant
-    # (the scale regression test_read_jsonl_tail_boundary_scan_uses_shared_budget...
-    # holds the constant-in-file-size property directly).
+    # (c) Physical reads are bounded. The shared budget caps total physical I/O;
+    # the streaming validator + prefix extractor stop at the record's actual end,
+    # so a small record costs little and a large record costs ~its length (not a
+    # fixed ceiling multiple). The scale regression test holds the
+    # constant-in-file-size property directly.
     handle = captured.get("handle")
     assert handle is not None, "the patched Path.open never returned a binary handle"
     total = handle.total_returned
     boundary_helper_bytes = total - cap  # subtract the one forward tail-window read
-    # lookup+prefix (2x cap) + validity proof reads the record's actual length
-    # (this fixture is a valid oversized done ~cap, so ~cap) — well under 5x cap.
+    # lookup (backward, ~token length) + 8 KiB prefix + streaming validity reads
+    # the record's actual length (this fixture is a valid oversized done ~cap) —
+    # well under 5x cap.
     assert boundary_helper_bytes <= 5 * cap, (
         f"boundary-helper physical reads ({boundary_helper_bytes} bytes) far exceed "
-        f"the expected envelope (lookup+prefix 2x cap + validity proof ~cap); the "
-        f"production boundary scan is reading unboundedly (#6139 r10/r13)"
+        f"the expected envelope (lookup + prefix + streaming validity ~cap); the "
+        f"production boundary scan is reading unboundedly (#6139 r10/r15)"
     )
 
 
@@ -2309,7 +2322,7 @@ def test_transient_oserror_not_cached_retry_recovers(tmp_path, monkeypatch):
     # Inject a one-shot OSError in the validity helper on the FIRST call after
     # clearing the cache. The fault flag must be set so ok=False propagates.
     run_journal._SUMMARY_CACHE.clear()
-    real_valid = run_journal._record_is_valid_complete
+    real_valid = run_journal._record_is_valid_jsonl
     calls = {"n": 0}
 
     def patched_valid(fh, size, record_start, *, budget=None, fault=None):
@@ -2320,7 +2333,7 @@ def test_transient_oserror_not_cached_retry_recovers(tmp_path, monkeypatch):
             raise OSError("simulated one-shot EIO during boundary scan")
         return real_valid(fh, size, record_start, budget=budget, fault=fault)
 
-    monkeypatch.setattr(run_journal, "_record_is_valid_complete", patched_valid)
+    monkeypatch.setattr(run_journal, "_record_is_valid_jsonl", patched_valid)
 
     # First call (fault): best-effort result, NOT cached.
     first = latest_run_summary("s1", "r1", session_dir=tmp_path)
@@ -2433,4 +2446,438 @@ def test_transient_oserror_in_unguarded_tail_read_not_cached(tmp_path, monkeypat
     assert reads["n"] >= 2, (
         f"fh.read was called {reads['n']} time(s) across both calls "
         f"(expected >= 2); the second call did not retry the read"
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PR #6139 ROUND 15 REGRESSION TESTS
+# ═════════════════════════════════════════════════════════════════════════════
+
+def test_streaming_json_validator_accepts_and_rejects(tmp_path):
+    """#6139 r15: _StreamingJsonValidator accepts valid JSONL records and rejects
+    malformed ones. This unit test pins the streaming JSON validator behavior
+    directly, covering the accept/reject cases that the blocker regression tests
+    rely on.
+
+    The validator enforces strict JSON grammar rules via byte-level state machine
+    scanning without materializing the full document. This test verifies:
+    - Valid JSON with various data types and structures is accepted
+    - Malformed JSON (trailing commas, bare words, incomplete structures) is rejected
+    - Proper terminator handling (\n, \r\n, but not bare \r or EOF without \n)
+    - No trailing garbage (multiple records) is allowed
+    """
+    from api.run_journal import _StreamingJsonValidator
+
+    # ACCEPT cases (finish() == True)
+    accept_cases = [
+        # Simple object with mixed types
+        ('{"a":1,"b":"x","c":true,"d":false,"e":null}\n', "simple mixed types"),
+        # Nested structures
+        ('{"a":{"b":[1,2,3]},"c":[{"d":null}]}\n', "nested objects and arrays"),
+        # String with escape sequences
+        ('{"a":"b\\"c\\\\d\\/\\b\\f\\n\\r\\t\\u0041"}\n', "string escapes"),
+        # Numbers (negative, zero, scientific notation)
+        ('{"n":-1.5,"m":0,"p":1e10,"q":-2.3E-4}\n', "number formats"),
+        # Unicode (ensure_ascii=False behavior)
+        ('{"msg":"héllo wörld 日本語"}\n', "unicode characters"),
+        # Empty containers
+        ('{"a":{},"b":[],"c":{"d":[]}}\n', "empty containers"),
+        # CRLF terminator
+        ('{"a":1}\r\n', "CRLF terminator"),
+        # Large payload (1 MiB)
+        ('{"payload":{"t":"' + 'Q' * 1048576 + '"}}\n', "large payload"),
+    ]
+
+    for json_bytes, desc in accept_cases:
+        validator = _StreamingJsonValidator()
+        validator.feed(json_bytes.encode("utf-8"))
+        result = validator.finish()
+        assert result is True, (
+            f"Validator should accept valid JSON: {desc}. "
+            f"Input: {json_bytes[:100]!r}..."
+        )
+
+    # REJECT cases (finish() == False)
+    reject_cases = [
+        # Trailing commas
+        ('{"a":1,}\n', "trailing comma in object"),
+        ('{"a":[1,2,]}\n', "trailing comma in array"),
+        # Unquoted value
+        ('{"a":bareword}\n', "unquoted value"),
+        # Malformed nested value
+        ('{"payload":{"t":"x",bad:nested}}\n', "malformed nested value"),
+        # Unterminated string
+        ('{"a":"unterminated}\n', "unterminated string"),
+        # Unclosed brace
+        ('{"a":1\n', "unclosed object brace"),
+        # Bad keywords
+        ('{"a":tru}\n', "incomplete 'true' keyword"),
+        ('{"a":True}\n', "incorrect case 'True'"),
+        # Bare CR terminator
+        ('{"a":1}\r', "bare CR terminator"),
+        # No terminator
+        ('{"a":1}', "no newline terminator"),
+        # Multiple records
+        ('{"a":1}\n{"b":2}\n', "multiple records (trailing garbage)"),
+        # Empty input
+        (b'', "empty input"),
+        # Leading zero
+        ('{"a":01}\n', "leading zero in number"),
+    ]
+
+    for json_bytes, desc in reject_cases:
+        validator = _StreamingJsonValidator()
+        if isinstance(json_bytes, str):
+            json_bytes = json_bytes.encode("utf-8")
+        validator.feed(json_bytes)
+        result = validator.finish()
+        assert result is False, (
+            f"Validator should reject malformed JSON: {desc}. "
+            f"Input: {json_bytes[:100]!r}..."
+        )
+
+
+def test_valid_terminal_above_any_ceiling_accepted(tmp_path):
+    """#6139 r15 blocker 1: A valid terminal record with a payload MUCH larger than
+    any byte ceiling (old _VALIDITY_PROOF_MAX_BYTES = 8 MiB, current
+    _SESSION_REPLAY_MAX_BYTES = 4 MiB) must be ACCEPTED and reported as terminal
+    with correct terminal_state. The streaming validator validates JSON grammar
+    without materializing the payload, so size alone never disqualifies a valid
+    record.
+
+    Journal layout:
+        seq=1: small token event
+        seq=2: valid done(tool_limit_reached) with ~17 MiB payload
+
+    Assertions:
+        - Full reader (_read_jsonl) keeps seq=2 with terminal_state=tool_limit_reached
+        - latest_run_summary reports last_seq=2, terminal=True, terminal_state='tool_limit_reached'
+        - find_run_summary agrees (same last_seq/terminal/terminal_state)
+    """
+    from api.run_journal import (
+        _read_jsonl,
+        _run_path,
+    )
+
+    session_id = "session_oversized_terminal"
+    run_id = "run_17mib_terminal"
+    path = _run_path(session_id, run_id, session_dir=tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    # seq=1: small token
+    token_line = '{"seq":1,"event":"token","payload":{"text":"ok"}}\n'
+
+    # seq=2: valid done with 17 MiB payload (well above any ceiling)
+    # 17 MiB = 17 * 1024 * 1024 = 17825792 bytes
+    payload_size = 17 * 1024 * 1024
+    done_line = (
+        '{"seq":2,"event":"done","type":"done","terminal":true,'
+        '"terminal_state":"tool_limit_reached","payload":{"text":"'
+        + "Z" * payload_size
+        + '"}}\n'
+    )
+
+    with path.open("wb") as fh:
+        fh.write(token_line.encode("utf-8"))
+        fh.write(done_line.encode("utf-8"))
+
+    # Full reader must accept the 17 MiB terminal record
+    full_events, malformed, _ok = _read_jsonl(path)
+    full_seqs = [e.get("seq") for e in full_events if isinstance(e, dict)]
+    assert 2 in full_seqs, (
+        f"Full reader rejected the 17 MiB terminal record (seq=2 missing). "
+        f"Got seqs: {full_seqs}"
+    )
+    # Find the done event and check its terminal_state
+    done_event = next((e for e in full_events if e.get("seq") == 2), None)
+    assert done_event is not None, "seq=2 not found in full events"
+    assert done_event.get("terminal_state") == "tool_limit_reached", (
+        f"Expected terminal_state='tool_limit_reached', got "
+        f"{done_event.get('terminal_state')!r}"
+    )
+
+    # latest_run_summary must report the 17 MiB terminal correctly
+    summary = latest_run_summary(session_id, run_id, session_dir=tmp_path)
+    assert summary["last_seq"] == 2, (
+        f"Expected last_seq=2, got {summary['last_seq']}"
+    )
+    assert summary["terminal"] is True, (
+        f"Expected terminal=True for 17 MiB valid terminal, got {summary['terminal']}"
+    )
+    assert summary["terminal_state"] == "tool_limit_reached", (
+        f"Expected terminal_state='tool_limit_reached', got "
+        f"{summary['terminal_state']!r}"
+    )
+
+    # find_run_summary must agree with latest_run_summary
+    find_summary = find_run_summary(run_id, session_dir=tmp_path)
+    assert find_summary is not None, "find_run_summary returned None"
+    assert find_summary["last_seq"] == summary["last_seq"], (
+        f"find_run_summary last_seq={find_summary['last_seq']} != "
+        f"latest_run_summary last_seq={summary['last_seq']}"
+    )
+    assert find_summary["terminal"] == summary["terminal"], (
+        f"find_run_summary terminal={find_summary['terminal']} != "
+        f"latest_run_summary terminal={summary['terminal']}"
+    )
+    assert find_summary["terminal_state"] == summary["terminal_state"], (
+        f"find_run_summary terminal_state={find_summary['terminal_state']!r} != "
+        f"latest_run_summary terminal_state={summary['terminal_state']!r}"
+    )
+
+
+def test_multi_mib_predecessor_recovered_before_truncated_boundary(tmp_path):
+    """#6139 r15 blocker 2: A VALID multi-MiB predecessor event (seq=2, ~2.3 MiB
+    tool_complete) must be RECOVERED when the boundary record (seq=3) is
+    crash-truncated and oversized. The streaming validator validates the large
+    predecessor via bounded streaming scan; if it's valid JSON, it's recovered
+    with its payload discarded (prefix-summary extraction).
+
+    Journal layout:
+        seq=1: valid token
+        seq=2: valid tool_complete with ~2.3 MiB payload (recoverable predecessor)
+        seq=3: crash-truncated oversized done (no trailing newline, payload > cap)
+
+    Assertions:
+        - Full reader keeps seqs [1, 2] (truncated seq=3 is rejected)
+        - latest_run_summary reports last_seq=2 (the 2.3 MiB predecessor recovered)
+    """
+    from api.run_journal import (
+        _SESSION_REPLAY_MAX_BYTES,
+        _read_jsonl,
+        _run_path,
+    )
+
+    session_id = "session_multi_mib_pred"
+    run_id = "run_2_3mib_predecessor"
+    path = _run_path(session_id, run_id, session_dir=tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    cap = _SESSION_REPLAY_MAX_BYTES
+
+    # seq=1: valid token
+    token_line = '{"seq":1,"event":"token","payload":{"text":"ok"}}\n'
+
+    # seq=2: valid tool_complete with ~2.3 MiB payload
+    pred_size = 2.3 * 1024 * 1024  # 2.3 MiB
+    pred_line = (
+        '{"seq":2,"event":"tool_complete","type":"tool_complete","terminal":false,'
+        '"payload":{"result":"'
+        + "X" * int(pred_size)
+        + '"}}\n'
+    )
+
+    # seq=3: crash-truncated oversized done (no newline, exceeds cap)
+    boundary_size = cap + 100_000
+    boundary_partial = (
+        '{"seq":3,"event":"done","type":"done","terminal":true,'
+        '"terminal_state":"completed","payload":{"text":"'
+        + "Y" * boundary_size
+    )  # No closing brace or newline
+
+    with path.open("wb") as fh:
+        fh.write(token_line.encode("utf-8"))
+        fh.write(pred_line.encode("utf-8"))
+        fh.write(boundary_partial.encode("utf-8"))
+
+    # Full reader: seqs [1, 2] (seq=3 rejected as truncated)
+    full_events, malformed, _ok = _read_jsonl(path)
+    full_seqs = sorted(e.get("seq") for e in full_events if isinstance(e, dict))
+    assert full_seqs == [1, 2], (
+        f"Full reader should keep seqs [1, 2]; got {full_seqs}. "
+        f"The 2.3 MiB predecessor (seq=2) must be recovered, and the truncated "
+        f"boundary (seq=3) must be rejected."
+    )
+
+    # latest_run_summary must report last_seq=2 (predecessor recovered)
+    summary = latest_run_summary(session_id, run_id, session_dir=tmp_path)
+    assert summary["last_seq"] == 2, (
+        f"Expected last_seq=2 (the 2.3 MiB predecessor recovered); "
+        f"got last_seq={summary['last_seq']}"
+    )
+    assert summary["terminal"] is False, (
+        f"The run should be non-terminal (boundary was truncated); "
+        f"got terminal={summary['terminal']}"
+    )
+
+
+def test_transient_open_failure_not_cached_retry_recovers(tmp_path, monkeypatch):
+    """#6139 r15 blocker 3 (open path): A transient OSError on the FIRST open()
+    of the journal file must NOT poison the _SUMMARY_CACHE. The first call
+    returns a best-effort (non-completed) summary; the second call retries
+    and recovers the correct terminal_state='completed'.
+
+    This pins that open() failures are treated as transient and do not cache
+    a failed result.
+    """
+    import pathlib
+    from api import run_journal
+
+    # Build a small completed journal (2 events)
+    session_id = "session_transient_open"
+    run_id = "run_transient_open"
+    path = tmp_path / "_run_journal" / session_id / f"{run_id}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    token = '{"seq":1,"event":"token","payload":{"text":"ok"}}\n'
+    done = '{"seq":2,"event":"done","terminal":true,"terminal_state":"completed","payload":{}}\n'
+    path.write_text(token + done, encoding="utf-8")
+
+    # Patch pathlib.Path.open to raise OSError on FIRST call for this journal
+    open_calls = {"n": 0}
+    real_open = pathlib.Path.open
+
+    def patched_open(self, *args, **kwargs):
+        if str(self) == str(path):
+            open_calls["n"] += 1
+            if open_calls["n"] == 1:
+                raise OSError("Simulated transient open failure")
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "open", patched_open)
+
+    # Clear cache before test
+    run_journal._SUMMARY_CACHE.clear()
+
+    # First call: open fails, returns best-effort (not completed)
+    first = latest_run_summary(session_id, run_id, session_dir=tmp_path)
+    assert first["terminal_state"] != "completed", (
+        f"First call (during open failure) should return best-effort non-completed; "
+        f"got {first['terminal_state']!r}"
+    )
+    # Cache must NOT be poisoned
+    assert str(path) not in run_journal._SUMMARY_CACHE, (
+        "The failed summary was cached; retry would not happen"
+    )
+
+    # Second call: open succeeds, recovers completed
+    second = latest_run_summary(session_id, run_id, session_dir=tmp_path)
+    assert second["terminal_state"] == "completed", (
+        f"Second call (no failure) should recover completed; got {second['terminal_state']!r}"
+    )
+    assert open_calls["n"] >= 2, (
+        f"Expected open to be called at least twice; called {open_calls['n']} times"
+    )
+
+
+def test_transient_fstat_failure_not_cached_retry_recovers(tmp_path, monkeypatch):
+    """#6139 r15 blocker 3 (fstat path): A transient OSError on os.fstat() for the
+    journal's file descriptor must NOT poison the _SUMMARY_CACHE. The first call
+    returns best-effort; the second call retries and recovers completed.
+
+    This pins that fstat failures are treated as transient and do not cache
+    a failed result.
+    """
+    import os
+    from api import run_journal
+
+    # Build a small completed journal
+    session_id = "session_transient_fstat"
+    run_id = "run_transient_fstat"
+    path = tmp_path / "_run_journal" / session_id / f"{run_id}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    token = '{"seq":1,"event":"token","payload":{"text":"ok"}}\n'
+    done = '{"seq":2,"event":"done","terminal":true,"terminal_state":"completed","payload":{}}\n'
+    path.write_text(token + done, encoding="utf-8")
+
+    # Patch os.fstat to raise OSError on FIRST call
+    fstat_calls = {"n": 0}
+    real_fstat = os.fstat
+
+    def patched_fstat(fd):
+        fstat_calls["n"] += 1
+        if fstat_calls["n"] == 1:
+            raise OSError("Simulated transient fstat failure")
+        return real_fstat(fd)
+
+    monkeypatch.setattr(os, "fstat", patched_fstat)
+
+    # Clear cache before test
+    run_journal._SUMMARY_CACHE.clear()
+
+    # First call: fstat fails, returns best-effort
+    first = latest_run_summary(session_id, run_id, session_dir=tmp_path)
+    assert first["terminal_state"] != "completed", (
+        f"First call (during fstat failure) should return best-effort; "
+        f"got {first['terminal_state']!r}"
+    )
+    # Cache must NOT be poisoned
+    assert str(path) not in run_journal._SUMMARY_CACHE, (
+        "The failed summary was cached after fstat failure"
+    )
+
+    # Second call: fstat succeeds, recovers completed
+    second = latest_run_summary(session_id, run_id, session_dir=tmp_path)
+    assert second["terminal_state"] == "completed", (
+        f"Second call should recover completed; got {second['terminal_state']!r}"
+    )
+    assert fstat_calls["n"] >= 2, (
+        f"Expected fstat to be called at least twice; called {fstat_calls['n']} times"
+    )
+
+
+def test_oversized_malformed_boundary_rejected_by_streaming_validator_not_suffix(tmp_path):
+    """#6139 r15 blocker 4: validity is decided by the streaming JSON validator,
+    NOT by suffix-based tier selection. The old two-tier design computed
+    ``record_len = size - record_start`` (the suffix from the boundary record's
+    start to EOF, INCLUDING trailing records) and routed records above the
+    ``_VALIDITY_PROOF_MAX_BYTES`` ceiling to a structural-only tier that accepted
+    brace-balanced records — so a malformed-but-brace-balanced oversized boundary
+    was fabricated as terminal.
+
+    This test constructs an OVERSIZED malformed boundary straddler (a ``cap + 50``
+    byte ``done`` with a trailing comma) whose ``size - record_start`` suffix
+    exceeds the old ceiling. The streaming validator must REJECT it (trailing
+    comma = invalid JSON) regardless of the suffix length, so it is not fabricated
+    as terminal and the preceding valid token is recovered instead.
+
+    (Geometry: the straddler is oversized so ``size - record_start`` — which spans
+    the straddler + the trailing window — exceeds the old 2x-cap ceiling. This is
+    the only layout in which a MALFORMED record's suffix can exceed the ceiling:
+    the straddler must itself be > cap, since the trailing window is only cap.)"""
+    from api.run_journal import _SESSION_REPLAY_MAX_BYTES, _read_jsonl, _read_jsonl_tail
+
+    cap = _SESSION_REPLAY_MAX_BYTES
+    token = '{"seq":1,"event":"token","payload":{"t":"valid"}}\n'
+    # Oversized malformed boundary: brace-balanced + newline-terminated but INVALID
+    # JSON (trailing comma after the payload value). Its suffix (size-record_start)
+    # exceeds the old 2x-cap ceiling.
+    big = "Q" * (cap + 50)
+    malformed_boundary = (
+        '{"seq":2,"event":"done","terminal":true,'
+        '"terminal_state":"completed","payload":{"t":"' + big + '"},}\n'
+    )
+    path = tmp_path / "_run_journal" / "s1" / "r1.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as fh:
+        fh.write(token.encode("utf-8"))
+        fh.write(malformed_boundary.encode("utf-8"))
+    assert path.stat().st_size > cap, "sanity: the journal must exceed the tail window"
+
+    full_events, _, _ok = _read_jsonl(path)
+    tail_events, _, _ok = _read_jsonl_tail(path, max_bytes=cap, max_rows=None)
+    full_seqs = {e.get("seq") for e in full_events if isinstance(e, dict)}
+    tail_seqs = {e.get("seq") for e in tail_events if isinstance(e, dict)}
+    # Baseline: the full reader rejects the malformed boundary (seq=2 absent).
+    assert 2 not in full_seqs, "baseline: the trailing-comma record is invalid JSON"
+    # The tail reader must NOT promote the malformed boundary as terminal — the
+    # streaming validator rejects it (not the old suffix-based tier-2 accept).
+    tail_promoted = any(e.get("_summary_extracted_from_oversized_record") for e in tail_events)
+    assert not tail_promoted, (
+        f"the malformed oversized boundary was fabricated into a summary "
+        f"(tail_seqs={tail_seqs}); the streaming validator should have rejected "
+        f"the trailing comma regardless of the suffix length (#6139 r15 blocker 4)"
+    )
+    # The preceding valid token must be recovered (matching the full reader).
+    assert 1 in tail_seqs, (
+        f"the preceding valid token (seq=1) was not recovered (tail_seqs={tail_seqs})"
+    )
+    summary = latest_run_summary("s1", "r1", session_dir=tmp_path)
+    assert summary["terminal_state"] != "completed", (
+        f"latest_run_summary fabricated terminal_state={summary['terminal_state']!r} "
+        f"from the malformed boundary (expected non-completed)"
+    )
+    assert not summary["terminal"], (
+        f"a run with only a malformed boundary was marked terminal={summary['terminal']}"
     )
