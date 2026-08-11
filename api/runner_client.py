@@ -20,7 +20,29 @@ _RUNNER_API_KEY_ENV = "HERMES_WEBUI_RUNNER_API_KEY"
 
 
 class RunnerClientError(RuntimeError):
-    """Raised when a configured runner endpoint rejects or fails a request."""
+    """Raised when a configured runner endpoint rejects or fails a request.
+
+    ``retryable``/``ambiguous`` carry reconciliation semantics for the caller:
+    ``ambiguous=True`` means the failure happened after the POST may have
+    reached the runner, so the caller must reconcile idempotently instead of
+    asserting that no run started.
+    """
+
+    retryable = False
+    ambiguous = False
+
+
+class RunnerFenceRefused(RunnerClientError):
+    """The runner did not receiver-compare-and-accept the exact owner fence.
+
+    The response could not be bound to the claimed nonce/version and complete
+    generation/route claim (``accepted: true`` + SID + profile/home +
+    generation + route + lease), so the run must NOT be treated as started.
+    Retryable: the caller requeues/reconciles under the current owner.
+    """
+
+    retryable = True
+    ambiguous = False
 
 
 def runner_client_configured(environ: dict[str, str] | None = None) -> bool:
@@ -47,6 +69,38 @@ def _runner_owner_fence_schema_error(fence) -> str | None:
     for field in ("workspace", "model", "provider"):
         if not str(route.get(field) or "").strip():
             return f"owner_fence.route missing required field '{field}'"
+    return None
+
+
+def _runner_fence_accepted(fence, accepted) -> str | None:
+    """Return None when *accepted* receiver-binds the run to the exact *fence*.
+
+    #6327 receiver-authoritative compare-and-accept: the echoed owner_fence
+    must carry ``accepted: true`` and match EVERY field of the claimed fence —
+    the exact SID, profile + home generation, credential-state generation,
+    the per-run nonce/version, the full route lane, and the per-session lease.
+    A reflected payload that only matches ``session_id`` + ``generation`` is
+    transport, not acceptance: it does not prove the runner compared owner
+    authority before creating the run or contacting the provider.
+    """
+    if not isinstance(accepted, dict):
+        return "runner did not echo an owner_fence object"
+    if accepted.get("accepted") is not True:
+        return "runner did not mark the owner fence accepted:true"
+    for field in ("session_id", "profile", "profile_home", "generation", "version"):
+        if str(accepted.get(field) or "") != str(fence.get(field) or ""):
+            return f"runner echoed a mismatched owner_fence.{field}"
+    if "lease" in fence and str(accepted.get("lease") or "") != str(fence.get("lease") or ""):
+        return "runner echoed a mismatched owner_fence.lease"
+    claimed_route = fence.get("route")
+    accepted_route = accepted.get("route")
+    if not isinstance(claimed_route, dict) or not isinstance(accepted_route, dict):
+        return "runner did not echo the owner_fence.route lane"
+    for field in ("workspace", "model", "provider"):
+        if str(accepted_route.get(field) or "") != str(claimed_route.get(field) or ""):
+            return f"runner echoed a mismatched owner_fence.route.{field}"
+    if bool(accepted_route.get("normalized_model")) != bool(claimed_route.get("normalized_model")):
+        return "runner echoed a mismatched owner_fence.route.normalized_model"
     return None
 
 

@@ -10205,6 +10205,25 @@ def _run_agent_streaming(
                     # a newer fork.  Forks created by the branch route never
                     # carry it.
                     s.compression_continuation_of = old_sid
+                    # #6327: old→new compression publication is a canonical
+                    # owner publisher — participate in the per-session
+                    # owner-generation lease BEFORE publishing the live
+                    # continuation so any in-flight sink bound to the old SID
+                    # serializes first and its installed sink claims are
+                    # refused (a stale worker can never keep sinking on the
+                    # archived predecessor after the rotation).
+                    try:
+                        from api.routes import _invalidate_owner_sink_claims
+
+                        _invalidate_owner_sink_claims(old_sid)
+                        _invalidate_owner_sink_claims(new_sid)
+                    except Exception:
+                        logger.debug(
+                            "failed to invalidate sink claims across compression %s -> %s",
+                            old_sid,
+                            new_sid,
+                            exc_info=True,
+                        )
                     with LOCK:
                         cached_old_session = SESSIONS.pop(old_sid, None)
                         if cached_old_session is not None and cached_old_session is not s:

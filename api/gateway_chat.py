@@ -732,7 +732,7 @@ def stop_gateway_run(run_id: str) -> bool:
         return False
 
 
-def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, model_provider, terminal_error):
+def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, model_provider, terminal_error, owner_token=None):
     from api.streaming import (
         _classify_provider_error,
         _materialize_pending_user_turn_before_error,
@@ -744,6 +744,12 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
 
     with _get_session_agent_lock(session_id):
         session = get_session(session_id)
+        # #6327 teardown authority: never settle the error on a non-canonical
+        # owner — the tokenized owner must still be the canonical cache owner
+        # with every owner-generation field matching, and the stream must
+        # still be this worker's stream.
+        if not _gateway_cleanup_owner_matches(owner_token, session, stream_id):
+            return None
         if not _stream_writeback_is_current(session, stream_id):
             return None
         error_classification = _classify_provider_error(terminal_error)
@@ -811,6 +817,32 @@ def _clear_gateway_pending_state(session: Any, stream_id: str) -> None:
     session.pending_started_at = None
     session.pending_user_source = None
     session.save()
+
+
+def _gateway_cleanup_owner_matches(owner_token, session, stream_id) -> bool:
+    """#6327 teardown authority: refuse cleanup on a non-canonical owner.
+
+    Gateway refusal/error/finally cleanup must compare ``{owner identity,
+    generation, stream_id}`` instead of re-resolving by SID + stream id
+    alone: a same-SID replacement must never have its pending state cleared,
+    its transcript mutated, or its error settlement written by the stale
+    worker's teardown.  Returns True when *session* is the tokenized owner
+    with every owner-generation field still matching (or when no token was
+    supplied — the synchronous path has no fence to compare).
+    """
+    if not isinstance(owner_token, dict):
+        return True
+    owner = owner_token.get("owner")
+    if owner is None or session is not owner:
+        return False
+    try:
+        from api.routes import _process_wakeup_owner_token_mismatch
+
+        if _process_wakeup_owner_token_mismatch(owner_token, session) is not None:
+            return False
+    except Exception:
+        return False
+    return True
 
 
 def _cleanup_gateway_pending_mirror(session_id: str) -> None:
@@ -1087,6 +1119,7 @@ def _run_gateway_chat_streaming(
                     model,
                     model_provider,
                     str(exc),
+                    owner_token=owner_token,
                 )
                 if error_payload is None:
                     return
@@ -1305,6 +1338,7 @@ def _run_gateway_chat_streaming(
                 model,
                 model_provider,
                 terminal_error,
+                owner_token=owner_token,
             )
             if error_payload is None:
                 return
@@ -1513,10 +1547,31 @@ def _run_gateway_chat_streaming(
         if s is not None:
             try:
                 with _get_session_agent_lock(session_id):
-                    _clear_gateway_pending_state(get_session(session_id), stream_id)
+                    resolved = get_session(session_id)
+                    # #6327 teardown authority: only clear pending state when
+                    # the resolved session is STILL the tokenized owner
+                    # (identity + generation) — a same-SID replacement must
+                    # never have its pending state cleared by this worker's
+                    # finally.
+                    if _gateway_cleanup_owner_matches(owner_token, resolved, stream_id):
+                        _clear_gateway_pending_state(resolved, stream_id)
             except Exception:
                 logger.debug("Failed to clear gateway stream state", exc_info=True)
             _cleanup_gateway_pending_mirror(session_id)
+        # #6327: clear the installed sink claim on EVERY exit path (success,
+        # refusal, pre-sink exception) so the claim registry never leaks an
+        # entry for (session_id, stream_id).
+        try:
+            from api.routes import _worker_clear_sink_claim
+
+            _worker_clear_sink_claim(session_id, stream_id)
+        except Exception:
+            logger.debug(
+                "failed to clear gateway worker sink claim for session %s stream %s",
+                session_id,
+                stream_id,
+                exc_info=True,
+            )
         with STREAMS_LOCK:
             AGENT_INSTANCES.pop(stream_id, None)
             CANCEL_FLAGS.pop(stream_id, None)

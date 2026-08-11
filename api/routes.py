@@ -3911,6 +3911,10 @@ def _ensure_full_session_before_mutation(sid: str, session):
     full_session = Session.load(sid)
     if full_session is None:
         raise KeyError(sid)
+    # #6327: upgrading the cached metadata stub REPLACES the canonical owner
+    # object under the same SID — participate in the owner-generation lease
+    # before publishing so an in-flight sink serializes first.
+    _invalidate_owner_sink_claims(sid)
     with LOCK:
         SESSIONS[sid] = full_session
         SESSIONS.move_to_end(sid)
@@ -15366,6 +15370,11 @@ def handle_post(handler, parsed) -> bool:
         if not session_lock.acquire(timeout=5):
             return bad(handler, "Session busy, try again", 503)
         try:
+            # #6327: deletion is a canonical owner publication — participate
+            # in the owner-generation lease BEFORE removing the owner so any
+            # in-flight sink for this session serializes first and installed
+            # sink claims are refused.
+            _invalidate_owner_sink_claims(sid)
             with LOCK:
                 SESSIONS.pop(sid, None)
             try:
@@ -21178,6 +21187,10 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
             else:
                 should_delete = s and s.title == "Untitled" and len(s.messages) == 0
             if should_delete:
+                # #6327: cleanup deletion is a canonical owner publication —
+                # participate in the owner-generation lease before removing
+                # the owner so installed sink claims are refused.
+                _invalidate_owner_sink_claims(p.stem)
                 with LOCK:
                     SESSIONS.pop(p.stem, None)
                 p.unlink(missing_ok=True)
@@ -21726,81 +21739,143 @@ def _start_chat_stream_for_session(
     attachments = attachments or []
     session_lock = _get_session_agent_lock(s.session_id)
     diag.stage("session_lock_wait") if diag else None
-    # #6327 validate-before-mutate: the owner fence must run BEFORE every
-    # owner/marker mutation below (stale-stream cleanup, pending
-    # goal/background marker consumption).  On mismatch return without
-    # touching the stale object — never clear state or consume markers for a
-    # session whose owner moved while the out-of-AGENT revalidation waited.
+    # #6327 validate-before-mutate, ONE owner-generation transaction: for the
+    # token path, owner validation + active-stream disposition + stale
+    # cleanup + goal/background marker consumption + pending-state
+    # preparation all run inside a single ``session_lock`` hold, with the
+    # owner fence re-verified immediately BEFORE each mutation.  A same-SID
+    # replacement after the first validation but before the first mutation is
+    # therefore caught before anything changes — a 409 leaves zero
+    # stale-object, marker, pending-state, and save changes (barrier test).
+    # The non-token path (synchronous browser chat-start) keeps the
+    # historical disposition loop unchanged.
     if owner_token is not None:
-        with session_lock:
-            _fence_error = _validate_start_owner_fence(owner_token, session_lock)
-        if _fence_error is not None:
+
+        def _owner_fence_409(_error):
             diag.stage("owner_fence") if diag else None
             return {
                 "error": "session owner changed during revalidation",
-                "owner_fence": _fence_error,
+                "owner_fence": _error,
                 "retryable": True,
                 "session_id": str(
                     getattr(owner_token.get("owner"), "session_id", None) or s.session_id
                 ),
                 "_status": 409,
             }
-    # Prevent duplicate runs in the same session while a stream is still active.
-    # This commonly happens after page refresh/reconnect races and can produce
-    # duplicated clarify cards for what appears to be a single user request.
-    diag.stage("active_stream_check") if diag else None
-    current_stream_id = getattr(s, "active_stream_id", None)
-    if current_stream_id:
-        if _active_stream_blocks_chat_start(s, current_stream_id):
-            diag.stage("response_write") if diag else None
-            return {
-                "error": "session already has an active stream",
-                "active_stream_id": current_stream_id,
-                "_status": 409,
-            }
-        # Stale stream id from a previous run; clear and continue.
-        diag.stage("stale_stream_cleanup") if diag else None
-        _clear_stale_stream_state(s)
 
-    # #1932: check if this session has a pending goal continuation flag.
-    # The streaming hook sets PENDING_GOAL_CONTINUATION when goal_continue fires,
-    # so the next chat/start for this session is automatically treated as goal-related.
-    if not goal_related and s.session_id in PENDING_GOAL_CONTINUATION:
-        goal_related = True
-        PENDING_GOAL_CONTINUATION.discard(s.session_id)
-
-    # process_complete wakeup (ours-original, Option B): if this session has a
-    # pending process_complete marker (set by api/background_process.py drain),
-    # discard it atomically here. Mirrors the goal_continue pattern (#1932).
-    # The marker is server-internal telemetry; the actual wakeup is delivered
-    # either server-side (Option Z) or via the PR #2279 next-turn drain.
-    if s.session_id in PENDING_BG_TASK_COMPLETIONS:
-        PENDING_BG_TASK_COMPLETIONS.discard(s.session_id)
-
-    while True:
         with session_lock:
-            # #6327 validation-to-start fence: when an immutable owner token
-            # was supplied, re-verify the canonical current owner under this
-            # lock BEFORE touching any pending state.  The out-of-AGENT
-            # credential revalidation may have waited while the session was
-            # replaced (same SID), compressed (SID rotation / lock migration),
-            # or had its profile/home/credential generation move; applying to
-            # or starting a run on the stale owner would corrupt the wrong
-            # session (or an archived pre-compression snapshot).  On movement
-            # the caller retries the whole flow outside AGENT (bounded).
-            if owner_token is not None:
-                _fence_error = _validate_start_owner_fence(owner_token, session_lock)
-                if _fence_error is not None:
-                    diag.stage("owner_fence") if diag else None
+            _fence_error = _validate_start_owner_fence(owner_token, session_lock)
+            if _fence_error is not None:
+                return _owner_fence_409(_fence_error)
+            # Active-stream disposition (no mutation yet — re-verify before
+            # the stale cleanup below touches the object).
+            diag.stage("active_stream_check") if diag else None
+            current_stream_id = getattr(s, "active_stream_id", None)
+            if current_stream_id:
+                if _active_stream_blocks_chat_start(s, current_stream_id):
+                    diag.stage("response_write") if diag else None
                     return {
-                        "error": "session owner changed during revalidation",
-                        "owner_fence": _fence_error,
-                        "retryable": True,
-                        "session_id": str(
-                            getattr(owner_token.get("owner"), "session_id", None) or s.session_id
-                        ),
+                        "error": "session already has an active stream",
+                        "active_stream_id": current_stream_id,
                         "_status": 409,
                     }
+                # Re-verify immediately before the stale-cleanup mutation.
+                _fence_error = _validate_start_owner_fence(owner_token, session_lock)
+                if _fence_error is not None:
+                    return _owner_fence_409(_fence_error)
+                diag.stage("stale_stream_cleanup") if diag else None
+                _clear_stale_stream_state(s)
+                if getattr(s, "active_stream_id", None):
+                    # Cleanup deferred (stale-repair grace) — still active.
+                    diag.stage("response_write") if diag else None
+                    return {
+                        "error": "session already has an active stream",
+                        "active_stream_id": getattr(s, "active_stream_id", None),
+                        "_status": 409,
+                    }
+            else:
+                blocking_run_stream_id = _active_run_stream_for_session(s.session_id)
+                if blocking_run_stream_id:
+                    diag.stage("response_write") if diag else None
+                    return {
+                        "error": "session already has an active stream",
+                        "active_stream_id": blocking_run_stream_id,
+                        "_status": 409,
+                    }
+            # #1932: pending goal continuation marker consumption (re-verify
+            # first so a replacement between validation and the discard is
+            # never followed by consuming the new owner's marker).
+            if not goal_related and s.session_id in PENDING_GOAL_CONTINUATION:
+                _fence_error = _validate_start_owner_fence(owner_token, session_lock)
+                if _fence_error is not None:
+                    return _owner_fence_409(_fence_error)
+                goal_related = True
+                PENDING_GOAL_CONTINUATION.discard(s.session_id)
+            # process_complete wakeup marker consumption (re-verify first).
+            if s.session_id in PENDING_BG_TASK_COMPLETIONS:
+                _fence_error = _validate_start_owner_fence(owner_token, session_lock)
+                if _fence_error is not None:
+                    return _owner_fence_409(_fence_error)
+                PENDING_BG_TASK_COMPLETIONS.discard(s.session_id)
+            # Pending-state preparation (final re-verify before the write).
+            stream_id = uuid.uuid4().hex
+            _fence_error = _validate_start_owner_fence(owner_token, session_lock)
+            if _fence_error is not None:
+                return _owner_fence_409(_fence_error)
+            diag.stage("save_pending_state") if diag else None
+            was_hidden_empty_session = _is_hidden_empty_session(s)
+            _prepare_chat_start_session_for_stream(
+                s,
+                msg=msg,
+                attachments=attachments,
+                workspace=workspace,
+                model=model,
+                model_provider=model_provider,
+                stream_id=stream_id,
+                source=source,
+            )
+    else:
+        # Prevent duplicate runs in the same session while a stream is still active.
+        # This commonly happens after page refresh/reconnect races and can produce
+        # duplicated clarify cards for what appears to be a single user request.
+        diag.stage("active_stream_check") if diag else None
+        current_stream_id = getattr(s, "active_stream_id", None)
+        if current_stream_id:
+            if _active_stream_blocks_chat_start(s, current_stream_id):
+                diag.stage("response_write") if diag else None
+                return {
+                    "error": "session already has an active stream",
+                    "active_stream_id": current_stream_id,
+                    "_status": 409,
+                }
+            # Stale stream id from a previous run; clear and continue.
+            diag.stage("stale_stream_cleanup") if diag else None
+            _clear_stale_stream_state(s)
+
+        # #1932: check if this session has a pending goal continuation flag.
+        # The streaming hook sets PENDING_GOAL_CONTINUATION when goal_continue fires,
+        # so the next chat/start for this session is automatically treated as goal-related.
+        if not goal_related and s.session_id in PENDING_GOAL_CONTINUATION:
+            goal_related = True
+            PENDING_GOAL_CONTINUATION.discard(s.session_id)
+
+        # process_complete wakeup (ours-original, Option B): if this session has a
+        # pending process_complete marker (set by api/background_process.py drain),
+        # discard it atomically here. Mirrors the goal_continue pattern (#1932).
+        # The marker is server-internal telemetry; the actual wakeup is delivered
+        # either server-side (Option Z) or via the PR #2279 next-turn drain.
+        if s.session_id in PENDING_BG_TASK_COMPLETIONS:
+            PENDING_BG_TASK_COMPLETIONS.discard(s.session_id)
+
+    # The immutable-owner-token path completed its disposition (validation +
+    # stale cleanup + marker consumption + pending-state prep) in the single
+    # owner-generation transaction above, so this historical disposition loop
+    # runs for the non-token path only.
+    needs_stale_cleanup = False
+    while True:
+        if owner_token is not None:
+            break
+        with session_lock:
             locked_stream_id = getattr(s, "active_stream_id", None)
             if locked_stream_id:
                 if _active_stream_blocks_chat_start(s, locked_stream_id):
@@ -22020,6 +22095,10 @@ def _start_run(
         runtime_adapter_enabled,
         runtime_adapter_runner_enabled,
     )
+    # #6327 runner acceptance: the client raises RunnerFenceRefused when the
+    # receiver did not compare-and-accept the exact nonce/version + complete
+    # claim, and RunnerClientError for ambiguous post-POST transport failures.
+    from api.runner_client import RunnerClientError, RunnerFenceRefused
 
     if runtime_adapter_enabled() or runtime_adapter_runner_enabled():
         def _legacy_start_run(request: StartRunRequest) -> dict:
@@ -22075,20 +22154,69 @@ def _start_run(
                         "session_id": str(getattr(s, "session_id", "") or ""),
                         "_status": 409,
                     }
-            result = adapter.start_run(
-                StartRunRequest(
-                    session_id=s.session_id,
-                    message=msg,
-                    attachments=attachments,
-                    workspace=workspace,
-                    profile=getattr(s, "profile", None),
-                    provider=model_provider,
-                    model=model,
-                    source=source,
-                    metadata={"route": route},
-                    owner_fence=owner_fence,
+            try:
+                result = adapter.start_run(
+                    StartRunRequest(
+                        session_id=s.session_id,
+                        message=msg,
+                        attachments=attachments,
+                        workspace=workspace,
+                        profile=getattr(s, "profile", None),
+                        provider=model_provider,
+                        model=model,
+                        source=source,
+                        metadata={"route": route},
+                        owner_fence=owner_fence,
+                    )
                 )
-            )
+            except RunnerFenceRefused as exc:
+                # #6327 receiver-authoritative refusal: the runner did not
+                # bind the run to the exact nonce/version + complete claim
+                # (accepted:true, SID, profile/home, generation, route, lease).
+                # The run was NOT acknowledged — retire the route's
+                # provisional pending state, re-defer the wakeup, and surface
+                # a retryable 409 so the caller requeues under the current
+                # owner instead of treating the run as started.
+                if owner_token is not None:
+                    _worker_retire_pending_state(
+                        owner_token,
+                        stream_id="",
+                        session_id=str(getattr(s, "session_id", "") or ""),
+                        wakeup_prompt=msg if source == "process_wakeup" else None,
+                        requeue_wakeup=(source == "process_wakeup"),
+                        reason=str(exc),
+                    )
+                return {
+                    "error": "runner refused the owner fence; run not started",
+                    "owner_fence": str(exc),
+                    "retryable": True,
+                    "session_id": str(getattr(s, "session_id", "") or ""),
+                    "_status": 409,
+                }
+            except RunnerClientError as exc:
+                # Ambiguous post-POST failure: the runner may or may not have
+                # created the run (transport error, HTTP error, malformed
+                # body).  Never assert that no run started — reconcile
+                # idempotently by re-deferring the wakeup (durable, safe to
+                # repeat) and surface a retryable error so the caller
+                # requeues and the runner-side run, if any, is reconciled by
+                # the next attempt.
+                if owner_token is not None:
+                    _worker_retire_pending_state(
+                        owner_token,
+                        stream_id="",
+                        session_id=str(getattr(s, "session_id", "") or ""),
+                        wakeup_prompt=msg if source == "process_wakeup" else None,
+                        requeue_wakeup=(source == "process_wakeup"),
+                        reason=str(exc),
+                    )
+                return {
+                    "error": str(exc),
+                    "retryable": True,
+                    "ambiguous": True,
+                    "session_id": str(getattr(s, "session_id", "") or ""),
+                    "_status": 502,
+                }
         except NotImplementedError as exc:
             return {"error": str(exc), "_status": 501}
         return _chat_start_response_from_run_start(result)
@@ -22857,18 +22985,74 @@ def _worker_atomic_owner_claim(
     return None
 
 
-# ── #6327 accepted-claim registry ─────────────────────────────────────────
+# ── #6327 per-session owner-generation lease ──────────────────────────────
 # The old sink fence (``_worker_sink_owner_fence``) re-verified the owner
 # under the AGENT lock, RETURNED, and then let the provider/network call
 # happen later — a same-SID replacement landing between the check and the
 # sink still reached the provider under stale ownership.  The accepted-claim
-# rule replaces that check-return-call pattern: the worker installs a
-# VERSIONED claim (bound to the exact owner identity, SID, generation, route,
-# and stream/run ID) under the canonical AGENT lock at worker start, and the
-# first provider/network sink compare-and-accepts that claim under the same
-# authority.  The claim lock is held ACROSS the sink (never AGENT across
-# network I/O), so an owner replacement/compression that invalidates claims
-# can never interleave between acceptance and the actual sink.
+# rule replaces that check-return-call pattern with a PER-SESSION OWNER
+# GENERATION LEASE: every canonical owner publisher (same-SID replacement,
+# deletion, cache refresh, compression/rotation publication) bumps the
+# session's lease token BEFORE it publishes the new owner, and a worker's
+# versioned sink claim (bound to the exact owner identity, SID, generation,
+# route, stream/run ID, and the lease token captured at install) is
+# compare-and-accepted under the PER-SESSION lease lock.  That lock is held
+# ACROSS the sink (never AGENT across network I/O, and never a process-global
+# mutex), so a publication for the same session blocks until the in-flight
+# sink completes while other sessions are never serialized behind one
+# session's LLM/network turn.
+_SESSION_OWNER_LEASES_GUARD = threading.Lock()
+_SESSION_OWNER_LEASES: dict[str, tuple[threading.Lock, str]] = {}
+
+
+def _session_owner_lease(sid):
+    """Return the ``(lease_lock, current_token)`` pair for *sid*, on demand.
+
+    The per-session lease lock is the compare-and-accept authority: a worker
+    holds it across its sink, so a publisher bumping the lease for the same
+    session serializes AFTER the in-flight sink — never a global mutex.
+    """
+    sid = str(sid or "")
+    with _SESSION_OWNER_LEASES_GUARD:
+        entry = _SESSION_OWNER_LEASES.get(sid)
+        if entry is None:
+            entry = (threading.Lock(), uuid.uuid4().hex)
+            _SESSION_OWNER_LEASES[sid] = entry
+        return entry
+
+
+def _read_owner_lease(sid) -> str:
+    """Return the current owner-generation lease token for *sid*."""
+    sid = str(sid or "")
+    lock, _ = _session_owner_lease(sid)
+    with lock:
+        with _SESSION_OWNER_LEASES_GUARD:
+            entry = _SESSION_OWNER_LEASES.get(sid)
+            return entry[1] if entry is not None else ""
+
+
+def _bump_owner_lease(sid) -> str:
+    """Bump the per-session owner-generation lease to a fresh token.
+
+    Every canonical owner publisher MUST call this (or
+    ``_invalidate_owner_sink_claims``) BEFORE publishing a new owner.  The
+    per-session lease lock is held across a worker's sink, so when a worker
+    is currently sinking this call blocks until that sink completes — the
+    new owner is never published while the old owner's sink is in flight,
+    without any process-global mutex.
+    """
+    sid = str(sid or "")
+    lock, _ = _session_owner_lease(sid)
+    with lock:
+        token = uuid.uuid4().hex
+        with _SESSION_OWNER_LEASES_GUARD:
+            _SESSION_OWNER_LEASES[sid] = (lock, token)
+        return token
+
+
+# Bookkeeping registry of installed claims (keyed by (sid, stream_id)); the
+# acceptance AUTHORITY is the per-session lease above.  ``_WORKER_SINK_CLAIMS_LOCK``
+# only guards dict operations — it is never held across a sink.
 _WORKER_SINK_CLAIMS_LOCK = threading.Lock()
 _WORKER_SINK_CLAIMS: dict[tuple[str, str], dict] = {}
 
@@ -22901,6 +23085,12 @@ def _install_worker_sink_claim(owner_token, owner, stream_id):
         "session_id": live_sid,
         "stream_id": str(stream_id or ""),
         "version": uuid.uuid4().hex,
+        # #6327 per-session owner-generation lease captured at install time:
+        # the sink guard compares it under the per-session lease lock, so a
+        # publisher that bumps the lease BEFORE publishing (replacement,
+        # deletion, cache refresh, compression/rotation) refuses this claim
+        # at its next sink compare-and-accept.
+        "lease": _read_owner_lease(live_sid),
         "owner_generation": str(owner_token.get("credential_state_fingerprint") or ""),
         "profile": str(getattr(owner, "profile", "") or ""),
         "profile_home": str(owner_token.get("profile_home") or ""),
@@ -22932,14 +23122,18 @@ def _worker_clear_sink_claim(session_id, stream_id):
 def _invalidate_owner_sink_claims(session_id):
     """Invalidate every outstanding sink claim bound to *session_id*.
 
-    Called by owner-replacement/compression/retire paths so a stale worker's
-    next sink compare-and-accept fails with ``claim_invalidated`` and the
-    provider/network call is never reached.  Runs under the claim lock, so
-    when a worker is currently sinking (claim lock held across the sink) the
-    invalidation serializes AFTER that sink completes — a newer owner can
-    never supersede the old one while its sink is in flight.
+    #6327: every canonical owner publisher calls this (or ``_bump_owner_lease``)
+    BEFORE publishing a new owner.  It bumps the per-session owner-generation
+    lease so any claim installed under the previous lease is refused with
+    ``claim_invalidated`` at its next sink compare-and-accept and the
+    provider/network call is never reached.  Because a worker holds the
+    per-session lease lock across its sink, this call blocks while that
+    session's sink is in flight (never a process-global mutex) — a newer
+    owner can never supersede the old one between acceptance and the actual
+    sink.
     """
     sid = str(session_id or "")
+    _bump_owner_lease(sid)
     with _WORKER_SINK_CLAIMS_LOCK:
         for key in [k for k in _WORKER_SINK_CLAIMS if k[0] == sid]:
             _WORKER_SINK_CLAIMS.pop(key, None)
@@ -22994,15 +23188,24 @@ def _worker_sink_claim_guard(claim, owner_token, s, stream_id):
         str(claim.get("session_id") or "") if isinstance(claim, dict) else "",
         str(stream_id or ""),
     )
-    # Compare-and-accept under the claim lock, then hold the lock ACROSS the
-    # sink (the ``with`` body): a concurrent replacement/compression that
-    # invalidates claims blocks until the sink completes, so a newer owner can
-    # never supersede the old one between acceptance and the provider call.
+    # Compare-and-accept under the PER-SESSION owner-generation lease lock,
+    # then hold that lock ACROSS the sink (the ``with`` body): a publisher
+    # bumping the lease for this session (replacement/compression/refresh)
+    # blocks until the sink completes, so a newer owner can never supersede
+    # the old one between acceptance and the provider call — without holding
+    # any process-global mutex across the turn.
     if reason is None:
-        with _WORKER_SINK_CLAIMS_LOCK:
-            installed = _WORKER_SINK_CLAIMS.get(key)
-            if installed is None or str(installed.get("version") or "") != str(
-                claim.get("version") or ""
+        lease_lock, _ = _session_owner_lease(str(claim.get("session_id") or ""))
+        with lease_lock:
+            with _SESSION_OWNER_LEASES_GUARD:
+                _lease_entry = _SESSION_OWNER_LEASES.get(str(claim.get("session_id") or ""))
+                current_lease = _lease_entry[1] if _lease_entry is not None else ""
+            with _WORKER_SINK_CLAIMS_LOCK:
+                installed = _WORKER_SINK_CLAIMS.get(key)
+            if (
+                current_lease != str(claim.get("lease") or "")
+                or installed is None
+                or str(installed.get("version") or "") != str(claim.get("version") or "")
             ):
                 reason = "claim_invalidated"
             else:
@@ -23010,7 +23213,8 @@ def _worker_sink_claim_guard(claim, owner_token, s, stream_id):
                 try:
                     yield None
                 finally:
-                    _WORKER_SINK_CLAIMS.pop(key, None)
+                    with _WORKER_SINK_CLAIMS_LOCK:
+                        _WORKER_SINK_CLAIMS.pop(key, None)
     if reason is not None:
         with _WORKER_SINK_CLAIMS_LOCK:
             _WORKER_SINK_CLAIMS.pop(key, None)
@@ -23098,6 +23302,11 @@ def _claim_runner_owner_fence(owner_token, s):
             # generation (compare-and-accept) before the run is treated as
             # started, so the claim carries this per-run nonce too.
             "version": uuid.uuid4().hex,
+            # #6327 per-session owner-generation lease: captured at claim time
+            # and echoed in the accepted response, so the receiver can bind
+            # the run to the exact nonce/version + complete claim instead of
+            # a reflected payload that only matches session_id + generation.
+            "lease": _read_owner_lease(live_sid),
         }
     return fence, None
 

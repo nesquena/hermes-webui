@@ -4691,6 +4691,23 @@ def get_session_for_scan(sid):
         return None
 
 
+def _bump_owner_publication_lease(session_id) -> None:
+    """Bump the #6327 per-session owner-generation lease BEFORE a cache
+    publication (same-SID replacement / cache refresh).
+
+    Every canonical owner publisher participates before publishing so an
+    in-flight sink for the same session serializes first.  Lazy-imported from
+    api.routes to avoid an import cycle; failures are best-effort (the sink
+    guard's exact-owner identity re-check remains the backstop).
+    """
+    try:
+        from api.routes import _invalidate_owner_sink_claims
+
+        _invalidate_owner_sink_claims(str(session_id or ""))
+    except Exception:
+        pass
+
+
 def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_miss=True):
     """Resolve a session through the canonical freshness/recovery path.
 
@@ -4724,6 +4741,11 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
         if not metadata_only and _cached_session_lags_disk(cached):
             try:
                 disk_session = Session.load(sid)
+                # #6327: the cache refresh REPLACES the canonical owner object
+                # under the same SID — participate in the owner-generation
+                # lease BEFORE publishing so an in-flight sink for this
+                # session serializes first and stale claims are refused.
+                _bump_owner_publication_lease(sid)
                 with LOCK:
                     SESSIONS[sid] = disk_session
                     if promote_cache:
@@ -4737,6 +4759,9 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
             try:
                 disk_session = Session.load(sid)
                 if _cache_has_stale_unsaved_user_tail(cached, disk_session):
+                    # #6327: same as above — lease-bump before the refresh
+                    # publication replaces the cached owner.
+                    _bump_owner_publication_lease(sid)
                     with LOCK:
                         SESSIONS[sid] = disk_session
                         if promote_cache:
