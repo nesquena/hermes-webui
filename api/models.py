@@ -4691,21 +4691,24 @@ def get_session_for_scan(sid):
         return None
 
 
-def _bump_owner_publication_lease(session_id) -> None:
-    """Bump the #6327 per-session owner-generation lease BEFORE a cache
-    publication (same-SID replacement / cache refresh).
+@contextmanager
+def _publish_owner_publication_lease(session_id):
+    """#6327 per-SID publication transaction (lazy-imported from api.routes).
 
-    Every canonical owner publisher participates before publishing so an
-    in-flight sink for the same session serializes first.  Lazy-imported from
-    api.routes to avoid an import cycle; failures are best-effort (the sink
-    guard's exact-owner identity re-check remains the backstop).
+    Wraps a same-SID cache publication (``SESSIONS[sid] = <new owner>``): the
+    per-session owner-generation lease is bumped AND held across the exact
+    SESSIONS write, so an in-flight sink for the same session serializes
+    first and no claim can be accepted with a lease minted in a
+    bump-to-publication gap.  Failures are best-effort (the sink guard's
+    exact-owner identity re-check remains the backstop).
     """
     try:
-        from api.routes import _invalidate_owner_sink_claims
+        from api.routes import _publish_owner_lease
 
-        _invalidate_owner_sink_claims(str(session_id or ""))
+        with _publish_owner_lease(str(session_id or "")):
+            yield
     except Exception:
-        pass
+        yield
 
 
 def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_miss=True):
@@ -4742,14 +4745,16 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
             try:
                 disk_session = Session.load(sid)
                 # #6327: the cache refresh REPLACES the canonical owner object
-                # under the same SID — participate in the owner-generation
-                # lease BEFORE publishing so an in-flight sink for this
-                # session serializes first and stale claims are refused.
-                _bump_owner_publication_lease(sid)
-                with LOCK:
-                    SESSIONS[sid] = disk_session
-                    if promote_cache:
-                        SESSIONS.move_to_end(sid)
+                # under the same SID — publish as a per-SID publication
+                # transaction so the lease authority is held ACROSS the exact
+                # SESSIONS write (an in-flight sink serializes first; no claim
+                # can be accepted with a lease minted in a bump-to-publication
+                # gap).
+                with _publish_owner_publication_lease(sid):
+                    with LOCK:
+                        SESSIONS[sid] = disk_session
+                        if promote_cache:
+                            SESSIONS.move_to_end(sid)
                 cached = disk_session
             except Exception:
                 logger.debug(
@@ -4759,13 +4764,14 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
             try:
                 disk_session = Session.load(sid)
                 if _cache_has_stale_unsaved_user_tail(cached, disk_session):
-                    # #6327: same as above — lease-bump before the refresh
-                    # publication replaces the cached owner.
-                    _bump_owner_publication_lease(sid)
-                    with LOCK:
-                        SESSIONS[sid] = disk_session
-                        if promote_cache:
-                            SESSIONS.move_to_end(sid)
+                    # #6327: same as above — publish the refresh as a per-SID
+                    # publication transaction holding the lease authority
+                    # across the exact SESSIONS write.
+                    with _publish_owner_publication_lease(sid):
+                        with LOCK:
+                            SESSIONS[sid] = disk_session
+                            if promote_cache:
+                                SESSIONS.move_to_end(sid)
                     cached = disk_session
             except Exception:
                 logger.debug(

@@ -3,7 +3,12 @@ import urllib.request
 
 import pytest
 
-from api.runner_client import HttpRunnerClient, RunnerClientError, runner_client_configured
+from api.runner_client import (
+    HttpRunnerClient,
+    RunnerClientError,
+    RunnerFenceRefused,
+    runner_client_configured,
+)
 from api.runtime_adapter import StartRunRequest
 
 
@@ -55,11 +60,23 @@ def test_runner_client_start_run_posts_explicit_boundary_payload(monkeypatch):
             "run_id": "run-1",
             "stream_id": "run-1",
             "status": "running",
-            # #6327 receiver compare-and-accept: the runner echoes the claimed
-            # SID + generation to acknowledge the owner fence.
+            # #6327 receiver compare-and-accept: the runner echoes the
+            # COMPLETE claimed fence (accepted:true + SID + profile/home +
+            # generation + per-run claim version + route lane + lease), not a
+            # weak SID+generation reflection.
             "owner_fence": {
                 "session_id": "s1",
+                "profile": "default",
+                "profile_home": "/home/test/.hermes",
                 "generation": "fingerprint-1",
+                "version": "claim-1",
+                "lease": "lease-1",
+                "route": {
+                    "workspace": "/workspace",
+                    "model": "gpt-5.5",
+                    "provider": "openai-codex",
+                    "normalized_model": False,
+                },
                 "accepted": True,
             },
         })
@@ -87,6 +104,7 @@ def test_runner_client_start_run_posts_explicit_boundary_payload(monkeypatch):
                 "profile_home": "/home/test/.hermes",
                 "generation": "fingerprint-1",
                 "version": "claim-1",
+                "lease": "lease-1",
                 "route": {
                     "workspace": "/workspace",
                     "model": "gpt-5.5",
@@ -118,6 +136,7 @@ def test_runner_client_start_run_posts_explicit_boundary_payload(monkeypatch):
             "profile_home": "/home/test/.hermes",
             "generation": "fingerprint-1",
             "version": "claim-1",
+            "lease": "lease-1",
             "route": {
                 "workspace": "/workspace",
                 "model": "gpt-5.5",
@@ -131,7 +150,10 @@ def test_runner_client_start_run_posts_explicit_boundary_payload(monkeypatch):
 def test_runner_client_refuses_run_without_fence_acceptance(monkeypatch):
     """#6327: a runner response without the owner-fence echo is NOT an
     accepted run — the run must never be treated as started until the
-    receiver compare-and-accepts the claimed SID + generation."""
+    receiver compare-and-accepts the complete claimed fence (accepted:true +
+    SID + profile/home + generation + version + route + lease).  The refusal
+    is RunnerFenceRefused (retryable, never ambiguous) so the route requeues
+    instead of treating the run as started."""
 
     def fake_urlopen(req, timeout=0):
         return FakeResponse({
@@ -143,7 +165,7 @@ def test_runner_client_refuses_run_without_fence_acceptance(monkeypatch):
     _patch_opener(monkeypatch, fake_urlopen)
     client = HttpRunnerClient(base_url="http://runner.local/", api_key="secret")
 
-    with pytest.raises(RunnerClientError, match="compare-and-accept"):
+    with pytest.raises(RunnerFenceRefused, match="owner_fence"):
         client.start_run(
             StartRunRequest(
                 session_id="s1",
@@ -165,6 +187,146 @@ def test_runner_client_refuses_run_without_fence_acceptance(monkeypatch):
                         "normalized_model": False,
                     },
                 },
+            )
+        )
+
+
+def test_runner_client_rejects_weak_sid_generation_echo(monkeypatch):
+    """#6327: the historical success oracle — a reflected owner_fence that
+    only matches session_id + generation — is TRANSPORT, not acceptance, and
+    must now be refused (the canonical validator requires the complete fence:
+    accepted:true, nonce/version, profile/home, route, lease)."""
+
+    claimed = {
+        "session_id": "s1",
+        "profile": "default",
+        "profile_home": "/home/test/.hermes",
+        "generation": "fingerprint-1",
+        "version": "claim-1",
+        "lease": "lease-1",
+        "route": {
+            "workspace": "/workspace",
+            "model": "gpt-5.5",
+            "provider": "openai-codex",
+            "normalized_model": False,
+        },
+    }
+
+    def fake_urlopen(req, timeout=0):
+        return FakeResponse({
+            "run_id": "run-1",
+            "status": "running",
+            # Weak reflection: only SID + generation + accepted:true.
+            "owner_fence": {
+                "session_id": "s1",
+                "generation": "fingerprint-1",
+                "accepted": True,
+            },
+        })
+
+    _patch_opener(monkeypatch, fake_urlopen)
+    client = HttpRunnerClient(base_url="http://runner.local/", api_key="secret")
+    with pytest.raises(RunnerFenceRefused, match="owner_fence"):
+        client.start_run(
+            StartRunRequest(
+                session_id="s1",
+                message="hello",
+                workspace="/workspace",
+                profile="default",
+                provider="openai-codex",
+                model="gpt-5.5",
+                owner_fence=claimed,
+            )
+        )
+
+
+def _complete_runner_echo(**overrides):
+    echo = {
+        "accepted": True,
+        "session_id": "s1",
+        "profile": "default",
+        "profile_home": "/home/test/.hermes",
+        "generation": "fingerprint-1",
+        "version": "claim-1",
+        "lease": "lease-1",
+        "route": {
+            "workspace": "/workspace",
+            "model": "gpt-5.5",
+            "provider": "openai-codex",
+            "normalized_model": False,
+        },
+    }
+    for key, value in overrides.items():
+        if key == "route" and isinstance(value, dict):
+            echo["route"] = dict(echo["route"])
+            echo["route"].update(value)
+        else:
+            echo[key] = value
+    return echo
+
+
+def _claimed_fence():
+    return {
+        "session_id": "s1",
+        "profile": "default",
+        "profile_home": "/home/test/.hermes",
+        "generation": "fingerprint-1",
+        "version": "claim-1",
+        "lease": "lease-1",
+        "route": {
+            "workspace": "/workspace",
+            "model": "gpt-5.5",
+            "provider": "openai-codex",
+            "normalized_model": False,
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "mutation,expected",
+    [
+        # accepted:true is required.
+        ({"accepted": False}, "accepted:true"),
+        ({"accepted": None}, "accepted:true"),
+        # Every identity field must match exactly.
+        ({"session_id": "other"}, "owner_fence.session_id"),
+        ({"profile": "other"}, "owner_fence.profile"),
+        ({"profile_home": "/other/home"}, "owner_fence.profile_home"),
+        ({"generation": "other-fingerprint"}, "owner_fence.generation"),
+        ({"version": "other-claim"}, "owner_fence.version"),
+        ({"lease": "other-lease"}, "owner_fence.lease"),
+        # The full route lane must match.
+        ({"route": {"workspace": "/other"}}, "route.workspace"),
+        ({"route": {"model": "other-model"}}, "route.model"),
+        ({"route": {"provider": "other-provider"}}, "route.provider"),
+        ({"route": {"normalized_model": True}}, "route.normalized_model"),
+    ],
+)
+def test_runner_client_rejects_fence_mismatch_per_field(monkeypatch, mutation, expected):
+    """#6327: one rejection test per fence field — a runner echo that
+    mismatches ANY field of the claimed generation/route fence (or misses
+    accepted:true) must raise RunnerFenceRefused, never a generic
+    RunnerClientError, so the retryable 409/requeue path stays reachable."""
+
+    def fake_urlopen(req, timeout=0):
+        return FakeResponse({
+            "run_id": "run-1",
+            "status": "running",
+            "owner_fence": _complete_runner_echo(**mutation),
+        })
+
+    _patch_opener(monkeypatch, fake_urlopen)
+    client = HttpRunnerClient(base_url="http://runner.local/", api_key="secret")
+    with pytest.raises(RunnerFenceRefused, match=expected):
+        client.start_run(
+            StartRunRequest(
+                session_id="s1",
+                message="hello",
+                workspace="/workspace",
+                profile="default",
+                provider="openai-codex",
+                model="gpt-5.5",
+                owner_fence=_claimed_fence(),
             )
         )
 

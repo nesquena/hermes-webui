@@ -157,18 +157,18 @@ class HttpRunnerClient:
             "metadata": dict(request.metadata or {}),
             "owner_fence": dict(fence),
         })
-        # Receiver compare-and-accept: without the runner echoing the claimed
-        # SID + generation the run is NOT started — never acknowledge a run
-        # the receiver did not explicitly accept under owner authority.
+        # Receiver compare-and-accept: the run is NOT started unless the
+        # runner echoes the COMPLETE claimed fence (accepted:true + SID +
+        # profile/home + generation + route lane + per-run claim version +
+        # per-session lease) — a reflected payload that only matches
+        # session_id + generation is transport, not acceptance.  Every
+        # mismatch raises RunnerFenceRefused (retryable, never ambiguous) so
+        # the route requeues/reconciles under the current owner instead of
+        # treating the run as started.
         accepted = payload.get("owner_fence") if isinstance(payload, dict) else None
-        if (
-            not isinstance(accepted, dict)
-            or str(accepted.get("session_id") or "") != str(fence.get("session_id") or "")
-            or str(accepted.get("generation") or "") != str(fence.get("generation") or "")
-        ):
-            raise RunnerClientError(
-                "runner did not compare-and-accept the owner fence; run not started"
-            )
+        mismatch = _runner_fence_accepted(fence, accepted)
+        if mismatch is not None:
+            raise RunnerFenceRefused(mismatch)
         return payload
 
     def observe_run(self, run_id: str, *, cursor: str | None = None) -> dict[str, Any]:

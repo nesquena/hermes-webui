@@ -2946,7 +2946,7 @@ def _cancelled_run_is_stale(run_entry) -> bool:
     return age >= _STALE_CANCELLED_RUN_GRACE_SECONDS
 
 
-def _clear_stale_stream_state(session) -> bool:
+def _clear_stale_stream_state(session, *, _agent_lock_held=False) -> bool:
     """Clear persisted streaming flags when the in-memory stream no longer exists.
 
     A server restart or worker crash can leave active_stream_id/pending_* in the
@@ -2958,6 +2958,15 @@ def _clear_stale_stream_state(session) -> bool:
     atomically overwrite the on-disk JSON, wiping the conversation. In that
     case we re-load the full session before mutating, so the persisted
     write carries the real messages forward.
+
+    LOCK CONTRACT (#6327 review 14): this helper never REACQUIRES the
+    per-session AGENT lock when the caller already holds it.  The historical
+    implementation took ``_get_session_agent_lock(session.session_id)``
+    itself, which deadlocked ``_start_chat_stream_for_session`` (it holds the
+    same non-reentrant lock across its owner-generation transaction and calls
+    this helper).  Callers that already hold the lock pass
+    ``_agent_lock_held=True`` and the mutation primitive runs directly under
+    the caller's hold; every other caller keeps the historical acquire.
     """
     stream_id = getattr(session, "active_stream_id", None)
     if not stream_id:
@@ -3069,68 +3078,85 @@ def _clear_stale_stream_state(session) -> bool:
                 pass
             return False
 
-    # ── #1533 race fix: acquire the per-session lock and re-read
-    # active_stream_id under it. A concurrent chat_start may have already
-    # registered a new stream after our STREAMS_LOCK check above; in that
-    # case we must NOT clobber its session.active_stream_id.
+    # ── #1533 race fix: re-read active_stream_id under the per-session lock.
+    # A concurrent chat_start may have already registered a new stream after
+    # our STREAMS_LOCK check above; in that case we must NOT clobber its
+    # session.active_stream_id.  #6327 review 14: when the caller already
+    # holds the per-session AGENT lock (_agent_lock_held=True) we run the
+    # mutation primitive directly under that hold — re-acquiring the same
+    # non-reentrant lock here deadlocks the owner-generation transaction.
+    if _agent_lock_held:
+        return _clear_stale_stream_state_locked(session, stream_id, original_stub)
     with _get_session_agent_lock(session.session_id):
-        if getattr(session, "active_stream_id", None) != stream_id:
-            return False
-        if getattr(session, "pending_user_message", None):
-            try:
-                from api.models import _apply_core_sync_or_error_marker, _get_profile_home
-                profile_home = _get_profile_home(getattr(session, "profile", None))
-                core_path = profile_home / "sessions" / f"session_{session.session_id}.json"
-                repaired = _apply_core_sync_or_error_marker(
-                    session,
-                    core_path,
-                    stream_id_for_recheck=stream_id,
-                    touch_updated_at=False,
-                )
-            except Exception:
-                logger.exception(
-                    "_clear_stale_stream_state: failed to repair stale pending stream %s "
-                    "for session %s",
-                    stream_id, getattr(session, "session_id", "?"),
-                )
-                repaired = False
-            if repaired:
-                if original_stub is not session:
-                    try:
-                        original_stub.active_stream_id = None
-                        if hasattr(original_stub, "pending_user_message"):
-                            original_stub.pending_user_message = None
-                        if hasattr(original_stub, "pending_attachments"):
-                            original_stub.pending_attachments = []
-                        if hasattr(original_stub, "pending_started_at"):
-                            original_stub.pending_started_at = None
-                        if hasattr(original_stub, "pending_user_source"):
-                            original_stub.pending_user_source = None
-                    except Exception:
-                        pass
-                return True
-            if getattr(session, "active_stream_id", None) != stream_id:
-                return False
-        _materialize_pending_user_turn_before_error(session)
-        session.active_stream_id = None
-        if hasattr(session, "pending_user_message"):
-            session.pending_user_message = None
-        if hasattr(session, "pending_attachments"):
-            session.pending_attachments = []
-        if hasattr(session, "pending_started_at"):
-            session.pending_started_at = None
-        if hasattr(session, "pending_user_source"):
-            session.pending_user_source = None
+        return _clear_stale_stream_state_locked(session, stream_id, original_stub)
+
+
+def _clear_stale_stream_state_locked(session, stream_id, original_stub) -> bool:
+    """Lock-held mutation primitive of ``_clear_stale_stream_state``.
+
+    #6327 review 14: runs the stale-stream mutation while the per-session
+    AGENT lock is held — either acquired by ``_clear_stale_stream_state``
+    itself or already held by the caller (``_start_chat_stream_for_session``
+    passes ``_agent_lock_held=True``).  The caller's lock is non-reentrant,
+    so this primitive never acquires it.
+    """
+    if getattr(session, "active_stream_id", None) != stream_id:
+        return False
+    if getattr(session, "pending_user_message", None):
         try:
-            # Runtime cleanup is not user activity; do not bubble old sessions
-            # to the top of the sidebar just because a stale stream flag was
-            # repaired during a read/list path.
-            session.save(touch_updated_at=False)
+            from api.models import _apply_core_sync_or_error_marker, _get_profile_home
+            profile_home = _get_profile_home(getattr(session, "profile", None))
+            core_path = profile_home / "sessions" / f"session_{session.session_id}.json"
+            repaired = _apply_core_sync_or_error_marker(
+                session,
+                core_path,
+                stream_id_for_recheck=stream_id,
+                touch_updated_at=False,
+            )
         except Exception:
             logger.exception(
-                "_clear_stale_stream_state: save() failed for session %s",
-                getattr(session, "session_id", "?"),
+                "_clear_stale_stream_state: failed to repair stale pending stream %s "
+                "for session %s",
+                stream_id, getattr(session, "session_id", "?"),
             )
+            repaired = False
+        if repaired:
+            if original_stub is not session:
+                try:
+                    original_stub.active_stream_id = None
+                    if hasattr(original_stub, "pending_user_message"):
+                        original_stub.pending_user_message = None
+                    if hasattr(original_stub, "pending_attachments"):
+                        original_stub.pending_attachments = []
+                    if hasattr(original_stub, "pending_started_at"):
+                        original_stub.pending_started_at = None
+                    if hasattr(original_stub, "pending_user_source"):
+                        original_stub.pending_user_source = None
+                except Exception:
+                    pass
+            return True
+        if getattr(session, "active_stream_id", None) != stream_id:
+            return False
+    _materialize_pending_user_turn_before_error(session)
+    session.active_stream_id = None
+    if hasattr(session, "pending_user_message"):
+        session.pending_user_message = None
+    if hasattr(session, "pending_attachments"):
+        session.pending_attachments = []
+    if hasattr(session, "pending_started_at"):
+        session.pending_started_at = None
+    if hasattr(session, "pending_user_source"):
+        session.pending_user_source = None
+    try:
+        # Runtime cleanup is not user activity; do not bubble old sessions
+        # to the top of the sidebar just because a stale stream flag was
+        # repaired during a read/list path.
+        session.save(touch_updated_at=False)
+    except Exception:
+        logger.exception(
+            "_clear_stale_stream_state: save() failed for session %s",
+            getattr(session, "session_id", "?"),
+        )
     # Patch the caller's stub (if different from the full-load object) so
     # its in-memory active_stream_id matches what just got persisted.
     if original_stub is not session:
@@ -3912,13 +3938,16 @@ def _ensure_full_session_before_mutation(sid: str, session):
     if full_session is None:
         raise KeyError(sid)
     # #6327: upgrading the cached metadata stub REPLACES the canonical owner
-    # object under the same SID — participate in the owner-generation lease
-    # before publishing so an in-flight sink serializes first.
-    _invalidate_owner_sink_claims(sid)
-    with LOCK:
-        SESSIONS[sid] = full_session
-        SESSIONS.move_to_end(sid)
-        _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+    # object under the same SID — run the replacement as a per-SID
+    # publication transaction so the lease authority is held ACROSS the exact
+    # SESSIONS write (an in-flight sink serializes first, and no claim can be
+    # accepted with a lease minted in a bump-to-publication gap).
+    with _publish_owner_lease(sid):
+        _clear_owner_sink_claims(sid)
+        with LOCK:
+            SESSIONS[sid] = full_session
+            SESSIONS.move_to_end(sid)
+            _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
     return full_session
 
 
@@ -15370,13 +15399,14 @@ def handle_post(handler, parsed) -> bool:
         if not session_lock.acquire(timeout=5):
             return bad(handler, "Session busy, try again", 503)
         try:
-            # #6327: deletion is a canonical owner publication — participate
-            # in the owner-generation lease BEFORE removing the owner so any
-            # in-flight sink for this session serializes first and installed
-            # sink claims are refused.
-            _invalidate_owner_sink_claims(sid)
-            with LOCK:
-                SESSIONS.pop(sid, None)
+            # #6327: deletion is a canonical owner publication — run it as a
+            # per-SID publication transaction so the lease authority is held
+            # ACROSS the exact SESSIONS removal (an in-flight sink for this
+            # session serializes first and installed sink claims are refused).
+            with _publish_owner_lease(sid):
+                _clear_owner_sink_claims(sid)
+                with LOCK:
+                    SESSIONS.pop(sid, None)
             try:
                 p = (SESSION_DIR / f"{sid}.json").resolve()
                 p.relative_to(SESSION_DIR.resolve())
@@ -16481,8 +16511,14 @@ def handle_post(handler, parsed) -> bool:
                 s = Session.load(sid)
                 if s is None:
                     raise KeyError(sid)
-                with LOCK:
-                    SESSIONS[sid] = s
+                # #6327: upgrading the cached metadata stub REPLACES the
+                # canonical owner object under the same SID — publish as a
+                # per-SID publication transaction holding the lease authority
+                # across the exact SESSIONS write.
+                with _publish_owner_lease(sid):
+                    _clear_owner_sink_claims(sid)
+                    with LOCK:
+                        SESSIONS[sid] = s
         except KeyError:
             cli_meta = _lookup_cli_session_metadata(sid)
             if not cli_meta:
@@ -21188,11 +21224,13 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
                 should_delete = s and s.title == "Untitled" and len(s.messages) == 0
             if should_delete:
                 # #6327: cleanup deletion is a canonical owner publication —
-                # participate in the owner-generation lease before removing
-                # the owner so installed sink claims are refused.
-                _invalidate_owner_sink_claims(p.stem)
-                with LOCK:
-                    SESSIONS.pop(p.stem, None)
+                # run it as a per-SID publication transaction so the lease
+                # authority is held ACROSS the exact SESSIONS removal
+                # (installed sink claims are refused).
+                with _publish_owner_lease(p.stem):
+                    _clear_owner_sink_claims(p.stem)
+                    with LOCK:
+                        SESSIONS.pop(p.stem, None)
                 p.unlink(missing_ok=True)
                 cleaned += 1
                 phase1_removed_ids.add(p.stem)
@@ -21784,7 +21822,11 @@ def _start_chat_stream_for_session(
                 if _fence_error is not None:
                     return _owner_fence_409(_fence_error)
                 diag.stage("stale_stream_cleanup") if diag else None
-                _clear_stale_stream_state(s)
+                # #6327 review 14: we already hold the non-reentrant
+                # per-session AGENT lock here; the helper must NOT re-acquire
+                # it (that deadlocked this validate-before-mutate path).  The
+                # lock-held mutation primitive runs under our hold.
+                _clear_stale_stream_state(s, _agent_lock_held=True)
                 if getattr(s, "active_stream_id", None):
                     # Cleanup deferred (stale-repair grace) — still active.
                     diag.stage("response_write") if diag else None
@@ -23050,6 +23092,31 @@ def _bump_owner_lease(sid) -> str:
         return token
 
 
+@contextmanager
+def _publish_owner_lease(sid):
+    """Per-SID publication transaction: hold the lease ACROSS the SESSIONS write.
+
+    #6327 review (14): replaces bump-and-return.  ``_bump_owner_lease``
+    released the per-session lease lock BEFORE the publisher mutated
+    ``SESSIONS``, so an old owner could validate, install/accept a claim
+    carrying the NEW lease in the bump-to-publication gap, and the
+    publication could replace that owner while its sink was in flight.  This
+    context manager bumps the token and keeps the lease lock held until the
+    caller's exact ``SESSIONS`` remove/replace/rotation write (the ``with``
+    body) completes: a worker's sink holds this same lock, so an in-flight
+    sink for the same session serializes before the publication, and any
+    claim installed under the previous lease is refused at its next
+    compare-and-accept because the lease already moved.
+    """
+    sid = str(sid or "")
+    lock, _ = _session_owner_lease(sid)
+    with lock:
+        token = uuid.uuid4().hex
+        with _SESSION_OWNER_LEASES_GUARD:
+            _SESSION_OWNER_LEASES[sid] = (lock, token)
+        yield token
+
+
 # Bookkeeping registry of installed claims (keyed by (sid, stream_id)); the
 # acceptance AUTHORITY is the per-session lease above.  ``_WORKER_SINK_CLAIMS_LOCK``
 # only guards dict operations — it is never held across a sink.
@@ -23119,10 +23186,24 @@ def _worker_clear_sink_claim(session_id, stream_id):
         _WORKER_SINK_CLAIMS.pop((str(session_id or ""), str(stream_id or "")), None)
 
 
+def _clear_owner_sink_claims(sid):
+    """Drop every outstanding sink claim bound to *sid* (bookkeeping only).
+
+    Callers hold the per-session lease authority (inside
+    ``_publish_owner_lease``) when they call this; the acceptance authority
+    is the bumped lease, this only keeps the registry tidy.  Never acquires
+    the lease lock itself.
+    """
+    sid = str(sid or "")
+    with _WORKER_SINK_CLAIMS_LOCK:
+        for key in [k for k in _WORKER_SINK_CLAIMS if k[0] == sid]:
+            _WORKER_SINK_CLAIMS.pop(key, None)
+
+
 def _invalidate_owner_sink_claims(session_id):
     """Invalidate every outstanding sink claim bound to *session_id*.
 
-    #6327: every canonical owner publisher calls this (or ``_bump_owner_lease``)
+    #6327: every canonical owner publisher calls this (or ``_publish_owner_lease``)
     BEFORE publishing a new owner.  It bumps the per-session owner-generation
     lease so any claim installed under the previous lease is refused with
     ``claim_invalidated`` at its next sink compare-and-accept and the
@@ -23130,13 +23211,14 @@ def _invalidate_owner_sink_claims(session_id):
     per-session lease lock across its sink, this call blocks while that
     session's sink is in flight (never a process-global mutex) — a newer
     owner can never supersede the old one between acceptance and the actual
-    sink.
+    sink.  The retire path (no SESSIONS write follows) uses this bump+clear
+    form; publishers that DO mutate ``SESSIONS`` must wrap their exact write
+    in ``_publish_owner_lease`` instead so the lease authority is held
+    through the publication.
     """
     sid = str(session_id or "")
-    _bump_owner_lease(sid)
-    with _WORKER_SINK_CLAIMS_LOCK:
-        for key in [k for k in _WORKER_SINK_CLAIMS if k[0] == sid]:
-            _WORKER_SINK_CLAIMS.pop(key, None)
+    with _publish_owner_lease(sid):
+        _clear_owner_sink_claims(sid)
 
 
 @contextmanager

@@ -3618,7 +3618,9 @@ def _register_stream_owner(session_id, stream_id):
 
 class _FakeRunnerClient:
     """Runner-client stand-in recording the owner fence of every start_run
-    and simulating the receiver compare-and-accept (echo of SID + generation)."""
+    and simulating the receiver compare-and-accept (complete echo of the
+    claimed fence: accepted:true + SID + profile/home + generation + version
+    + route + lease)."""
 
     def __init__(self, posts):
         self._posts = posts
@@ -3629,6 +3631,7 @@ class _FakeRunnerClient:
             "runner must receive a complete owner fence"
         )
         assert fence.get("session_id") and fence.get("generation")
+        assert fence.get("version"), "runner fence must carry the claim version"
         self._posts.append(dict(fence))
         return {
             "run_id": "run-1",
@@ -3636,11 +3639,18 @@ class _FakeRunnerClient:
             "session_id": request.session_id,
             "status": "started",
             "_status": 200,
-            # #6327 receiver compare-and-accept echo.
+            # #6327 receiver compare-and-accept: echo the COMPLETE claimed
+            # fence (accepted:true + SID + profile/home + generation + version
+            # + route lane + lease), not a weak SID+generation reflection.
             "owner_fence": {
-                "session_id": fence["session_id"],
-                "generation": fence["generation"],
                 "accepted": True,
+                "session_id": fence.get("session_id"),
+                "profile": fence.get("profile"),
+                "profile_home": fence.get("profile_home"),
+                "generation": fence.get("generation"),
+                "version": fence.get("version"),
+                "lease": fence.get("lease"),
+                "route": dict(fence.get("route") or {}),
             },
         }
 

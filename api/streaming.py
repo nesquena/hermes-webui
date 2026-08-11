@@ -10206,40 +10206,69 @@ def _run_agent_streaming(
                     # carry it.
                     s.compression_continuation_of = old_sid
                     # #6327: old→new compression publication is a canonical
-                    # owner publisher — participate in the per-session
-                    # owner-generation lease BEFORE publishing the live
-                    # continuation so any in-flight sink bound to the old SID
-                    # serializes first and its installed sink claims are
-                    # refused (a stale worker can never keep sinking on the
-                    # archived predecessor after the rotation).
+                    # owner publisher — publish as a per-SID publication
+                    # transaction so the lease authority for BOTH the old SID
+                    # (removed) and the new SID (published) is held ACROSS the
+                    # exact SESSIONS write: any in-flight sink bound to the
+                    # old SID serializes first, its installed sink claims are
+                    # refused, and no claim can be accepted with a lease
+                    # minted in a bump-to-publication gap (a stale worker can
+                    # never keep sinking on the archived predecessor after the
+                    # rotation).
                     try:
-                        from api.routes import _invalidate_owner_sink_claims
+                        from api.routes import _publish_owner_lease, _clear_owner_sink_claims
 
-                        _invalidate_owner_sink_claims(old_sid)
-                        _invalidate_owner_sink_claims(new_sid)
+                        # Deterministic lock order (old, new) so two
+                        # concurrent rotations can never AB/BA.
+                        _lease_a, _lease_b = sorted((str(old_sid), str(new_sid)))
+                        if _lease_a == _lease_b:
+                            # Defensive: a same-SID "rotation" must not
+                            # double-acquire the non-reentrant lease lock.
+                            _pub_cm = _publish_owner_lease(_lease_a)
+                            _pub_cm2 = contextlib.nullcontext()
+                        else:
+                            _pub_cm = _publish_owner_lease(_lease_a)
+                            _pub_cm2 = _publish_owner_lease(_lease_b)
                     except Exception:
+                        _pub_cm = _pub_cm2 = None
                         logger.debug(
-                            "failed to invalidate sink claims across compression %s -> %s",
+                            "failed to acquire publication lease across compression %s -> %s",
                             old_sid,
                             new_sid,
                             exc_info=True,
                         )
-                    with LOCK:
-                        cached_old_session = SESSIONS.pop(old_sid, None)
-                        if cached_old_session is not None and cached_old_session is not s:
-                            cached_old_sid = str(getattr(cached_old_session, 'session_id', '') or '')
-                            if cached_old_sid == str(old_sid):
-                                SESSIONS[old_sid] = cached_old_session
-                            else:
-                                logger.warning(
-                                    "compression cache migration skipped stale object: old_sid=%s new_sid=%s cached_session_id=%s",
-                                    old_sid,
-                                    new_sid,
-                                    cached_old_sid or None,
-                                )
-                        SESSIONS[new_sid] = s
-                        SESSIONS.move_to_end(new_sid)
-                        _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+                    if _pub_cm is None:
+                        _pub_ctx = contextlib.nullcontext()
+                        _pub_ctx2 = contextlib.nullcontext()
+                    else:
+                        _pub_ctx, _pub_ctx2 = _pub_cm, _pub_cm2
+                    with _pub_ctx, _pub_ctx2:
+                        try:
+                            _clear_owner_sink_claims(old_sid)
+                            _clear_owner_sink_claims(new_sid)
+                        except Exception:
+                            logger.debug(
+                                "failed to clear sink claims across compression %s -> %s",
+                                old_sid,
+                                new_sid,
+                                exc_info=True,
+                            )
+                        with LOCK:
+                            cached_old_session = SESSIONS.pop(old_sid, None)
+                            if cached_old_session is not None and cached_old_session is not s:
+                                cached_old_sid = str(getattr(cached_old_session, 'session_id', '') or '')
+                                if cached_old_sid == str(old_sid):
+                                    SESSIONS[old_sid] = cached_old_session
+                                else:
+                                    logger.warning(
+                                        "compression cache migration skipped stale object: old_sid=%s new_sid=%s cached_session_id=%s",
+                                        old_sid,
+                                        new_sid,
+                                        cached_old_sid or None,
+                                    )
+                            SESSIONS[new_sid] = s
+                            SESSIONS.move_to_end(new_sid)
+                            _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
                     # Migrate the per-session lock by aliasing new_sid to the
                     # held _agent_lock reference directly. Keep old_sid aliased
                     # too until the weak registry can reclaim both safely after
