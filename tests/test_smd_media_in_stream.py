@@ -207,13 +207,19 @@ def _run_real_smd_media_cases() -> dict:
         "  trailingPeriodEnd:renderModes(['MEDIA:/tmp/report.xlsx.']),\n"
         "  bareMarker:renderModes(['`MEDIA:` ']),\n"
         "  queryFragment:renderModes(['MEDIA:https://example.com/a.png?size=1#preview ']),\n"
+        "  wrappedRemoteQueryPunctuation:renderModes(['**MEDIA:https://example.com/a.png?signature=value.**. ']),\n"
         "  windowsPath:renderModes(['MEDIA:C:\\\\Temp\\\\report.xlsx ']),\n"
         "  unmatchedDelimiter:renderModes(['MEDIA:/tmp/report.xlsx* ']),\n"
         "  multiple:renderModes(['MEDIA:/tmp/one.png then MEDIA:/tmp/two.pdf after']),\n"
         "};\n"
         "const punctuation={};\n"
         "for(const mark of ['.',',',';',':','!','?',')']) punctuation[mark]=renderModes([`MEDIA:/tmp/report.xlsx${mark} `]);\n"
-        "console.log(JSON.stringify({prefixSplits, refSplit, finalExtensionless, pdf, falsePrefix, crossParent, boundaries, punctuation}));\n"
+        "const remoteSuffixPunctuation={query:{},fragment:{}};\n"
+        "for(const mark of ['.',',',';',':','!','?']){\n"
+        "  remoteSuffixPunctuation.query[mark]=renderModes([`MEDIA:https://example.com/a.png?signature=value${mark} `]);\n"
+        "  remoteSuffixPunctuation.fragment[mark]=renderModes([`MEDIA:https://example.com/a.png#section${mark} `]);\n"
+        "}\n"
+        "console.log(JSON.stringify({prefixSplits, refSplit, finalExtensionless, pdf, falsePrefix, crossParent, boundaries, punctuation, remoteSuffixPunctuation}));\n"
     )
     completed = subprocess.run(
         [NODE, "--input-type=module", "-e", script],
@@ -612,6 +618,25 @@ class TestSmdMediaRealParserBehaviour(unittest.TestCase):
         for mode, result in self.cases["boundaries"]["unmatchedDelimiter"].items():
             with self.subTest(mode=mode):
                 self.assertIn('data-ref="/tmp/report.xlsx*"', result["html"])
+
+    def test_real_smd_parser_preserves_remote_query_and_fragment_punctuation(self):
+        for suffix_kind, punctuation_cases in self.cases["remoteSuffixPunctuation"].items():
+            separator = "?signature=value" if suffix_kind == "query" else "#section"
+            for punctuation, modes in punctuation_cases.items():
+                expected = f"https://example.com/a.png{separator}{punctuation}"
+                for mode, result in modes.items():
+                    with self.subTest(
+                        suffix_kind=suffix_kind,
+                        punctuation=punctuation,
+                        mode=mode,
+                    ):
+                        self.assertIn(f'data-ref="{expected}"', result["html"])
+
+        wrapped_ref = "https://example.com/a.png?signature=value."
+        for mode, result in self.cases["boundaries"]["wrappedRemoteQueryPunctuation"].items():
+            with self.subTest(suffix_kind="wrapped_query", mode=mode):
+                self.assertIn(f'data-ref="{wrapped_ref}"', result["html"])
+                self.assertIn(".", result["text"])
 
     def test_real_smd_parser_preserves_other_requested_token_shapes(self):
         for mode, result in self.cases["boundaries"]["bareMarker"].items():

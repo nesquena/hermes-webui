@@ -263,6 +263,25 @@ class TestMediaTokenBoundaries:
         out = _render(driver_path, f"MEDIA:{ref}")
         assert f'src="{ref}"' in out
 
+    @pytest.mark.parametrize("punctuation", [".", ",", ";", ":", "!", "?"])
+    @pytest.mark.parametrize("suffix_kind", ["query", "fragment"])
+    def test_remote_query_and_fragment_preserve_trailing_punctuation(
+        self, driver_path, punctuation, suffix_kind
+    ):
+        suffix = f"?signature=value{punctuation}"
+        if suffix_kind == "fragment":
+            suffix = f"#section{punctuation}"
+        ref = f"https://example.com/report.png{suffix}"
+        out = _render(driver_path, f"MEDIA:{ref}")
+        assert f'src="{ref}"' in out
+
+    def test_wrapped_remote_query_preserves_value_punctuation_and_detaches_markdown(self, driver_path):
+        ref = "https://example.com/report.png?signature=value."
+        out = _render(driver_path, f"**MEDIA:{ref}**.")
+        assert f'src="{ref}"' in out
+        assert "<strong>" in out
+        assert out.endswith(".</p>")
+
     def test_multiple_tokens_and_following_prose_keep_their_boundaries(self, driver_path):
         out = _render(
             driver_path,

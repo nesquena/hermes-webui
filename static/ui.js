@@ -2595,18 +2595,28 @@ function _mdImageHtml(alt, url){
 function _mediaTokenParts(source, matchOffset, rawRef){
   let ref=String(rawRef||'');
   let suffix='';
-  const punctuation=ref.match(/[.,;:!?]+$/);
-  if(punctuation&&ref.length>punctuation[0].length){
-    ref=ref.slice(0,-punctuation[0].length);
-    suffix=punctuation[0];
-  }
   const before=String(source||'').slice(0,Number(matchOffset)||0);
+  const trailingPunctuation=ref.match(/[.,;:!?]+$/)?.[0]||'';
   for(const delimiter of ['***','___','**','__','*','_','`']){
-    if(before.endsWith(delimiter)&&ref.endsWith(delimiter)&&ref.length>delimiter.length){
-      ref=ref.slice(0,-delimiter.length);
-      suffix=delimiter+suffix;
+    if(!before.endsWith(delimiter)) continue;
+    let candidate=ref;
+    let afterDelimiter='';
+    if(trailingPunctuation&&candidate.slice(0,-trailingPunctuation.length).endsWith(delimiter)){
+      candidate=candidate.slice(0,-trailingPunctuation.length);
+      afterDelimiter=trailingPunctuation;
+    }
+    if(candidate.endsWith(delimiter)&&candidate.length>delimiter.length){
+      ref=candidate.slice(0,-delimiter.length);
+      suffix=delimiter+afterDelimiter;
       break;
     }
+  }
+  const remoteValue=/^https?:\/\//i.test(ref)
+    && /[?#]/.test(ref.slice(ref.indexOf('://')+3));
+  const punctuation=remoteValue?null:ref.match(/[.,;:!?]+$/);
+  if(punctuation&&ref.length>punctuation[0].length){
+    ref=ref.slice(0,-punctuation[0].length);
+    suffix=punctuation[0]+suffix;
   }
   if(!ref||/^[*_`]+$/.test(ref)) return null;
   return [ref,suffix];
