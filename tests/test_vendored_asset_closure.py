@@ -17,9 +17,11 @@ def _local_asset_paths():
     """Parse local src= and href= values from index.html (skip http/https)."""
     with open("static/index.html") as f:
         src = f.read()
-    # Match src="..." and href="..." in actual HTML tags only (not inside <script> blocks)
-    # Remove inline script content first to avoid matching JS string literals
-    cleaned = re.sub(r'<script[^>]*>.*?</script>', '', src, flags=re.DOTALL)
+    # Remove inline script bodies to avoid matching JS string literals,
+    # but preserve opening tags so src= attributes are still captured.
+    cleaned = re.sub(
+        r'(<script\b[^>]*>).*?</script>', r'\1</script>', src, flags=re.DOTALL | re.IGNORECASE
+    )
     refs = re.findall(r'(?:src|href)="([^"]+)"', cleaned)
     return [r for r in refs if not r.startswith(("http://", "https://", "data:"))]
 
