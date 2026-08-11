@@ -2,7 +2,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 import json
 
-from api import config, gateway_chat, routes
+import pytest
+
+from api import config, gateway_chat, routes, session_queue
 from api.models import Session
 
 
@@ -22,9 +24,19 @@ def test_save_clears_queue_correlation_when_no_pending_turn(monkeypatch, tmp_pat
     assert persisted["pending_queue_client_id"] is None
 
 
-def test_worker_thread_start_failure_clears_durable_pending_owner(monkeypatch):
+@pytest.mark.parametrize(
+    ("dispatch_accepted", "expected_response"),
+    [
+        (True, {"error": "failed to start agent worker", "_status": 500}),
+        (False, {"error": "queued item lost dispatch ownership", "_status": 409}),
+    ],
+)
+def test_queue_dispatch_failure_clears_durable_pending_owner(
+    monkeypatch, dispatch_accepted, expected_response
+):
     recorded = {}
     released_owners = []
+    dispatches = []
     session = SimpleNamespace(
         session_id="sess-queue-start-fail",
         active_stream_id=None,
@@ -50,6 +62,7 @@ def test_worker_thread_start_failure_clears_durable_pending_owner(monkeypatch):
             pass
 
         def start(self):
+            assert dispatch_accepted
             raise RuntimeError("thread start failed")
 
     def fake_prepare(session_obj, *, stream_id, **_kwargs):
@@ -69,6 +82,14 @@ def test_worker_thread_start_failure_clears_durable_pending_owner(monkeypatch):
     monkeypatch.setattr(routes, "unregister_stream_owner", lambda stream_id: released_owners.append(stream_id))
     monkeypatch.setattr(config, "clear_session_writeback_owner_if_owned", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(routes, "set_last_workspace", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        session_queue,
+        "mark_dispatched",
+        lambda sid, item_id, stream_id, **kwargs: dispatches.append(
+            (sid, item_id, stream_id, kwargs)
+        )
+        or dispatch_accepted,
+    )
     monkeypatch.setattr(routes, "threading", SimpleNamespace(Thread=_BoomThread))
 
     with patch("api.turn_journal.append_turn_journal_event", return_value={}):
@@ -80,9 +101,20 @@ def test_worker_thread_start_failure_clears_durable_pending_owner(monkeypatch):
             model="test-model",
             source="queued_followup",
             external_runtime_owned=True,
+            queue_item_id="queue-item-1",
+            queue_client_id="queue-client-1",
+            queue_attempt_id="queue-attempt-1",
         )
 
-    assert response == {"error": "failed to start agent worker", "_status": 500}
+    assert response == expected_response
+    assert dispatches == [
+        (
+            session.session_id,
+            "queue-item-1",
+            recorded["stream_id"],
+            {"attempt_id": "queue-attempt-1"},
+        )
+    ]
     assert session.active_stream_id is None
     assert session.pending_user_message is None
     assert session.pending_started_at is None

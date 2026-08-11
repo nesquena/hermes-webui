@@ -202,6 +202,93 @@ def _record_completed_unlocked(session_id: str, completed_items: list[dict[str, 
     _write_receipts_unlocked(session_id, ordered[-_MAX_RECEIPTS:])
 
 
+def mark_dispatched(
+    session_id: str,
+    item_id: str,
+    stream_id: str,
+    *,
+    attempt_id: str | None = None,
+) -> bool:
+    """Durably bind a claimed FIFO item to the exact stream before it runs."""
+    if not session_id or not item_id or not stream_id:
+        return False
+    with _LOCK:
+        items = _read_items_unlocked(session_id)
+        item = next((entry for entry in items if str(entry.get("id") or "") == str(item_id)), None)
+        if (
+            item is None
+            or str(item.get("state") or "queued") != "starting"
+            or (attempt_id and str(item.get("attempt_id") or "") != str(attempt_id))
+        ):
+            return False
+        item["stream_id"] = str(stream_id)
+        item["dispatched_at"] = time.time()
+        _write_items_unlocked(session_id, items)
+        _emit_queue_changed(session_id)
+        return True
+
+
+def mark_external_admission(
+    session_id: str,
+    item_id: str,
+    stream_id: str,
+    admission_id: str,
+    *,
+    attempt_id: str | None = None,
+) -> bool:
+    """Persist a fail-closed Gateway admission marker before the POST begins."""
+    if not session_id or not item_id or not stream_id or not admission_id:
+        return False
+    with _LOCK:
+        items = _read_items_unlocked(session_id)
+        item = next((entry for entry in items if str(entry.get("id") or "") == str(item_id)), None)
+        if (
+            item is None
+            or str(item.get("state") or "queued") not in ("starting", "started")
+            or str(item.get("stream_id") or "") != str(stream_id)
+            or (attempt_id and str(item.get("attempt_id") or "") != str(attempt_id))
+        ):
+            return False
+        item["external_admission_id"] = str(admission_id)
+        item["external_admission_started_at"] = time.time()
+        _write_items_unlocked(session_id, items)
+        _emit_queue_changed(session_id)
+        return True
+
+
+def mark_external_run(
+    session_id: str,
+    item_id: str,
+    stream_id: str,
+    run_id: str,
+    *,
+    admission_id: str | None = None,
+    attempt_id: str | None = None,
+) -> bool:
+    """Bind an accepted Gateway run to its exact durable queue owner."""
+    if not session_id or not item_id or not stream_id or not run_id:
+        return False
+    with _LOCK:
+        items = _read_items_unlocked(session_id)
+        item = next((entry for entry in items if str(entry.get("id") or "") == str(item_id)), None)
+        if (
+            item is None
+            or str(item.get("state") or "queued") not in ("starting", "started")
+            or str(item.get("stream_id") or "") != str(stream_id)
+            or (attempt_id and str(item.get("attempt_id") or "") != str(attempt_id))
+            or (
+                admission_id
+                and str(item.get("external_admission_id") or "") != str(admission_id)
+            )
+        ):
+            return False
+        item["external_run_id"] = str(run_id)
+        item["external_run_bound_at"] = time.time()
+        _write_items_unlocked(session_id, items)
+        _emit_queue_changed(session_id)
+        return True
+
+
 def _normalize_attachments(raw: Any) -> list[dict[str, Any]]:
     if not isinstance(raw, list):
         return []
@@ -437,6 +524,7 @@ def claim_next(session_id: str) -> dict[str, Any] | None:
         if str(item.get("state") or "queued") != "queued":
             return None
         item["state"] = "starting"
+        item["attempt_id"] = uuid.uuid4().hex
         item["starting_at"] = time.time()
         _write_items_unlocked(session_id, items)
         _emit_queue_changed(session_id)
@@ -456,31 +544,58 @@ def requeue_front(session_id: str, item: dict[str, Any]) -> None:
                 restored = dict(existing)
                 restored.update(item)
                 restored["state"] = "blocked" if restored.get("blocked") else "queued"
+                restored.pop("attempt_id", None)
                 restored.pop("starting_at", None)
                 restored.pop("stream_id", None)
+                restored.pop("dispatched_at", None)
+                restored.pop("external_run_id", None)
+                restored.pop("external_run_bound_at", None)
+                restored.pop("external_admission_id", None)
+                restored.pop("external_admission_started_at", None)
                 items[idx] = restored
                 _write_items_unlocked(session_id, items)
                 _emit_queue_changed(session_id)
                 return
         restored = dict(item)
         restored["state"] = "blocked" if restored.get("blocked") else "queued"
+        restored.pop("attempt_id", None)
         restored.pop("starting_at", None)
         restored.pop("stream_id", None)
+        restored.pop("dispatched_at", None)
+        restored.pop("external_run_id", None)
+        restored.pop("external_run_bound_at", None)
+        restored.pop("external_admission_id", None)
+        restored.pop("external_admission_started_at", None)
         items.insert(0, restored)
         _write_items_unlocked(session_id, items)
         _emit_queue_changed(session_id)
 
 
-def _finish_attempt(session_id: str, item_id: str, response: dict[str, Any]) -> None:
+def _finish_attempt(
+    session_id: str,
+    item_id: str,
+    response: dict[str, Any],
+    *,
+    attempt_id: str | None = None,
+) -> None:
     status = int((response or {}).get("_status", 200) or 200)
     with _LOCK:
         items = _read_items_unlocked(session_id)
         item = next((entry for entry in items if str(entry.get("id") or "") == item_id), None)
         if item is None:
             return
+        if attempt_id and str(item.get("attempt_id") or "") != str(attempt_id):
+            return
         item.pop("starting_at", None)
         if status == 409:
             item["state"] = "queued"
+            item.pop("attempt_id", None)
+            item.pop("stream_id", None)
+            item.pop("dispatched_at", None)
+            item.pop("external_run_id", None)
+            item.pop("external_run_bound_at", None)
+            item.pop("external_admission_id", None)
+            item.pop("external_admission_started_at", None)
         elif status >= 400:
             retry_count = int(item.get("retry_count") or 0) + 1
             item["retry_count"] = retry_count
@@ -490,18 +605,25 @@ def _finish_attempt(session_id: str, item_id: str, response: dict[str, Any]) -> 
                 item["state"] = "blocked"
             else:
                 item["state"] = "queued"
+            item.pop("attempt_id", None)
+            item.pop("stream_id", None)
+            item.pop("dispatched_at", None)
+            item.pop("external_run_id", None)
+            item.pop("external_run_bound_at", None)
+            item.pop("external_admission_id", None)
+            item.pop("external_admission_started_at", None)
         else:
             stream_id = str((response or {}).get("stream_id") or "").strip()
             if not stream_id:
                 item["state"] = "queued"
                 item["error"] = "start response did not include a stream id"
-            elif not _stream_is_still_active(session_id, stream_id):
-                # The worker can finish between returning its start response
-                # and this durable transition. Teardown cannot retire a
-                # `starting` item, so retire it here while holding the same
-                # queue lock; otherwise a completed turn leaves a tombstone.
-                _record_completed_unlocked(session_id, [item])
-                items.remove(item)
+                item.pop("attempt_id", None)
+                item.pop("stream_id", None)
+                item.pop("dispatched_at", None)
+                item.pop("external_run_id", None)
+                item.pop("external_run_bound_at", None)
+                item.pop("external_admission_id", None)
+                item.pop("external_admission_started_at", None)
             else:
                 item["state"] = "started"
                 item["stream_id"] = stream_id
@@ -522,7 +644,7 @@ def complete_started(session_id: str, stream_id: str) -> bool:
             item
             for item in items
             if (
-                str(item.get("state") or "") == "started"
+                str(item.get("state") or "") in ("starting", "started")
                 and str(item.get("stream_id") or "") == str(stream_id)
             )
         ]
@@ -530,7 +652,7 @@ def complete_started(session_id: str, stream_id: str) -> bool:
             item
             for item in items
             if not (
-                str(item.get("state") or "") == "started"
+                str(item.get("state") or "") in ("starting", "started")
                 and str(item.get("stream_id") or "") == str(stream_id)
             )
         ]
@@ -558,26 +680,6 @@ def _session_has_active_turn(session_id: str) -> bool:
     return False
 
 
-def _stream_is_still_active(session_id: str, stream_id: str) -> bool:
-    try:
-        from api import config
-
-        with config.ACTIVE_RUNS_LOCK:
-            for active_stream_id, active in config.ACTIVE_RUNS.items():
-                if str(active_stream_id) == stream_id and str((active or {}).get("session_id") or "") == session_id:
-                    return True
-    except Exception:
-        logger.debug("Could not inspect active runs for queue completion", exc_info=True)
-    try:
-        from api.routes import STREAMS, get_session
-
-        if stream_id in STREAMS:
-            return True
-        return str(getattr(get_session(session_id), "active_stream_id", None) or "") == stream_id
-    except Exception:
-        return False
-
-
 def _stream_has_live_runtime(session_id: str, stream_id: str) -> bool:
     """Return true only for process-live ownership, not a persisted session id."""
     try:
@@ -595,6 +697,19 @@ def _stream_has_live_runtime(session_id: str, stream_id: str) -> bool:
         return stream_id in STREAMS
     except Exception:
         return False
+
+
+def _external_run_status(run_id: str) -> str | None:
+    """Return the authoritative Gateway status, or unknown on any lookup failure."""
+    if not run_id:
+        return None
+    try:
+        from api.gateway_chat import gateway_run_status
+
+        return gateway_run_status(run_id)
+    except Exception:
+        logger.warning("could not reconcile Gateway run %s", run_id, exc_info=True)
+        return None
 
 
 def drain_for_session(session_id: str) -> int:
@@ -628,9 +743,15 @@ def drain_for_session(session_id: str) -> int:
                 requested_provider=item.get("model_provider"),
                 queue_item_id=str(item.get("id") or "") or None,
                 queue_client_id=str(item.get("client_queue_id") or "") or None,
+                queue_attempt_id=str(item.get("attempt_id") or "") or None,
             )
             status = int((resp or {}).get("_status", 200) or 200)
-            _finish_attempt(session_id, str(item.get("id") or ""), resp or {})
+            _finish_attempt(
+                session_id,
+                str(item.get("id") or ""),
+                resp or {},
+                attempt_id=str(item.get("attempt_id") or "") or None,
+            )
             if status >= 400:
                 retry_needed = status != 409
                 logger.warning(
@@ -653,6 +774,7 @@ def drain_for_session(session_id: str) -> int:
                 session_id,
                 str(item.get("id") or ""),
                 {"_status": 500, "error": str(exc) or type(exc).__name__},
+                attempt_id=str(item.get("attempt_id") or "") or None,
             )
             retry_needed = True
             logger.warning("queued follow-up turn raised for session %s", session_id, exc_info=True)
@@ -705,6 +827,15 @@ def recover_all_queues(*, schedule: bool = True) -> dict[str, int]:
             session_id = str(raw[0].get("session_id") or "").strip()
             if not session_id:
                 raise QueueStorageError(f"queue file {path.name} has no session owner")
+            external_statuses = {
+                run_id: _external_run_status(run_id)
+                for run_id in {
+                    str(entry.get("external_run_id") or "").strip()
+                    for entry in raw
+                    if isinstance(entry, dict)
+                }
+                if run_id
+            }
             session = get_session(session_id)
             active_stream_id = str(getattr(session, "active_stream_id", None) or "").strip()
             pending_item_id = str(getattr(session, "pending_queue_item_id", None) or "").strip()
@@ -718,15 +849,50 @@ def recover_all_queues(*, schedule: bool = True) -> dict[str, int]:
                 for item in items:
                     state = str(item.get("state") or "queued")
                     item_id = str(item.get("id") or "")
-                    correlated = bool(
+                    item_stream_id = str(item.get("stream_id") or "").strip()
+                    external_run_id = str(item.get("external_run_id") or "").strip()
+                    external_admission_id = str(
+                        item.get("external_admission_id") or ""
+                    ).strip()
+                    if external_run_id:
+                        remote_status = external_statuses.get(external_run_id)
+                        if remote_status in {
+                            "cancelled",
+                            "completed",
+                            "error",
+                            "failed",
+                            "stopped",
+                        }:
+                            changed = True
+                            _record_completed_unlocked(session_id, [item])
+                            result["retired"] += 1
+                            continue
+                        if state != "started":
+                            item["state"] = "started"
+                            item.pop("starting_at", None)
+                            changed = True
+                        result["started"] += 1
+                        repaired.append(item)
+                        continue
+                    if external_admission_id:
+                        if state != "started":
+                            item["state"] = "started"
+                            item.pop("starting_at", None)
+                            changed = True
+                        result["started"] += 1
+                        repaired.append(item)
+                        continue
+                    pending_correlated = bool(
                         pending_item_id
                         and pending_item_id == item_id
-                        and active_stream_is_live
+                        and active_stream_id
+                        and (not item_stream_id or item_stream_id == active_stream_id)
                     )
+                    runtime_correlated = pending_correlated and active_stream_is_live
                     if state == "starting":
                         changed = True
                         item.pop("starting_at", None)
-                        if correlated:
+                        if runtime_correlated:
                             item["state"] = "started"
                             if active_stream_id:
                                 item["stream_id"] = active_stream_id
@@ -734,9 +900,14 @@ def recover_all_queues(*, schedule: bool = True) -> dict[str, int]:
                         else:
                             item["state"] = "queued"
                             item.pop("stream_id", None)
+                            item.pop("dispatched_at", None)
+                            item.pop("external_run_id", None)
+                            item.pop("external_run_bound_at", None)
+                            item.pop("external_admission_id", None)
+                            item.pop("external_admission_started_at", None)
                             result["requeued"] += 1
                     elif state == "started":
-                        if correlated:
+                        if runtime_correlated:
                             if active_stream_id and item.get("stream_id") != active_stream_id:
                                 item["stream_id"] = active_stream_id
                                 changed = True

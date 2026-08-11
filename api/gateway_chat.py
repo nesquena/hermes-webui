@@ -499,6 +499,8 @@ def _run_gateway_runs_api_streaming(
     *, put_gateway_event, cancel_event,
     attachments=None, cfg=None, session=None,
     active_provider: str = "",
+    queue_item_id: str | None = None,
+    queue_attempt_id: str | None = None,
 ):
     """Submit via POST /v1/runs and relay SSE events including approval."""
     try:
@@ -569,6 +571,19 @@ def _run_gateway_runs_api_streaming(
             headers=headers,
             method="POST",
         )
+        admission_id = ""
+        if queue_item_id:
+            from api.session_queue import mark_external_admission
+
+            admission_id = uuid.uuid4().hex
+            if not mark_external_admission(
+                session_id,
+                queue_item_id,
+                stream_id,
+                admission_id,
+                attempt_id=queue_attempt_id,
+            ):
+                raise RuntimeError("queued item lost external admission ownership")
         update_active_run(stream_id, phase="gateway-request")
         with urllib.request.urlopen(req, timeout=30) as resp:
             run_data = json.loads(resp.read(65536))
@@ -580,6 +595,19 @@ def _run_gateway_runs_api_streaming(
         raise
 
     usage: dict = {}
+    if queue_item_id:
+        from api.session_queue import mark_external_run
+
+        if not mark_external_run(
+            session_id,
+            queue_item_id,
+            stream_id,
+            run_id,
+            admission_id=admission_id,
+            attempt_id=queue_attempt_id,
+        ):
+            stop_gateway_run(run_id)
+            raise RuntimeError("queued item lost external run ownership")
     _publish_gateway_run_id(stream_id, run_id)
 
     url_events = f"{base_url.rstrip('/')}/v1/runs/{run_id}/events"
@@ -834,6 +862,8 @@ def _run_gateway_chat_streaming(
     *,
     model_provider=None,
     goal_related=False,
+    queue_item_id: str | None = None,
+    queue_attempt_id: str | None = None,
 ):
     """Bridge a WebUI chat turn through Hermes Gateway's API server.
 
@@ -992,6 +1022,8 @@ def _run_gateway_chat_streaming(
                     cfg=cfg,
                     session=s,
                     active_provider=(model_provider or ""),
+                    queue_item_id=queue_item_id,
+                    queue_attempt_id=queue_attempt_id,
                 )
             except Exception as exc:
                 error_payload = _settle_gateway_terminal_error(

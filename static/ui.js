@@ -266,6 +266,20 @@ function _findQueuedEntryByClientId(sid, clientId){
   const idx=q.findIndex(e=>e&&e._client_queue_id===clientId);
   return {q,idx,entry:idx>=0?q[idx]:null};
 }
+function _findQueuedEntryIndex(queue, target){
+  if(!Array.isArray(queue)||!target)return -1;
+  const serverId=String(target._server_queue_id||'');
+  if(serverId){
+    const index=queue.findIndex(entry=>entry&&String(entry._server_queue_id||'')===serverId);
+    if(index>=0)return index;
+  }
+  const clientId=String(target._client_queue_id||'');
+  if(clientId){
+    const index=queue.findIndex(entry=>entry&&String(entry._client_queue_id||'')===clientId);
+    if(index>=0)return index;
+  }
+  return queue.indexOf(target);
+}
 function _deleteBackendQueuedItem(sid, serverId){
   if(!sid||!serverId||typeof fetch!=='function')return Promise.resolve(false);
   return fetch(new URL('api/session/queue/delete',document.baseURI||location.href).href,{
@@ -8207,7 +8221,11 @@ function _renderQueueChips(sid){
   const inner=document.getElementById('queueChips');
   if(!card||!inner) return;
   const q=_getSessionQueue(sid,false);
-  const key=q.map(e=>{const t=e&&(e.text||e.message||e.content||'');return(e&&e._queued_at||0)+':'+t.length+':'+t.slice(0,20);}).join('|');
+  const key=q.map((e,index)=>{
+    const t=e&&(e.text||e.message||e.content||'');
+    const identity=e&&(e._server_queue_id||e._client_queue_id)||('local-'+index+'-'+(e&&e._queued_at||0));
+    return identity+':'+(e&&e._server_state||'')+':'+t.length+':'+t.slice(0,20);
+  }).join('|');
   if(key===(_queueRenderKeys[sid]||'')&&key!='') return;
   // Skip re-render if user is actively editing inside the queue panel
   if(inner.contains(document.activeElement)&&document.activeElement!==inner) return;
@@ -8333,9 +8351,8 @@ function _renderQueueChips(sid){
     inner.appendChild(header);
   }
 
-  let _dragTs=null;  // use _queued_at timestamp — survives re-renders, not an index
+  let _dragEntry=null;
   q.forEach((entry,i)=>{
-    const _entryTs=entry&&entry._queued_at;
     const entryText=entry&&(entry.text||entry.message||entry.content||'');
     const _files=entry&&Array.isArray(entry.files)?entry.files.filter(Boolean):[];
     const _serverState=entry&&entry._server_state||'';
@@ -8343,17 +8360,20 @@ function _renderQueueChips(sid){
     const row=document.createElement('div');
     row.className='queue-card-row';
     row.setAttribute('role','listitem');
+    row.setAttribute('data-queue-item-id',String(entry&&entry._server_queue_id||entry&&entry._client_queue_id||''));
     row.setAttribute('draggable',_entryMutable?'true':'false');
-    row.ondragstart=(e)=>{if(_entryTs==null) return;_dragTs=_entryTs;row.style.opacity='.4';e.dataTransfer.effectAllowed='move';};
+    row.ondragstart=(e)=>{_dragEntry=entry;row.style.opacity='.4';e.dataTransfer.effectAllowed='move';};
     row.ondragend=()=>{row.style.opacity='';};
     row.ondragover=(e)=>{e.preventDefault();row.style.background='var(--hover-bg)';};
     row.ondragleave=()=>{row.style.background='';};
     row.ondrop=async(e)=>{
       e.preventDefault();row.style.background='';
-      if(_dragTs!=null&&_dragTs!==_entryTs){
-        const fromIdx=q.findIndex(e=>e&&e._queued_at===_dragTs);
-        if(fromIdx!==-1&&fromIdx!==i){
-          const planned=[...q];const moved=planned.splice(fromIdx,1)[0];planned.splice(i,0,moved);
+      if(_dragEntry&&_findQueuedEntryIndex(_getSessionQueue(sid,false),_dragEntry)!==_findQueuedEntryIndex(_getSessionQueue(sid,false),entry)){
+        const liveQ=_getSessionQueue(sid,false);
+        const fromIdx=_findQueuedEntryIndex(liveQ,_dragEntry);
+        const toIdx=_findQueuedEntryIndex(liveQ,entry);
+        if(fromIdx!==-1&&toIdx!==-1&&fromIdx!==toIdx){
+          const planned=[...liveQ];const moved=planned.splice(fromIdx,1)[0];planned.splice(toIdx,0,moved);
           const backendOwned=planned.every(item=>item&&item._server_owned&&item._server_queue_id&&
             (!item._server_state||item._server_state==='queued'||item._server_state==='blocked'));
           if(backendOwned){
@@ -8362,9 +8382,9 @@ function _renderQueueChips(sid){
               if(typeof showToast==='function')showToast('Could not reorder queued messages: '+(err&&err.message||err),null,'error');
               await syncBackendSessionQueue(sid).catch(()=>{});
             }
-          }else{q.length=0;q.push(...planned);_saveAndRefresh();}
+          }else{liveQ.length=0;liveQ.push(...planned);_saveAndRefresh();}
         }
-        _dragTs=null;
+        _dragEntry=null;
       }
     };
     // Drag handle
@@ -8387,7 +8407,7 @@ function _renderQueueChips(sid){
       if(newText===''&&!_files.length){ msgSpan.textContent=entryText||'—'; return; }
       if(newText!==entryText){
         const liveQ=_getSessionQueue(sid,false);
-        const idx=_entryTs!=null?liveQ.findIndex(e=>e&&e._queued_at===_entryTs):i;
+        const idx=_findQueuedEntryIndex(liveQ,entry);
         if(idx!==-1){
           if(liveQ[idx]._server_owned&&liveQ[idx]._server_queue_id){
             try{await _postBackendQueueMutation(sid,'update',{id:liveQ[idx]._server_queue_id,text:newText});}
@@ -8449,8 +8469,9 @@ function _renderQueueChips(sid){
     delBtn.disabled=!_entryMutable;
     delBtn.innerHTML=li('x',13);
     delBtn.onclick=async()=>{
+      delBtn.blur();
       const liveQ=_getSessionQueue(sid,false);
-      const idx=_entryTs!=null?liveQ.findIndex(e=>e&&e._queued_at===_entryTs):i;
+      const idx=_findQueuedEntryIndex(liveQ,entry);
       if(idx!==-1){
         const removed=liveQ[idx];
         if(removed&&removed._server_owned&&removed._server_queue_id){

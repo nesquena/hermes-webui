@@ -21564,6 +21564,7 @@ def _start_chat_stream_for_session(
     external_runtime_owned: bool | None = None,
     queue_item_id: str | None = None,
     queue_client_id: str | None = None,
+    queue_attempt_id: str | None = None,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn."""
     if external_runtime_owned is None:
@@ -21704,13 +21705,28 @@ def _start_chat_stream_for_session(
     if backend_is_gateway:
         from api.gateway_chat import _mark_gateway_run_starting
         _mark_gateway_run_starting(stream_id)
+        if queue_item_id:
+            worker_kwargs["queue_item_id"] = queue_item_id
+            worker_kwargs["queue_attempt_id"] = queue_attempt_id
     thr = threading.Thread(
         target=worker_target,
         args=(s.session_id, msg, model, workspace, stream_id, attachments),
         kwargs=worker_kwargs,
         daemon=True,
     )
+    queue_dispatch_conflict = False
     try:
+        if queue_item_id:
+            from api.session_queue import mark_dispatched
+
+            if not mark_dispatched(
+                s.session_id,
+                str(queue_item_id),
+                stream_id,
+                attempt_id=queue_attempt_id,
+            ):
+                queue_dispatch_conflict = True
+                raise RuntimeError("queued item lost dispatch ownership")
         thr.start()
     except Exception:
         if backend_is_gateway:
@@ -21743,6 +21759,8 @@ def _start_chat_stream_for_session(
                     s.save(touch_updated_at=False)
                 except Exception:
                     logger.exception("Failed to persist worker start failure cleanup for %s", s.session_id)
+        if queue_dispatch_conflict:
+            return {"error": "queued item lost dispatch ownership", "_status": 409}
         return {"error": "failed to start agent worker", "_status": 500}
     response = {
         "stream_id": stream_id,
@@ -21826,6 +21844,7 @@ def _start_run(
     gateway_chat_enabled: bool | None = None,
     queue_item_id: str | None = None,
     queue_client_id: str | None = None,
+    queue_attempt_id: str | None = None,
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
 
@@ -21869,6 +21888,7 @@ def _start_run(
                 external_runtime_owned=gateway_chat_enabled,
                 queue_item_id=queue_item_id,
                 queue_client_id=queue_client_id,
+                queue_attempt_id=queue_attempt_id,
             )
 
         def _legacy_adapter_factory():
@@ -21895,6 +21915,7 @@ def _start_run(
                         "route": route,
                         **({"queue_item_id": str(queue_item_id)} if queue_item_id else {}),
                         **({"queue_client_id": str(queue_client_id)} if queue_client_id else {}),
+                        **({"queue_attempt_id": str(queue_attempt_id)} if queue_attempt_id else {}),
                     },
                 )
             )
@@ -21916,6 +21937,7 @@ def _start_run(
         external_runtime_owned=gateway_chat_enabled,
         queue_item_id=queue_item_id,
         queue_client_id=queue_client_id,
+        queue_attempt_id=queue_attempt_id,
     )
 
 
@@ -21980,6 +22002,7 @@ def start_session_turn(
     requested_provider=None,
     queue_item_id: str | None = None,
     queue_client_id: str | None = None,
+    queue_attempt_id: str | None = None,
 ):
     """Start a server-side agent turn for ``session_id`` with ``message``.
 
@@ -22178,6 +22201,7 @@ def start_session_turn(
         route="start_session_turn",
         queue_item_id=queue_item_id,
         queue_client_id=queue_client_id,
+        queue_attempt_id=queue_attempt_id,
     )
 
     # ── Defect B: live-view of server-initiated turns ──────────────────────

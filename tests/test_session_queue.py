@@ -351,6 +351,27 @@ if(q.length!==1||q[0]._server_queue_id!=='server-race'){
     )
 
 
+def test_frontend_queue_mutations_resolve_stable_item_identity():
+    _run_queue_sync_node_script(
+        r"""
+const first={text:'same',_queued_at:1700000000000,_server_queue_id:'server-first',_client_queue_id:'client-first'};
+const second={text:'same',_queued_at:1700000000000,_server_queue_id:'server-second',_client_queue_id:'client-second'};
+const q=[first,second];
+const rerenderedSecond={...second};
+if(_findQueuedEntryIndex(q,rerenderedSecond)!==1){
+  throw new Error('server identity did not select the second duplicate');
+}
+const optimistic=[
+  {text:'same',_queued_at:1700000000000,_client_queue_id:'client-first'},
+  {text:'same',_queued_at:1700000000000,_client_queue_id:'client-second'},
+];
+if(_findQueuedEntryIndex(optimistic,{...optimistic[1]})!==1){
+  throw new Error('client identity did not select the second duplicate');
+}
+"""
+    )
+
+
 def test_frontend_ack_deletes_backend_item_when_local_chip_was_removed():
     _run_queue_sync_node_script(
         r"""
@@ -412,20 +433,20 @@ def test_drain_for_session_starts_one_backend_owned_turn(monkeypatch, tmp_path):
 
     assert session_queue.drain_for_session("sid-drain") == 1
     assert _wait_until(lambda: calls)
-    assert calls == [
-        (
-            "sid-drain",
-            "queued followup",
-            {
-                "source": "queued_followup",
-                "attachments": [],
-                "requested_model": "m-drain",
-                "requested_provider": "p-drain",
-                "queue_item_id": item["id"],
-                "queue_client_id": "client-drain",
-            },
-        )
-    ]
+    assert len(calls) == 1
+    call_session_id, call_message, call_kwargs = calls[0]
+    assert call_session_id == "sid-drain"
+    assert call_message == "queued followup"
+    assert call_kwargs == {
+        "source": "queued_followup",
+        "attachments": [],
+        "requested_model": "m-drain",
+        "requested_provider": "p-drain",
+        "queue_item_id": item["id"],
+        "queue_client_id": "client-drain",
+        "queue_attempt_id": call_kwargs["queue_attempt_id"],
+    }
+    assert call_kwargs["queue_attempt_id"]
     queued = session_queue.list_queue("sid-drain")
     assert len(queued) == 1
     assert queued[0]["id"] == item["id"]
@@ -444,11 +465,265 @@ def test_turn_that_finishes_before_started_transition_does_not_leave_tombstone(m
     )
 
     def fake_start_session_turn(session_id, message, **kwargs):
+        assert session_queue.mark_dispatched(
+            session_id, kwargs["queue_item_id"], "stream-fast"
+        ) is True
+        assert session_queue.complete_started(session_id, "stream-fast") is True
         return {"stream_id": "stream-fast", "session_id": session_id, "_status": 200}
 
     _install_fake_routes(monkeypatch, fake_start_session_turn)
     assert session_queue.drain_for_session("sid-fast") == 1
     assert _wait_until(lambda: not session_queue.list_queue("sid-fast"))
+
+
+def test_remote_start_without_process_local_registry_remains_started_until_terminal(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(config, "ACTIVE_RUNS", {})
+    item = session_queue.enqueue(
+        "sid-remote", {"text": "remote run", "client_queue_id": "client-remote"}
+    )
+
+    def fake_start_session_turn(session_id, message, **kwargs):
+        assert session_queue.mark_dispatched(
+            session_id, kwargs["queue_item_id"], "remote-run-1"
+        ) is True
+        assert session_queue.mark_external_run(
+            session_id,
+            kwargs["queue_item_id"],
+            "remote-run-1",
+            "gateway-run-1",
+        ) is True
+        return {"stream_id": "remote-run-1", "session_id": session_id, "_status": 200}
+
+    _install_fake_routes(monkeypatch, fake_start_session_turn)
+    assert session_queue.drain_for_session("sid-remote") == 1
+    assert _wait_until(
+        lambda: session_queue.list_queue("sid-remote")
+        and session_queue.list_queue("sid-remote")[0].get("state") == "started"
+    )
+    queued = session_queue.list_queue("sid-remote")
+    assert [(entry["id"], entry["stream_id"]) for entry in queued] == [
+        (item["id"], "remote-run-1")
+    ]
+
+
+def test_recovery_does_not_infer_started_remote_completion_from_local_absence(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "SESSION_DIR", tmp_path)
+    item = session_queue.enqueue(
+        "sid-remote-recover",
+        {"text": "remote pending", "client_queue_id": "client-remote-recover"},
+    )
+    session_queue.claim_next("sid-remote-recover")
+    assert session_queue.mark_dispatched(
+        "sid-remote-recover", item["id"], "remote-run-recover"
+    ) is True
+    assert session_queue.mark_external_run(
+        "sid-remote-recover",
+        item["id"],
+        "remote-run-recover",
+        "gateway-run-recover",
+    ) is True
+    session_queue._finish_attempt(
+        "sid-remote-recover", item["id"], {"stream_id": "remote-run-recover"}
+    )
+    monkeypatch.setattr(
+        routes,
+        "get_session",
+        lambda _sid: types.SimpleNamespace(
+            active_stream_id="remote-run-recover",
+            pending_queue_item_id=item["id"],
+        ),
+    )
+    monkeypatch.setattr(config, "ACTIVE_RUNS", {})
+    monkeypatch.setattr(routes, "STREAMS", {})
+
+    result = session_queue.recover_all_queues(schedule=False)
+
+    assert result["retired"] == 0
+    queued = session_queue.list_queue("sid-remote-recover")
+    assert [(entry["id"], entry["state"]) for entry in queued] == [
+        (item["id"], "started")
+    ]
+
+
+def test_recovery_preserves_dispatched_remote_owner_before_start_response(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "SESSION_DIR", tmp_path)
+    item = session_queue.enqueue(
+        "sid-remote-dispatched",
+        {"text": "remote dispatched", "client_queue_id": "client-remote-dispatched"},
+    )
+    session_queue.claim_next("sid-remote-dispatched")
+    assert session_queue.mark_dispatched(
+        "sid-remote-dispatched", item["id"], "remote-run-dispatched"
+    ) is True
+    assert session_queue.mark_external_run(
+        "sid-remote-dispatched",
+        item["id"],
+        "remote-run-dispatched",
+        "gateway-run-dispatched",
+    ) is True
+    monkeypatch.setattr(
+        routes,
+        "get_session",
+        lambda _sid: types.SimpleNamespace(
+            active_stream_id="remote-run-dispatched",
+            pending_queue_item_id=item["id"],
+        ),
+    )
+    monkeypatch.setattr(config, "ACTIVE_RUNS", {})
+    monkeypatch.setattr(routes, "STREAMS", {})
+
+    result = session_queue.recover_all_queues(schedule=False)
+
+    assert result["started"] == 1
+    queued = session_queue.list_queue("sid-remote-dispatched")
+    assert [(entry["id"], entry["state"]) for entry in queued] == [
+        (item["id"], "started")
+    ]
+
+
+def test_recovery_preserves_unknown_remote_admission_without_duplicate(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "SESSION_DIR", tmp_path)
+    item = session_queue.enqueue(
+        "sid-remote-admission",
+        {"text": "remote admission", "client_queue_id": "client-remote-admission"},
+    )
+    claimed = session_queue.claim_next("sid-remote-admission")
+    assert claimed is not None
+    assert session_queue.mark_dispatched(
+        "sid-remote-admission",
+        item["id"],
+        "remote-admission-stream",
+        attempt_id=claimed["attempt_id"],
+    ) is True
+    session_queue._finish_attempt(
+        "sid-remote-admission",
+        item["id"],
+        {"stream_id": "remote-admission-stream"},
+        attempt_id=claimed["attempt_id"],
+    )
+    assert session_queue.mark_external_admission(
+        "sid-remote-admission",
+        item["id"],
+        "remote-admission-stream",
+        "admission-1",
+        attempt_id=claimed["attempt_id"],
+    ) is True
+    monkeypatch.setattr(
+        routes,
+        "get_session",
+        lambda _sid: types.SimpleNamespace(
+            active_stream_id=None,
+            pending_queue_item_id=None,
+        ),
+    )
+    monkeypatch.setattr(config, "ACTIVE_RUNS", {})
+
+    result = session_queue.recover_all_queues(schedule=False)
+
+    assert result["started"] == 1
+    assert session_queue.list_queue("sid-remote-admission")[0]["state"] == "started"
+
+
+@pytest.mark.parametrize(
+    ("remote_status", "expected_started", "expected_retired"),
+    [("running", 1, 0), (None, 1, 0), ("completed", 0, 1)],
+)
+def test_recovery_reconciles_exact_remote_run_status_without_session_correlation(
+    monkeypatch,
+    tmp_path,
+    remote_status,
+    expected_started,
+    expected_retired,
+):
+    monkeypatch.setattr(config, "SESSION_DIR", tmp_path)
+    item = session_queue.enqueue(
+        "sid-remote-status",
+        {"text": "remote status", "client_queue_id": "client-remote-status"},
+    )
+    claimed = session_queue.claim_next("sid-remote-status")
+    assert claimed is not None
+    assert session_queue.mark_dispatched(
+        "sid-remote-status",
+        item["id"],
+        "remote-status-stream",
+        attempt_id=claimed["attempt_id"],
+    ) is True
+    session_queue._finish_attempt(
+        "sid-remote-status",
+        item["id"],
+        {"stream_id": "remote-status-stream"},
+        attempt_id=claimed["attempt_id"],
+    )
+    assert session_queue.mark_external_admission(
+        "sid-remote-status",
+        item["id"],
+        "remote-status-stream",
+        "admission-status",
+        attempt_id=claimed["attempt_id"],
+    ) is True
+    assert session_queue.mark_external_run(
+        "sid-remote-status",
+        item["id"],
+        "remote-status-stream",
+        "gateway-run-status",
+        admission_id="admission-status",
+        attempt_id=claimed["attempt_id"],
+    ) is True
+    monkeypatch.setattr(session_queue, "_external_run_status", lambda _run_id: remote_status)
+    monkeypatch.setattr(
+        routes,
+        "get_session",
+        lambda _sid: types.SimpleNamespace(
+            active_stream_id=None,
+            pending_queue_item_id=None,
+        ),
+    )
+    monkeypatch.setattr(config, "ACTIVE_RUNS", {})
+
+    result = session_queue.recover_all_queues(schedule=False)
+
+    assert result["started"] == expected_started
+    assert result["retired"] == expected_retired
+    if expected_retired:
+        assert session_queue.list_queue("sid-remote-status") == []
+        replay = session_queue.enqueue(
+            "sid-remote-status",
+            {"text": "remote status", "client_queue_id": "client-remote-status"},
+        )
+        assert replay["state"] == "completed"
+    else:
+        assert session_queue.list_queue("sid-remote-status")[0]["state"] == "started"
+
+
+def test_recovery_retires_started_local_owner_without_live_runtime(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "SESSION_DIR", tmp_path)
+    item = session_queue.enqueue(
+        "sid-local-recover",
+        {"text": "local interrupted", "client_queue_id": "client-local-recover"},
+    )
+    session_queue.claim_next("sid-local-recover")
+    assert session_queue.mark_dispatched(
+        "sid-local-recover", item["id"], "local-run-recover"
+    ) is True
+    session_queue._finish_attempt(
+        "sid-local-recover", item["id"], {"stream_id": "local-run-recover"}
+    )
+    monkeypatch.setattr(
+        routes,
+        "get_session",
+        lambda _sid: types.SimpleNamespace(
+            active_stream_id="local-run-recover",
+            pending_queue_item_id=item["id"],
+        ),
+    )
+    monkeypatch.setattr(config, "ACTIVE_RUNS", {})
+    monkeypatch.setattr(routes, "STREAMS", {})
+
+    result = session_queue.recover_all_queues(schedule=False)
+
+    assert result["retired"] == 1
+    assert session_queue.list_queue("sid-local-recover") == []
 
 
 def test_thread_start_failure_restores_starting_item(monkeypatch, tmp_path):
@@ -676,6 +951,36 @@ def test_raised_start_error_retries_automatically_then_blocks(monkeypatch, tmp_p
     )
     assert len(calls) == 2
     assert session_queue.list_queue("sid-raised")[0]["retry_count"] == 2
+
+
+def test_stale_attempt_settlement_cannot_requeue_a_successor_dispatch(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "SESSION_DIR", tmp_path)
+    item = session_queue.enqueue(
+        "sid-attempt-fence",
+        {"text": "once", "client_queue_id": "client-attempt-fence"},
+    )
+
+    first = session_queue.claim_next("sid-attempt-fence")
+    assert first is not None
+    first_attempt_id = first["attempt_id"]
+    session_queue.requeue_front("sid-attempt-fence", first)
+
+    successor = session_queue.claim_next("sid-attempt-fence")
+    assert successor is not None
+    assert successor["attempt_id"] != first_attempt_id
+
+    session_queue._finish_attempt(
+        "sid-attempt-fence",
+        item["id"],
+        {"_status": 500, "error": "stale failure"},
+        attempt_id=first_attempt_id,
+    )
+
+    with session_queue._LOCK:
+        current = session_queue._read_items_unlocked("sid-attempt-fence")[0]
+    assert current["state"] == "starting"
+    assert current["attempt_id"] == successor["attempt_id"]
+    assert current.get("last_error") != "stale failure"
 
 
 def test_drain_does_not_claim_while_session_has_active_run(monkeypatch, tmp_path):
