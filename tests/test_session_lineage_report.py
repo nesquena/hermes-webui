@@ -394,6 +394,49 @@ def test_production_identity_metadata_keeps_branches_out_of_raced_compression_li
         conn.close()
 
 
+def test_state_db_transcript_stitch_keeps_overlapping_synthetic_fork_independent(
+    tmp_path, monkeypatch
+):
+    """Synthetic fork identity must reach the shared continuation predicate."""
+    db_path = tmp_path / "state.db"
+    conn = _ensure_state_db(db_path)
+    try:
+        conn.execute("ALTER TABLE sessions ADD COLUMN model_config TEXT")
+        _insert_state_row(
+            conn,
+            "parent",
+            started_at=100.0,
+            ended_at=200.0,
+            end_reason="compression",
+        )
+        _insert_state_row(
+            conn,
+            "fork",
+            parent="parent",
+            started_at=199.5,
+            session_source="fork",
+        )
+        conn.executemany(
+            "INSERT INTO messages (id, session_id, role, content, timestamp) VALUES (?, ?, 'user', ?, ?)",
+            [
+                ("parent-message", "parent", "PARENT_MUST_NOT_STITCH", 150.0),
+                ("fork-message", "fork", "FORK_ONLY", 201.0),
+            ],
+        )
+        conn.commit()
+
+        monkeypatch.setattr(models, "_active_state_db_path", lambda: db_path)
+
+        assert [
+            message["content"]
+            for message in models.get_state_db_session_messages(
+                "fork", stitch_continuations=True
+            )
+        ] == ["FORK_ONLY"]
+    finally:
+        conn.close()
+
+
 def test_jouvence_compression_collapse_preserves_three_real_delegate_children(
     tmp_path, monkeypatch
 ):

@@ -8000,12 +8000,15 @@ def get_state_db_session_messages(
                 cur.execute("PRAGMA table_info(sessions)")
                 session_cols = {str(row['name']) for row in cur.fetchall()}
                 if {'parent_session_id', 'end_reason', 'started_at', 'source'}.issubset(session_cols):
+                    session_source_expr = (
+                        "session_source" if 'session_source' in session_cols else "NULL AS session_source"
+                    )
                     model_config_expr = (
                         "model_config" if 'model_config' in session_cols else "NULL AS model_config"
                     )
                     lineage_select = (
                         "id, source, started_at, parent_session_id, ended_at, "
-                        f"end_reason, {model_config_expr}"
+                        f"end_reason, {session_source_expr}, {model_config_expr}"
                     )
                     cur.execute(
                         f"SELECT {lineage_select} FROM sessions WHERE id = ?",
