@@ -1,10 +1,8 @@
 """Tests for the wakeup ``_source`` backstop and completion-row dedup.
 
-Wakeup deliveries that arrive without durable source metadata (api_server
-self-POST wake turns, gateway-side turns merged from state.db) must still be
-stamped ``_source='process_wakeup'`` so the never-render UI contract and the
-``[[SILENT]]`` turn collapse keep working, and duplicate deliveries of the
-same completion must collapse to a single store row.
+Wakeup deliveries with trusted internal provenance but missing ``_source``
+must still be stamped so the never-render UI contract and dedup keep working.
+Text shape alone is not authority: a human may paste the same envelope.
 """
 
 from api.models import _normalize_wakeup_rows_for_display
@@ -73,7 +71,7 @@ def test_wakeup_event_key_watch_and_human_are_none():
 
 
 def test_backstop_stamps_untagged_wakeup_row():
-    msg = {"role": "user", "content": RAW_COMPLETION}
+    msg = {"role": "user", "content": RAW_COMPLETION, "_user_originated": False}
     assert stamp_wakeup_source_if_untagged(msg)
     assert msg["_source"] == "process_wakeup"
     assert msg["_wakeup_meta"]["task_id"] == "proc_5b9fcce4cbff"
@@ -85,6 +83,10 @@ def test_backstop_leaves_human_and_stamped_rows_untouched():
     assert not stamp_wakeup_source_if_untagged(human)
     assert "_source" not in human
 
+    pasted = {"role": "user", "content": RAW_COMPLETION}
+    assert not stamp_wakeup_source_if_untagged(pasted)
+    assert "_source" not in pasted
+
     stamped = {"role": "user", "content": RAW_COMPLETION, "_source": "telegram"}
     assert not stamp_wakeup_source_if_untagged(stamped)
     assert stamped["_source"] == "telegram"
@@ -94,7 +96,7 @@ def test_backstop_leaves_human_and_stamped_rows_untouched():
 
 
 def test_stamp_message_source_falls_back_to_backstop():
-    msg = {"role": "user", "content": PREFIXED_COMPLETION}
+    msg = {"role": "user", "content": PREFIXED_COMPLETION, "_user_originated": False}
     stamp_message_source(msg, None)
     assert msg["_source"] == "process_wakeup"
 
@@ -110,8 +112,8 @@ def test_stamp_message_source_falls_back_to_backstop():
 
 
 def test_normalize_collapses_eager_and_merged_twins():
-    eager = {"role": "user", "content": RAW_COMPLETION, "_active_turn_token": "t:1"}
-    merged = {"role": "user", "content": PREFIXED_COMPLETION}
+    eager = {"role": "user", "content": RAW_COMPLETION, "_active_turn_token": "t:1", "_user_originated": False}
+    merged = {"role": "user", "content": PREFIXED_COMPLETION, "_user_originated": False}
     reply = {"role": "assistant", "content": "[[SILENT]]"}
     out = _normalize_wakeup_rows_for_display([eager, merged, reply])
     assert len(out) == 2
@@ -123,10 +125,10 @@ def test_normalize_collapses_eager_and_merged_twins():
 def test_normalize_keeps_distinct_processes_and_watch_rows():
     other = RAW_COMPLETION.replace("proc_5b9fcce4cbff", "proc_000011112222")
     rows = [
-        {"role": "user", "content": RAW_COMPLETION},
-        {"role": "user", "content": other},
-        {"role": "user", "content": WATCH_MATCH},
-        {"role": "user", "content": WATCH_MATCH},
+        {"role": "user", "content": RAW_COMPLETION, "_user_originated": False},
+        {"role": "user", "content": other, "_user_originated": False},
+        {"role": "user", "content": WATCH_MATCH, "_user_originated": False},
+        {"role": "user", "content": WATCH_MATCH, "_user_originated": False},
     ]
     out = _normalize_wakeup_rows_for_display(rows)
     # Two completions (distinct sids) + both watch rows survive.
@@ -138,8 +140,8 @@ def test_normalize_keeps_divergent_payloads_for_same_process_identity():
     partial = RAW_COMPLETION.replace("error Couldn't", "partial output: Couldn't")
     final = RAW_COMPLETION.replace("error Couldn't", "final output: Couldn't")
     out = _normalize_wakeup_rows_for_display([
-        {"role": "user", "content": partial},
-        {"role": "user", "content": final},
+        {"role": "user", "content": partial, "_user_originated": False},
+        {"role": "user", "content": final, "_user_originated": False},
     ])
     assert [row["content"] for row in out] == [partial, final]
 
@@ -150,7 +152,7 @@ def test_normalize_stamps_previously_stamped_rows_into_dedup():
         "content": RAW_COMPLETION,
         "_source": "process_wakeup",
     }
-    second = {"role": "user", "content": PREFIXED_COMPLETION}
+    second = {"role": "user", "content": PREFIXED_COMPLETION, "_user_originated": False}
     out = _normalize_wakeup_rows_for_display([first, second])
     assert len(out) == 1
     assert out[0] is first
@@ -169,7 +171,7 @@ def test_async_delegation_shape_key_and_backstop_metadata():
         "async_delegation",
         "deleg_c60b0f8e",
     )
-    msg = {"role": "user", "content": ASYNC_DELEGATION}
+    msg = {"role": "user", "content": ASYNC_DELEGATION, "_user_originated": False}
     assert stamp_wakeup_source_if_untagged(msg)
     assert msg["_source"] == "async_delegation"
     assert msg["_display_kind"] == "internal_event"
@@ -178,7 +180,7 @@ def test_async_delegation_shape_key_and_backstop_metadata():
     assert msg["_workflow_id"] == "delegation:deleg_c60b0f8e"
 
 
-def test_normalize_collapses_state_and_sidecar_async_twins():
+def test_normalize_keeps_untrusted_state_row_separate_from_internal_twin():
     state_row = {
         "role": "user",
         "content": ASYNC_DELEGATION,
@@ -192,7 +194,8 @@ def test_normalize_collapses_state_and_sidecar_async_twins():
         "_event_id": "async_delegation:deleg_c60b0f8e:terminal",
     }
     out = _normalize_wakeup_rows_for_display([state_row, sidecar_row])
-    assert len(out) == 1
+    assert len(out) == 2
     assert out[0] is state_row
-    assert out[0]["_source"] == "async_delegation"
-    assert out[0]["_event_id"] == "async_delegation:deleg_c60b0f8e:terminal"
+    assert "_source" not in out[0]
+    assert out[1] is sidecar_row
+    assert out[1]["_source"] == "async_delegation"

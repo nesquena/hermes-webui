@@ -247,14 +247,23 @@ def stamp_wakeup_source_if_untagged(msg: Any) -> bool:
     Wakeup rows are never renderable (the UI contract), and the ``[[SILENT]]``
     collapse keys on this marker — both break when a delivery path (self-POST
     wake, state.db merge of a gateway-run turn) persists the row untagged.
-    Only user-role messages without an existing ``_source`` are touched, so
-    human turns stay untouched even in the pathological case of a user
-    pasting the exact envelope. Never raises.
+    Only user-role messages without an existing ``_source`` and with an
+    independent trusted-internal provenance signal are touched. Text shape
+    alone is never authority: a human pasting the exact envelope stays human.
+    Never raises.
     """
     try:
         if not isinstance(msg, dict) or msg.get("role") != "user":
             return False
         if msg.get("_source"):
+            return False
+        trusted_internal = bool(
+            msg.get("_transport_internal") is True
+            or msg.get("_user_originated") is False
+            or str(msg.get("_display_kind") or "")
+            in {"internal_event", "process_wakeup", "async_delegation_complete"}
+        )
+        if not trusted_internal:
             return False
         content = msg.get("content")
         # isinstance guard first: never coerce exotic content objects (the
