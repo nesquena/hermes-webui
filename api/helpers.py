@@ -62,6 +62,25 @@ def safe_resolve(root: Path, requested: str) -> Path:
     return resolved
 
 
+def split_media_token_ref(text: str, match) -> tuple[str, str] | None:
+    """Split a MEDIA regex match into its clean ref and detached prose suffix."""
+    ref = str(match.group(1) or "")
+    suffix = ""
+    punctuation = _re.search(r"[.,;:!?]+$", ref)
+    if punctuation and len(ref) > len(punctuation.group(0)):
+        ref = ref[: punctuation.start()]
+        suffix = punctuation.group(0)
+    before = str(text or "")[: match.start()]
+    for delimiter in ("***", "___", "**", "__", "*", "_", "`"):
+        if before.endswith(delimiter) and ref.endswith(delimiter) and len(ref) > len(delimiter):
+            ref = ref[: -len(delimiter)]
+            suffix = delimiter + suffix
+            break
+    if not ref or _re.fullmatch(r"[*_`]+", ref):
+        return None
+    return ref, suffix
+
+
 _CSP_CONNECT_BASE = (
     "'self' http://127.0.0.1:* http://localhost:* http://ipc.localhost "
     "https://127.0.0.1:* https://localhost:* "

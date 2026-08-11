@@ -4734,8 +4734,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const chunk=_smdMediaTailEntryChunk(entry);
     if(!chunk) return;
     const m=/^MEDIA:([^\s\)\]]+)$/.exec(String(chunk));
-    const emitted=!!(m && entry && entry.parent && _smdAppendMediaNode(entry.parent, m[1]));
-    if(!emitted && entry) _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, chunk);
+    const parts=m&&typeof _mediaTokenParts==='function'?_mediaTokenParts(String(chunk),0,m[1]):null;
+    const emitted=!!(parts && entry && entry.parent && _smdAppendMediaNode(entry.parent, parts[0]));
+    if(emitted&&parts[1]) _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, parts[1]);
+    else if(!emitted&&entry) _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, chunk);
   }
   function _smdMediaTailFlush(parser){
     if(!_SMD_MEDIA_TAIL||!parser||!_SMD_MEDIA_TAIL.get) return;
@@ -4790,7 +4792,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const slice = combined.slice(last, m.index);
         writeCurrent(slice);
       }
-      if(matchEnd===combined.length && !_smdMediaRefHasReliableBoundary(m[1])){
+      const parts=typeof _mediaTokenParts==='function'?_mediaTokenParts(combined,m.index,m[1]):null;
+      const hasDetachedSuffix=!!(parts&&parts[1]);
+      if(matchEnd===combined.length && !hasDetachedSuffix && !_smdMediaRefHasReliableBoundary(parts?parts[0]:m[1])){
         const candidate = combined.slice(m.index);
         if(candidate.length < _MEDIA_TAIL_MAX){
           unmatchedTail = candidate;
@@ -4800,7 +4804,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         last = combined.length;
         break;
       }
-      if(!_smdAppendMediaNode(parent, m[1])) writeCurrent(m[0]);
+      if(parts&&_smdAppendMediaNode(parent,parts[0])){
+        if(parts[1]) writeCurrent(parts[1]);
+      }else{
+        writeCurrent(m[0]);
+      }
       last = matchEnd;
     }
     // Tail buffer — hold trailing bytes that look like an unterminated
