@@ -42,8 +42,9 @@ services:
       - HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui
       # Default workspace directory shown on first launch
 #      - HERMES_WEBUI_DEFAULT_WORKSPACE=/workspace
-      # Optional: set a password for remote access
-      # - HERMES_WEBUI_PASSWORD=your-secret-password
+      # Optional: enable password auth. Set HERMES_WEBUI_PASSWORD in .env
+      # (required if you expose the port beyond 127.0.0.1).
+      - HERMES_WEBUI_PASSWORD=${HERMES_WEBUI_PASSWORD:-}
       #
       # Bind-mount permission handling (fixes #1389, #1399):
       #   When you mount an EXISTING ~/.hermes directory (the common case),
