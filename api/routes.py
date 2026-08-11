@@ -22467,7 +22467,7 @@ def recover_incorporated_completion_delivery(completion_context) -> bool:
                 )
             # The pending receipt plus exact sidecar identity supersedes generic
             # young-pending grace after a fresh process has no live owner.
-            setattr(session, "active_stream_id", None)
+            session.active_stream_id = None
         if (
             getattr(session, "pending_turn_id", None) != completion_context.turn_id
             or getattr(session, "pending_completion_key", None)

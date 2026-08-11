@@ -695,11 +695,11 @@ def _install_counting_completion_core(
             attachment_calls.append(list(_attachments or []))
         current = Session.load(session_id)
         assert current is not None
-        setattr(current, "active_stream_id", None)
-        setattr(current, "pending_user_message", None)
+        current.active_stream_id = None
+        current.pending_user_message = None
         current.pending_attachments = []
         current.pending_started_at = None
-        setattr(current, "pending_user_source", None)
+        current.pending_user_source = None
         current.save()
         with config.LOCK:
             config.SESSIONS[session_id] = current
@@ -1672,7 +1672,7 @@ def test_stale_pending_receipt_diagnostic_is_bounded_across_restarts(
     persisted = Session.load("stale-source")
     assert persisted is not None
     if case == "no_prompt":
-        setattr(persisted, "pending_user_message", None)
+        persisted.pending_user_message = None
         persisted.pending_attachments = []
     else:
         persisted.active_stream_id = "different-stream-owner"
