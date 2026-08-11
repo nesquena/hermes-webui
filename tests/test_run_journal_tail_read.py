@@ -2881,3 +2881,460 @@ def test_oversized_malformed_boundary_rejected_by_streaming_validator_not_suffix
     assert not summary["terminal"], (
         f"a run with only a malformed boundary was marked terminal={summary['terminal']}"
     )
+
+
+def test_oversized_terminal_with_non_standard_number_constants_full_tail_parity(tmp_path):
+    """#6139 r16 FIX 2: full/tail readers agree on NaN/Infinity/-Infinity in oversized
+    terminal records. The writer emits these constants via json.dumps(allow_nan=True),
+    the full reader accepts them via json.loads default behavior, and now the tail
+    reader's _StreamingJsonValidator also accepts them to maintain grammar parity.
+
+    Mutation proof: removing the NaN/Infinity branches from _validate_accumulated_scalar
+    causes these tests to FAIL (tail rejects the record).
+    """
+    from api.run_journal import _SESSION_REPLAY_MAX_BYTES
+
+    # Test each non-standard constant
+    test_cases = [
+        (float('nan'), "NaN"),
+        (float('inf'), "Infinity"),
+        (float('-inf'), "-Infinity"),
+    ]
+
+    for constant_value, constant_name in test_cases:
+        session_id = f"session_nan_{constant_name}"
+        run_id = f"run_nan_{constant_name}"
+
+        # Write seq=1: a small valid non-terminal event
+        writer = RunJournalWriter(session_id, run_id, session_dir=tmp_path)
+        writer.append_sse_event("assistant_message", {"content": "test"})
+
+        # Write seq=2: an OVERSIZED terminal done event containing the constant
+        # The payload must be > 4 MiB to trigger boundary record handling
+        huge_payload = {
+            "metric": constant_value,
+            "bulk": "X" * (_SESSION_REPLAY_MAX_BYTES + 100_000)
+        }
+        writer.append_sse_event("done", {
+            "session": {"session_id": session_id},
+            **huge_payload
+        })
+
+        # Full reader should accept the record (json.loads allows these constants)
+        full_result = read_run_events(session_id, run_id, session_dir=tmp_path)
+        full_events = full_result["events"]
+        full_last = full_events[-1] if full_events else None
+
+        assert full_last is not None, f"full reader should return events for {constant_name}"
+        assert full_last.get("seq") == 2, f"full reader last_seq should be 2 for {constant_name}"
+        assert full_last.get("terminal") is True, f"full reader should see terminal=True for {constant_name}"
+        assert full_last.get("terminal_state") == "completed", (
+            f"full reader should see terminal_state='completed' for {constant_name}"
+        )
+
+        # Tail readers (both) should agree with full reader
+        tail_summary = latest_run_summary(session_id, run_id, session_dir=tmp_path)
+        assert tail_summary["last_seq"] == 2, (
+            f"latest_run_summary last_seq should be 2 for {constant_name}, "
+            f"got {tail_summary['last_seq']}"
+        )
+        assert tail_summary["terminal"] is True, (
+            f"latest_run_summary should see terminal=True for {constant_name}, "
+            f"got {tail_summary['terminal']}"
+        )
+        assert tail_summary["terminal_state"] == "completed", (
+            f"latest_run_summary should see terminal_state='completed' for {constant_name}, "
+            f"got {tail_summary['terminal_state']!r}"
+        )
+
+        find_summary = find_run_summary(run_id, session_dir=tmp_path)
+        assert find_summary is not None, f"find_run_summary should find the run for {constant_name}"
+        assert find_summary["last_seq"] == 2, (
+            f"find_run_summary last_seq should be 2 for {constant_name}, "
+            f"got {find_summary['last_seq']}"
+        )
+        assert find_summary["terminal"] is True, (
+            f"find_run_summary should see terminal=True for {constant_name}, "
+            f"got {find_summary['terminal']}"
+        )
+        assert find_summary["terminal_state"] == "completed", (
+            f"find_run_summary should see terminal_state='completed' for {constant_name}, "
+            f"got {find_summary['terminal_state']!r}"
+        )
+
+
+def test_streaming_json_validator_accepts_non_standard_constants(tmp_path):
+    """#6139 r16 FIX 2: _StreamingJsonValidator accepts the three Python non-standard
+    numeric constants (NaN, Infinity, -Infinity) that the writer emits and the full
+    reader accepts.
+
+    The validator must accept ONLY the exact tokens (case-sensitive) and reject
+    malformed variants (Infinite, Nan, -Infinityx, etc.).
+    """
+    from api.run_journal import _StreamingJsonValidator
+
+    # ACCEPT cases (exact tokens)
+    accept_cases = [
+        (b'{"x":NaN}\n', "NaN constant"),
+        (b'{"x":Infinity}\n', "Infinity constant"),
+        (b'{"x":-Infinity}\n', "-Infinity constant"),
+        (b'[NaN,Infinity,-Infinity]\n', "array with all three constants"),
+        (b'{"a":-Infinity,"b":1}\n', "object with -Infinity and normal field"),
+        (b'{"payload":{"data":NaN},"seq":1}\n', "nested NaN"),
+    ]
+
+    for json_bytes, desc in accept_cases:
+        validator = _StreamingJsonValidator()
+        validator.feed(json_bytes)
+        result = validator.finish()
+        assert result is True, (
+            f"Validator should accept non-standard constant: {desc}. "
+            f"Input: {json_bytes!r}"
+        )
+
+    # REJECT cases (malformed variants)
+    reject_cases = [
+        (b'{"x":NaNx}\n', "NaN with trailing text"),
+        (b'{"x":Infinite}\n', "Infinite (wrong spelling)"),
+        (b'{"x":-Infinityx}\n', "-Infinity with trailing text"),
+        (b'{"x":Nan}\n', "Nan (wrong case)"),
+        (b'{"x":infinity}\n', "infinity (wrong case)"),
+        (b'{"x":-nan}\n', "-nan (not a valid token)"),
+    ]
+
+    for json_bytes, desc in reject_cases:
+        validator = _StreamingJsonValidator()
+        validator.feed(json_bytes)
+        result = validator.finish()
+        assert result is False, (
+            f"Validator should reject malformed constant variant: {desc}. "
+            f"Input: {json_bytes!r}"
+        )
+
+
+def test_5mib_predecessor_recovered_before_truncated_boundary(tmp_path):
+    """#6139 r16 FIX 3: a valid predecessor > 4 MiB is recovered before a truncated
+    boundary record. The predecessor's streaming validation gets its OWN budget
+    (line_len + one chunk) instead of charging the shared recovery_budget again,
+    preventing starvation for large predecessors.
+
+    Mutation proof: reverting fix 3 (charging budget_obj again) causes tail
+    last_seq to drop (0 or 1) instead of recovering seq=2.
+    """
+    from api.run_journal import _SESSION_REPLAY_MAX_BYTES, _run_path
+
+    session_id = "session_5mib_pred"
+    run_id = "run_5mib_pred"
+    path = _run_path(session_id, run_id, session_dir=tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    # seq=1: small valid token
+    writer = RunJournalWriter(session_id, run_id, session_dir=tmp_path)
+    writer.append_sse_event("token", {"text": "start"})
+
+    # seq=2: VALID 5 MiB non-terminal event (tool_complete)
+    large_size = _SESSION_REPLAY_MAX_BYTES + 1_000_000  # ~5 MiB
+    large_payload = {"data": "X" * large_size}
+    writer.append_sse_event("tool_complete", large_payload)
+
+    # seq=3: CRASH-TRUNCATED oversized done event (no closing brace + newline)
+    huge_size = _SESSION_REPLAY_MAX_BYTES + 100_000
+    partial_done = (
+        '{"version":1,"event_id":"' + run_id + ':3","seq":3,'
+        '"event":"done","type":"done","terminal":true,'
+        '"terminal_state":"completed","payload":{"text":"'
+        + "X" * huge_size
+        # NO closing brace, no newline - truncated
+    )
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(partial_done)
+
+    # Full reader should report last_seq=2 (seq=3 is truncated)
+    full_result = read_run_events(session_id, run_id, session_dir=tmp_path)
+    full_events = full_result["events"]
+    full_last_seq = full_events[-1].get("seq") if full_events else 0
+    assert full_last_seq == 2, (
+        f"full reader should report last_seq=2 (seq=3 is truncated), "
+        f"got {full_last_seq}"
+    )
+
+    # Tail reader should ALSO report last_seq=2 (recovering the 5 MiB predecessor)
+    tail_summary = latest_run_summary(session_id, run_id, session_dir=tmp_path)
+    tail_last_seq = tail_summary["last_seq"]
+    assert tail_last_seq == 2, (
+        f"tail reader should recover the 5 MiB predecessor and report last_seq=2, "
+        f"got {tail_last_seq} (predecessor lost)"
+    )
+
+    # find_run_summary should agree
+    find_summary = find_run_summary(run_id, session_dir=tmp_path)
+    assert find_summary is not None, "find_run_summary should find the run"
+    assert find_summary["last_seq"] == 2, (
+        f"find_run_summary should report last_seq=2, got {find_summary['last_seq']}"
+    )
+
+
+def test_large_predecessor_above_16mib_recovered(tmp_path):
+    """#6139 r16 FIX 3: stress test with a >16 MiB predecessor to ensure the independent
+    budget approach handles very large predecessors. The validator's budget is
+    line_len + _SESSION_REPLAY_READ_CHUNK_BYTES, so it scales with line size.
+
+    Mutation proof: reverting fix 3 causes this test to fail (predecessor lost).
+    """
+    from api.run_journal import _SESSION_REPLAY_MAX_BYTES, _run_path
+
+    session_id = "session_16mib_pred"
+    run_id = "run_16mib_pred"
+    path = _run_path(session_id, run_id, session_dir=tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    # seq=1: small valid token
+    writer = RunJournalWriter(session_id, run_id, session_dir=tmp_path)
+    writer.append_sse_event("token", {"text": "start"})
+
+    # seq=2: VALID >16 MiB non-terminal event (tool_complete)
+    # Use 17 MiB to clearly exceed any plausible cap
+    large_size = 17 * 1024 * 1024  # 17 MiB
+    large_payload = {"data": "X" * large_size}
+    writer.append_sse_event("tool_complete", large_payload)
+
+    # seq=3: CRASH-TRUNCATED oversized done event
+    huge_size = _SESSION_REPLAY_MAX_BYTES + 100_000
+    partial_done = (
+        '{"version":1,"event_id":"' + run_id + ':3","seq":3,'
+        '"event":"done","type":"done","terminal":true,'
+        '"terminal_state":"completed","payload":{"text":"'
+        + "X" * huge_size
+        # NO closing brace, no newline - truncated
+    )
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(partial_done)
+
+    # Full reader should report last_seq=2
+    full_result = read_run_events(session_id, run_id, session_dir=tmp_path)
+    full_events = full_result["events"]
+    full_last_seq = full_events[-1].get("seq") if full_events else 0
+    assert full_last_seq == 2, (
+        f"full reader should report last_seq=2, got {full_last_seq}"
+    )
+
+    # Tail reader should recover the 17 MiB predecessor
+    tail_summary = latest_run_summary(session_id, run_id, session_dir=tmp_path)
+    tail_last_seq = tail_summary["last_seq"]
+    assert tail_last_seq == 2, (
+        f"tail reader should recover the 17 MiB predecessor and report last_seq=2, "
+        f"got {tail_last_seq} (very large predecessor lost)"
+    )
+
+    find_summary = find_run_summary(run_id, session_dir=tmp_path)
+    assert find_summary is not None, "find_run_summary should find the run"
+    assert find_summary["last_seq"] == 2, (
+        f"find_run_summary should report last_seq=2, got {find_summary['last_seq']}"
+    )
+
+
+def test_transient_rfind_oserror_not_cached_retry_recovers_latest_run_summary(tmp_path):
+    """#6139 r16 FIX 4: _rfind_byte_before propagates fault via fault[0]=True on OSError,
+    so a transient error during backward newline scan is NOT cached as an authoritative
+    "no predecessor" result. A retry succeeds and recovers the correct state.
+
+    Mutation proof: removing fault[0]=True from _rfind_byte_before causes this test to
+    FAIL (the first call's failed result IS cached, second call returns stale data).
+    """
+    import inspect
+    import pathlib
+    from api.run_journal import _SESSION_REPLAY_MAX_BYTES, _run_path
+
+    session_id = "session_rfind_fault"
+    run_id = "run_rfind_fault"
+    path = _run_path(session_id, run_id, session_dir=tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Write seq=1 and seq=2 valid events, then truncated seq=3 boundary
+    writer = RunJournalWriter(session_id, run_id, session_dir=tmp_path)
+    writer.append_sse_event("token", {"text": "first"})
+    writer.append_sse_event("tool_complete", {"result": "ok"})
+
+    # seq=3: truncated oversized boundary
+    huge_size = _SESSION_REPLAY_MAX_BYTES + 100_000
+    partial_done = (
+        '{"version":1,"event_id":"' + run_id + ':3","seq":3,'
+        '"event":"done","type":"done","terminal":true,'
+        '"terminal_state":"completed","payload":{"text":"'
+        + "X" * huge_size
+        # NO closing brace, no newline - truncated
+    )
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(partial_done)
+
+    # Inject transient OSError on fh.read() when called from _rfind_byte_before
+    # This tests the REAL function's except clause, not the outer one
+    real_path_open = pathlib.Path.open
+    fault_injected = [False]
+    read_calls_while_in_rfind = [0]
+
+    def patched_open(self, *args, **kwargs):
+        # Open the real file handle
+        fh = real_path_open(self, *args, **kwargs)
+        real_read = fh.read
+
+        def maybe_failing_read(size=-1):
+            # Check if _rfind_byte_before is in the call stack
+            stack_names = {frame.frame.f_code.co_name for frame in inspect.stack()}
+            if "_rfind_byte_before" in stack_names and not fault_injected[0]:
+                # First read from _rfind_byte_before: inject transient OSError
+                fault_injected[0] = True
+                read_calls_while_in_rfind[0] += 1
+                raise OSError("Injected transient OSError during _rfind_byte_before read")
+            return real_read(size)
+
+        fh.read = maybe_failing_read
+        return fh
+
+    # Patch Path.open to inject our wrapper
+    original_open = pathlib.Path.open
+    pathlib.Path.open = patched_open
+
+    try:
+        # Clear any existing cache entry for this run
+        from api.run_journal import _SUMMARY_CACHE
+        _SUMMARY_CACHE.pop((session_id, run_id), None)
+
+        # First call during fault should return best-effort (unknown or partial)
+        # It should NOT cache the failed result
+        first_summary = latest_run_summary(session_id, run_id, session_dir=tmp_path)
+
+        # Second call should RE-READ and recover the real completed state
+        # (not return a cached stale "no predecessor" result)
+        second_summary = latest_run_summary(session_id, run_id, session_dir=tmp_path)
+    finally:
+        # Restore original Path.open
+        pathlib.Path.open = original_open
+
+    # Verify the fault was indeed injected during _rfind_byte_before
+    assert fault_injected[0], "OSError should have been injected during _rfind_byte_before"
+    assert read_calls_while_in_rfind[0] == 1, (
+        f"exactly one read should have failed while in _rfind_byte_before, "
+        f"got {read_calls_while_in_rfind[0]}"
+    )
+
+    # Assertions:
+    # 1. First call during fault returns best-effort (last_seq=0/1, terminal=False/running)
+    # 2. Second call RECOVERS (last_seq=2) after the OSError clears
+    # 3. The results are DIFFERENT (proving the first wasn't cached)
+
+    # First call may return last_seq=0 or 1 (best-effort during fault)
+    first_last_seq = first_summary["last_seq"]
+    assert first_last_seq in {0, 1}, (
+        f"first call during fault may return best-effort result, got last_seq={first_last_seq}"
+    )
+
+    # Second call should recover the last valid seq (seq=2)
+    # Note: terminal_state may still be "running" because seq=3 is truncated
+    # and seq=2 (tool_complete) is non-terminal. The key is that last_seq advances.
+    assert second_summary["last_seq"] == 2, (
+        f"second call should recover seq=2, got last_seq={second_summary['last_seq']}"
+    )
+
+    # The key assertion: results are DIFFERENT
+    # If fault[0]=True is missing from _rfind_byte_before, the first failed
+    # result would be cached, and both calls would return the SAME stale result.
+    # With fix 4, the second call produces a different result (last_seq advances).
+    assert first_summary["last_seq"] != second_summary["last_seq"], (
+        f"second call should produce different last_seq than first call (proving no cache), "
+        f"but both returned last_seq={first_summary['last_seq']}"
+    )
+
+
+def test_transient_rfind_oserror_not_cached_retry_recovers_find_run_summary(tmp_path):
+    """#6139 r16 FIX 4: same fault propagation test via find_run_summary instead of
+    latest_run_summary, ensuring both summary readers benefit from _rfind_byte_before
+    fault propagation.
+
+    Mutation proof: removing fault[0]=True from _rfind_byte_before causes this test to
+    FAIL (stale cached result instead of recovery).
+    """
+    import inspect
+    import pathlib
+    from api.run_journal import _SESSION_REPLAY_MAX_BYTES, _run_path
+
+    session_id = "session_rfind_find"
+    run_id = "run_rfind_find"
+    path = _run_path(session_id, run_id, session_dir=tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Write same shape: valid seq=1, seq=2, truncated seq=3 boundary
+    writer = RunJournalWriter(session_id, run_id, session_dir=tmp_path)
+    writer.append_sse_event("token", {"text": "first"})
+    writer.append_sse_event("tool_complete", {"result": "ok"})
+
+    huge_size = _SESSION_REPLAY_MAX_BYTES + 100_000
+    partial_done = (
+        '{"version":1,"event_id":"' + run_id + ':3","seq":3,'
+        '"event":"done","type":"done","terminal":true,'
+        '"terminal_state":"completed","payload":{"text":"'
+        + "X" * huge_size
+    )
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(partial_done)
+
+    # Inject transient OSError on fh.read() when called from _rfind_byte_before
+    real_path_open = pathlib.Path.open
+    fault_injected = [False]
+    read_calls_while_in_rfind = [0]
+
+    def patched_open(self, *args, **kwargs):
+        fh = real_path_open(self, *args, **kwargs)
+        real_read = fh.read
+
+        def maybe_failing_read(size=-1):
+            stack_names = {frame.frame.f_code.co_name for frame in inspect.stack()}
+            if "_rfind_byte_before" in stack_names and not fault_injected[0]:
+                fault_injected[0] = True
+                read_calls_while_in_rfind[0] += 1
+                raise OSError("Injected transient OSError during _rfind_byte_before read")
+            return real_read(size)
+
+        fh.read = maybe_failing_read
+        return fh
+
+    original_open = pathlib.Path.open
+    pathlib.Path.open = patched_open
+
+    try:
+        # Clear cache
+        from api.run_journal import _SUMMARY_CACHE
+        cache_key = (run_id,)  # find_run_summary uses (run_id,) as cache key
+        _SUMMARY_CACHE.pop(cache_key, None)
+
+        # First call during fault
+        first_summary = find_run_summary(run_id, session_dir=tmp_path)
+
+        # Second call should recover
+        second_summary = find_run_summary(run_id, session_dir=tmp_path)
+    finally:
+        pathlib.Path.open = original_open
+
+    # Verify the fault was indeed injected during _rfind_byte_before
+    assert fault_injected[0], "OSError should have been injected during _rfind_byte_before"
+    assert read_calls_while_in_rfind[0] == 1, (
+        f"exactly one read should have failed while in _rfind_byte_before, "
+        f"got {read_calls_while_in_rfind[0]}"
+    )
+
+    assert first_summary is not None, "first call should return a summary"
+    first_last_seq = first_summary["last_seq"]
+    assert first_last_seq in {0, 1}, (
+        f"first call during fault may return best-effort result, got last_seq={first_last_seq}"
+    )
+
+    assert second_summary is not None, "second call should return a summary"
+    assert second_summary["last_seq"] == 2, (
+        f"second call should recover seq=2, got last_seq={second_summary['last_seq']}"
+    )
+
+    # Results must be different (proving no cache)
+    assert first_summary["last_seq"] != second_summary["last_seq"], (
+        f"second call should produce different last_seq than first call (proving no cache), "
+        f"but both returned last_seq={first_summary['last_seq']}"
+    )

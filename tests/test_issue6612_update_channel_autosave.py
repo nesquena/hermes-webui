@@ -965,4 +965,3 @@ def test_channel_writer_concurrent_selection(tmp_path, monkeypatch):
     assert result["finalSeq"] == 2, (
         f"_channelSaveSeq must be 2 after two calls; got {result['finalSeq']!r}"
     )
-

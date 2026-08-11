@@ -305,10 +305,10 @@ _BOUNDARY_SUMMARY_PREFIX_BYTES = 8192
 
 class _StreamingJsonValidator:
     """Byte-level streaming JSON grammar validator (RFC 8259 subset).
-    
+
     Feed bytes via feed(); call result via finish() or check .accepted/.rejected.
     Memory is O(nesting depth). Never materializes the full document.
-    
+
     The validator tracks complete state for objects, arrays, strings, numbers,
     keywords, and whitespace. It enforces strict grammar rules:
     - No trailing commas in objects or arrays
@@ -316,10 +316,14 @@ class _StreamingJsonValidator:
     - Valid number format (no leading zeros, proper exponent notation)
     - Exact keyword spellings (true/false/null)
     - Proper nesting and termination
-    
+
+    Additionally accepts the three Python-specific floating-point constants
+    (NaN, Infinity, -Infinity) to match the writer's ``json.dumps(allow_nan=True)``
+    behavior and the full reader's ``json.loads`` grammar.
+
     Fuzz-proven: passed 84,000 cases against json.loads oracle with 0 mismatches.
     """
-    
+
     __slots__ = (
         "_stack",
         "_state",
@@ -338,28 +342,28 @@ class _StreamingJsonValidator:
         "_utf8_first_min",   # min value of the FIRST continuation byte (0x80 default)
         "_utf8_first_max",   # max value of the FIRST continuation byte (0xBF default)
     )
-    
+
     # Frame states for objects/arrays
     _OBJ_EXPECT_KEY = "obj_expect_key"      # after { or ,
     _OBJ_EXPECT_COLON = "obj_expect_colon"  # after key string
     _OBJ_EXPECT_VALUE = "obj_expect_value"  # after :
     _OBJ_EXPECT_COMMA_OR_END = "obj_expect_comma_or_end"  # after value
-    
+
     _ARR_EXPECT_VALUE_OR_END = "arr_expect_value_or_end"  # after [ or ,
     _ARR_EXPECT_VALUE = "arr_expect_value"  # after ,
     _ARR_EXPECT_COMMA_OR_END = "arr_expect_comma_or_end"  # after value
-    
+
     # Top-level states
     _TOP_EXPECT_VALUE = "top_expect_value"
     _TOP_EXPECT_TERMINATOR = "top_expect_terminator"
-    
+
     # Whitespace definition (RFC 8259)
     _WHITESPACE = frozenset({0x20, 0x09, 0x0A, 0x0D})  # space, tab, LF, CR
-    
+
     def __init__(self) -> None:
         """Initialize validator to start parsing a new JSON value."""
         self._reset()
-    
+
     def _reset(self) -> None:
         """Reset all state for a new validation."""
         self._stack: list[str] = []
@@ -377,8 +381,8 @@ class _StreamingJsonValidator:
         self._in_object_start = False  # Track if we're at the start of an object
         self._utf8_remaining = 0
         self._utf8_first_min = 0x80
-        self._utf8_first_max = 0xBF    
-    
+        self._utf8_first_max = 0xBF
+
     def feed(self, data: bytes) -> None:
         """Feed bytes to the validator.
 
@@ -399,7 +403,7 @@ class _StreamingJsonValidator:
                 self._reject("Trailing bytes after complete JSONL record")
                 return
             self._process_byte(b)
-    
+
     def _process_byte(self, b: int) -> None:
         """Process a single byte through the state machine."""
         # Handle CR pending state (CRLF handling)
@@ -416,7 +420,7 @@ class _StreamingJsonValidator:
             if self._state == self._TOP_EXPECT_TERMINATOR:
                 self._accept()
             return
-        
+
         # Handle unicode escape sequence (inside \uXXXX)
         if self._unicode_escape_remaining > 0:
             if not self._is_hex_digit(b):
@@ -424,12 +428,12 @@ class _StreamingJsonValidator:
                 return
             self._unicode_escape_remaining -= 1
             return
-        
+
         # Handle string state
         if self._in_string:
             self._process_string_byte(b)
             return
-        
+
         # Handle whitespace
         if b in self._WHITESPACE:
             # Whitespace inside a partially-accumulated scalar token (keyword or
@@ -451,18 +455,18 @@ class _StreamingJsonValidator:
                 # Otherwise, LF is just whitespace
             # Other whitespace (space, tab) is ignored
             return
-        
+
         # Handle scalar token accumulation (keywords, numbers)
-        if self._state in (self._TOP_EXPECT_VALUE, self._OBJ_EXPECT_VALUE, 
+        if self._state in (self._TOP_EXPECT_VALUE, self._OBJ_EXPECT_VALUE,
                           self._ARR_EXPECT_VALUE_OR_END, self._ARR_EXPECT_VALUE,
                           self._OBJ_EXPECT_COMMA_OR_END, self._ARR_EXPECT_COMMA_OR_END,
                           self._OBJ_EXPECT_KEY, self._OBJ_EXPECT_COLON):
             self._process_scalar_byte(b)
             return
-        
+
         # Should not reach here
         self._reject(f"Unexpected byte {b} in state {self._state}")
-    
+
     def _process_string_byte(self, b: int) -> None:
         """Process a byte inside a string literal."""
         if self._escaped:
@@ -549,7 +553,7 @@ class _StreamingJsonValidator:
         if b < 0x20:
             self._reject(f"Control character 0x{b:02X} inside string")
         # Regular character, nothing to do
-    
+
     def _finalize_string(self) -> None:
         """Called when a string is completed."""
         # Check what we expect this string to be
@@ -562,7 +566,7 @@ class _StreamingJsonValidator:
             self._finalize_value()
         else:
             self._reject(f"String in unexpected state {self._state}")
-    
+
     def _process_scalar_byte(self, b: int) -> None:
         """Process a byte that could be part of a scalar value (keyword, number, or structure)."""
 
@@ -586,20 +590,20 @@ class _StreamingJsonValidator:
                     return
             self._in_string = True
             # Quote is valid when expecting a key (in object) or a value (anywhere)
-            if self._state in (self._OBJ_EXPECT_KEY, self._TOP_EXPECT_VALUE, 
-                              self._OBJ_EXPECT_VALUE, self._ARR_EXPECT_VALUE, 
+            if self._state in (self._OBJ_EXPECT_KEY, self._TOP_EXPECT_VALUE,
+                              self._OBJ_EXPECT_VALUE, self._ARR_EXPECT_VALUE,
                               self._ARR_EXPECT_VALUE_OR_END):
                 pass  # Valid start of string
             else:
                 self._reject(f"Unexpected string start in state {self._state}")
             return
-        
+
         # Validate any pending scalar before processing structural bytes
         if self._scalar_buf and b in (0x7B, 0x7D, 0x5B, 0x5D, 0x2C, 0x3A):
             self._validate_accumulated_scalar()
             if self._rejected:
                 return
-        
+
         # Structure characters (start/end of containers)
         if b == 0x7B:  # {
             self._start_object()
@@ -631,20 +635,20 @@ class _StreamingJsonValidator:
                 self._reject(f"Non-ASCII byte 0x{b:02X} outside string")
                 return
             self._scalar_buf.append(b)
-    
+
     def _start_object(self) -> None:
         """Handle opening brace {."""
         if self._state not in (self._TOP_EXPECT_VALUE, self._OBJ_EXPECT_VALUE,
                                self._ARR_EXPECT_VALUE, self._ARR_EXPECT_VALUE_OR_END):
             self._reject(f"Unexpected {{ in state {self._state}")
             return
-        
+
         self._depth += 1
         # Store the container type (object) in the stack
         self._stack.append("object")
         self._state = self._OBJ_EXPECT_KEY
         self._in_object_start = True  # We're at the start of a new object
-    
+
     def _end_object(self) -> None:
         """Handle closing brace }."""
         # Validate any pending scalar first
@@ -663,18 +667,18 @@ class _StreamingJsonValidator:
         if self._state not in (self._OBJ_EXPECT_KEY, self._OBJ_EXPECT_COMMA_OR_END):
             self._reject(f"Unexpected }} in state {self._state}")
             return
-        
+
         self._depth -= 1
         if self._depth < 0:
             self._reject("Too many closing braces")
             return
-        
+
         # Pop the container type
         container = self._stack.pop()
         if container != "object":
             self._reject(f"Container type mismatch: expected object, got {container}")
             return
-        
+
         if self._depth == 0:
             # Top-level value completed
             self._state = self._TOP_EXPECT_TERMINATOR
@@ -688,20 +692,20 @@ class _StreamingJsonValidator:
                 self._state = self._ARR_EXPECT_COMMA_OR_END
             else:
                 self._reject(f"Unexpected parent container type: {parent}")
-    
+
     def _start_array(self) -> None:
         """Handle opening bracket [."""
         if self._state not in (self._TOP_EXPECT_VALUE, self._OBJ_EXPECT_VALUE,
                                self._ARR_EXPECT_VALUE, self._ARR_EXPECT_VALUE_OR_END):
             self._reject(f"Unexpected [ in state {self._state}")
             return
-        
+
         self._depth += 1
         # Store the container type (array) in the stack
         self._stack.append("array")
         self._state = self._ARR_EXPECT_VALUE_OR_END
         self._in_object_start = True  # We're at the start of a new array (for trailing comma check)
-    
+
     def _end_array(self) -> None:
         """Handle closing bracket ]."""
         # Validate any pending scalar first
@@ -720,18 +724,18 @@ class _StreamingJsonValidator:
         if self._state not in (self._ARR_EXPECT_VALUE_OR_END, self._ARR_EXPECT_COMMA_OR_END):
             self._reject(f"Unexpected ] in state {self._state}")
             return
-        
+
         self._depth -= 1
         if self._depth < 0:
             self._reject("Too many closing brackets")
             return
-        
+
         # Pop the container type
         container = self._stack.pop()
         if container != "array":
             self._reject(f"Container type mismatch: expected array, got {container}")
             return
-        
+
         if self._depth == 0:
             # Top-level value completed
             self._state = self._TOP_EXPECT_TERMINATOR
@@ -745,7 +749,7 @@ class _StreamingJsonValidator:
                 self._state = self._ARR_EXPECT_COMMA_OR_END
             else:
                 self._reject(f"Unexpected parent container type: {parent}")
-    
+
     def _handle_comma(self) -> None:
         """Handle comma separator."""
         if self._state == self._OBJ_EXPECT_COMMA_OR_END:
@@ -759,14 +763,14 @@ class _StreamingJsonValidator:
         elif self._state == self._ARR_EXPECT_VALUE_OR_END and self._in_object_start:
             # Comma at the start of an array - this is a trailing comma!
             self._reject("Trailing comma in array")
-        elif self._state in (self._OBJ_EXPECT_KEY, self._ARR_EXPECT_VALUE, 
+        elif self._state in (self._OBJ_EXPECT_KEY, self._ARR_EXPECT_VALUE,
                            self._OBJ_EXPECT_VALUE, self._TOP_EXPECT_VALUE,
                            self._ARR_EXPECT_VALUE_OR_END):
             # Comma appeared where we expected a value - this is invalid
             self._reject(f"Unexpected comma in state {self._state}")
         else:
             self._reject(f"Unexpected comma in state {self._state}")
-    
+
     def _handle_colon(self) -> None:
         """Handle colon after key in object."""
         if self._state != self._OBJ_EXPECT_COLON:
@@ -778,7 +782,7 @@ class _StreamingJsonValidator:
             if self._rejected:
                 return
         self._state = self._OBJ_EXPECT_VALUE
-    
+
     def _finalize_value(self) -> None:
         """Called when any value (string, number, keyword, container) is completed."""
         if self._depth == 0:
@@ -795,22 +799,28 @@ class _StreamingJsonValidator:
                 self._state = self._ARR_EXPECT_COMMA_OR_END
             else:
                 self._reject(f"Value completed in unexpected context (parent={parent})")
-    
+
     def _is_hex_digit(self, b: int) -> bool:
         """Check if byte is a valid hex digit."""
         return (0x30 <= b <= 0x39 or  # 0-9
                 0x41 <= b <= 0x46 or  # A-F
                 0x61 <= b <= 0x66)   # a-f
-    
+
     def _validate_accumulated_scalar(self) -> None:
-        """Validate an accumulated scalar token (keyword or number)."""
+        """Validate an accumulated scalar token (keyword or number).
+
+        Accepts the standard RFC 8259 keywords (true, false, null) and the three
+        Python-specific floating-point constants (NaN, Infinity, -Infinity) to
+        match the writer's ``json.dumps(allow_nan=True)`` behavior and the full
+        reader's ``json.loads`` grammar.
+        """
         if not self._scalar_buf:
             self._reject("Empty scalar token")
             return
-        
+
         token_bytes = bytes(self._scalar_buf)
         self._scalar_buf = []
-        
+
         # Try to match keyword
         token_str = token_bytes.decode("utf-8", errors="replace")
         if token_str == "true":
@@ -819,25 +829,31 @@ class _StreamingJsonValidator:
             self._finalize_value()
         elif token_str == "null":
             self._finalize_value()
+        elif token_str == "NaN":
+            self._finalize_value()
+        elif token_str == "Infinity":
+            self._finalize_value()
+        elif token_str == "-Infinity":
+            self._finalize_value()
         else:
             # Must be a number
             self._validate_number_token(token_bytes)
-    
+
     def _validate_number_token(self, token_bytes: bytes) -> None:
         """Validate a number token according to RFC 8259."""
         # Number grammar: -?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?
         i = 0
         n = len(token_bytes)
-        
+
         # Optional minus sign
         if i < n and token_bytes[i] == 0x2D:  # -
             i += 1
-        
+
         # Integer part
         if i >= n:
             self._reject("Number has no digits")
             return
-        
+
         if token_bytes[i] == 0x30:  # 0
             i += 1
             # Leading zeros not allowed (unless it's just "0")
@@ -851,7 +867,7 @@ class _StreamingJsonValidator:
         else:
             self._reject("Number has invalid integer part")
             return
-        
+
         # Fractional part
         if i < n and token_bytes[i] == 0x2E:  # .
             i += 1
@@ -860,7 +876,7 @@ class _StreamingJsonValidator:
                 return
             while i < n and 0x30 <= token_bytes[i] <= 0x39:
                 i += 1
-        
+
         # Exponent part
         if i < n and token_bytes[i] in (0x45, 0x65):  # E or e
             i += 1
@@ -872,38 +888,38 @@ class _StreamingJsonValidator:
                 return
             while i < n and 0x30 <= token_bytes[i] <= 0x39:
                 i += 1
-        
+
         # Must have consumed all bytes
         if i != n:
             self._reject(f"Number has trailing bytes: {token_bytes[i:]!r}")
             return
-        
+
         self._finalize_value()
-    
+
     def _reject(self, msg: str) -> None:
         """Mark the input as rejected with an error message."""
         self._rejected = True
         self._error_msg = msg
-    
+
     def _accept(self) -> None:
         """Mark the input as accepted."""
         self._accepted = True
-    
+
     @property
     def accepted(self) -> bool:
         """True if the input was accepted as valid JSON."""
         return self._accepted
-    
+
     @property
     def rejected(self) -> bool:
         """True if the input was rejected as invalid JSON."""
         return self._rejected
-    
+
     @property
     def error_message(self) -> str:
         """Error message if rejected, empty otherwise."""
         return self._error_msg
-    
+
     def finish(self) -> bool:
         """Return True iff the fed bytes form a complete, valid JSON value.
 
@@ -921,27 +937,27 @@ class _StreamingJsonValidator:
             return False
         if self._accepted:
             return True
-        
+
         # Check for pending CR without LF (bare CR)
         if self._pending_cr:
             self._reject("Bare CR (terminator is \\r\\n, not just \\r)")
             return False
-        
+
         # Check if we have a complete value
         if not self._saw_complete_value:
             # Either empty input or incomplete value
             self._reject("Incomplete JSON value (no complete value found)")
             return False
-        
+
         # Check for incomplete state
         if self._in_string:
             self._reject("Unterminated string")
             return False
-        
+
         if self._escaped:
             self._reject("Unterminated escape sequence")
             return False
-        
+
         if self._unicode_escape_remaining > 0:
             self._reject("Incomplete \\u escape sequence")
             return False
@@ -949,11 +965,11 @@ class _StreamingJsonValidator:
         if self._utf8_remaining > 0:
             self._reject("Incomplete UTF-8 sequence in string")
             return False
-        
+
         if self._depth > 0:
             self._reject(f"Unclosed container (depth={self._depth})")
             return False
-        
+
         # Check if we have pending scalar token
         if self._scalar_buf:
             self._validate_accumulated_scalar()
@@ -963,7 +979,7 @@ class _StreamingJsonValidator:
             if not self._saw_complete_value:
                 self._reject("Scalar did not complete the value")
                 return False
-        
+
         # If we reach here with a complete value and no errors, accept
         # BUT we must also be in the proper terminator state
         if self._saw_complete_value and self._state == self._TOP_EXPECT_TERMINATOR:
@@ -972,7 +988,7 @@ class _StreamingJsonValidator:
             # Actually, if we're in TOP_EXPECT_TERMINATOR state and haven't accepted yet,
             # it means we didn't get the newline terminator
             return self._accepted  # Only accept if we actually got the terminator
-        
+
         self._reject(f"Invalid end state: {self._state}")
         return False
 
@@ -1098,12 +1114,12 @@ def _read_last_complete_line_before(fh, size: int, end_offset: int, *, budget: i
         # words for item 1: "stop before the next helper at exhaustion").
         if budget_obj.exhausted:
             return None
-        first_nl = _rfind_byte_before(fh, b"\n", scan_end, budget=budget_obj)
+        first_nl = _rfind_byte_before(fh, b"\n", scan_end, budget=budget_obj, fault=fault)
         if first_nl is None or first_nl == 0:
             return None  # no preceding complete line (or budget exhausted mid-scan)
         if budget_obj.exhausted:
             return None  # stop before the next helper at exhaustion
-        second_nl = _rfind_byte_before(fh, b"\n", first_nl, budget=budget_obj)
+        second_nl = _rfind_byte_before(fh, b"\n", first_nl, budget=budget_obj, fault=fault)
         line_start = (second_nl + 1) if second_nl is not None else 0
         line_len = first_nl - line_start
         if line_len <= 0:
@@ -1118,7 +1134,7 @@ def _read_last_complete_line_before(fh, size: int, end_offset: int, *, budget: i
         # Candidate predecessor line. This loop only reaches COMPLETE lines
         # (newline-terminated on both sides — _rfind_byte_before found the
         # surrounding newlines, and the caller's end_offset is the boundary
-        # record's start, strictly after this line). 
+        # record's start, strictly after this line).
         #
         # #6139 redesign: validate the predecessor via prefix-summary + streaming
         # grammar validation (O(depth) memory, never materializes the full line).
@@ -1159,7 +1175,15 @@ def _read_last_complete_line_before(fh, size: int, end_offset: int, *, budget: i
         # _record_is_valid_jsonl streams from line_start to line_end (the actual
         # line end, not EOF), confirming grammar + terminator. If it returns False,
         # the line is malformed/truncated — skip it and continue backward.
-        if not _record_is_valid_jsonl(fh, line_end, line_start, budget=budget_obj, fault=fault):
+        # Give the predecessor's streaming validation its OWN budget sized to the
+        # discovered line extent (mirrors the boundary record's validity_budget =
+        # size - record_start). The shared recovery_budget already paid for the
+        # backward newline scan + prefix read; charging it AGAIN for full-line
+        # validation starves >4 MiB predecessors (they need ~2x their size but
+        # only ~size+cap remains). The validator self-terminates at the line's
+        # terminating newline (depth-0 + \n), so line_len + one chunk covers it.
+        predecessor_validity_budget = _ReadBudget(line_len + _SESSION_REPLAY_READ_CHUNK_BYTES)
+        if not _record_is_valid_jsonl(fh, line_end, line_start, budget=predecessor_validity_budget, fault=fault):
             # Malformed or truncated predecessor — skip, continue backward.
             rows_scanned += 1
             scan_end = line_start
@@ -1173,7 +1197,7 @@ def _read_last_complete_line_before(fh, size: int, end_offset: int, *, budget: i
 
 
 def _rfind_byte_before(
-    fh, byte: bytes, end_offset: int, *, budget: _ReadBudget | None = None
+    fh, byte: bytes, end_offset: int, *, budget: _ReadBudget | None = None, fault: list[bool] | None = None
 ) -> int | None:
     """Return the offset of the last occurrence of ``byte`` at or before
     ``end_offset - 1``, scanning backward in bounded chunks. None if not found.
@@ -1221,7 +1245,10 @@ def _rfind_byte_before(
     except (FileNotFoundError, OSError):
         # TOCTOU: journal deleted before/during the scan. Return the safe
         # fallback (None = byte not found) rather than escaping to the caller.
-        # (#6139 Greptile P1)
+        # Signal the transient fault so the caller does NOT cache this as an
+        # authoritative "no predecessor" result. (#6139 r16)
+        if fault is not None:
+            fault[0] = True
         return None
     return None
 
@@ -1396,48 +1423,6 @@ def _record_is_valid_jsonl(
     # EOF reached without the validator accepting (crash-truncated or incomplete).
     result = validator.finish()
     return result
-
-
-def _extract_boundary_record_summary(
-    fh, record_start: int, *, budget: _ReadBudget | None = None, fault: list[bool] | None = None
-) -> dict | None:
-    """Extract ONLY the summary fields of an oversized journal record that
-    straddles the tail-window boundary, without materializing its payload.
-
-    Reads a bounded prefix (``_BOUNDARY_SUMMARY_PREFIX_BYTES``) from
-    ``record_start``, locates the top-level ``"payload"`` key via a brace-depth
-    scan, truncates the JSON before it, closes the object, and parses. Returns
-    a dict with the summary fields (``event``/``seq``/``event_id``/``terminal``/
-    ``terminal_state``) or ``None`` if the layout is unexpected. The payload is
-    replaced with an empty dict so downstream consumers see the shape but not
-    the bytes.
-
-    The caller owns the handle; all reads use the same inode generation. When
-    ``budget`` is a ``_ReadBudget`` the prefix read is capped at the budget's
-    remaining allowance; if the allowance hits 0 the function returns None. The
-    rest of the function operates on whatever prefix was read — if a shorter-
-    than-expected prefix can't be parsed, returns None.
-
-    When ``fault`` is a mutable list[bool], a caught OSError sets fault[0]=True
-    to signal the caller that a transient read fault occurred. (#6139 r14)
-    """
-    try:
-        fh.seek(record_start)
-        if budget is not None:
-            to_read = budget.take(_BOUNDARY_SUMMARY_PREFIX_BYTES)
-            if to_read == 0:
-                return None  # exhausted before reading any prefix — stop
-            prefix_raw = fh.read(to_read)
-        else:
-            prefix_raw = fh.read(_BOUNDARY_SUMMARY_PREFIX_BYTES)
-    except (FileNotFoundError, OSError):
-        if fault is not None:
-            fault[0] = True
-        return None
-    text = prefix_raw.decode("utf-8", errors="replace")
-    # The boundary record is oversized by definition (it straddles the tail
-    # window), so its payload is discarded — mark the summary as extracted.
-    return _parse_prefix_summary(text, mark_extracted=True)
 
 
 def _parse_prefix_summary(text: str, *, mark_extracted: bool = True) -> dict | None:
