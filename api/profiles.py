@@ -7,6 +7,13 @@ HERMES_HOME directory is used for config, skills, memory, cron, and API keys.
 Profile switches update os.environ['HERMES_HOME'] and monkey-patch module-level
 cached paths in hermes-agent modules (skills_tool, skill_manager_tool,
 cron/jobs) that snapshot HERMES_HOME at import time.
+
+#6857: since hermes-agent v0.18.0 the context-local home override
+(hermes_constants.set_hermes_home_override) is the in-process home resolver,
+so request-time writes to the process-global os.environ['HERMES_HOME'] are
+skipped when the override is available — the env key is a residual
+cross-profile write vector for readers that call os.getenv() directly.
+Pre-v0.18 agents keep the legacy env-mirror behavior.
 """
 import json
 import logging
@@ -668,8 +675,31 @@ class cron_profile_context_for_home:
         _cron_env_lock.acquire()
         _push_cron_profile_context_depth()
         try:
-            self._prev_env = os.environ.get('HERMES_HOME')
-            os.environ['HERMES_HOME'] = str(self._home)
+            # #6857: when the context-local home override is available
+            # (hermes-agent >= 0.18), pin the home via the override instead of
+            # mutating the process-global os.environ mirror. The env mirror is
+            # a residual cross-profile write vector for readers that call
+            # os.getenv() directly outside this scope. Pre-v0.18 agents keep
+            # the legacy env behavior.
+            self._home_override_mod = _resolve_hermes_home_override()
+            self._home_override_token = None
+            self._home_override_installed = False
+            self._env_mirrored = False
+            if self._home_override_mod is not None:
+                try:
+                    self._home_override_token = self._home_override_mod.set_hermes_home_override(
+                        str(self._home)
+                    )
+                    self._home_override_installed = True
+                except Exception:
+                    self._home_override_token = None
+                    self._home_override_installed = False
+            if not self._home_override_installed:
+                self._prev_env = os.environ.get('HERMES_HOME')
+                os.environ['HERMES_HOME'] = str(self._home)
+                self._env_mirrored = True
+            else:
+                self._prev_env = None
 
             # Re-patch cron.jobs module-level constants (see main context manager
             # below for the rationale).
@@ -709,10 +739,18 @@ class cron_profile_context_for_home:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         try:
-            if self._prev_env is None:
-                os.environ.pop('HERMES_HOME', None)
-            else:
-                os.environ['HERMES_HOME'] = self._prev_env
+            if getattr(self, '_home_override_installed', False):
+                try:
+                    self._home_override_mod.reset_hermes_home_override(
+                        self._home_override_token
+                    )
+                except Exception:
+                    pass
+            elif getattr(self, '_env_mirrored', False):
+                if self._prev_env is None:
+                    os.environ.pop('HERMES_HOME', None)
+                else:
+                    os.environ['HERMES_HOME'] = self._prev_env
             if self._prev_cj is not None:
                 try:
                     import cron.jobs as _cj
@@ -747,9 +785,30 @@ class cron_profile_context:
         _cron_env_lock.acquire()
         _push_cron_profile_context_depth()
         try:
-            self._prev_env = os.environ.get('HERMES_HOME')
             home = get_active_hermes_home()
-            os.environ['HERMES_HOME'] = str(home)
+            # #6857: when the context-local home override is available
+            # (hermes-agent >= 0.18), pin the home via the override instead of
+            # mutating the process-global os.environ mirror. Pre-v0.18 agents
+            # keep the legacy env behavior.
+            self._home_override_mod = _resolve_hermes_home_override()
+            self._home_override_token = None
+            self._home_override_installed = False
+            self._env_mirrored = False
+            if self._home_override_mod is not None:
+                try:
+                    self._home_override_token = self._home_override_mod.set_hermes_home_override(
+                        str(home)
+                    )
+                    self._home_override_installed = True
+                except Exception:
+                    self._home_override_token = None
+                    self._home_override_installed = False
+            if not self._home_override_installed:
+                self._prev_env = os.environ.get('HERMES_HOME')
+                os.environ['HERMES_HOME'] = str(home)
+                self._env_mirrored = True
+            else:
+                self._prev_env = None
 
             # Re-patch cron.jobs module-level constants. They are snapshot at
             # import time (line 68-71 of cron/jobs.py) and don't participate in
@@ -787,11 +846,19 @@ class cron_profile_context:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         try:
-            # Restore env var
-            if self._prev_env is None:
-                os.environ.pop('HERMES_HOME', None)
-            else:
-                os.environ['HERMES_HOME'] = self._prev_env
+            # Restore the home pin (override when available, else env mirror).
+            if getattr(self, '_home_override_installed', False):
+                try:
+                    self._home_override_mod.reset_hermes_home_override(
+                        self._home_override_token
+                    )
+                except Exception:
+                    pass
+            elif getattr(self, '_env_mirrored', False):
+                if self._prev_env is None:
+                    os.environ.pop('HERMES_HOME', None)
+                else:
+                    os.environ['HERMES_HOME'] = self._prev_env
 
             # Restore cron.jobs module constants
             if self._prev_cj is not None:
@@ -907,6 +974,11 @@ def get_profile_runtime_env(home: Path) -> dict[str, str]:
                         # HERMES_WEBUI_ISOLATED_PROFILE=0) on the runtime-env path
                         # the same way _reload_dotenv() protects the live env.
                         if k in _PROTECTED_ENV_KEYS:
+                            continue
+                        if k == 'HERMES_HOME' and _home_override_active():
+                            # #6857: the ContextVar override is the in-process home
+                            # resolver; a profile .env must not re-mirror the
+                            # process-global HERMES_HOME (residual write vector).
                             continue
                         env[k] = v
         except Exception:
@@ -1094,6 +1166,11 @@ def _apply_profile_env_to_process(
     secret_env_names: set[str],
 ) -> dict[str, Optional[str]]:
     scoped_keys = set(safe_runtime_env) | set(secret_env_names)
+    if _home_override_active():
+        # #6857: never mirror HERMES_HOME into the process env when the
+        # ContextVar override is the home resolver — the env key is a residual
+        # cross-profile write vector for readers that call os.getenv() directly.
+        scoped_keys.discard('HERMES_HOME')
     previous_env = {key: process_env.get(key) for key in scoped_keys}
     for key in secret_env_names:
         if key not in safe_runtime_env:
@@ -1160,6 +1237,16 @@ def _resolve_hermes_home_override():
         return mod
     _hermes_home_override_available = False
     return None
+
+
+def _home_override_active() -> bool:
+    """True when the ContextVar home override is importable (function form).
+
+    Named distinctly from the module-level ``_hermes_home_override_available``
+    cache variable (set by ``_resolve_hermes_home_override()`` and monkeypatched
+    as a plain bool by existing tests) so the two never collide (#6857).
+    """
+    return _resolve_hermes_home_override() is not None
 
 
 @contextmanager
@@ -1296,10 +1383,25 @@ def profile_env_for_background_worker(
                 safe_runtime_env,
                 secret_env_names=secret_env_names,
             )
-            had_hermes_home = "HERMES_HOME" in os.environ
-            old_hermes_home = os.environ.get("HERMES_HOME")
-            os.environ.update(safe_runtime_env)
-            os.environ["HERMES_HOME"] = str(profile_home_path)
+            if not _home_override_installed:
+                # #6857: when the ContextVar override is installed (hermes-agent
+                # >= 0.18), it is the sole in-process home resolver — do NOT
+                # mirror HERMES_HOME into the process env, which is a residual
+                # cross-profile write vector for readers that call os.getenv()
+                # directly outside this scope. Pre-v0.18 agents keep the legacy
+                # env-mirror behavior.
+                had_hermes_home = "HERMES_HOME" in os.environ
+                old_hermes_home = os.environ.get("HERMES_HOME")
+                os.environ.update(safe_runtime_env)
+                os.environ["HERMES_HOME"] = str(profile_home_path)
+            else:
+                # Still apply non-home runtime env keys (provider credentials,
+                # TERMINAL_*) for readers that bypass the thread-local channel.
+                os.environ.update(
+                    {k: v for k, v in safe_runtime_env.items() if k != "HERMES_HOME"}
+                )
+                had_hermes_home = False
+                old_hermes_home = None
         yield
     finally:
         try:
@@ -1309,9 +1411,9 @@ def profile_env_for_background_worker(
                         os.environ.pop(key, None)
                     else:
                         os.environ[key] = old_value
-                if had_hermes_home:
+                if not _home_override_installed and had_hermes_home:
                     os.environ["HERMES_HOME"] = old_hermes_home or ""
-                else:
+                elif not _home_override_installed:
                     os.environ.pop("HERMES_HOME", None)
                 if should_restore_skill_modules and skill_home_snapshot is not None:
                     restore_skill_home_modules(skill_home_snapshot)
@@ -1510,8 +1612,17 @@ def profile_scope_for_detached_worker(
 
 
 def _set_hermes_home(home: Path):
-    """Set HERMES_HOME env var and monkey-patch cached module-level paths."""
-    os.environ['HERMES_HOME'] = str(home)
+    """Set HERMES_HOME env var and monkey-patch cached module-level paths.
+
+    The process-global env write is skipped when the context-local home
+    override is available (hermes-agent >= 0.18): the override is the sole
+    in-process home resolver, and mutating ``os.environ['HERMES_HOME']`` at
+    request time is a residual cross-profile write vector (#6857). Module
+    patching is kept as harmless belt-and-braces. Pre-v0.18 agents (resolver
+    returns None) keep the legacy env-mirror behavior.
+    """
+    if not _home_override_active():
+        os.environ['HERMES_HOME'] = str(home)
 
     patch_skill_home_modules(home)
 
@@ -1568,6 +1679,16 @@ def _reload_dotenv(home: Path):
                             "Ignoring protected key %s in profile .env %s; "
                             "operator/deployment env takes precedence",
                             k, env_path,
+                        )
+                        continue
+                    if k == 'HERMES_HOME' and _home_override_active():
+                        # #6857: the ContextVar override is the in-process home
+                        # resolver; a profile .env must not re-mirror the
+                        # process-global HERMES_HOME (residual write vector).
+                        logger.debug(
+                            "Ignoring HERMES_HOME in profile .env %s; "
+                            "context-local override is the home resolver",
+                            env_path,
                         )
                         continue
                     os.environ[k] = v
