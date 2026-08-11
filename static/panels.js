@@ -6655,7 +6655,7 @@ function _profileDropdownBestCachedData(){
 function _profileDropdownFetchFresh(){
   if(_profileDropdownFetchPromise) return _profileDropdownFetchPromise;
   _profileDropdownFetchPromise = api('/api/profiles', {timeoutToast:false}).then(data=>{
-    if(_profileDropdownDataCacheUsable(data)) _profilesCache = data;
+    if(_profileDropdownDataCacheUsable(data)) { _profilesCache = data; window._profilesCacheFreshAt=Date.now(); }
     _profileDropdownWriteStoredCache(data);
     return data;
   }).finally(()=>{ _profileDropdownFetchPromise = null; });
@@ -6751,6 +6751,7 @@ async function loadProfilesPanel() {
   try {
     const data = await api('/api/profiles');
     _profilesCache = data;
+    window._profilesCacheFreshAt=Date.now();
     _profileDropdownWriteStoredCache(data);
     panel.innerHTML = '';
 
@@ -7599,8 +7600,11 @@ async function loadMemory(force) {
 
 // Drag and drop
 const wrap=$('composerWrap');let dragCounter=0;
-document.addEventListener('dragover',e=>e.preventDefault());
-document.addEventListener('dragenter',e=>{e.preventDefault();
+const _isInternalSessionDragEvent=e=>!!(e&&e.dataTransfer&&e.dataTransfer.types&&e.dataTransfer.types.includes('application/x-hermes-webui-session-id'));
+document.addEventListener('dragover',e=>{if(_isInternalSessionDragEvent(e)){if(e.dataTransfer)e.dataTransfer.dropEffect='none';return;}e.preventDefault();});
+document.addEventListener('dragenter',e=>{
+  if(_isInternalSessionDragEvent(e)){if(e.dataTransfer)e.dataTransfer.dropEffect='none';return;}
+  e.preventDefault();
   const isWsPath=e.dataTransfer.types.includes('application/ws-path');
   const isFiles=e.dataTransfer.types.includes('Files');
   if(isFiles||isWsPath){
@@ -7614,6 +7618,7 @@ document.addEventListener('dragenter',e=>{e.preventDefault();
 });
 document.addEventListener('dragleave',e=>{dragCounter--;if(dragCounter<=0){dragCounter=0;wrap.classList.remove('drag-over');}});
 document.addEventListener('drop',e=>{
+  if(_isInternalSessionDragEvent(e)){if(e.dataTransfer)e.dataTransfer.dropEffect='none';dragCounter=0;wrap.classList.remove('drag-over');return;}
   e.preventDefault();dragCounter=0;wrap.classList.remove('drag-over');
   // Workspace file/folder drag → insert @path reference into composer
   const wsPath=e.dataTransfer.getData('application/ws-path');
@@ -8887,6 +8892,8 @@ function _preferencesPayloadFromUi(){
   if(notifCb) payload.notifications_enabled=notifCb.checked;
   const sidebarDensitySel=$('settingsSidebarDensity');
   if(sidebarDensitySel) payload.sidebar_density=sidebarDensitySel.value;
+  const groupByProjectCb=$('settingsSidebarGroupByProject');
+  if(groupByProjectCb) payload.sidebar_group_by_project=groupByProjectCb.checked;
   const pinnedLimitField=$('settingsPinnedSessionsLimit');
   if(pinnedLimitField) payload.pinned_sessions_limit=parseInt(pinnedLimitField.value,10);
   const autoTitleRefreshSel=$('settingsAutoTitleRefresh');
@@ -9500,7 +9507,7 @@ async function loadSettingsPanel(){
       }
       langSel.value=resolvedLanguage;
       langSel.addEventListener('change',function(){
-        if(typeof setLocale==='function'){setLocale(this.value);if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();}
+        if(typeof setLocale==='function'){setLocale(this.value);if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();if(typeof renderSessionListFromCache==='function')renderSessionListFromCache();}
         _schedulePreferencesAutosave();
       },{once:false});
     }
@@ -9870,6 +9877,12 @@ async function loadSettingsPanel(){
     if(sidebarDensitySel){
       sidebarDensitySel.value=settings.sidebar_density==='detailed'?'detailed':'compact';
       sidebarDensitySel.addEventListener('change',_schedulePreferencesAutosave,{once:false});
+    }
+    const groupByProjectCb=$('settingsSidebarGroupByProject');
+    if(groupByProjectCb){
+      groupByProjectCb.checked=!!settings.sidebar_group_by_project;
+      window._sidebarGroupByProject=groupByProjectCb.checked;
+      groupByProjectCb.addEventListener('change',function(){window._sidebarGroupByProject=this.checked;renderSessionListFromCache();_schedulePreferencesAutosave();},{once:false});
     }
     const autoTitleRefreshSel=$('settingsAutoTitleRefresh');
     if(autoTitleRefreshSel){
@@ -12286,6 +12299,9 @@ function _applySavedSettingsUi(saved, body, opts){
   window._sessionJumpButtonsEnabled=!!body.session_jump_buttons;
   if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
   window._sidebarDensity=sidebarDensity==='detailed'?'detailed':'compact';
+  if(Object.prototype.hasOwnProperty.call(body,'sidebar_group_by_project')){
+    window._sidebarGroupByProject=!!body.sidebar_group_by_project;
+  }
   // #5170 mirror write in _applySavedSettingsUi, under the #5145 rename:
   // persist so a reload/offline first-send honors the resolved mode.
   window._defaultMessageMode=(typeof _persistDefaultMessageMode==='function')
