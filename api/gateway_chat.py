@@ -837,9 +837,22 @@ def _settle_gateway_empty_response(
 def _emit_gateway_empty_response_events(put_gateway_event, error_payload, session_id):
     """Close an empty Gateway turn with a replayable terminal session payload."""
     put_gateway_event("apperror", error_payload)
-    terminal_session = error_payload.get("session") if isinstance(error_payload, dict) else None
-    if terminal_session is not None:
-        put_gateway_event("done", {"session": terminal_session, "usage": {}})
+    try:
+        from api.streaming import _session_payload_with_full_messages
+
+        s = get_session(session_id)
+        gateway_session_payload = redact_session_data(
+            _session_payload_with_full_messages(s, tool_calls=[])
+        )
+    except Exception:
+        gateway_fallback_payload = (
+            error_payload.get("session") if isinstance(error_payload, dict) else None
+        )
+        if gateway_fallback_payload is not None:
+            put_gateway_event("done", {"session": gateway_fallback_payload, "usage": {}})
+    else:
+        if gateway_session_payload is not None:
+            put_gateway_event("done", {"session": gateway_session_payload, "usage": {}})
     put_gateway_event("stream_end", {"session_id": session_id})
 
 
