@@ -207,7 +207,10 @@ class _ProfileGoalManager:
         if judge_goal is None:
             verdict, reason = "continue", "goal judge unavailable"
         else:
-            verdict, reason = judge_goal(state.goal, str(last_response or ""))
+            judge_result = judge_goal(state.goal, str(last_response or ""))
+            if not isinstance(judge_result, (tuple, list)) or len(judge_result) < 2:
+                raise RuntimeError("goal judge returned an invalid result")
+            verdict, reason = str(judge_result[0]), str(judge_result[1])
         state.last_verdict = verdict
         state.last_reason = reason
 
