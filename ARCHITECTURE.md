@@ -355,32 +355,51 @@ execution fence: only `incorporated/pending` may resume after restart, and only
 from the exact pending prompt, attachments, completion identity, correlation,
 and delivery-tip checkpoint. A restart claim rotates only owner, attempt, and
 reservation fields while retaining `incorporated/pending`; it never downgrades
-the receipt to `accepted`. The route resolves the expected tip, acquires the
-stable-root permit, and re-resolves before publishing an active run. A moved tip
-therefore fails with `delivery_tip_moved` before receipt or sidecar mutation.
+the receipt to `accepted`. The route first calls `resolve_session_lineage()`,
+which may repair `recoverable -> committed` transition evidence before permit
+acquisition. It then checks the expected tip, acquires the stable-root permit,
+and re-resolves before completion-delivery receipt or replay-sidecar mutation
+and before publishing an active run. A moved tip therefore fails with
+`delivery_tip_moved` inside that completion-delivery boundary; the initial
+lineage resolution is not claimed to be mutation-free.
 `started` is terminal no-replay evidence even when
 the process died before recording `delivered`. A post-incorporation acceptance
 failure releases all live stream/admission owners but retains that exact durable
 replay input.
 
 Malformed, duplicate, cross-lineage, moved-tip, or conflicting receipt/journal
-evidence fails closed for that receipt. Pending-receipt startup enumeration
-isolates those failures per row so one poison receipt cannot starve a distinct
-validated receipt. The poison row stays in its original lifecycle state and gets
+evidence fails closed for that receipt. Startup enumeration in both
+`accepted_completion_delivery_contexts()` and
+`pending_completion_delivery_contexts()` isolates failures per row, so a
+malformed, non-object, foreign, or identity-invalid row cannot starve a distinct
+validated sibling. The poison row stays in its original lifecycle state and gets
 one bounded, prompt-free disposition. Object rows may carry the fixed-size
 `restart_diagnostic`; non-object rows remain byte-preserved and appear only in
-the deduplicated aggregate restart diagnostic. Repeated restarts do not append
-duplicate diagnostics or rebind work to a newer compression tip.
+the deduplicated aggregate restart diagnostic. Corruption of the top-level store
+remains globally fail-closed because safe row boundaries cannot be established.
+Repeated restarts do not append duplicate diagnostics or rebind work to a newer
+compression tip.
 Receipt/lock files are private (`0600`), atomically replaced where applicable,
 and never contain prompts, tool output, provider payloads, credentials, or
 admission owner tokens in transcript/journal rows.
 
 Persisted-session membership used by lineage/recovery scans is an mtime-keyed
 optimization protected by one process-local fence. Stat/cache validation, glob,
-publication, and save/delete invalidation serialize on that fence, so a
-successful sidecar mutation cannot race with an old scan and republish stale IDs
-even on filesystems with frozen or coarse directory mtimes. Failed atomic
-replaces do not invalidate the still-correct prior snapshot.
+publication, and save/delete invalidation serialize on that fence, so within one
+process a successful sidecar mutation cannot race with an old scan and republish
+stale IDs even on filesystems with frozen or coarse directory mtimes. Successful
+delete invalidation is wired at two streaming sites
+(`_cleanup_ephemeral_cancelled_turn` and ephemeral completion cleanup in
+`_run_agent_streaming_core`) and two routes sites (`_discard_hidden_session` and
+the `_handle_background` completion cleanup). This is not global deletion or
+cross-process cache coherence: another process can retain stale membership when
+the directory mtime is frozen or too coarse to advance. Failed atomic replaces
+do not invalidate the still-correct prior snapshot.
+
+This work does not redesign every completion owner. A paused-wakeup `409` can
+still retain the local dedupe gate without a deferred entry or requeue, and the
+shared receipt JSON plus per-completion lock files still grow without a bounded
+retirement policy. Those ownership and retention limits remain deferred.
 
 ### 4.4 Agent Invocation (`_run_agent_streaming_core`)
 
