@@ -732,7 +732,16 @@ def stop_gateway_run(run_id: str) -> bool:
         return False
 
 
-def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, model_provider, terminal_error):
+def _settle_gateway_terminal_error(
+    session_id,
+    stream_id,
+    workspace,
+    model,
+    model_provider,
+    terminal_error,
+    *,
+    error_classification_override=None,
+):
     from api.streaming import (
         _classify_provider_error,
         _materialize_pending_user_turn_before_error,
@@ -747,6 +756,11 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
         if not _stream_writeback_is_current(session, stream_id):
             return None
         error_classification = _classify_provider_error(terminal_error)
+        if isinstance(error_classification_override, dict):
+            error_classification = {
+                **error_classification,
+                **error_classification_override,
+            }
         error_payload = _provider_error_payload(
             terminal_error,
             error_classification["type"],
@@ -796,6 +810,37 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
         if terminal_session_persisted:
             error_payload["terminal_session_persisted_session_id"] = session.session_id
         return error_payload
+
+
+def _settle_gateway_empty_response(
+    session_id,
+    stream_id,
+    workspace,
+    model,
+    model_provider,
+):
+    return _settle_gateway_terminal_error(
+        session_id,
+        stream_id,
+        workspace,
+        model,
+        model_provider,
+        "Gateway returned no assistant message for this turn.",
+        error_classification_override={
+            "label": "Gateway returned no response",
+            "type": "gateway_empty_response",
+            "hint": "Check that Hermes Gateway API server is running and reachable.",
+        },
+    )
+
+
+def _emit_gateway_empty_response_events(put_gateway_event, error_payload, session_id):
+    """Close an empty Gateway turn with a replayable terminal session payload."""
+    put_gateway_event("apperror", error_payload)
+    terminal_session = error_payload.get("session") if isinstance(error_payload, dict) else None
+    if terminal_session is not None:
+        put_gateway_event("done", {"session": terminal_session, "usage": {}})
+    put_gateway_event("stream_end", {"session_id": session_id})
 
 
 def _gateway_event_blocks_empty_retry(event: str) -> bool:
@@ -1221,12 +1266,20 @@ def _run_gateway_chat_streaming(
                         put_gateway_event,
                     )
                     return
-            put_gateway_event("apperror", {
-                "label": "Gateway returned no response",
-                "type": "gateway_empty_response",
-                "message": "Gateway returned no assistant message for this turn.",
-                "hint": "Check that Hermes Gateway API server is running and reachable.",
-            })
+            error_payload = _settle_gateway_empty_response(
+                session_id,
+                stream_id,
+                workspace,
+                model,
+                model_provider,
+            )
+            if error_payload is None:
+                return
+            _emit_gateway_empty_response_events(
+                put_gateway_event,
+                error_payload,
+                session_id,
+            )
             return
         with _get_session_agent_lock(session_id):
             s = get_session(session_id)

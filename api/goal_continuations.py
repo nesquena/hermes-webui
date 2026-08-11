@@ -855,6 +855,18 @@ def _default_run_active(session_id: str, stream_id: str) -> bool:
     return False
 
 
+def _run_summary_evidence(summary: Any) -> tuple[bool, str, str | None]:
+    payload = summary if isinstance(summary, dict) else {}
+    observable_activity = bool(payload.get("observable_activity"))
+    terminal_state = str(payload.get("terminal_state") or "unknown").strip().lower()
+    evidence_error = (
+        "run journal contains malformed evidence; automatic replay refused"
+        if payload.get("evidence_unavailable")
+        else None
+    )
+    return observable_activity, terminal_state, evidence_error
+
+
 def reconcile_goal_continuations_once(
     *,
     active_run_check: Callable[[str, str], bool] | None = None,
@@ -967,13 +979,7 @@ def reconcile_goal_continuations_once(
 
         try:
             summary = summary_loader(sid, stream_id) or {}
-            observable_activity = bool(summary.get("observable_activity"))
-            terminal_state = str(summary.get("terminal_state") or "unknown").strip().lower()
-            evidence_error = (
-                "run journal contains malformed evidence; automatic replay refused"
-                if summary.get("evidence_unavailable")
-                else None
-            )
+            observable_activity, terminal_state, evidence_error = _run_summary_evidence(summary)
         except Exception as exc:
             logger.warning("Goal continuation orphan evidence failed for %s", sid, exc_info=True)
             observable_activity = True
@@ -989,6 +995,43 @@ def reconcile_goal_continuations_once(
                 or str(record.get("stream_id") or "") != stream_id
             ):
                 continue
+            # The first liveness/journal reads happened outside the registry
+            # transaction. A worker may have entered — or emitted durable
+            # activity — in that gap. Revalidate both proofs while the intent
+            # fence is held before any replay transition.
+            try:
+                revalidated_live = bool(active_check(sid, stream_id))
+            except Exception:
+                logger.warning(
+                    "Goal continuation liveness recheck failed for %s",
+                    sid,
+                    exc_info=True,
+                )
+                continue
+            if revalidated_live:
+                record["last_heartbeat_at"] = timestamp
+                _record_now(record, timestamp)
+                _save_locked()
+                changed += 1
+                continue
+            try:
+                latest_summary = summary_loader(sid, stream_id) or {}
+                latest_activity, latest_terminal, latest_error = _run_summary_evidence(
+                    latest_summary
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Goal continuation orphan evidence recheck failed for %s",
+                    sid,
+                    exc_info=True,
+                )
+                latest_activity = True
+                latest_terminal = "unknown"
+                latest_error = f"run evidence unavailable: {type(exc).__name__}: {exc}"
+            observable_activity = observable_activity or latest_activity
+            if latest_terminal != "unknown":
+                terminal_state = latest_terminal
+            evidence_error = evidence_error or latest_error
             attempts = int(record.get("attempts") or 0)
             max_attempts = max(1, int(record.get("max_attempts") or DEFAULT_MAX_ATTEMPTS))
             if evidence_error:
