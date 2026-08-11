@@ -641,6 +641,31 @@ def _retry_delay(attempts: int) -> float:
     return min(30.0, 2.0 ** max(0, int(attempts or 0) - 1))
 
 
+def mark_goal_continuation_worker_started(
+    session_id: str,
+    stream_id: str,
+    *,
+    now: float | None = None,
+) -> bool:
+    """Fence actual worker entry before ACTIVE_RUNS registration or effects."""
+    sid = str(session_id or "").strip()
+    stream = str(stream_id or "").strip()
+    timestamp = float(time.time() if now is None else now)
+    with _registry_transaction() as registry:
+        record = registry["intents"].get(sid)
+        if (
+            not isinstance(record, dict)
+            or record.get("status") != "running"
+            or str(record.get("stream_id") or "") != stream
+        ):
+            return False
+        record["worker_started_at"] = timestamp
+        record["last_heartbeat_at"] = timestamp
+        _record_now(record, timestamp)
+        _save_locked()
+        return True
+
+
 def requeue_goal_continuation_after_no_response(
     session_id: str,
     stream_id: str,
@@ -696,6 +721,7 @@ def requeue_goal_continuation_after_no_response(
         record["claim_id"] = None
         record["claim_started_at"] = None
         record["admitted_at"] = None
+        record["worker_started_at"] = None
         record["last_heartbeat_at"] = None
         record["owner_id"] = _current_owner_id()
         record["available_at"] = timestamp + _retry_delay(attempts)
@@ -995,6 +1021,12 @@ def reconcile_goal_continuations_once(
                 or str(record.get("stream_id") or "") != stream_id
             ):
                 continue
+            if record.get("worker_started_at"):
+                record["last_heartbeat_at"] = timestamp
+                _record_now(record, timestamp)
+                _save_locked()
+                changed += 1
+                continue
             # The first liveness/journal reads happened outside the registry
             # transaction. A worker may have entered — or emitted durable
             # activity — in that gap. Revalidate both proofs while the intent
@@ -1056,6 +1088,7 @@ def reconcile_goal_continuations_once(
                 record["claim_id"] = None
                 record["claim_started_at"] = None
                 record["admitted_at"] = None
+                record["worker_started_at"] = None
                 record["last_heartbeat_at"] = None
                 record["owner_id"] = _current_owner_id()
                 record["available_at"] = timestamp + _retry_delay(attempts)
