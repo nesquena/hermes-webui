@@ -22277,6 +22277,13 @@ def _handle_session_queue_enqueue(handler, body):
     return j(handler, {"ok": True, "session_id": sid, "item": item, "items": list_queue(sid)})
 
 
+def _drain_session_queue_after_mutation(session_id: str):
+    """Resume an idle FIFO when a successful mutation exposes a queued head."""
+    from api.session_queue import drain_for_session
+
+    drain_for_session(session_id)
+
+
 def _handle_session_queue_update(handler, body):
     try:
         require(body, "session_id")
@@ -22298,7 +22305,10 @@ def _handle_session_queue_update(handler, body):
         return bad(handler, str(e), 409)
     if item is None:
         return bad(handler, "Queued item not found", 404)
-    return j(handler, {"ok": True, "session_id": sid, "item": item, "items": list_queue(sid)})
+    _drain_session_queue_after_mutation(sid)
+    items = list_queue(sid)
+    current = next((entry for entry in items if entry.get("id") == item.get("id")), item)
+    return j(handler, {"ok": True, "session_id": sid, "item": current, "items": items})
 
 
 def _handle_session_queue_delete(handler, body):
@@ -22322,6 +22332,7 @@ def _handle_session_queue_delete(handler, body):
         return bad(handler, str(e), 409)
     if not deleted:
         return bad(handler, "Queued item not found", 404)
+    _drain_session_queue_after_mutation(sid)
     return j(handler, {"ok": True, "session_id": sid, "deleted": True, "items": list_queue(sid)})
 
 
@@ -22348,21 +22359,23 @@ def _handle_session_queue_order_mutation(handler, body, *, operation: str):
         QueueItemConflictError,
         QueueStorageError,
         combine_items,
+        list_queue,
         reorder_items,
     )
 
     try:
         if operation == "combine":
-            items = combine_items(sid, body.get("ordered_ids") or [])
+            combine_items(sid, body.get("ordered_ids") or [])
         else:
-            items = reorder_items(sid, body.get("ordered_ids") or [])
+            reorder_items(sid, body.get("ordered_ids") or [])
     except ValueError as e:
         return bad(handler, str(e), 400)
     except QueueItemConflictError as e:
         return bad(handler, str(e), 409)
     except QueueStorageError as e:
         return bad(handler, str(e), 503)
-    return j(handler, {"ok": True, "session_id": sid, "items": items})
+    _drain_session_queue_after_mutation(sid)
+    return j(handler, {"ok": True, "session_id": sid, "items": list_queue(sid)})
 
 
 def _handle_session_queue_clear(handler, body):

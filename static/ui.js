@@ -208,6 +208,8 @@ function _getSessionQueue(sid, create=false){
   if(!SESSION_QUEUES[sid]&&create) SESSION_QUEUES[sid]=[];
   return SESSION_QUEUES[sid]||[];
 }
+const _QUEUE_ACK_IN_FLIGHT=new Set();
+function _queueAckKey(sid,clientId){return String(sid||'')+'\n'+String(clientId||'');}
 function _queueStorageKey(sid){
   return 'hermes-queue-'+sid;
 }
@@ -291,8 +293,12 @@ function _deleteBackendQueuedItem(sid, serverId){
     throw new Error(data.error||'queue_delete_failed');
   });
 }
-async function _backendAcknowledgeQueuedMessage(sid, entry, attempt=0){
-  if(!sid||!entry||entry._server_owned||entry._server_pending)return;
+async function _backendAcknowledgeQueuedMessage(sid, entry, attempt=0, recoverPending=false){
+  if(!sid||!entry||entry._server_owned||(entry._server_pending&&!recoverPending))return;
+  const clientId=String(entry._client_queue_id||'');
+  if(!clientId)return;
+  const ackKey=_queueAckKey(sid,clientId);
+  if(_QUEUE_ACK_IN_FLIGHT.has(ackKey))return;
   if(_queuedEntryHasBrowserOnlyFiles(entry)){
     entry._server_error='Attachments could not be queued durably; remove this item and resend';
     _persistSessionQueueStorage(sid,_getSessionQueue(sid,false));
@@ -301,6 +307,7 @@ async function _backendAcknowledgeQueuedMessage(sid, entry, attempt=0){
   }
   const text=String(entry.text||entry.message||entry.content||'').trim();
   if(!text)return;
+  _QUEUE_ACK_IN_FLIGHT.add(ackKey);
   entry._server_pending=true;
   _persistSessionQueueStorage(sid,_getSessionQueue(sid,false));
   const body={
@@ -310,7 +317,7 @@ async function _backendAcknowledgeQueuedMessage(sid, entry, attempt=0){
     model:entry.model||'',
     model_provider:entry.model_provider||null,
     profile:entry.profile||S.activeProfile||'default',
-    client_queue_id:entry._client_queue_id,
+    client_queue_id:clientId,
   };
   try{
     const r=await fetch(new URL('api/session/queue',document.baseURI||location.href).href,{
@@ -319,30 +326,33 @@ async function _backendAcknowledgeQueuedMessage(sid, entry, attempt=0){
     });
     let data={};try{data=await r.json();}catch(_){}
     const ok=r.ok;
-      const found=_findQueuedEntryByClientId(sid,entry._client_queue_id);
-      if(found.idx<0){
-        if(ok&&data&&data.item&&data.item.id)await _deleteBackendQueuedItem(sid,data.item.id).catch(()=>{});
-        return;
-      }
-      if(ok&&data&&data.item&&data.item.id){
-        found.q[found.idx]={...found.entry,_server_pending:false,_server_owned:true,
-          _server_queue_id:data.item.id,_server_state:data.item.state||'queued',_server_error:data.item.error||''};
-      }else{
-        found.q[found.idx]={...found.entry,_server_pending:false,_server_error:(data&&data.error)||'queue_ack_failed'};
-      }
-      _persistSessionQueueStorage(sid,found.q);
-      delete _queueRenderKeys[sid];
-      updateQueueBadge(sid);
+    const found=_findQueuedEntryByClientId(sid,clientId);
+    if(found.idx<0){
+      if(ok&&data&&data.item&&data.item.id)await _deleteBackendQueuedItem(sid,data.item.id).catch(()=>{});
+      return;
+    }
+    if(ok&&data&&data.item&&data.item.id){
+      found.q[found.idx]={...found.entry,_server_pending:false,_server_owned:true,
+        _server_queue_id:data.item.id,_server_state:data.item.state||'queued',_server_error:data.item.error||'',_server_ack_attempts:0};
+    }else{
+      found.q[found.idx]={...found.entry,_server_pending:false,
+        _server_error:(data&&data.error)||'queue_ack_failed',_server_ack_attempts:attempt+1};
+    }
+    _persistSessionQueueStorage(sid,found.q);
+    delete _queueRenderKeys[sid];
+    updateQueueBadge(sid);
   }catch(_){
-      await syncBackendSessionQueue(sid).catch(()=>{});
-      const found=_findQueuedEntryByClientId(sid,entry._client_queue_id);
-      if(found.idx<0)return;
-      if(found.entry&&found.entry._server_owned)return;
-      found.q[found.idx]={...found.entry,_server_pending:false,_server_error:'queue_ack_failed',_server_ack_attempts:attempt+1};
-      _persistSessionQueueStorage(sid,found.q);
-      delete _queueRenderKeys[sid];
-      updateQueueBadge(sid);
-      if(attempt<2)setTimeout(()=>_backendAcknowledgeQueuedMessage(sid,found.q[found.idx],attempt+1),250*(attempt+1));
+    await syncBackendSessionQueue(sid).catch(()=>{});
+    const found=_findQueuedEntryByClientId(sid,clientId);
+    if(found.idx<0)return;
+    if(found.entry&&found.entry._server_owned)return;
+    found.q[found.idx]={...found.entry,_server_pending:false,_server_error:'queue_ack_failed',_server_ack_attempts:attempt+1};
+    _persistSessionQueueStorage(sid,found.q);
+    delete _queueRenderKeys[sid];
+    updateQueueBadge(sid);
+    if(attempt<2)setTimeout(()=>_backendAcknowledgeQueuedMessage(sid,found.q[found.idx],attempt+1),250*(attempt+1));
+  }finally{
+    _QUEUE_ACK_IN_FLIGHT.delete(ackKey);
   }
 }
 function _removeServerQueuedEntry(sid, serverId, clientId=''){
@@ -446,7 +456,21 @@ async function syncBackendSessionQueue(sid){
   else{delete SESSION_QUEUES[sid];_clearPersistedSessionQueue(sid);}
   delete _queueRenderKeys[sid];
   updateQueueBadge(sid);
-  return reconciled;
+  const recoveries=browserOwned.filter(entry=>{
+    const clientId=String(entry&&entry._client_queue_id||'');
+    const attempts=Number(entry&&entry._server_ack_attempts)||0;
+    return clientId&&attempts<3&&!_QUEUE_ACK_IN_FLIGHT.has(_queueAckKey(sid,clientId));
+  }).map(entry=>{
+    entry._server_pending=false;
+    return _backendAcknowledgeQueuedMessage(
+      sid,entry,Number(entry._server_ack_attempts)||0,true
+    );
+  });
+  if(recoveries.length){
+    _persistSessionQueueStorage(sid,reconciled);
+    await Promise.all(recoveries);
+  }
+  return _getSessionQueue(sid,false);
 }
 function _compressionSessionLock(){
   return window._compressionLockSid||null;

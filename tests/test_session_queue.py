@@ -238,7 +238,64 @@ def test_enqueue_handler_attempts_idle_drain(monkeypatch, tmp_path):
     assert body["item"]["text"] == "queued while idle"
 
 
-def test_frontend_sync_preserves_uncertain_ack_and_matches_legacy_server_item():
+@pytest.mark.parametrize("operation", ["update", "delete", "reorder", "combine"])
+def test_successful_queue_mutation_restarts_exposed_idle_head(monkeypatch, tmp_path, operation):
+    monkeypatch.setattr(config, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(routes, "get_session", lambda sid: {"id": sid})
+    sid = f"sid-mutation-{operation}"
+    first = session_queue.enqueue(sid, {"text": "blocked", "client_queue_id": "client-blocked"})
+    second = session_queue.enqueue(sid, {"text": "next", "client_queue_id": "client-next"})
+    with session_queue._LOCK:
+        items = session_queue._read_items_unlocked(sid)
+        items[0]["state"] = "blocked"
+        items[0]["blocked"] = True
+        items[0]["error"] = "start failed"
+        session_queue._write_items_unlocked(sid, items)
+
+    drained = []
+    monkeypatch.setattr(session_queue, "drain_for_session", lambda value: drained.append(value) or 1)
+    handler = _FakeHandler()
+    if operation == "update":
+        routes._handle_session_queue_update(handler, {"session_id": sid, "id": first["id"], "text": "fixed"})
+    elif operation == "delete":
+        routes._handle_session_queue_delete(handler, {"session_id": sid, "id": first["id"]})
+    elif operation == "reorder":
+        routes._handle_session_queue_reorder(
+            handler, {"session_id": sid, "ordered_ids": [second["id"], first["id"]]}
+        )
+    else:
+        routes._handle_session_queue_combine(
+            handler, {"session_id": sid, "ordered_ids": [second["id"], first["id"]]}
+        )
+
+    assert handler.status == 200
+    assert drained == [sid]
+    assert session_queue.list_queue(sid)[0]["state"] == "queued"
+
+
+def test_mutation_drain_respects_active_session_guard(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(routes, "get_session", lambda sid: {"id": sid})
+    sid = "sid-mutation-active"
+    item = session_queue.enqueue(sid, {"text": "blocked", "client_queue_id": "client-active"})
+    with session_queue._LOCK:
+        items = session_queue._read_items_unlocked(sid)
+        items[0]["state"] = "blocked"
+        items[0]["blocked"] = True
+        session_queue._write_items_unlocked(sid, items)
+    monkeypatch.setattr(config, "ACTIVE_RUNS", {"stream-active": {"session_id": sid}})
+
+    handler = _FakeHandler()
+    routes._handle_session_queue_update(
+        handler, {"session_id": sid, "id": item["id"], "text": "fixed while busy"}
+    )
+
+    assert handler.status == 200
+    queued = session_queue.list_queue(sid)
+    assert [(entry["id"], entry["state"]) for entry in queued] == [(item["id"], "queued")]
+
+
+def test_frontend_sync_retries_unmatched_ack_and_matches_legacy_server_item():
     _run_queue_sync_node_script(
         r"""
 const sid = 'sid-sync';
@@ -246,23 +303,27 @@ SESSION_QUEUES[sid] = [
   {text: '  hello from pending  ', _server_pending: true, _client_queue_id: 'local-1'},
   {text: 'orphan after tab close', _server_pending: true, _client_queue_id: 'local-2'},
 ];
-fetch = async () => ({ok: true, json: async () => ({items: [
-  {id: 'srv-1', text: 'hello from pending', attachments: [], model: 'm1', model_provider: 'p1', profile: 'default', created_at: 1700000000},
-]})});
-syncBackendSessionQueue(sid);
-await new Promise(resolve => setTimeout(resolve, 0));
+let reposts=0;
+fetch = async (_url, opts) => {
+  if(opts&&opts.method==='POST'){
+    reposts++;
+    const body=JSON.parse(opts.body);
+    return {ok:true,json:async()=>({item:{id:'srv-2',client_queue_id:body.client_queue_id,state:'queued'}})};
+  }
+  return {ok: true, json: async () => ({items: [
+    {id: 'srv-1', text: 'hello from pending', attachments: [], model: 'm1', model_provider: 'p1', profile: 'default', created_at: 1700000000},
+  ]})};
+};
+await syncBackendSessionQueue(sid);
 const q = SESSION_QUEUES[sid];
 if(q.length !== 2) throw new Error('expected no duplicate server chip, got '+q.length);
 if(q[0]._server_queue_id !== 'srv-1' || !q[0]._server_owned || q[0]._server_pending){
   throw new Error('trimmed pending entry was not promoted: '+JSON.stringify(q[0]));
 }
-if(!q[1]._server_pending || q[1]._server_owned || q[1]._server_queue_id){
-  throw new Error('uncertain acknowledgement was not preserved: '+JSON.stringify(q[1]));
+if(q[1]._server_queue_id !== 'srv-2' || !q[1]._server_owned || q[1]._server_pending){
+  throw new Error('unmatched acknowledgement was not recovered: '+JSON.stringify(q[1]));
 }
-const shifted = shiftQueuedSessionMessage(sid);
-if(shifted){
-  throw new Error('uncertain acknowledgement must not become browser-drainable: '+JSON.stringify(shifted));
-}
+if(reposts!==1)throw new Error('expected one idempotent recovery POST, got '+reposts);
 """
     )
 
@@ -347,6 +408,45 @@ const q=_getSessionQueue(sid,false);
 if(q.length!==1||q[0]._server_queue_id!=='server-race'){
   throw new Error('stale GET erased newer authority: '+JSON.stringify(q));
 }
+"""
+    )
+
+
+def test_frontend_reload_reposts_complete_intent_once_and_converges_to_server_owner():
+    _run_queue_sync_node_script(
+        r"""
+const sid='sid-reload-repost';
+sessionStorage.setItem('hermes-queue-'+sid,JSON.stringify([{
+  text:' recover me ',attachments:[{name:'note.txt',path:'/tmp/note.txt'}],
+  model:'model-a',model_provider:'provider-a',profile:'profile-a',
+  _server_pending:true,_client_queue_id:'client-reload'
+}]));
+let gets=0;
+let posts=0;
+let postedBody=null;
+fetch=async(url,opts)=>{
+  if(opts&&opts.method==='POST'){
+    posts++;
+    postedBody=JSON.parse(opts.body);
+    return {ok:true,json:async()=>({item:{
+      id:'server-reload',client_queue_id:'client-reload',state:'queued'
+    }})};
+  }
+  gets++;
+  return {ok:true,json:async()=>({items:[]})};
+};
+await Promise.all([syncBackendSessionQueue(sid),syncBackendSessionQueue(sid)]);
+const q=_getSessionQueue(sid,false);
+if(gets!==2||posts!==1)throw new Error('recovery was not single-flight: '+JSON.stringify({gets,posts}));
+if(!postedBody||postedBody.client_queue_id!=='client-reload'||postedBody.text!=='recover me'||
+   postedBody.model!=='model-a'||postedBody.model_provider!=='provider-a'||
+   postedBody.profile!=='profile-a'||postedBody.attachments[0].path!=='/tmp/note.txt'){
+  throw new Error('recovery POST lost canonical intent: '+JSON.stringify(postedBody));
+}
+if(q.length!==1||q[0]._server_queue_id!=='server-reload'||!q[0]._server_owned||q[0]._server_pending){
+  throw new Error('recovery did not converge to server owner: '+JSON.stringify(q));
+}
+if(shiftQueuedSessionMessage(sid)!==null)throw new Error('recovered owner became browser-drainable');
 """
     )
 
