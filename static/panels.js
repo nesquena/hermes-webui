@@ -6550,7 +6550,8 @@ function _profileDropdownBestCachedData(){
 function _profileDropdownFetchFresh(){
   if(_profileDropdownFetchPromise) return _profileDropdownFetchPromise;
   _profileDropdownFetchPromise = api('/api/profiles', {timeoutToast:false}).then(data=>{
-    if(_profileDropdownDataCacheUsable(data)) { _profilesCache = data; window._profilesCacheFreshAt=Date.now(); }
+    if(_profileDropdownDataCacheUsable(data)) _profilesCache = data;
+    if(_profileDropdownDataCacheUsable(data)) window._profilesCacheFreshAt=Date.now();
     _profileDropdownWriteStoredCache(data);
     return data;
   }).finally(()=>{ _profileDropdownFetchPromise = null; });
@@ -9341,8 +9342,9 @@ async function loadSettingsPanel(){
       }
       langSel.value=resolvedLanguage;
       langSel.addEventListener('change',function(){
+        const autosaveLanguagePreference=_schedulePreferencesAutosave;
         if(typeof setLocale==='function'){setLocale(this.value);if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();if(typeof renderSessionListFromCache==='function')renderSessionListFromCache();}
-        _schedulePreferencesAutosave();
+        autosaveLanguagePreference();
       },{once:false});
     }
     const showUsageCb=$('settingsShowTokenUsage');
