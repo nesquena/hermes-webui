@@ -99,6 +99,7 @@ def _insert_production_row(
     end_reason=None,
     model_config=None,
     source="webui",
+    title=None,
 ):
     if isinstance(model_config, dict):
         model_config = json.dumps(model_config)
@@ -109,7 +110,7 @@ def _insert_production_row(
          parent_session_id, ended_at, end_reason)
         VALUES (?, ?, ?, 'openai/gpt-5', ?, ?, 1, ?, ?, ?)
         """,
-        (sid, source, sid, model_config, started_at, parent, ended_at, end_reason),
+        (sid, source, title or sid, model_config, started_at, parent, ended_at, end_reason),
     )
     conn.execute(
         "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, 'user', ?, ?)",
@@ -433,6 +434,162 @@ def test_state_db_transcript_stitch_keeps_overlapping_synthetic_fork_independent
                 "fork", stitch_continuations=True
             )
         ] == ["FORK_ONLY"]
+    finally:
+        conn.close()
+
+
+def test_live_title_families_collapse_and_read_back_from_every_stale_segment(
+    tmp_path, monkeypatch
+):
+    """Sanitized 2026-08-11 lineages keep one row, one tip, and full history."""
+    db_path = tmp_path / "state.db"
+    conn = _ensure_production_state_db(db_path)
+    families = [
+        (
+            "Autopilote horaire des conversations Hermes",
+            [
+                ("67731d41a751", 1786199393.152380, 1786260379.268876),
+                ("20260809_092619_1df4e5", 1786260379.227051, 1786282227.910058),
+                ("20260809_153027_ecd2d0", 1786282227.878877, 1786458894.936033),
+                ("20260811_163454_515676", 1786458894.893529, 1786462423.932897),
+                ("20260811_173343_35b01a", 1786462423.579563, 1786466746.646338),
+                ("20260811_184546_6a9d43", 1786466746.605288, None),
+            ],
+        ),
+        (
+            "Continuing Session Compaction Analysis",
+            [
+                ("5614899f20c1", 1785149596.191732, 1785151212.680752),
+                ("20260727_132012_cfd871", 1785151212.659361, 1785153940.767830),
+                ("20260727_140540_d53386", 1785153940.623974, 1785155431.781549),
+                ("20260727_143031_ef4b12", 1785155431.697044, 1785156223.920522),
+                ("20260727_144343_257512", 1785156223.857336, 1785160956.350932),
+                ("20260727_160236_15a54c", 1785160956.085989, 1785161310.475170),
+                ("20260727_160830_ac2f3c", 1785161310.350187, 1785162060.158157),
+                ("20260727_162059_4f40a6", 1785162059.967021, 1785167813.575161),
+                ("20260727_175653_f3e1b1", 1785167813.496525, 1785187411.139954),
+                ("20260727_232331_c5c5d0", 1785187411.110537, 1785190793.448982),
+                ("20260728_001953_9256d5", 1785190793.410722, 1785232651.865177),
+                ("20260728_115731_6ac7d1", 1785232651.368463, 1785666018.332939),
+                ("20260802_122018_e27695", 1785666018.125275, 1786262452.129295),
+                ("20260809_100052_0e8b4c", 1786262452.047742, 1786459582.710381),
+                ("20260811_164622_304865", 1786459582.685995, 1786466779.658785),
+                ("20260811_184619_9bf3d0", 1786466779.633715, None),
+            ],
+        ),
+        (
+            "Résolution des conflits et validation PR (fork)",
+            [
+                ("06fc4aac7a3d", 1785144260.375660, 1785144379.690550),
+                ("20260727_112619_043c7e", 1785144379.661809, 1785151726.380666),
+                ("20260727_132846_261925", 1785151726.347790, 1785153397.592452),
+                ("20260727_135637_389b2a", 1785153397.417235, 1785154116.375054),
+                ("20260727_140836_a1ad57", 1785154116.293680, 1785162081.853102),
+                ("20260727_162121_bfe2e2", 1785162081.782784, 1785166760.640480),
+                ("20260727_173920_c3c7e9", 1785166760.623645, 1785234994.808266),
+                ("20260728_123634_02f377", 1785234994.789763, 1785235430.425519),
+                ("20260728_124350_f27aaf", 1785235430.346803, 1785316501.566468),
+                ("20260729_111501_4bfbc4", 1785316501.487571, 1785428575.902096),
+                ("20260730_182255_cb8af6", 1785428575.842911, 1785693684.900629),
+                ("20260802_200124_2ae2ef", 1785693684.862480, 1786221839.421037),
+                ("20260808_224359_22465b", 1786221839.363932, 1786266062.115920),
+                ("20260809_110101_cc59c5", 1786266061.908550, 1786459562.448499),
+                ("20260811_164602_0577ed", 1786459562.407618, None),
+            ],
+        ),
+    ]
+    try:
+        for title, segments in families:
+            parent = None
+            for index, (sid, started_at, ended_at) in enumerate(segments):
+                _insert_production_row(
+                    conn,
+                    sid,
+                    parent=parent,
+                    started_at=started_at,
+                    ended_at=ended_at,
+                    end_reason="compression" if ended_at is not None else None,
+                    title=title if index == 0 else None,
+                )
+                parent = sid
+
+        rows = agent_sessions.read_importable_agent_session_rows(
+            db_path, limit=None, exclude_sources=()
+        )
+        rows_by_id = {row["id"]: row for row in rows}
+        assert set(rows_by_id) == {segments[-1][0] for _, segments in families}
+
+        all_ids = {sid for _, segments in families for sid, _, _ in segments}
+        metadata = agent_sessions.read_session_lineage_metadata(db_path, all_ids)
+        monkeypatch.setattr(models, "_active_state_db_path", lambda: db_path)
+
+        for title, segments in families:
+            root_id = segments[0][0]
+            tip_id = segments[-1][0]
+            tip_row = rows_by_id[tip_id]
+            assert tip_row["title"] == title
+            assert tip_row["_lineage_root_id"] == root_id
+            assert tip_row["_lineage_tip_id"] == tip_id
+            assert tip_row["_compression_segment_count"] == len(segments)
+            assert tip_row.get("relationship_type") != "child_session"
+
+            report = agent_sessions.read_session_lineage_report(db_path, tip_id)
+            assert report["lineage_key"] == root_id
+            assert report["tip_session_id"] == tip_id
+            assert report["total_segments"] == len(segments)
+            assert report["children"] == []
+
+            for sid, _, _ in segments:
+                assert metadata[sid]["_lineage_root_id"] == root_id
+                assert metadata[sid]["_lineage_tip_id"] == tip_id
+
+            assert [
+                message["content"]
+                for message in models.get_state_db_session_messages(
+                    tip_id, stitch_continuations=True
+                )
+            ] == [f"message:{sid}" for sid, _, _ in segments]
+    finally:
+        conn.close()
+
+
+def test_live_cli_mislabeled_tip_stays_outside_webui_lineage_until_repaired(
+    tmp_path, monkeypatch
+):
+    """Do not weaken the cross-source guard to absorb an autopilot source defect."""
+    db_path = tmp_path / "state.db"
+    conn = _ensure_production_state_db(db_path)
+    try:
+        _insert_production_row(
+            conn,
+            "20260811_164622_304865",
+            started_at=1786459582.685995,
+            ended_at=1786466779.658785,
+            end_reason="compression",
+        )
+        _insert_production_row(
+            conn,
+            "20260811_184619_9bf3d0",
+            parent="20260811_164622_304865",
+            started_at=1786466779.633715,
+            source="cli",
+        )
+
+        rows = agent_sessions.read_importable_agent_session_rows(
+            db_path, limit=None, exclude_sources=()
+        )
+        assert {row["id"] for row in rows} == {
+            "20260811_164622_304865",
+            "20260811_184619_9bf3d0",
+        }
+
+        monkeypatch.setattr(models, "_active_state_db_path", lambda: db_path)
+        assert [
+            message["content"]
+            for message in models.get_state_db_session_messages(
+                "20260811_184619_9bf3d0", stitch_continuations=True
+            )
+        ] == ["message:20260811_184619_9bf3d0"]
     finally:
         conn.close()
 
