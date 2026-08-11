@@ -142,6 +142,32 @@ class TestNavigationKeepsZoom:
         assert "state.fitScale = fitScale;" in src
 
 
+class TestInitialFitBounded:
+    def test_fit_scale_capped_at_no_upscale(self):
+        """_imgFitScale() must never exceed 1: the pre-PR lightbox
+        (img{max-width:90vw;max-height:90vh;object-fit:contain}) constrained
+        oversized images but left small ones at intrinsic size. An unbounded
+        fit ratio on a tiny image (e.g. 50px in a 900px viewport -> 18)
+        would exceed the feature's 8x zoom max and make the first wheel
+        gesture snap from 18 down to 8 instead of zooming smoothly. The
+        shared helper must store the bounded value in state.fitScale, which
+        _imgMinScale() and the at-fit resize comparison depend on."""
+        src = UI.read_text(encoding="utf-8")
+        assert "return Math.min(1, size.width / state.boxW, size.height / state.boxH);" in src
+
+    def test_fit_assigns_bounded_scale_to_state(self):
+        """_fit() must store the bounded helper value in both state.fitScale
+        (baseline for _imgMinScale / the at-fit resize check) and
+        state.scale (the applied transform), so the initial view is never
+        above the interactive 8x maximum and the first wheel gesture starts
+        smoothly from the fitted scale."""
+        src = UI.read_text(encoding="utf-8")
+        fit_idx = src.index("const fitScale = _imgFitScale();")
+        assert "state.fitScale = fitScale;" in src
+        assert "state.scale = fitScale;" in src
+        assert src.index("state.scale = fitScale;") > fit_idx
+
+
 class TestCleanup:
     def test_close_removes_img_zoom_resize_listener(self):
         """_closeImgLightbox must tear down the image-zoom resize listener so

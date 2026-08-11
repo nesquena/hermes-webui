@@ -2527,7 +2527,15 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
 
   function _imgFitScale() {
     const size = _imgViewportSize();
-    return Math.min(size.width / state.boxW, size.height / state.boxH);
+    // Cap at 1 to preserve the pre-PR no-upscale behavior
+    // (img{max-width:90vw;max-height:90vh;object-fit:contain} constrained
+    // oversized images but left small ones at intrinsic size). An unbounded
+    // ratio on a tiny image (e.g. 50px in a 900px viewport -> 18) would
+    // exceed the 8x zoom max, so the first wheel gesture would snap from 18
+    // to 8 instead of zooming smoothly. state.fitScale stores this bounded
+    // value because _imgMinScale() and the at-fit resize comparison depend
+    // on it.
+    return Math.min(1, size.width / state.boxW, size.height / state.boxH);
   }
 
   function _imgSetScale(nextScale, anchorX, anchorY) {
