@@ -1403,23 +1403,6 @@ class Session:
         # Own the complete snapshot BEFORE duplicate selection.  Otherwise a
         # nested mutation after selection but before deepcopy can invalidate the
         # equality decision and leak into this save's payload (#6600).
-        # One Session may be saved by a stream worker and a request worker at
-        # the same time.  Serialize the complete sidecar + index publication so
-        # the two files always describe one owned save generation.  RLock keeps
-        # nested same-thread save paths safe without involving the global
-        # sessions lock during filesystem I/O.
-        persistence_lock = getattr(self, '_persistence_lock', None)
-        if persistence_lock is None:
-            with LOCK:
-                persistence_lock = getattr(self, '_persistence_lock', None)
-                if persistence_lock is None:
-                    persistence_lock = threading.RLock()
-                    self._persistence_lock = persistence_lock
-        with persistence_lock:
-            return self._save_owned(touch_updated_at=touch_updated_at, skip_index=skip_index)
-
-    def _save_owned(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
-        """Publish one deep-owned sidecar/index generation under the save lock."""
         owned_messages = copy.deepcopy(self.messages)
         messages_to_persist, _ = _collapse_duplicate_incomplete_message_ids(owned_messages)
         if touch_updated_at:
