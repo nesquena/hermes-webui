@@ -761,23 +761,32 @@ def _save_webui_deleted_session_tombstone(ids) -> None:
     }
     p = _webui_deleted_session_tombstone_file()
     _tmp = None
+    # #6327 (review 17, blocker 2): durability failures RAISE (fail closed).
+    # The previous implementation swallowed write errors, so
+    # ``/api/session/delete`` reported success even when the durable
+    # revocation was never persisted — a cold loader that passed the early
+    # generation check and waited behind the deletion could then publish the
+    # deleted session.  Callers decide how to surface the failure; the delete
+    # route maps it to a 500 and the tombstone-clear callers treat it as
+    # best-effort (the entry simply remains, which is the fail-closed
+    # direction).
+    SESSION_DIR.mkdir(parents=True, exist_ok=True)
+    _tmp = p.with_suffix(
+        f'.tmp.{os.getpid()}.{threading.current_thread().ident}'
+    )
     try:
-        SESSION_DIR.mkdir(parents=True, exist_ok=True)
-        _tmp = p.with_suffix(
-            f'.tmp.{os.getpid()}.{threading.current_thread().ident}'
-        )
         with open(_tmp, 'w', encoding='utf-8') as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
             f.flush()
             os.fsync(f.fileno())
         os.replace(_tmp, p)
     except Exception:
-        logger.debug("Failed to save webui deleted-session tombstone", exc_info=True)
         if _tmp is not None:
             try:
                 _tmp.unlink(missing_ok=True)
             except Exception:
                 pass
+        raise
 
 
 def _record_webui_deleted_session_tombstone(sid: str) -> None:
@@ -4697,6 +4706,7 @@ def get_session_for_scan(sid):
 
 
 _PUBLICATION_EXPECT_UNSET = object()
+_PUBLICATION_GEN_UNSET = object()
 
 
 def _session_deleted_tombstone_marks(sid) -> bool:
@@ -4734,7 +4744,12 @@ def _read_owner_generation(sid) -> str:
 
 
 @contextmanager
-def _publish_owner_publication_lease(session_id, *, expected=_PUBLICATION_EXPECT_UNSET):
+def _publish_owner_publication_lease(
+    session_id,
+    *,
+    expected=_PUBLICATION_EXPECT_UNSET,
+    expected_generation=_PUBLICATION_GEN_UNSET,
+):
     """#6327 per-SID publication transaction (lazy-imported from api.routes).
 
     Wraps a same-SID cache publication (``SESSIONS[sid] = <new owner>``): the
@@ -4755,6 +4770,19 @@ def _publish_owner_publication_lease(session_id, *, expected=_PUBLICATION_EXPECT
     ``@contextmanager`` never raises ``RuntimeError: generator didn't
     yield``).
 
+    ``expected_generation`` (optional, review 17): a captured per-SID
+    owner-generation token that must ALSO still match under LOCK for the CAS
+    to hit — the cold loader re-verifies the generation it captured BEFORE
+    ``Session.load()``, so a deletion/publication that fired during the
+    in-flight disk I/O is observed even when durable tombstone persistence
+    failed (a deleted session is never resurrected).
+
+    REVIEW 17 CONTRACT: on CAS-hit the global ``LOCK`` is held ACROSS the
+    yield — compare-and-publish is one atomic lease → LOCK operation, so no
+    LOCK-only publisher can install a winner in a check→write gap.  The
+    caller's guarded body MUST NOT re-acquire ``LOCK`` (non-reentrant); it
+    runs with LOCK already held and writes ``SESSIONS`` directly.
+
     The lease authority is selected BEFORE the single ``yield``: a failure
     thrown through the yield (a publication-body exception) must propagate
     to the caller.  Catching it and yielding a SECOND time would turn the
@@ -4762,8 +4790,13 @@ def _publish_owner_publication_lease(session_id, *, expected=_PUBLICATION_EXPECT
     (#6327 review 15) instead of letting the caller handle it.
     """
     try:
-        from api.routes import _publish_owner_lease, _publish_owner_lease_if_current
+        from api.routes import (
+            _OWNER_LEASE_GEN_UNSET,
+            _publish_owner_lease,
+            _publish_owner_lease_if_current,
+        )
     except Exception:
+        _OWNER_LEASE_GEN_UNSET = None
         _publish_owner_lease = None
         _publish_owner_lease_if_current = None
     if _publish_owner_lease is None:
@@ -4776,7 +4809,15 @@ def _publish_owner_publication_lease(session_id, *, expected=_PUBLICATION_EXPECT
         with _publish_owner_lease(str(session_id or "")) as _token:
             yield _token
         return
-    with _publish_owner_lease_if_current(str(session_id or ""), expected=expected) as _token:
+    with _publish_owner_lease_if_current(
+        str(session_id or ""),
+        expected=expected,
+        expected_generation=(
+            expected_generation
+            if expected_generation is not _PUBLICATION_GEN_UNSET
+            else _OWNER_LEASE_GEN_UNSET
+        ),
+    ) as _token:
         yield _token
 
 
@@ -4870,10 +4911,12 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
                 _refreshed = False
                 with _publish_owner_publication_lease(sid, expected=cached) as _cas_token:
                     if _cas_token is not None:
-                        with LOCK:
-                            SESSIONS[sid] = disk_session
-                            if promote_cache:
-                                SESSIONS.move_to_end(sid)
+                        # #6327 (review 17): LOCK is held across the CAS →
+                        # write (see _publish_owner_lease_if_current) — no
+                        # re-acquisition (non-reentrant).
+                        SESSIONS[sid] = disk_session
+                        if promote_cache:
+                            SESSIONS.move_to_end(sid)
                         _refreshed = True
                 if _refreshed:
                     cached = disk_session
@@ -4897,10 +4940,11 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
                     _refreshed = False
                     with _publish_owner_publication_lease(sid, expected=cached) as _cas_token:
                         if _cas_token is not None:
-                            with LOCK:
-                                SESSIONS[sid] = disk_session
-                                if promote_cache:
-                                    SESSIONS.move_to_end(sid)
+                            # #6327 (review 17): LOCK is held across the CAS
+                            # → write — no re-acquisition (non-reentrant).
+                            SESSIONS[sid] = disk_session
+                            if promote_cache:
+                                SESSIONS.move_to_end(sid)
                             _refreshed = True
                     if _refreshed:
                         cached = disk_session
@@ -4964,16 +5008,32 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
                 # worker can never keep sinking on a replaced owner).  If a
                 # live owner appeared during the load, the loaded object is
                 # discarded (the live owner wins).
-                with _publish_owner_publication_lease(sid, expected=None) as _cas_token:
+                #
+                # #6327 (review 17, blocker 2): the CAS ALSO re-verifies the
+                # captured owner-generation token under LOCK
+                # (``expected_generation=_lease_before_load``), and LOCK is
+                # held across the compare AND the map write.  A deletion that
+                # fired during the in-flight load (lease bumped + sidecar
+                # unlinked) is therefore observed even when durable tombstone
+                # persistence failed — the deleted session is never
+                # resurrected behind a successful-looking HTTP delete — and
+                # no LOCK-only publisher can slip a winner into a
+                # check→write gap.
+                with _publish_owner_publication_lease(
+                    sid,
+                    expected=None,
+                    expected_generation=_lease_before_load,
+                ) as _cas_token:
                     if _cas_token is not None:
                         _deleted_now = _session_deleted_tombstone_marks(sid)
-                        with LOCK:
-                            if SESSIONS.get(sid) is None and not _deleted_now:
-                                SESSIONS[sid] = s
-                                if promote_cache:
-                                    SESSIONS.move_to_end(sid)
-                                _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
-                                _installed = True
+                        # #6327 (review 17): LOCK is held across the CAS →
+                        # write — no re-acquisition (non-reentrant).
+                        if SESSIONS.get(sid) is None and not _deleted_now:
+                            SESSIONS[sid] = s
+                            if promote_cache:
+                                SESSIONS.move_to_end(sid)
+                            _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+                            _installed = True
             if not _installed:
                 # The cold load lost the publication CAS: a canonical winner
                 # was installed (or the session deleted) while the disk I/O

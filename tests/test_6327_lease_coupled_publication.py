@@ -541,3 +541,242 @@ def test_cold_load_returns_concurrent_canonical_winner(isolated_session_env, mon
     )
     with _models.LOCK:
         assert _models.SESSIONS.get(sid) is replacement
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 9) Review 17 blocker 2: compare-and-publish holds LOCK across the write
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_cas_publication_holds_lock_across_compare_and_write(isolated_session_env):
+    """The publication CAS must be ONE atomic lease → LOCK operation: the
+    global LOCK is held across the compare AND the caller's exact map write,
+    so a publisher that uses only LOCK (generated-title persistence, browser
+    foreign-session publication) can never install a winner in a
+    check→write gap for the stale refresh to overwrite."""
+    from api import models as _models
+    from api.routes import _publish_owner_lease_if_current
+
+    sid = "sess-cas-atomic"
+    cached = _FakeSession(sid)
+    disk_version = _FakeSession(sid)
+    with _models.LOCK:
+        _models.SESSIONS[sid] = cached
+
+    body_entered = threading.Event()
+    release_body = threading.Event()
+    results = {}
+
+    def _locked_only_publisher():
+        # A publisher that uses ONLY LOCK (the review-17 gap publisher).
+        with _models.LOCK:
+            results["winner_installed"] = _models.SESSIONS.get(sid)
+            _models.SESSIONS[sid] = _FakeSession(sid)
+
+    def _cas_publisher():
+        with _publish_owner_lease_if_current(sid, expected=cached) as token:
+            results["token"] = token
+            # The CAS body must still hold LOCK (compare→write atomicity).
+            results["lock_held"] = _models.LOCK.locked()
+            body_entered.set()
+            assert release_body.wait(10), "CAS body never released"
+            _models.SESSIONS[sid] = disk_version
+
+    thread = threading.Thread(target=_cas_publisher, daemon=True)
+    thread.start()
+    assert body_entered.wait(10), "CAS body never entered"
+    assert results.get("lock_held") is True, (
+        "LOCK released between the CAS compare and the caller's write"
+    )
+
+    # While the CAS body holds LOCK, a LOCK-only publisher must BLOCK — it
+    # cannot install a winner in the check→write gap (bounded block check).
+    writer = threading.Thread(target=_locked_only_publisher, daemon=True)
+    writer.start()
+    time.sleep(0.2)
+    assert writer.is_alive(), (
+        "LOCK-only publisher slipped into the CAS check→write gap"
+    )
+
+    release_body.set()
+    thread.join(10)
+    assert not thread.is_alive(), "CAS publisher deadlocked"
+    writer.join(10)
+    assert not writer.is_alive(), "LOCK-only publisher deadlocked"
+
+    # The LOCK-only winner landed AFTER the atomic CAS write — never between
+    # the compare and the write — so the CAS write was not overwritten by a
+    # stale refresh racing a current winner.
+    with _models.LOCK:
+        final = _models.SESSIONS.get(sid)
+    assert final is not disk_version
+    assert results["token"] is not None
+
+
+def test_cas_publication_rechecks_captured_generation_under_lock(isolated_session_env):
+    """The cold-load CAS re-verifies the captured owner-generation token UNDER
+    LOCK: a deletion that fired while the caller's disk I/O was in flight is
+    observed even when the durable tombstone persistence FAILED — the
+    publication CAS-fails (yields None) and the deleted session is never
+    resurrected behind a successful-looking delete."""
+    from api import models as _models
+    from api.routes import _publish_owner_lease, _publish_owner_lease_if_current
+
+    sid = "sess-cas-generation"
+    s = _FakeSession(sid)
+    with _models.LOCK:
+        _models.SESSIONS[sid] = s
+    # The loader captures the generation BEFORE its in-flight disk load.
+    gen_before_load = _models._read_owner_generation(sid)
+
+    # A deletion fires while the load is in flight: canonical removal under
+    # the per-SID lease — but the durable tombstone persistence FAILS.
+    def _boom(ids):
+        raise OSError("tombstone write failed")
+
+    _real_save = _models._save_webui_deleted_session_tombstone
+    _models._save_webui_deleted_session_tombstone = _boom
+    try:
+        with pytest.raises(OSError):
+            with _publish_owner_lease(sid):
+                with _models.LOCK:
+                    _models.SESSIONS.pop(sid, None)
+                _models._record_webui_deleted_session_tombstone(sid)
+    finally:
+        _models._save_webui_deleted_session_tombstone = _real_save
+    # The durable revocation was never persisted.
+    assert sid not in _models._load_webui_deleted_session_tombstone()
+
+    # The cold-load publication with the STALE captured generation must
+    # CAS-fail under LOCK — no tombstone is needed; the bumped generation is
+    # the barrier (review 17).
+    with _publish_owner_lease_if_current(
+        sid, expected=None, expected_generation=gen_before_load
+    ) as token:
+        assert token is None, "stale captured generation must CAS-fail"
+    with _models.LOCK:
+        assert sid not in _models.SESSIONS, (
+            "cold-load publish resurrected a session deleted while tombstone persistence failed"
+        )
+
+
+def test_cold_load_never_resurrects_when_tombstone_persistence_fails(
+    isolated_session_env, monkeypatch
+):
+    """End-to-end review-17 schedule: a cold loader waits behind a deletion
+    whose durable tombstone persistence FAILS.  The lease was bumped by the
+    deletion, so the loader must never install the loaded object — no cache
+    entry, ``_resolve_session`` raises KeyError, and the deletion that
+    reported failure is never undone by a resurrection."""
+    from api import models as _models
+    from api.routes import _publish_owner_lease
+
+    sid = "sess-cold-delete-tombstone-fail"
+    load_started = threading.Event()
+    release_load = threading.Event()
+    results = []
+
+    def _blocking_load(loaded_sid):
+        load_started.set()
+        assert release_load.wait(10), "cold-load Session.load never released"
+        return _FakeSession(loaded_sid)
+
+    monkeypatch.setattr(_models.Session, "load", lambda loaded_sid: _blocking_load(loaded_sid))
+    monkeypatch.setattr(_models, "_sync_sidecar_from_state_db_if_newer", lambda s: False)
+    monkeypatch.setattr(_models, "_repair_stale_pending", lambda s: False)
+    monkeypatch.setattr(_models, "_session_has_pending_journal_retry", lambda s: False)
+
+    def _boom(ids):
+        raise OSError("tombstone write failed")
+
+    monkeypatch.setattr(_models, "_save_webui_deleted_session_tombstone", _boom)
+
+    def _cold_load():
+        try:
+            results.append(_models._resolve_session(sid))
+        except Exception as exc:  # pragma: no cover - failure surfaced below
+            results.append(exc)
+
+    thread = threading.Thread(target=_cold_load, daemon=True)
+    thread.start()
+    assert load_started.wait(10), "cold load never entered Session.load"
+
+    # Deletion fires while the load is blocked: lease bumped + SESSIONS popped
+    # + sidecar unlinked — and the durable tombstone write FAILS (the API
+    # reports the delete as failed, fail-closed).
+    with pytest.raises(OSError):
+        with _publish_owner_lease(sid):
+            with _models.LOCK:
+                _models.SESSIONS.pop(sid, None)
+            _models._record_webui_deleted_session_tombstone(sid)
+    assert sid not in _models._load_webui_deleted_session_tombstone()
+
+    release_load.set()
+    thread.join(10)
+    assert not thread.is_alive(), "cold-load-vs-failed-tombstone-delete deadlocked"
+
+    with _models.LOCK:
+        assert sid not in _models.SESSIONS, (
+            "cold load resurrected a session deleted while tombstone persistence failed"
+        )
+    assert len(results) == 1 and isinstance(results[0], KeyError), results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 10) Review 17 blocker 2: durable deletion revocation fails closed
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_session_delete_fails_closed_when_tombstone_persistence_fails(
+    isolated_session_env, monkeypatch
+):
+    """``/api/session/delete`` must NOT report success when the durable
+    deleted-session tombstone cannot be persisted: the revocation error is
+    surfaced as a 500 (fail closed), not swallowed into ``ok: True``."""
+    from types import SimpleNamespace
+
+    import api.routes as routes
+    from api import models as _models
+
+    sid = "sess-delete-tombstone-fail-closed"
+    session = _FakeSession(sid)
+    session.save = lambda *a, **kw: None  # sidecar persistence not needed here
+    with _models.LOCK:
+        _models.SESSIONS[sid] = session
+
+    captured = {}
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda handler: {"session_id": sid})
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda handler, payload, status=200, extra_headers=None: captured.update(
+            payload=payload, status=status
+        )
+        or True,
+    )
+    monkeypatch.setattr(
+        routes,
+        "bad",
+        lambda handler, msg, status=400: captured.update(
+            payload={"error": msg}, status=status
+        )
+        or True,
+    )
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda sid: {})
+    monkeypatch.setattr(routes, "_is_messaging_session_id", lambda sid: False)
+    monkeypatch.setattr(routes, "_worktree_retained_payload_for_session_id", lambda sid: {})
+    monkeypatch.setattr(_models, "delete_cli_session", lambda sid: True)
+    monkeypatch.setattr(routes, "_session_is_subagent_view_only", lambda sid: False)
+    # The durable tombstone write fails (disk error).
+    monkeypatch.setattr(
+        _models,
+        "_save_webui_deleted_session_tombstone",
+        lambda ids: (_ for _ in ()).throw(OSError("tombstone disk full")),
+    )
+
+    assert routes.handle_post(object(), SimpleNamespace(path="/api/session/delete")) is True
+    assert captured["status"] == 500, captured
+    assert "error" in (captured.get("payload") or {}), captured
+    # Fail-closed: never ok:True after a lost durable revocation.
+    assert captured["payload"].get("ok") is not True, captured

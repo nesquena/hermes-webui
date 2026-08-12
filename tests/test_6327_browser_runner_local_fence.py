@@ -229,3 +229,229 @@ def test_browser_chat_start_runner_local_accepts_complete_fence(
     assert fence["route"]["normalized_model"] is False
     assert fence["version"] and fence["lease"], fence
     assert fence["profile"] == "default"  # root/empty profile canonicalized
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Review 17, blocker 1: explicit browser lane changes are fenced VERBATIM
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("normalized_model", [False, True])
+def test_browser_explicit_lane_change_is_fenced_verbatim(
+    isolated_session_env, monkeypatch, normalized_model
+):
+    """An EXPLICIT model/provider/workspace change resolved by the browser
+    request — NOT yet persisted to the owner fields — must be bound to the
+    fence and the ``StartRunRequest`` verbatim and ACCEPTED (200).
+
+    Before review 17 the fence claim recomputed the lane from the still-old
+    persisted owner (``_process_wakeup_owner_token_mismatch``) and rejected
+    the legitimate explicit change with ``model_changed`` /
+    ``provider_changed`` / ``workspace_changed`` (retryable 409) BEFORE
+    ``adapter.start_run()`` ever contacted the runner.  The browser-request
+    lane is the authority; owner identity, SID, canonical lock, profile/home,
+    and credential generation are still re-checked exactly.
+    """
+    import api.routes as routes
+    from api import models as _models
+
+    sid = "sess-browser-explicit-lane"
+    # The PERSISTED owner lane is the OLD one (gpt-5.5/openai-codex at
+    # /workspace) — the browser resolves an explicit change away from it.
+    session = _BrowserSession(sid)
+    session.model = "gpt-5.5"
+    session.model_provider = "openai-codex"
+    session.workspace = "/workspace"
+    with _models.LOCK:
+        _models.SESSIONS[sid] = session
+
+    # Runner-local adapter selection + real HttpRunnerClient.from_env().
+    monkeypatch.setenv("HERMES_WEBUI_RUNTIME_ADAPTER", "runner-local")
+    monkeypatch.setenv("HERMES_WEBUI_RUNNER_BASE_URL", "http://127.0.0.1:1")
+
+    # Deterministic route plumbing (model resolution, workspace, profiles).
+    monkeypatch.setattr(routes, "_get_or_materialize_session", lambda s_id, **kw: session)
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *a, **kw: True)
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(routes, "_normalize_chat_attachments", lambda raw: [])
+    monkeypatch.setattr(routes, "compression_recovery_payload_for_session", lambda s: None)
+    # An explicit WORKSPACE change resolves to the requested workspace.
+    monkeypatch.setattr(
+        routes, "_resolve_chat_workspace_with_recovery", lambda s, w: (w or "/workspace")
+    )
+    monkeypatch.setattr(routes, "_read_profile_model_config", lambda s, p: (None, None, None))
+    monkeypatch.setattr(routes, "get_config_snapshot", lambda: {})
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda cfg: False)
+    # An explicit model/provider change resolves to the REQUESTED lane, which
+    # differs from the persisted owner fields.
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda model, provider, **kw: (model, provider, normalized_model),
+    )
+    monkeypatch.setattr(
+        routes, "_repair_foreign_session_model_provider", lambda s, **kw: kw.get("resolved_provider")
+    )
+    monkeypatch.setattr(routes, "process_wakeup_credential_state_fingerprint", lambda s: "fp-browser-lane")
+    monkeypatch.setattr(routes, "_process_wakeup_profile_home", lambda s: "/home/test/.hermes")
+
+    responses = {}
+
+    def _fake_j(handler, payload, status=200, **kw):
+        responses["payload"] = payload
+        responses["status"] = status
+        return payload
+
+    monkeypatch.setattr(routes, "j", _fake_j)
+    monkeypatch.setattr(routes, "bad", lambda handler, msg, status=400: _fake_j(handler, {"error": msg}, status=status))
+
+    captured = {}
+
+    def fake_urlopen(req, timeout=0):
+        captured["url"] = req.full_url
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        fence = dict(captured["body"]["owner_fence"])
+        return _FakeResponse({
+            "run_id": "run-browser-lane-1",
+            "stream_id": "run-browser-lane-1",
+            "status": "running",
+            "session_id": fence["session_id"],
+            "owner_fence": {**fence, "accepted": True},
+        })
+
+    monkeypatch.setattr(
+        HttpRunnerClient, "_opener", lambda self: _FakeOpener(fake_urlopen)
+    )
+
+    result = routes._handle_chat_start(
+        None,
+        {
+            "session_id": sid,
+            "message": "switch lanes explicitly",
+            "model": "claude-sonnet-4",
+            "model_provider": "anthropic",
+            "workspace": "/other-ws",
+            "explicit_model_pick": True,
+        },
+    )
+
+    # The explicit lane change is ACCEPTED — never the pre-POST 409 the
+    # persisted-lane recompute produced before review 17.
+    assert responses.get("status") == 200, responses
+    assert responses.get("payload", {}).get("stream_id") == "run-browser-lane-1", responses
+    assert "error" not in (responses.get("payload") or {}), responses
+    assert result == responses.get("payload")
+
+    assert captured.get("url", "").endswith("/v1/runs"), captured
+    body = captured["body"]
+    fence = body["owner_fence"]
+    assert _runner_owner_fence_schema_error(fence) is None, fence
+    # The browser-request lane is bound VERBATIM to the fence...
+    assert fence["route"]["model"] == "claude-sonnet-4", fence
+    assert fence["route"]["provider"] == "anthropic", fence
+    assert fence["route"]["workspace"] == "/other-ws", fence
+    assert fence["route"]["normalized_model"] is normalized_model, fence
+    # ...and the real client cross-bound the StartRunRequest to the same lane.
+    assert body["session_id"] == sid
+    assert body["model"] == "claude-sonnet-4", body
+    assert body["provider"] == "anthropic", body
+    assert body["workspace"] == "/other-ws", body
+    # Root/default profile canonicalized on the wire, generation carried.
+    assert fence["profile"] == "default", fence
+    assert fence["generation"] == "fp-browser-lane", fence
+
+
+def test_browser_explicit_lane_change_root_default_profile_is_accepted(
+    isolated_session_env, monkeypatch
+):
+    """The explicit-lane browser start also succeeds for a root (profile
+    None/empty) session — the fence canonicalizes the root profile wire
+    identity to 'default' and binds the request lane verbatim (review 17)."""
+    import api.routes as routes
+    from api import models as _models
+
+    sid = "sess-browser-explicit-root"
+    session = _BrowserSession(sid)  # profile stays None (root)
+    session.model = "old-model"
+    session.model_provider = "old-provider"
+    with _models.LOCK:
+        _models.SESSIONS[sid] = session
+
+    monkeypatch.setenv("HERMES_WEBUI_RUNTIME_ADAPTER", "runner-local")
+    monkeypatch.setenv("HERMES_WEBUI_RUNNER_BASE_URL", "http://127.0.0.1:1")
+
+    monkeypatch.setattr(routes, "_get_or_materialize_session", lambda s_id, **kw: session)
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *a, **kw: True)
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(routes, "_normalize_chat_attachments", lambda raw: [])
+    monkeypatch.setattr(routes, "compression_recovery_payload_for_session", lambda s: None)
+    monkeypatch.setattr(
+        routes, "_resolve_chat_workspace_with_recovery", lambda s, w: (w or "/workspace")
+    )
+    monkeypatch.setattr(routes, "_read_profile_model_config", lambda s, p: (None, None, None))
+    monkeypatch.setattr(routes, "get_config_snapshot", lambda: {})
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda cfg: False)
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda model, provider, **kw: (model, provider, True),
+    )
+    monkeypatch.setattr(
+        routes, "_repair_foreign_session_model_provider", lambda s, **kw: kw.get("resolved_provider")
+    )
+    monkeypatch.setattr(routes, "process_wakeup_credential_state_fingerprint", lambda s: "fp-root-lane")
+    monkeypatch.setattr(routes, "_process_wakeup_profile_home", lambda s: "/home/test/.hermes")
+
+    responses = {}
+
+    def _fake_j(handler, payload, status=200, **kw):
+        responses["payload"] = payload
+        responses["status"] = status
+        return payload
+
+    monkeypatch.setattr(routes, "j", _fake_j)
+    monkeypatch.setattr(routes, "bad", lambda handler, msg, status=400: _fake_j(handler, {"error": msg}, status=status))
+
+    captured = {}
+
+    def fake_urlopen(req, timeout=0):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        fence = dict(captured["body"]["owner_fence"])
+        return _FakeResponse({
+            "run_id": "run-browser-root-1",
+            "stream_id": "run-browser-root-1",
+            "status": "running",
+            "session_id": fence["session_id"],
+            "owner_fence": {**fence, "accepted": True},
+        })
+
+    monkeypatch.setattr(
+        HttpRunnerClient, "_opener", lambda self: _FakeOpener(fake_urlopen)
+    )
+
+    result = routes._handle_chat_start(
+        None,
+        {
+            "session_id": sid,
+            "message": "root explicit lane",
+            "model": "new-model",
+            "model_provider": "new-provider",
+            "workspace": "/root-ws",
+            "explicit_model_pick": True,
+        },
+    )
+
+    assert responses.get("status") == 200, responses
+    assert responses.get("payload", {}).get("stream_id") == "run-browser-root-1", responses
+    assert "error" not in (responses.get("payload") or {}), responses
+
+    fence = captured["body"]["owner_fence"]
+    assert _runner_owner_fence_schema_error(fence) is None, fence
+    assert fence["profile"] == "default"  # root/empty profile canonicalized
+    assert fence["route"]["model"] == "new-model", fence
+    assert fence["route"]["provider"] == "new-provider", fence
+    assert fence["route"]["workspace"] == "/root-ws", fence
+    assert fence["route"]["normalized_model"] is True, fence
+    assert captured["body"]["model"] == "new-model", captured["body"]
+    assert captured["body"]["provider"] == "new-provider", captured["body"]
+    assert captured["body"]["workspace"] == "/root-ws", captured["body"]

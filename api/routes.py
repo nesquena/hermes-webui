@@ -157,10 +157,16 @@ def _persist_generated_session_title(
         # mark_session_title_generated sets s.llm_title_generated = True and clears manual_title.
         mark_session_title_generated(session)
         session.save(touch_updated_at=False)
-        with LOCK:
-            SESSIONS[sid] = session
-            SESSIONS.move_to_end(sid)
-            _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+        # #6327 (review 17, blocker 2): this same-SID replacement is a
+        # canonical owner publication — hold the per-SID owner-generation
+        # lease ACROSS the exact SESSIONS write (an in-flight sink for this
+        # session serializes first, installed sink claims are refused, and
+        # the CAS refresh's compare-and-write can never interleave with it).
+        with _publish_owner_lease(sid):
+            with LOCK:
+                SESSIONS[sid] = session
+                SESSIONS.move_to_end(sid)
+                _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
     _sync_session_title_to_insights(session)
     _publish_session_list_changed(
         event_reason,
@@ -15427,10 +15433,21 @@ def handle_post(handler, parsed) -> bool:
                     logger.debug("Failed to unlink session file %s", p)
                 sidecar_deleted = not p.exists()
                 if sidecar_deleted and not is_messaging_session:
+                    # #6327 (review 17, blocker 2): durable deletion
+                    # revocation FAILS CLOSED.  A tombstone persistence error
+                    # must NOT be swallowed — the HTTP delete reports failure
+                    # (500) instead of success-after-lost-revocation, and a
+                    # cold loader that waited behind this deletion re-checks
+                    # the bumped owner-generation under the lease and never
+                    # resurrects the deleted session.
                     try:
                         _record_webui_deleted_session_tombstone(sid)
                     except Exception:
-                        logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
+                        logger.exception(
+                            "Failed to record durable delete tombstone for WebUI session %s",
+                            sid,
+                        )
+                        return bad(handler, "Failed to persist session deletion", 500)
             try:
                 prune_session_from_index(sid)
             except Exception:
@@ -22153,6 +22170,15 @@ def _build_browser_start_owner_token(s, *, model, provider, normalized_model, wo
             "owner": s,
             "profile": str(getattr(s, "profile", "") or ""),
             "profile_home": _process_wakeup_profile_home(s),
+            # #6327 (review 17): the browser-request lane is the AUTHORITY —
+            # the caller resolved workspace/model/provider/normalized_model for
+            # exactly this run (possibly an EXPLICIT change that has not been
+            # persisted to the owner fields yet).  ``lane_source == "request"``
+            # tells the fence claim to bind the token's lane verbatim instead
+            # of recomputing it from the still-old persisted owner (which
+            # would wrongly reject model/provider/workspace changes with a 409
+            # before the runner is ever contacted).
+            "lane_source": "request",
             "model": model,
             "provider": provider,
             "normalized_model": bool(normalized_model),
@@ -22555,7 +22581,7 @@ def _live_owner_routing_lane(owner, *, fallback_model=None, fallback_provider=No
     )
 
 
-def _process_wakeup_owner_token_mismatch(token, owner) -> str | None:
+def _process_wakeup_owner_token_mismatch(token, owner, *, recompute_lane: bool = True) -> str | None:
     """Return a reason string when the live owner no longer matches ``token``.
 
     Called while holding the canonical AGENT lock for ``owner``'s live sid.
@@ -22565,6 +22591,15 @@ def _process_wakeup_owner_token_mismatch(token, owner) -> str | None:
     profile + home generation, the ROUTE lane (workspace + model/provider,
     recomputed from the live owner, #6327), pause version/state, and the
     credential-state fingerprint.  ``None`` means the token still matches.
+
+    ``recompute_lane=False`` (browser runner-local tokens, #6327 review 17):
+    the token's lane was resolved BY THE REQUEST (an explicit model/provider/
+    workspace change that has not been persisted to the owner fields yet) and
+    is the authority — the lane is NOT recomputed from the still-old
+    persisted owner, so a legitimate explicit lane change is never rejected
+    with a 409 before the runner is contacted.  Owner identity, SID, archived
+    flag, profile/home generation, pause, and the credential-state
+    fingerprint are still compared exactly either way.
     """
     if owner is not token.get("owner"):
         return "owner_replaced"
@@ -22577,11 +22612,15 @@ def _process_wakeup_owner_token_mismatch(token, owner) -> str | None:
     if _process_wakeup_profile_home(owner) != token.get("profile_home"):
         return "profile_home_changed"
     # ── #6327: fence the route lane that authorizes apply/start ────────────
-    # The token records workspace/model/provider RECOMPUTED from the selected
-    # live owner.  Recompute the same lane now: a workspace/model/provider
-    # movement during the out-of-AGENT revalidation window must never let the
-    # stale answer (or the run) apply to the new lane.
-    if token.get("workspace") is not None:
+    # The process-wakeup token records workspace/model/provider RECOMPUTED
+    # from the selected live owner.  Recompute the same lane now: a
+    # workspace/model/provider movement during the out-of-AGENT revalidation
+    # window must never let the stale answer (or the run) apply to the new
+    # lane.  Browser runner-local tokens (``recompute_lane=False``) carry the
+    # request-resolved lane instead — the browser's explicit model/provider/
+    # workspace change is the authority and is bound to the fence verbatim,
+    # never recomputed from the still-old persisted owner (#6327 review 17).
+    if recompute_lane and token.get("workspace") is not None:
         try:
             _live_workspace, _live_model, _live_provider, _live_normalized = (
                 _live_owner_routing_lane(
@@ -23214,8 +23253,14 @@ def _publish_owner_lease(sid):
         yield token
 
 
+# Sentinel: no captured owner-generation comparison requested for the CAS.
+_OWNER_LEASE_GEN_UNSET = object()
+
+
 @contextmanager
-def _publish_owner_lease_if_current(sid, *, expected):
+def _publish_owner_lease_if_current(
+    sid, *, expected, expected_generation=_OWNER_LEASE_GEN_UNSET
+):
     """Per-SID publication transaction that bumps the lease ONLY on CAS-hit.
 
     #6327 (review 16): identical to ``_publish_owner_lease`` except the bump
@@ -23226,6 +23271,25 @@ def _publish_owner_lease_if_current(sid, *, expected):
     caller's disk I/O was in flight — returns WITHOUT bumping the lease, so
     the winner's claims are never invalidated by a stale publisher's bump,
     and WITHOUT running the body, so the winner is never overwritten.
+
+    #6327 (review 17, blocker 2): the global LOCK is now held ACROSS the
+    yield — compare-and-publish is ONE atomic lease → LOCK operation.  The
+    previous version checked the CAS under LOCK, released LOCK, and only then
+    yielded, so a publisher that uses only LOCK (generated-title persistence,
+    browser foreign-session publication) could install a current winner in
+    the check→write gap and the stale refresh would overwrite it.  With LOCK
+    held across the compare AND the caller's exact map write, no other
+    publisher can interleave a winner between them.  Callers MUST NOT
+    re-acquire ``LOCK`` inside the guarded body (it is non-reentrant and
+    already held).
+
+    ``expected_generation`` (review 17): when given (not the sentinel), the
+    captured per-SID owner-generation token is ALSO compared under LOCK
+    before the bump/write.  A deletion (or any canonical publication) that
+    fired while the caller's disk I/O was in flight bumps the generation, so
+    the cold loader observes the movement even when the durable tombstone
+    persistence itself failed — a deleted session is never resurrected
+    behind a successful-looking HTTP delete.
 
     ``SESSIONS``/``LOCK`` are resolved lazily from ``api.config`` (the
     canonical source the models-side callers bind): test fixtures rebind the
@@ -23248,21 +23312,29 @@ def _publish_owner_lease_if_current(sid, *, expected):
     sid = str(sid or "")
     lock, _ = _session_owner_lease(sid)
     with lock:
-        _cas_ok = False
+        # LOCK is acquired and held ACROSS the compare AND the caller's map
+        # write (the ``yield`` body): no LOCK-only publisher can slip a
+        # winner into a check→write gap (review 17 blocker 2).
         with _CAS_LOCK:
             _cas_ok = _CAS_SESSIONS.get(sid) is expected
-        if not _cas_ok:
-            # CAS-fail (a concurrent canonical winner was installed while the
-            # caller's disk I/O was in flight): yield None WITHOUT bumping the
-            # lease, so the winner's claims are never invalidated by a stale
-            # publisher's bump.  LOCK is released before the yield — the
-            # caller's guarded body re-acquires it under lease → LOCK order.
-            yield None
-            return
-        token = uuid.uuid4().hex
-        with _SESSION_OWNER_LEASES_GUARD:
-            _SESSION_OWNER_LEASES[sid] = (lock, token)
-        yield token
+            if _cas_ok and expected_generation is not _OWNER_LEASE_GEN_UNSET:
+                with _SESSION_OWNER_LEASES_GUARD:
+                    _entry = _SESSION_OWNER_LEASES.get(sid)
+                    _current_gen = _entry[1] if _entry is not None else ""
+                _cas_ok = _current_gen == expected_generation
+            if not _cas_ok:
+                # CAS-fail (a concurrent canonical winner was installed while
+                # the caller's disk I/O was in flight): yield None WITHOUT
+                # bumping the lease, so the winner's claims are never
+                # invalidated by a stale publisher's bump.  The caller's
+                # guarded body must skip its SESSIONS write.  LOCK is
+                # released when this generator resumes/exits.
+                yield None
+                return
+            token = uuid.uuid4().hex
+            with _SESSION_OWNER_LEASES_GUARD:
+                _SESSION_OWNER_LEASES[sid] = (lock, token)
+            yield token
 
 
 # Bookkeeping registry of installed claims (keyed by (sid, stream_id)); the
@@ -23507,7 +23579,16 @@ def _claim_runner_owner_fence(owner_token, s):
             resolved = None
         if resolved is None or resolved is not owner:
             return None, "owner_replaced"
-        mismatch = _process_wakeup_owner_token_mismatch(owner_token, owner)
+        # #6327 (review 17): browser runner-local tokens carry a
+        # request-resolved lane (explicit model/provider/workspace change not
+        # yet persisted to the owner fields) — that lane is the authority and
+        # is bound to the fence verbatim.  Only process-wakeup tokens
+        # recompute the lane from the live persisted owner.
+        mismatch = _process_wakeup_owner_token_mismatch(
+            owner_token,
+            owner,
+            recompute_lane=owner_token.get("lane_source") != "request",
+        )
         if mismatch:
             return None, mismatch
         # Compact generation/route fence under canonical owner authority: the
@@ -23598,7 +23679,12 @@ def _worker_retire_pending_state(
                     if (
                         resolved is not None
                         and resolved is owner
-                        and _process_wakeup_owner_token_mismatch(owner_token, resolved) is None
+                        and _process_wakeup_owner_token_mismatch(
+                            owner_token,
+                            resolved,
+                            recompute_lane=owner_token.get("lane_source") != "request",
+                        )
+                        is None
                     ):
                         _retire_provisional_pending_state(owner, stream_id=stream_id)
         except Exception:
@@ -24367,9 +24453,17 @@ def _handle_chat_start(handler, body, diag=None):
                 )
             s = synth
             try:
-                with LOCK:
-                    SESSIONS[s.session_id] = s
-                    SESSIONS.move_to_end(s.session_id)
+                # #6327 (review 17, blocker 2): materialising a foreign
+                # session's sidecar REPLACES the canonical owner under the
+                # same SID — publish as a per-SID publication transaction
+                # holding the owner-generation lease across the exact
+                # SESSIONS write (an in-flight sink serializes first and no
+                # claim can be accepted with a lease minted in a
+                # bump-to-publication gap).
+                with _publish_owner_lease(s.session_id):
+                    with LOCK:
+                        SESSIONS[s.session_id] = s
+                        SESSIONS.move_to_end(s.session_id)
             except Exception:
                 # If the in-memory LRU refuses the new session, fall through
                 # with the just-persisted sidecar; _start_run will load it
