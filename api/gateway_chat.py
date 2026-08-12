@@ -310,16 +310,16 @@ def _gateway_use_runs_api_enabled(config_data=None, environ: dict[str, str] | No
     return raw in ("1", "true", "yes", "on")
 
 
-def _gateway_reasoning_effort_for_request(cfg, *, model=None, model_provider=None):
-    """Read and coerce user-configured reasoning effort for a gateway request."""
+def _gateway_reasoning_effort_for_request(cfg, *, model=None, model_provider=None, session_effort=None):
+    """Resolve the session-aware effective effort for a gateway request."""
     try:
-        cfg_data = cfg if isinstance(cfg, dict) else {}
-        effort_cfg = cfg_data.get("agent", {}) if isinstance(cfg_data, dict) else {}
-        effort_raw = effort_cfg.get("reasoning_effort") if isinstance(effort_cfg, dict) else None
-        coerced = coerce_reasoning_effort_for_model(
-            effort_raw,
+        from api.config import resolve_effective_reasoning_effort
+
+        coerced = resolve_effective_reasoning_effort(
+            cfg if isinstance(cfg, dict) else {},
             model,
             provider_id=model_provider,
+            session_effort=session_effort,
         )
         # Preserve explicit "none" while still omitting absent or invalid effort.
         return None if not coerced else str(coerced)
@@ -995,6 +995,7 @@ def _run_gateway_chat_streaming(
             cfg,
             model=model,
             model_provider=model_provider,
+            session_effort=getattr(s, "reasoning_effort", None),
         )
         base_url = _gateway_base_url(cfg)
         api_key = _gateway_api_key()

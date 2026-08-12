@@ -3357,7 +3357,7 @@ def get_effective_default_model(config_data: dict | None = None) -> str:
 # importing from the agent tree (which may not be installed).  Any drift here
 # will show up in the shared test suite since both sides accept the same set.
 # Keep this WebUI-visible set aligned with hermes-agent#29248.
-VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max")
+VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 
 
 def parse_reasoning_effort(effort):
@@ -3368,10 +3368,12 @@ def parse_reasoning_effort(effort):
     ``{"enabled": True, "effort": <level>}`` for any of
     ``VALID_REASONING_EFFORTS``.
     """
-    if not effort or not str(effort).strip():
+    if effort is False:
+        return {"enabled": False}
+    if effort is None or not str(effort).strip():
         return None
     eff = str(effort).strip().lower()
-    if eff == "none":
+    if eff in {"none", "false", "disabled", "off", "no"}:
         return {"enabled": False}
     if eff in VALID_REASONING_EFFORTS:
         return {"enabled": True, "effort": eff}
@@ -4352,16 +4354,42 @@ def resolve_effective_reasoning_effort(
             overrides = agent_cfg.get("reasoning_overrides")
             overrides = overrides if isinstance(overrides, dict) else {}
             model_raw = str(model_id or "").strip()
-            candidates = [model_raw]
             if model_raw.startswith("@") and ":" in model_raw:
-                candidates.append(model_raw.split(":", 1)[1])
-            if "/" in model_raw:
-                candidates.append(model_raw.rsplit("/", 1)[-1])
-            override = next(
-                (overrides[key] for key in candidates if key and key in overrides),
-                agent_cfg.get("reasoning_effort"),
-            )
-            resolved = {"enabled": str(override or "").strip().lower() != "none", "effort": override}
+                model_raw = model_raw.split(":", 1)[1]
+            candidates = []
+            seen = set()
+
+            def add(value):
+                value = str(value or "")
+                if value and value not in seen:
+                    seen.add(value)
+                    candidates.append(value)
+
+            def add_variants(value):
+                add(value)
+                add(value.replace(".", "-"))
+                add(value.replace("-", "."))
+                add(re.sub(r"(\d)-(\d)", r"\1.\2", value))
+                add(re.sub(r"(\d)\.(\d)", r"\1-\2", value))
+
+            add_variants(model_raw)
+            parts = model_raw.split("/")
+            if len(parts) >= 2:
+                add_variants(parts[-1])
+            if len(parts) >= 3:
+                add_variants("/".join(parts[1:]))
+            override = None
+            for key in candidates:
+                if key not in overrides:
+                    continue
+                parsed = parse_reasoning_effort(overrides[key])
+                if parsed is not None:
+                    override = overrides[key]
+                    break
+            if override is None:
+                override = agent_cfg.get("reasoning_effort", "")
+            parsed = parse_reasoning_effort(override)
+            resolved = parsed
         except Exception:
             resolved = None
         if isinstance(resolved, dict):
@@ -4435,12 +4463,7 @@ def get_reasoning_status(
         "show_reasoning": bool(show_raw) if isinstance(show_raw, bool) else True,
         # Report the COERCED effort so boot/status/chip read paths agree with
         # what streaming actually sends. (Codex review of the drop-max alignment.)
-        "reasoning_effort": coerce_reasoning_effort_for_model(
-            str(effort_raw or "").strip().lower(),
-            resolve_model,
-            provider_id=resolve_provider,
-            base_url=resolve_base_url,
-        ),
+        "reasoning_effort": effort_raw,
         "supported_efforts": supported_efforts,
         "supports_reasoning_effort": bool(supported_efforts),
         # Whether the composer should render ANY reasoning control. True for any
