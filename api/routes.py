@@ -9947,6 +9947,10 @@ from api.route_approvals import (  # noqa: F401 — re-exports for backward comp
     resolve_gateway_pending_local_no_run_mirror,
     submit_gateway_pending_mirror,
     submit_pending,
+    pending_head_for_session_locked,
+    resolve_child_approval_locked,
+    child_approval_keys_for_session_locked,
+    _queue_entries_locked,
 )
 
 # Clarify prompts (optional -- graceful fallback if agent not available)
@@ -9979,6 +9983,12 @@ def _session_attention_summary(session_id: str) -> dict | None:
             approval_count = len(queue_list)
         elif queue_list:
             approval_count = 1
+        if approval_count == 0:
+            # Delegated-child approvals (agent#82009 child-key contract) must
+            # also light the parent's attention dot so a stuck child is
+            # visible from the sidebar (#6943).
+            _child_head, _child_total = pending_head_for_session_locked(session_id)
+            approval_count = _child_total
     if approval_count > 0:
         return {
             "kind": "approval",
@@ -19774,6 +19784,11 @@ def _handle_approval_pending(handler, parsed):
                     total = len(gw_queue)
                 else:
                     logger.warning("Gateway queue entry for %s has no .data attribute", sid)
+        if p is None:
+            # Delegated-child approvals are parked under "subagent:<child_id>"
+            # keys (agent#82009 contract); surface them in the parent session
+            # so a dangerous child command never goes unanswered (#6943).
+            p, total = pending_head_for_session_locked(sid)
     if p:
         return j(handler, {"pending": dict(p), "pending_count": total})
     return j(handler, {"pending": None, "pending_count": 0})
@@ -19809,6 +19824,14 @@ def _handle_approval_sse_stream(handler, parsed):
         elif q_list:
             initial_pending = dict(q_list)
             initial_count = 1
+        if initial_pending is None:
+            # Include delegated-child approvals parked under child keys
+            # (agent#82009 contract) so a fresh stream snapshot matches the
+            # polling endpoint (#6943).
+            _child_head, _child_total = pending_head_for_session_locked(sid)
+            if _child_head is not None:
+                initial_pending = _child_head
+                initial_count = _child_total
 
     handler.send_response(200)
     handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
@@ -24357,9 +24380,25 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: st
         gateway_resolved = resolve_gateway_approval(sid, choice, resolve_all=False) or 0
     elif not approval_id:
         gateway_resolved = resolve_gateway_approval(sid, choice, resolve_all=False) or 0
+    # Delegated-child approvals (#6943): the agent parks a child's approval
+    # under "subagent:<child_session_id>" (agent#82009 contract). Resolve it
+    # under the child's own key — session/permanent approval plus gateway
+    # wakeup — so the child's next guarded call proceeds instead of retrying
+    # forever while the UI believes the click was answered. Runs only when the
+    # parent's own queue had no match, and outside `_lock` (the child-side
+    # approve_session/resolve_gateway_approval acquire the agent lock).
+    child_resolved = False
+    if not pending:
+        child_resolved = resolve_child_approval_locked(sid, approval_id, choice)
     # Keep the historical no-id response path truthy for old clients/tests while
     # making stale explicit ids bounded as not-active for Slice 3b.
-    resolved = bool(pending) or bool(gateway_resolved) or bool(local_gateway_resolved) or not bool(approval_id)
+    resolved = (
+        bool(pending)
+        or bool(gateway_resolved)
+        or bool(local_gateway_resolved)
+        or bool(child_resolved)
+        or not bool(approval_id)
+    )
     if resolved:
         publish_session_list_changed("attention_resolved")
     return resolved
@@ -24413,7 +24452,16 @@ def _session_has_pending_approval(sid: str) -> bool:
         elif queue:
             return True
         gw_queue = _gateway_queues.get(sid)
-        return bool(gw_queue)
+        if gw_queue:
+            return True
+        # A delegated-child approval parked under a child key (agent#82009
+        # contract) is still live work for this session (#6943).
+        for child_key in child_approval_keys_for_session_locked(sid):
+            if child_key == sid:
+                continue
+            if _queue_entries_locked(child_key):
+                return True
+        return False
 
 
 def _handle_approval_respond(handler, body):

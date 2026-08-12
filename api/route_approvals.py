@@ -3,11 +3,15 @@
 State-extraction prelude to the routes.py split tracked in #1907.
 Extracts approval state, not handlers, by design.
 """
+import json
+import logging
 import queue
 import threading
 import uuid
 
 from api.session_events import publish_session_list_changed
+
+logger = logging.getLogger(__name__)
 
 # Approval system (optional -- graceful fallback if agent not available)
 try:
@@ -636,3 +640,201 @@ def submit_pending(session_key: str, approval: dict) -> None:
     # built. The gateway blocking path uses _gateway_queues (a separate mechanism
     # managed by check_all_command_guards / register_gateway_notify), which is
     # unaffected by _pending. The _pending dict is only used for UI polling.
+
+
+# ── Delegated-child approval routing (agent approval-key rebinding contract) ─
+# The agent rebinds a delegated child's approval authority to a child-owned
+# key ("subagent:<child_session_id>") at the worker boundary (hermes-agent
+# PR #82009, the agent-side root-cause fix for nesquena/hermes-webui#6100).
+# The WebUI previously only ever read/resolved approvals under the parent
+# WebUI session key, so a dangerous child command enqueued under the child key
+# was never surfaced and the child retried forever — "approval gets stuck"
+# (nesquena/hermes-webui#6943). These helpers route child-key approvals into
+# the parent session's UI and resolve them back under the child's key.
+_CHILD_APPROVAL_KEY_PREFIX = "subagent:"
+
+# child_session_id -> parent session key. Populated lazily on first sight of a
+# child approval key (state.db fallback below); seeded directly by tests.
+_child_approval_parents: dict[str, str] = {}
+
+
+def _is_child_approval_key(key: str) -> bool:
+    """True when *key* is a delegated-child approval key (``subagent:`` prefix)."""
+    return isinstance(key, str) and key.startswith(_CHILD_APPROVAL_KEY_PREFIX)
+
+
+def _child_parent_session_id(child_session_id: str) -> str | None:
+    """Return the parent WebUI session key for a delegated child session id.
+
+    Consults the in-process cache first, then falls back to the state.db
+    signals the sidebar uses to identify delegated children (#5307): the
+    ``model_config._delegate_from`` marker is authoritative, and
+    ``source='subagent'`` + ``parent_session_id`` is the legacy signal. Any
+    failure resolves to ``None`` (fail-closed: an unassociated child approval
+    is never surfaced in a session that does not own it).
+    """
+    cached = _child_approval_parents.get(child_session_id)
+    if cached is not None:
+        return cached or None
+    parent: str | None = None
+    try:
+        from api.models import _active_state_db_path
+        from contextlib import closing
+        from pathlib import Path
+        import sqlite3 as _sqlite
+
+        db_path = _active_state_db_path()
+        if db_path and Path(str(db_path)).exists():
+            with closing(_sqlite.connect(str(db_path))) as conn:
+                row = conn.execute(
+                    "SELECT parent_session_id, model_config, source FROM sessions WHERE id = ?",
+                    (child_session_id,),
+                ).fetchone()
+            if row:
+                parent_session_id, raw_model_config, source = row
+                model_config = {}
+                if isinstance(raw_model_config, str) and raw_model_config.strip():
+                    try:
+                        parsed = json.loads(raw_model_config)
+                        if isinstance(parsed, dict):
+                            model_config = parsed
+                    except (TypeError, ValueError):
+                        pass
+                delegate_from = str(model_config.get("_delegate_from") or "").strip()
+                if delegate_from:
+                    parent = delegate_from
+                elif str(source or "").strip().lower() == "subagent":
+                    parent = str(parent_session_id or "").strip() or None
+    except Exception:
+        logger.debug("child approval parent lookup failed", exc_info=True)
+    _child_approval_parents[child_session_id] = parent or ""
+    return parent
+
+
+def child_approval_keys_for_session_locked(session_key: str) -> list[str]:
+    """Return every approval key that belongs to *session_key*.
+
+    Includes the session's own key plus any delegated-child keys
+    (``subagent:<child_session_id>``) whose recorded parent is this session.
+
+    CALLER MUST HOLD `_lock`. Scans only keys that actually carry a pending
+    entry, so the child->parent mapping stays lazy and costs nothing when no
+    child approval is live.
+    """
+    keys = [session_key]
+    seen = {session_key}
+    for candidate in list(_gateway_queues.keys()) + list(_pending.keys()):
+        if not _is_child_approval_key(candidate) or candidate in seen:
+            continue
+        seen.add(candidate)
+        child_id = candidate[len(_CHILD_APPROVAL_KEY_PREFIX):]
+        if _child_parent_session_id(child_id) == session_key:
+            keys.append(candidate)
+    return keys
+
+
+def _queue_entries_locked(key: str) -> list[dict]:
+    """Return the pending entries for *key* as a list of dicts.
+
+    Tolerates the agent's legacy single-dict ``_pending`` value and folds in
+    live gateway-queue heads (``_ApprovalEntry.data`` payloads).
+
+    CALLER MUST HOLD `_lock`.
+    """
+    entries: list[dict] = []
+    q = _pending.get(key)
+    if isinstance(q, list):
+        entries.extend(dict(entry) for entry in q)
+    elif q:
+        entries.append(dict(q))
+    for entry in _gateway_queues.get(key) or []:
+        raw = getattr(entry, "data", None) or {}
+        if raw:
+            entries.append(dict(raw))
+    return entries
+
+
+def pending_head_for_session_locked(session_key: str) -> tuple[dict | None, int]:
+    """Return ``(head, total)`` of every pending approval visible for *session_key*.
+
+    The session's own queue comes first, then any delegated-child approvals
+    routed to this session under the agent#82009 child-key contract (fixes
+    nesquena/hermes-webui#6943: child approvals were never surfaced, leaving
+    the child retrying forever).
+
+    CALLER MUST HOLD `_lock`.
+    """
+    entries = _queue_entries_locked(session_key)
+    for child_key in child_approval_keys_for_session_locked(session_key):
+        if child_key == session_key:
+            continue
+        entries.extend(_queue_entries_locked(child_key))
+    if not entries:
+        return None, 0
+    return dict(entries[0]), len(entries)
+
+
+def resolve_child_approval_locked(session_key: str, approval_id: str, choice: str) -> bool:
+    """Resolve a pending approval that lives under a delegated-child key.
+
+    CALLER MUST HOLD `_lock`. Returns True when an entry was found and
+    resolved under the child's own key — session/permanent approval applied to
+    the child key and the child's gateway queue woken — so the parent-session
+    respond path clears the card and the child's next guarded call proceeds
+    instead of retrying forever (#6943).
+    """
+    approval_id = str(approval_id or "").strip()
+    for child_key in child_approval_keys_for_session_locked(session_key):
+        if child_key == session_key:
+            continue
+        entries = _queue_entries_locked(child_key)
+        if not entries:
+            continue
+        if approval_id:
+            target = next(
+                (e for e in entries if e.get("approval_id") == approval_id), None
+            )
+            if target is None:
+                continue
+        else:
+            target = entries[0]
+
+        # Remove the entry from the source queue (list or legacy single dict).
+        q = _pending.get(child_key)
+        removed = False
+        if isinstance(q, list):
+            for i, entry in enumerate(q):
+                if (approval_id and entry.get("approval_id") == approval_id) or (
+                    not approval_id and i == 0
+                ):
+                    q.pop(i)
+                    removed = True
+                    break
+            if not q:
+                _pending.pop(child_key, None)
+        elif q is not None:
+            if not approval_id or q.get("approval_id") == approval_id:
+                _pending.pop(child_key, None)
+                removed = True
+        if not removed:
+            continue
+
+        pattern_keys = target.get("pattern_keys") or (
+            [target["pattern_key"]] if target.get("pattern_key") else []
+        )
+        if choice == "session":
+            for pattern_key in pattern_keys:
+                if pattern_key:
+                    approve_session(child_key, pattern_key)
+        elif choice == "always":
+            for pattern_key in pattern_keys:
+                if pattern_key:
+                    approve_session(child_key, pattern_key)
+                    approve_permanent(pattern_key)
+            save_permanent_allowlist(_permanent_approved)
+        # choice == "once": no persistence — the child's next matching guarded
+        # call re-prompts, exactly like the parent "once" contract.
+        resolve_gateway_approval(child_key, choice, resolve_all=False)
+        return True
+    return False
+

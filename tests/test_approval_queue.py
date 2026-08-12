@@ -248,3 +248,218 @@ def test_stale_explicit_approval_id_does_not_pop_oldest_entry():
 
     with r._lock:
         r._pending.pop(sid, None)
+
+
+# ---------------------------------------------------------------------------
+# Delegated-child approval routing (#6943)
+#
+# The agent rebinds a delegated child's approval authority to a child-owned
+# key "subagent:<child_session_id>" (hermes-agent #82009 contract). These
+# tests prove the WebUI surfaces and resolves those child-key approvals under
+# the parent session key instead of leaving the child stuck forever.
+# ---------------------------------------------------------------------------
+
+def _seed_child_parent(child_session_id: str, parent_session_id: str) -> None:
+    from api import route_approvals as ra
+
+    with ra._lock:
+        ra._child_approval_parents[child_session_id] = parent_session_id
+
+
+def _clear_approval_state(*session_keys: str) -> None:
+    from api import routes as r
+    from api import route_approvals as ra
+
+    with ra._lock:
+        for key in session_keys:
+            r._pending.pop(key, None)
+            r._gateway_queues.pop(key, None)
+        ra._child_approval_parents.clear()
+
+
+def test_child_approval_surfaced_under_parent_key():
+    """A child-key approval must be visible when polling the parent session."""
+    from api import routes as r
+
+    parent = "test-child-parent-surfaced"
+    child = "test-child-surfaced"
+    child_key = f"subagent:{child}"
+    _clear_approval_state(parent, child_key)
+    _seed_child_parent(child, parent)
+    try:
+        r.submit_pending(
+            child_key,
+            {"command": "childcmd", "pattern_key": "cp", "pattern_keys": ["cp"], "description": "cd"},
+        )
+        with r._lock:
+            head, total = r.pending_head_for_session_locked(parent)
+        assert head is not None, "child approval must be surfaced under parent key"
+        assert head["command"] == "childcmd"
+        assert total == 1
+        # The parent's own queue stays untouched; the entry lives under the
+        # child key so the agent-side child resolution still finds it.
+        with r._lock:
+            assert not r._pending.get(parent)
+            assert len(r._pending[child_key]) == 1
+    finally:
+        _clear_approval_state(parent, child_key)
+
+
+def test_child_approval_resolved_via_parent_respond_path():
+    """Responding from the parent session must resolve the child-key entry."""
+    from api import routes as r
+
+    parent = "test-child-parent-resolve"
+    child = "test-child-resolve"
+    child_key = f"subagent:{child}"
+    _clear_approval_state(parent, child_key)
+    _seed_child_parent(child, parent)
+    try:
+        r.submit_pending(
+            child_key,
+            {"command": "childcmd", "pattern_key": "cp", "pattern_keys": ["cp"], "description": "cd"},
+        )
+        with r._lock:
+            aid = r._pending[child_key][0]["approval_id"]
+
+        accepted = r._resolve_approval_legacy(parent, aid, "once")
+
+        assert accepted is True, "parent respond must resolve the child approval"
+        with r._lock:
+            assert child_key not in r._pending, "child entry must be removed on resolve"
+        # A stale second click must not be accepted (nothing pending anymore).
+        assert r._resolve_approval_legacy(parent, aid, "once") is False
+    finally:
+        _clear_approval_state(parent, child_key)
+
+
+def test_child_approval_no_id_respond_resolves_child_head():
+    """A legacy no-approval_id click from the parent resolves the child head."""
+    from api import routes as r
+
+    parent = "test-child-parent-noid"
+    child = "test-child-noid"
+    child_key = f"subagent:{child}"
+    _clear_approval_state(parent, child_key)
+    _seed_child_parent(child, parent)
+    try:
+        r.submit_pending(
+            child_key,
+            {"command": "childcmd", "pattern_key": "cp", "pattern_keys": ["cp"], "description": "cd"},
+        )
+        assert r._resolve_approval_legacy(parent, "", "once") is True
+        with r._lock:
+            assert child_key not in r._pending
+    finally:
+        _clear_approval_state(parent, child_key)
+
+
+def test_parent_approval_unchanged_by_child_routing():
+    """A normal parent-key approval resolves exactly as before the fix."""
+    from api import routes as r
+
+    parent = "test-child-parent-normal"
+    child = "test-child-normal"
+    child_key = f"subagent:{child}"
+    _clear_approval_state(parent, child_key)
+    _seed_child_parent(child, parent)
+    try:
+        r.submit_pending(
+            parent,
+            {"command": "parentcmd", "pattern_key": "pp", "pattern_keys": ["pp"], "description": "pd"},
+        )
+        r.submit_pending(
+            child_key,
+            {"command": "childcmd", "pattern_key": "cp", "pattern_keys": ["cp"], "description": "cd"},
+        )
+        with r._lock:
+            parent_aid = r._pending[parent][0]["approval_id"]
+            child_aid = r._pending[child_key][0]["approval_id"]
+
+        # Parent head must be its own approval, not the child's.
+        with r._lock:
+            head, total = r.pending_head_for_session_locked(parent)
+        assert head["approval_id"] == parent_aid
+        assert total == 2
+
+        assert r._resolve_approval_legacy(parent, parent_aid, "once") is True
+        with r._lock:
+            assert parent not in r._pending
+            assert len(r._pending[child_key]) == 1
+            assert r._pending[child_key][0]["approval_id"] == child_aid
+        # A stale explicit child id must not resolve the unrelated parent head
+        # (#527 guard) — and here nothing is pending for the parent at all.
+        assert r._resolve_approval_legacy(parent, "missing-id", "deny") is False
+    finally:
+        _clear_approval_state(parent, child_key)
+
+
+def test_session_has_pending_approval_sees_child_approval():
+    """_session_has_pending_approval must count child-key work as live."""
+    from api import routes as r
+
+    parent = "test-child-parent-haspending"
+    child = "test-child-haspending"
+    child_key = f"subagent:{child}"
+    _clear_approval_state(parent, child_key)
+    _seed_child_parent(child, parent)
+    try:
+        assert r._session_has_pending_approval(parent) is False
+        r.submit_pending(
+            child_key,
+            {"command": "childcmd", "pattern_key": "cp", "pattern_keys": ["cp"], "description": "cd"},
+        )
+        assert r._session_has_pending_approval(parent) is True
+    finally:
+        _clear_approval_state(parent, child_key)
+
+
+def test_attention_summary_lights_for_child_approval():
+    """The sidebar attention dot must light when only a child approval is live."""
+    from api import routes as r
+
+    parent = "test-child-parent-attn"
+    child = "test-child-attn"
+    child_key = f"subagent:{child}"
+    _clear_approval_state(parent, child_key)
+    _seed_child_parent(child, parent)
+    try:
+        assert r._session_attention_summary(parent) is None
+        r.submit_pending(
+            child_key,
+            {"command": "childcmd", "pattern_key": "cp", "pattern_keys": ["cp"], "description": "cd"},
+        )
+        summary = r._session_attention_summary(parent)
+        assert summary is not None
+        assert summary["kind"] == "approval"
+        assert summary["count"] == 1
+    finally:
+        _clear_approval_state(parent, child_key)
+
+
+def test_unassociated_child_approval_not_surfaced():
+    """A child key with no recorded parent must fail closed (never surfaced)."""
+    from api import routes as r
+
+    parent = "test-child-parent-unassoc"
+    child = "test-child-unassoc"
+    child_key = f"subagent:{child}"
+    _clear_approval_state(parent, child_key)
+    try:
+        r.submit_pending(
+            child_key,
+            {"command": "childcmd", "pattern_key": "cp", "pattern_keys": ["cp"], "description": "cd"},
+        )
+        with r._lock:
+            head, total = r.pending_head_for_session_locked(parent)
+        assert head is None
+        assert total == 0
+        with r._lock:
+            aid = r._pending[child_key][0]["approval_id"]
+        # Explicit-id respond must fail closed: the entry stays parked under
+        # the child key, never surfaced into an unrelated parent session.
+        assert r._resolve_approval_legacy(parent, aid, "once") is False
+        with r._lock:
+            assert child_key in r._pending, "unassociated child entry must stay parked"
+    finally:
+        _clear_approval_state(parent, child_key)
