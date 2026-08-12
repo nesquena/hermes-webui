@@ -2,6 +2,8 @@ import copy
 import json
 import threading
 
+import pytest
+
 
 def _incomplete_reasoning_only(message_id, *, reasoning="encrypted reasoning", timestamp=123):
     return {
@@ -465,6 +467,80 @@ def test_save_writes_index_from_same_collapsed_snapshot(tmp_path, monkeypatch):
     # 2, and no adoption of the dropped duplicate's later timestamp.
     assert entry["message_count"] == sidecar["message_count"] == 1
     assert entry["last_message_at"] == 100
+
+
+@pytest.mark.parametrize("first_generation", ["one", "two"])
+def test_same_sid_saves_publish_one_complete_generation_in_both_orders(
+    tmp_path, monkeypatch, first_generation
+):
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    index_file = session_dir / "_index.json"
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", index_file)
+
+    one = models.Session(
+        session_id="shared-save-authority",
+        title="generation-one",
+        model="model-one",
+        messages=[{"role": "user", "content": "one", "timestamp": 100}],
+    )
+    two = models.Session(
+        session_id="shared-save-authority",
+        title="generation-two",
+        model="model-two",
+        messages=[
+            {"role": "user", "content": "one", "timestamp": 100},
+            {"role": "assistant", "content": "two", "timestamp": 200},
+        ],
+    )
+    generations = {"one": one, "two": two}
+    second_generation = "two" if first_generation == "one" else "one"
+    first_reached_index = threading.Event()
+    release_first = threading.Event()
+    second_started = threading.Event()
+    real_write_index = models._write_session_index
+    first_thread_id = {"value": None}
+
+    def gated_write_index(*args, **kwargs):
+        if threading.get_ident() == first_thread_id["value"]:
+            first_reached_index.set()
+            assert release_first.wait(timeout=2)
+        return real_write_index(*args, **kwargs)
+
+    monkeypatch.setattr(models, "_write_session_index", gated_write_index)
+
+    def save_first():
+        first_thread_id["value"] = threading.get_ident()
+        generations[first_generation].save(touch_updated_at=False)
+
+    def save_second():
+        second_started.set()
+        generations[second_generation].save(touch_updated_at=False)
+
+    first = threading.Thread(target=save_first)
+    second = threading.Thread(target=save_second)
+    first.start()
+    assert first_reached_index.wait(timeout=2)
+    second.start()
+    assert second_started.wait(timeout=2)
+    release_first.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+    assert not first.is_alive()
+    assert not second.is_alive()
+
+    sidecar = json.loads((session_dir / "shared-save-authority.json").read_text(encoding="utf-8"))
+    index = json.loads(index_file.read_text(encoding="utf-8"))
+    row = next(entry for entry in index if entry["session_id"] == "shared-save-authority")
+    expected = generations[second_generation]
+    assert sidecar["title"] == row["title"] == expected.title
+    assert sidecar["model"] == row["model"] == expected.model
+    assert sidecar["message_count"] == row["message_count"] == len(expected.messages)
+    assert row["user_message_count"] == expected._compute_user_message_count(expected.messages)
+    assert row["last_message_at"] == expected.messages[-1]["timestamp"]
 
 
 def test_recovery_restores_the_collapsed_backup_payload(tmp_path):

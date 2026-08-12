@@ -12,6 +12,7 @@ import re
 import threading
 import time
 import uuid
+import weakref
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -185,9 +186,21 @@ def _safe_replace(src: Path, dst: Path) -> None:
 # Serializes index writers so concurrent Session.save() calls cannot race on
 # stale baselines while still allowing LOCK to be released before disk I/O.
 _INDEX_WRITE_LOCK = threading.RLock()
+_SESSION_SAVE_AUTHORITIES_LOCK = threading.Lock()
+_SESSION_SAVE_AUTHORITIES: "weakref.WeakValueDictionary[str, threading.RLock]" = weakref.WeakValueDictionary()
 _SESSION_INDEX_REBUILD_LOCK = threading.Lock()
 _SESSION_INDEX_REBUILD_THREAD = None
 _SESSION_INDEX_REBUILD_THREAD_TARGET: tuple[Path, Path] | None = None
+
+
+def _session_save_authority(session_id: str) -> threading.RLock:
+    """Return the process-wide reentrant save authority for one session ID."""
+    with _SESSION_SAVE_AUTHORITIES_LOCK:
+        authority = _SESSION_SAVE_AUTHORITIES.get(session_id)
+        if authority is None:
+            authority = threading.RLock()
+            _SESSION_SAVE_AUTHORITIES[session_id] = authority
+        return authority
 
 # Serializes ``_record_webui_zero_message_orphan_tombstone`` /
 # ``_clear_webui_zero_message_orphan_tombstone`` so two concurrent sidebar
@@ -1377,6 +1390,14 @@ class Session:
         return SESSION_DIR / f'{self.session_id}.json'
 
     def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
+        # Distinct Session objects can represent the same durable sidecar.  One
+        # stable SID authority therefore spans snapshot creation, sidecar
+        # replacement, and publication of the matching compact index row.
+        authority = _session_save_authority(self.session_id)
+        with authority:
+            self._save_owned_generation(touch_updated_at=touch_updated_at, skip_index=skip_index)
+
+    def _save_owned_generation(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
         if not is_safe_session_id(self.session_id):
             raise ValueError(f"Unsafe session_id {self.session_id!r}; refusing to write outside session store")
         # ── #1558 P0 guard ──────────────────────────────────────────────
@@ -1403,10 +1424,17 @@ class Session:
         # Own the complete snapshot BEFORE duplicate selection.  Otherwise a
         # nested mutation after selection but before deepcopy can invalidate the
         # equality decision and leak into this save's payload (#6600).
-        owned_messages = copy.deepcopy(self.messages)
-        messages_to_persist, _ = _collapse_duplicate_incomplete_message_ids(owned_messages)
         if touch_updated_at:
             self.updated_at = time.time()
+        # Freeze every persisted/indexed field, not only messages.  The sidecar
+        # and compact row below are projections of this one immutable generation.
+        generation = copy.copy(self)
+        generation.__dict__ = {
+            key: copy.deepcopy(value)
+            for key, value in self.__dict__.items()
+        }
+        owned_messages = generation.messages
+        messages_to_persist, _ = _collapse_duplicate_incomplete_message_ids(owned_messages)
         # Write metadata fields first so load_metadata_only() can read them
         # without parsing the full messages array (which may be 400KB+).
         # Fields are listed in the order they should appear in the JSON file.
@@ -1437,7 +1465,7 @@ class Session:
             'process_wakeup_pause',
             'share_token', 'share_created_at',
         ]
-        meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
+        meta = {k: getattr(generation, k, None) for k in METADATA_FIELDS}
         # #5854: message_count and a compact anchor-scene fingerprint go in the
         # metadata prefix (BEFORE messages) so load_metadata_only() and the
         # sidebar-poll freshness check never have to parse the full (250-480KB)
@@ -1445,7 +1473,7 @@ class Session:
         # legacy-format reader that stops at a scene key still finds the count.
         # The full anchor_activity_scenes bodies serialize AFTER messages.
         meta['message_count'] = len(messages_to_persist or [])
-        meta['anchor_scene_index'] = _anchor_scene_index_from_records(self.anchor_activity_scenes)
+        meta['anchor_scene_index'] = _anchor_scene_index_from_records(generation.anchor_activity_scenes)
         # Keep the in-memory fingerprint aligned with what we just persisted, so a
         # later metadata-only reload of THIS object (or any fingerprint reader)
         # sees the current value rather than a stale load-time snapshot (#5854
@@ -1453,12 +1481,12 @@ class Session:
         # not this, so this is belt-and-suspenders).
         self._anchor_scene_index = dict(meta['anchor_scene_index'])
         meta['messages'] = messages_to_persist
-        meta['tool_calls'] = self.tool_calls
-        meta['anchor_activity_scenes'] = self.anchor_activity_scenes if isinstance(self.anchor_activity_scenes, dict) else {}
+        meta['tool_calls'] = generation.tool_calls
+        meta['anchor_activity_scenes'] = generation.anchor_activity_scenes if isinstance(generation.anchor_activity_scenes, dict) else {}
         # Fields not in METADATA_FIELDS (e.g. last_usage) go at the end. Exclude
         # the keys we placed explicitly above so they aren't emitted twice.
         _placed = {'message_count', 'anchor_scene_index', 'messages', 'tool_calls', 'anchor_activity_scenes'}
-        extra = {k: v for k, v in self.__dict__.items()
+        extra = {k: v for k, v in generation.__dict__.items()
                  if k not in METADATA_FIELDS and k not in _placed
                  and not k.startswith('_')}
         payload = json.dumps({**meta, **extra}, ensure_ascii=False, indent=2)
@@ -1487,7 +1515,7 @@ class Session:
                 if (
                     existing_msg_count > 0
                     and incoming_msg_count == 0
-                    and (self.active_stream_id or self.pending_user_message)
+                    and (generation.active_stream_id or generation.pending_user_message)
                 ):
                     logger.warning(
                         "refusing to overwrite session %s messages with empty active/pending snapshot "
@@ -1495,7 +1523,7 @@ class Session:
                         self.session_id,
                         existing_msg_count,
                         incoming_msg_count,
-                        self.active_stream_id,
+                        generation.active_stream_id,
                     )
                     return
                 if existing_msg_count > incoming_msg_count:
@@ -1544,7 +1572,7 @@ class Session:
             # just serialized — never from the live list — so _index.json can
             # neither record the uncollapsed message_count nor adopt a dropped
             # duplicate row's later timestamp.
-            index_entry = self.compact(projection_messages=messages_to_persist)
+            index_entry = generation.compact(projection_messages=messages_to_persist)
             _write_session_index(updates=[index_entry])
 
         # #4985 belt-and-suspenders self-heal: a successful save with at
