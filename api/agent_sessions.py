@@ -54,7 +54,6 @@ MESSAGING_SOURCES = {
 
 CLI_MIN_UNTITLED_MESSAGE_COUNT = 6
 CLI_MIN_UNTITLED_USER_MESSAGE_COUNT = 2
-COMPRESSION_ROTATION_OVERLAP_TOLERANCE_SECONDS = 1.0
 
 SOURCE_LABELS = {
     'acp': 'ACP',
@@ -345,12 +344,12 @@ def _session_lineage_identity(row: dict) -> dict[str, str] | None:
 def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
     """Return True when ``child`` is the next segment of the same conversation.
 
-    Compression rotates session ids automatically. The replacement row may be
-    inserted just before the parent closure is committed, so automatic rotation
-    tolerates a bounded timestamp overlap. Production branch/delegate identity
-    in ``model_config`` is authoritative before that allowance is considered.
-    A manual CLI close followed by ``hermes -c`` still requires the child to
-    start after the parent's ended boundary.
+    Compression rotates session ids automatically. The durable writer inserts
+    the physical child and its handoff before stamping the parent closed, with no
+    elapsed wall-clock bound on that work. Once physical parent, identity, fork,
+    and source guards pass, compression is authoritative regardless of timestamp
+    overlap. A manual CLI close followed by ``hermes -c`` still requires the
+    child to start after the parent's ended boundary.
 
     Do not collapse lineage across raw sources. A WebUI session that continues
     from a Telegram/CLI/etc. parent must remain visible as its own surface-owned
@@ -401,12 +400,9 @@ def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
         return False
     if not math.isfinite(child_started_at) or not math.isfinite(parent_ended_at):
         return False
-    tolerance = (
-        COMPRESSION_ROTATION_OVERLAP_TOLERANCE_SECONDS
-        if end_reason == 'compression'
-        else 0.0
-    )
-    return child_started_at + tolerance >= parent_ended_at
+    if end_reason == 'compression':
+        return True
+    return child_started_at >= parent_ended_at
 
 
 def _continuation_root_id(rows_by_id: dict[str, dict], session_id: str | None) -> str | None:

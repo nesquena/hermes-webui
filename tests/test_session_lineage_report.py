@@ -192,7 +192,7 @@ def test_compression_persist_race_still_collapses_to_one_lineage(tmp_path):
 def test_production_identity_metadata_keeps_branches_out_of_raced_compression_lineage(
     tmp_path, monkeypatch
 ):
-    """Production branch/delegate identity wins before bounded overlap stitching."""
+    """A slow production handoff stitches only after identity/source guards pass."""
     db_path = tmp_path / "state.db"
     conn = _ensure_production_state_db(db_path)
     root_id = "67731d41a751"
@@ -204,7 +204,6 @@ def test_production_identity_metadata_keeps_branches_out_of_raced_compression_li
     malformed_id = "malformed_identity"
     ambiguous_id = "ambiguous_identity"
     foreign_identity_id = "foreign_identity"
-    older_id = "materially_older_child"
     inherited_identity = {"_branched_from": "pre_compression_origin"}
     try:
         _insert_production_row(
@@ -237,7 +236,10 @@ def test_production_identity_metadata_keeps_branches_out_of_raced_compression_li
             conn,
             tip_id,
             parent=middle2_id,
-            started_at=1300.0,
+            # Publishing a large handoff can take longer than one second before
+            # the parent closure is stamped. The Agent contract has no elapsed
+            # wall-clock cutoff once the physical and identity guards validate.
+            started_at=1290.0,
             model_config=inherited_identity,
         )
         _insert_production_row(
@@ -278,13 +280,6 @@ def test_production_identity_metadata_keeps_branches_out_of_raced_compression_li
             started_at=1300.02,
             model_config={"_branched_from": "unrelated_lineage"},
         )
-        _insert_production_row(
-            conn,
-            older_id,
-            parent=middle2_id,
-            started_at=1290.0,
-        )
-
         rows = agent_sessions.read_importable_agent_session_rows(
             db_path, limit=None, exclude_sources=()
         )
@@ -296,7 +291,6 @@ def test_production_identity_metadata_keeps_branches_out_of_raced_compression_li
             malformed_id,
             ambiguous_id,
             foreign_identity_id,
-            older_id,
         }
         assert rows_by_id[tip_id]["_lineage_root_id"] == root_id
         assert rows_by_id[tip_id]["_lineage_tip_id"] == tip_id
@@ -307,7 +301,6 @@ def test_production_identity_metadata_keeps_branches_out_of_raced_compression_li
             malformed_id,
             ambiguous_id,
             foreign_identity_id,
-            older_id,
         ):
             assert rows_by_id[independent_id]["relationship_type"] == "child_session"
             assert "_lineage_root_id" not in rows_by_id[independent_id]
@@ -347,7 +340,6 @@ def test_production_identity_metadata_keeps_branches_out_of_raced_compression_li
                 malformed_id,
                 ambiguous_id,
                 foreign_identity_id,
-                older_id,
             },
         )
         assert metadata[tip_id]["_lineage_root_id"] == root_id
@@ -360,7 +352,6 @@ def test_production_identity_metadata_keeps_branches_out_of_raced_compression_li
             malformed_id,
             ambiguous_id,
             foreign_identity_id,
-            older_id,
         ):
             assert metadata[independent_id]["relationship_type"] == "child_session"
             assert "_lineage_root_id" not in metadata[independent_id]
@@ -383,7 +374,6 @@ def test_production_identity_metadata_keeps_branches_out_of_raced_compression_li
             malformed_id,
             ambiguous_id,
             foreign_identity_id,
-            older_id,
         ):
             assert [
                 message["content"]
@@ -699,9 +689,9 @@ def test_cli_close_overlap_remains_a_child_session(tmp_path):
         conn.close()
 
 
-def test_compression_overlap_allowance_is_bounded_at_one_second():
+def test_guarded_compression_handoff_has_no_wall_clock_cutoff():
     parent = {
-        "id": "bounded_parent",
+        "id": "compression_parent",
         "source": "webui",
         "ended_at": 200.0,
         "end_reason": "compression",
@@ -710,19 +700,10 @@ def test_compression_overlap_allowance_is_bounded_at_one_second():
     assert agent_sessions._is_continuation_session(
         parent,
         {
-            "id": "at_boundary",
+            "id": "slow_handoff",
             "source": "webui",
-            "parent_session_id": "bounded_parent",
-            "started_at": 199.0,
-        },
-    )
-    assert not agent_sessions._is_continuation_session(
-        parent,
-        {
-            "id": "past_boundary",
-            "source": "webui",
-            "parent_session_id": "bounded_parent",
-            "started_at": 198.999,
+            "parent_session_id": "compression_parent",
+            "started_at": 150.0,
         },
     )
 

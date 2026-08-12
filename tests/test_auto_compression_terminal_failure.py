@@ -7,7 +7,7 @@ import sys
 import types
 from pathlib import Path
 
-from api import models, streaming
+from api import models, routes, streaming
 from api.models import Session
 from api.streaming import (
     _agent_result_terminal_failure,
@@ -36,18 +36,38 @@ def test_compression_exhausted_after_session_rotation_preserves_snapshot_and_err
     streaming.SESSION_AGENT_LOCKS.clear()
     old_sid = "old_sid"
     new_sid = "new_sid"
+    root_sid = "root_sid"
     stream_id = "stream-compression-exhausted"
+    root_messages = [
+        {"role": "user", "content": "Ancestor prompt", "timestamp": 1},
+        {"role": "assistant", "content": "Ancestor answer", "timestamp": 2},
+    ]
+    old_segment = [
+        {"role": "user", "content": "Earlier prompt", "timestamp": 3},
+        {"role": "assistant", "content": "Earlier answer", "timestamp": 4},
+    ]
+    root = Session(
+        session_id=root_sid,
+        title="Compression root",
+        workspace=str(tmp_path),
+        model="gpt-4o",
+        messages=copy.deepcopy(root_messages),
+        context_messages=copy.deepcopy(root_messages),
+        pre_compression_snapshot=True,
+    )
+    root.save(touch_updated_at=False)
     session = Session(
         session_id=old_sid,
         title="Compression test",
         workspace=str(tmp_path),
         model="gpt-4o",
-        messages=[],
-        context_messages=[],
+        messages=copy.deepcopy(root_messages + old_segment),
+        context_messages=copy.deepcopy(root_messages + old_segment),
+        parent_session_id=root_sid,
     )
     session.active_stream_id = stream_id
     session.pending_user_message = "Do the long task."
-    session.pending_started_at = 1.0
+    session.pending_started_at = 5.0
     session.save()
     models.SESSIONS[old_sid] = session
     streaming.SESSIONS[old_sid] = session
@@ -97,9 +117,15 @@ def test_compression_exhausted_after_session_rotation_preserves_snapshot_and_err
                 "compression_exhausted": True,
                 "error": "Context length exceeded: cannot compress further.",
                 "messages": [
+                    *(kwargs.get("conversation_history") or []),
                     {"role": "user", "content": kwargs.get("persist_user_message", "")},
                     {"role": "assistant", "content": "I am still working through the files."},
-                    {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1"}]},
+                    {
+                        "role": "assistant",
+                        "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}}],
+                        "reasoning_content": "Reasoning before the tool.",
+                        "tool_calls": [{"id": "call_1"}],
+                    },
                     {"role": "tool", "tool_call_id": "call_1", "content": "large output"},
                 ],
             }
@@ -138,9 +164,14 @@ def test_compression_exhausted_after_session_rotation_preserves_snapshot_and_err
     assert payload["recommended_recovery_action"] == "start_focused_continuation"
     assert payload["compression_recovery"]["terminal_state"] == "compression_exhausted"
     assert payload["compression_recovery"]["source_session_id"] == new_sid
+    assert payload["session"]["messages"][-1]["_error"] is True
+    assert "Context compression exhausted" in payload["session"]["messages"][-1]["content"]
 
+    root_payload = json.loads((session_dir / f"{root_sid}.json").read_text(encoding="utf-8"))
     old_payload = json.loads((session_dir / f"{old_sid}.json").read_text(encoding="utf-8"))
     new_payload = json.loads((session_dir / f"{new_sid}.json").read_text(encoding="utf-8"))
+    assert root_payload["messages"] == root_messages
+    assert old_payload["messages"] == old_segment
     assert old_payload["pre_compression_snapshot"] is True
     assert old_payload["active_stream_id"] is None
     assert old_payload["pending_user_message"] is None
@@ -152,8 +183,22 @@ def test_compression_exhausted_after_session_rotation_preserves_snapshot_and_err
     assert new_payload["messages"][-1]["_error"] is True
     assert new_payload["messages"][-1]["_compressionRecovery"]["recommended_action"] == "start_focused_continuation"
     assert "Context compression exhausted" in new_payload["messages"][-1]["content"]
+    payload_messages = payload["session"]["messages"]
+    assert payload_messages == root_messages + old_segment + new_payload["messages"]
+    assert sum(message.get("content") == "Ancestor prompt" for message in payload_messages) == 1
+    assert any(message.get("reasoning_content") == "Reasoning before the tool." for message in payload_messages)
+    assert any(message.get("tool_call_id") == "call_1" for message in payload_messages)
+    assert any(
+        isinstance(message.get("content"), list)
+        and message["content"][0].get("type") == "image_url"
+        for message in payload_messages
+    )
     assert old_sid not in streaming.SESSIONS
     assert streaming.SESSIONS[new_sid].session_id == new_sid
+    models.SESSIONS.clear()
+    reloaded = Session.load(new_sid)
+    stitched = routes._webui_sidecar_lineage_messages_for_display(reloaded)
+    assert stitched == payload_messages
 
 
 def test_compression_exhausted_result_is_terminal_failure_even_after_streamed_text():

@@ -66,8 +66,10 @@ from api.usage import prompt_cache_hit_percent
 from api.models import (
     _is_empty_partial_activity_message,
     _evict_sessions_over_cap,
+    _session_messages_have_prefix,
     clear_process_wakeup_pause,
     get_state_db_session_messages,
+    merge_session_messages_append_only,
     record_process_wakeup_provider_unavailable_pause,
     reconciled_state_db_messages_for_session,
 )
@@ -84,7 +86,7 @@ from api.process_event_utils import (
 )
 
 
-def _session_payload_with_full_messages(session, *, tool_calls=None):
+def _session_payload_with_full_messages(session, *, tool_calls=None, messages=None):
     """Return compact session metadata plus the embedded full transcript.
 
     ``Session.compact()`` may intentionally use metadata-only counts from an
@@ -92,7 +94,11 @@ def _session_payload_with_full_messages(session, *, tool_calls=None):
     must report the count of that embedded transcript, otherwise completion and
     reconcile paths can mistake a complete payload for a stale short window.
     """
-    messages = list(getattr(session, 'messages', None) or [])
+    messages = list(
+        (getattr(session, 'messages', None) or [])
+        if messages is None
+        else messages
+    )
     raw = session.compact() | {
         'messages': messages,
         'message_count': len(messages),
@@ -4574,7 +4580,7 @@ def generate_session_title_for_session(session, *, prefer_latest: bool = False, 
     return None, llm_status or 'empty_title', raw_preview
 
 
-def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
+def _preserve_pre_compression_snapshot(s, old_sid: str, *, snapshot_messages=None) -> None:
     """Persist old_sid as a read-only pre-compression snapshot.
 
     Context compression rotates the active WebUI session id from old_sid to the
@@ -4589,23 +4595,25 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
         try:
             existing = json.loads(existing_text)
             existing_msgs = len(existing.get('messages') or [])
-            existing_snapshot = bool(existing.get('pre_compression_snapshot'))
         except (json.JSONDecodeError, ValueError):
             # Treat corrupt/malformed old JSON as missing history and rewrite it
             # from the in-memory pre-compression messages below. That is safer
             # than leaving an unreadable recovery snapshot behind.
             existing_msgs = -1
-            existing_snapshot = False
-        if len(s.messages) > existing_msgs:
+
+        if snapshot_messages is not None or len(s.messages) > existing_msgs:
             # In-memory messages are newer than the file; save the full old
             # snapshot from the current session object while preserving its
             # pre-existing parent_session_id lineage.
             saved_sid = s.session_id
             saved_snapshot = bool(getattr(s, 'pre_compression_snapshot', False))
             saved_pinned = bool(getattr(s, 'pinned', False))
+            saved_messages = s.messages
             s.session_id = old_sid
             s.pre_compression_snapshot = True
             s.pinned = False
+            if snapshot_messages is not None:
+                s.messages = list(snapshot_messages)
             # Stage-359 / PR #2295: clear runtime stream-state fields on the
             # archived snapshot so the sidebar does not reopen the parent as
             # a permanently-running session while the child already holds the
@@ -4635,6 +4643,7 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
                 s.session_id = saved_sid
                 s.pre_compression_snapshot = saved_snapshot
                 s.pinned = saved_pinned
+                s.messages = saved_messages
                 s.active_stream_id = saved_active_stream_id
                 s.pending_user_message = saved_pending_user_message
                 s.pending_attachments = saved_pending_attachments
@@ -4670,6 +4679,110 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
         logger.debug("Could not read old session file before preservation")
     except Exception:
         logger.debug("Failed to preserve pre-compression session file", exc_info=True)
+
+
+def _compression_snapshot_ancestor_messages(session, *, max_hops: int = 20) -> list:
+    """Return only archived compression ancestors already persisted elsewhere."""
+    from api.models import Session
+
+    segments = []
+    current = session
+    root_is_fork = str(getattr(session, 'session_source', '') or '').strip().lower() == 'fork'
+    seen = {str(getattr(session, 'session_id', '') or '')}
+    for _ in range(max(0, int(max_hops))):
+        parent_id = str(getattr(current, 'parent_session_id', '') or '').strip()
+        if not parent_id or parent_id in seen:
+            break
+        parent = Session.load(parent_id)
+        if not parent or not getattr(parent, 'pre_compression_snapshot', False):
+            break
+        parent_source = str(getattr(parent, 'session_source', '') or '').strip().lower()
+        if root_is_fork and parent_source != 'fork':
+            break
+        segments.append(parent)
+        seen.add(parent_id)
+        current = parent
+
+    merged = []
+    for segment in reversed(segments):
+        segment_messages = list(getattr(segment, 'messages', None) or [])
+        if _session_messages_have_prefix(segment_messages, merged):
+            merged = segment_messages
+        else:
+            merged = merge_session_messages_append_only(
+                merged,
+                segment_messages,
+                truncation_watermark=getattr(segment, 'truncation_watermark', None),
+                truncation_boundary=getattr(segment, 'truncation_boundary', None),
+            )
+    return merged
+
+
+def _bound_compression_rotation_sidecars(s, *, old_sid: str, previous_messages) -> list:
+    """Archive one canonical segment and leave one segment on the live tip.
+
+    Display/recovery reconciliation can hand streaming a cumulative transcript
+    that already contains every archived compression ancestor. Persisting that
+    projection again on each rotation amplifies sidecars geometrically. Split
+    only when both boundaries are proven prefixes; otherwise retain the complete
+    transcript and use the legacy preservation path so uncertainty cannot lose a
+    user turn.
+    """
+    full_display = list(getattr(s, 'messages', None) or [])
+    previous_messages = list(previous_messages or [])
+    ancestor_messages = _compression_snapshot_ancestor_messages(s)
+    boundaries_proven = (
+        _session_messages_have_prefix(previous_messages, ancestor_messages)
+        and _session_messages_have_prefix(full_display, previous_messages)
+    )
+    if not boundaries_proven:
+        _preserve_pre_compression_snapshot(s, old_sid)
+        return full_display
+
+    archived_segment = previous_messages[len(ancestor_messages):]
+    live_segment = full_display[len(previous_messages):]
+    _preserve_pre_compression_snapshot(
+        s,
+        old_sid,
+        snapshot_messages=archived_segment,
+    )
+    s._compression_live_segment_messages = live_segment
+    return full_display
+
+
+def _apply_compression_live_segment(s) -> None:
+    live_segment = getattr(s, '_compression_live_segment_messages', None)
+    if live_segment is None:
+        return
+    s.messages = list(live_segment)
+    del s._compression_live_segment_messages
+
+
+def _current_compression_display_projection(s, captured_display):
+    """Project the current bounded tip over its archived compression ancestors.
+
+    ``captured_display`` is the full display scene at rotation time. Terminal
+    settlement can subsequently append status/error rows to the bounded live
+    segment, so returning the capture verbatim would omit those rows from SSE.
+    Rebuild from the persisted ancestor segments plus the current live segment
+    when their boundary is proven; otherwise merge append-only so uncertainty
+    cannot hide a terminal row. The projection is never assigned to ``s.messages``.
+    """
+    if captured_display is None:
+        return None
+    captured_display = list(captured_display or [])
+    live_messages = list(getattr(s, 'messages', None) or [])
+    ancestor_messages = _compression_snapshot_ancestor_messages(s)
+    if _session_messages_have_prefix(captured_display, ancestor_messages):
+        captured_live = captured_display[len(ancestor_messages):]
+        if _session_messages_have_prefix(live_messages, captured_live):
+            return ancestor_messages + live_messages
+    return merge_session_messages_append_only(
+        captured_display,
+        live_messages,
+        truncation_watermark=getattr(s, 'truncation_watermark', None),
+        truncation_boundary=getattr(s, 'truncation_boundary', None),
+    )
 
 
 def _maybe_schedule_title_refresh(session, put_event, agent):
@@ -10107,6 +10220,7 @@ def _run_agent_streaming(
                 # reference to the Lock is released.
                 _compression_origin_session_id = session_id
                 _compression_continuation_session_id = None
+                _compression_display_messages = None
                 _agent_sid = getattr(agent, 'session_id', None)
                 _compressed = False
                 if _agent_sid and _agent_sid != session_id:
@@ -10144,7 +10258,11 @@ def _run_agent_streaming(
                     # compression removes messages from the model's context. Skip
                     # the write when the file already contains up-to-date data
                     # (i.e. it was just saved by a checkpoint).
-                    _preserve_pre_compression_snapshot(s, old_sid)
+                    _compression_display_messages = _bound_compression_rotation_sidecars(
+                        s,
+                        old_sid=old_sid,
+                        previous_messages=_previous_messages,
+                    )
                     # The continuation is the live/tip session, not another archived
                     # snapshot. If the in-memory object was itself loaded from a
                     # pre-compression snapshot (possible on repeated compression chains
@@ -10207,6 +10325,7 @@ def _run_agent_streaming(
                             _close_cached_agent_entry_at_session_boundary(old_sid, _skipped_agent_migration_entry)
                         except Exception:
                             logger.debug("Failed to close skipped compression-migration cached agent for session %s", old_sid, exc_info=True)
+                    _apply_compression_live_segment(s)
                     _compressed = True
 
                 # ── Detect silent agent failure (no assistant reply produced) ──
@@ -10546,7 +10665,14 @@ def _run_agent_streaming(
                         except Exception:
                             pass
                         _error_payload['session'] = redact_session_data(
-                            _session_payload_with_full_messages(s, tool_calls=s.tool_calls)
+                            _session_payload_with_full_messages(
+                                s,
+                                tool_calls=s.tool_calls,
+                                messages=_current_compression_display_projection(
+                                    s,
+                                    _compression_display_messages,
+                                ),
+                            )
                         )
                         _error_payload['session_id'] = s.session_id
                         _error_payload['old_session_id'] = _compression_origin_session_id
@@ -11400,7 +11526,14 @@ def _run_agent_streaming(
             except Exception as _goal_exc:
                 logger.debug("Goal continuation hook failed for session %s: %s", session_id, _goal_exc)
             with _stream_writeback_stage(_writeback_timings, "done_payload"):
-                raw_session = _session_payload_with_full_messages(s, tool_calls=tool_calls)
+                raw_session = _session_payload_with_full_messages(
+                    s,
+                    tool_calls=tool_calls,
+                    messages=_current_compression_display_projection(
+                        s,
+                        _compression_display_messages,
+                    ),
+                )
                 _done_payload = {'session': redact_session_data(raw_session), 'usage': usage}
                 if _tool_limit_reached:
                     _done_payload['terminal_state'] = 'tool_limit_reached'
