@@ -7737,13 +7737,11 @@ function _sessionProjectDragSid(dt){
   return custom&&custom===_activeSidebarProjectDragSessionId?custom:'';
 }
 
-function _isSessionProjectMoveDrag(dt,validatePayload=true){
+function _isSessionProjectMoveDrag(dt){
   if(!dt) return false;
   const types=Array.isArray(dt.types)?dt.types:Array.from(dt.types||[]);
   if(!(_activeSidebarProjectDragSessionId&&types.includes(SESSION_PROJECT_DRAG_MIME))) return false;
-  if(!validatePayload) return true;
-  const custom=dt.getData&&dt.getData(SESSION_PROJECT_DRAG_MIME)||'';
-  return custom===_activeSidebarProjectDragSessionId;
+  return true;
 }
 
 async function _handleGroupedProjectDrop(e,targetProject,targetLabel){
@@ -7759,7 +7757,7 @@ async function _handleGroupedProjectDrop(e,targetProject,targetLabel){
 function _bindGroupedProjectDropTarget(hdr,targetProject,targetLabel){
   let enterDepth=0;
   const protectedEligibilityFor=(e)=>{
-    if(!_isSessionProjectMoveDrag(e.dataTransfer,false)) return {session:null,eligibility:{eligible:false}};
+    if(!_isSessionProjectMoveDrag(e.dataTransfer)) return {session:null,eligibility:{eligible:false}};
     const session=(_allSessions||[]).find(item=>item&&item.session_id===_activeSidebarProjectDragSessionId);
     return {session,eligibility:_projectMoveEligibility(session,targetProject||{project_id:null})};
   };
@@ -7860,7 +7858,11 @@ function renderSessionListFromCache(){
   let groupedActiveWasVisibleBeforeRender=false;
   if(groupedMode&&activeSidForSidebar&&typeof list.querySelectorAll==='function'&&typeof list.getBoundingClientRect==='function'){
     const rows=[...list.querySelectorAll('.session-item[data-sid]')];
-    const activeRow=rows.find(row=>row.dataset.sid===activeSidForSidebar)||list.querySelector('.session-item.active');
+    const activeRow=rows.find(row=>{
+      if(row.dataset.sid===activeSidForSidebar) return true;
+      const rowSession=Array.isArray(_allSessions)?_allSessions.find(item=>item&&item.session_id===row.dataset.sid):null;
+      return !!(rowSession&&_sessionLineageContainsSession(rowSession,activeSidForSidebar));
+    });
     if(activeRow&&typeof activeRow.getBoundingClientRect==='function'){
       const listRect=list.getBoundingClientRect();
       const rowRect=activeRow.getBoundingClientRect();
@@ -8145,7 +8147,7 @@ function renderSessionListFromCache(){
   let groupedActiveNeedsGeometry=groupedMode&&shouldMoveSidebarToActiveForMode;
   if(shouldMoveSidebarToActive&&virtualWindow.virtualized){
     list.dataset.sessionVirtualActiveAnchor=activeSidForSidebar;
-    virtualAnchorScrollTop=virtualWindow.topPad;
+    if(!groupedMode) virtualAnchorScrollTop=virtualWindow.topPad;
   }else if(activeSidForSidebar){
     list.dataset.sessionVirtualActiveAnchor=activeSidForSidebar;
   }else{

@@ -7485,7 +7485,7 @@ async function loadMemory(force) {
 
 // Drag and drop
 const wrap=$('composerWrap');let dragCounter=0;
-const _isInternalSessionDragEvent=e=>!!(e&&e.dataTransfer&&e.dataTransfer.types&&e.dataTransfer.types.includes('application/x-hermes-webui-session-id'));
+const _isInternalSessionDragEvent=e=>!!(e&&e.dataTransfer&&e.dataTransfer.types&&e.dataTransfer.types.includes('application/x-hermes-webui-session-id')&&wrap&&e.target&&wrap.contains(e.target));
 document.addEventListener('dragover',e=>{if(_isInternalSessionDragEvent(e)){if(e.dataTransfer)e.dataTransfer.dropEffect='none';return;}e.preventDefault();});
 document.addEventListener('dragenter',e=>{
   if(_isInternalSessionDragEvent(e)){if(e.dataTransfer)e.dataTransfer.dropEffect='none';return;}
