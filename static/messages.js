@@ -166,6 +166,8 @@ if(_msgEl) _msgEl.addEventListener('focus', ()=>{ if('speechSynthesis' in window
 if(_msgEl) _msgEl.addEventListener('blur', ()=>{ if('speechSynthesis' in window && speechSynthesis.paused) speechSynthesis.resume(); });
 
 let _selectedTextReplyBtn=null;
+let _selectedTextRefineBtn=null;
+let _selectedTextReplyGroup=null;
 let _selectedTextReplyText='';
 let _pendingSelections=[];  // [{id, name, text}] — named context blocks
 let _selectionIdCounter=0;
@@ -788,21 +790,47 @@ function _selectedTextReplySelection(){
   return {text, rect};
 }
 
-function _formatSelectedTextReplyQuote(text){
+function _formatSelectedTextReplyQuote(text, includeMarker=true){
   const normalized=String(text||'').replace(/\r\n?/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
   if(!normalized)return '';
-  return `<!-- hermes-selected-context -->\n${normalized.split('\n').map(line=>`> ${line}`).join('\n')}`;
+  const quote=normalized.split('\n').map(line=>`> ${line}`).join('\n');
+  return includeMarker?`<!-- hermes-selected-context -->\n${quote}`:quote;
 }
 
-function insertSavedPromptIntoComposer(text){
+function _appendComposerText(text){
   const composer=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
   if(!composer||!text)return;
   const current=String(composer.value||'');
-  composer.value=current.trim()?`${current.replace(/\s+$/,'')}\n\n${text}\n\n`:`${text}\n\n`;
+  composer.value=current.trim()?`${current.replace(/\s+$/,'')}\n\n${text}`:String(text);
   composer.focus();
   try{composer.setSelectionRange(composer.value.length, composer.value.length);}catch(_e){}
   composer.dispatchEvent(new Event('input',{bubbles:true}));
   if(typeof autoResize==='function') autoResize();
+}
+
+function insertSavedPromptIntoComposer(text){
+  if(!text)return;
+  _appendComposerText(`${text}\n\n`);
+}
+
+function _seedSelectedTextRefineDraft(text){
+  const quote=_formatSelectedTextReplyQuote(text, false);
+  const instruction=_selectedTextReplyT('selected_text_refine_instruction','Refine instruction:');
+  if(!quote||!instruction)return;
+  _appendComposerText(`${quote}\n\n${instruction} `);
+}
+
+function _consumeSelectedTextReplySelection(){
+  const info=_selectedTextReplySelection();
+  if(!info){
+    _hideSelectedTextReplyButton();
+    return '';
+  }
+  const text=info.text;
+  _hideSelectedTextReplyButton();
+  const selection=window.getSelection&&window.getSelection();
+  if(selection&&selection.removeAllRanges)selection.removeAllRanges();
+  return text;
 }
 
 let _savedPromptsCache=null;
@@ -1053,49 +1081,72 @@ function _flushSelectionBlocksToComposer(){
 
 function _selectedTextReplyButton(){
   if(_selectedTextReplyBtn)return _selectedTextReplyBtn;
+  const group=document.createElement('div');
+  group.id='selectedTextActionGroup';
+  group.className='selected-text-action-group';
   const btn=document.createElement('button');
   btn.type='button';
   btn.id='selectedTextReplyBtn';
   btn.className='selected-text-reply-btn';
   btn.setAttribute('data-i18n', 'selected_text_reply');
   btn.setAttribute('data-i18n-title', 'selected_text_reply_title');
-  btn.setAttribute('data-i18n-aria-label', 'selected_text_reply_title');
+  btn.setAttribute('data-i18n-aria-label', 'selected_text_reply');
   btn.textContent=_selectedTextReplyT('selected_text_reply', 'Reply with selection');
   btn.title=_selectedTextReplyT('selected_text_reply_title', 'Append selected chat text as quoted context');
-  btn.setAttribute('aria-label', btn.title);
+  btn.setAttribute('aria-label', btn.textContent);
   btn.addEventListener('mousedown', e=>e.preventDefault());
   btn.addEventListener('click', e=>{
     e.preventDefault();
-    if(_selectedTextReplyText){
-      _addNamedContextBlock(_selectedTextReplyText);
-      _hideSelectedTextReplyButton();
-      const selection=window.getSelection&&window.getSelection();
-      if(selection&&selection.removeAllRanges)selection.removeAllRanges();
+    const text=_consumeSelectedTextReplySelection();
+    if(text){
+      _addNamedContextBlock(text);
     }
   });
-  document.body.appendChild(btn);
+  const refine=document.createElement('button');
+  refine.type='button';
+  refine.id='selectedTextRefineBtn';
+  refine.className='selected-text-refine-btn';
+  refine.setAttribute('data-i18n', 'selected_text_refine');
+  refine.setAttribute('data-i18n-title', 'selected_text_refine_title');
+  refine.setAttribute('data-i18n-aria-label', 'selected_text_refine');
+  refine.textContent=_selectedTextReplyT('selected_text_refine', 'Refine');
+  refine.title=_selectedTextReplyT('selected_text_refine_title', 'Start an editable refinement draft from the selection');
+  refine.setAttribute('aria-label', refine.textContent);
+  refine.addEventListener('mousedown', e=>e.preventDefault());
+  refine.addEventListener('click', e=>{
+    e.preventDefault();
+    const text=_consumeSelectedTextReplySelection();
+    if(text){
+      _seedSelectedTextRefineDraft(text);
+    }
+  });
+  group.appendChild(btn);
+  group.appendChild(refine);
+  document.body.appendChild(group);
   if(typeof applyLocaleToDOM==='function') applyLocaleToDOM();
   _selectedTextReplyBtn=btn;
+  _selectedTextRefineBtn=refine;
+  _selectedTextReplyGroup=group;
   return btn;
 }
 
 function _hideSelectedTextReplyButton(){
   _selectedTextReplyText='';
-  if(_selectedTextReplyBtn)_selectedTextReplyBtn.classList.remove('visible');
+  if(_selectedTextReplyGroup)_selectedTextReplyGroup.classList.remove('visible');
 }
 
 function _positionSelectedTextReplyButton(info){
   const btn=_selectedTextReplyButton();
   _selectedTextReplyText=info.text;
-  btn.classList.add('visible');
+  _selectedTextReplyGroup.classList.add('visible');
   const gap=8;
-  const btnRect=btn.getBoundingClientRect();
-  const width=btnRect.width||150;
-  const height=btnRect.height||32;
+  const groupRect=_selectedTextReplyGroup.getBoundingClientRect();
+  const width=groupRect.width||250;
+  const height=groupRect.height||40;
   const left=Math.min(Math.max(gap, info.rect.left+(info.rect.width/2)-(width/2)), Math.max(gap, window.innerWidth-width-gap));
   const top=Math.max(gap, info.rect.top-height-gap);
-  btn.style.left=`${left}px`;
-  btn.style.top=`${top}px`;
+  _selectedTextReplyGroup.style.left=`${left}px`;
+  _selectedTextReplyGroup.style.top=`${top}px`;
 }
 
 function _updateSelectedTextReplyButton(){
@@ -1114,7 +1165,7 @@ function _updateSelectedTextReplyButton(){
 if(typeof document!=='undefined'){
   document.addEventListener('selectionchange', _updateSelectedTextReplyButton);
   document.addEventListener('mouseup', e=>{
-    if(e.target&&e.target.closest&&e.target.closest('.selected-text-reply-btn'))return;
+    if(e.target&&e.target.closest&&e.target.closest('.selected-text-action-group'))return;
     _updateSelectedTextReplyButton();
   });
   document.addEventListener('keyup', e=>{
@@ -2015,9 +2066,26 @@ function closeOtherLiveStreams(activeSid){
   }
 }
 
+function _dispatchExtensionTurnLifecycle(type,sessionId,streamId,details={}){
+  const runtime=typeof window!=='undefined'&&window.HermesExtensionSettings;
+  const dispatch=runtime&&runtime._dispatchTurnLifecycle;
+  if(typeof dispatch!=='function') return false;
+  try{
+    return dispatch(type,{sessionId,streamId,...details});
+  }catch(error){
+    if(typeof console!=='undefined'&&typeof console.error==='function'){
+      try{console.error('[Hermes extensions] lifecycle dispatch failed:',error);}catch(_loggingError){ }
+    }
+    return false;
+  }
+}
+
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!activeSid||!streamId) return;
   const reconnecting=!!options.reconnecting;
+  const _extensionTurnStartedAt=(S.session&&S.session.session_id===activeSid&&Number.isFinite(S.session.pending_started_at))
+    ?S.session.pending_started_at
+    :Date.now()/1000;
   // #4416: start (or, on reconnect for the SAME stream, keep) tracking whether
   // the tab was hidden during this stream so the done-notification fires for a
   // backgrounded tab. A reconnect with a different streamId re-seeds (the old
@@ -2601,6 +2669,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _streamFadeHoldUntilMs=0;
   let _streamFadeCurrentMs=620;
   let _streamFadeDomText='';
+  let _streamFadeSilentPrefixChars=0;
   let _streamFadeReduceMotionMql=null;
   let _streamFadeReduceMotion=false;
   let _streamFadeReduceMotionOnChange=null;
@@ -3877,11 +3946,26 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const value=String(text||'');
     const fade=typeof _shouldUseLiveProseFade==='function'&&_shouldUseLiveProseFade();
     let st;
+    let _rewindPrevRendered='';
     try{
       st=_anchorProseSmdCache.get(key);
       // Self-heal desyncs (edit/sanitize made the text no longer a pure append):
       // rebuild the parser+node from scratch, mirroring the _smdWrite guard.
-      if(st && st.writtenText && !value.startsWith(st.writtenText)) st=null;
+      // Fade-flash guard: when the text REWINDS (tool-call XML stripped from the
+      // live prose), the rebuilt node would re-create every word as a new
+      // is-new span and replay the fade on ALL visible words at once. Mute the
+      // fade renderer for the common prefix so only the post-rewind tail fades.
+      if(st && st.writtenText && !value.startsWith(st.writtenText)){
+        // Snapshot the OLD rendered text BEFORE clearing the node. The silent
+        // prefix is later recomputed in RENDERED-text space (old node text vs
+        // new node text) — source-space byte counts are wrong here because
+        // markdown delimiters, link destinations and MEDIA tokens never reach
+        // the fade add_text hook, so a source-space budget over-mutes the
+        // first genuinely new word after a rewind (#6783 review).
+        const oldBody=st.node&&st.node.querySelector&&st.node.querySelector('.msg-body');
+        _rewindPrevRendered=oldBody?(oldBody.textContent||''):'';
+        st=null;
+      }
       if(st && st.fade!==fade) st=null;
       if(st && st.finalized && st.writtenText!==value){
         const body=st.node&&st.node.querySelector&&st.node.querySelector('.msg-body');
@@ -3916,6 +4000,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(delta){
         window.smd.parser_write(st.parser,delta);
         st.writtenText=value;
+      }
+      // Rewind rebuild: mute the rendered common prefix (old node text vs new
+      // node text) so already-visible words do not replay their fade; only the
+      // post-rewind tail animates. Rendered-space compare, not source-space
+      // (#6783 review — markdown/MEDIA bytes never reach add_text).
+      if(_rewindPrevRendered && typeof _streamFadeMuteRenderedPrefix==='function'){
+        _streamFadeMuteRenderedPrefix(body,_rewindPrevRendered);
+        _rewindPrevRendered='';
       }
       if(finalize){
         _finalizeAnchorProseIncrementalNode(st);
@@ -4335,10 +4427,24 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _smdWrite(displayText, fade=false){
     if(!_smdParser||!window.smd) return;
     displayText=String(displayText||'');
-    // Self-heal desyncs: if displayText no longer starts with what we've already
-    // written (e.g. due to stream sanitization/tag stripping), incremental slicing
+    let _rewindPrevRendered='';
+    // Self-heal desyncs: if displayText no longer starts with what we have
+    // already written (e.g. due to stream sanitization/tag stripping), incremental slicing
     // can skip characters. Rebuild parser from the full current displayText.
     if(_smdWrittenText && !displayText.startsWith(_smdWrittenText)){
+      // Fade-flash fix: when the visible text REWINDS (tool-call XML stripping
+      // makes displayText a strict prefix of what was already written), the
+      // rebuild below would clear the body and re-create every word as a new
+      // `is-new` span — replaying the fade animation on ALL visible text at
+      // once (a full-message blink on every tool call). Instead, snapshot the
+      // OLD RENDERED text and mute the rebuild prefix spans AFTER the
+      // parser_write, in RENDERED-text space: source-space byte counts include
+      // markdown delimiters / link destinations / MEDIA token bytes that never
+      // reach the fade add_text hook, so a source-space budget over-mutes the
+      // first genuinely new word after a rewind (#6783 review).
+      if(assistantBody && typeof assistantBody.textContent==='string'){
+        _rewindPrevRendered=assistantBody.textContent;
+      }
       _smdParser=null;
       _smdWrittenLen=0;
       _smdWrittenText='';
@@ -4351,6 +4457,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     try{window.smd.parser_write(_smdParser,delta);}catch(_){}
     _smdWrittenLen=displayText.length;
     _smdWrittenText=displayText;
+    // Rebuild after a rewind: strip is-new from spans covered by the
+    // RENDERED common prefix (old node text vs new node text), so already-
+    // visible words stay plain while only the post-rewind tail fades.
+    if(_rewindPrevRendered && typeof _streamFadeMuteRenderedPrefix==='function'){
+      _streamFadeMuteRenderedPrefix(assistantBody,_rewindPrevRendered);
+    }
     // URL scheme safety is handled by the renderer's set_attr hook
     // (_safeSmdRenderer or _streamFadeRenderer), applied inline as smd
     // creates each DOM node — no post-hoc full-DOM scan needed.
@@ -4427,6 +4539,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _streamFadeHoldUntilMs=0;
     _streamFadeCurrentMs=_STREAM_FADE_MS;
     _streamFadeDomText='';
+    _streamFadeSilentPrefixChars=0;
   }
   function _cancelAnimationFramePendingStreamRender(){
     if(_pendingRafHandle===null) return;
@@ -4511,11 +4624,24 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const reduceMotion=_streamFadeReduceMotionEnabled();
       const appendStartedAt=performance.now();
       let last=0, match, changed=false;
+      // Silent-prefix window: after a rebuild caused by a REWIND (tool-call
+      // XML stripping), words that were already visible before the rewind
+      // point must NOT replay their fade animation. They are appended as
+      // plain text; only the tail beyond _streamFadeSilentPrefixChars fades.
+      let silentLeft=_streamFadeSilentPrefixChars||0;
       while((match=wordRe.exec(value))){
         if(match.index>last) frag.appendChild(document.createTextNode(value.slice(last,match.index)));
         if(reduceMotion){
           frag.appendChild(document.createTextNode(match[1]));
           if(match[2]) frag.appendChild(document.createTextNode(match[2]));
+          last=match.index+match[0].length;
+          changed=true;
+          continue;
+        }
+        if(silentLeft>0){
+          frag.appendChild(document.createTextNode(match[1]));
+          if(match[2]) frag.appendChild(document.createTextNode(match[2]));
+          silentLeft-=match[0].length;
           last=match.index+match[0].length;
           changed=true;
           continue;
@@ -4531,6 +4657,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         last=match.index+match[0].length;
         changed=true;
       }
+      if(silentLeft>0) _streamFadeSilentPrefixChars=silentLeft;
+      else _streamFadeSilentPrefixChars=0;
       if(!changed){baseAddText(data,text);return;}
       if(last<value.length) frag.appendChild(document.createTextNode(value.slice(last)));
       parent.appendChild(frag);
@@ -4821,10 +4949,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const wordRe=/(\S+)(\s*)/g;
     const appendStartedAt=performance.now();
     let last=0, match, changed=false;
+    // Silent-prefix window (same contract as _streamFadeRenderer.add_text):
+    // after a rewind-triggered rebuild, words before the rewind point must
+    // not replay their fade animation.
+    let silentLeft=_streamFadeSilentPrefixChars||0;
     while((match=wordRe.exec(value))){
       if(match.index>last) frag.appendChild(document.createTextNode(value.slice(last,match.index)));
       if(reduceMotion){
         frag.appendChild(document.createTextNode(match[1]));
+      }else if(silentLeft>0){
+        frag.appendChild(document.createTextNode(match[1]));
+        silentLeft-=match[0].length;
       }else{
         const span=document.createElement('span');
         span.className='stream-fade-word is-new';
@@ -4838,12 +4973,57 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       last=match.index+match[0].length;
       changed=true;
     }
+    if(silentLeft>0) _streamFadeSilentPrefixChars=silentLeft;
+    else _streamFadeSilentPrefixChars=0;
     if(!changed){
       frag.appendChild(document.createTextNode(value));
     }else if(last<value.length){
       frag.appendChild(document.createTextNode(value.slice(last)));
     }
     el.appendChild(frag);
+  }
+  // Rendered-text-space mute for rewind rebuilds (#6783 review): after a
+  // rewind-triggered rebuild every word is a fresh `is-new` span. Compare the
+  // OLD rendered text (snapshot before rebuild) with the NEW rendered text in
+  // RENDERED coordinates — what smd's add_text actually emits; markdown
+  // delimiters, link destinations and MEDIA token bytes never reach it — and
+  // strip `is-new` from spans inside the common prefix, so already-visible
+  // words don't replay their fade while the genuinely new tail still animates.
+  function _streamFadeMuteRenderedPrefix(rootEl, prevRendered){
+    if(!rootEl || !prevRendered) return;
+    const newRendered=(rootEl.textContent||'');
+    if(!newRendered) return;
+    const _maxCommon=Math.min(prevRendered.length,newRendered.length);
+    let _common=0;
+    while(_common<_maxCommon&&prevRendered.charCodeAt(_common)===newRendered.charCodeAt(_common)) _common+=1;
+    if(_common<=0) return;
+    let consumed=0;
+    const _walk=(node)=>{
+      if(!node||consumed>_common) return;
+      const isText=node.nodeType===3||node.type==='text';
+      if(isText){
+        const len=(node.textContent||'').length;
+        const start=consumed;
+        consumed+=len;
+        // Text node inside a fade span that starts before the common-prefix
+        // boundary → mute the span (drop is-new, keeping the word visible
+        // without replaying its animation).
+        if(start<_common){
+          const parent=node.parentNode;
+          if(parent&&/\bstream-fade-word\b/.test(parent.className||'')&&/\bis-new\b/.test(parent.className||'')){
+            if(parent.classList&&typeof parent.classList.remove==='function'){
+              parent.classList.remove('is-new');
+            }else{
+              parent.className=String(parent.className||'').replace(/\bis-new\b/g,'').replace(/\s{2,}/g,' ').trim();
+            }
+          }
+        }
+        return;
+      }
+      const kids=node.childNodes||node.children;
+      if(kids){ for(let i=0;i<kids.length;i++) _walk(kids[i]); }
+    };
+    _walk(rootEl);
   }
   function _streamFadePauseAfter(text, paragraphBreakIndex){
     if(paragraphBreakIndex>=0) return 90;
@@ -4861,8 +5041,26 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       return {text:'', caughtUp:true, changed:hadVisible};
     }
     if(!_streamFadeVisibleText||!targetText.startsWith(_streamFadeVisibleText)){
-      // Markdown/tool stripping can rewrite the visible prefix. Reset safely rather than
-      // trying to animate across incompatible strings or stale word birth timestamps.
+      // Markdown/tool stripping can rewrite the visible prefix. Shrink the
+      // playout cursor to the common prefix instead of resetting to zero —
+      // a full reset would replay the fade animation on every already-visible
+      // word whenever the display text briefly rewinds (e.g. tool-call XML
+      // being stripped mid-stream). Only when nothing overlaps does the playout
+      // need a true from-scratch start.
+      let _commonLen=0;
+      const _maxCommon=Math.min(_streamFadeVisibleText.length,targetText.length);
+      while(_commonLen<_maxCommon&&_streamFadeVisibleText.charCodeAt(_commonLen)===targetText.charCodeAt(_commonLen)) _commonLen+=1;
+      if(_commonLen>0){
+        _streamFadeVisibleText=targetText.slice(0,_commonLen);
+        _streamFadeVisibleWords=_streamFadeWordCountOf(_streamFadeVisibleText);
+        _streamFadeWordCarry=0;
+        _streamFadeLastTickMs=0;
+        _streamFadeStartedAt=0;
+        // changed:true forces the DOM to sync to the shrunken prefix this
+        // frame (dropping the rewind tail). The rebuild mutes the common
+        // prefix so no fade animation is replayed.
+        return {text:_streamFadeVisibleText,caughtUp:_streamFadeVisibleText===targetText,changed:true};
+      }
       _resetStreamFadeState();
     }
     if(!_streamFadeLastTickMs){
@@ -5940,7 +6138,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             window._compressionUi.sessionId===activeSid&&
             d.session&&d.session.session_id
           ){
-            window._compressionUi={...window._compressionUi, sessionId:d.session.session_id};
+            if(window._compressionUi.phase==='running'){
+              // Turn completed (done event) but the compression UI is still in
+              // 'running' phase - the 'compressed' SSE event was lost or delayed.
+              // Clear the stale running state instead of leaving it active,
+              // which would surface a phantom "Compressing context" barrier.
+              // This covers both A->B (session rotation) and A->A (no rotation)
+              // since in both cases a running phase at done-time means the
+              // compressed event never arrived.
+              if(typeof clearCompressionUi==='function') clearCompressionUi();
+              else window._compressionUi=null;
+            } else {
+              window._compressionUi={...window._compressionUi, sessionId:d.session.session_id};
+            }
           }
           // Find the last assistant message once for both reasoning persistence and timestamp
           lastAsst=[...S.messages].reverse().find(m=>m.role==='assistant');
@@ -6082,8 +6292,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(typeof _armKeepSettledWorklogOpen==='function') _armKeepSettledWorklogOpen(_settledStreamId);
           syncTopbar();renderMessages({preserveScroll:true});
           if(typeof _disarmKeepSettledWorklogOpen==='function') _disarmKeepSettledWorklogOpen();
-          if(typeof _renderMessagesWithScrollSnapshot==='function') _renderMessagesWithScrollSnapshot({_prescrollSnapshot:_doneLiveScrollSnapshot});
-          else renderMessages({preserveScroll:true});
+          const _collapsedInPlace=typeof _collapseJustSettledWorklogInPlace==='function'
+            && _collapseJustSettledWorklogInPlace(_settledStreamId);
+          if(!_collapsedInPlace&&typeof _renderMessagesWithScrollSnapshot==='function'){
+            _renderMessagesWithScrollSnapshot({_prescrollSnapshot:_doneLiveScrollSnapshot});
+          }else if(!_collapsedInPlace){
+            renderMessages({preserveScroll:true});
+          }else if(_doneLiveScrollSnapshot&&typeof _restoreMessageScrollSnapshotSameFrame==='function'){
+            _restoreMessageScrollSnapshotSameFrame(_doneLiveScrollSnapshot);
+          }
           if(shouldFollowOnDone&&typeof scrollToBottom==='function') scrollToBottom();
           if(typeof noteWorkspaceMutationsFromToolCalls==='function') noteWorkspaceMutationsFromToolCalls(S.toolCalls);
           loadDir('.', { preservePreview: true });
@@ -6108,6 +6325,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(isActiveSession) _queueDrainSid=activeSid;
         renderSessionList();
         _setActivePaneIdleIfOwner();
+        _dispatchExtensionTurnLifecycle('turn:complete',activeSid,streamId,{
+          status:d.status||'completed',
+          endedAt:Date.now()/1000,
+        });
         playNotificationSound();
         // #4416: notify if the tab was hidden at ANY point during this stream
         // (not just at done-receive time, which a throttled background-tab SSE
@@ -6292,6 +6513,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _clearClarifyForOwner('terminal');
       let d={};
       try{ d=JSON.parse(e.data||'{}')||{}; }catch(_){ d={}; }
+      const _extensionErrorType=(d.type==='cancelled'||d.type==='interrupted')?'turn:cancel':'turn:error';
       const currentSid=S.session&&S.session.session_id;
       const eventSid=d.old_session_id||d.session_id||'';
       const continuationSid=(d.session&&d.session.session_id)||d.new_session_id||d.continuation_session_id||'';
@@ -6389,6 +6611,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       _setActivePaneIdleIfOwner();
       renderSessionList(); // clear streaming indicator immediately on apperror
+      _dispatchExtensionTurnLifecycle(_extensionErrorType,activeSid,streamId,{
+        status:d.status||d.type||(_extensionErrorType==='turn:cancel'?'cancelled':'error'),
+        endedAt:Date.now()/1000,
+      });
     });
 
     source.addEventListener('warning',e=>{
@@ -6591,6 +6817,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // a second GET race where the visible cancelled work briefly collapses to only
       // the fallback "Task cancelled" marker (#4076).
       const _cancelSessionPayload=_cancelData&&typeof _cancelData.session==='object'?_cancelData.session:null;
+      renderSessionList();
+      _setActivePaneIdleIfOwner();
       (async()=>{
         try{
           if(_applyCancelSessionPayload(_cancelSessionPayload)) return;
@@ -6616,10 +6844,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             if(_wasFollowingAtCancelFb && typeof scrollToBottom==='function') scrollToBottom();
             _markSessionViewed(activeSid, S.messages.length);
           }
+        }finally{
+          _dispatchExtensionTurnLifecycle('turn:cancel',activeSid,streamId,{
+            status:_cancelData.status||_cancelData.type||'cancelled',
+            endedAt:Date.now()/1000,
+          });
         }
       })();
-      renderSessionList();
-      _setActivePaneIdleIfOwner();
     });
 
     for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
@@ -6847,6 +7078,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
     }
     _setActivePaneIdleIfOwner();
+    _dispatchExtensionTurnLifecycle('turn:error',activeSid,streamId,{
+      status:'connection_lost',
+      endedAt:Date.now()/1000,
+    });
   }
 
   (async()=>{
@@ -6888,6 +7123,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){}
     }
     const replayParams=(reconnecting||replayOnly)?_runJournalReplayParams():'';
+    _dispatchExtensionTurnLifecycle('turn:start',activeSid,streamId,{
+      startedAt:_extensionTurnStartedAt,
+    });
     _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${replayParams}`,document.baseURI||location.href).href,{withCredentials:true}));
   })();
 
@@ -8696,7 +8934,7 @@ function playAttentionSound(key){
 function _notificationOptions(body,options={}){
   const sid=(options&&options.sid)||(S&&S.session&&S.session.session_id);
   const url=sid?`${location.origin}${_sessionUrlForSid(sid)}`:location.href;
-  return {body:body||'',tag:sid?`hermes-${sid}`:'hermes-webui',renotify:false,icon:'static/favicon-192.png',badge:'static/favicon-32.png',data:{url}};
+  return {body:body||'',tag:sid?`hermes-${sid}`:'hermes-webui',renotify:true,icon:'static/favicon-192.png',badge:'static/favicon-32.png',data:{url}};
 }
 function _showPwaNotification(title,body,options={}){
   const botName=assistantDisplayName();

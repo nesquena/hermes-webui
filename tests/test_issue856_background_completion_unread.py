@@ -362,11 +362,11 @@ def test_polling_transition_marks_completion_when_long_running_stream_snapshot_a
     assert "function _forgetObservedStreamingSession(" in SESSIONS_JS
     assert "const previousSnapshot = _sessionListSnapshotById.get(sid);" in transition_block
     assert "const observedStreaming = _getSessionObservedStreaming()[sid];" in transition_block
-    assert "const completedWithNewMessages = Boolean(" in transition_block
+    assert "const completedWithNewMessages = !cronRunning && Boolean(" in transition_block
     assert "(previousSnapshot || observedStreaming)" in transition_block
     assert "messageCount > Number((previousSnapshot || observedStreaming).message_count || 0)" in transition_block
     assert "lastMessageAt > Number((previousSnapshot || observedStreaming).last_message_at || 0)" in transition_block
-    assert "const completedPersistedObservedStream = Boolean(observedStreaming && !isStreaming);" in transition_block
+    assert "const completedPersistedObservedStream = !cronRunning && Boolean(observedStreaming && !isStreaming);" in transition_block
     assert "completedObservedStream || completedPersistedObservedStream || completedWithNewMessages" in transition_block
     assert "_sessionListSnapshotById.set(sid, {" in transition_block
     assert "_rememberRenderedSessionSnapshot(s);" in render_block, (
@@ -383,7 +383,7 @@ def test_polling_snapshot_fallback_does_not_mark_first_seen_historical_sessions(
     )
 
     prev_idx = transition_block.find("const previousSnapshot = _sessionListSnapshotById.get(sid);")
-    fallback_idx = transition_block.find("const completedWithNewMessages = Boolean(")
+    fallback_idx = transition_block.find("const completedWithNewMessages = !cronRunning && Boolean(")
     mark_idx = transition_block.find("_markSessionCompletionUnread(sid")
     snapshot_set_idx = transition_block.find("_sessionListSnapshotById.set(sid, {")
 

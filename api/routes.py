@@ -534,6 +534,42 @@ def _session_visible_to_active_profile(session_profile, handler=None) -> bool:
     return _profiles_match(session_profile, active_profile)
 
 
+def _is_profile_agnostic_foreign_session(cli_meta) -> bool:
+    """Return whether a foreign-session row lives outside the Hermes profile tree.
+
+    Claude Code transcripts are scanned straight out of ``~/.claude/projects``
+    by ``get_claude_code_sessions()``, which stamps ``profile: None`` on every
+    row because the JSONL files belong to no Hermes profile at all. The sidebar
+    lists them under whichever profile is active, but ``_profiles_match``
+    coerces ``None`` to ``'default'``, so the detail-load profile gate 404s
+    every one of them as soon as the active profile is a named (non-root) one —
+    the session shows in the list and then renders "Session not available in
+    web UI." when clicked.
+
+    Exempt these profile-less external-agent rows from the gate so opening one
+    behaves identically on the root profile and on named profiles. Rows that
+    DO carry a profile (every state.db-backed CLI/messaging/cron session) stay
+    fully scoped.
+    """
+    if not isinstance(cli_meta, dict):
+        return False
+    if cli_meta.get("profile"):
+        return False
+    sources = {
+        str(cli_meta.get("source_tag") or "").strip().lower(),
+        str(cli_meta.get("raw_source") or "").strip().lower(),
+    }
+    # Profile-less external-agent rows that live outside the Hermes profile tree.
+    # Claude Code: scanned from ~/.claude/projects; Codex: scanned from ~/.codex/
+    profile_agnostic_sources = {CLAUDE_CODE_SOURCE}
+    try:
+        from api.codex_sessions import CODEX_SOURCE
+        profile_agnostic_sources.add(CODEX_SOURCE)
+    except ImportError:
+        pass
+    return bool(sources & profile_agnostic_sources)
+
+
 def _request_session_visibility_exempt(method: str, path: str | None) -> bool:
     if not path:
         return False
@@ -1906,6 +1942,7 @@ def _session_list_cache_key(
     exclude_hidden: bool = False,
     visible_only: bool = False,
     show_webhook_sessions: bool = False,
+    show_kanban_sessions: bool = False,
     source_filter: str | None = None,
     sidebar_source: str | None = None,
     archived_limit: int | None = None,
@@ -1922,6 +1959,7 @@ def _session_list_cache_key(
         exclude_hidden=exclude_hidden,
         visible_only=visible_only,
         show_webhook_sessions=show_webhook_sessions,
+        show_kanban_sessions=show_kanban_sessions,
         source_filter=source_filter,
         sidebar_source=sidebar_source,
         archived_limit=archived_limit,
@@ -2167,6 +2205,7 @@ def _build_session_list_cache_payload(
     exclude_hidden: bool = False,
     visible_only: bool = False,
     show_webhook_sessions: bool = False,
+    show_kanban_sessions: bool = False,
     source_filter: str | None = None,
     sidebar_source: str | None = None,
     archived_limit: int | None = None,
@@ -2218,6 +2257,7 @@ def _build_session_list_cache_payload(
     show_previous_messaging_sessions = bool(show_previous_messaging_sessions)
     show_cron_sessions = bool(show_cron_sessions)
     show_webhook_sessions = bool(show_webhook_sessions)
+    show_kanban_sessions = bool(show_kanban_sessions)
     webui_sessions = [_normalize_sidebar_source_flags(s) for s in webui_sessions]
     if show_cli_sessions:
         diag_stage("get_cli_sessions")
@@ -2364,6 +2404,8 @@ def _build_session_list_cache_payload(
             represented_webui_ids,
             show_cron_sessions=show_cron_sessions,
             show_webhook_sessions=show_webhook_sessions,
+            show_kanban_sessions=show_kanban_sessions,
+            source_filter=source_filter,
         )
     else:
         diag_stage("filter_webui_sessions")
@@ -2537,6 +2579,7 @@ def _build_session_list_cache_payload(
             "show_cron_sessions": show_cron_sessions,
             "show_claude_code_sessions": show_claude_code_sessions if show_cli_sessions else False,
             "show_webhook_sessions": show_webhook_sessions,
+            "show_kanban_sessions": show_kanban_sessions,
         },
     }
 
@@ -2805,6 +2848,7 @@ from api.config import (
     ACTIVE_RUNS,
     ACTIVE_RUNS_LOCK,
     register_stream_owner,
+    register_session_writeback_owner,
     stream_owner_session_id,
     unregister_stream_owner,
     CHAT_LOCK,
@@ -2833,6 +2877,7 @@ from api.config import (
     get_config_for_profile_home,
     _cfg_lock,
     PENDING_BG_TASK_COMPLETIONS,
+    _parse_provider_qualified_model_id,
 )
 from api import config as api_config
 from api.helpers import (
@@ -2846,6 +2891,8 @@ from api.helpers import (
     _security_headers,
     _sanitize_error,
     redact_session_data,
+    public_session_projection,
+    strip_public_internal_fields,
     _redact_text,
     _CLIENT_DISCONNECT_ERRORS,
 )
@@ -2866,6 +2913,37 @@ def _kanban_unknown_endpoint(handler, parsed, method: str) -> bool:
         ),
         status=404,
     ) or True
+
+
+# A cancelled worker that stays in ACTIVE_RUNS longer than this is treated as
+# stuck (e.g. blocked in C-level provider I/O and never reaching its finally).
+# Once the cancel has been outstanding past this grace window, the run row can
+# no longer protect the session's active_stream_id/pending_* from stale
+# cleanup: _clear_stale_stream_state() clears them, and every delayed cancel
+# finalizer (api/streaming.py _finalize_cancelled_turn) is generation-guarded
+# under the session lock — it no-ops unless the session still points at the
+# cancelled stream — so clearing early cannot clobber a newer turn (#6623).
+_STALE_CANCELLED_RUN_GRACE_SECONDS = 60.0
+
+
+def _cancelled_run_is_stale(run_entry) -> bool:
+    """Return True when an ACTIVE_RUNS row belongs to a cancel that has been
+    outstanding longer than the stale grace window.
+
+    ``cancelled_at`` is stamped by cancel_stream() when it flips the run to
+    phase="cancelling". ``started_at`` is accepted as a fallback anchor so runs
+    cancelled before the stamp was introduced are still reclaimed eventually.
+    """
+    if not isinstance(run_entry, dict) or run_entry.get("phase") != "cancelling":
+        return False
+    anchor = run_entry.get("cancelled_at") or run_entry.get("started_at")
+    if not anchor:
+        return False
+    try:
+        age = time.time() - float(anchor)
+    except (TypeError, ValueError):
+        return False
+    return age >= _STALE_CANCELLED_RUN_GRACE_SECONDS
 
 
 def _clear_stale_stream_state(session) -> bool:
@@ -2895,13 +2973,33 @@ def _clear_stale_stream_state(session) -> bool:
     except Exception:
         worker_alive = False
     if worker_alive:
-        logger.debug(
-            "_clear_stale_stream_state: stream %s for session %s missing SSE channel "
-            "but worker bookkeeping is still active; deferring stale cleanup",
+        # #6623: a worker stuck in C-level I/O may never reach its finally to
+        # unregister the run, so ACTIVE_RUNS could hold the row forever and
+        # block stale cleanup indefinitely. A *cancelled* run (cancel_stream()
+        # stamped phase="cancelling" + cancelled_at) that has not unwound past
+        # the grace window is treated as stale — clear the session anyway. The
+        # _stream_writeback_is_current() guard rejects any eventual writeback
+        # from the stuck worker, so this cannot clobber a newer turn.
+        try:
+            with _live_config.ACTIVE_RUNS_LOCK:
+                run_entry = dict((_live_config.ACTIVE_RUNS or {}).get(stream_id) or {})
+        except Exception:
+            run_entry = {}
+        if not _cancelled_run_is_stale(run_entry):
+            logger.debug(
+                "_clear_stale_stream_state: stream %s for session %s missing SSE channel "
+                "but worker bookkeeping is still active; deferring stale cleanup",
+                stream_id,
+                getattr(session, "session_id", "?"),
+            )
+            return False
+        logger.info(
+            "_clear_stale_stream_state: stream %s for session %s missing SSE channel and "
+            "cancelled run is stale (cancelled_at=%s); clearing stale stream state (#6623)",
             stream_id,
             getattr(session, "session_id", "?"),
+            run_entry.get("cancelled_at"),
         )
-        return False
     grace_seconds = 30.0
     try:
         from api.models import _REPAIR_STALE_PENDING_GRACE_SECONDS
@@ -3719,6 +3817,85 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "activity_rows": anchor_activity_rows,
         },
     }
+
+
+def _runtime_journal_snapshot_for_session_payload(snapshot: dict | None) -> dict | None:
+    """Return the non-mutating, display-equivalent transport form of a live snapshot.
+
+    The canonical recovery snapshot intentionally keeps fallback representations.
+    Sending all of them duplicates each tool result in top-level ``tool_calls``
+    and row ``text``, ``tool``, and ``payload`` fields. Keep one authoritative
+    display source for each value at the HTTP boundary; the durable journal and
+    the canonical in-process snapshot remain unchanged.
+    """
+    if not isinstance(snapshot, dict):
+        return snapshot
+
+    projected = dict(snapshot)
+    # The frontend reconstructs this single live assistant row from the
+    # authoritative last_* strings when messages is empty. Preserve the row's
+    # timestamp separately so the synthesized message keeps stable identity.
+    live_messages = [
+        message
+        for message in (projected.get("messages") or [])
+        if isinstance(message, dict) and message.get("role") == "assistant"
+    ]
+    if live_messages:
+        last_message_ts = live_messages[-1].get("_ts")
+        if last_message_ts is not None:
+            projected["last_message_ts"] = last_message_ts
+    if projected.get("last_assistant_text") or projected.get("last_reasoning_text"):
+        projected["messages"] = []
+
+    scene = projected.get("anchor_activity_scene")
+    compact_calls = []
+    for raw_call in projected.get("tool_calls") or []:
+        if not isinstance(raw_call, dict):
+            continue
+        call = dict(raw_call)
+        if call.get("preview") == call.get("snippet"):
+            call.pop("preview", None)
+        compact_calls.append(call)
+    # Retain the compact top-level list as the degraded-render fallback. The
+    # Anchor scene is normally authoritative, but session reattach deliberately
+    # falls back to INFLIGHT.toolCalls when scene rendering is unavailable.
+    projected["tool_calls"] = compact_calls
+
+    if not isinstance(scene, dict):
+        return projected
+    compact_scene = dict(scene)
+    compact_rows = []
+    row_keys = (
+        "row_id", "local_id", "kind", "role", "source_event_type", "status",
+        "created_at", "group", "text", "thinking", "tool_call_id", "tool",
+    )
+    for raw_row in scene.get("activity_rows") or []:
+        if not isinstance(raw_row, dict):
+            continue
+        row = {
+            key: raw_row[key]
+            for key in row_keys
+            if key in raw_row and raw_row[key] not in (None, "")
+        }
+        if str(raw_row.get("role") or "") == "tool":
+            tool = raw_row.get("tool") if isinstance(raw_row.get("tool"), dict) else {}
+            compact_tool = dict(tool)
+            if compact_tool.get("preview") == compact_tool.get("snippet"):
+                compact_tool.pop("preview", None)
+            if compact_tool.get("tid") == compact_tool.get("id"):
+                compact_tool.pop("tid", None)
+            row["tool"] = compact_tool
+            # Tool cards consume args/snippet from row.tool. row.payload and
+            # row.text are byte-for-byte fallbacks of those same values.
+            row.pop("text", None)
+        else:
+            thinking = row.get("thinking")
+            if isinstance(thinking, dict) and thinking.get("text") == row.get("text"):
+                row.pop("thinking", None)
+        compact_rows.append(row)
+    compact_scene["activity_rows"] = compact_rows
+    projected["anchor_activity_scene"] = compact_scene
+    return projected
 
 
 def _ensure_full_session_before_mutation(sid: str, session):
@@ -6358,20 +6535,42 @@ def _repair_foreign_session_model_provider(
 
 
 def _clean_session_model_provider(value: str | None) -> str | None:
+    """Normalize a stored/requested provider value to a bare provider ID.
+
+    An ``@``-prefixed value is a provider-qualified *model* hint, so the
+    provider is resolved with the shared
+    ``config._parse_provider_qualified_model_id()`` grammar rather than a
+    positional colon split — that keeps multi-segment custom provider IDs
+    (``custom:<slug>``, ``custom:<host>:<port>``) whole while still dropping a
+    trailing model segment (#6722). Values without the ``@`` marker are already
+    plain provider IDs, whose colons belong to the ID itself, so they are
+    preserved verbatim.
+    """
     provider = str(value or "").strip().lower()
     if not provider or provider == "default":
         return None
     if provider.startswith("@"):
-        provider = provider[1:]
+        parsed = _parse_provider_qualified_model_id(provider)
+        provider = parsed[1].strip() if parsed else provider[1:]
     return provider or None
 
 
 def _split_provider_qualified_model(model: str) -> tuple[str, str | None]:
+    """Split an ``@provider:model`` hint into ``(bare_model, provider)``.
+
+    Delegates the grammar to ``config._parse_provider_qualified_model_id()``,
+    the shared parser that already knows how to keep a multi-segment custom
+    provider ID (``custom:<slug>``, ``custom:<host>:<port>``) intact while
+    still letting the model segment carry its own colons for tags such as
+    ``:free``. Keeping one parser here means every caller in this module and
+    the gateway request path resolve the same provider/model pair (#6722).
+    """
     model = str(model or "").strip()
-    if model.startswith("@") and ":" in model:
-        provider_hint, bare_model = model[1:].rsplit(":", 1)
+    parsed = _parse_provider_qualified_model_id(model)
+    if parsed:
+        bare_model, provider_hint = parsed
         provider = _clean_session_model_provider(provider_hint)
-        bare = bare_model.strip()
+        bare = str(bare_model or "").strip()
         if provider and bare:
             return bare, provider
     return model, None
@@ -9215,6 +9414,8 @@ def _dedupe_cli_sidebar_sessions_for_api(
     *,
     show_cron_sessions: bool = False,
     show_webhook_sessions: bool = False,
+    show_kanban_sessions: bool = False,
+    source_filter: str | None = None,
 ) -> list[dict]:
     """Return state sidebar rows while preserving project-hidden background rows.
 
@@ -9222,11 +9423,25 @@ def _dedupe_cli_sidebar_sessions_for_api(
     session store. They should stay hidden from the default sidebar, but
     project-assigned messageful rows must remain in the `/api/sessions` payload
     with `default_hidden` so the matching project chip can reveal them (#3134).
+
+    An explicit ``source_filter`` for a background source (cron/webhook/kanban)
+    is a deliberate request to view those rows, so it overrides the default
+    hide for that source only — the user asked for them.
     """
     from api.models import (
         _hide_from_default_sidebar as _hide_background,
         _include_project_hidden_background_sidebar_sessions,
     )
+
+    # An explicit background source filter reveals that source (override the hide).
+    # Normalize to match how the loader canonicalizes source_filter (strip+lower).
+    _sf = str(source_filter or '').strip().lower()
+    if _sf == 'cron':
+        show_cron_sessions = True
+    elif _sf == 'webhook':
+        show_webhook_sessions = True
+    elif _sf == 'kanban':
+        show_kanban_sessions = True
 
     candidates = [
         s for s in cli
@@ -9240,6 +9455,7 @@ def _dedupe_cli_sidebar_sessions_for_api(
             s,
             show_cron=show_cron_sessions,
             show_webhook=show_webhook_sessions,
+            show_kanban=show_kanban_sessions,
         )
     ]
     return _include_project_hidden_background_sidebar_sessions(candidates, visible)
@@ -9401,6 +9617,7 @@ from api.models import (
     load_projects,
     save_projects,
     import_cli_session,
+    CLAUDE_CODE_SOURCE,
     get_cli_sessions,
     get_cli_session_messages,
     get_state_db_session_messages,
@@ -9408,6 +9625,7 @@ from api.models import (
     get_state_db_session_message_keys_before_timestamp,
     get_state_db_session_summary,
     merge_session_messages_append_only,
+    _reconcile_api_content_sidecars,
     _enrich_sidebar_lineage_metadata,
     _active_stream_ids,
     _evict_sessions_over_cap,
@@ -9623,6 +9841,7 @@ from api.workspace import (
     EscapeAuthorizationExpiredError,
     list_dir,
     list_authorized_escape_dir,
+    serialize_workspace_entries_for_browser,
     dir_signature,
     list_workspace_suggestions,
     read_file_content,
@@ -9811,6 +10030,7 @@ _SIDEBAR_SESSION_RESPONSE_FIELDS = {
     "is_cli_session",
     "is_messaging_session",
     "is_streaming",
+    "cron_running",
     "active_stream_id",
     "has_pending_user_message",
     "pending_started_at",
@@ -12874,7 +13094,7 @@ def handle_get(handler, parsed) -> bool:
                         journal,
                         active=journal_active,
                     )
-                    if journal_active:
+                    if journal_active and (not load_messages or msg_limit is None):
                         try:
                             snapshot = _run_journal_live_snapshot(original_stream_id, handler=handler)
                         except Exception:
@@ -12885,7 +13105,7 @@ def handle_get(handler, parsed) -> bool:
                             )
                             snapshot = None
                         if snapshot:
-                            raw["runtime_journal_snapshot"] = snapshot
+                            raw["runtime_journal_snapshot"] = _runtime_journal_snapshot_for_session_payload(snapshot)
                             raw["pending_attachments"] = getattr(s, "pending_attachments", []) or []
             # Cold-load: derive the latest settled todo snapshot from the full
             # merged transcript, not the truncated display window. This keeps
@@ -12989,7 +13209,12 @@ def handle_get(handler, parsed) -> bool:
             # drift on foreign-session semantics.
             cli_meta = _lookup_cli_session_metadata(sid)
             _session_profile = (cli_meta or {}).get("profile") or None
-            if not _session_visible_to_active_profile(_session_profile, handler):
+            # Claude Code rows are profile-less by construction (they come from
+            # ~/.claude/projects, not from any profile's state.db), so the gate
+            # below would 404 every one of them under a named active profile
+            # even though /api/sessions happily lists them. Exempt them.
+            _profile_agnostic = _is_profile_agnostic_foreign_session(cli_meta)
+            if not _profile_agnostic and not _session_visible_to_active_profile(_session_profile, handler):
                 if _session_profile:
                     # Valid CLI/foreign session owned by a KNOWN other profile:
                     # 409 so the client can offer to switch to it (#5419).
@@ -13061,7 +13286,7 @@ def handle_get(handler, parsed) -> bool:
             }
             attach_todo_state(sess, msgs)
             sess = _merge_cli_sidebar_metadata(sess, cli_meta)
-            return j(handler, {"session": redact_session_data(sess)})
+            return j(handler, {"session": public_session_projection(sess)})
 
     if parsed.path == "/api/session/lineage/report":
         sid = parse_qs(parsed.query).get("session_id", [""])[0]
@@ -13124,6 +13349,7 @@ def handle_get(handler, parsed) -> bool:
             )
             show_cron_sessions = bool(settings.get("show_cron_sessions"))
             show_webhook_sessions = bool(settings.get("show_webhook_sessions"))
+            show_kanban_sessions = bool(settings.get("show_kanban_sessions"))
             agent_session_source_filter = settings.get("agent_session_source_filter")
             active_profile = profiles_api.get_active_profile_name()
             all_profiles = _all_profiles_enabled(parsed)
@@ -13147,6 +13373,7 @@ def handle_get(handler, parsed) -> bool:
                 exclude_hidden=exclude_hidden,
                 visible_only=True,
                 show_webhook_sessions=show_webhook_sessions,
+                show_kanban_sessions=show_kanban_sessions,
                 source_filter=agent_session_source_filter,
                 sidebar_source=sidebar_source,
                 archived_limit=archived_limit,
@@ -13169,6 +13396,7 @@ def handle_get(handler, parsed) -> bool:
                     exclude_hidden=exclude_hidden,
                     visible_only=True,
                     show_webhook_sessions=show_webhook_sessions,
+                    show_kanban_sessions=show_kanban_sessions,
                     source_filter=agent_session_source_filter,
                     sidebar_source=sidebar_source,
                     archived_limit=archived_limit,
@@ -14186,7 +14414,9 @@ def handle_post(handler, parsed) -> bool:
                     "created_at": share_meta["share_created_at"],
                     "updated_at": share_meta["share_updated_at"],
                 },
-                "session": response_session.compact() | {"messages": response_session.messages},
+                "session": public_session_projection(
+                    response_session.compact() | {"messages": response_session.messages}
+                ),
             },
         )
 
@@ -14225,7 +14455,9 @@ def handle_post(handler, parsed) -> bool:
             handler,
             {
                 "ok": True,
-                "session": response_session.compact() | {"messages": response_session.messages},
+                "session": public_session_projection(
+                    response_session.compact() | {"messages": response_session.messages}
+                ),
             },
         )
 
@@ -14355,7 +14587,9 @@ def handle_post(handler, parsed) -> bool:
                 profile=getattr(s, "profile", None),
                 session_id=getattr(s, "session_id", None),
             )
-        payload = {"session": s.compact() | {"messages": s.messages}}
+        payload = {
+            "session": public_session_projection(s.compact() | {"messages": s.messages})
+        }
         if worktree_skipped:
             # Config-default worktree was skipped (non-git workspace); tell the
             # client the session is plain so the UI doesn't assume isolation.
@@ -14452,7 +14686,14 @@ def handle_post(handler, parsed) -> bool:
                 session_id=getattr(copied_session, "session_id", None),
             )
 
-            return j(handler, {"session": copied_session.compact() | {"messages": copied_session.messages}})
+            return j(
+                handler,
+                {
+                    "session": public_session_projection(
+                        copied_session.compact() | {"messages": copied_session.messages}
+                    )
+                },
+            )
         except Exception as e:
             return bad(handler, str(e))
 
@@ -14851,7 +15092,10 @@ def handle_post(handler, parsed) -> bool:
             except Exception:
                 logger.debug("Failed to close workspace terminal after workspace update")
         set_last_workspace(new_ws)
-        return j(handler, {"session": s.compact() | {"messages": s.messages}})
+        return j(
+            handler,
+            {"session": public_session_projection(s.compact() | {"messages": s.messages})},
+        )
     if parsed.path == "/api/session/worktree/remove":
         sid = body.get("session_id", "")
         if not sid or not isinstance(sid, str) or not sid.strip():
@@ -15128,7 +15372,13 @@ def handle_post(handler, parsed) -> bool:
         from api.config import _evict_session_agent
         _evict_session_agent(body["session_id"])
         return j(
-            handler, {"ok": True, "session": s.compact() | {"messages": s.messages}}
+            handler,
+            {
+                "ok": True,
+                "session": public_session_projection(
+                    s.compact() | {"messages": s.messages}
+                ),
+            },
         )
 
     if parsed.path == "/api/session/branch":
@@ -15176,11 +15426,44 @@ def handle_post(handler, parsed) -> bool:
         cli_meta = _lookup_cli_session_metadata(source.session_id) if _session_requires_cli_metadata_lookup(source) else {}
         is_messaging_session = _is_messaging_session_record(source) or _is_messaging_session_record(cli_meta)
         cli_messages = get_cli_session_messages(source.session_id) if is_messaging_session else []
-        source_messages = (
-            _merged_session_messages_for_display(source, cli_messages)
-            if is_messaging_session and cli_messages
-            else list(source.messages or [])
-        )
+        if is_messaging_session:
+            if cli_messages:
+                source_messages = _merged_session_messages_for_display(source, cli_messages)
+            else:
+                # Match GET /api/session: a messaging session with no CLI
+                # transcript does not fall back to state.db rows.
+                source_messages = merge_session_messages_append_only(
+                    _webui_sidecar_lineage_messages_for_display(source),
+                    [],
+                    truncation_watermark=getattr(source, "truncation_watermark", None),
+                    truncation_boundary=getattr(source, "truncation_boundary", None),
+                )
+                source_messages = _merged_webui_lineage_messages_for_display(source, source_messages)
+        else:
+            # Match GET /api/session's full-transcript display path exactly:
+            # sidecar lineage stitched across compression snapshots, merged
+            # append-only with state.db rows, then parent-row backfill for
+            # partial continuations. The frontend's keep_count is an index
+            # into THAT merged list; slicing the raw sidecar instead landed
+            # the cut too early whenever the merged view deduplicates rows
+            # (replayed sidecar/state.db doubles, filtered prefixes), so the
+            # fork stopped mid tool-run and dropped the final conclusion.
+            _state_db_reader_kwargs = {
+                "profile": getattr(source, "profile", None) or None,
+            }
+            _backstop = _state_db_backstop_limit_for_display(source, None)
+            if _backstop is not None:
+                _state_db_reader_kwargs["limit"] = _backstop
+            source_messages = merge_session_messages_append_only(
+                _webui_sidecar_lineage_messages_for_display(source),
+                get_state_db_session_messages(
+                    source.session_id,
+                    **_state_db_reader_kwargs,
+                ),
+                truncation_watermark=getattr(source, "truncation_watermark", None),
+                truncation_boundary=getattr(source, "truncation_boundary", None),
+            )
+            source_messages = _merged_webui_lineage_messages_for_display(source, source_messages)
         if keep_count is not None:
             forked_messages = source_messages[:keep_count]
         else:
@@ -15197,11 +15480,21 @@ def handle_post(handler, parsed) -> bool:
         from api.session_ops import truncate_context_for_display_keep
 
         fork_keep = keep_count if keep_count is not None else len(source_messages)
-        forked_context = truncate_context_for_display_keep(
-            getattr(source, "context_messages", None),
-            source_messages,
-            fork_keep,
+        forked_context = copy.deepcopy(
+            truncate_context_for_display_keep(
+                getattr(source, "context_messages", None),
+                source_messages,
+                fork_keep,
+            )
         )
+        # `truncate_context_for_display_keep` aligns rows by visible display
+        # identity but intentionally does not carry provider replay sidecars.
+        # Reconcile only the retained prefix before constructing the branch so
+        # its persisted model context receives the same conservative
+        # api_content bytes as the forked display messages.  The helper mutates
+        # the freshly aligned context copy; the source session and
+        # forked_messages ownership remain untouched.
+        _reconcile_api_content_sidecars(forked_context, forked_messages)
         branch = Session(
             workspace=source.workspace,
             model=source.model,
@@ -15772,6 +16065,7 @@ def handle_post(handler, parsed) -> bool:
                 "show_claude_code_sessions",
                 "show_cron_sessions",
                 "show_webhook_sessions",
+                "show_kanban_sessions",
                 "show_previous_messaging_sessions",
             )
         ):
@@ -16769,7 +17063,10 @@ def _handle_session_export(handler, parsed):
     active_profile = get_active_profile_name()
     if not _profiles_match(getattr(s, "profile", None), active_profile):
         return bad(handler, "Session not found", 404)
-    safe = redact_session_data(s.__dict__)
+    # ``public_session_projection`` supersedes the narrower
+    # ``redact_session_data`` path so export context_messages uses the same
+    # alias-stripping boundary as the visible transcript.
+    safe = public_session_projection(s.__dict__)
     qs = parse_qs(parsed.query)
     fmt = qs.get("format", ["json"])[0].lower()
     if fmt == "html":
@@ -16982,7 +17279,7 @@ def _handle_list_dir(handler, parsed):
         return j(
             handler,
             {
-                "entries": entries,
+                "entries": serialize_workspace_entries_for_browser(entries),
                 "signature": dir_signature(Path(workspace), rel_path, entries),
                 "path": rel_path,
                 "workspace": str(workspace),
@@ -17056,6 +17353,7 @@ def _handle_escape_list_dir(handler, parsed):
     rel_path = qs.get("path", ["."])[0]
     try:
         payload = list_authorized_escape_dir(Path(s.workspace), sid, token, rel_path)
+        payload["entries"] = serialize_workspace_entries_for_browser(payload.get("entries"))
         return j(handler, payload)
     except FileNotFoundError as exc:
         return bad(handler, _sanitize_error(exc), 404)
@@ -17434,6 +17732,29 @@ def _runner_event_payload(entry: dict):
     return entry
 
 
+def _project_runner_event_payload(payload):
+    """Strip internal replay fields (api_content, row-id aliases) from a runner
+    SSE payload before it is relayed to the browser.
+
+    Runner-backed SSE relays adapter payloads verbatim; a terminal event can
+    carry a full ``session`` object (with per-message ``api_content`` sidecars)
+    or be session/message-shaped itself. Neither must reach a client, so route
+    the transcript-bearing shapes through the same public projection every other
+    session emitter uses. Non-session payloads pass through unchanged.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    # Terminal events wrap the session under a "session" key.
+    if isinstance(payload.get("session"), dict):
+        projected = dict(payload)
+        projected["session"] = public_session_projection(payload["session"])
+        return projected
+    # Payload is itself session/message-shaped (has a messages transcript).
+    if "messages" in payload or "context_messages" in payload:
+        return public_session_projection(payload)
+    return payload
+
+
 def _runner_event_id(run_id: str, entry: dict) -> str | None:
     event_id = entry.get("event_id") or entry.get("id")
     if event_id:
@@ -17480,7 +17801,7 @@ def _stream_runner_run_events(handler, run_id: str, cursor: str | None = None) -
                 if not isinstance(entry, dict):
                     continue
                 event = _runner_event_name(entry)
-                _sse_with_id(handler, event, _runner_event_payload(entry), _runner_event_id(run_id, entry))
+                _sse_with_id(handler, event, _project_runner_event_payload(_runner_event_payload(entry)), _runner_event_id(run_id, entry))
                 emitted = True
                 if event in SSE_RELAY_CLOSE_EVENTS:
                     terminal = True
@@ -19163,7 +19484,11 @@ def _handle_media(handler, parsed):
     ) else "attachment"
     # _serve_file_bytes sends Content-Security-Policy when csp is set.
     csp = "sandbox allow-scripts" if html_inline_ok else None
-    return _serve_file_bytes(handler, target, mime, disposition, "private, max-age=3600", csp=csp)
+    # HTML inline previews change frequently (agent edits + re-renders).
+    # Use no-store so the browser always fetches fresh content, avoiding stale
+    # previews that require a manual full-page refresh to update.
+    cache_control = "no-store" if mime == "text/html" else "private, max-age=3600"
+    return _serve_file_bytes(handler, target, mime, disposition, cache_control, csp=csp)
 
 
 def _file_raw_target(session, sid: str, rel: str) -> tuple[Path, Path] | None:
@@ -20606,17 +20931,28 @@ def _handle_memory_read(handler, parsed=None):
     except ImportError:
         home = Path.home() / ".hermes"
         mem_dir = home / "memories"
-    mem_file = mem_dir / "MEMORY.md"
-    user_file = mem_dir / "USER.md"
+
+    # Respect memory_enabled and user_profile_enabled config flags (#6406)
+    # Use get_config_snapshot() for per-profile isolation — get_config() returns
+    # the process-global mutable _cfg_cache which races across profiles.
+    # The flags are nested under cfg["memory"] in Hermes Agent's schema.
+    cfg = get_config_snapshot()
+    mem = cfg.get("memory") if isinstance(cfg, dict) else None
+    mem_cfg = mem if isinstance(mem, dict) else {}
+    memory_enabled = _webui_truthy(mem_cfg.get("memory_enabled", True))
+    user_profile_enabled = _webui_truthy(mem_cfg.get("user_profile_enabled", True))
+
+    mem_file = mem_dir / "MEMORY.md" if memory_enabled else None
+    user_file = mem_dir / "USER.md" if user_profile_enabled else None
     soul_file = home / "SOUL.md"
     memory = (
         mem_file.read_text(encoding="utf-8", errors="replace")
-        if mem_file.exists()
+        if mem_file and mem_file.exists()
         else ""
     )
     user = (
         user_file.read_text(encoding="utf-8", errors="replace")
-        if user_file.exists()
+        if user_file and user_file.exists()
         else ""
     )
     soul = (
@@ -20632,18 +20968,18 @@ def _handle_memory_read(handler, parsed=None):
             "user": _redact_text(user),
             "soul": _redact_text(soul),
             "project_context": _redact_text(project_context["content"]),
-            "memory_path": str(mem_file),
-            "user_path": str(user_file),
+            "memory_path": str(mem_file) if mem_file else "",
+            "user_path": str(user_file) if user_file else "",
             "soul_path": str(soul_file),
             "project_context_path": project_context["path"],
             "project_context_name": project_context.get("name", ""),
             "project_context_workspace": project_context["workspace"],
-            "memory_mtime": mem_file.stat().st_mtime if mem_file.exists() else None,
-            "user_mtime": user_file.stat().st_mtime if user_file.exists() else None,
+            "memory_mtime": mem_file.stat().st_mtime if mem_file and mem_file.exists() else None,
+            "user_mtime": user_file.stat().st_mtime if user_file and user_file.exists() else None,
             "soul_mtime": soul_file.stat().st_mtime if soul_file.exists() else None,
             "project_context_mtime": project_context["mtime"],
             "project_context_shadowed": project_context["shadowed"],
-            "external_notes_enabled": _external_notes_sources_enabled(),
+            "external_notes_enabled": _external_notes_sources_enabled(cfg),
         },
     )
 
@@ -20799,6 +21135,7 @@ def _handle_btw(handler, body):
     ephemeral.save()
     stream_id = uuid.uuid4().hex
     ephemeral.active_stream_id = stream_id
+    register_session_writeback_owner(ephemeral.session_id, stream_id)
     ephemeral.save()
     stream = create_stream_channel()
     register_stream_owner(stream_id, ephemeral.session_id)
@@ -20849,6 +21186,7 @@ def _handle_background(handler, body):
     bg.save()
     stream_id = uuid.uuid4().hex
     bg.active_stream_id = stream_id
+    register_session_writeback_owner(bg.session_id, stream_id)
     bg.save()
     stream = create_stream_channel()
     register_stream_owner(stream_id, bg.session_id)
@@ -20988,6 +21326,7 @@ def _prepare_chat_start_session_for_stream(
     s.model = model
     s.model_provider = model_provider
     s.active_stream_id = stream_id
+    register_session_writeback_owner(s.session_id, stream_id)
     s.post_compression_context_tokens_estimate = None
     s.pending_user_message = msg
     s.pending_attachments = attachments
@@ -21069,9 +21408,14 @@ def _active_run_stream_for_session(session_id: str | None) -> str | None:
     wedged worker that never reaches its finally (e.g. stuck in a provider call,
     or leaked by SIGKILL without restart) must NOT 409 the session forever — so an
     entry older than the unwind ceiling (180s) is treated as stale and ignored
-    here. A legitimately long-running turn keeps ``active_stream_id`` SET
-    and is handled by ``_active_stream_blocks_chat_start`` above; this guard only
-    covers the cleared-stream-id unwind window. (Codex brick-gate hardening, #3822.)
+    here. For a phase="cancelling" row the ceiling is anchored on the cancel time
+    (``cancelled_at``), never on the original run start: cancel_stream() removes
+    STREAMS itself, so absence from STREAMS is not worker-death proof, and a
+    long-running turn that was just cancelled must not be reaped (and a successor
+    admitted) while the old worker is still alive (#6623). A legitimately
+    long-running turn keeps ``active_stream_id`` SET and is handled by
+    ``_active_stream_blocks_chat_start`` above; this guard only covers the
+    cleared-stream-id unwind window. (Codex brick-gate hardening, #3822.)
     """
     sid = str(session_id or "").strip()
     if not sid:
@@ -21099,13 +21443,35 @@ def _active_run_stream_for_session(session_id: str | None) -> str | None:
                     started_at = float((raw or {}).get("started_at") or 0)
                 except (TypeError, ValueError):
                     started_at = 0.0
+                # #6623 re-gate: cancel_stream() removes STREAMS itself, so a
+                # missing SSE channel is NOT proof that a cancelled worker is
+                # dead. For a phase="cancelling" row the unwind ceiling must be
+                # anchored on the CANCEL time (cancelled_at, started_at as a
+                # legacy fallback), never on the original run start: a turn that
+                # ran for minutes and was just cancelled would otherwise be
+                # reaped the instant its started_at crosses the ceiling and a
+                # successor admitted while the old worker is still alive. A
+                # recently cancelled run therefore keeps blocking a successor
+                # (this function returns its stream id) until the worker either
+                # unwinds (its finally unregisters the row within seconds) or
+                # the cancel itself has been outstanding past the ceiling.
+                _run_phase = str((raw or {}).get("phase") or "").strip()
+                if _run_phase == "cancelling":
+                    try:
+                        _age_anchor = float(
+                            (raw or {}).get("cancelled_at") or started_at or 0
+                        )
+                    except (TypeError, ValueError):
+                        _age_anchor = started_at
+                else:
+                    _age_anchor = started_at
                 # Past the unwind ceiling: never block a successor on it (the
                 # anti-permanent-409 guarantee, #3822). Additionally reconcile the
                 # zombie out of ACTIVE_RUNS so health/recovery polling stops seeing a
                 # half-alive run — but ONLY when the worker is truly gone from
                 # STREAMS, so a still-live / still-tearing-down worker keeps its
                 # lifecycle row. Pop by the real dict key. (Codex gate, #4492)
-                if started_at and (now - started_at) > ceiling:
+                if _age_anchor and (now - _age_anchor) > ceiling:
                     if run_stream_id not in live_stream_ids and stream_id not in live_stream_ids:
                         stale_stream_ids.append(run_stream_id)
                     continue
@@ -22488,7 +22854,7 @@ def _handle_chat_sync(handler, body):
                 _merge_display_messages_after_agent_result,
                 _restore_display_reasoning_metadata,
                 _restore_reasoning_metadata,
-                _sanitize_messages_for_api,
+                _sanitize_messages_for_agent,
                 _compact_session_image_parts_for_persistence,
                 _context_messages_for_new_turn,
                 _workspace_context_prefix,
@@ -22519,7 +22885,7 @@ def _handle_chat_sync(handler, body):
             result = agent.run_conversation(
                 user_message=workspace_ctx + msg,
                 system_message=workspace_system_msg,
-                conversation_history=_sanitize_messages_for_api(
+                conversation_history=_sanitize_messages_for_agent(
                     _previous_context_messages,
                     cfg=get_config(),
                     effective_model=_model,
@@ -22601,7 +22967,7 @@ def _handle_chat_sync(handler, body):
         {
             "answer": result.get("final_response") or "",
             "status": "done" if result.get("completed", True) else "partial",
-            "session": s.compact() | {"messages": s.messages},
+            "session": public_session_projection(s.compact() | {"messages": s.messages}),
             "result": {k: v for k, v in result.items() if k != "messages"},
         },
     )
@@ -25701,6 +26067,22 @@ def _handle_memory_write(handler, body):
         require(body, "section", "content")
     except ValueError as e:
         return bad(handler, str(e))
+    section = body["section"]
+
+    # Respect memory_enabled and user_profile_enabled config flags (#6406)
+    # Use get_config_snapshot() for per-profile isolation — get_config() returns
+    # the process-global mutable _cfg_cache which races across profiles.
+    # The flags are nested under cfg["memory"] in Hermes Agent's schema.
+    cfg = get_config_snapshot()
+    mem = cfg.get("memory") if isinstance(cfg, dict) else None
+    mem_cfg = mem if isinstance(mem, dict) else {}
+    if section == "memory":
+        if not _webui_truthy(mem_cfg.get("memory_enabled", True)):
+            return bad(handler, "Memory is disabled by configuration (memory_enabled: false)", 403)
+    elif section == "user":
+        if not _webui_truthy(mem_cfg.get("user_profile_enabled", True)):
+            return bad(handler, "User profile is disabled by configuration (user_profile_enabled: false)", 403)
+
     try:
         from api.profiles import get_active_hermes_home
 
@@ -25710,7 +26092,6 @@ def _handle_memory_write(handler, body):
         home = Path.home() / ".hermes"
         mem_dir = home / "memories"
     mem_dir.mkdir(parents=True, exist_ok=True)
-    section = body["section"]
     if section == "memory":
         target = mem_dir / "MEMORY.md"
     elif section == "user":
@@ -25760,6 +26141,11 @@ def _normalize_message_for_import_refresh(message: object) -> object:
     normalized = dict(message)
     normalized.pop("timestamp", None)
     normalized.pop("_ts", None)
+    # These are WebUI/Agent replay bookkeeping aliases at the message's top
+    # level.  Strip only those exact keys; nested business payloads are opaque
+    # and must remain part of the semantic import comparison.
+    for key in ("api_content", "_state_db_row_id", "_db_row_id", "state_db_row_id"):
+        normalized.pop(key, None)
     return normalized
 
 
@@ -25918,19 +26304,21 @@ def _handle_session_import_cli(handler, body):
         return j(
             handler,
             {
-                "session": existing.compact()
-                | {
-                    "messages": existing.messages,
-                    "is_cli_session": (False if _existing_is_sa else True),
-                    # Greptile #4911 follow-up: read read_only from
-                    # the persisted Session, NOT from cli_meta.  This
-                    # refresh path is for an already-WebUI-owned
-                    # session; the WebUI's persisted view is the
-                    # source of truth for the response, not the
-                    # foreign store's current value.  (Mirrors the
-                    # GET /api/session fix.)
-                    "read_only": bool(getattr(existing, "read_only", False)),
-                },
+                "session": public_session_projection(
+                    existing.compact()
+                    | {
+                        "messages": existing.messages,
+                        "is_cli_session": (False if _existing_is_sa else True),
+                        # Greptile #4911 follow-up: read read_only from
+                        # the persisted Session, NOT from cli_meta.  This
+                        # refresh path is for an already-WebUI-owned
+                        # session; the WebUI's persisted view is the
+                        # source of truth for the response, not the
+                        # foreign store's current value.  (Mirrors the
+                        # GET /api/session fix.)
+                        "read_only": bool(getattr(existing, "read_only", False)),
+                    }
+                ),
                 "imported": False,
             },
         )
@@ -26014,7 +26402,13 @@ def _handle_session_import_cli(handler, body):
             "messages": msgs,
             "tool_calls": [],
         }
-        return j(handler, {"session": session_payload, "imported": False})
+        return j(
+            handler,
+            {
+                "session": public_session_projection(session_payload),
+                "imported": False,
+            },
+        )
 
     s = import_cli_session(
         sid,
@@ -26059,11 +26453,13 @@ def _handle_session_import_cli(handler, body):
     return j(
         handler,
         {
-            "session": s.compact()
-            | {
-                "messages": msgs,
-                "is_cli_session": True,
-            },
+            "session": public_session_projection(
+                s.compact()
+                | {
+                    "messages": msgs,
+                    "is_cli_session": True,
+                }
+            ),
             "imported": True,
         },
     )
@@ -26073,9 +26469,15 @@ def _handle_session_import(handler, body):
     """Import a session from a JSON export. Creates a new session with a new ID."""
     if not body or not isinstance(body, dict):
         return bad(handler, "Request body must be a JSON object")
-    messages = body.get("messages")
+    messages = strip_public_internal_fields(
+        body.get("messages"),
+        message_records=True,
+    )
     if not isinstance(messages, list):
         return bad(handler, 'JSON must contain a "messages" array')
+    raw_tool_calls = body.get("tool_calls", [])
+    if not isinstance(raw_tool_calls, list):
+        return bad(handler, 'JSON "tool_calls" must be an array')
     title = body.get("title", "Imported session")
     try:
         workspace = str(resolve_trusted_workspace(body.get("workspace", str(DEFAULT_WORKSPACE))))
@@ -26087,7 +26489,7 @@ def _handle_session_import(handler, body):
         workspace=workspace,
         model=model,
         messages=messages,
-        tool_calls=body.get("tool_calls", []),
+        tool_calls=strip_public_internal_fields(raw_tool_calls),
         profile=get_active_profile_name(),
     )
     s.pinned = body.get("pinned", False)
@@ -26097,7 +26499,13 @@ def _handle_session_import(handler, body):
         _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
     s.save()
     publish_session_list_changed("session_import")
-    return j(handler, {"ok": True, "session": s.compact() | {"messages": s.messages}})
+    return j(
+        handler,
+        {
+            "ok": True,
+            "session": public_session_projection(s.compact() | {"messages": s.messages}),
+        },
+    )
 
 
 def _mask_secrets(obj):

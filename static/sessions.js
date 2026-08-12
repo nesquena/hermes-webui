@@ -814,6 +814,7 @@ function _isSessionLocallyStreaming(s) {
 function _isSessionEffectivelyStreaming(s) {
   return Boolean(s && (
     s.is_streaming ||
+    s.cron_running ||
     _hasPendingUserMessageSignal(s) ||
     _isSessionLocallyStreaming(s)
   ));
@@ -1038,6 +1039,7 @@ function _serverLiveSnapshotInflight(snapshot, uploaded){
       role:'assistant',
       content:lastAssistantText,
       reasoning:lastReasoningText||undefined,
+      _ts:snapshot.last_message_ts??snapshot.lastMessageTs??undefined,
       _live:true,
       _journal_snapshot:true,
     });
@@ -1213,8 +1215,12 @@ function _markPollingCompletionUnreadTransitions(sessions) {
     const lastMessageAt = Number(s.last_message_at || 0);
     const hasServerRunSignal=Boolean(s.is_streaming||_hasPendingUserMessageSignal(s));
     const canMarkCompletedStream=Boolean(hasServerRunSignal||previousSnapshot||observedStreaming);
-    const completedObservedStream = canMarkCompletedStream&&wasStreaming === true && !isStreaming;
-    const completedWithNewMessages = Boolean(
+    // #6728: cron liveness is server-side (only /api/crons/status exposes it);
+    // the sidebar must defer its completion/unread transition while the job is
+    // still running, or a mid-run message makes the row look completed.
+    const cronRunning = Boolean(s.cron_running);
+    const completedObservedStream = !cronRunning && canMarkCompletedStream && wasStreaming === true && !isStreaming;
+    const completedWithNewMessages = !cronRunning && Boolean(
       (previousSnapshot || observedStreaming)
       && !isStreaming
       && (
@@ -1222,7 +1228,7 @@ function _markPollingCompletionUnreadTransitions(sessions) {
         || lastMessageAt > Number((previousSnapshot || observedStreaming).last_message_at || 0)
       )
     );
-    const completedPersistedObservedStream = Boolean(observedStreaming && !isStreaming);
+    const completedPersistedObservedStream = !cronRunning && Boolean(observedStreaming && !isStreaming);
     if (completedObservedStream || completedPersistedObservedStream || completedWithNewMessages) {
       if (!_isSessionActivelyViewedForList(sid)) {
         // Tag cron session-list markers with source+profile so profile-switch
@@ -1728,6 +1734,13 @@ async function loadSession(sid){
   _yoloEnabled=false;_updateYoloPill();
   if(typeof stopClarifyPolling==='function') stopClarifyPolling();
   if(typeof hideClarifyCard==='function') hideClarifyCard(forceReload, forceReload?'external-refresh':'dismissed');
+  // #6572: clear stale compression state when switching sessions.
+  // The compression UI state is per-session and must not leak across loads.
+  // Without this, a compression card from a prior session can appear as a
+  // phantom "Compressing context" barrier on a fresh session that never
+  // triggered compression.
+  if(typeof clearCompressionUi==='function') clearCompressionUi();
+  else window._compressionUi=null;
   // Show loading indicator immediately for responsiveness.
   // Cleared by renderMessages() once full session data arrives.
   // Persist the current composer draft before switching away so it can be
@@ -2390,7 +2403,7 @@ const _HANDOFF_THRESHOLD = 10;  // conversation rounds
 const _HANDOFF_STORAGE_PREFIX = 'handoff:';
 const _HANDOFF_SUFFIX_DISMISSED_AT = 'dismissed_at';
 const _HANDOFF_SUFFIX_SUMMARY_HANDLED_AT = 'summary_handled_at';
-const _MESSAGING_RAW_SOURCES = new Set(['weixin', 'telegram', 'discord', 'slack', 'email', 'wecom', 'wecom_callback']);
+const _MESSAGING_RAW_SOURCES = new Set(['weixin', 'telegram', 'discord', 'slack', 'email', 'wecom', 'wecom_callback', 'matrix']);
 const _MESSAGING_SOURCE_LABELS = {
   weixin: 'WeChat',
   telegram: 'Telegram',
@@ -2399,6 +2412,7 @@ const _MESSAGING_SOURCE_LABELS = {
   email: 'Email',
   wecom: 'WeCom',
   wecom_callback: 'WeCom Callback',
+  matrix: 'Matrix',
 };
 
 function _isMessagingSession(session) {
@@ -3798,6 +3812,7 @@ async function _loadOlderMessages() {
           ? virtualAddedHeight
           : Math.max(0, newScrollH - prevScrollH);
         _programmaticScroll = true;
+        _programmaticScrollSetAt = performance.now();
         container.scrollTop = oldTop + addedHeight;
         requestAnimationFrame(()=>{ _programmaticScroll = false; });
       }

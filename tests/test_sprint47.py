@@ -63,7 +63,9 @@ def test_skill_mutations_invalidate_slash_skill_caches():
 def test_builtin_commands_take_precedence_over_skill_slug_collisions():
     assert "_getReservedSlashCommandSlugs" in COMMANDS_JS
     assert "if(_getReservedSlashCommandSlugs().has(slug)) return null;" in COMMANDS_JS
-    assert "if(!skill.name.startsWith(q)||seen.has(skill.name)||reserved.has(skill.name))continue;" in COMMANDS_JS
+    command_matching = _function_body(COMMANDS_JS, "getMatchingCommands")
+    assert "reserved.has(name)" in command_matching
+    assert "!name.includes(q)&&!description.includes(q)" in command_matching
 
 
 def test_bundle_entries_merge_before_plain_skill_entries():
