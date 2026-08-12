@@ -2277,7 +2277,8 @@ def append_run_event(
             except OSError:
                 pass
 
-        # 7. Discard cached summary (existing logic unchanged)
+        # 5. Discard the cached summary: the JSONL (and sidecar, if published)
+        # both changed, so any cached summary for the old generation is stale.
         _discard_cached_summary(path)
         if created_file:
             _fsync_parent_dir(path)
