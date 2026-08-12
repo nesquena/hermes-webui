@@ -2,6 +2,8 @@
 
 from pathlib import Path
 import inspect
+import json
+import subprocess
 import sys
 
 import api.config as config
@@ -124,6 +126,51 @@ def test_reasoning_chip_ignores_response_after_session_switch():
     )[0]
     assert "const requestedSessionId=" in fetch
     assert fetch.count("currentSessionId!==requestedSessionId") == 2
+
+
+def test_reasoning_mutation_ignores_success_and_failure_after_session_switch(tmp_path):
+    """A session A mutation settling on session B must have no visible effect."""
+    reasoning_start = UI.index("// ── Reasoning effort chip")
+    handler_start = UI.index("document.addEventListener('click',function(e){", reasoning_start)
+    handler_end = UI.index("// ── Session toolsets chip", handler_start)
+    handler = UI[handler_start:handler_end]
+    script = tmp_path / "reasoning_navigation_race.js"
+    script.write_text(
+        f"""
+const handlers={{}};
+global.document={{addEventListener:(name, fn)=>{{handlers[name]=fn;}}}};
+global.closeReasoningDropdown=()=>{{}};
+global._reasoningEffortContext=()=>({{}});
+global.fetchReasoningChip=()=>{{effects.push('fetch');}};
+global._applyReasoningChip=(effort)=>{{effects.push('apply:'+effort);}};
+global.showToast=(message)=>{{effects.push('toast:'+message);}};
+let resolveRequest, rejectRequest;
+global.api=()=>new Promise((resolve,reject)=>{{resolveRequest=resolve;rejectRequest=reject;}});
+global.S={{session:{{session_id:'session-a',reasoning_effort:null}}}};
+const effects=[];
+eval({json.dumps(handler)});
+const option={{dataset:{{effort:'high'}}}};
+const target={{closest:(selector)=>selector==='.reasoning-option'?option:null}};
+handlers.click({{target}});
+const originalSession=S.session;
+S.session={{session_id:'session-b',reasoning_effort:'low'}};
+resolveRequest({{reasoning_effort:'high'}});
+setImmediate(()=>{{
+  if(originalSession.reasoning_effort!==null) throw new Error('stale owner session mutated');
+  if(S.session.reasoning_effort!=='low') throw new Error('active session mutated');
+  if(effects.length) throw new Error('stale success produced UI effects: '+effects.join(','));
+  S.session={{session_id:'session-a',reasoning_effort:null}};
+  handlers.click({{target}});
+  S.session={{session_id:'session-b',reasoning_effort:'low'}};
+  rejectRequest(new Error('late failure'));
+  setImmediate(()=>{{
+    if(effects.length) throw new Error('stale failure produced UI effects: '+effects.join(','));
+  }});
+}});
+""",
+        encoding="utf-8",
+    )
+    subprocess.run(["node", str(script)], check=True, timeout=10)
 
 
 def test_clearing_session_effort_refetches_effective_model_override():

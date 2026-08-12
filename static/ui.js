@@ -5409,18 +5409,28 @@ document.addEventListener('click',function(e){
     // (#6219 round-3)
     if(opt){
       const session=S&&S.session;
-      const request=session&&session.session_id
-        ?api('/api/session/update',{method:'POST',body:JSON.stringify({session_id:session.session_id,reasoning_effort:effort})})
+      // Fence every mutation callback to the session that owned the click. The
+      // request may settle after navigation, when applying its value or toast
+      // would misrepresent the newly visible conversation.
+      const requestedSessionId=(session&&session.session_id)||null;
+      const request=requestedSessionId
+        ?api('/api/session/update',{method:'POST',body:JSON.stringify({session_id:requestedSessionId,reasoning_effort:effort})})
         :api('/api/reasoning',{method:'POST',body:JSON.stringify(Object.assign({effort:effort},_reasoningEffortContext()))});
       request
         .then(function(st){
+          const currentSessionId=(S&&S.session&&S.session.session_id)||null;
+          if(currentSessionId!==requestedSessionId) return;
           if(session) session.reasoning_effort=effort||null;
           const display=effort||'Auto';
           if(!effort) fetchReasoningChip();
           else _applyReasoningChip(effort, st||{});
           showToast('🧠 Reasoning effort set to '+display);
         })
-        .catch(function(){showToast('🧠 Failed to set effort');});
+        .catch(function(){
+          const currentSessionId=(S&&S.session&&S.session.session_id)||null;
+          if(currentSessionId!==requestedSessionId) return;
+          showToast('🧠 Failed to set effort');
+        });
       closeReasoningDropdown();
     }
   }
