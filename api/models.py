@@ -438,7 +438,15 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
                 raise ValueError("session index must be a list")
             with LOCK:
                 in_memory_ids = set(SESSIONS.keys())
-                updated_map = {s.session_id: s.compact() for s in updates}
+            # Callers may pass already-owned compact entries.  In particular,
+            # Session.save() does so to prevent the index writer from rereading
+            # mutable Session state after the matching sidecar was published.
+            updated_map = {}
+            for update in updates:
+                entry = update if isinstance(update, dict) else update.compact()
+                sid = entry.get('session_id') if isinstance(entry, dict) else None
+                if sid:
+                    updated_map[sid] = entry
 
             existing = [
                 e for e in existing
@@ -1395,6 +1403,23 @@ class Session:
         # Own the complete snapshot BEFORE duplicate selection.  Otherwise a
         # nested mutation after selection but before deepcopy can invalidate the
         # equality decision and leak into this save's payload (#6600).
+        # One Session may be saved by a stream worker and a request worker at
+        # the same time.  Serialize the complete sidecar + index publication so
+        # the two files always describe one owned save generation.  RLock keeps
+        # nested same-thread save paths safe without involving the global
+        # sessions lock during filesystem I/O.
+        persistence_lock = getattr(self, '_persistence_lock', None)
+        if persistence_lock is None:
+            with LOCK:
+                persistence_lock = getattr(self, '_persistence_lock', None)
+                if persistence_lock is None:
+                    persistence_lock = threading.RLock()
+                    self._persistence_lock = persistence_lock
+        with persistence_lock:
+            return self._save_owned(touch_updated_at=touch_updated_at, skip_index=skip_index)
+
+    def _save_owned(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
+        """Publish one deep-owned sidecar/index generation under the save lock."""
         owned_messages = copy.deepcopy(self.messages)
         messages_to_persist, _ = _collapse_duplicate_incomplete_message_ids(owned_messages)
         if touch_updated_at:
@@ -1536,11 +1561,8 @@ class Session:
             # just serialized — never from the live list — so _index.json can
             # neither record the uncollapsed message_count nor adopt a dropped
             # duplicate row's later timestamp.
-            self._index_projection_messages = messages_to_persist
-            try:
-                _write_session_index(updates=[self])
-            finally:
-                self._index_projection_messages = None
+            index_entry = self.compact(projection_messages=messages_to_persist)
+            _write_session_index(updates=[index_entry])
 
         # #4985 belt-and-suspenders self-heal: a successful save with at
         # least one real message on the sidecar is unconditional proof the
@@ -1740,14 +1762,13 @@ class Session:
                     n += 1
         return n
 
-    def compact(self, include_runtime=False, active_stream_ids=None) -> dict:
+    def compact(self, include_runtime=False, active_stream_ids=None, projection_messages=None) -> dict:
         active_stream_ids = active_stream_ids if active_stream_ids is not None else set()
         has_pending_user_message = bool(self.pending_user_message)
         # #6600: during save()'s index update this is the detached, collapsed
         # snapshot just written to the sidecar, keeping the index projection
         # identical to the persisted payload.  Outside save() it is None and
         # the live list is used as before.
-        projection_messages = getattr(self, '_index_projection_messages', None)
         has_index_projection = projection_messages is not None
         if not has_index_projection:
             projection_messages = self.messages
