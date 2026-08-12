@@ -1084,6 +1084,25 @@ def _retire_worker_cancelled_state(stream_id: str) -> None:
         _retire_worker_cancelled_state_locked(stream_id)
 
 
+def _stream_has_cancellation_state_locked(stream_id: str) -> bool:
+    """Check whether a stream has ANY cancellation/settlement state.
+
+    Caller MUST hold STREAMS_LOCK.  Ordinary completed streams that never
+    entered cancellation settlement have no entries in any of these registries;
+    they must not leak tombstones into _STREAM_SETTLEMENT_COMPLETED.
+    """
+    return (
+        stream_id in _STREAM_SETTLEMENT_PARTICIPANTS
+        or stream_id in _STREAM_SETTLEMENT_COMPLETED
+        or stream_id in _STREAM_SETTLEMENT_TERMINAL
+        or stream_id in _STREAM_CANCEL_CLAIMED
+        or stream_id in _STREAM_FALLBACK_NOTICES
+        or stream_id in _STREAM_FALLBACK_DEAD_LETTER
+        or stream_id in _STREAM_WORKER_SAVED
+        or stream_id in _STREAM_NOTICE_GENERATION
+    )
+
+
 def _retire_worker_cancelled_state_locked(stream_id: str) -> None:
     """Atomically retire the streaming worker's cancellation state.
 
@@ -1091,7 +1110,16 @@ def _retire_worker_cancelled_state_locked(stream_id: str) -> None:
     as independent settlement participants: the worker retires only the notice
     generation it actually saved, releases only its own participant, and the
     SECOND completed participant owns terminal-fence cleanup.
+
+    For ordinary completed streams that never entered cancellation settlement,
+    this is a no-op — no tombstone is left in _STREAM_SETTLEMENT_COMPLETED.
     """
+    # Early return for ordinary completed streams: no cancellation state to
+    # retire.  Without this guard, _complete_stream_settlement_participant_locked
+    # inserts a {'worker'} entry into _STREAM_SETTLEMENT_COMPLETED that never
+    # gets removed, leaking one process-lifetime dict entry per normal stream.
+    if not _stream_has_cancellation_state_locked(stream_id):
+        return
     _fb_entry = _STREAM_FALLBACK_NOTICES.get(stream_id)
     _dl_entry = _STREAM_FALLBACK_DEAD_LETTER.get(stream_id)
     _saved_gen = _STREAM_WORKER_SAVED.get(stream_id)
@@ -2646,11 +2674,6 @@ def _finalize_cancelled_turn(
     _persist_cancelled_turn(session, message=message, stream_id=stream_id)
     try:
         session.save()
-        session.active_stream_id = None
-        try:
-            session.save()
-        except Exception:
-            logger.debug("Failed to persist cancelled-turn active_stream_id clear", exc_info=True)
         if stream_id is not None:
             with STREAMS_LOCK:
                 _STREAM_WORKER_SAVED[stream_id] = int(_saved_generation or 0)
@@ -2672,6 +2695,16 @@ def _finalize_cancelled_turn(
                         owner_profile=owner_profile,
                         terminal_status='failed',
                     )
+    finally:
+        # Clear active_stream_id on EVERY path — including first-save failure.
+        # If the first save() above raised, the in-memory session retained
+        # active_stream_id pointing at an unregistered stream_id, leaving the
+        # sidebar stuck in "streaming" state (greptile P1).
+        session.active_stream_id = None
+        try:
+            session.save()
+        except Exception:
+            logger.debug("Failed to persist cancelled-turn active_stream_id clear", exc_info=True)
 
 
 def _aiagent_import_error_detail() -> str:

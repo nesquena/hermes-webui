@@ -86,8 +86,9 @@ async function cancelSessionStream(session){
     respOk=!!(r&&r.ok);
     try{respBody=await r.json();}catch(_){}
   }catch(e){/* close local stream; keep UI state honest below */}
-  if(!respOk) return false;
-  if(respBody&&respBody.persistence_failed){
+  if(!respOk) return {cancelled: false, persistence_failed: false};
+  const persistenceFailed = !!(respBody && respBody.persistence_failed);
+  if(persistenceFailed){
     if(typeof showToast==='function') showToast('Cancellation incomplete — response may not be fully saved',4000);
     // The backend DID cancel the stream (agent interrupted, cancel marker
     // persisted) — only the fallback-notice stamping failed.  Continue with
@@ -117,7 +118,7 @@ async function cancelSessionStream(session){
     hideClarifyCard(true, 'cancelled');
   }
   if(typeof renderSessionList==='function') renderSessionList();
-  return true;
+  return {cancelled: true, persistence_failed: persistenceFailed};
 }
 
 async function _savedSessionShouldStaySidebarOnly(sid){

@@ -42,13 +42,18 @@ SHOW_TOAST_SRC = _extract_function(UI_JS, "show" + "Toast").replace(
 
 
 def test_source_gates_sidebar_settle_on_http_success():
-    assert "return false" in CANCEL_SESSION_STREAM_SRC
-    assert "return true" in CANCEL_SESSION_STREAM_SRC
+    compact = "".join(CANCEL_SESSION_STREAM_SRC.split())
+    assert "return{cancelled:false,persistence_failed:false}" in compact, (
+        "cancelSessionStream() must return a structured result on HTTP failure"
+    )
+    assert "return{cancelled:true,persistence_failed:" in compact, (
+        "cancelSessionStream() must return a structured result on HTTP success"
+    )
     assert "r.ok" in CANCEL_SESSION_STREAM_SRC, (
         "cancelSessionStream() must check the /api/chat/cancel HTTP status before "
         "closing local UI state"
     )
-    assert "if(!respOk)returnfalse;" in "".join(CANCEL_SESSION_STREAM_SRC.split()), (
+    assert "if(!respOk)return{cancelled:false,persistence_failed:false};" in compact, (
         "cancelSessionStream() must bail out on failed stop responses"
     )
 
@@ -69,10 +74,18 @@ def test_stop_callers_gate_success_toasts_on_cancel_result():
         "if(awaitcancelStream('busy-interrupt'))showToast(t('busy_interrupt_confirm'),2000);"
         "elseshowToast(t('cancel_failed'),null,'error');"
     ) in compact_messages
-    assert (
-        "if(awaitcancelSessionStream(session))showToast(t('stream_stopped'));"
-        "elseshowToast(t('cancel_failed'),null,'error');"
-    ) in compact_sessions
+    # Sidebar Stop caller: structured tri-state result from cancelSessionStream.
+    # When persistence_failed is true, suppress both generic success and failure
+    # toasts so the warning remains the final visible result.
+    assert "constresult=awaitcancelSessionStream(session);" in compact_sessions, (
+        "sidebar Stop must capture the structured result from cancelSessionStream"
+    )
+    assert "if(result&&result.persistence_failed)return;" in compact_sessions, (
+        "sidebar Stop must suppress toasts when persistence_failed is true"
+    )
+    assert "if(result&&result.cancelled)showToast(t('stream_stopped'));" in compact_sessions, (
+        "sidebar Stop must show stream_stopped only when cancelled is true"
+    )
     assert (
         "if(typeofcancelStream==='function'&&!awaitcancelStream('composer-stop'))"
         "showToast(t('cancel_failed'),null,'error');"
@@ -236,3 +249,112 @@ console.log(JSON.stringify(M));
         {"result": False, "rendered": 1, "sends": 0},
         {"result": True, "rendered": 0, "sends": 0},
     ]
+
+
+_PERSISTENCE_FAILED_NODE_SCRIPT = r'''
+const M = {
+  closeCalls: [],
+  busyCalls: [],
+  composerCalls: [],
+  statusCalls: [],
+  renderCalls: 0,
+  clearCalls: [],
+  approvalStops: 0,
+  approvalHides: 0,
+  clarifyStops: 0,
+  clarifyHides: 0,
+  fetchCalls: [],
+  toastMessages: [],
+};
+
+globalThis.INFLIGHT = { 'sid-pf': { streamId: 'stream-pf' } };
+globalThis.S = { activeStreamId: 'stream-pf', session: { session_id: 'sid-pf', active_stream_id: 'stream-pf' } };
+globalThis.closeLiveStream = (...a) => M.closeCalls.push(a);
+globalThis.clearInflightState = (sid) => M.clearCalls.push(['clearInflightState', sid]);
+globalThis.clearInflight = () => M.clearCalls.push(['clearInflight']);
+globalThis.setBusy = (v) => M.busyCalls.push(v);
+globalThis.setComposerStatus = (v) => M.composerCalls.push(v);
+globalThis.setStatus = (v) => M.statusCalls.push(v);
+globalThis.stopApprovalPolling = () => M.approvalStops += 1;
+globalThis.hideApprovalCard = () => M.approvalHides += 1;
+globalThis.stopClarifyPolling = () => M.clarifyStops += 1;
+globalThis.hideClarifyCard = () => M.clarifyHides += 1;
+globalThis.renderSessionList = () => M.renderCalls += 1;
+globalThis._approvalSessionId = 'sid-pf';
+globalThis._clarifySessionId = 'sid-pf';
+globalThis.document = { baseURI: 'http://localhost:8787/' };
+globalThis.location = { href: 'http://localhost:8787/' };
+globalThis.showToast = (msg, ms) => M.toastMessages.push(msg);
+globalThis.fetch = (url, opts) => {
+  M.fetchCalls.push({ url: String(url), opts });
+  return Promise.resolve({
+    ok: true,
+    json: () => Promise.resolve({ ok: true, cancelled: false, persistence_failed: true, stream_id: 'stream-pf' }),
+  });
+};
+
+__CANCEL_SESSION_STREAM_SRC__
+
+const session = { session_id: 'sid-pf', active_stream_id: 'stream-pf' };
+const result = await cancelSessionStream(session);
+console.log(JSON.stringify({
+  result: result,
+  sessionActiveStreamId: session.active_stream_id,
+  activeStreamId: globalThis.S.activeStreamId,
+  closeCalls: M.closeCalls,
+  busyCalls: M.busyCalls,
+  composerCalls: M.composerCalls,
+  renderCalls: M.renderCalls,
+  clearCalls: M.clearCalls,
+  approvalStops: M.approvalStops,
+  approvalHides: M.approvalHides,
+  clarifyStops: M.clarifyStops,
+  clarifyHides: M.clarifyHides,
+  fetchCalls: M.fetchCalls.length,
+  toastMessages: M.toastMessages,
+}));
+'''
+
+
+def test_persistence_failed_clears_owned_stream_and_preserves_warning():
+    """HTTP 200 {cancelled:false,persistence_failed:true} must:
+    1. Clear owned stream state (closeLiveStream, active_stream_id=null, INFLIGHT delete)
+    2. Show the incomplete-persistence warning as the final visible toast
+    3. NOT render stream_stopped or cancel_failed
+
+    (gate-certifier blocker #2: sidebar Stop overwrites persistence warning)
+    """
+    script = _PERSISTENCE_FAILED_NODE_SCRIPT.replace(
+        "__CANCEL_SESSION_STREAM_SRC__", CANCEL_SESSION_STREAM_SRC
+    )
+    completed = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        cwd=str(REPO),
+        capture_output=True,
+        encoding="utf-8",
+        timeout=30,
+    )
+    assert completed.returncode == 0, (
+        f"node subprocess failed:\n--- stdout ---\n{completed.stdout}\n--- stderr ---\n{completed.stderr}"
+    )
+    result = json.loads(completed.stdout.splitlines()[-1])
+
+    # Structured return: the HTTP request succeeded (cancelled=true means the
+    # cancel request was processed), persistence_failed=true means the
+    # fallback-notice stamping failed.
+    assert result["result"]["cancelled"] is True
+    assert result["result"]["persistence_failed"] is True
+
+    # Owned stream state MUST be cleared (not stuck rendering "streaming")
+    assert result["sessionActiveStreamId"] is None
+    assert result["activeStreamId"] is None
+    assert len(result["closeCalls"]) == 1
+    assert result["renderCalls"] == 1
+    assert len(result["clearCalls"]) >= 2  # clearInflightState + clearInflight
+
+    # Warning toast was shown
+    assert len(result["toastMessages"]) == 1
+    assert "incomplete" in result["toastMessages"][0].lower()
+    # Neither stream_stopped nor cancel_failed was rendered
+    assert "stopped" not in " ".join(result["toastMessages"]).lower()
+    assert "failed" not in " ".join(result["toastMessages"]).lower()
