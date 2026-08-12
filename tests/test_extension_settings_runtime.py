@@ -214,7 +214,7 @@ def test_hermes_ext_register_runtime_identity_and_reload_lifecycle():
         assert.ok(alpha);
         assert.strictEqual(alpha.id, 'alpha.ext');
         assert.strictEqual(Object.isFrozen(alpha), true);
-        assert.deepStrictEqual(Object.keys(alpha).sort(), ['id', 'settings', 'storage']);
+        assert.deepStrictEqual(Object.keys(alpha).sort(), ['events', 'id', 'settings', 'storage']);
         assert.deepStrictEqual(alpha.settings.values, {{enabled: false, mode: 'alpha'}});
         assert.strictEqual(alpha.settings.set('enabled', true).ok, true);
         assert.strictEqual(alpha.storage.set('note', 'alpha-note'), true);
