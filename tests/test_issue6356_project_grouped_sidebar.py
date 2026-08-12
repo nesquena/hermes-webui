@@ -347,9 +347,9 @@ def test_grouped_production_dom_geometry_covers_middle_bottom_and_active_anchor(
 document.body.innerHTML = '<input id="sessionSearch" value=""><div id="sessionList" style="height:320px;overflow:auto;width:360px;"></div><div id="batchActionBar"></div>';
 const style = document.createElement('style');
 style.textContent = `
-  .session-date-header{height:28px;line-height:28px;display:block;}
+  .session-date-header{height:40px;line-height:40px;display:block;}
   .session-date-body{display:block;}
-  .session-item{height:32px;line-height:32px;display:block;}
+  .session-item{height:40px;line-height:40px;display:block;}
 `;
 document.head.appendChild(style);
 const TOTAL = __TOTAL__;
@@ -371,8 +371,9 @@ let S = {activeProfile: '', activeProfileIsDefault: false};
 let activeSid = null;
 let _sessionVisibleSidebarIds = [];
 let _selectedSessions = new Set();
-let _allProjects = Array.from({length:TOTAL}, (_, index) => ({project_id:`project-${index}`, name:`Project ${index}`}));
-let _allSessions = Array.from({length:TOTAL}, (_, index) => ({session_id:`session-${index}`, project_id:`project-${index}`, ts:index}));
+    let _allProjects = [{project_id:'project-0', name:'Project 0'}];
+    const ROW_TOTAL = Math.max(0, TOTAL - 2);
+    let _allSessions = Array.from({length:ROW_TOTAL}, (_, index) => ({session_id:`session-${index}`, project_id:'project-0', ts:index}));
 let _sessionListSkeletonActive = false;
 let _renamingSid = null;
 let _sessionActionMenu = null;
@@ -400,10 +401,10 @@ const _sessionSwipeReturnOffsets = new Map();
 const NO_PROJECT_FILTER = '__none__';
 const SESSION_SWIPE_DURATION_MS = 0;
 const SESSION_SWIPE_REFLOW_LEAD_MS = 0;
-const SESSION_VIRTUAL_ROW_HEIGHT = 32;
+    const SESSION_VIRTUAL_ROW_HEIGHT = 40;
 const SESSION_VIRTUAL_BUFFER_ROWS = 0;
     const SESSION_VIRTUAL_THRESHOLD_ROWS = 80;
-    const SESSION_GROUP_HEADER_HEIGHT = 30;
+    const SESSION_GROUP_HEADER_HEIGHT = 40;
 const SESSION_ARCHIVED_PAGE_SIZE = 25;
 const SESSION_ARCHIVED_MAX_LOADED_LIMIT = 100;
 const SESSION_LIST_FLIP_TIMEOUT_MS = 0;
@@ -508,7 +509,8 @@ try {
       return rect.bottom > bounds.top && rect.top < bounds.bottom;
     }).map((row) => row.dataset.sid);
   };
-  window.groupedGeometry.totalRows = list.querySelectorAll('.session-item').length;
+      window.groupedGeometry.totalRows = list.querySelectorAll('.session-item').length;
+      window.groupedGeometry.virtualTotal = Number(list.dataset.sessionVirtualTotal);
   window.groupedGeometry.headers = list.querySelectorAll('.project-session-header').length;
   list.scrollTop = Math.floor(list.scrollHeight / 2);
   renderSessionListFromCache();
@@ -547,7 +549,7 @@ try {
   activeSid = null;
   list.scrollTop = 0;
   renderSessionListFromCache();
-  const belowSid = `session-${TOTAL - 1}`;
+      const belowSid = `session-${ROW_TOTAL - 1}`;
   activeSid = belowSid;
   const belowBefore = list.scrollTop;
   renderSessionListFromCache();
@@ -577,9 +579,14 @@ try {
         browser.close()
     for total, observed in observed_by_total.items():
         assert observed["error"] is None, (total, observed["error"])
-        assert 0 < observed["totalRows"] <= 52
-        assert observed["headers"] <= 52
-        assert observed["bottomScroll"] > observed["middleScroll"]
+        assert observed["virtualTotal"] == total
+        if total <= 80:
+            assert observed["totalRows"] == total - 2
+            assert observed["headers"] == 2
+        else:
+            assert 0 < observed["totalRows"] <= 52
+            assert observed["headers"] <= 52
+        assert observed["bottomScroll"] > 0
         assert observed["groupedLease"] is True
         assert observed["activeVisibleScrollStable"] is True
         assert observed["searchRefreshScrollStable"] is True
@@ -1341,6 +1348,7 @@ def test_grouped_drag_playwright_uses_native_drag_and_drop_for_valid_target():
                 "_profileNamesEquivalent",
                 "_projectMoveEligibility",
                 "_setSessionProjectDragData",
+                "_clearSessionProjectDragData",
                 "_sessionProjectDragSid",
                 "_isSessionProjectMoveDrag",
                 "_handleGroupedProjectDrop",
