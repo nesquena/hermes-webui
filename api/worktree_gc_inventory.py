@@ -574,7 +574,12 @@ def _scan_managed_worktree_sessions(
     try:
         paths = sorted(sessions_dir.iterdir(), key=lambda path: path.name)
     except FileNotFoundError:
-        return _SessionScan((), (), 0, ())
+        return _SessionScan(
+            (),
+            (),
+            0,
+            ("session_directory_missing",),
+        )
     except OSError as exc:
         return _SessionScan(
             (),
