@@ -6,6 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 
 
 def test_cron_search_input_uses_the_shared_sidebar_search_pattern():
@@ -25,19 +26,67 @@ def test_cron_search_input_uses_the_shared_sidebar_search_pattern():
     )
 
 
-def test_cron_filter_is_case_insensitive_name_only_and_uses_cached_jobs():
-    """Filter must read from the cached _cronList (no API call) and match name only."""
-    assert "function filterCrons() { loadCrons(false, true); }" in PANELS_JS, (
+def test_cron_search_has_an_explicit_clear_control():
+    """The shared CSS hides the native WebKit clear (x), so an explicit control is required.
+
+    .sidebar-search input::-webkit-search-cancel-button is disabled for every panel
+    (style.css), so type="search" alone does not give the user a way to clear the
+    query in Chromium/Safari. The Chat filter compensates with #sessionSearchClear;
+    the cron filter must follow the same pattern with #cronSearchClear.
+    """
+    assert 'id="cronSearchClear"' in INDEX_HTML, (
+        "no explicit clear button -> user has no way to clear the query, since the native "
+        "WebKit clear (x) is disabled by .sidebar-search input::-webkit-search-cancel-button"
+    )
+    assert 'onclick="clearCronSearch()"' in INDEX_HTML, (
+        "clear button must call clearCronSearch() -> otherwise the button renders but does "
+        "nothing when clicked"
+    )
+    assert '<div class="cron-search-field">' in INDEX_HTML, (
+        "input and clear button must share the .cron-search-field wrapper, mirroring "
+        ".session-search-field -> needed for the clear button's absolute positioning"
+    )
+    assert "function clearCronSearch(" in PANELS_JS, (
+        "clearCronSearch must be defined -> the clear button's onclick would be a no-op "
+        "otherwise"
+    )
+    assert "function syncCronSearchClear(" in PANELS_JS, (
+        "syncCronSearchClear must be defined -> without it the clear button never becomes "
+        "visible when the user types, or never hides again after clearing"
+    )
+    assert ".cron-search-clear" in STYLE_CSS, (
+        "no CSS for the clear button -> it would render unstyled or overlap the input text, "
+        "since .session-search-clear's rules are scoped to .session-search only"
+    )
+
+
+def test_cron_filter_is_case_insensitive_name_only_locale_safe_and_uses_cached_jobs():
+    """Filter must read from the cached _cronList (no API call), match name only, and
+    avoid toLocaleLowerCase()'s Turkish-locale dotless-i bug (e.g. 'I' -> 'ı', not 'i'),
+    which would silently hide a valid case-insensitive match for Turkish-locale users.
+    """
+    assert "if (!Array.isArray(_cronList)) return;" in PANELS_JS, (
+        "filterCrons must guard against _cronList being null -> typing before the initial "
+        "/api/crons request resolves would otherwise throw '_cronList is not iterable'"
+    )
+    assert "loadCrons(false, true)" in PANELS_JS, (
         "filterCrons must call loadCrons with useCached=true -> otherwise every keystroke "
         "re-fetches /api/crons instead of filtering the cached list"
     )
-    assert "const query = ($('cronSearch')?.value || '').trim().toLocaleLowerCase();" in PANELS_JS, (
-        "query must be trimmed and lowercased -> without this, trailing whitespace or case "
-        "differences would hide matching jobs"
+    assert "const query = ($('cronSearch')?.value || '').trim().toLowerCase();" in PANELS_JS, (
+        "query must use toLowerCase(), not toLocaleLowerCase() -> under the Turkish locale, "
+        "toLocaleLowerCase() maps 'I' to dotless 'ı' instead of 'i', silently breaking matches "
+        "like searching 'import' against a job named 'IMPORT'"
     )
-    assert "String(job.name || '').toLocaleLowerCase().includes(query)" in PANELS_JS, (
-        "filter must match job.name only -> matching status/profile too would produce "
-        "surprising hits, e.g. a job named 'Cleanup after errors' matching a search for 'error'"
+    assert "String(job.name || '').toLowerCase().includes(query)" in PANELS_JS, (
+        "filter must match job.name only, using locale-independent toLowerCase() -> matching "
+        "status/profile too would produce surprising hits, e.g. a job named 'Cleanup after "
+        "errors' matching a search for 'error'; toLocaleLowerCase() would also reintroduce the "
+        "Turkish dotless-i bug on this side of the comparison"
+    )
+    assert "toLocaleLowerCase" not in PANELS_JS, (
+        "toLocaleLowerCase() must not reappear anywhere in panels.js -> it silently breaks "
+        "case-insensitive matching under the Turkish locale"
     )
 
 

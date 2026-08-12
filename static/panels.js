@@ -1021,7 +1021,7 @@ async function loadCrons(animate, useCached = false) {
         _cronOtherProfileCount = 0;
       }
     }
-    const query = ($('cronSearch')?.value || '').trim().toLocaleLowerCase();
+    const query = ($('cronSearch')?.value || '').trim().toLowerCase();
     box.innerHTML = '';
     // Partition active vs paused so paused jobs don't drown the list (#4026).
     // _cronList stays the single source of truth — only the render is split,
@@ -1030,7 +1030,7 @@ async function loadCrons(animate, useCached = false) {
     const _pausedJobs = [];
     for (const job of _cronList) {
       const status = _cronStatusMeta(job);
-      if (query && !String(job.name || '').toLocaleLowerCase().includes(query)) continue;
+      if (query && !String(job.name || '').toLowerCase().includes(query)) continue;
       (status.state === 'paused' ? _pausedJobs : _activeJobs).push({ job, status });
     }
     const _appendCronItem = (parent, { job, status }) => {
@@ -1113,7 +1113,30 @@ async function loadCrons(animate, useCached = false) {
   }
 }
 
-function filterCrons() { loadCrons(false, true); }
+function syncCronSearchClear() {
+  const input = $('cronSearch');
+  const clear = $('cronSearchClear');
+  if (!input || !clear) return;
+  clear.hidden = !Boolean(input.value);
+}
+
+function filterCrons() {
+  if (!Array.isArray(_cronList)) return;
+  syncCronSearchClear();
+  loadCrons(false, true);
+}
+
+function clearCronSearch(focusInput = true) {
+  const input = $('cronSearch');
+  if (!input) return;
+  if (input.value) {
+    input.value = '';
+    filterCrons();
+  } else {
+    syncCronSearchClear();
+  }
+  if (focusInput) input.focus();
+}
 
 function _cronPanelExpandKey(jobId, suffix){
   return `hermes-webui-cron-${suffix}-expanded-${encodeURIComponent(String(jobId||''))}`;
