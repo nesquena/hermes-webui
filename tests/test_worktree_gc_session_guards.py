@@ -358,6 +358,26 @@ def test_unreadable_sidecar_blocks_collection_without_exposing_contents(tmp_path
     assert "must-not-leak" not in json.dumps(report)
 
 
+def test_missing_sessions_directory_is_a_blocking_inventory_failure(tmp_path):
+    state_dir = tmp_path / "state"
+    repo = tmp_path / "repo"
+    state_dir.mkdir()
+    repo.mkdir()
+    backend = FakeGitBackend()
+
+    report = _audit(state_dir, repo, backend)
+
+    assert backend.classify_calls == []
+    assert report["candidates"] == []
+    assert report["has_blocking_anomalies"] is True
+    assert report["global_reasons"] == ["session_scan_incomplete"]
+    assert report["session_scan"] == {
+        "sidecars_scanned": 0,
+        "errors": 1,
+        "error_kinds": ["session_directory_missing"],
+    }
+
+
 def test_contradictory_duplicate_path_is_uncertain(tmp_path):
     state_dir = tmp_path / "state"
     repo = tmp_path / "repo"
