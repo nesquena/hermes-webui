@@ -16,6 +16,7 @@ import pytest
 
 from api.models import Session
 from api.streaming import _effective_reasoning_effort_label
+from api.gateway_chat import _gateway_reasoning_effort_label
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -64,6 +65,11 @@ class TestEffectiveReasoningEffortLabel:
 
 
 class TestBackendEmission:
+    def test_gateway_reasoning_effort_label(self):
+        assert _gateway_reasoning_effort_label("high") == "high"
+        assert _gateway_reasoning_effort_label("none") == "off"
+        assert _gateway_reasoning_effort_label(None) is None
+
     def test_run_meta_emitted_upfront_after_agent_registration(self):
         registration = STREAMING_PY.index("AGENT_INSTANCES[stream_id] = agent")
         initial_emission = STREAMING_PY.index(

@@ -394,6 +394,14 @@ def _auto_approve_gateway_run(
     )
 
 
+def _gateway_reasoning_effort_label(reasoning_effort):
+    """Translate the resolved gateway request value to display metadata."""
+    value = str(reasoning_effort or "").strip().lower()
+    if not value:
+        return None
+    return "off" if value == "none" else value
+
+
 def gateway_chat_config_status(config_data=None, environ: dict[str, str] | None = None) -> dict:
     """Return redacted Gateway-backed chat configuration status."""
     mode = webui_chat_backend_mode(config_data, environ)
@@ -996,6 +1004,13 @@ def _run_gateway_chat_streaming(
             model=model,
             model_provider=model_provider,
         )
+        reasoning_effort_label = _gateway_reasoning_effort_label(reasoning_effort)
+        put_gateway_event("run_meta", {
+            "session_id": session_id,
+            "model": model,
+            "provider": model_provider or "",
+            "reasoning_effort": reasoning_effort_label,
+        })
         base_url = _gateway_base_url(cfg)
         api_key = _gateway_api_key()
         try:
@@ -1293,6 +1308,10 @@ def _run_gateway_chat_streaming(
                 active_turn_identity.get("timestamp") or now
             )
             assistant_msg = {"role": "assistant", "content": assistant_text, "timestamp": assistant_ts}
+            if model:
+                assistant_msg["_usedModel"] = model
+            if reasoning_effort_label is not None:
+                assistant_msg["_reasoningEffort"] = reasoning_effort_label
             saved_reasoning = STREAM_REASONING_TEXT.get(stream_id, "")
             if saved_reasoning:
                 assistant_msg["reasoning"] = saved_reasoning
@@ -1439,6 +1458,8 @@ def _run_gateway_chat_streaming(
                 goal_exc,
             )
         from api.streaming import _session_payload_with_full_messages
+        if reasoning_effort_label is not None:
+            usage["reasoning_effort"] = reasoning_effort_label
         gateway_session_payload = _session_payload_with_full_messages(s, tool_calls=[])
         put_gateway_event("done", {"session": redact_session_data(gateway_session_payload), "usage": usage})
         put_gateway_event("stream_end", {"session_id": session_id})
