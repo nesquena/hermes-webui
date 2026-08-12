@@ -15402,6 +15402,11 @@ def handle_post(handler, parsed) -> bool:
         if not session_lock.acquire(timeout=5):
             return bad(handler, "Session busy, try again", 503)
         try:
+            try:
+                p = (SESSION_DIR / f"{sid}.json").resolve()
+                p.relative_to(SESSION_DIR.resolve())
+            except Exception:
+                return bad(handler, "Invalid session_id", 400)
             # #6327: deletion is a canonical owner publication — run it as a
             # per-SID publication transaction so the lease authority is held
             # ACROSS the exact SESSIONS removal (an in-flight sink for this
@@ -15410,17 +15415,22 @@ def handle_post(handler, parsed) -> bool:
                 _clear_owner_sink_claims(sid)
                 with LOCK:
                     SESSIONS.pop(sid, None)
-            try:
-                p = (SESSION_DIR / f"{sid}.json").resolve()
-                p.relative_to(SESSION_DIR.resolve())
-            except Exception:
-                return bad(handler, "Invalid session_id", 400)
-            sidecar_deleted = False
-            try:
-                p.unlink(missing_ok=True)
-            except Exception:
-                logger.debug("Failed to unlink session file %s", p)
-            sidecar_deleted = not p.exists()
+                # #6327 (review 16): unlink the sidecar and record the durable
+                # delete tombstone INSIDE the per-SID lease authority — a
+                # cold-load publisher that acquires the lease afterwards
+                # observes the deletion (no cache entry + tombstone) and can
+                # never resurrect the deleted session across an in-flight load.
+                sidecar_deleted = False
+                try:
+                    p.unlink(missing_ok=True)
+                except Exception:
+                    logger.debug("Failed to unlink session file %s", p)
+                sidecar_deleted = not p.exists()
+                if sidecar_deleted and not is_messaging_session:
+                    try:
+                        _record_webui_deleted_session_tombstone(sid)
+                    except Exception:
+                        logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
             try:
                 prune_session_from_index(sid)
             except Exception:
@@ -15429,11 +15439,6 @@ def handle_post(handler, parsed) -> bool:
                 p.with_suffix('.json.bak').unlink(missing_ok=True)
             except Exception:
                 logger.debug("Failed to unlink session backup file %s", p.with_suffix('.json.bak'))
-            if sidecar_deleted and not is_messaging_session:
-                try:
-                    _record_webui_deleted_session_tombstone(sid)
-                except Exception:
-                    logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
         finally:
             session_lock.release()
         # Evict outside the mutation lock: lifecycle commit may perform provider
@@ -22098,6 +22103,67 @@ def _runtime_adapter_goal_action(goal_args: str) -> str:
     return "set"
 
 
+def _build_browser_start_owner_token(s, *, model, provider, normalized_model, workspace):
+    """#6327 canonical per-session owner authority for browser runner-local starts.
+
+    The process-wakeup drain path builds its immutable owner token through
+    ``_build_immutable_session_owner_token``, recomputing the route lane from
+    the LIVE owner (wakeups must never carry predecessor-derived routing).  A
+    browser ``/api/chat/start`` is the opposite: the route lane the caller
+    resolved (workspace + model/provider + normalized_model) IS the authority
+    — the run must be fenced for exactly the lane the browser requested,
+    never silently recomputed to a different one.  Under the canonical
+    per-session AGENT lock we re-verify ``s`` is still the live owner and
+    snapshot the compact immutable token carrying the browser's lane plus the
+    profile-home generation and credential-state fingerprint, so
+    ``_claim_runner_owner_fence`` can mint the complete fence the real
+    ``HttpRunnerClient`` compare-and-accepts (review 16 blocker 1: ordinary
+    browser runner-local starts were previously unfenced and deterministically
+    refused with a retryable 409 before ever contacting the runner).
+
+    Returns ``(token, None)`` or ``(None, reason)`` — the caller surfaces a
+    retryable 409 (an unowned run is never acknowledged).
+    """
+    if s is None:
+        return None, "missing_owner"
+    live_sid = str(getattr(s, "session_id", "") or "")
+    if not live_sid:
+        return None, "empty_sid"
+    lock = _get_session_agent_lock(live_sid)
+    with lock:
+        with SESSION_AGENT_LOCKS_LOCK:
+            canonical = SESSION_AGENT_LOCKS.get(live_sid)
+        if canonical is not lock:
+            return None, "lock_migrated"
+        try:
+            resolved = get_session(live_sid)
+        except KeyError:
+            resolved = None
+        if resolved is None or resolved is not s:
+            return None, "owner_replaced"
+        try:
+            credential_fingerprint = process_wakeup_credential_state_fingerprint(s)
+        except Exception:
+            # Fail closed: a fence without the credential-state generation
+            # cannot be compared-and-accepted by the runner.
+            return None, "credential_fingerprint_unreadable"
+        token = {
+            "requested_sid": live_sid,
+            "session_id": live_sid,
+            "owner": s,
+            "profile": str(getattr(s, "profile", "") or ""),
+            "profile_home": _process_wakeup_profile_home(s),
+            "model": model,
+            "provider": provider,
+            "normalized_model": bool(normalized_model),
+            "workspace": str(workspace or ""),
+            "pause_state": None,
+            "pause_matches": False,
+            "credential_state_fingerprint": credential_fingerprint,
+        }
+    return token, None
+
+
 def _start_run(
     s,
     *,
@@ -22173,7 +22239,35 @@ def _start_run(
             if adapter is None:
                 raise NotImplementedError("runtime adapter selection returned no adapter")
             owner_fence = None
-            if isinstance(adapter, RunnerRuntimeAdapter) and owner_token is not None:
+            if isinstance(adapter, RunnerRuntimeAdapter):
+                if owner_token is None:
+                    # #6327 (review 16 blocker 1): ordinary browser
+                    # runner-local starts arrive WITHOUT the immutable owner
+                    # token only the process-wakeup drain path builds.  The
+                    # real HttpRunnerClient fails closed when the fence is
+                    # absent (RunnerFenceRefused → deterministic retryable
+                    # 409 before ever contacting the runner), so establish
+                    # the canonical per-session owner authority NOW — under
+                    # the AGENT lock, for exactly the route lane the caller
+                    # resolved — and claim the complete fence below.
+                    owner_token, _browser_fence_error = _build_browser_start_owner_token(
+                        s,
+                        model=model,
+                        provider=model_provider,
+                        normalized_model=normalized_model,
+                        workspace=workspace,
+                    )
+                    if owner_token is None:
+                        # No token: no provisional worker state was ever
+                        # installed for a browser start, so there is nothing
+                        # to retire — surface the retryable 409 directly.
+                        return {
+                            "error": "session owner changed before the agent turn started",
+                            "owner_fence": _browser_fence_error,
+                            "retryable": True,
+                            "session_id": str(getattr(s, "session_id", "") or ""),
+                            "_status": 409,
+                        }
                 # #6327 runner acceptance: claim the compact NON-EMPTY
                 # JSON-safe generation/route fence under the canonical owner's
                 # per-session AGENT lock immediately before the runner HTTP
@@ -23114,6 +23208,57 @@ def _publish_owner_lease(sid):
     sid = str(sid or "")
     lock, _ = _session_owner_lease(sid)
     with lock:
+        token = uuid.uuid4().hex
+        with _SESSION_OWNER_LEASES_GUARD:
+            _SESSION_OWNER_LEASES[sid] = (lock, token)
+        yield token
+
+
+@contextmanager
+def _publish_owner_lease_if_current(sid, *, expected):
+    """Per-SID publication transaction that bumps the lease ONLY on CAS-hit.
+
+    #6327 (review 16): identical to ``_publish_owner_lease`` except the bump
+    is conditional.  While the per-SID lease is held (preserving the
+    lease → LOCK order), ``SESSIONS[sid] is expected`` is evaluated under the
+    global LOCK; the token is refreshed and the body runs ONLY when the CAS
+    hits.  A CAS-fail — a concurrent canonical winner was installed while the
+    caller's disk I/O was in flight — returns WITHOUT bumping the lease, so
+    the winner's claims are never invalidated by a stale publisher's bump,
+    and WITHOUT running the body, so the winner is never overwritten.
+
+    ``SESSIONS``/``LOCK`` are resolved lazily from ``api.config`` (the
+    canonical source the models-side callers bind): test fixtures rebind the
+    config + models copies, so a stale routes-module binding would observe a
+    different dict than the publishers mutate.
+
+    Yields the freshly minted lease token on CAS-hit, or ``None`` on CAS-fail
+    (the caller's guarded body must skip its SESSIONS write) — the context
+    manager always yields exactly once so ``@contextmanager`` never raises
+    ``RuntimeError: generator didn't yield``.
+    """
+    try:
+        from api.config import LOCK as _CAS_LOCK, SESSIONS as _CAS_SESSIONS
+    except Exception:
+        _CAS_LOCK = None
+        _CAS_SESSIONS = None
+    if _CAS_LOCK is None or _CAS_SESSIONS is None:
+        yield
+        return
+    sid = str(sid or "")
+    lock, _ = _session_owner_lease(sid)
+    with lock:
+        _cas_ok = False
+        with _CAS_LOCK:
+            _cas_ok = _CAS_SESSIONS.get(sid) is expected
+        if not _cas_ok:
+            # CAS-fail (a concurrent canonical winner was installed while the
+            # caller's disk I/O was in flight): yield None WITHOUT bumping the
+            # lease, so the winner's claims are never invalidated by a stale
+            # publisher's bump.  LOCK is released before the yield — the
+            # caller's guarded body re-acquires it under lease → LOCK order.
+            yield None
+            return
         token = uuid.uuid4().hex
         with _SESSION_OWNER_LEASES_GUARD:
             _SESSION_OWNER_LEASES[sid] = (lock, token)

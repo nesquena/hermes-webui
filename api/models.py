@@ -4696,8 +4696,45 @@ def get_session_for_scan(sid):
         return None
 
 
+_PUBLICATION_EXPECT_UNSET = object()
+
+
+def _session_deleted_tombstone_marks(sid) -> bool:
+    """Return True when *sid* carries the durable webui deleted-session tombstone.
+
+    #6327 (review 16): the cold-load publication re-checks this BEFORE the
+    in-flight disk load and AGAIN under the per-SID lease authority, so a
+    concurrent deletion (sidecar unlink + tombstone) can never be followed
+    by a stale resurrection of the deleted session.
+    """
+    try:
+        return str(sid or "") in _load_webui_deleted_session_tombstone()
+    except Exception:
+        return False
+
+
+def _read_owner_generation(sid) -> str:
+    """Return the current per-SID owner-generation lease token.
+
+    #6327 (review 16): cold load captures this BEFORE ``Session.load()`` and
+    compares after the load — a canonical publication or deletion that fired
+    during the in-flight disk I/O bumps the token, so the loaded object is
+    stale and must never be installed.  Returns "" when the lease authority
+    is unavailable (import failure) — the tombstone re-check remains the
+    deletion backstop.
+    """
+    try:
+        from api.routes import _read_owner_lease
+    except Exception:
+        return ""
+    try:
+        return str(_read_owner_lease(str(sid or "")) or "")
+    except Exception:
+        return ""
+
+
 @contextmanager
-def _publish_owner_publication_lease(session_id):
+def _publish_owner_publication_lease(session_id, *, expected=_PUBLICATION_EXPECT_UNSET):
     """#6327 per-SID publication transaction (lazy-imported from api.routes).
 
     Wraps a same-SID cache publication (``SESSIONS[sid] = <new owner>``): the
@@ -4707,6 +4744,17 @@ def _publish_owner_publication_lease(session_id):
     bump-to-publication gap.  Failures are best-effort (the sink guard's
     exact-owner identity re-check remains the backstop).
 
+    ``expected`` (optional): compare-and-swap guard (review 16).  When given,
+    the lease is bumped and the body runs ONLY while ``SESSIONS[sid] is
+    expected`` still holds — evaluated under the global LOCK while the
+    per-SID lease is held, preserving the lease → LOCK order.  On CAS-fail (a
+    concurrent canonical winner was installed while the caller's disk I/O was
+    in flight) the lease is NOT bumped and the body must skip its SESSIONS
+    write — the context manager yields the freshly minted lease token on
+    CAS-hit and ``None`` on CAS-fail (always exactly one yield, so
+    ``@contextmanager`` never raises ``RuntimeError: generator didn't
+    yield``).
+
     The lease authority is selected BEFORE the single ``yield``: a failure
     thrown through the yield (a publication-body exception) must propagate
     to the caller.  Catching it and yielding a SECOND time would turn the
@@ -4714,16 +4762,22 @@ def _publish_owner_publication_lease(session_id):
     (#6327 review 15) instead of letting the caller handle it.
     """
     try:
-        from api.routes import _publish_owner_lease
+        from api.routes import _publish_owner_lease, _publish_owner_lease_if_current
     except Exception:
         _publish_owner_lease = None
+        _publish_owner_lease_if_current = None
     if _publish_owner_lease is None:
-        # Fallback: no lease authority available (import failure).  The
-        # sink guard's exact-owner identity re-check remains the backstop.
-        yield
+        # Fallback: no lease authority available (import failure).  Yield a
+        # non-None token so the guarded bodies publish as before; the sink
+        # guard's exact-owner identity re-check remains the backstop.
+        yield _PUBLICATION_EXPECT_UNSET
         return
-    with _publish_owner_lease(str(session_id or "")):
-        yield
+    if expected is _PUBLICATION_EXPECT_UNSET:
+        with _publish_owner_lease(str(session_id or "")) as _token:
+            yield _token
+        return
+    with _publish_owner_lease_if_current(str(session_id or ""), expected=expected) as _token:
+        yield _token
 
 
 def _publish_owner_removal_lease(sid) -> bool:
@@ -4806,18 +4860,28 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
         if not metadata_only and _cached_session_lags_disk(cached):
             try:
                 disk_session = Session.load(sid)
-                # #6327: the cache refresh REPLACES the canonical owner object
-                # under the same SID — publish as a per-SID publication
-                # transaction so the lease authority is held ACROSS the exact
-                # SESSIONS write (an in-flight sink serializes first; no claim
-                # can be accepted with a lease minted in a bump-to-publication
-                # gap).
-                with _publish_owner_publication_lease(sid):
+                # #6327 (review 16): the refresh performs disk I/O OUTSIDE
+                # the per-SID authority — a newer owner may be installed
+                # while ``Session.load()`` runs.  The publication
+                # CAS-succeeds ONLY while the refreshed-from owner is still
+                # canonical: a concurrent winner is never overwritten (and
+                # is returned below), and its lease is never bumped by the
+                # stale publisher.
+                _refreshed = False
+                with _publish_owner_publication_lease(sid, expected=cached) as _cas_token:
+                    if _cas_token is not None:
+                        with LOCK:
+                            SESSIONS[sid] = disk_session
+                            if promote_cache:
+                                SESSIONS.move_to_end(sid)
+                        _refreshed = True
+                if _refreshed:
+                    cached = disk_session
+                else:
                     with LOCK:
-                        SESSIONS[sid] = disk_session
-                        if promote_cache:
-                            SESSIONS.move_to_end(sid)
-                cached = disk_session
+                        _winner = SESSIONS.get(sid)
+                    if _winner is not None:
+                        cached = _winner
             except Exception:
                 logger.debug(
                     "cached session disk-freshness check failed for session %s", sid, exc_info=True,
@@ -4828,13 +4892,23 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
                 if _cache_has_stale_unsaved_user_tail(cached, disk_session):
                     # #6327: same as above — publish the refresh as a per-SID
                     # publication transaction holding the lease authority
-                    # across the exact SESSIONS write.
-                    with _publish_owner_publication_lease(sid):
+                    # across the exact SESSIONS write, CAS'd against the
+                    # refreshed-from owner.
+                    _refreshed = False
+                    with _publish_owner_publication_lease(sid, expected=cached) as _cas_token:
+                        if _cas_token is not None:
+                            with LOCK:
+                                SESSIONS[sid] = disk_session
+                                if promote_cache:
+                                    SESSIONS.move_to_end(sid)
+                            _refreshed = True
+                    if _refreshed:
+                        cached = disk_session
+                    else:
                         with LOCK:
-                            SESSIONS[sid] = disk_session
-                            if promote_cache:
-                                SESSIONS.move_to_end(sid)
-                    cached = disk_session
+                            _winner = SESSIONS.get(sid)
+                        if _winner is not None:
+                            cached = _winner
             except Exception:
                 logger.debug(
                     "stale cached user-tail check failed for session %s", sid, exc_info=True,
@@ -4859,26 +4933,58 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
         if s:
             return s
     else:
+        # #6327 (review 16): capture the deletion authority BEFORE the
+        # in-flight disk load — the durable webui delete tombstone and the
+        # per-SID owner-generation lease.  A deletion that fires while
+        # ``Session.load()`` runs bumps the lease and tombstones the sid, so
+        # the loaded object must be discarded instead of resurrected.
+        _deleted_before_load = _session_deleted_tombstone_marks(sid)
+        _lease_before_load = _read_owner_generation(sid)
         s = Session.load(sid)
     if s:
         if cache_on_miss:
-            # #6327 cold-load publication: another thread may have installed
-            # a canonical owner while Session.load() ran — NEVER overwrite it
-            # with the just-loaded object.  The load runs OUTSIDE LOCK (disk
-            # I/O), so the ownership is re-checked under LOCK immediately
-            # before installation, and the install is run as a per-SID
-            # publication transaction holding the lease authority across the
-            # exact SESSIONS write (an in-flight sink for this SID
-            # serializes first — a stale worker can never keep sinking on a
-            # replaced owner).  If a live owner appeared during the load, the
-            # loaded object is discarded (the live owner wins).
-            with _publish_owner_publication_lease(sid):
+            # #6327 (review 16): cold-load publication CAS — install ONLY
+            # while (a) no canonical owner appeared during the load and (b)
+            # the deletion authority did not move (lease unchanged, no
+            # tombstone).  A concurrent canonical winner is RETURNED (never
+            # the discarded loaded object); a concurrent deletion raises
+            # KeyError (never resurrected).
+            _installed = False
+            _deletion_moved = (
+                _deleted_before_load
+                or _session_deleted_tombstone_marks(sid)
+                or _read_owner_generation(sid) != _lease_before_load
+            )
+            if not _deletion_moved:
+                # The load ran OUTSIDE LOCK (disk I/O), so ownership is
+                # re-checked under LOCK immediately before installation, and
+                # the install is run as a per-SID publication transaction
+                # holding the lease authority across the exact SESSIONS write
+                # (an in-flight sink for this SID serializes first — a stale
+                # worker can never keep sinking on a replaced owner).  If a
+                # live owner appeared during the load, the loaded object is
+                # discarded (the live owner wins).
+                with _publish_owner_publication_lease(sid, expected=None) as _cas_token:
+                    if _cas_token is not None:
+                        _deleted_now = _session_deleted_tombstone_marks(sid)
+                        with LOCK:
+                            if SESSIONS.get(sid) is None and not _deleted_now:
+                                SESSIONS[sid] = s
+                                if promote_cache:
+                                    SESSIONS.move_to_end(sid)
+                                _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+                                _installed = True
+            if not _installed:
+                # The cold load lost the publication CAS: a canonical winner
+                # was installed (or the session deleted) while the disk I/O
+                # was in flight.  Return the winner — never the discarded
+                # loaded object — and never resurrect a deleted session.
                 with LOCK:
-                    if SESSIONS.get(sid) is None:
-                        SESSIONS[sid] = s
-                        if promote_cache:
-                            SESSIONS.move_to_end(sid)
-                        _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+                    _winner = SESSIONS.get(sid)
+                if _winner is not None:
+                    s = _winner
+                else:
+                    raise KeyError(sid)
         if not metadata_only:
             try:
                 synced_from_state = _sync_sidecar_from_state_db_if_newer(s)

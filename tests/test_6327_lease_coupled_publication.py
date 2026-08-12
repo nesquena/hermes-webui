@@ -359,3 +359,185 @@ def test_publication_lease_propagates_body_exception(isolated_session_env):
     with pytest.raises(RuntimeError, match="publication-body boom"):
         with _publish_owner_publication_lease("sess-body-exc"):
             raise RuntimeError("publication-body boom")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6) Review 16 blocker 2: refresh publication CAS (disk I/O outside authority)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_cache_refresh_cas_never_overwrites_newer_owner_installed_during_io(
+    isolated_session_env, monkeypatch
+):
+    """The refresh performs ``Session.load()`` OUTSIDE the per-SID authority,
+    so a newer canonical owner installed while the disk I/O was in flight must
+    never be overwritten by the refresh publication — and must be RETURNED.
+    The publication CAS-succeeds only while the refreshed-from owner is still
+    canonical; a CAS-fail must not bump the winner's lease either."""
+    from api import models as _models
+    from api.routes import _read_owner_lease
+
+    sid = "sess-refresh-cas"
+    stale = _FakeSession(sid)  # the cached owner the refresh starts from
+    replacement = _FakeSession(sid)  # newer canonical owner installed mid-I/O
+    with _models.LOCK:
+        _models.SESSIONS[sid] = stale
+    lease_before = _read_owner_lease(sid)
+
+    load_started = threading.Event()
+    release_load = threading.Event()
+
+    def _blocking_load(loaded_sid):
+        load_started.set()
+        assert release_load.wait(10), "refresh Session.load never released"
+        return _FakeSession(loaded_sid)  # the "disk" version
+
+    monkeypatch.setattr(_models, "_cached_session_lags_disk", lambda cached: True)
+    monkeypatch.setattr(_models, "_inactive_cache_tail_needs_disk_check", lambda cached: False)
+    monkeypatch.setattr(_models, "_session_has_pending_journal_retry", lambda s: False)
+    monkeypatch.setattr(_models, "_sync_sidecar_from_state_db_if_newer", lambda s: False)
+    monkeypatch.setattr(_models.Session, "load", lambda loaded_sid: _blocking_load(loaded_sid))
+
+    results = []
+
+    def _refresh():
+        try:
+            results.append(_models._resolve_session(sid))
+        except Exception as exc:  # pragma: no cover - failure surfaced below
+            results.append(exc)
+
+    thread = threading.Thread(target=_refresh, daemon=True)
+    thread.start()
+    assert load_started.wait(10), "refresh never entered Session.load"
+
+    # A newer canonical owner is published while the refresh I/O is in flight.
+    with _models.LOCK:
+        _models.SESSIONS[sid] = replacement
+
+    release_load.set()
+    thread.join(10)
+    assert not thread.is_alive(), "refresh CAS deadlocked"
+
+    with _models.LOCK:
+        assert _models.SESSIONS.get(sid) is replacement, (
+            "refresh overwrote a newer owner installed while Session.load() ran"
+        )
+    assert len(results) == 1 and not isinstance(results[0], Exception), results
+    assert results[0] is replacement, (
+        "refresh must return the concurrent canonical winner, not the stale object"
+    )
+    assert _read_owner_lease(sid) == lease_before, (
+        "a CAS-failed refresh must never bump the winner's owner-generation lease"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7) Review 16 blocker 2: cold load never resurrects a session deleted mid-load
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_cold_load_never_resurrects_session_deleted_during_load(
+    isolated_session_env, monkeypatch
+):
+    """A deletion that fires while ``Session.load()`` runs (per-SID lease
+    bump + durable tombstone) must never be followed by a stale resurrection:
+    the cold-load publication CAS refuses to install, no cache entry appears,
+    and ``_resolve_session`` raises KeyError."""
+    from api import models as _models
+    from api.routes import _publish_owner_lease
+
+    sid = "sess-cold-delete"
+    load_started = threading.Event()
+    release_load = threading.Event()
+
+    def _blocking_load(loaded_sid):
+        load_started.set()
+        assert release_load.wait(10), "cold-load Session.load never released"
+        return _FakeSession(loaded_sid)
+
+    monkeypatch.setattr(_models.Session, "load", lambda loaded_sid: _blocking_load(loaded_sid))
+    monkeypatch.setattr(_models, "_sync_sidecar_from_state_db_if_newer", lambda s: False)
+    monkeypatch.setattr(_models, "_repair_stale_pending", lambda s: False)
+    monkeypatch.setattr(_models, "_session_has_pending_journal_retry", lambda s: False)
+
+    results = []
+
+    def _cold_load():
+        try:
+            results.append(_models._resolve_session(sid))
+        except Exception as exc:
+            results.append(exc)
+
+    thread = threading.Thread(target=_cold_load, daemon=True)
+    thread.start()
+    assert load_started.wait(10), "cold load never entered Session.load"
+
+    # A deletion fires while the load is in flight: canonical removal under
+    # the per-SID lease + durable tombstone (the review-16 delete authority).
+    with _publish_owner_lease(sid):
+        with _models.LOCK:
+            _models.SESSIONS.pop(sid, None)
+    _models._record_webui_deleted_session_tombstone(sid)
+
+    release_load.set()
+    thread.join(10)
+    assert not thread.is_alive(), "cold-load-vs-delete deadlocked"
+
+    with _models.LOCK:
+        assert sid not in _models.SESSIONS, (
+            "cold load resurrected a session deleted while Session.load() ran"
+        )
+    assert len(results) == 1 and isinstance(results[0], KeyError), results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 8) Review 16 blocker 2: cold load RETURNS the concurrent canonical winner
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_cold_load_returns_concurrent_canonical_winner(isolated_session_env, monkeypatch):
+    """A cold load that loses the publication CAS to a concurrent canonical
+    winner must RETURN the winner — never the discarded loaded object (the
+    review-15 test only asserted cache identity and non-exception)."""
+    from api import models as _models
+
+    sid = "sess-cold-return-winner"
+    replacement = _FakeSession(sid)
+    load_started = threading.Event()
+    release_load = threading.Event()
+
+    def _blocking_load(loaded_sid):
+        load_started.set()
+        assert release_load.wait(10), "cold-load Session.load never released"
+        return _FakeSession(loaded_sid)
+
+    monkeypatch.setattr(_models.Session, "load", lambda loaded_sid: _blocking_load(loaded_sid))
+    monkeypatch.setattr(_models, "_sync_sidecar_from_state_db_if_newer", lambda s: False)
+    monkeypatch.setattr(_models, "_repair_stale_pending", lambda s: False)
+    monkeypatch.setattr(_models, "_session_has_pending_journal_retry", lambda s: False)
+
+    results = []
+
+    def _cold_load():
+        try:
+            results.append(_models._resolve_session(sid))
+        except Exception as exc:  # pragma: no cover - failure surfaced below
+            results.append(exc)
+
+    thread = threading.Thread(target=_cold_load, daemon=True)
+    thread.start()
+    assert load_started.wait(10), "cold load never entered Session.load"
+
+    # A canonical winner is installed while the load is blocked.
+    with _models.LOCK:
+        _models.SESSIONS[sid] = replacement
+
+    release_load.set()
+    thread.join(10)
+    assert not thread.is_alive(), "cold load deadlocked"
+    assert len(results) == 1 and not isinstance(results[0], Exception), results
+    assert results[0] is replacement, (
+        "cold load returned the discarded loaded object instead of the canonical winner"
+    )
+    with _models.LOCK:
+        assert _models.SESSIONS.get(sid) is replacement
