@@ -988,7 +988,11 @@ def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops:
     }
 
 
-def read_session_lineage_ids(db_path: Path, session_id: str | None) -> list[str]:
+def read_session_lineage_ids(
+    db_path: Path,
+    session_id: str | None,
+    profile: str | None = None,
+) -> list[str]:
     """Resolve the complete continuation tree represented by a collapsed row."""
     sid = str(session_id or '').strip()
     db_path = Path(db_path)
@@ -996,9 +1000,17 @@ def read_session_lineage_ids(db_path: Path, session_id: str | None) -> list[str]
         return []
     with closing(open_state_db_readonly(db_path)) as conn:
         conn.row_factory = sqlite3.Row
+        session_cols = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
+        profile_projection = ", profile" if "profile" in session_cols else ""
         rows = [dict(row) for row in conn.execute(
-            "SELECT id, parent_session_id, end_reason, started_at, ended_at, source, session_source FROM sessions"
+            f"SELECT id, parent_session_id, end_reason, started_at, ended_at, source, session_source{profile_projection} FROM sessions"
         )]
+    if profile_projection:
+        requested_profile = str(profile or "default").strip() or "default"
+        rows = [
+            row for row in rows
+            if (str(row.get("profile") or "default").strip() or "default") == requested_profile
+        ]
     rows_by_id = {row['id']: row for row in rows}
     if sid not in rows_by_id:
         return []

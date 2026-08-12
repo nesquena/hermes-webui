@@ -29,6 +29,28 @@ def test_lineage_ids_enumerates_complete_continuation_tree_only(tmp_path):
     assert set(read_session_lineage_ids(db, "tip-b")) == {"root", "tip-a", "mid-b", "tip-b"}
 
 
+def test_lineage_ids_excludes_cross_profile_continuations(tmp_path):
+    db = tmp_path / "state.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE sessions (id TEXT, parent_session_id TEXT, end_reason TEXT, started_at REAL, "
+        "ended_at REAL, source TEXT, session_source TEXT, profile TEXT)"
+    )
+    conn.executemany(
+        "INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?)",
+        [
+            ("root", None, "compression", 1, 2, "cli", None, "default"),
+            ("own-tip", "root", None, 3, None, "cli", None, "default"),
+            ("foreign-tip", "root", None, 3, None, "cli", None, "research"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    assert set(read_session_lineage_ids(db, "own-tip", "default")) == {"root", "own-tip"}
+    assert read_session_lineage_ids(db, "foreign-tip", "default") == []
+
+
 def test_lineage_archive_rechecks_scope_while_all_target_locks_are_held():
     routes = (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
     start = routes.index('        if body.get("lineage"):\n')
@@ -38,9 +60,11 @@ def test_lineage_archive_rechecks_scope_while_all_target_locks_are_held():
     assert "with ExitStack() as locks:" in archive
     assert "for lineage_sid in sorted(lineage_ids):" in archive
     assert archive.index("locks.enter_context(_get_session_agent_lock(lineage_sid))") < archive.index(
-        "current_ids = read_session_lineage_ids(state_db_path, sid)"
+        "current_ids = read_session_lineage_ids(state_db_path, sid, request_profile)"
     )
     assert "if set(current_ids) != set(lineage_ids):" in archive
+    assert "read_session_lineage_ids(state_db_path, sid, request_profile)" in archive
+    assert "_session_visible_to_active_profile(getattr(session, \"profile\", None), handler)" in archive
     assert 'return bad(handler, "Session lineage changed during archive; retry", 409)' in archive
 
 

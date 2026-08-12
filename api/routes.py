@@ -16349,7 +16349,8 @@ def handle_post(handler, parsed) -> bool:
         sid = body["session_id"]
         if body.get("lineage"):
             state_db_path = _active_state_db_path()
-            lineage_ids = read_session_lineage_ids(state_db_path, sid)
+            request_profile = _get_active_profile_name()
+            lineage_ids = read_session_lineage_ids(state_db_path, sid, request_profile)
             if not lineage_ids:
                 return bad(handler, "Session lineage not found", 404)
             archived = bool(body.get("archived", True))
@@ -16362,7 +16363,7 @@ def handle_post(handler, parsed) -> bool:
                 with ExitStack() as locks:
                     for lineage_sid in sorted(lineage_ids):
                         locks.enter_context(_get_session_agent_lock(lineage_sid))
-                    current_ids = read_session_lineage_ids(state_db_path, sid)
+                    current_ids = read_session_lineage_ids(state_db_path, sid, request_profile)
                     if set(current_ids) != set(lineage_ids):
                         lineage_ids = current_ids
                         if not lineage_ids:
@@ -16373,7 +16374,10 @@ def handle_post(handler, parsed) -> bool:
                         for lineage_sid in lineage_ids:
                             if _session_is_subagent_view_only(lineage_sid):
                                 raise PermissionError("Subagent sessions are view-only")
-                            sessions.append(_get_or_materialize_session(lineage_sid))
+                            session = _get_or_materialize_session(lineage_sid)
+                            if not _session_visible_to_active_profile(getattr(session, "profile", None), handler):
+                                raise PermissionError("Session not found")
+                            sessions.append(session)
                     except (KeyError, PermissionError) as exc:
                         return bad(handler, str(exc), 400)
                     previous = [bool(getattr(session, "archived", False)) for session in sessions]
