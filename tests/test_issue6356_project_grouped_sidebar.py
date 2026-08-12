@@ -512,6 +512,16 @@ try {
       window.groupedGeometry.totalRows = list.querySelectorAll('.session-item').length;
       window.groupedGeometry.virtualTotal = Number(list.dataset.sessionVirtualTotal);
   window.groupedGeometry.headers = list.querySelectorAll('.project-session-header').length;
+  const expectedOffsets = [0, SESSION_GROUP_HEADER_HEIGHT];
+  for (let i = 0; i < ROW_TOTAL; i++) expectedOffsets.push(expectedOffsets.at(-1) + SESSION_VIRTUAL_ROW_HEIGHT);
+  expectedOffsets.push(expectedOffsets.at(-1) + SESSION_GROUP_HEADER_HEIGHT);
+  const intersects = (sid) => {
+    const row = list.querySelector(`[data-sid="${sid}"]`);
+    if (!row) return false;
+    const listRect = list.getBoundingClientRect();
+    const rowRect = row.getBoundingClientRect();
+    return rowRect.bottom > listRect.top && rowRect.top < listRect.bottom;
+  };
   list.scrollTop = Math.floor(list.scrollHeight / 2);
   renderSessionListFromCache();
   window.groupedGeometry.middleScroll = list.scrollTop;
@@ -545,7 +555,8 @@ try {
   renderSessionListFromCache();
   const above = list.querySelector(`[data-sid="${aboveSid}"]`);
   if (!above) throw new Error(`aboveSid=${aboveSid} visible=${_sessionVisibleSidebarIds.join(',')}`);
-  window.groupedGeometry.activeAboveRevealed = !!above && list.scrollTop < aboveBefore && list.dataset.sessionVirtualActiveAnchor === aboveSid;
+  window.groupedGeometry.activeAboveRevealed = intersects(aboveSid) && list.scrollTop === expectedOffsets[1] && list.dataset.sessionVirtualActiveAnchor === aboveSid;
+  window.groupedGeometry.activeAboveExpected = expectedOffsets[1];
   activeSid = null;
   list.scrollTop = 0;
   renderSessionListFromCache();
@@ -555,7 +566,16 @@ try {
   renderSessionListFromCache();
   const active = list.querySelector(`[data-sid="${belowSid}"]`);
   if (!active) throw new Error(`belowSid=${belowSid} visible=${_sessionVisibleSidebarIds.join(',')}`);
-  window.groupedGeometry.activeBelowRevealed = !!active && list.scrollTop > belowBefore && list.dataset.sessionVirtualActiveAnchor === belowSid;
+  window.groupedGeometry.activeBelowRevealed = intersects(belowSid) && list.scrollTop === expectedOffsets[ROW_TOTAL + 1] - list.clientHeight && list.dataset.sessionVirtualActiveAnchor === belowSid;
+  window.groupedGeometry.activeBelowExpected = expectedOffsets[ROW_TOTAL + 1] - list.clientHeight;
+  if (TOTAL === 81) {
+    activeSid = 'session-0';
+    list.scrollTop = 0;
+    renderSessionListFromCache();
+    activeSid = belowSid;
+    renderSessionListFromCache();
+    window.groupedGeometry.activeSwitchReveal = intersects(belowSid) && list.scrollTop === expectedOffsets[ROW_TOTAL + 1] - list.clientHeight;
+  }
 } catch (error) {
   window.groupedGeometry.error = String(error);
 }
@@ -592,6 +612,8 @@ try {
         assert observed["searchRefreshScrollStable"] is True
         assert observed["activeAboveRevealed"] is True, (total, observed)
         assert observed["activeBelowRevealed"] is True, (total, observed)
+        if total == 81:
+            assert observed["activeSwitchReveal"] is True, observed
         if total > 80:
             assert observed["totalRows"] <= 52
             assert len(observed["middle"]) <= 52
@@ -722,11 +744,92 @@ process.stdout.write(JSON.stringify(cases));
     ]
 
 
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_internal_session_mime_is_rejected_by_composer_and_workspace_guards():
-    assert "_isInternalSessionDragEvent" in PANELS_JS
-    assert "application/x-hermes-webui-session-id" in PANELS_JS
+    guard = _extract_js_line(PANELS_JS, "const _isInternalSessionDragEvent=")
+    script = f"""
+const inside={{}}; const outside={{}};
+const wrap={{contains:node=>node===inside}};
+{guard}
+const internal=types=>({{target:inside,dataTransfer:{{types}}}});
+const external=types=>({{target:outside,dataTransfer:{{types}}}});
+process.stdout.write(JSON.stringify({{
+  composerInternal:_isInternalSessionDragEvent(internal(['application/x-hermes-webui-session-id'])),
+  projectInternal:_isInternalSessionDragEvent(external(['application/x-hermes-webui-session-id'])),
+  ordinaryComposer:_isInternalSessionDragEvent(internal(['Files'])),
+}}));
+"""
+    assert _run_node_json(script) == {
+        "composerInternal": True,
+        "projectInternal": False,
+        "ordinaryComposer": False,
+    }
     assert "application/x-hermes-webui-session-id" in UI_JS
     assert "return false;" in UI_JS[UI_JS.find("function _isWorkspaceTreeMoveDrag"):]
+
+
+def test_client_eligibility_is_a_subset_of_server_authorization():
+    profiles = (ROOT / "api" / "profiles.py").read_text(encoding="utf-8")
+    assert "def _profiles_match" in profiles
+    assert "_is_root_profile" in profiles
+    assert "profile-unproven" in SESSIONS_JS
+    assert "profile-mismatch" in SESSIONS_JS
+
+
+def test_grouped_scroll_defers_pending_session_list_apply_for_700ms():
+    scheduler = _extract_js_function(SESSIONS_JS, "_scheduleSessionVirtualizedRender")
+    assert "_sessionListLastScrollAt=Date.now()" in scheduler
+    assert "SESSION_LIST_INTERACTION_IDLE_MS" in SESSIONS_JS
+    assert "700" in SESSIONS_JS
+
+
+def test_flat_mode_window_inputs_are_unchanged():
+    render = _extract_js_function(SESSIONS_JS, "renderSessionListFromCache")
+    flat_call = render[render.index(": _sessionVirtualWindow({"):]
+    flat_call = flat_call[:flat_call.index("    });")]
+    assert "offsets:" not in flat_call
+    assert "flatSessionRows.length" in flat_call
+
+
+def test_default_off_renders_master_identical_dom():
+    grouped = _extract_js_function(SESSIONS_JS, "_buildSessionSidebarGroups")
+    script = f"""
+const rows=[{{session_id:'a',project_id:'p',ts:1}},{{session_id:'b',project_id:null,ts:2}}];
+const projects=[{{project_id:'p',name:'P'}}];
+const _activeProject=null; const NO_PROJECT_FILTER='__none__';
+const t=key=>key==='sidebar_group_unassigned'?'Unassigned':key;
+const _sessionSortTimestampMs=s=>s.ts||0;
+const _sessionTimeBucketLabel=()=> 'Today';
+{grouped}
+process.stdout.write(JSON.stringify(_buildSessionSidebarGroups(rows,false,projects,0).map(g=>g.label)));
+"""
+    assert _run_node_json(script) == ["Today"]
+
+
+def test_picker_still_lists_unproven_default_named_projects():
+    picker = _extract_js_function(SESSIONS_JS, "_showProjectPicker")
+    assert re.search(r"reason\s*===\s*'profile-mismatch'", picker)
+    assert "profile-unproven" not in picker
+
+
+def test_no_new_route_or_persistence_surface():
+    move = _extract_js_function(SESSIONS_JS, "_handleGroupedProjectDrop")
+    transport = _extract_js_function(SESSIONS_JS, "_moveSessionToProject")
+    assert "_moveSessionToProject(session,targetProjectId,targetLabel)" in move
+    assert "api('/api/session/move'" in transport
+    assert "fetch(" not in transport
+    assert "localStorage" not in transport
+    assert "sessionStorage" not in transport
+    assert "indexedDB" not in transport
+
+
+def test_drag_grip_is_hidden_from_accessibility_tree():
+    assert "dragHandle.setAttribute('aria-hidden','true')" in SESSIONS_JS
+
+
+def test_project_chip_is_a_valid_drop_target():
+    assert "_bindGroupedProjectDropTarget(chip,p,p.name)" in SESSIONS_JS
+    assert "_bindGroupedProjectDropTarget(noneChip,null,'Unassigned')" in SESSIONS_JS
 
 
 def test_nested_dragleave_resets_header_depth_outside_target():
@@ -856,7 +959,8 @@ class FakeDataTransfer {
 __DRAG_DECLS__
 __DRAG_FUNCS__
 function brandedDragIsAccepted() {
-  return _isSessionProjectMoveDrag(new FakeDataTransfer(['text/plain'], {
+  return _isSessionProjectMoveDrag(new FakeDataTransfer([SESSION_PROJECT_DRAG_MIME], {
+    [SESSION_PROJECT_DRAG_MIME]: 'drop',
     'text/plain': 'hermes-webui-session:drop',
   }));
 }
@@ -908,7 +1012,7 @@ run().catch(error => { console.error(error); process.exit(1); });
         "dragend": False,
         "pagehide": False,
         "blur": False,
-        "dropBeforeTick": False,
+        "dropBeforeTick": True,
         "dropAfterTick": False,
     }
 
@@ -1385,22 +1489,27 @@ const el = source;
 const titleRow = source;
 __SOURCE_BINDING__
 const valid = document.createElement('div');
+valid.className = 'project-chip';
 valid.id = 'native-valid';
 valid.textContent = 'valid';
 valid.style.cssText = 'display:block;width:120px;height:40px;';
 const unassigned = document.createElement('div');
+unassigned.className = 'session-project-group-header';
 unassigned.id = 'native-unassigned';
 unassigned.textContent = 'unassigned';
 unassigned.style.cssText = 'display:block;width:120px;height:40px;';
 const same = document.createElement('div');
+same.className = 'project-chip';
 same.id = 'native-same';
 same.textContent = 'same';
 same.style.cssText = 'display:block;width:120px;height:40px;';
 const invalid = document.createElement('div');
+invalid.className = 'project-chip';
 invalid.id = 'native-invalid';
 invalid.textContent = 'invalid';
 invalid.style.cssText = 'display:block;width:120px;height:40px;';
 const failed = document.createElement('div');
+failed.className = 'project-chip';
 failed.id = 'native-failed';
 failed.textContent = 'failed';
 failed.style.cssText = 'display:block;width:120px;height:40px;';
@@ -1434,6 +1543,7 @@ window.nativeDragState = {valid, unassigned, same, invalid, failed, source};
   sameClass: nativeDragState.same.classList.contains('drag-over'),
   invalidClass: nativeDragState.invalid.classList.contains('drag-over'),
   failedClass: nativeDragState.failed.classList.contains('drag-over'),
+  validTargetIsProjectChip: nativeDragState.valid.classList.contains('project-chip'),
 })
 """)
         browser.close()
@@ -1450,3 +1560,4 @@ window.nativeDragState = {valid, unassigned, same, invalid, failed, source};
     assert observed["sameClass"] is False
     assert observed["invalidClass"] is False
     assert observed["failedClass"] is False
+    assert observed["validTargetIsProjectChip"] is True
