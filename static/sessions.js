@@ -4862,8 +4862,10 @@ async function _archiveSession(session, archived=true, beforeListRender=null){
   const reflowPositions=_captureSessionReflowPositions();
   const renderHold=beforeListRender?Promise.resolve().then(beforeListRender):null;
   try{
-    const collapsed=_sessionSegmentCount(session)>1;
-    const payload=collapsed?{session_id:session.session_id,archived,lineage:true}:{session_id:session.session_id,archived};
+    // Sidebar lineage metadata is deliberately bounded, so its absence cannot
+    // prove that this row is a singleton. Let the backend resolve the mutation
+    // scope authoritatively for every archive and restore action.
+    const payload={session_id:session.session_id,archived,lineage:true};
     const response=await api('/api/session/archive',{method:'POST',body:JSON.stringify(payload)});
     const targetIds=new Set(Array.isArray(response.session_ids)?response.session_ids:[session.session_id]);
     session.archived=archived;

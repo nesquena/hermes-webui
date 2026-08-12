@@ -16369,7 +16369,7 @@ def handle_post(handler, parsed) -> bool:
                         session.save(touch_updated_at=False)
                     saved.append(session)
             except Exception:
-                for session, old_archived in zip(saved, previous):
+                for session, old_archived in zip(saved, previous, strict=False):
                     try:
                         with _get_session_agent_lock(session.session_id):
                             session.archived = old_archived

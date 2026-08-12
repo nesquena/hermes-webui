@@ -29,8 +29,8 @@ def test_lineage_ids_enumerates_complete_continuation_tree_only(tmp_path):
     assert set(read_session_lineage_ids(db, "tip-b")) == {"root", "tip-a", "mid-b", "tip-b"}
 
 
-def test_collapsed_archive_uses_one_backend_lineage_operation():
-    assert "const payload=collapsed?{session_id:session.session_id,archived,lineage:true}" in SESSIONS_JS
+def test_archive_always_uses_one_backend_lineage_operation():
+    assert "const payload={session_id:session.session_id,archived,lineage:true}" in SESSIONS_JS
     assert "Promise.all(targets.map" not in SESSIONS_JS
     script = f"""
 const src={SESSIONS_JS!r};
@@ -50,3 +50,29 @@ _archiveSession({{session_id:'tip',archived:false}},true).then(()=>console.log(J
     proc = subprocess.run(["node"], input=script, text=True, capture_output=True, cwd=ROOT)
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout) == [{"session_id": "tip", "archived": True, "lineage": True}]
+
+
+def test_archive_does_not_trust_bounded_sidebar_metadata():
+    """A row beyond the top-300 enrichment cap still delegates scope to the server."""
+    script = f"""
+const src={SESSIONS_JS!r};
+const start=src.indexOf('async function _archiveSession('); let brace=src.indexOf('{{',start), depth=0, end=-1;
+for(let i=brace;i<src.length;i++){{if(src[i]==='{{')depth++;else if(src[i]==='}}'&&--depth===0){{end=i+1;break;}}}}
+eval(src.slice(start,end));
+const calls=[];
+Object.assign(globalThis,{{
+  _isReadOnlySession:()=>false,_captureSessionReflowPositions:()=>new Map(),
+  _sessionSegmentCount:()=>0,
+  api:async(p,o)=>{{calls.push(JSON.parse(o.body));return {{session_ids:['hidden-root','row-301']}};}},
+  _allSessions:Array.from({{length:301}},(_,i)=>({{session_id:`row-${{i+1}}`,archived:false}})),
+  S:{{session:null}},localStorage:{{getItem:()=>null,removeItem:()=>{{}}}},showToast:()=>{{}},
+  _sessionArchiveToast:()=>'',t:x=>x,_showArchived:false,_sessionPrefersReducedMotion:()=>true,
+  _sessionSwipeReturnOffsets:new Map(),renderSessionListFromCache:()=>{{}},renderSessionList:async()=>{{}}
+}});
+_archiveSession(_allSessions[300],true).then(()=>console.log(JSON.stringify(calls)));
+"""
+    proc = subprocess.run(["node"], input=script, text=True, capture_output=True, cwd=ROOT)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == [
+        {"session_id": "row-301", "archived": True, "lineage": True}
+    ]
