@@ -5404,7 +5404,7 @@ document.addEventListener('click',function(e){
     if(opt){
       const session=S&&S.session;
       const request=session&&session.session_id
-        ?api('/api/session/update',{method:'POST',body:JSON.stringify({session_id:session.session_id,workspace:session.workspace,reasoning_effort:effort})})
+        ?api('/api/session/update',{method:'POST',body:JSON.stringify({session_id:session.session_id,reasoning_effort:effort})})
         :api('/api/reasoning',{method:'POST',body:JSON.stringify(Object.assign({effort:effort},_reasoningEffortContext()))});
       request
         .then(function(st){

@@ -79,7 +79,7 @@ def test_ultra_is_valid_and_gateway_uses_session_aware_resolution(monkeypatch):
     assert 'data-effort="ultra"' in INDEX
     assert _gateway_reasoning_effort_for_request(
         cfg, model="gpt-5.6-sol", model_provider="openai-codex", session_effort="ultra"
-    ) == "ultra"
+    ) == "xhigh"
     assert _gateway_reasoning_effort_for_request(
         cfg, model="gpt-5.6-sol", model_provider="openai-codex"
     ) == "xhigh"

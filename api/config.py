@@ -3703,12 +3703,16 @@ def _filter_reasoning_efforts_for_provider(
     provider = _resolve_provider_alias(str(provider_id or "").strip().lower())
     bare = _strip_provider_hint_for_reasoning(model_id).lower().rsplit("/", 1)[-1]
     # OpenAI-family lanes cap pre-GPT-5.6 GPT-5 models at xhigh and o-series at
-    # high. GPT-5.6's alias and Sol/Terra/Luna variants natively accept max.
+    # high. GPT-5.6's alias and Sol/Terra/Luna variants natively accept max —
+    # but Agent's provider-specific ``ultra`` extension is not accepted by any
+    # of these OpenAI-family APIs.
     if provider in _OPENAI_FAMILY_REASONING_PROVIDERS:
         if bare.startswith(("o1", "o3", "o4")):
             return [eff for eff in normalized if eff in {"low", "medium", "high"}]
-        if bare.startswith("gpt-5") and not _is_gpt_5_6_reasoning_model(bare):
-            return [eff for eff in normalized if eff != "max"]
+        if bare.startswith("gpt-5"):
+            if _is_gpt_5_6_reasoning_model(bare):
+                return [eff for eff in normalized if eff != "ultra"]
+            return [eff for eff in normalized if eff not in {"max", "ultra"}]
     # Providers whose native ladder tops out below 'max' must NOT advertise it,
     # otherwise a stored/CLI 'max' degrades WORSE than the
     # prior max->xhigh coercion (Gemini's adapter treats unknown 'max' as medium;
@@ -3730,9 +3734,13 @@ def _filter_reasoning_efforts_for_provider(
     # GLM and forced-thinking GLM-4.7); None → not a zai GLM case, defer.
     zai_supports = _zai_glm_reasoning_efforts_supported(model_id, provider_id)
     if zai_supports is True:
-        return normalized
+        # Z.AI documents max/xhigh/high/medium/low/minimal; ``ultra`` is an
+        # Agent-level extension, not part of this provider's native ladder.
+        return [eff for eff in normalized if eff != "ultra"]
     if zai_supports is False:
         return []
+    if provider == "zai":
+        return [eff for eff in normalized if eff != "ultra"]
     return normalized
 
 
