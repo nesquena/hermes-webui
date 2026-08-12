@@ -3731,3 +3731,302 @@ def test_sidecar_absent_falls_back_to_tail_correctness(tmp_path):
     assert summary["terminal"] is True
     assert summary["last_seq"] == 2
     assert summary["event_count"] == 2
+
+
+# ── Round 18 regression tests ─────────────────────────────────────────────────────
+
+
+def test_failed_interior_sidecar_commit_not_healed_into_wrong_terminal(tmp_path, monkeypatch):
+    """Regression (Round 18, blocker 1): When a sidecar write fails between appends
+    (e.g. the cancel's sidecar commit OSError), the writer must NOT trust the
+    stale prior sidecar as the fold base for the next append. The stale sidecar's
+    journal_size reflects a pre-append state, so the writer validates it matches
+    the actual JSONL size before folding. A mismatch rebuilds from the tail, not
+    from the stale sidecar. Without this check, the lost cancel event is
+    permanently healed into a wrong 'completed' terminal."""
+    from api.run_journal import _run_path, _summary_sidecar_path, _read_jsonl, _summary_from_events, append_run_event
+    import json
+    from unittest import mock
+
+    session_id = "session_r18_b1"
+    run_id = "run_r18_b1"
+    path = _run_path(session_id, run_id, session_dir=tmp_path)
+    sidecar_path = _summary_sidecar_path(path)
+
+    # Append token(seq=1) — sidecar written successfully
+    append_run_event(session_id, run_id, "token", {"text": "first"}, session_dir=tmp_path)
+
+    # Verify token sidecar
+    with sidecar_path.open("r", encoding="utf-8") as f:
+        token_sidecar = json.load(f)
+    assert token_sidecar["event_count"] == 1
+    token_journal_size = token_sidecar["journal_size"]
+
+    # Now make the NEXT sidecar write fail (cancel) - patch only during this append
+    real_atomic_write = __import__("api.run_journal", fromlist=["_atomic_write_json"])._atomic_write_json
+    failed_once = {"v": False}
+
+    def failing_write(p, payload, *, fsync):
+        if not failed_once["v"]:
+            failed_once["v"] = True
+            raise OSError("Simulated sidecar write failure")
+        return real_atomic_write(p, payload, fsync=fsync)
+
+    # Patch only during the cancel append
+    with mock.patch("api.run_journal._atomic_write_json", failing_write):
+        append_run_event(session_id, run_id, "cancel", {"message": "Cancelled"}, session_dir=tmp_path)
+
+    # After cancel: JSONL has token+cancel, but sidecar is still stale (event_count=1, journal_size=token_size)
+    with sidecar_path.open("r", encoding="utf-8") as f:
+        cancel_sidecar = json.load(f)
+    assert cancel_sidecar["event_count"] == 1, "cancel's sidecar write failed, leaving stale sidecar"
+    assert cancel_sidecar["journal_size"] == token_journal_size, "stale sidecar journal_size unchanged"
+
+    # Append stream_end(seq=3) — sidecar write succeeds (terminal committed)
+    append_run_event(session_id, run_id, "stream_end", {"terminal_state": "closed"}, session_dir=tmp_path)
+
+    # The sidecar must reflect seq=3 (stream_end), not the stale seq=1
+    assert sidecar_path.exists()
+    with sidecar_path.open("r", encoding="utf-8") as f:
+        sidecar_data = json.load(f)
+    assert sidecar_data["event_count"] == 3, (
+        f"sidecar must count all 3 events; got {sidecar_data['event_count']} — "
+        "stale seq=1 sidecar was incorrectly folded onto"
+    )
+    assert sidecar_data["last"]["seq"] == 3, (
+        f"sidecar last_seq must be 3 (stream_end); got {sidecar_data['last']['seq']} — "
+        "stale sidecar caused wrong terminal"
+    )
+
+    # Clear cache and get cold summary (must match full read)
+    from api.run_journal import _SUMMARY_CACHE, _SUMMARY_CACHE_LOCK
+    with _SUMMARY_CACHE_LOCK:
+        _SUMMARY_CACHE.clear()
+
+    cold_summary = latest_run_summary(session_id, run_id, session_dir=tmp_path)
+    full_events, _, _ = _read_jsonl(path)
+    full_summary = _summary_from_events(session_id, run_id, full_events)
+
+    # Cold summary must equal full summary (event_count=3, terminal=interrupted-by-user)
+    assert cold_summary["event_count"] == full_summary["event_count"] == 3, (
+        f"cold summary event_count={cold_summary['event_count']}, "
+        f"full={full_summary['event_count']} — lost cancel event was healed into wrong terminal"
+    )
+    assert cold_summary["terminal_state"] == full_summary["terminal_state"] == "interrupted-by-user", (
+        f"cold terminal_state={cold_summary['terminal_state']}, "
+        f"full={full_summary['terminal_state']} — stale sidecar misreported terminal"
+    )
+
+
+def test_transient_tail_rebuild_fault_not_published_as_authority(tmp_path, monkeypatch):
+    """Regression (Round 18, blocker 2): When a sidecar is absent for an existing run
+    and the writer rebuilds from the tail, a transient fault in _read_jsonl_tail
+    (ok=False) must NOT publish a sidecar. A faulted rebuild could be incomplete
+    (e.g., tail truncated mid-read due to concurrent append), so publishing it as
+    authority would brick the summary readers. The writer honors tail_ok and only
+    publishes when the rebuild succeeded. Readers keep falling back to the tail
+    reader, and a later append retries the rebuild."""
+    from api.run_journal import _run_path, _summary_sidecar_path, _read_jsonl, _summary_from_events
+    import json
+
+    session_id = "session_r18_b2"
+    run_id = "run_r18_b2"
+    path = _run_path(session_id, run_id, session_dir=tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Hand-write a 3-event journal (token, token, cancel) with NO sidecar
+    events = [
+        {"version": 1, "event_id": f"{run_id}:1", "seq": 1, "run_id": run_id,
+         "session_id": session_id, "event": "token", "type": "token",
+         "terminal": False, "terminal_state": None, "created_at": 100.0,
+         "payload": {"text": "first"}},
+        {"version": 1, "event_id": f"{run_id}:2", "seq": 2, "run_id": run_id,
+         "session_id": session_id, "event": "token", "type": "token",
+         "terminal": False, "terminal_state": None, "created_at": 200.0,
+         "payload": {"text": "second"}},
+        {"version": 1, "event_id": f"{run_id}:3", "seq": 3, "run_id": run_id,
+         "session_id": session_id, "event": "cancel", "type": "cancel",
+         "terminal": True, "terminal_state": "interrupted-by-user", "created_at": 300.0,
+         "payload": {"message": "Cancelled"}},
+    ]
+
+    with path.open("w", encoding="utf-8") as f:
+        for event in events:
+            f.write(json.dumps(event, separators=(",", ":")) + "\n")
+
+    # Verify no sidecar exists
+    sidecar_path = _summary_sidecar_path(path)
+    assert not sidecar_path.exists()
+
+    # Monkeypatch _read_jsonl_tail to return ok=False (simulated transient fault)
+    real_read_tail = __import__("api.run_journal", fromlist=["_read_jsonl_tail"])._read_jsonl_tail
+
+    def faulted_tail(path, *, max_bytes, max_rows, attribute_lines):
+        events, malformed, _ok = real_read_tail(
+            path, max_bytes=max_bytes, max_rows=max_rows, attribute_lines=attribute_lines
+        )
+        return events, malformed, False  # Force ok=False
+
+    monkeypatch.setattr("api.run_journal._read_jsonl_tail", faulted_tail)
+
+    # Append a 4th event (stream_end) — this rebuilds from the faulted tail
+    writer = RunJournalWriter(session_id, run_id, session_dir=tmp_path)
+    writer.append_sse_event("stream_end", {"terminal_state": "closed"})
+
+    # The append must have succeeded (JSONL has 4 lines)
+    with path.open("r", encoding="utf-8") as f:
+        jsonl_lines = [line for line in f if line.strip()]
+    assert len(jsonl_lines) == 4, (
+        f"JSONL must have 4 lines after append; got {len(jsonl_lines)} — "
+        "append may have failed"
+    )
+
+    # The sidecar must NOT have been published (rebuild was faulted)
+    assert not sidecar_path.exists(), (
+        "sidecar must not exist after faulted rebuild — writer must not publish "
+        "untrusted state"
+    )
+
+    # Clear cache
+    from api.run_journal import _SUMMARY_CACHE, _SUMMARY_CACHE_LOCK
+    with _SUMMARY_CACHE_LOCK:
+        _SUMMARY_CACHE.clear()
+
+    # Cold latest_run_summary must still work (tail fallback) and match full read
+    cold_summary = latest_run_summary(session_id, run_id, session_dir=tmp_path)
+    full_events, _, _ = _read_jsonl(path)
+    full_summary = _summary_from_events(session_id, run_id, full_events)
+
+    assert cold_summary["event_count"] == full_summary["event_count"] == 4, (
+        f"cold summary event_count={cold_summary['event_count']}, "
+        f"full={full_summary['event_count']} — tail fallback failed"
+    )
+    assert cold_summary["terminal_state"] == full_summary["terminal_state"], (
+        f"cold terminal_state={cold_summary['terminal_state']}, "
+        f"full={full_summary['terminal_state']} — tail fallback misreported terminal"
+    )
+
+
+def test_malformed_matching_size_sidecar_reader_degrades_without_raising(tmp_path, monkeypatch):
+    """Regression (Round 18, blocker 3): A malformed sidecar that passes the
+    journal_size stale check (size matches JSONL) must not raise ValueError or
+    KeyError in the reader or during append. The reader's _validate_sidecar
+    strictly checks schema/types/ranges and returns None on any malformation,
+    degrading to the JSONL fallback. Append must not brick journaling."""
+    from api.run_journal import _run_path, _summary_sidecar_path
+    import json
+
+    session_id = "session_r18_b3_reader"
+    run_id = "run_r18_b3_reader"
+    writer = RunJournalWriter(session_id, run_id, session_dir=tmp_path)
+
+    # Append a done event (sidecar written)
+    writer.append_sse_event("done", {"session": {"session_id": session_id}})
+
+    path = _run_path(session_id, run_id, session_dir=tmp_path)
+    sidecar_path = _summary_sidecar_path(path)
+    jsonl_size = path.stat().st_size
+
+    # Overwrite the sidecar with malformed JSON: event_count is a string, not int
+    malformed_sidecar = {
+        "version": 1,
+        "journal_size": jsonl_size,  # Matches JSONL size (passes stale check)
+        "event_count": "oops",  # WRONG TYPE — must be int
+        "last": None,
+        "terminal": None
+    }
+
+    with sidecar_path.open("w", encoding="utf-8") as f:
+        json.dump(malformed_sidecar, f)
+
+    # Clear cache
+    from api.run_journal import _SUMMARY_CACHE, _SUMMARY_CACHE_LOCK
+    with _SUMMARY_CACHE_LOCK:
+        _SUMMARY_CACHE.clear()
+
+    # latest_run_summary must NOT raise — it degrades to tail fallback
+    summary = latest_run_summary(session_id, run_id, session_dir=tmp_path)
+
+    # The summary must be correct (recovered via tail fallback)
+    assert summary["terminal_state"] == "completed", (
+        f"summary terminal_state={summary['terminal_state']!r} — malformed sidecar "
+        "should degrade to tail and recover correct terminal"
+    )
+    assert summary["event_count"] == 1, (
+        f"summary event_count={summary['event_count']} — malformed sidecar should "
+        "degrade to tail and recover correct count"
+    )
+
+
+def test_malformed_matching_size_sidecar_append_does_not_brick_journaling(tmp_path, monkeypatch):
+    """Regression (Round 18, blocker 3 follow-up): A malformed sidecar (e.g., missing
+    fold keys like event_count/last/terminal) must not raise KeyError during the
+    next append. The writer's _read_sidecar validates strictly and returns None
+    for malformed sidecars, triggering a rebuild instead of trusting corrupt state.
+    Journaling must continue working — the JSONL line is written, and a new valid
+    sidecar is published."""
+    from api.run_journal import _run_path, _summary_sidecar_path, _read_jsonl, _summary_from_events
+    import json
+
+    session_id = "session_r18_b3_append"
+    run_id = "run_r18_b3_append"
+    writer = RunJournalWriter(session_id, run_id, session_dir=tmp_path)
+
+    # Append a done event (sidecar written)
+    writer.append_sse_event("done", {"session": {"session_id": session_id}})
+
+    path = _run_path(session_id, run_id, session_dir=tmp_path)
+    sidecar_path = _summary_sidecar_path(path)
+    jsonl_size = path.stat().st_size
+
+    # Overwrite the sidecar with incomplete data (missing fold keys)
+    incomplete_sidecar = {
+        "version": 1,
+        "journal_size": jsonl_size,  # Matches JSONL size (passes stale check)
+        # Missing: event_count, last, terminal — MALFORMED
+    }
+
+    with sidecar_path.open("w", encoding="utf-8") as f:
+        json.dump(incomplete_sidecar, f)
+
+    # Clear cache
+    from api.run_journal import _SUMMARY_CACHE, _SUMMARY_CACHE_LOCK
+    with _SUMMARY_CACHE_LOCK:
+        _SUMMARY_CACHE.clear()
+
+    # Append stream_end — must NOT raise (malformed sidecar is ignored, rebuilt)
+    writer.append_sse_event("stream_end", {"terminal_state": "closed"})
+
+    # The JSONL must have gained exactly one line (stream_end)
+    with path.open("r", encoding="utf-8") as f:
+        jsonl_lines = [line for line in f if line.strip()]
+    assert len(jsonl_lines) == 2, (
+        f"JSONL must have 2 lines after append; got {len(jsonl_lines)} — "
+        "append may have failed"
+    )
+
+    # The sidecar must now be valid (writer published a new correct sidecar)
+    assert sidecar_path.exists()
+    with sidecar_path.open("r", encoding="utf-8") as f:
+        sidecar_data = json.load(f)
+    assert sidecar_data["event_count"] == 2, (
+        f"sidecar event_count={sidecar_data['event_count']} — writer must rebuild "
+        "and publish correct sidecar after ignoring malformed one"
+    )
+
+    # Clear cache and verify cold summary matches full read
+    with _SUMMARY_CACHE_LOCK:
+        _SUMMARY_CACHE.clear()
+
+    cold_summary = latest_run_summary(session_id, run_id, session_dir=tmp_path)
+    full_events, _, _ = _read_jsonl(path)
+    full_summary = _summary_from_events(session_id, run_id, full_events)
+
+    assert cold_summary["event_count"] == full_summary["event_count"] == 2, (
+        f"cold summary event_count={cold_summary['event_count']}, "
+        f"full={full_summary['event_count']} — malformed sidecar broke summary"
+    )
+    assert cold_summary["last_seq"] == full_summary["last_seq"] == 2, (
+        f"cold summary last_seq={cold_summary['last_seq']}, "
+        f"full={full_summary['last_seq']} — malformed sidecar broke seq tracking"
+    )

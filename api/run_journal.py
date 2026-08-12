@@ -138,9 +138,53 @@ def _serialize_sidecar(state: dict, journal_size: int) -> dict:
     }
 
 
+def _is_nonneg_int(value) -> bool:
+    """True for a real non-negative int (bool excluded)."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _validate_sidecar(data) -> dict | None:
+    """Strictly validate a sidecar's full schema/types/ranges.
+
+    Returns the validated dict, or None if anything is malformed. NEVER raises
+    — readers and writers must degrade to the JSONL authority on a corrupt
+    sidecar, never brick status polling or journaling. (#6139 r18 b3)
+    """
+    if not isinstance(data, dict):
+        return None
+    if data.get("version") != _RUN_SUMMARY_SIDECAR_VERSION:
+        return None
+    if not _is_nonneg_int(data.get("journal_size")):
+        return None
+    if not _is_nonneg_int(data.get("event_count")):
+        return None
+    last = data.get("last")
+    if last is not None:
+        if not (
+            isinstance(last, dict)
+            and _is_nonneg_int(last.get("seq"))
+            and (last.get("event_id") is None or isinstance(last.get("event_id"), str))
+            and isinstance(last.get("event"), str)
+        ):
+            return None
+    term = data.get("terminal")
+    if term is not None:
+        if not (
+            isinstance(term, dict)
+            and isinstance(term.get("event"), str)
+            and (term.get("state") is None or isinstance(term.get("state"), str))
+            and _is_nonneg_int(term.get("seq"))
+            and (term.get("event_id") is None or isinstance(term.get("event_id"), str))
+        ):
+            return None
+    return data
+
+
 def _read_sidecar(sidecar_path: Path) -> dict | None:
-    """Read+json.loads the sidecar. Return the parsed dict, or None if absent
-    or invalid (missing version / wrong shape). NEVER raises."""
+    """Read+validate the sidecar. Return the validated dict, or None if absent
+    or malformed (wrong version / bad schema / bad types). NEVER raises: a
+    corrupt sidecar must degrade to the JSONL authority on both the read and
+    write paths. (#6139 r18 b3)"""
     try:
         raw = sidecar_path.read_bytes()
     except (FileNotFoundError, OSError):
@@ -149,9 +193,7 @@ def _read_sidecar(sidecar_path: Path) -> dict | None:
         data = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
         return None
-    if not isinstance(data, dict) or int(data.get("version") or 0) != _RUN_SUMMARY_SIDECAR_VERSION:
-        return None
-    return data
+    return _validate_sidecar(data)
 
 
 def _summary_from_sidecar(session_id, run_id, data: dict) -> dict:
@@ -185,14 +227,10 @@ def _try_summary_from_sidecar(path, session_id, run_id) -> tuple[dict | None, bo
     except (FileNotFoundError, OSError):
         return None, True  # missing jsonl -> let the tail reader handle (returns empty)
     sidecar_path = _summary_sidecar_path(path)
-    data = _read_sidecar(sidecar_path)  # never raises
+    data = _read_sidecar(sidecar_path)  # strictly validated; never raises
     if data is None:
         return None, True
-    try:
-        journal_size = int(data.get("journal_size") or -1)
-    except (TypeError, ValueError):
-        journal_size = -1
-    if journal_size != int(jsonl_stat.st_size):
+    if int(data["journal_size"]) != int(jsonl_stat.st_size):
         return None, True  # stale (crash-mid-append / hand-edit / replacement) -> fallback
     return _summary_from_sidecar(session_id, run_id, data), True
 
@@ -2171,30 +2209,45 @@ def append_run_event(
             "payload": payload,
         }
 
-        # 2. Compute sidecar path and read prior state
+        # 2. Resolve the fold base for the sidecar. The prior sidecar is a
+        # trustworthy fold base ONLY if its recorded journal_size matches the
+        # JSONL size BEFORE this append — a mismatch means a prior sidecar
+        # commit failed (or the JSONL changed out of band), so the sidecar is
+        # stale and must NOT be folded onto (else a lost interior event is
+        # permanently healed into the summary). (#6139 r18 b1)
         sidecar_path = _summary_sidecar_path(path)
-        prior = _read_sidecar(sidecar_path)
-        if prior is not None:
+        try:
+            pre_size = path.stat().st_size if path.exists() else 0
+        except OSError:
+            pre_size = 0
+        prior = _read_sidecar(sidecar_path)  # strictly validated; None if malformed (#6139 r18 b3)
+        base_trusted = False
+        if prior is not None and int(prior["journal_size"]) == pre_size:
             state = {
                 "event_count": prior["event_count"],
                 "last": prior["last"],
-                "terminal": prior["terminal"]
+                "terminal": prior["terminal"],
             }
+            base_trusted = True
+        elif pre_size > 0:
+            # Sidecar absent/stale/malformed for an existing run: rebuild from
+            # the bounded tail. Honor ``ok=False`` — a transient rebuild fault
+            # must NOT be published as current authority; readers keep falling
+            # back to the tail reader and a later append retries. (#6139 r18 b2)
+            tail_events, _tail_malformed, tail_ok = _read_jsonl_tail(
+                path,
+                max_bytes=_SESSION_REPLAY_MAX_BYTES,
+                max_rows=_SESSION_REPLAY_MAX_ROWS,
+                attribute_lines=False,
+            )
+            state = _new_sidecar_state()
+            for ev in tail_events:
+                _fold_event_into_state(state, ev)
+            base_trusted = bool(tail_ok)
         else:
-            # No sidecar yet - rebuild from tail if this is an existing run
-            pre_size = path.stat().st_size if path.exists() else 0
-            if pre_size > 0:
-                # Old run, no sidecar: rebuild by folding the bounded tail
-                tail_events, _, _ = _read_jsonl_tail(
-                    path, max_bytes=_SESSION_REPLAY_MAX_BYTES,
-                    max_rows=_SESSION_REPLAY_MAX_ROWS, attribute_lines=False
-                )
-                state = _new_sidecar_state()
-                for ev in tail_events:
-                    _fold_event_into_state(state, ev)
-            else:
-                # Fresh run
-                state = _new_sidecar_state()
+            # Fresh run (no JSONL yet).
+            state = _new_sidecar_state()
+            base_trusted = True
 
         # 3. Write the JSONL line (existing logic unchanged)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -2207,23 +2260,22 @@ def append_run_event(
             if _should_fsync_event(terminal_state):
                 os.fsync(fh.fileno())
 
-        # 4. Fold the new event into state, then persist the sidecar atomically.
-        # The sidecar write is BEST-EFFORT: a failure here MUST NOT abort the
-        # append, because the JSONL line is already durably written above. On any
-        # sidecar failure/absence the summary readers fall back to the existing
-        # tail reader, so terminal identity stays correct regardless. The parent
-        # directory is fsynced by the JSONL ``created_file`` path below on the
-        # first event (the sidecar lives in the SAME directory), covering the
-        # sidecar's first rename; later events reuse the already-durable name.
+        # 4. Fold the new event, then publish the sidecar ONLY from a trusted
+        # base — never publish a current-generation sidecar built on
+        # stale/missing/corrupt/faulted state. (#6139 r18 b1/b2) The sidecar
+        # write is BEST-EFFORT: a failure MUST NOT abort the append (the JSONL
+        # line is already durably written); readers fall back to the tail reader
+        # and the next append's pre-size check rebuilds from a clean read.
         _fold_event_into_state(state, event)
-        try:
-            post_size = path.stat().st_size
-            payload_dict = _serialize_sidecar(state, post_size)
-            _atomic_write_json(
-                sidecar_path, payload_dict, fsync=_should_fsync_event(terminal_state)
-            )
-        except OSError:
-            pass
+        if base_trusted:
+            try:
+                post_size = path.stat().st_size
+                payload_dict = _serialize_sidecar(state, post_size)
+                _atomic_write_json(
+                    sidecar_path, payload_dict, fsync=_should_fsync_event(terminal_state)
+                )
+            except OSError:
+                pass
 
         # 7. Discard cached summary (existing logic unchanged)
         _discard_cached_summary(path)
