@@ -4665,8 +4665,13 @@ def _evict_sessions_over_cap(cap: int | None = None) -> int:
             break
         candidate = SESSIONS.get(sid)
         if _session_is_evictable(candidate):
-            SESSIONS.pop(sid, None)
-            evicted += 1
+            # #6327: eviction is a canonical same-SID cache REMOVAL — remove
+            # under per-SID lease authority (non-blocking: LOCK is held by
+            # the caller, so a contended lease means an in-flight sink and
+            # the removal is skipped — never evict a session whose sink is
+            # running, and never block on the lease while holding LOCK).
+            if _publish_owner_removal_lease(sid):
+                evicted += 1
     if len(SESSIONS) > cap:
         logger.debug(
             "SESSIONS cache above cap (%d > %d) after eviction pass: remaining "
@@ -4701,14 +4706,69 @@ def _publish_owner_publication_lease(session_id):
     first and no claim can be accepted with a lease minted in a
     bump-to-publication gap.  Failures are best-effort (the sink guard's
     exact-owner identity re-check remains the backstop).
+
+    The lease authority is selected BEFORE the single ``yield``: a failure
+    thrown through the yield (a publication-body exception) must propagate
+    to the caller.  Catching it and yielding a SECOND time would turn the
+    exception into ``RuntimeError: generator didn't stop after throw``
+    (#6327 review 15) instead of letting the caller handle it.
     """
     try:
         from api.routes import _publish_owner_lease
-
-        with _publish_owner_lease(str(session_id or "")):
-            yield
     except Exception:
+        _publish_owner_lease = None
+    if _publish_owner_lease is None:
+        # Fallback: no lease authority available (import failure).  The
+        # sink guard's exact-owner identity re-check remains the backstop.
         yield
+        return
+    with _publish_owner_lease(str(session_id or "")):
+        yield
+
+
+def _publish_owner_removal_lease(sid) -> bool:
+    """#6327 canonical same-SID cache REMOVAL under per-SID lease authority.
+
+    The caller MUST already hold the global ``LOCK`` (every canonical
+    removal site mutates ``SESSIONS`` under ``LOCK``).  Because the global
+    lock is already held, this never BLOCKS on the per-session lease lock —
+    blocking would invert the lease → LOCK publication order and create an
+    AB/BA cycle with ``_publish_owner_lease`` (a publisher holds the lease
+    and waits for LOCK).  Instead the lease lock is acquired non-blockingly:
+    a contended lease means an in-flight sink for this session, so the
+    removal is SKIPPED (never evict/delete a session whose sink is running),
+    which is exactly the serialization the blocking publication provides for
+    the LOCK-held removal sites.
+
+    On acquisition the owner-generation lease is bumped BEFORE the exact
+    ``SESSIONS.pop`` so any claim installed under the previous lease is
+    refused at its next compare-and-accept (the sink guard re-checks the
+    lease under the per-session lock).
+
+    Returns True when the entry was removed under a fresh lease; False when
+    the lease was contended (in-flight sink) and the removal was skipped.
+    """
+    try:
+        from api.routes import (
+            _SESSION_OWNER_LEASES,
+            _SESSION_OWNER_LEASES_GUARD,
+            _session_owner_lease,
+        )
+    except Exception:
+        # No lease authority available — fall back to the plain removal (the
+        # sink guard's exact-owner identity re-check remains the backstop).
+        SESSIONS.pop(str(sid or ""), None)
+        return True
+    lease_lock, _ = _session_owner_lease(str(sid or ""))
+    if not lease_lock.acquire(blocking=False):
+        return False
+    try:
+        with _SESSION_OWNER_LEASES_GUARD:
+            _SESSION_OWNER_LEASES[str(sid or "")] = (lease_lock, uuid.uuid4().hex)
+        SESSIONS.pop(str(sid or ""), None)
+    finally:
+        lease_lock.release()
+    return True
 
 
 def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_miss=True):
@@ -4738,7 +4798,9 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
             )
             with LOCK:
                 if SESSIONS.get(sid) is cached:
-                    SESSIONS.pop(sid, None)
+                    # #6327: mismatch removal is a canonical same-SID cache
+                    # removal — drop it under per-SID lease authority.
+                    _publish_owner_removal_lease(sid)
             cached = None
     if cached is not None:
         if not metadata_only and _cached_session_lags_disk(cached):
@@ -4800,11 +4862,23 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
         s = Session.load(sid)
     if s:
         if cache_on_miss:
-            with LOCK:
-                SESSIONS[sid] = s
-                if promote_cache:
-                    SESSIONS.move_to_end(sid)
-                _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+            # #6327 cold-load publication: another thread may have installed
+            # a canonical owner while Session.load() ran — NEVER overwrite it
+            # with the just-loaded object.  The load runs OUTSIDE LOCK (disk
+            # I/O), so the ownership is re-checked under LOCK immediately
+            # before installation, and the install is run as a per-SID
+            # publication transaction holding the lease authority across the
+            # exact SESSIONS write (an in-flight sink for this SID
+            # serializes first — a stale worker can never keep sinking on a
+            # replaced owner).  If a live owner appeared during the load, the
+            # loaded object is discarded (the live owner wins).
+            with _publish_owner_publication_lease(sid):
+                with LOCK:
+                    if SESSIONS.get(sid) is None:
+                        SESSIONS[sid] = s
+                        if promote_cache:
+                            SESSIONS.move_to_end(sid)
+                        _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
         if not metadata_only:
             try:
                 synced_from_state = _sync_sidecar_from_state_db_if_newer(s)
@@ -4830,7 +4904,10 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
                         and s.active_stream_id not in _active_stream_ids()):
                     with LOCK:
                         if SESSIONS.get(sid) is s:
-                            SESSIONS.pop(sid, None)
+                            # #6327: repair bail-out removal is a canonical
+                            # same-SID cache removal — drop it under per-SID
+                            # lease authority.
+                            _publish_owner_removal_lease(sid)
             except Exception:
                 pass  # repair is best-effort
         return s

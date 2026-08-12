@@ -50,17 +50,23 @@ def runner_client_configured(environ: dict[str, str] | None = None) -> bool:
     return bool(str(source.get(_RUNNER_BASE_URL_ENV) or "").strip())
 
 
+def _canonical_runner_profile(profile) -> str:
+    """Canonicalize the wire profile identity: root/empty -> 'default'."""
+    return str(profile or "").strip() or "default"
+
+
 def _runner_owner_fence_schema_error(fence) -> str | None:
     """Return an error string when *fence* is not a COMPLETE owner claim.
 
     #6327: transport (a non-empty dict) is not acceptance — every field the
     receiver needs to compare-and-accept the run under owner authority must
     be present: the exact SID, profile + home generation, the credential-state
-    generation, the full route lane, and the run claim version.
+    generation, the run claim version, the per-session lease, and the full
+    route lane (including the type-checked ``normalized_model`` flag).
     """
     if not isinstance(fence, dict) or not fence:
         return "owner_fence must be a non-empty generation/route claim"
-    for field in ("session_id", "profile", "profile_home", "generation", "version"):
+    for field in ("session_id", "profile", "profile_home", "generation", "version", "lease"):
         if not str(fence.get(field) or "").strip():
             return f"owner_fence missing required field '{field}'"
     route = fence.get("route")
@@ -69,6 +75,8 @@ def _runner_owner_fence_schema_error(fence) -> str | None:
     for field in ("workspace", "model", "provider"):
         if not str(route.get(field) or "").strip():
             return f"owner_fence.route missing required field '{field}'"
+    if not isinstance(route.get("normalized_model"), bool):
+        return "owner_fence.route missing required 'normalized_model' (bool)"
     return None
 
 
@@ -78,20 +86,22 @@ def _runner_fence_accepted(fence, accepted) -> str | None:
     #6327 receiver-authoritative compare-and-accept: the echoed owner_fence
     must carry ``accepted: true`` and match EVERY field of the claimed fence —
     the exact SID, profile + home generation, credential-state generation,
-    the per-run nonce/version, the full route lane, and the per-session lease.
-    A reflected payload that only matches ``session_id`` + ``generation`` is
-    transport, not acceptance: it does not prove the runner compared owner
-    authority before creating the run or contacting the provider.
+    the per-run nonce/version, the full route lane, and the per-session lease
+    (lease is REQUIRED and compared unconditionally — an absent echo can
+    never be treated as equal).  ``route.normalized_model`` is compared
+    EXACTLY as a bool: a missing echo must not equal a claimed ``false``
+    value (``bool()`` coercion would treat absent == false).  A reflected
+    payload that only matches ``session_id`` + ``generation`` is transport,
+    not acceptance: it does not prove the runner compared owner authority
+    before creating the run or contacting the provider.
     """
     if not isinstance(accepted, dict):
         return "runner did not echo an owner_fence object"
     if accepted.get("accepted") is not True:
         return "runner did not mark the owner fence accepted:true"
-    for field in ("session_id", "profile", "profile_home", "generation", "version"):
+    for field in ("session_id", "profile", "profile_home", "generation", "version", "lease"):
         if str(accepted.get(field) or "") != str(fence.get(field) or ""):
             return f"runner echoed a mismatched owner_fence.{field}"
-    if "lease" in fence and str(accepted.get("lease") or "") != str(fence.get("lease") or ""):
-        return "runner echoed a mismatched owner_fence.lease"
     claimed_route = fence.get("route")
     accepted_route = accepted.get("route")
     if not isinstance(claimed_route, dict) or not isinstance(accepted_route, dict):
@@ -99,8 +109,38 @@ def _runner_fence_accepted(fence, accepted) -> str | None:
     for field in ("workspace", "model", "provider"):
         if str(accepted_route.get(field) or "") != str(claimed_route.get(field) or ""):
             return f"runner echoed a mismatched owner_fence.route.{field}"
-    if bool(accepted_route.get("normalized_model")) != bool(claimed_route.get("normalized_model")):
+    claimed_nm = claimed_route.get("normalized_model")
+    accepted_nm = accepted_route.get("normalized_model")
+    if (
+        not isinstance(claimed_nm, bool)
+        or not isinstance(accepted_nm, bool)
+        or accepted_nm is not claimed_nm
+    ):
         return "runner echoed a mismatched owner_fence.route.normalized_model"
+    return None
+
+
+def _runner_request_fence_lane_error(request, fence, canonical_profile) -> str | None:
+    """Return an error string when the request's top-level lane diverges.
+
+    #6327: the top-level request route is cross-bound to the fence route
+    BEFORE the POST — the run must be created for the exact SID/profile/
+    workspace/model/provider the fence claims under owner authority, never a
+    different lane the fence did not authorize.
+    """
+    if str(getattr(request, "session_id", "") or "") != str(fence.get("session_id") or ""):
+        return "request.session_id diverges from the owner_fence lane"
+    if canonical_profile != str(fence.get("profile") or ""):
+        return "request.profile diverges from the owner_fence lane"
+    route = fence.get("route")
+    if not isinstance(route, dict):
+        return "owner_fence missing required 'route' object"
+    if str(getattr(request, "workspace", "") or "") != str(route.get("workspace") or ""):
+        return "request.workspace diverges from the owner_fence lane"
+    if str(getattr(request, "model", "") or "") != str(route.get("model") or ""):
+        return "request.model diverges from the owner_fence lane"
+    if str(getattr(request, "provider", "") or "") != str(route.get("provider") or ""):
+        return "request.provider diverges from the owner_fence lane"
     return None
 
 
@@ -136,20 +176,37 @@ class HttpRunnerClient:
         # acknowledged.  A non-empty JSON dictionary is TRANSPORT, not
         # acceptance: the fence must carry the complete generation/route
         # schema (SID + profile/home + generation + route lane + claim
-        # version), and the runner must echo the accepted fence back in its
-        # response before the run is treated as started.
+        # version + per-session lease), and the runner must echo the accepted
+        # fence back in its response before the run is treated as started.
+        # Every schema/lane/acceptance rejection raises RunnerFenceRefused
+        # (retryable, never ambiguous) so the route requeues/reconciles
+        # instead of treating the run as started.
         fence = request.owner_fence
+        if isinstance(fence, dict):
+            # Defensive canonicalization: a root/empty profile serializes as
+            # the canonical 'default' wire identity so a valid root session
+            # never falls into the generic schema-error path.
+            fence = dict(fence)
+            if not str(fence.get("profile") or "").strip():
+                fence["profile"] = "default"
         schema_error = _runner_owner_fence_schema_error(fence)
         if schema_error is not None:
-            raise RunnerClientError(
+            raise RunnerFenceRefused(
                 f"refusing to start an unowned run: {schema_error}"
             )
+        # Cross-bind the top-level request route to the fence lane BEFORE the
+        # POST: the run must be created for the exact SID/profile/workspace/
+        # model/provider the fence authorizes, never a different lane.
+        canonical_profile = _canonical_runner_profile(getattr(request, "profile", None))
+        lane_error = _runner_request_fence_lane_error(request, fence, canonical_profile)
+        if lane_error is not None:
+            raise RunnerFenceRefused(lane_error)
         payload = self._post("/v1/runs", {
             "session_id": request.session_id,
             "message": request.message,
             "attachments": list(request.attachments or []),
             "workspace": request.workspace,
-            "profile": request.profile,
+            "profile": canonical_profile,
             "provider": request.provider,
             "model": request.model,
             "toolsets": list(request.toolsets or []),

@@ -300,6 +300,9 @@ def _claimed_fence():
         ({"route": {"model": "other-model"}}, "route.model"),
         ({"route": {"provider": "other-provider"}}, "route.provider"),
         ({"route": {"normalized_model": True}}, "route.normalized_model"),
+        # A MISSING normalized_model echo must never equal a claimed false
+        # value (bool() coercion would treat absent == false).
+        ({"route": {"normalized_model": None}}, "route.normalized_model"),
     ],
 )
 def test_runner_client_rejects_fence_mismatch_per_field(monkeypatch, mutation, expected):
@@ -333,8 +336,11 @@ def test_runner_client_rejects_fence_mismatch_per_field(monkeypatch, mutation, e
 
 def test_runner_client_refuses_run_with_partial_fence_schema(monkeypatch):
     """#6327: a non-empty dict is transport, not acceptance — an incomplete
-    fence schema (missing generation / route lane / claim version) is refused
-    before any POST."""
+    fence schema (missing lease, missing generation / route lane / claim
+    version, or a missing/malformed ``route.normalized_model``) is refused
+    BEFORE any POST, and the refusal is the typed RunnerFenceRefused
+    (retryable, never ambiguous) so the route requeues instead of reaching
+    the generic 502 path."""
 
     def fake_urlopen(req, timeout=0):
         raise AssertionError("start_run must not POST an incomplete owner fence")
@@ -353,8 +359,51 @@ def test_runner_client_refuses_run_with_partial_fence_schema(monkeypatch):
             "version": "v1",
             "route": {"workspace": "/workspace"},
         },
+        # Missing the REQUIRED per-session lease.
+        {
+            "session_id": "s1",
+            "profile": "default",
+            "profile_home": "/home/test/.hermes",
+            "generation": "g1",
+            "version": "v1",
+            "route": {
+                "workspace": "/workspace",
+                "model": "gpt-5.5",
+                "provider": "openai-codex",
+                "normalized_model": False,
+            },
+        },
+        # Missing the required route.normalized_model flag.
+        {
+            "session_id": "s1",
+            "profile": "default",
+            "profile_home": "/home/test/.hermes",
+            "generation": "g1",
+            "version": "v1",
+            "lease": "lease-1",
+            "route": {
+                "workspace": "/workspace",
+                "model": "gpt-5.5",
+                "provider": "openai-codex",
+            },
+        },
+        # Malformed normalized_model (not type-checked as a bool).
+        {
+            "session_id": "s1",
+            "profile": "default",
+            "profile_home": "/home/test/.hermes",
+            "generation": "g1",
+            "version": "v1",
+            "lease": "lease-1",
+            "route": {
+                "workspace": "/workspace",
+                "model": "gpt-5.5",
+                "provider": "openai-codex",
+                "normalized_model": "false",
+            },
+        },
     ):
-        with pytest.raises(RunnerClientError, match="owner_fence"):
+        with pytest.raises(RunnerFenceRefused, match="owner_fence"):
             client.start_run(
                 StartRunRequest(
                     session_id="s1",
@@ -364,6 +413,94 @@ def test_runner_client_refuses_run_with_partial_fence_schema(monkeypatch):
                     owner_fence=bad_fence,
                 )
             )
+
+
+def test_runner_client_rejects_request_lane_divergence(monkeypatch):
+    """#6327: the top-level request route is cross-bound to the fence route
+    BEFORE the POST — a request whose SID/profile/workspace/model/provider
+    diverges from the claimed fence lane is refused (typed RunnerFenceRefused)
+    with zero POSTs, so the runner can never create a run for a lane the
+    fence did not authorize."""
+
+    def fake_urlopen(req, timeout=0):
+        raise AssertionError("start_run must not POST a divergent request lane")
+
+    _patch_opener(monkeypatch, fake_urlopen)
+    client = HttpRunnerClient(base_url="http://runner.local/", api_key="secret")
+
+    fence = _claimed_fence()
+    base = dict(
+        session_id="s1",
+        message="hello",
+        workspace="/workspace",
+        profile="default",
+        provider="openai-codex",
+        model="gpt-5.5",
+        owner_fence=fence,
+    )
+    for request_mutation in (
+        {"session_id": "other-sid"},
+        {"profile": "other-profile"},
+        {"workspace": "/other-workspace"},
+        {"model": "other-model"},
+        {"provider": "other-provider"},
+    ):
+        req = StartRunRequest(**{**base, **request_mutation})
+        with pytest.raises(RunnerFenceRefused, match="diverges from the owner_fence lane"):
+            client.start_run(req)
+
+
+def test_runner_client_canonicalizes_root_profile_wire_identity(monkeypatch):
+    """#6327: a valid ROOT session (profile None) serializes an empty
+    profile; the client canonicalizes it to the 'default' wire identity so it
+    never falls into the generic schema-error path, and the POST body carries
+    the canonical profile bound to the fence lane."""
+
+    captured = {}
+
+    def fake_urlopen(req, timeout=0):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return FakeResponse({
+            "run_id": "run-1",
+            "stream_id": "run-1",
+            "status": "running",
+            "owner_fence": {
+                "accepted": True,
+                "session_id": "s1",
+                "profile": "default",
+                "profile_home": "/home/test/.hermes",
+                "generation": "fingerprint-1",
+                "version": "claim-1",
+                "lease": "lease-1",
+                "route": {
+                    "workspace": "/workspace",
+                    "model": "gpt-5.5",
+                    "provider": "openai-codex",
+                    "normalized_model": False,
+                },
+            },
+        })
+
+    _patch_opener(monkeypatch, fake_urlopen)
+    client = HttpRunnerClient(base_url="http://runner.local/", api_key="secret")
+
+    root_fence = _claimed_fence()
+    root_fence["profile"] = ""  # root session serializes an empty profile
+    result = client.start_run(
+        StartRunRequest(
+            session_id="s1",
+            message="hello",
+            workspace="/workspace",
+            profile=None,
+            provider="openai-codex",
+            model="gpt-5.5",
+            owner_fence=root_fence,
+        )
+    )
+
+    assert result["run_id"] == "run-1"
+    assert captured["body"]["profile"] == "default"
+    assert captured["body"]["owner_fence"]["profile"] == "default"
 
 
 def test_runner_client_start_run_refuses_empty_owner_fence(monkeypatch):

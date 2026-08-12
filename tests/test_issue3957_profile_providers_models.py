@@ -4071,6 +4071,196 @@ def test_runner_local_replacement_before_runner_call_refuses_with_fence(
             config.SESSIONS.pop(sid, None)
 
 
+def test_runner_local_schema_and_lane_refusals_map_to_retryable_409(
+    monkeypatch, tmp_path
+):
+    """#6327 route-composed (review 15): fence schema failures (missing
+    lease, missing/malformed ``route.normalized_model``) and request/fence
+    lane divergence are raised by the REAL HttpRunnerClient as typed
+    RunnerFenceRefused inside ``_start_run`` and map to the retryable 409 +
+    durable wakeup re-defer — NEVER the generic 502/ambiguous path.  The
+    complete-fence success control posts and the receiver compare-and-accept
+    echo is accepted; the root-profile control canonicalizes the empty
+    profile to the 'default' wire identity and still succeeds."""
+    import api.background_process as bg
+    import api.routes as routes
+    from api.runner_client import HttpRunnerClient
+
+    real_start_run = routes._start_run
+    real_claim = routes._claim_runner_owner_fence
+    session, calls, proxy = _install_immutable_owner_token_fixture(
+        monkeypatch, tmp_path, recovered=True
+    )
+    # The fixture stubs _start_run to record calls; the runner-local barrier
+    # must drive the REAL production helper (fence claim + adapter dispatch).
+    monkeypatch.setattr(routes, "_start_run", real_start_run)
+    sid = session.session_id
+    deferred = []
+    monkeypatch.setattr(
+        bg, "record_deferred_wakeup", lambda s, _c, p: deferred.append((s, p))
+    )
+    monkeypatch.setenv("HERMES_WEBUI_RUNTIME_ADAPTER", "runner-local")
+
+    posts = []
+
+    class _EchoRunnerClient(HttpRunnerClient):
+        """Real client whose _post records the boundary and echoes the
+        COMPLETE claimed fence (accepted:true), like a compliant runner."""
+
+        def _post(self, path, body):
+            posts.append((path, dict(body)))
+            fence = body.get("owner_fence") or {}
+            return {
+                "run_id": "run-1",
+                "stream_id": "run-1",
+                "session_id": body.get("session_id"),
+                "status": "started",
+                "owner_fence": {
+                    "accepted": True,
+                    "session_id": fence.get("session_id"),
+                    "profile": fence.get("profile"),
+                    "profile_home": fence.get("profile_home"),
+                    "generation": fence.get("generation"),
+                    "version": fence.get("version"),
+                    "lease": fence.get("lease"),
+                    "route": dict(fence.get("route") or {}),
+                },
+            }
+
+    monkeypatch.setattr(
+        routes,
+        "_runtime_runner_client_factory",
+        lambda: _EchoRunnerClient(base_url="http://runner.local/", api_key="secret"),
+    )
+
+    def _run_start():
+        return routes._start_run(
+            session,
+            msg="hello",
+            attachments=[],
+            workspace=str(tmp_path),
+            model="test-model",
+            model_provider="test-provider",
+            normalized_model=False,
+            source="process_wakeup",
+            route="start_session_turn",
+            owner_token=token,
+        )
+
+    try:
+        token, owner, _revalidation = _build_token_and_revalidate(routes, sid)
+        assert owner is session
+
+        # ── 1) Missing lease → schema refusal BEFORE any POST ───────────────
+        def _claim_without_lease(owner_token, s):
+            fence, err = real_claim(owner_token, s)
+            fence.pop("lease", None)
+            return fence, err
+
+        monkeypatch.setattr(routes, "_claim_runner_owner_fence", _claim_without_lease)
+        resp = _run_start()
+        assert resp["_status"] == 409, resp
+        assert resp["retryable"] is True, resp
+        assert "owner_fence" in resp and "lease" in str(resp["owner_fence"]), resp
+        assert posts == [], "missing-lease refusal must happen before any POST"
+        assert deferred == [(sid, "hello")], deferred
+        deferred.clear()
+
+        # ── 2) Missing route.normalized_model → schema refusal, no POST ─────
+        def _claim_without_normalized_model(owner_token, s):
+            fence, err = real_claim(owner_token, s)
+            fence["route"].pop("normalized_model", None)
+            return fence, err
+
+        monkeypatch.setattr(
+            routes, "_claim_runner_owner_fence", _claim_without_normalized_model
+        )
+        resp = _run_start()
+        assert resp["_status"] == 409, resp
+        assert "normalized_model" in str(resp["owner_fence"]), resp
+        assert posts == [], "missing-normalized_model refusal must precede POST"
+        assert deferred == [(sid, "hello")], deferred
+        deferred.clear()
+
+        # ── 3) Malformed normalized_model → schema refusal, no POST ─────────
+        def _claim_malformed_normalized_model(owner_token, s):
+            fence, err = real_claim(owner_token, s)
+            fence["route"]["normalized_model"] = "false"  # not type-checked bool
+            return fence, err
+
+        monkeypatch.setattr(
+            routes, "_claim_runner_owner_fence", _claim_malformed_normalized_model
+        )
+        resp = _run_start()
+        assert resp["_status"] == 409, resp
+        assert "normalized_model" in str(resp["owner_fence"]), resp
+        assert posts == [], "malformed-normalized_model refusal must precede POST"
+        assert deferred == [(sid, "hello")], deferred
+        deferred.clear()
+
+        # ── 4) Request/fence lane divergence → refusal, no POST ─────────────
+        def _claim_divergent_sid(owner_token, s):
+            fence, err = real_claim(owner_token, s)
+            fence["session_id"] = "other-sid"
+            return fence, err
+
+        monkeypatch.setattr(routes, "_claim_runner_owner_fence", _claim_divergent_sid)
+        resp = _run_start()
+        assert resp["_status"] == 409, resp
+        assert "diverges from the owner_fence lane" in str(resp["owner_fence"]), resp
+        assert posts == [], "lane-divergence refusal must precede any POST"
+        assert deferred == [(sid, "hello")], deferred
+        deferred.clear()
+
+        # ── 5) Complete-fence success control: POST + accepted echo ─────────
+        monkeypatch.setattr(routes, "_claim_runner_owner_fence", real_claim)
+        resp = _run_start()
+        # Success maps through _chat_start_response_from_run_start (legacy
+        # fields, no _status key — an absence of error IS the 200 path).
+        assert resp.get("_status", 200) == 200, resp
+        assert not resp.get("error"), resp
+        assert resp.get("stream_id") == "run-1", resp
+        assert len(posts) == 1, posts
+        body = posts[0][1]
+        assert body["owner_fence"].get("lease"), "lease required in the posted fence"
+        assert body["owner_fence"]["route"].get("normalized_model") is False
+        assert deferred == [], deferred
+
+        # ── 6) Root-profile control: empty profile canonicalized to 'default'
+        # on the wire, still accepted (never the schema-error path) ─────────
+        root_session = _StreamingFakeSession(
+            sid, None, tmp_path, "issue6327-root-runner"
+        )
+        with config.LOCK:
+            config.SESSIONS[sid] = root_session
+        token, owner, _revalidation = _build_token_and_revalidate(routes, sid)
+        assert owner is root_session
+        posts.clear()
+        resp = routes._start_run(
+            root_session,
+            msg="hello",
+            attachments=[],
+            workspace=str(tmp_path),
+            model="test-model",
+            model_provider="test-provider",
+            normalized_model=False,
+            source="process_wakeup",
+            route="start_session_turn",
+            owner_token=token,
+        )
+        assert resp.get("_status", 200) == 200, resp
+        assert not resp.get("error"), resp
+        assert resp.get("stream_id") == "run-1", resp
+        assert len(posts) == 1, posts
+        body = posts[0][1]
+        assert body["profile"] == "default"
+        assert body["owner_fence"]["profile"] == "default"
+        _assert_no_ownership_lock_leak(proxy)
+    finally:
+        with config.LOCK:
+            config.SESSIONS.pop(sid, None)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # #6327 — B6: accepted-claim sink barriers, stale-finalizer settlement, and
 # validate-before-mutate

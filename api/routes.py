@@ -128,7 +128,9 @@ def _persist_generated_session_title(
         with LOCK:
             latest = SESSIONS.get(sid)
             if latest is not None and str(getattr(latest, "session_id", "") or "") != sid:
-                SESSIONS.pop(sid, None)
+                # #6327: mismatch removal is a canonical same-SID cache
+                # removal — drop it under per-SID lease authority.
+                _publish_owner_removal_lease(sid)
                 latest = None
             elif latest is not None:
                 SESSIONS.move_to_end(sid)
@@ -9661,6 +9663,7 @@ from api.models import (
     _enrich_sidebar_lineage_metadata,
     _active_stream_ids,
     _evict_sessions_over_cap,
+    _publish_owner_removal_lease,
     _merge_session_display_metadata,
     _session_message_merge_key,
     _session_messages_have_prefix,
@@ -23370,7 +23373,11 @@ def _claim_runner_owner_fence(owner_token, s):
         # authority, not stale predecessor-derived values.
         fence = {
             "session_id": str(live_sid),
-            "profile": str(getattr(owner, "profile", "") or ""),
+            # #6327: canonicalize the root-profile wire identity — a root
+            # session (profile None/'') serializes as the canonical 'default'
+            # so a valid root session never falls into the generic
+            # schema-error path and the request lane cross-binds cleanly.
+            "profile": str(getattr(owner, "profile", "") or "").strip() or "default",
             "profile_home": str(owner_token.get("profile_home") or ""),
             "generation": str(owner_token.get("credential_state_fingerprint") or ""),
             "route": {
