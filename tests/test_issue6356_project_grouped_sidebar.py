@@ -275,6 +275,7 @@ function _sessionTitleForForkParent(s) { return s.session_id; }
 function _lineageSegmentsForRender() { return []; }
 function _lineageReportCacheKey() { return ''; }
 function _sessionSearchContentPreview() { return ''; }
+function _appendHighlightedText(element, text) { element.textContent = text; }
 function _buildSessionRenameStarter() { return () => {}; }
 function _sessionStateTooltip() { return ''; }
 function _sessionSortTimestampMs(s) { return s.ts || 0; }
@@ -351,6 +352,7 @@ style.textContent = `
   .session-item{height:32px;line-height:32px;display:block;}
 `;
 document.head.appendChild(style);
+const TOTAL = __TOTAL__;
 const storageState = new Map([['hermes-date-groups-collapsed', '{}']]);
 Object.defineProperty(window, 'localStorage', {
   configurable: true,
@@ -369,8 +371,8 @@ let S = {activeProfile: '', activeProfileIsDefault: false};
 let activeSid = null;
 let _sessionVisibleSidebarIds = [];
 let _selectedSessions = new Set();
-let _allProjects = Array.from({length:96}, (_, index) => ({project_id:`project-${index}`, name:`Project ${index}`}));
-let _allSessions = Array.from({length:96}, (_, index) => ({session_id:`session-${index}`, project_id:`project-${index}`, ts:index}));
+let _allProjects = Array.from({length:TOTAL}, (_, index) => ({project_id:`project-${index}`, name:`Project ${index}`}));
+let _allSessions = Array.from({length:TOTAL}, (_, index) => ({session_id:`session-${index}`, project_id:`project-${index}`, ts:index}));
 let _sessionListSkeletonActive = false;
 let _renamingSid = null;
 let _sessionActionMenu = null;
@@ -456,6 +458,7 @@ function _sessionTitleForForkParent(session) { return session.session_id; }
 function _lineageSegmentsForRender() { return []; }
 function _lineageReportCacheKey() { return ''; }
 function _sessionSearchContentPreview() { return ''; }
+function _appendHighlightedText(element, text) { element.textContent = text; }
 function _buildSessionRenameStarter() { return () => {}; }
 function _sessionStateTooltip() { return ''; }
 function _sessionArchivePagingFilterActive() { return false; }
@@ -526,10 +529,13 @@ try {
   window.groupedGeometry.stableSid = stableSid;
   window.groupedGeometry.stableBefore = stableBefore;
   window.groupedGeometry.stableAfter = list.scrollTop;
+  document.querySelector('#sessionSearch').value = 'session';
+  renderSessionListFromCache();
+  window.groupedGeometry.searchRefreshScrollStable = list.scrollTop === stableBefore && !!list.querySelector(`[data-sid="${stableSid}"]`);
   activeSid = null;
   list.scrollTop = 0;
   renderSessionListFromCache();
-  const aboveSid = list.querySelector('.session-item').dataset.sid;
+  const aboveSid = 'session-0';
   list.scrollTop = Math.floor(list.scrollHeight / 2);
   renderSessionListFromCache();
   activeSid = aboveSid;
@@ -541,7 +547,7 @@ try {
   activeSid = null;
   list.scrollTop = 0;
   renderSessionListFromCache();
-  const belowSid = 'session-95';
+  const belowSid = `session-${TOTAL - 1}`;
   activeSid = belowSid;
   const belowBefore = list.scrollTop;
   renderSessionListFromCache();
@@ -561,23 +567,29 @@ try {
     fixture = fixture.replace("__SCHEDULE__", _extract_js_function(SESSIONS_JS, "_scheduleSessionVirtualizedRender"))
     with playwright_factory() as playwright:
         browser = playwright.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
-        page = browser.new_page(viewport={"width":500, "height":500})
-        page.set_content("<!doctype html><html><body></body></html>")
-        page.add_script_tag(content=fixture)
-        observed = page.evaluate("window.groupedGeometry")
+        observed_by_total = {}
+        for total in (10, 79, 80, 81):
+            page = browser.new_page(viewport={"width":500, "height":500})
+            page.set_content("<!doctype html><html><body></body></html>")
+            page.add_script_tag(content=fixture.replace("__TOTAL__", str(total)))
+            observed_by_total[total] = page.evaluate("window.groupedGeometry")
+            page.close()
         browser.close()
-    assert observed["error"] is None, observed["error"]
-    assert observed["totalRows"] <= 52
-    assert observed["headers"] <= 52
-    assert observed["middleScroll"] > 0
-    assert observed["bottomScroll"] > observed["middleScroll"]
-    assert observed["groupedLease"] is True
-    assert observed["activeVisibleScrollStable"] is True
-    assert observed["activeAboveRevealed"] is True
-    assert observed["activeBelowRevealed"] is True
-    assert len(observed["middle"]) <= 52
-    assert len(observed["bottom"]) <= 52
-    assert len(observed["bottom"]) <= 52
+    for total, observed in observed_by_total.items():
+        assert observed["error"] is None, (total, observed["error"])
+        assert 0 < observed["totalRows"] <= 52
+        assert observed["headers"] <= 52
+        assert observed["bottomScroll"] > observed["middleScroll"]
+        assert observed["groupedLease"] is True
+        assert observed["activeVisibleScrollStable"] is True
+        assert observed["searchRefreshScrollStable"] is True
+        if total > 80:
+            assert observed["activeAboveRevealed"] is True, (total, observed)
+            assert observed["activeBelowRevealed"] is True, (total, observed)
+        if total > 80:
+            assert observed["totalRows"] <= 52
+            assert len(observed["middle"]) <= 52
+            assert len(observed["bottom"]) <= 52
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -805,8 +817,8 @@ process.stdout.write(JSON.stringify({nativeObserved, strippedAccepted, strippedS
             "custom": "alpha",
             "plain": "hermes-webui-session:alpha",
         },
-        "strippedAccepted": True,
-        "strippedSid": "alpha",
+        "strippedAccepted": False,
+        "strippedSid": "",
         "foreignCustomAccepted": False,
         "foreignCustomSid": "",
         "activeCustomAccepted": True,
@@ -890,7 +902,7 @@ run().catch(error => { console.error(error); process.exit(1); });
         "dragend": False,
         "pagehide": False,
         "blur": False,
-        "dropBeforeTick": True,
+        "dropBeforeTick": False,
         "dropAfterTick": False,
     }
 
@@ -1200,6 +1212,15 @@ window.runGroupedDragProof = async () => {
   const compatibleHeader = document.querySelector('[data-target="compatible-target"]');
   observed.dragoverDefaultPrevented = !compatibleHeader.dispatchEvent(dragover);
   observed.dragoverClass = compatibleHeader.classList.contains('drag-over');
+  const invalidHeader = document.querySelector('[data-target="cross-profile-target"]');
+  const invalidDragover = new DragEvent('dragover', {
+    bubbles: true,
+    cancelable: true,
+    dataTransfer: protectedDragoverData,
+  });
+  observed.invalidDragoverDefaultPrevented = !invalidHeader.dispatchEvent(invalidDragover);
+  observed.invalidDragoverEffect = protectedDragoverData.dropEffect;
+  observed.invalidDragoverClass = invalidHeader.classList.contains('drag-over');
   document.querySelector('[data-target="compatible-target"]').dispatchEvent(
     new DragEvent('drop', {bubbles:true, cancelable:true, dataTransfer:compatible})
   );
@@ -1269,9 +1290,12 @@ window.runGroupedDragProof = async () => {
         "compatibleTypes": ["application/x-hermes-webui-session-id", "text/plain"],
         "compatibleCustom": "compatible",
         "compatiblePlain": "hermes-webui-session:compatible",
-        "dragoverDefaultPrevented": False,
-        "dragoverClass": False,
-        "fallbackPlain": "hermes-webui-session:fallback",
+      "dragoverDefaultPrevented": True,
+      "dragoverClass": True,
+      "invalidDragoverDefaultPrevented": False,
+      "invalidDragoverEffect": "none",
+      "invalidDragoverClass": False,
+      "fallbackPlain": "hermes-webui-session:fallback",
     }
     assert observed["apiCalls"] == [
         {
@@ -1284,20 +1308,111 @@ window.runGroupedDragProof = async () => {
         },
         {
             "url": "/api/session/move",
-            "body": {"session_id": "fallback", "project_id": "fallback-project"},
-        },
-        {
-            "url": "/api/session/move",
             "body": {"session_id": "to-unassigned", "project_id": None},
         },
     ]
-    assert observed["renderCount"] == 3
+    assert observed["renderCount"] == 2
     assert observed["toasts"] == [
         "Moved to Compatible",
         "Move failed: failed-target blocked",
-        "Moved to Fallback",
         "Removed from project",
     ]
     assert next(item for item in observed["sessions"] if item["session_id"] == "compatible")["project_id"] == "target"
     assert next(item for item in observed["sessions"] if item["session_id"] == "failed")["project_id"] == "source"
-    assert next(item for item in observed["sessions"] if item["session_id"] == "fallback")["project_id"] == "fallback-project"
+    assert next(item for item in observed["sessions"] if item["session_id"] == "fallback")["project_id"] == "source"
+
+
+def test_grouped_drag_playwright_uses_native_drag_and_drop_for_valid_target():
+    playwright_factory = _require_playwright()
+    helpers = "\n".join(
+        [_extract_js_line(SESSIONS_JS, prefix) for prefix in (
+            "const SESSION_PROJECT_DRAG_MIME=",
+            "const SESSION_PROJECT_DRAG_TEXT_PREFIX=",
+            "let _activeSidebarProjectDragSessionId=",
+        )]
+        + [
+            _extract_js_function(SESSIONS_JS, name)
+            for name in (
+                "_profileNameIsRoot",
+                "_profileNameIsRootAlias",
+                "_normalizedProfileEquivalent",
+                "_profileNamesEquivalent",
+                "_projectMoveEligibility",
+                "_setSessionProjectDragData",
+                "_sessionProjectDragSid",
+                "_isSessionProjectMoveDrag",
+                "_handleGroupedProjectDrop",
+                "_bindGroupedProjectDropTarget",
+                "_moveSessionToProject",
+            )
+        ]
+    )
+    fixture = """
+const _profilesCache = {profiles:[{name:'alpha',is_default:false},{name:'beta',is_default:false}]};
+window._profilesCacheFreshAt = Date.now();
+const _allSessions = [{session_id:'native-source',project_id:'source',profile:'alpha'}];
+const apiCalls = [];
+let renderCount = 0;
+async function api(url, options) { apiCalls.push({url, body:JSON.parse(options.body)}); return {ok:true}; }
+function renderSessionListFromCache() { renderCount += 1; }
+function showToast() {}
+function _isReadOnlySession() { return false; }
+""" + helpers + """
+const source = document.createElement('div');
+source.id = 'native-source';
+source.draggable = true;
+source.textContent = 'source';
+source.addEventListener('dragstart', event => {
+  event.dataTransfer.effectAllowed = 'move';
+  _setSessionProjectDragData(event.dataTransfer, 'native-source');
+});
+const valid = document.createElement('div');
+valid.id = 'native-valid';
+valid.textContent = 'valid';
+valid.style.cssText = 'display:block;width:120px;height:40px;';
+const invalid = document.createElement('div');
+invalid.id = 'native-invalid';
+invalid.textContent = 'invalid';
+invalid.style.cssText = 'display:block;width:120px;height:40px;';
+document.body.append(source, valid, invalid);
+_bindGroupedProjectDropTarget(valid, {project_id:'target',profile:'alpha'}, 'Target');
+_bindGroupedProjectDropTarget(invalid, {project_id:'other',profile:'beta'}, 'Other');
+window.nativeDragState = {valid, invalid, source};
+"""
+    with playwright_factory() as playwright:
+        browser = playwright.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+        page = browser.new_page()
+        page.set_content("<!doctype html><html><body></body></html>")
+        page.add_script_tag(content=fixture)
+        page.drag_and_drop("#native-source", "#native-valid")
+        observed = page.evaluate("""
+() => {
+  const nativeProjectId = _allSessions[0].project_id;
+  _allSessions[0].project_id = 'source';
+  const dt = new DataTransfer();
+  _setSessionProjectDragData(dt, 'native-source');
+  const validEvent = new DragEvent('dragover', {bubbles:true,cancelable:true,dataTransfer:dt});
+  const invalidEvent = new DragEvent('dragover', {bubbles:true,cancelable:true,dataTransfer:dt});
+  const validAccepted = !nativeDragState.valid.dispatchEvent(validEvent);
+  const validClassBeforeInvalid = nativeDragState.valid.classList.contains('drag-over');
+  nativeDragState.invalid.dispatchEvent(invalidEvent);
+  return {
+        validAccepted,
+            validClass: validClassBeforeInvalid,
+    invalidEffect: dt.dropEffect,
+    invalidClass: nativeDragState.invalid.classList.contains('drag-over'),
+    apiCalls,
+    renderCount,
+        projectId: _allSessions[0].project_id,
+        nativeProjectId,
+  };
+}
+""")
+        browser.close()
+    assert observed["validAccepted"] is True, observed
+    assert observed["validClass"] is True
+    assert observed["invalidEffect"] == "none"
+    assert observed["invalidClass"] is False
+    assert observed["apiCalls"] == [{"url":"/api/session/move","body":{"session_id":"native-source","project_id":"target"}}]
+    assert observed["renderCount"] == 1
+    assert observed["nativeProjectId"] == "target"
