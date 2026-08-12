@@ -124,8 +124,9 @@ def test_gateway_empty_response_is_persisted_before_terminal_sse(monkeypatch, tm
         payload,
         session.session_id,
     )
-    assert [name for name, _data in events] == ["done", "stream_end"]
-    assert events[0][1]["session"]["session_id"] == session.session_id
+    assert [name for name, _data in events] == ["apperror", "done", "stream_end"]
+    assert events[0][1]["type"] == "gateway_empty_response"
+    assert events[1][1]["session"]["session_id"] == session.session_id
 
 
 def test_stream_status_exposes_replay_summary():
