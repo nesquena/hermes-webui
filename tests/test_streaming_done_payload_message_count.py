@@ -36,6 +36,28 @@ def test_full_message_payload_overrides_stale_compact_message_count():
     assert payload["message_count"] != session.compact()["message_count"]
 
 
+def test_full_message_payload_accepts_a_display_projection_without_mutating_the_session():
+    persisted_segment = [{"role": "assistant", "content": "bounded tip"}]
+    display_projection = [
+        {"role": "user", "content": "archived ancestor"},
+        *persisted_segment,
+    ]
+    session = _FakeSession(
+        session_id="compressed-child-session",
+        messages=persisted_segment,
+    )
+
+    payload = _session_payload_with_full_messages(
+        session,
+        tool_calls=[],
+        messages=display_projection,
+    )
+
+    assert payload["messages"] == display_projection
+    assert payload["message_count"] == len(display_projection)
+    assert session.messages == persisted_segment
+
+
 def test_full_message_payload_includes_todo_state_snapshot():
     todo_result = {
         "todos": [
@@ -75,7 +97,9 @@ def test_done_payload_uses_full_message_count_helper():
     block_start = STREAMING_SOURCE.rfind("raw_session =", 0, done_idx)
     block = STREAMING_SOURCE[block_start:done_idx]
 
-    assert "_session_payload_with_full_messages(s, tool_calls=tool_calls)" in block
+    assert "_session_payload_with_full_messages(" in block
+    assert "tool_calls=tool_calls" in block
+    assert "messages=_current_compression_display_projection(" in block
     assert "s.compact() | {'messages': s.messages" not in block
 
 
@@ -84,7 +108,9 @@ def test_apperror_payload_uses_full_message_count_helper():
     block_start = STREAMING_SOURCE.rfind("_error_payload['session']", 0, error_idx)
     block = STREAMING_SOURCE[block_start:error_idx]
 
-    assert "_session_payload_with_full_messages(s, tool_calls=s.tool_calls)" in block
+    assert "_session_payload_with_full_messages(" in block
+    assert "tool_calls=s.tool_calls" in block
+    assert "messages=_current_compression_display_projection(" in block
     assert "s.compact() | {'messages': s.messages" not in block
 
 
