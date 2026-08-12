@@ -746,7 +746,10 @@ process.stdout.write(JSON.stringify(cases));
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_internal_session_mime_is_rejected_by_composer_and_workspace_guards():
-    guard = _extract_js_line(PANELS_JS, "const _isInternalSessionDragEvent=")
+    guard = "\n".join(
+        _extract_js_line(PANELS_JS, prefix)
+        for prefix in ("const _isOwnedSessionDragEvent=", "const _isInternalSessionDragEvent=")
+    )
     script = f"""
 const inside={{}}; const outside={{}};
 const wrap={{contains:node=>node===inside}};
@@ -754,12 +757,14 @@ const wrap={{contains:node=>node===inside}};
 const internal=types=>({{target:inside,dataTransfer:{{types}}}});
 const external=types=>({{target:outside,dataTransfer:{{types}}}});
 process.stdout.write(JSON.stringify({{
+  projectOwned:_isOwnedSessionDragEvent(external(['application/x-hermes-webui-session-id'])),
   composerInternal:_isInternalSessionDragEvent(internal(['application/x-hermes-webui-session-id'])),
   projectInternal:_isInternalSessionDragEvent(external(['application/x-hermes-webui-session-id'])),
   ordinaryComposer:_isInternalSessionDragEvent(internal(['Files'])),
 }}));
 """
     assert _run_node_json(script) == {
+        "projectOwned": True,
         "composerInternal": True,
         "projectInternal": False,
         "ordinaryComposer": False,
