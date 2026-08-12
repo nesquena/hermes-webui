@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import api.project_context as project_context
 from api.project_context import recent_project_messages
 
 
@@ -298,6 +299,24 @@ def test_explicit_classifier_excludes_cron_delegation_compaction_and_system_noti
     assert result["classifier"] == "project_context_v1"
 
 
+def test_max_iteration_summary_classifier_is_case_insensitive(project_store):
+    mixed_case_summary = (
+        "You've reached the maximum number of tool-calling iterations allowed. "
+        "Please provide a final response summarizing what you've found and accomplished "
+        "so far, without calling any more tools."
+    ).swapcase()
+    _seed(
+        project_store,
+        [{"session_id": "regular"}],
+        [
+            ("regular", "user", "genuine", 1.0),
+            ("regular", "user", mixed_case_summary, 2.0),
+        ],
+    )
+
+    assert [m["content"] for m in _read(project_store, limit=20)["messages"]] == ["genuine"]
+
+
 def test_classifier_does_not_drop_plain_user_discussion_of_context_compaction(project_store):
     _seed(
         project_store,
@@ -375,6 +394,20 @@ def test_cursor_reuse_is_rejected_across_every_query_scope_dimension(project_sto
         )
 
 
+def test_cursor_reuse_is_rejected_after_classifier_version_changes(project_store, monkeypatch):
+    _seed(
+        project_store,
+        [{"session_id": "session_a"}],
+        [("session_a", "user", "message", 1.0)],
+    )
+    cursor = _read(project_store)["next_before"]
+
+    monkeypatch.setattr(project_context, "_CLASSIFIER_VERSION", "project_context_v2")
+
+    with pytest.raises(ValueError, match="before"):
+        _read(project_store, before=cursor)
+
+
 def test_archived_sessions_are_opt_in(project_store):
     _seed(
         project_store,
@@ -405,6 +438,29 @@ def test_large_corpus_reads_only_a_bounded_tail_per_eligible_session(project_sto
     assert len(result["messages"]) == 5
     assert result["diagnostics"]["candidate_rows_read"] <= 26 * len(sessions)
     assert result["diagnostics"]["eligible_sessions"] == len(sessions)
+
+
+def test_compacted_inactive_messages_are_not_returned(project_store):
+    with sqlite3.connect(project_store["state_db_path"]) as conn:
+        conn.execute("ALTER TABLE messages ADD COLUMN active INTEGER")
+    _seed(
+        project_store,
+        [{"session_id": "session_a"}],
+        [("session_a", "user", "active", 2.0)],
+    )
+    with sqlite3.connect(project_store["state_db_path"]) as conn:
+        conn.execute("UPDATE messages SET active = 1 WHERE content = 'active'")
+        conn.executemany(
+            "INSERT INTO messages (session_id, role, content, timestamp, active) VALUES (?, ?, ?, ?, ?)",
+            [
+                ("session_a", "user", "inactive-newer", 3.0, 0),
+                ("session_a", "user", "inactive-older", 1.0, 0),
+            ],
+        )
+
+    result = _read(project_store, limit=5)
+
+    assert [m["content"] for m in result["messages"]] == ["active"]
 
 
 def test_synthetic_tail_saturation_fails_bounded_and_reports_partial(project_store):

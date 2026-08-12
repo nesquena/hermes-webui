@@ -61,8 +61,10 @@ Classifier `project_context_v1` excludes:
   and `[System: ...]` scaffolding.
 
 Only `user` and `assistant` content columns are selected; tool-call columns are
-never read or returned. For each session, the classifier examines a hard-bounded
-tail of `max(20, limit × 5)` rows plus one saturation sentinel. Synthetic rows
+never read or returned. When the messages schema exposes the canonical `active`
+column, compacted inactive rows are excluded; legacy schemas without that column
+remain supported. For each session, the classifier examines a hard-bounded tail
+of `max(20, limit × 5)` rows plus one saturation sentinel. Synthetic rows
 do not consume the requested result limit within that window. If the window is
 all or mostly synthetic and older rows may remain, the response fails bounded:
 it returns the genuine rows it can prove, sets `partial=true`, and increments
@@ -89,7 +91,8 @@ confirmed because a sidecar, database row/schema, read, bounded classifier
 window, or timestamp is unavailable.
 Missing or malformed session indexes are likewise partial, never a silently
 complete empty result. Opaque cursors are bound to the project, profile, roles,
-and archive policy that created them; cross-scope reuse is rejected.
+archive policy, and classifier version that created them; cross-scope or
+stale-classifier reuse is rejected.
 
 The read path never mutates WebUI state, repairs indexes, loads `Session`
 objects, or parses sidecar transcript arrays. It opens `state.db` in SQLite

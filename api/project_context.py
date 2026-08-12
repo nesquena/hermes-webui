@@ -94,7 +94,7 @@ def _normalize_limit(limit: Any) -> int:
 
 def _cursor_scope(project_id: str, profile: str, roles: tuple[str, ...], include_archived: bool) -> str:
     payload = json.dumps(
-        [project_id, profile, sorted(roles), bool(include_archived)],
+        [_CLASSIFIER_VERSION, project_id, profile, sorted(roles), bool(include_archived)],
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()[:24]
@@ -240,18 +240,25 @@ def _state_db_sources(
 
 def _is_synthetic_content(content: Any) -> bool:
     text = str(content or "").strip()
-    if not text or text == _MAX_ITERATION_SUMMARY_REQUEST:
+    if not text or text.casefold() == _MAX_ITERATION_SUMMARY_REQUEST.casefold():
         return True
     lowered = text.lower()
     return any(lowered.startswith(prefix) for prefix in _SYNTHETIC_CONTENT_PREFIXES)
 
 
-def _message_tail_sql(roles: tuple[str, ...], before: tuple[float, str, int] | None) -> tuple[str, list[Any]]:
+def _message_tail_sql(
+    roles: tuple[str, ...],
+    before: tuple[float, str, int] | None,
+    *,
+    has_active: bool,
+) -> tuple[str, list[Any]]:
     role_placeholders = ",".join("?" for _ in roles)
     clauses = [
         f"LOWER(role) IN ({role_placeholders})",
         "timestamp IS NOT NULL",
     ]
+    if has_active:
+        clauses.append("(active IS NULL OR active != 0)")
     params: list[Any] = list(roles)
     if before is not None:
         timestamp, cursor_sid, cursor_rowid = before
@@ -343,7 +350,11 @@ def recent_project_messages(
                         source = sources.get(sid)
                         if source is None or source in _SYNTHETIC_SESSION_SOURCES:
                             continue
-                        sql, tail_params = _message_tail_sql(normalized_roles, decoded_before)
+                        sql, tail_params = _message_tail_sql(
+                            normalized_roles,
+                            decoded_before,
+                            has_active="active" in message_columns,
+                        )
                         scan_limit = max(_MIN_SCAN_ROWS, normalized_limit * _SCAN_MULTIPLIER)
                         fetched = conn.execute(
                             sql,
