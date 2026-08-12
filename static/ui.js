@@ -14667,7 +14667,10 @@ function _renderLiveRunStatusContent(el,startedAt){
   const timeStr=_formatRunElapsed(elapsed);
   const tokens=_liveRunStatusTokens;
   const meta=_liveRunMeta||{};
-  const metaModelRaw=String(meta.model||((S.session&&S.session.model)||'')).trim();
+  // run_meta is authoritative for the active attempt. Do not fall back to the
+  // requested session model: after a runtime fallback that value is stale, and
+  // an absent effective model must remain undisplayed rather than guessed.
+  const metaModelRaw=String(meta.model||'').trim();
   const metaModel=metaModelRaw?_compactComposerModelChipLabel(metaModelRaw,getModelLabel(metaModelRaw)):'';
   const metaEffort=String(meta.effort||'').trim().toLowerCase();
   const effortLabel=metaEffort==='off'?(t('reasoning_off')||'reasoning off'):metaEffort;

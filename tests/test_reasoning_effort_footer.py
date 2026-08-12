@@ -66,10 +66,21 @@ class TestEffectiveReasoningEffortLabel:
 class TestBackendEmission:
     def test_run_meta_emitted_upfront_after_agent_registration(self):
         registration = STREAMING_PY.index("AGENT_INSTANCES[stream_id] = agent")
-        emission = STREAMING_PY.index("put('run_meta'")
-        assert registration < emission
-        assert "'reasoning_effort': _run_meta_effort" in STREAMING_PY
-        assert "'model': getattr(agent, 'model', None) or resolved_model or model" in STREAMING_PY
+        initial_emission = STREAMING_PY.index(
+            "_emit_effective_run_meta()", registration
+        )
+        assert registration < initial_emission
+        assert "'reasoning_effort': _effective_effort" in STREAMING_PY
+        assert "'model': _effective_model" in STREAMING_PY
+
+    def test_fallback_reemits_effective_run_meta_after_notice(self):
+        callback = STREAMING_PY.split("def _agent_status_callback", 1)[1].split(
+            "# xsession wakeup", 1
+        )[0]
+        warning = callback.index("put('warning'")
+        refresh = callback.index("_emit_effective_run_meta()")
+        assert warning < refresh
+        assert "_effective_reasoning_effort_label(agent)" in STREAMING_PY
 
     def test_done_payload_carries_reasoning_effort(self):
         assert "usage['reasoning_effort'] = _effort_label_done" in STREAMING_PY
@@ -173,6 +184,8 @@ class TestFrontendWiring:
         assert "'run_meta'" in journal_list
         assert "let _liveRunMeta=null" in UI_JS
         assert "opts.meta)_liveRunMeta=opts.meta" in UI_JS
+        assert "String(meta.model||'').trim()" in UI_JS
+        assert "meta.model||((S.session&&S.session.model)||'')" not in UI_JS
         assert ".live-run-status .lf-effort" in STYLE_CSS
 
     def test_i18n_keys_en_and_fr(self):

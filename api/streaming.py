@@ -9105,6 +9105,23 @@ def _run_agent_streaming(
     # surface the real, actionable cause (model_not_found / auth_mismatch).
     _captured_terminal_error = [None]
 
+    def _emit_effective_run_meta():
+        """Announce the model and reasoning config currently owned by the agent.
+
+        Hermes mutates these values when it activates a fallback, so this must
+        be callable both at run start and from the fallback lifecycle callback.
+        Missing values stay missing; consumers must not infer an effective
+        value from the originally requested session settings.
+        """
+        _effective_model = getattr(agent, 'model', None)
+        _effective_effort = _effective_reasoning_effort_label(agent)
+        put('run_meta', {
+            'session_id': session_id,
+            'model': _effective_model,
+            'provider': getattr(agent, 'provider', None),
+            'reasoning_effort': _effective_effort,
+        })
+
     def _agent_status_callback(kind, message):
         """Bridge Agent lifecycle status into WebUI SSE.
 
@@ -9139,6 +9156,11 @@ def _run_agent_streaming(
         _is_fallback_notice = _is_fallback_lifecycle_message(_kind, _message)
         if _is_fallback_notice:
             put('warning', {'type': 'fallback', 'message': _message})
+            # The agent has already installed the fallback model and its
+            # resolved reasoning config when it emits this lifecycle notice.
+            # Replace the initial run metadata now so live and replayed footers
+            # never keep showing the pre-fallback values.
+            _emit_effective_run_meta()
 
     # xsession wakeup misroute root fix (Option 1): pre-init so the outer
     # finally can always reset even if an exception fires before the bind.
@@ -10506,13 +10528,7 @@ def _run_agent_streaming(
             # the live footer can display them during streaming, not only after
             # the turn settles. The effort label reads the frozen agent config —
             # the value actually used for this run (overrides + clamp applied).
-            _run_meta_effort = _effective_reasoning_effort_label(agent, _reasoning_config)
-            put('run_meta', {
-                'session_id': session_id,
-                'model': getattr(agent, 'model', None) or resolved_model or model,
-                'provider': resolved_provider or '',
-                'reasoning_effort': _run_meta_effort,
-            })
+            _emit_effective_run_meta()
 
             # Prepend workspace context so the agent always knows which directory
             # to use for file operations, regardless of session age or AGENTS.md defaults.
