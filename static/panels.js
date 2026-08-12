@@ -7485,10 +7485,12 @@ async function loadMemory(force) {
 
 // Drag and drop
 const wrap=$('composerWrap');let dragCounter=0;
-const _isInternalSessionDragEvent=e=>!!(e&&e.dataTransfer&&e.dataTransfer.types&&e.dataTransfer.types.includes('application/x-hermes-webui-session-id')&&wrap&&e.target&&wrap.contains(e.target));
-document.addEventListener('dragover',e=>{if(_isInternalSessionDragEvent(e)){if(e.dataTransfer)e.dataTransfer.dropEffect='none';return;}e.preventDefault();});
+const _isOwnedSessionDragEvent=e=>!!(e&&e.dataTransfer&&e.dataTransfer.types&&e.dataTransfer.types.includes('application/x-hermes-webui-session-id'));
+const _isInternalSessionDragEvent=e=>_isOwnedSessionDragEvent(e)&&wrap&&e.target&&wrap.contains(e.target);
+document.addEventListener('dragover',e=>{if(_isInternalSessionDragEvent(e)){if(e.dataTransfer)e.dataTransfer.dropEffect='none';return;}if(_isOwnedSessionDragEvent(e))return;e.preventDefault();});
 document.addEventListener('dragenter',e=>{
   if(_isInternalSessionDragEvent(e)){if(e.dataTransfer)e.dataTransfer.dropEffect='none';return;}
+  if(_isOwnedSessionDragEvent(e))return;
   e.preventDefault();
   const isWsPath=e.dataTransfer.types.includes('application/ws-path');
   const isFiles=e.dataTransfer.types.includes('Files');
@@ -7504,6 +7506,7 @@ document.addEventListener('dragenter',e=>{
 document.addEventListener('dragleave',e=>{dragCounter--;if(dragCounter<=0){dragCounter=0;wrap.classList.remove('drag-over');}});
 document.addEventListener('drop',e=>{
   if(_isInternalSessionDragEvent(e)){if(e.dataTransfer)e.dataTransfer.dropEffect='none';dragCounter=0;wrap.classList.remove('drag-over');return;}
+  if(_isOwnedSessionDragEvent(e))return;
   e.preventDefault();dragCounter=0;wrap.classList.remove('drag-over');
   // Workspace file/folder drag → insert @path reference into composer
   const wsPath=e.dataTransfer.getData('application/ws-path');
