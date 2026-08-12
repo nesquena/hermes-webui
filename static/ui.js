@@ -5278,18 +5278,24 @@ function fetchReasoningChip(keyOverride){
   // while this GET is in flight short-circuit instead of re-dispatching (that
   // in-flight window is exactly where the #4650 storm lived).
   const key=keyOverride===undefined?_reasoningEffortQuery():keyOverride;
+  // Bind the response to the session visible at dispatch time. A newly loaded
+  // session may use the same model/provider while this request is still live.
+  const requestedSessionId=(S&&S.session&&S.session.session_id)||null;
   const seq=++_reasoningFetchSeq;
   _lastReasoningFetchKey=key;
   api('/api/reasoning'+key).then(function(st){
-    // Ignore a stale/superseded response: only the most recent dispatch may
-    // apply, so an older in-flight GET can't poison the current chip (#4650).
-    if(seq!==_reasoningFetchSeq) return;
+    // Ignore a stale/superseded response: only the most recent dispatch for the
+    // still-visible session may apply, so an older in-flight GET cannot poison
+    // the current chip (#4650, #6629).
+    const currentSessionId=(S&&S.session&&S.session.session_id)||null;
+    if(seq!==_reasoningFetchSeq||currentSessionId!==requestedSessionId) return;
     _applyReasoningChip((st&&st.reasoning_effort)||'', st||{});
   }).catch(function(){
     // Same staleness guard on failure: a stale error must neither hide the chip
-    // nor clear a newer fetch's key. Only the latest dispatch clears the key so
-    // routine syncs retry after a genuine transient failure.
-    if(seq!==_reasoningFetchSeq) return;
+    // nor clear a newer fetch's key. Only the latest dispatch for the same
+    // visible session clears the key after a genuine transient failure.
+    const currentSessionId=(S&&S.session&&S.session.session_id)||null;
+    if(seq!==_reasoningFetchSeq||currentSessionId!==requestedSessionId) return;
     _lastReasoningFetchKey=null;
     _applyReasoningChip('', {supported_efforts:[], supports_thinking_toggle:false});
   });
