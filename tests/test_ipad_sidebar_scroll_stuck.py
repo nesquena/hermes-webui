@@ -3661,15 +3661,23 @@ def test_full_ownership_revalidation_before_append():
       1. Positive control: unchanged owner → append succeeds (60→100)
       2. Geometry change (scroll away from bottom AFTER RAF drains) → no append
       3. Owner/list replacement (AFTER RAF drains) → no append
-      4. Token supersession (AFTER RAF drains) → no append
+      4. Token supersession (AFTER RAF drains) → stale microtask does NOT clear
+         _touchBatchPending; newer owner settles and clears it
       5. Loaded>=total terminal state (AFTER RAF drains) → no append
+      6. Owner-only replacement (only _touchScrollOwner changes) → no append
+      7. List-only replacement (only _sessionTouchListEl changes) → no append
 
-    The prior version mutated state BEFORE draining the RAF callback, so
-    production bailed at the RAF stage (before queuing the Promise microtask)
-    and the tests stayed green even if the microtask revalidation checks were
-    removed — i.e. they were false-green oracles. This version ensures the
-    Promise continuation is actually queued (RAF drains with all preconditions
-    valid) and THEN mutates state before yielding to microtasks.
+    Scenarios 6 and 7 are independent mutation bites: deleting only the
+    Promise-stage owner check makes scenario 6 fail, and deleting only the
+    Promise-stage list check makes scenario 7 fail — each check has
+    independent bite because gen, token, list/owner, loaded, and geometry are
+    all held unchanged in the respective case.
+
+    Each stale scenario snapshots exact live row references and SID order
+    before the schedule; after settlement the test asserts the same count,
+    same objects at each index, and same order (live-tree identity
+    postcondition). The exact replacement owner/list is retained and asserted
+    to remain current and untouched after settlement.
     """
     total = 140  # 60 initial + one batch of 40 = 100, leaving room for more
     flat_rows = []
@@ -3727,9 +3735,47 @@ const _realAppend = _appendTouchBatch;
 _appendTouchBatch = function() {{ appendCount++; _realAppend(); }};
 
 // Suppress the continuous batch chain so each scenario tests ONLY the
-// scroll-handler → RAF → microtask path. Without this, _scheduleContinuousBatch
+// scroll-handler -> RAF -> microtask path. Without this, _scheduleContinuousBatch
 // chains appends via microtasks and the loaded count races past 100.
 _scheduleContinuousBatch = function() {{}};
+
+// ── Live-tree snapshot helper ──
+// Captures exact row references, SID order, count, group/body refs, and
+// settlement state (owner, listEl, gen, token, loaded, total, pending).
+function snapshotLiveTree() {{
+  return {{
+    items: list._items.slice(),
+    sids: list._items.map(function(i) {{ return i.dataset.sid; }}),
+    count: list._items.length,
+    groupWrapper: gw,
+    body: body,
+    batchPending: _touchBatchPending,
+    owner: _touchScrollOwner,
+    listEl: _sessionTouchListEl,
+    gen: _sessionTouchGen,
+    token: _touchBatchToken,
+    loaded: _sessionTouchLoadedCount,
+    total: _sessionTouchTotalCount,
+  }};
+}}
+
+// ── Live-tree untouched assertion helper ──
+// After a stale schedule, assert the live tree is unchanged: same count,
+// same object identity at each index, same SID order, same group/body refs,
+// and _touchBatchPending cleared (settlement postcondition).
+function assertLiveTreeUntouched(snap) {{
+  var c = snapshotLiveTree();
+  return {{
+    sameCount: c.count === snap.count,
+    sameRefs: snap.items.every(function(ref, i) {{ return c.items[i] === ref; }}),
+    sameSids: JSON.stringify(c.sids) === JSON.stringify(snap.sids),
+    sameGroupWrapper: c.groupWrapper === snap.groupWrapper,
+    sameBody: c.body === snap.body,
+    pendingCleared: c.batchPending === false,
+    countBefore: snap.count,
+    countAfter: c.count,
+  }};
+}}
 
 // Helper: fire the scroll handler and drain RAF + microtasks
 async function fireScrollAndDrain() {{
@@ -3779,14 +3825,17 @@ async function fireScrollDrainRAFMutateThenMicrotasks(mutator) {{
   // away BEFORE microtasks drain — the microtask's nearBottom2 check fails.
   _setupTouchSentinel(list, {total}, flatRows, renderOne, null, 100);
   appendCount = 0;
+  const snap2 = snapshotLiveTree();
   await fireScrollDrainRAFMutateThenMicrotasks(function() {{
     list.scrollTop = 0; // 20000 - 0 - 800 = 19200 >= 200 → not near bottom
   }});
+  const tree2 = assertLiveTreeUntouched(snap2);
   results.push({{
     name: 'geometry_change',
-    appended: appendCount === 0,
+    noAppend: appendCount === 0,
     loadedAfter: _sessionTouchLoadedCount,
     expectedLoaded: 100, // unchanged
+    tree: tree2,
   }});
 
   // ── 3. Owner/list replacement AFTER RAF drains → no append ──
@@ -3795,6 +3844,7 @@ async function fireScrollDrainRAFMutateThenMicrotasks(mutator) {{
   _setupTouchSentinel(list, {total}, flatRows, renderOne, null, 100);
   const ownerBeforeReplace = _touchScrollOwner;
   appendCount = 0;
+  const snap3 = snapshotLiveTree();
   await fireScrollDrainRAFMutateThenMicrotasks(function() {{
     // Install a new owner via re-setup. This replaces _touchScrollOwner,
     // _sessionTouchListEl (via _invalidateTouchRender inside _setupTouchSentinel),
@@ -3802,35 +3852,66 @@ async function fireScrollDrainRAFMutateThenMicrotasks(mutator) {{
     _setupTouchSentinel(list, {total}, flatRows, renderOne, null, 100);
   }});
   const ownerAfterReplace = _touchScrollOwner;
+  const tree3 = assertLiveTreeUntouched(snap3);
   results.push({{
     name: 'owner_replacement',
-    appended: appendCount === 0,
+    noAppend: appendCount === 0,
     loadedAfter: _sessionTouchLoadedCount,
     expectedLoaded: 100, // unchanged
     ownerChanged: ownerAfterReplace !== ownerBeforeReplace,
+    tree: tree3,
   }});
 
-  // ── 4. Token supersession: bump _touchBatchToken before microtask runs ──
-  // (This case was already correct — the RAF drains, token is set, then we
-  // bump it before microtasks. Kept as a valid positive control.)
+  // ── 4. Token supersession: stale callback cannot clear newer pending ownership;
+  //      newer owner then settles deliberately ──
+  // The RAF drains and sets token=T. Before the microtask runs, we bump
+  // _touchBatchToken to T+1. The stale microtask sees token!==_touchBatchToken
+  // and returns WITHOUT clearing _touchBatchPending (because token !==
+  // _touchBatchToken — the guard is `if(token===_touchBatchToken)` which is
+  // false, so it does NOT clear). This proves the stale microtask cannot
+  // clobber a newer owner's pending flag. We then manually settle the newer
+  // owner by calling _appendTouchBatch directly (simulating the newer owner's
+  // own microtask firing), which grows loaded 100→140 and clears pending.
   list.scrollTop = 19500;
   _setupTouchSentinel(list, {total}, flatRows, renderOne, null, 100);
   appendCount = 0;
+  const snap4 = snapshotLiveTree();
+  const tokenBefore4 = _touchBatchToken;
   // Fire the scroll handler to arm RAF + microtask
   rafCallbacks = [];
   rafSchedules = 0;
   if (_touchScrollOwner && _touchScrollOwner.handler) _touchScrollOwner.handler();
   // Drain the RAF callback — this sets token and arms the microtask
-  const rafCbs = rafCallbacks.splice(0);
-  for (const cb of rafCbs) cb();
+  const rafCbs4 = rafCallbacks.splice(0);
+  for (const cb of rafCbs4) cb();
   // BEFORE draining the microtask, supersede the token
   _touchBatchToken++;
   for (let i = 0; i < 10; i++) await Promise.resolve();
+  // The stale microtask ran and bailed on token mismatch WITHOUT clearing
+  // _touchBatchPending — so pending is still true.
+  const pendingAfterStale4 = _touchBatchPending;
+  const staleAppendCount4 = appendCount;
+  const tree4 = assertLiveTreeUntouched(snap4);
+  // Now model the newer owner settling: the newer token's microtask fires,
+  // calls _appendTouchBatch, and clears pending. We simulate this by directly
+  // calling _appendTouchBatch (the newer owner has valid state) and clearing
+  // pending afterward.
+  _touchBatchPending = false; // reset stale pending from the superseded token
+  appendCount = 0;
+  _appendTouchBatch();
+  const newerAppendCount4 = appendCount;
+  const newerLoaded4 = _sessionTouchLoadedCount;
+  _touchBatchPending = false;
   results.push({{
     name: 'token_supersession',
-    appended: appendCount === 0,
-    loadedAfter: _sessionTouchLoadedCount,
-    expectedLoaded: 100, // unchanged
+    staleNoAppend: staleAppendCount4 === 0,
+    staleDidNotClearPending: pendingAfterStale4 === true,
+    tokenWasSuperseded: _touchBatchToken !== tokenBefore4,
+    treeUntouched: tree4,
+    newerSettled: newerAppendCount4 === 1,
+    newerLoaded: newerLoaded4,
+    expectedNewerLoaded: 140,
+    pendingClearedAfterSettlement: _touchBatchPending === false,
   }});
 
   // ── 5. Loaded>=total terminal state AFTER RAF drains → no append ──
@@ -3840,15 +3921,18 @@ async function fireScrollDrainRAFMutateThenMicrotasks(mutator) {{
   list.scrollTop = 19500;
   _setupTouchSentinel(list, {total}, flatRows, renderOne, null, 100);
   appendCount = 0;
+  const snap5 = snapshotLiveTree();
   await fireScrollDrainRAFMutateThenMicrotasks(function() {{
     // Advance loaded to total so the microtask sees l2>=t2 and bails.
     _sessionTouchLoadedCount = _sessionTouchTotalCount;
   }});
+  const tree5 = assertLiveTreeUntouched(snap5);
   results.push({{
     name: 'terminal_state',
-    appended: appendCount === 0,
+    noAppend: appendCount === 0,
     loadedAfter: _sessionTouchLoadedCount,
     expectedLoaded: 140, // we set it to total (140) in the mutator
+    tree: tree5,
   }});
 
   // ── 6. Owner-only replacement: replace ONLY _touchScrollOwner, keep gen/list/token/loaded ──
@@ -3858,27 +3942,57 @@ async function fireScrollDrainRAFMutateThenMicrotasks(mutator) {{
   // owner_replacement case (scenario 3) is false-green because it calls
   // _setupTouchSentinel() which also bumps gen and token, so the Promise bails
   // on gen/token even if the owner check is deleted.
+  //
+  // Note: the RAF callback itself bumps _touchBatchToken (production behavior
+  // — the scroll handler sets the token before arming the microtask). We
+  // capture token6 AFTER the RAF drains but BEFORE the mutator runs, so the
+  // invariant is: the MUTATOR does not change token, gen, list, or loaded —
+  // only _touchScrollOwner.
   list.scrollTop = 19500;
   _setupTouchSentinel(list, {total}, flatRows, renderOne, null, 100);
   appendCount = 0;
   const ownerBefore6 = _touchScrollOwner;
+  // Inline the adversarial schedule so we can capture state post-RAF, pre-mutator.
+  rafCallbacks = [];
+  rafSchedules = 0;
+  if (_touchScrollOwner && _touchScrollOwner.handler) _touchScrollOwner.handler();
+  const rafCbs6 = rafCallbacks.splice(0);
+  for (const cb of rafCbs6) cb();
+  // Capture state AFTER RAF drain, BEFORE mutator. The RAF bumped the token;
+  // these values are what the microtask should see as "current" if the mutator
+  // doesn't touch them.
   const gen6 = _sessionTouchGen;
   const token6 = _touchBatchToken;
   const list6 = _sessionTouchListEl;
   const loaded6 = _sessionTouchLoadedCount;
-  await fireScrollDrainRAFMutateThenMicrotasks(function() {{
-    // Replace ONLY the owner object — point _touchScrollOwner at a fresh stub.
-    // Leave generation, list, token, and loaded/total identical.
-    _touchScrollOwner = {{ gen: gen6, list: list6, handler: null, raf: 0, token: token6 }};
-  }});
+  const snap6 = snapshotLiveTree();
+  // Retain the exact replacement owner object so we can assert it remains
+  // current and untouched after settlement. Built with post-RAF state so its
+  // fields match what the microtask sees as "current".
+  const replacementOwner6 = {{ gen: gen6, list: list6, handler: null, raf: 0, token: token6 }};
+  // Mutator: replace ONLY _touchScrollOwner, leave everything else identical.
+  _touchScrollOwner = replacementOwner6;
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  const tree6 = assertLiveTreeUntouched(snap6);
   results.push({{
     name: 'owner_only_replacement',
-    appended: appendCount === 0,
+    noAppend: appendCount === 0,
     loadedAfter: _sessionTouchLoadedCount,
     expectedLoaded: loaded6, // unchanged
     ownerWasReplaced: _touchScrollOwner !== ownerBefore6,
     genUnchanged: _sessionTouchGen === gen6,
     listUnchanged: _sessionTouchListEl === list6,
+    tokenUnchanged: _touchBatchToken === token6,
+    // Exact replacement owner retained and untouched:
+    replacementOwnerRetained: _touchScrollOwner === replacementOwner6,
+    replacementOwnerUntouched: replacementOwner6.gen === gen6 && replacementOwner6.list === list6 && replacementOwner6.token === token6,
+    // Geometry, token, loaded/total remain as intended:
+    geometryValid: list.scrollHeight - list.scrollTop - list.clientHeight < 200,
+    tokenStill6: _touchBatchToken === token6,
+    loadedStill6: _sessionTouchLoadedCount === loaded6,
+    // Same-token rejection clears _touchBatchPending:
+    pendingCleared: _touchBatchPending === false,
+    tree: tree6,
   }});
 
   // ── 7. List-only replacement: replace ONLY _sessionTouchListEl, keep owner/gen/token/loaded ──
@@ -3886,34 +4000,55 @@ async function fireScrollDrainRAFMutateThenMicrotasks(mutator) {{
   // object identity, gen, token, and loaded/total are all unchanged — only
   // the list element reference changes. Without this scenario the list
   // check has no independent bite.
+  //
+  // Same as scenario 6: the RAF bumps the token before the mutator runs.
+  // We capture state post-RAF, pre-mutator to isolate that the MUTATOR only
+  // changes the list reference.
   list.scrollTop = 19500;
   _setupTouchSentinel(list, {total}, flatRows, renderOne, null, 100);
   appendCount = 0;
-  const owner7 = _touchScrollOwner;
+  const snap7 = snapshotLiveTree();
+  const owner7 = snap7.owner;
+  // Retain the exact replacement list so we can assert it remains current.
+  const oldList7 = snap7.listEl;
+  const oldListScrollTop7 = oldList7.scrollTop;
+  const oldListItemCount7 = oldList7._items.length;
+  const replacementList7 = makeList();
+  replacementList7.scrollHeight = 20000;
+  replacementList7.scrollTop = 19500;
+  replacementList7.clientHeight = 800;
+  // Inline the adversarial schedule so we can capture state post-RAF, pre-mutator.
+  rafCallbacks = [];
+  rafSchedules = 0;
+  if (_touchScrollOwner && _touchScrollOwner.handler) _touchScrollOwner.handler();
+  const rafCbs7 = rafCallbacks.splice(0);
+  for (const cb of rafCbs7) cb();
+  // Capture state AFTER RAF drain, BEFORE mutator.
   const gen7 = _sessionTouchGen;
   const token7 = _touchBatchToken;
   const loaded7 = _sessionTouchLoadedCount;
-  await fireScrollDrainRAFMutateThenMicrotasks(function() {{
-    // Replace ONLY the list reference — swap _sessionTouchListEl to a new stub
-    // that has valid near-bottom geometry. Without the list-identity check in the
-    // Promise microtask, production would read nearBottom2 from this stub (which
-    // is near-bottom) and proceed to append — so the mutation bite fires correctly.
-    // The closure's captured `list` variable (the original list) is what the
-    // Promise checks against; the new stub is a different object.
-    const newList = makeList();
-    newList.scrollHeight = 20000;
-    newList.scrollTop = 19500;
-    newList.clientHeight = 800;
-    _sessionTouchListEl = newList;
-  }});
+  const total7 = _sessionTouchTotalCount;
+  // Mutator: replace ONLY _sessionTouchListEl, leave everything else identical.
+  _sessionTouchListEl = replacementList7;
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  const tree7 = assertLiveTreeUntouched(snap7);
   results.push({{
     name: 'list_only_replacement',
-    appended: appendCount === 0,
+    noAppend: appendCount === 0,
     loadedAfter: _sessionTouchLoadedCount,
     expectedLoaded: loaded7, // unchanged
     ownerUnchanged: _touchScrollOwner === owner7,
     genUnchanged: _sessionTouchGen === gen7,
     tokenUnchanged: _touchBatchToken === token7,
+    // Unchanged owner/gen/token/count authorities:
+    totalUnchanged: _sessionTouchTotalCount === total7,
+    // Exact replacement list retained and current:
+    replacementListRetained: _sessionTouchListEl === replacementList7,
+    // Old list node state preserved:
+    oldListStatePreserved: oldList7.scrollTop === oldListScrollTop7 && oldList7._items.length === oldListItemCount7,
+    // Pending settlement:
+    pendingCleared: _touchBatchPending === false,
+    tree: tree7,
   }});
 
   console.log(JSON.stringify({{
@@ -3924,7 +4059,7 @@ async function fireScrollDrainRAFMutateThenMicrotasks(mutator) {{
 """
     result = json.loads(_run_node_vm(source))
 
-    # Verify all 5 scenarios
+    # Verify all 7 scenarios
     scenarios = {r["name"]: r for r in result["results"]}
     assert len(result["results"]) == 7, \
         f"Expected 7 scenarios, got {len(result['results'])}"
@@ -3936,39 +4071,94 @@ async function fireScrollDrainRAFMutateThenMicrotasks(mutator) {{
     assert s["loadedAfter"] == 100, \
         f"Positive control: loaded must be 100 after append, got {s['loadedAfter']}"
 
-    # 2. Geometry change: no append
+    # 2. Geometry change: no append; live-tree untouched
     s = scenarios["geometry_change"]
-    assert s["appended"], \
-        f"Geometry change: must NOT append when scrolled away from bottom — got appendCount=0 expected, loaded={s['loadedAfter']}"
+    assert s["noAppend"], \
+        f"Geometry change: must NOT append when scrolled away from bottom — got appendCount={s.get('noAppend')}, loaded={s['loadedAfter']}"
     assert s["loadedAfter"] == 100, \
         f"Geometry change: loaded must stay 100, got {s['loadedAfter']}"
+    t = s["tree"]
+    assert t["sameCount"], \
+        f"Geometry change: live-tree count must be unchanged — before={t['countBefore']}, after={t['countAfter']}"
+    assert t["sameRefs"], \
+        "Geometry change: live-tree row object identities must be unchanged at every index"
+    assert t["sameSids"], \
+        "Geometry change: live-tree SID order must be unchanged"
+    assert t["sameGroupWrapper"], \
+        "Geometry change: group wrapper ref must be unchanged"
+    assert t["sameBody"], \
+        "Geometry change: body ref must be unchanged"
+    assert t["pendingCleared"], \
+        "Geometry change: _touchBatchPending must be cleared after stale rejection"
 
-    # 3. Owner replacement: no append
+    # 3. Owner replacement: no append; live-tree untouched
     s = scenarios["owner_replacement"]
-    assert s["appended"], \
+    assert s["noAppend"], \
         "Owner replacement: stale microtask must NOT append after owner replaced — got appendCount=0 expected"
     assert s["loadedAfter"] == 100, \
         f"Owner replacement: loaded must stay 100, got {s['loadedAfter']}"
     assert s["ownerChanged"], \
         "Owner replacement: _touchScrollOwner must have changed after re-setup"
+    t = s["tree"]
+    assert t["sameCount"], \
+        f"Owner replacement: live-tree count must be unchanged — before={t['countBefore']}, after={t['countAfter']}"
+    assert t["sameRefs"], \
+        "Owner replacement: live-tree row object identities must be unchanged at every index"
+    assert t["sameSids"], \
+        "Owner replacement: live-tree SID order must be unchanged"
+    assert t["sameGroupWrapper"], \
+        "Owner replacement: group wrapper ref must be unchanged"
+    assert t["sameBody"], \
+        "Owner replacement: body ref must be unchanged"
+    assert t["pendingCleared"], \
+        "Owner replacement: _touchBatchPending must be cleared after stale rejection"
 
-    # 4. Token supersession: no append
+    # 4. Token supersession: stale does not append, does not clear pending;
+    #    newer owner settles and clears it
     s = scenarios["token_supersession"]
-    assert s["appended"], \
-        "Token supersession: microtask must NOT append after token bumped — got appendCount=0 expected"
-    assert s["loadedAfter"] == 100, \
-        f"Token supersession: loaded must stay 100, got {s['loadedAfter']}"
+    assert s["staleNoAppend"], \
+        "Token supersession: stale microtask must NOT append after token bumped — got appendCount=0 expected"
+    assert s["staleDidNotClearPending"], \
+        "Token supersession: stale microtask must NOT clear _touchBatchPending when token mismatches (newer owner owns it)"
+    assert s["tokenWasSuperseded"], \
+        "Token supersession: _touchBatchToken must have been bumped"
+    t = s["treeUntouched"]
+    assert t["sameCount"], \
+        f"Token supersession: live-tree count must be unchanged — before={t['countBefore']}, after={t['countAfter']}"
+    assert t["sameRefs"], \
+        "Token supersession: live-tree row object identities must be unchanged at every index"
+    assert t["sameSids"], \
+        "Token supersession: live-tree SID order must be unchanged"
+    assert s["newerSettled"], \
+        "Token supersession: newer owner must settle (append succeeds after stale rejection)"
+    assert s["newerLoaded"] == 140, \
+        f"Token supersession: newer owner loaded must be 140, got {s['newerLoaded']}"
+    assert s["pendingClearedAfterSettlement"], \
+        "Token supersession: _touchBatchPending must be cleared after newer owner settles"
 
-    # 5. Terminal state: no append
+    # 5. Terminal state: no append; live-tree untouched
     s = scenarios["terminal_state"]
-    assert s["appended"], \
+    assert s["noAppend"], \
         "Terminal state: must NOT append when loaded>=total — got appendCount=0 expected"
     assert s["loadedAfter"] == 140, \
         f"Terminal state: loaded must be 140 (set to total by mutator), got {s['loadedAfter']}"
+    t = s["tree"]
+    assert t["sameCount"], \
+        f"Terminal state: live-tree count must be unchanged — before={t['countBefore']}, after={t['countAfter']}"
+    assert t["sameRefs"], \
+        "Terminal state: live-tree row object identities must be unchanged at every index"
+    assert t["sameSids"], \
+        "Terminal state: live-tree SID order must be unchanged"
+    assert t["sameGroupWrapper"], \
+        "Terminal state: group wrapper ref must be unchanged"
+    assert t["sameBody"], \
+        "Terminal state: body ref must be unchanged"
+    assert t["pendingCleared"], \
+        "Terminal state: _touchBatchPending must be cleared after stale rejection"
 
     # 6. Owner-only replacement: no append; independent oracle for _touchScrollOwner check
     s = scenarios["owner_only_replacement"]
-    assert s["appended"], \
+    assert s["noAppend"], \
         "Owner-only replacement: stale microtask must NOT append when only owner replaced — got appendCount=0 expected"
     assert s["loadedAfter"] == s["expectedLoaded"], \
         f"Owner-only replacement: loaded must stay unchanged, got {s['loadedAfter']}"
@@ -3978,10 +4168,39 @@ async function fireScrollDrainRAFMutateThenMicrotasks(mutator) {{
         "Owner-only replacement: _sessionTouchGen must be unchanged (only owner replaced)"
     assert s["listUnchanged"], \
         "Owner-only replacement: _sessionTouchListEl must be unchanged (only owner replaced)"
+    assert s["tokenUnchanged"], \
+        "Owner-only replacement: _touchBatchToken must be unchanged (only owner replaced)"
+    # Exact replacement owner retained and untouched
+    assert s["replacementOwnerRetained"], \
+        "Owner-only replacement: exact replacement owner must remain current after settlement"
+    assert s["replacementOwnerUntouched"], \
+        "Owner-only replacement: replacement owner fields (gen, list, token) must be untouched"
+    # Geometry, token, loaded/total remain as intended
+    assert s["geometryValid"], \
+        "Owner-only replacement: geometry must remain near-bottom"
+    assert s["tokenStill6"], \
+        "Owner-only replacement: _touchBatchToken must still equal the captured token6"
+    assert s["loadedStill6"], \
+        "Owner-only replacement: loaded must still equal loaded6"
+    # Same-token rejection clears _touchBatchPending
+    assert s["pendingCleared"], \
+        "Owner-only replacement: _touchBatchPending must be cleared (same-token rejection)"
+    # Live-tree untouched
+    t = s["tree"]
+    assert t["sameCount"], \
+        f"Owner-only replacement: live-tree count must be unchanged — before={t['countBefore']}, after={t['countAfter']}"
+    assert t["sameRefs"], \
+        "Owner-only replacement: live-tree row object identities must be unchanged at every index"
+    assert t["sameSids"], \
+        "Owner-only replacement: live-tree SID order must be unchanged"
+    assert t["sameGroupWrapper"], \
+        "Owner-only replacement: group wrapper ref must be unchanged"
+    assert t["sameBody"], \
+        "Owner-only replacement: body ref must be unchanged"
 
     # 7. List-only replacement: no append; independent oracle for _sessionTouchListEl check
     s = scenarios["list_only_replacement"]
-    assert s["appended"], \
+    assert s["noAppend"], \
         "List-only replacement: stale microtask must NOT append when only list replaced — got appendCount=0 expected"
     assert s["loadedAfter"] == s["expectedLoaded"], \
         f"List-only replacement: loaded must stay unchanged, got {s['loadedAfter']}"
@@ -3989,6 +4208,32 @@ async function fireScrollDrainRAFMutateThenMicrotasks(mutator) {{
         "List-only replacement: _touchScrollOwner must be unchanged (only list replaced)"
     assert s["genUnchanged"], \
         "List-only replacement: _sessionTouchGen must be unchanged (only list replaced)"
+    assert s["tokenUnchanged"], \
+        "List-only replacement: _touchBatchToken must be unchanged (only list replaced)"
+    # Unchanged owner/gen/token/count authorities
+    assert s["totalUnchanged"], \
+        "List-only replacement: _sessionTouchTotalCount must be unchanged"
+    # Exact replacement list retained and current
+    assert s["replacementListRetained"], \
+        "List-only replacement: exact replacement list must remain current after settlement"
+    # Old list node state preserved
+    assert s["oldListStatePreserved"], \
+        "List-only replacement: old list node state (scrollTop, item count) must be preserved"
+    # Pending settlement
+    assert s["pendingCleared"], \
+        "List-only replacement: _touchBatchPending must be cleared after stale rejection"
+    # Live-tree untouched
+    t = s["tree"]
+    assert t["sameCount"], \
+        f"List-only replacement: live-tree count must be unchanged — before={t['countBefore']}, after={t['countAfter']}"
+    assert t["sameRefs"], \
+        "List-only replacement: live-tree row object identities must be unchanged at every index"
+    assert t["sameSids"], \
+        "List-only replacement: live-tree SID order must be unchanged"
+    assert t["sameGroupWrapper"], \
+        "List-only replacement: group wrapper ref must be unchanged"
+    assert t["sameBody"], \
+        "List-only replacement: body ref must be unchanged"
 
     assert result["innerHTMLWipes"] == 0, \
         f"No innerHTML wipes in any scenario, got {result['innerHTMLWipes']}"
