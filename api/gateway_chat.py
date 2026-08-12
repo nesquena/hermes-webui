@@ -836,6 +836,7 @@ def _settle_gateway_empty_response(
 
 def _emit_gateway_empty_response_events(put_gateway_event, error_payload, session_id):
     """Close an empty Gateway turn with a replayable terminal session payload."""
+    put_gateway_event("apperror", error_payload)
     try:
         from api.streaming import _session_payload_with_full_messages
 
