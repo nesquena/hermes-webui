@@ -23818,6 +23818,14 @@ def _start_run(
             return LegacyJournalRuntimeAdapter(start_run_delegate=_legacy_start_run)
 
         try:
+            from api.config import resolve_effective_reasoning_effort
+
+            runner_reasoning_effort = resolve_effective_reasoning_effort(
+                get_config(),
+                model,
+                provider_id=model_provider,
+                session_effort=getattr(s, "reasoning_effort", None),
+            ) or None
             adapter = build_runtime_adapter(
                 legacy_adapter_factory=_legacy_adapter_factory,
                 runner_client_factory=_runtime_runner_client_factory,
@@ -23833,6 +23841,7 @@ def _start_run(
                     profile=getattr(s, "profile", None),
                     provider=model_provider,
                     model=model,
+                    reasoning_effort=runner_reasoning_effort,
                     source=source,
                     metadata={"route": route},
                 )
