@@ -3197,7 +3197,13 @@ function _apiSessionNav(sid, url, apiOpts){
     const p=entry.urls.get(url);
     if(p){
       entry.urls.delete(url); // single-use: later reloads must re-read fresh state
-      return p;
+      return p.catch(()=>{
+        // Hover/focus prefetch is speculative. Its failure must not become the
+        // click's result: discard the complete paired entry (metadata + tail)
+        // and repeat this request through the normal authoritative API path.
+        if(_sessionNavCache.get(sid)===entry) _sessionNavCache.delete(sid);
+        return api(url, apiOpts);
+      });
     }
   }
   return api(url, apiOpts);
