@@ -263,6 +263,49 @@ def test_auto_assign_project_for_workspace(tmp_path, monkeypatch):
     assert routes._auto_assign_project_for_workspace(ws_str) is None
 
 
+def test_auto_assign_project_omitted_profile_resolves_to_active(monkeypatch):
+    """Greptile P1 (#6836): an omitted ``profile`` must resolve to the ACTIVE
+    profile (same rule as ``new_session``), never to None-as-default.
+
+    Otherwise a named-profile caller that omits ``profile`` could have its
+    session auto-assigned to a default-profile project (or vice versa) —
+    the auto-assign matcher and the session creator disagree on the
+    effective profile.
+    """
+    import api.routes as routes
+
+    ws = "C:/Users/Admin/workspace"
+    default_proj = {
+        "project_id": "proj_default", "name": "d",
+        "profile": "default", "workspaces": [ws], "auto_assign": True,
+    }
+    named_proj = {
+        "project_id": "proj_work", "name": "w",
+        "profile": "work", "workspaces": [ws], "auto_assign": True,
+    }
+    monkeypatch.setattr(routes, "load_projects", lambda: [default_proj, named_proj])
+
+    # Active profile = default: omitted profile resolves to default → the
+    # default project must win, NOT the named one.
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
+    assert routes._auto_assign_project_for_workspace(ws) == "proj_default"
+    # Explicit named profile → the named project wins.
+    assert routes._auto_assign_project_for_workspace(ws, profile="work") == "proj_work"
+
+    # Active profile = named (e.g. caller is operating inside profile "work"):
+    # an omitted profile must resolve to "work", so the named project wins and
+    # the default project is NOT matched (cross-profile pollution).
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "work")
+    assert routes._auto_assign_project_for_workspace(ws) == "proj_work"
+
+    # The pre-fix bug: with profile=None (unpatched helper), the default
+    # project used to be returned even when the ACTIVE profile is a named one
+    # (condition `p.get("profile") and profile` short-circuited). Regression
+    # guard: an explicit None must behave identically to the active profile.
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "work")
+    assert routes._auto_assign_project_for_workspace(ws, profile=None) == "proj_work"
+
+
 def test_apply_project_auto_assign_files_existing_sessions(tmp_path, monkeypatch):
     """_apply_project_auto_assign re-files existing sessions whose workspace
     is bound, skipping cross-profile rows and already-owned sessions."""

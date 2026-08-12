@@ -1409,6 +1409,26 @@ async function newSession(flash, options={}){
     _messagesTruncated=false;
     _oldestIdx=0;
     clearLiveToolCards();
+    // Chat-header/rail "+" (btnNewChat) with an active project filter applies
+    // that project's bindings (default workspace / model / effort) exactly
+    // like the project-chip quick-create (+): selecting a project then
+    // pressing the top-level New Chat button must open the session in the
+    // project's pinned workspace. Only merge when the caller did NOT pass an
+    // explicit project_id (chip + passes one — never double-apply), and only
+    // fill fields the caller did not already set explicitly.
+    if(!Object.prototype.hasOwnProperty.call(options,'project_id')
+       && _activeProject && _activeProject!==NO_PROJECT_FILTER){
+      const _proj=(typeof _allProjects!=='undefined'?_allProjects:[]).find(p=>p.project_id===_activeProject);
+      if(_proj){
+        const _pb=_projectBindingsForNewSession(_proj);
+        const _merged=Object.assign({},options);
+        if(_pb.workspace&&!Object.prototype.hasOwnProperty.call(_merged,'workspace')) _merged.workspace=_pb.workspace;
+        if(_pb.model&&!Object.prototype.hasOwnProperty.call(_merged,'model')) _merged.model=_pb.model;
+        if(_pb.model_provider&&!Object.prototype.hasOwnProperty.call(_merged,'model_provider')) _merged.model_provider=_pb.model_provider;
+        if(_pb.reasoning_effort&&!Object.prototype.hasOwnProperty.call(_merged,'reasoning_effort')) _merged.reasoning_effort=_pb.reasoning_effort;
+        options=_merged;
+      }
+    }
     // Project-bound workspace (quick-create with bindings) wins first,
     // then explicit profile-switch, then current conversation, then profile default.
     // Provenance lets the server recover only a deleted inherited path; explicit paths stay strict.

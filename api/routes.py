@@ -637,9 +637,18 @@ def _auto_assign_project_for_workspace(workspace, profile=None) -> str | None:
     contains ``workspace``. First match in the on-disk list order wins (the
     same ordering /api/projects returns). Returns None when no project
     claims the workspace.
+
+    ``profile`` resolves exactly like ``new_session`` does: an omitted value
+    means the ACTIVE profile (``get_active_profile_name()``), never
+    ``None``-as-default. Auto-assignment and session creation must agree on
+    the effective profile, otherwise a named-profile session could be filed
+    under a default-profile project (or vice versa) when the caller omits
+    ``profile`` (Greptile P1 on #6836).
     """
     if not workspace:
         return None
+    if not profile:
+        profile = _get_active_profile_name() or "default"
     try:
         projects = load_projects()
     except Exception:
