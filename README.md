@@ -294,6 +294,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 
 ### Slash commands
 - Type `/` in the composer for autocomplete dropdown
+- Plain skills match case-insensitive keywords in their name or description; built-in, agent/plugin, and bundle commands keep prefix matching and take precedence over a same-slug skill
 - Built-in: `/help`, `/clear`, `/compress [focus topic]`, `/compact` (alias), `/model <name>`, `/workspace <name>`, `/new`, `/usage`, `/theme`
 - Arrow keys navigate, Tab/Enter select, Escape closes
 - Unrecognized commands pass through to the agent
