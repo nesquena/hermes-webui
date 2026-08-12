@@ -3851,6 +3851,71 @@ async function fireScrollDrainRAFMutateThenMicrotasks(mutator) {{
     expectedLoaded: 140, // we set it to total (140) in the mutator
   }});
 
+  // ── 6. Owner-only replacement: replace ONLY _touchScrollOwner, keep gen/list/token/loaded ──
+  // This isolates the _touchScrollOwner !== owner microtask check. Gen, list,
+  // token, and loaded/total are all unchanged — the ONLY thing that changes is
+  // the owner object reference. Without this scenario, the existing
+  // owner_replacement case (scenario 3) is false-green because it calls
+  // _setupTouchSentinel() which also bumps gen and token, so the Promise bails
+  // on gen/token even if the owner check is deleted.
+  list.scrollTop = 19500;
+  _setupTouchSentinel(list, {total}, flatRows, renderOne, null, 100);
+  appendCount = 0;
+  const ownerBefore6 = _touchScrollOwner;
+  const gen6 = _sessionTouchGen;
+  const token6 = _touchBatchToken;
+  const list6 = _sessionTouchListEl;
+  const loaded6 = _sessionTouchLoadedCount;
+  await fireScrollDrainRAFMutateThenMicrotasks(function() {{
+    // Replace ONLY the owner object — point _touchScrollOwner at a fresh stub.
+    // Leave generation, list, token, and loaded/total identical.
+    _touchScrollOwner = {{ gen: gen6, list: list6, handler: null, raf: 0, token: token6 }};
+  }});
+  results.push({{
+    name: 'owner_only_replacement',
+    appended: appendCount === 0,
+    loadedAfter: _sessionTouchLoadedCount,
+    expectedLoaded: loaded6, // unchanged
+    ownerWasReplaced: _touchScrollOwner !== ownerBefore6,
+    genUnchanged: _sessionTouchGen === gen6,
+    listUnchanged: _sessionTouchListEl === list6,
+  }});
+
+  // ── 7. List-only replacement: replace ONLY _sessionTouchListEl, keep owner/gen/token/loaded ──
+  // This isolates the _sessionTouchListEl !== list microtask check. Owner
+  // object identity, gen, token, and loaded/total are all unchanged — only
+  // the list element reference changes. Without this scenario the list
+  // check has no independent bite.
+  list.scrollTop = 19500;
+  _setupTouchSentinel(list, {total}, flatRows, renderOne, null, 100);
+  appendCount = 0;
+  const owner7 = _touchScrollOwner;
+  const gen7 = _sessionTouchGen;
+  const token7 = _touchBatchToken;
+  const loaded7 = _sessionTouchLoadedCount;
+  await fireScrollDrainRAFMutateThenMicrotasks(function() {{
+    // Replace ONLY the list reference — swap _sessionTouchListEl to a new stub
+    // that has valid near-bottom geometry. Without the list-identity check in the
+    // Promise microtask, production would read nearBottom2 from this stub (which
+    // is near-bottom) and proceed to append — so the mutation bite fires correctly.
+    // The closure's captured `list` variable (the original list) is what the
+    // Promise checks against; the new stub is a different object.
+    const newList = makeList();
+    newList.scrollHeight = 20000;
+    newList.scrollTop = 19500;
+    newList.clientHeight = 800;
+    _sessionTouchListEl = newList;
+  }});
+  results.push({{
+    name: 'list_only_replacement',
+    appended: appendCount === 0,
+    loadedAfter: _sessionTouchLoadedCount,
+    expectedLoaded: loaded7, // unchanged
+    ownerUnchanged: _touchScrollOwner === owner7,
+    genUnchanged: _sessionTouchGen === gen7,
+    tokenUnchanged: _touchBatchToken === token7,
+  }});
+
   console.log(JSON.stringify({{
     results: results,
     innerHTMLWipes: _innerHTMLWipes,
@@ -3861,8 +3926,8 @@ async function fireScrollDrainRAFMutateThenMicrotasks(mutator) {{
 
     # Verify all 5 scenarios
     scenarios = {r["name"]: r for r in result["results"]}
-    assert len(result["results"]) == 5, \
-        f"Expected 5 scenarios, got {len(result['results'])}"
+    assert len(result["results"]) == 7, \
+        f"Expected 7 scenarios, got {len(result['results'])}"
 
     # 1. Positive control: append succeeds
     s = scenarios["positive_control"]
@@ -3900,6 +3965,30 @@ async function fireScrollDrainRAFMutateThenMicrotasks(mutator) {{
         "Terminal state: must NOT append when loaded>=total — got appendCount=0 expected"
     assert s["loadedAfter"] == 140, \
         f"Terminal state: loaded must be 140 (set to total by mutator), got {s['loadedAfter']}"
+
+    # 6. Owner-only replacement: no append; independent oracle for _touchScrollOwner check
+    s = scenarios["owner_only_replacement"]
+    assert s["appended"], \
+        "Owner-only replacement: stale microtask must NOT append when only owner replaced — got appendCount=0 expected"
+    assert s["loadedAfter"] == s["expectedLoaded"], \
+        f"Owner-only replacement: loaded must stay unchanged, got {s['loadedAfter']}"
+    assert s["ownerWasReplaced"], \
+        "Owner-only replacement: _touchScrollOwner must be a different object after replacement"
+    assert s["genUnchanged"], \
+        "Owner-only replacement: _sessionTouchGen must be unchanged (only owner replaced)"
+    assert s["listUnchanged"], \
+        "Owner-only replacement: _sessionTouchListEl must be unchanged (only owner replaced)"
+
+    # 7. List-only replacement: no append; independent oracle for _sessionTouchListEl check
+    s = scenarios["list_only_replacement"]
+    assert s["appended"], \
+        "List-only replacement: stale microtask must NOT append when only list replaced — got appendCount=0 expected"
+    assert s["loadedAfter"] == s["expectedLoaded"], \
+        f"List-only replacement: loaded must stay unchanged, got {s['loadedAfter']}"
+    assert s["ownerUnchanged"], \
+        "List-only replacement: _touchScrollOwner must be unchanged (only list replaced)"
+    assert s["genUnchanged"], \
+        "List-only replacement: _sessionTouchGen must be unchanged (only list replaced)"
 
     assert result["innerHTMLWipes"] == 0, \
         f"No innerHTML wipes in any scenario, got {result['innerHTMLWipes']}"
