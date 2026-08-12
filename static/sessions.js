@@ -7734,21 +7734,16 @@ _bindSessionProjectDragCleanup();
 function _sessionProjectDragSid(dt){
   if(!dt) return '';
   const custom=dt.getData&&dt.getData(SESSION_PROJECT_DRAG_MIME)||'';
-  if(custom) return custom===_activeSidebarProjectDragSessionId?custom:'';
-  const plain=dt.getData&&dt.getData('text/plain')||'';
-  const fallback=SESSION_PROJECT_DRAG_TEXT_PREFIX+(_activeSidebarProjectDragSessionId||'');
-  return plain&&plain===fallback?_activeSidebarProjectDragSessionId||'':'';
+  return custom&&custom===_activeSidebarProjectDragSessionId?custom:'';
 }
 
 function _isSessionProjectMoveDrag(dt,validatePayload=true){
   if(!dt) return false;
   const types=Array.isArray(dt.types)?dt.types:Array.from(dt.types||[]);
-  if(types.includes(SESSION_PROJECT_DRAG_MIME)){
-    const custom=dt.getData&&dt.getData(SESSION_PROJECT_DRAG_MIME)||'';
-    return Boolean(_activeSidebarProjectDragSessionId&&(!validatePayload||custom===_activeSidebarProjectDragSessionId));
-  }
-  const plain=dt.getData&&dt.getData('text/plain')||'';
-  return Boolean(_activeSidebarProjectDragSessionId&&types.includes('text/plain')&&(!validatePayload||plain===SESSION_PROJECT_DRAG_TEXT_PREFIX+_activeSidebarProjectDragSessionId));
+  if(!(_activeSidebarProjectDragSessionId&&types.includes(SESSION_PROJECT_DRAG_MIME))) return false;
+  if(!validatePayload) return true;
+  const custom=dt.getData&&dt.getData(SESSION_PROJECT_DRAG_MIME)||'';
+  return custom===_activeSidebarProjectDragSessionId;
 }
 
 async function _handleGroupedProjectDrop(e,targetProject,targetLabel){
@@ -7763,21 +7758,21 @@ async function _handleGroupedProjectDrop(e,targetProject,targetLabel){
 
 function _bindGroupedProjectDropTarget(hdr,targetProject,targetLabel){
   let enterDepth=0;
-  const eligibilityFor=(e)=>{
-    const sid=_sessionProjectDragSid(e.dataTransfer);
-    const session=(_allSessions||[]).find(item=>item&&item.session_id===sid);
+  const protectedEligibilityFor=(e)=>{
+    if(!_isSessionProjectMoveDrag(e.dataTransfer,false)) return {session:null,eligibility:{eligible:false}};
+    const session=(_allSessions||[]).find(item=>item&&item.session_id===_activeSidebarProjectDragSessionId);
     return {session,eligibility:_projectMoveEligibility(session,targetProject||{project_id:null})};
   };
   const clear=()=>{enterDepth=0;hdr.classList.remove('drag-over');};
   hdr._sessionProjectDragReset=clear;
   hdr.addEventListener('dragenter',(e)=>{
-    const {eligibility}=eligibilityFor(e);
-    if(!_isSessionProjectMoveDrag(e.dataTransfer)||!eligibility.eligible){clear();if(e.dataTransfer)e.dataTransfer.dropEffect='none';return;}
+    const {eligibility}=protectedEligibilityFor(e);
+    if(!eligibility.eligible){clear();if(e.dataTransfer)e.dataTransfer.dropEffect='none';return;}
     enterDepth++;hdr.classList.add('drag-over');
   });
   hdr.addEventListener('dragover',(e)=>{
-    const {eligibility}=eligibilityFor(e);
-    if(_isSessionProjectMoveDrag(e.dataTransfer)&&eligibility.eligible){
+    const {eligibility}=protectedEligibilityFor(e);
+    if(eligibility.eligible){
       e.preventDefault();
       e.dataTransfer.dropEffect='move';
       hdr.classList.add('drag-over');
@@ -7861,6 +7856,17 @@ function renderSessionListFromCache(){
   const committedSwipeDuration=_sessionPrefersReducedMotion()?0:SESSION_SWIPE_DURATION_MS;
   const committedSwipeReflowDelay=Math.max(0,committedSwipeDuration-SESSION_SWIPE_REFLOW_LEAD_MS);
   const listScrollTopBeforeRender=list.scrollTop||0;
+  const groupedMode=!!window._sidebarGroupByProject;
+  let groupedActiveWasVisibleBeforeRender=false;
+  if(groupedMode&&activeSidForSidebar&&typeof list.querySelectorAll==='function'&&typeof list.getBoundingClientRect==='function'){
+    const rows=[...list.querySelectorAll('.session-item[data-sid]')];
+    const activeRow=rows.find(row=>row.dataset.sid===activeSidForSidebar)||list.querySelector('.session-item.active');
+    if(activeRow&&typeof activeRow.getBoundingClientRect==='function'){
+      const listRect=list.getBoundingClientRect();
+      const rowRect=activeRow.getBoundingClientRect();
+      groupedActiveWasVisibleBeforeRender=rowRect.bottom>listRect.top&&rowRect.top<listRect.bottom;
+    }
+  }
   list.innerHTML='';
   // #4671: belt-and-suspenders. The authoritative skeleton-clear happens in
   // _applySessionListPayload (once fresh data is in hand) BEFORE this function is
@@ -8059,7 +8065,6 @@ function renderSessionListFromCache(){
   let _groupCollapsed={};
   try{_groupCollapsed=JSON.parse(localStorage.getItem('hermes-date-groups-collapsed')||'{}');}catch(e){}
   const _saveCollapsed=()=>{try{localStorage.setItem('hermes-date-groups-collapsed',JSON.stringify(_groupCollapsed));}catch(e){}};
-  const groupedMode=!!window._sidebarGroupByProject;
   const groups=groupedMode?[]:_buildSessionSidebarGroups(orderedSessions,false,_allProjects,now);
   const flatSessionRows=[];
   for(const g of groups){
@@ -8113,7 +8118,7 @@ function renderSessionListFromCache(){
     offsets:groupedMode?groupedOffsets:undefined,
   });
   const activeWasAlreadyVisible=activeIndex>=virtualWindowBeforeActiveAnchor.start&&activeIndex<virtualWindowBeforeActiveAnchor.end;
-  const activeWasAlreadyVisibleForMode=groupedMode?activeIndex>=virtualWindowBeforeActiveAnchor.start&&activeIndex<virtualWindowBeforeActiveAnchor.end:activeWasAlreadyVisible;
+  const activeWasAlreadyVisibleForMode=groupedMode?groupedActiveWasVisibleBeforeRender:activeWasAlreadyVisible;
   const shouldMoveSidebarToActive=shouldAnchorActive&&!activeWasAlreadyVisible;
   const shouldMoveSidebarToActiveForMode=shouldMoveSidebarToActive;
   let virtualWindow=groupedMode
