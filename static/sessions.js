@@ -9363,7 +9363,7 @@ function renderSessionListFromCache(){
   });
   const activeWasAlreadyVisible=activeIndex>=virtualWindowBeforeActiveAnchor.start&&activeIndex<virtualWindowBeforeActiveAnchor.end;
   const activeWasAlreadyVisibleForMode=groupedMode?groupedActiveWasVisibleBeforeRender:activeWasAlreadyVisible;
-  const shouldMoveSidebarToActive=shouldAnchorActive&&!activeWasAlreadyVisible;
+  const shouldMoveSidebarToActive=shouldAnchorActive&&!activeWasAlreadyVisibleForMode;
   const shouldMoveSidebarToActiveForMode=shouldMoveSidebarToActive;
   let virtualWindow=groupedMode
     ? _sessionVirtualWindow({

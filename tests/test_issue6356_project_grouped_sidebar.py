@@ -520,7 +520,7 @@ try {
   window.groupedGeometry.bottom = visibleIds();
   list.scrollTop = Math.floor(list.scrollHeight / 2);
   renderSessionListFromCache();
-  const stableSid = _sessionVisibleSidebarIds[Math.floor(_sessionVisibleSidebarIds.length / 2)];
+  const stableSid = window.groupedGeometry.middle[Math.floor(window.groupedGeometry.middle.length / 2)];
   activeSid = stableSid;
   const stableBefore = list.scrollTop;
   renderSessionListFromCache();
@@ -583,9 +583,8 @@ try {
         assert observed["groupedLease"] is True
         assert observed["activeVisibleScrollStable"] is True
         assert observed["searchRefreshScrollStable"] is True
-        if total > 80:
-            assert observed["activeAboveRevealed"] is True, (total, observed)
-            assert observed["activeBelowRevealed"] is True, (total, observed)
+        assert observed["activeAboveRevealed"] is True, (total, observed)
+        assert observed["activeBelowRevealed"] is True, (total, observed)
         if total > 80:
             assert observed["totalRows"] <= 52
             assert len(observed["middle"]) <= 52
@@ -1324,6 +1323,9 @@ window.runGroupedDragProof = async () => {
 
 def test_grouped_drag_playwright_uses_native_drag_and_drop_for_valid_target():
     playwright_factory = _require_playwright()
+    binding_start = SESSIONS_JS.index("const isGroupedDragControl=")
+    binding_end = SESSIONS_JS.index("const dragHandle=", binding_start)
+    source_binding = SESSIONS_JS[binding_start:binding_end]
     helpers = "\n".join(
         [_extract_js_line(SESSIONS_JS, prefix) for prefix in (
             "const SESSION_PROJECT_DRAG_MIME=",
@@ -1353,66 +1355,90 @@ window._profilesCacheFreshAt = Date.now();
 const _allSessions = [{session_id:'native-source',project_id:'source',profile:'alpha'}];
 const apiCalls = [];
 let renderCount = 0;
-async function api(url, options) { apiCalls.push({url, body:JSON.parse(options.body)}); return {ok:true}; }
+const toasts = [];
+async function api(url, options) {
+  const body = JSON.parse(options.body);
+  apiCalls.push({url, body});
+  if (body.project_id === 'failed-target') throw new Error('failed-target blocked');
+  return {ok:true};
+}
 function renderSessionListFromCache() { renderCount += 1; }
-function showToast() {}
+function showToast(message) { toasts.push(message); }
 function _isReadOnlySession() { return false; }
 """ + helpers + """
+const sourceSession = {session_id:'native-source'};
 const source = document.createElement('div');
 source.id = 'native-source';
+source.className = 'session-title-row';
 source.draggable = true;
 source.textContent = 'source';
-source.addEventListener('dragstart', event => {
-  event.dataTransfer.effectAllowed = 'move';
-  _setSessionProjectDragData(event.dataTransfer, 'native-source');
-});
+const s = sourceSession;
+const el = source;
+const titleRow = source;
+__SOURCE_BINDING__
 const valid = document.createElement('div');
 valid.id = 'native-valid';
 valid.textContent = 'valid';
 valid.style.cssText = 'display:block;width:120px;height:40px;';
+const unassigned = document.createElement('div');
+unassigned.id = 'native-unassigned';
+unassigned.textContent = 'unassigned';
+unassigned.style.cssText = 'display:block;width:120px;height:40px;';
+const same = document.createElement('div');
+same.id = 'native-same';
+same.textContent = 'same';
+same.style.cssText = 'display:block;width:120px;height:40px;';
 const invalid = document.createElement('div');
 invalid.id = 'native-invalid';
 invalid.textContent = 'invalid';
 invalid.style.cssText = 'display:block;width:120px;height:40px;';
-document.body.append(source, valid, invalid);
+const failed = document.createElement('div');
+failed.id = 'native-failed';
+failed.textContent = 'failed';
+failed.style.cssText = 'display:block;width:120px;height:40px;';
+document.body.append(source, valid, unassigned, same, invalid, failed);
 _bindGroupedProjectDropTarget(valid, {project_id:'target',profile:'alpha'}, 'Target');
+_bindGroupedProjectDropTarget(unassigned, null, 'Unassigned');
+_bindGroupedProjectDropTarget(same, null, 'Unassigned');
 _bindGroupedProjectDropTarget(invalid, {project_id:'other',profile:'beta'}, 'Other');
-window.nativeDragState = {valid, invalid, source};
+_bindGroupedProjectDropTarget(failed, {project_id:'failed-target',profile:'alpha'}, 'Failed');
+window.nativeDragState = {valid, unassigned, same, invalid, failed, source};
 """
+    fixture = fixture.replace("__SOURCE_BINDING__", source_binding)
     with playwright_factory() as playwright:
         browser = playwright.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
         page = browser.new_page()
         page.set_content("<!doctype html><html><body></body></html>")
         page.add_script_tag(content=fixture)
         page.drag_and_drop("#native-source", "#native-valid")
+        page.drag_and_drop("#native-source", "#native-unassigned")
+        page.drag_and_drop("#native-source", "#native-same")
+        page.drag_and_drop("#native-source", "#native-invalid")
+        page.drag_and_drop("#native-source", "#native-failed")
         observed = page.evaluate("""
-() => {
-  const nativeProjectId = _allSessions[0].project_id;
-  _allSessions[0].project_id = 'source';
-  const dt = new DataTransfer();
-  _setSessionProjectDragData(dt, 'native-source');
-  const validEvent = new DragEvent('dragover', {bubbles:true,cancelable:true,dataTransfer:dt});
-  const invalidEvent = new DragEvent('dragover', {bubbles:true,cancelable:true,dataTransfer:dt});
-  const validAccepted = !nativeDragState.valid.dispatchEvent(validEvent);
-  const validClassBeforeInvalid = nativeDragState.valid.classList.contains('drag-over');
-  nativeDragState.invalid.dispatchEvent(invalidEvent);
-  return {
-        validAccepted,
-            validClass: validClassBeforeInvalid,
-    invalidEffect: dt.dropEffect,
-    invalidClass: nativeDragState.invalid.classList.contains('drag-over'),
-    apiCalls,
-    renderCount,
-        projectId: _allSessions[0].project_id,
-        nativeProjectId,
-  };
-}
+() => ({
+  apiCalls,
+  renderCount,
+  toasts,
+  projectId: _allSessions[0].project_id,
+  validClass: nativeDragState.valid.classList.contains('drag-over'),
+  unassignedClass: nativeDragState.unassigned.classList.contains('drag-over'),
+  sameClass: nativeDragState.same.classList.contains('drag-over'),
+  invalidClass: nativeDragState.invalid.classList.contains('drag-over'),
+  failedClass: nativeDragState.failed.classList.contains('drag-over'),
+})
 """)
         browser.close()
-    assert observed["validAccepted"] is True, observed
-    assert observed["validClass"] is True
-    assert observed["invalidEffect"] == "none"
+    assert observed["apiCalls"] == [
+        {"url":"/api/session/move","body":{"session_id":"native-source","project_id":"target"}},
+        {"url":"/api/session/move","body":{"session_id":"native-source","project_id":None}},
+        {"url":"/api/session/move","body":{"session_id":"native-source","project_id":"failed-target"}},
+    ], observed
+    assert observed["renderCount"] == 2
+    assert observed["toasts"] == ["Moved to Target", "Removed from project", "Move failed: failed-target blocked"]
+    assert observed["projectId"] is None
+    assert observed["validClass"] is False
+    assert observed["unassignedClass"] is False
+    assert observed["sameClass"] is False
     assert observed["invalidClass"] is False
-    assert observed["apiCalls"] == [{"url":"/api/session/move","body":{"session_id":"native-source","project_id":"target"}}]
-    assert observed["renderCount"] == 1
-    assert observed["nativeProjectId"] == "target"
+    assert observed["failedClass"] is False
