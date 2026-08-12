@@ -30,7 +30,7 @@ import http.client
 import socket as _socket
 from collections import defaultdict, deque
 from pathlib import Path
-from contextlib import closing
+from contextlib import ExitStack, closing
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
@@ -16348,35 +16348,52 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
         sid = body["session_id"]
         if body.get("lineage"):
-            lineage_ids = read_session_lineage_ids(_active_state_db_path(), sid)
+            state_db_path = _active_state_db_path()
+            lineage_ids = read_session_lineage_ids(state_db_path, sid)
             if not lineage_ids:
                 return bad(handler, "Session lineage not found", 404)
             archived = bool(body.get("archived", True))
-            sessions = []
-            try:
-                for lineage_sid in lineage_ids:
-                    if _session_is_subagent_view_only(lineage_sid):
-                        raise PermissionError("Subagent sessions are view-only")
-                    sessions.append(_get_or_materialize_session(lineage_sid))
-            except (KeyError, PermissionError) as exc:
-                return bad(handler, str(exc), 400)
-            previous = [bool(getattr(session, "archived", False)) for session in sessions]
-            saved = []
-            try:
-                for session in sessions:
-                    with _get_session_agent_lock(session.session_id):
-                        session.archived = archived
-                        session.save(touch_updated_at=False)
-                    saved.append(session)
-            except Exception:
-                for session, old_archived in zip(saved, previous, strict=False):
+            # Hold every target lock in a stable order, then resolve again under
+            # those locks.  If compression added or moved a segment between the
+            # first resolution and lock acquisition, retry instead of mutating a
+            # stale set.  The bounded retry also avoids deadlocking by trying to
+            # acquire a newly discovered lock while holding the old set.
+            for _attempt in range(3):
+                with ExitStack() as locks:
+                    for lineage_sid in sorted(lineage_ids):
+                        locks.enter_context(_get_session_agent_lock(lineage_sid))
+                    current_ids = read_session_lineage_ids(state_db_path, sid)
+                    if set(current_ids) != set(lineage_ids):
+                        lineage_ids = current_ids
+                        if not lineage_ids:
+                            return bad(handler, "Session lineage not found", 404)
+                        continue
+                    sessions = []
                     try:
-                        with _get_session_agent_lock(session.session_id):
-                            session.archived = old_archived
+                        for lineage_sid in lineage_ids:
+                            if _session_is_subagent_view_only(lineage_sid):
+                                raise PermissionError("Subagent sessions are view-only")
+                            sessions.append(_get_or_materialize_session(lineage_sid))
+                    except (KeyError, PermissionError) as exc:
+                        return bad(handler, str(exc), 400)
+                    previous = [bool(getattr(session, "archived", False)) for session in sessions]
+                    saved = []
+                    try:
+                        for session in sessions:
+                            session.archived = archived
                             session.save(touch_updated_at=False)
+                            saved.append(session)
                     except Exception:
-                        logger.exception("Failed to roll back lineage archive for %s", session.session_id)
-                raise
+                        for session, old_archived in zip(saved, previous, strict=False):
+                            try:
+                                session.archived = old_archived
+                                session.save(touch_updated_at=False)
+                            except Exception:
+                                logger.exception("Failed to roll back lineage archive for %s", session.session_id)
+                        raise
+                    break
+            else:
+                return bad(handler, "Session lineage changed during archive; retry", 409)
             publish_session_list_changed("session_archive", profile=getattr(sessions[0], "profile", None), session_id=sid)
             return j(handler, {"ok": True, "session": sessions[0].compact(), "session_ids": lineage_ids})
         if _session_is_subagent_view_only(sid):

@@ -29,6 +29,21 @@ def test_lineage_ids_enumerates_complete_continuation_tree_only(tmp_path):
     assert set(read_session_lineage_ids(db, "tip-b")) == {"root", "tip-a", "mid-b", "tip-b"}
 
 
+def test_lineage_archive_rechecks_scope_while_all_target_locks_are_held():
+    routes = (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
+    start = routes.index('        if body.get("lineage"):\n')
+    end = routes.index("        if _session_is_subagent_view_only(sid):\n", start)
+    archive = routes[start:end]
+
+    assert "with ExitStack() as locks:" in archive
+    assert "for lineage_sid in sorted(lineage_ids):" in archive
+    assert archive.index("locks.enter_context(_get_session_agent_lock(lineage_sid))") < archive.index(
+        "current_ids = read_session_lineage_ids(state_db_path, sid)"
+    )
+    assert "if set(current_ids) != set(lineage_ids):" in archive
+    assert 'return bad(handler, "Session lineage changed during archive; retry", 409)' in archive
+
+
 def test_archive_always_uses_one_backend_lineage_operation():
     assert "const payload={session_id:session.session_id,archived,lineage:true}" in SESSIONS_JS
     assert "Promise.all(targets.map" not in SESSIONS_JS
