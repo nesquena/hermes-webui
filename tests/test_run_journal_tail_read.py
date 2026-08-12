@@ -769,7 +769,8 @@ def test_read_jsonl_tail_handles_file_deleted_during_boundary_scan(tmp_path, mon
     summary = run_journal.latest_run_summary("s1", "r1", session_dir=tmp_path)
     assert isinstance(summary, dict), "latest_run_summary must return a dict, not raise"
     assert boundary_calls["n"] >= 1, "the boundary helper must be reached via latest_run_summary too"
-    assert open_calls["n"] == 1, "latest_run_summary must reuse the pinned descriptor"
+    # Round 17: sidecar adds an extra open (JSONL + sidecar = 2 total)
+    assert open_calls["n"] == 2, "latest_run_summary must open JSONL + sidecar (2 opens total)"
 
 
 def test_blank_line_before_oversized_partial_done_recovers_preceding_event(tmp_path, monkeypatch):
@@ -3338,3 +3339,395 @@ def test_transient_rfind_oserror_not_cached_retry_recovers_find_run_summary(tmp_
         f"second call should produce different last_seq than first call (proving no cache), "
         f"but both returned last_seq={first_summary['last_seq']}"
     )
+
+
+# ── Round 17 sidecar tests ─────────────────────────────────────────────────────
+
+
+def test_writer_produces_sidecar_and_summary_matches_full_read(tmp_path):
+    """Test that RunJournalWriter produces a sidecar file and the sidecar-derived
+    summary matches the full read summary field-by-field."""
+    from api.run_journal import _run_path, _summary_sidecar_path, _read_jsonl, _summary_from_events
+    import json
+
+    session_id = "session_s1"
+    run_id = "run_s1"
+    writer = RunJournalWriter(session_id, run_id, session_dir=tmp_path)
+
+    # Write token events and a terminal done
+    writer.append_sse_event("token", {"text": "first"})
+    writer.append_sse_event("token", {"text": "second"})
+    writer.append_sse_event("done", {"session": {"session_id": session_id}})
+
+    path = _run_path(session_id, run_id, session_dir=tmp_path)
+    sidecar_path = _summary_sidecar_path(path)
+
+    # Sidecar must exist
+    assert sidecar_path.exists(), "sidecar file must exist after writer appends events"
+
+    # Read sidecar directly
+    with sidecar_path.open("r", encoding="utf-8") as f:
+        sidecar_data = json.load(f)
+
+    # Verify sidecar structure
+    assert sidecar_data["version"] == 1
+    assert sidecar_data["event_count"] == 3
+    assert sidecar_data["last"]["seq"] == 3
+    assert sidecar_data["last"]["event"] == "done"
+    assert sidecar_data["terminal"]["event"] == "done"
+    assert sidecar_data["terminal"]["state"] == "completed"
+
+    # Get sidecar-derived summary via latest_run_summary
+    sidecar_summary = latest_run_summary(session_id, run_id, session_dir=tmp_path)
+
+    # Get full-read summary for comparison
+    full_events, _, _ = _read_jsonl(path)
+    full_summary = _summary_from_events(session_id, run_id, full_events)
+
+    # Field-by-field match
+    assert sidecar_summary["session_id"] == full_summary["session_id"]
+    assert sidecar_summary["run_id"] == full_summary["run_id"]
+    assert sidecar_summary["stream_id"] == full_summary["stream_id"]
+    assert sidecar_summary["event_count"] == full_summary["event_count"]
+    assert sidecar_summary["last_seq"] == full_summary["last_seq"]
+    assert sidecar_summary["last_event_id"] == full_summary["last_event_id"]
+    assert sidecar_summary["terminal"] == full_summary["terminal"]
+    assert sidecar_summary["terminal_state"] == full_summary["terminal_state"]
+    assert sidecar_summary["last_event"] == full_summary["last_event"]
+
+
+def test_oversized_terminal_summary_uses_sidecar_bounded_reads(tmp_path):
+    """Regression test for the #6139 r17 blocker: a cold summary read of a run
+    whose terminal record carries a huge transcript payload must use the compact
+    sidecar (O(1)) instead of walking + scanning the oversized record (O(payload)).
+    Physical bytes read from the JSONL must stay bounded (< 1 MiB) regardless of
+    payload size, and the read must finish well under the UI's 30s API timeout.
+
+    Writer-produced single-terminal-record regression (the maintainer's r17 ask).
+    The payload size defaults to 8 MiB (comfortably > the 4 MiB tail cap, CI-
+    friendly); setting ``HERMES_WEBUI_RUN_JOURNAL_BIG_REGRESSION=144`` runs the
+    exact 144 MiB case the gate measured at 30s+ pre-fix.
+    """
+    import os
+    import time
+    import pathlib
+    from api.run_journal import (
+        _run_path,
+        _summary_sidecar_path,
+        _SUMMARY_CACHE,
+        _SUMMARY_CACHE_LOCK,
+    )
+
+    session_id = "session_os"
+    run_id = "run_os"
+    # Default 8 MiB for CI; env override enables the exact 144 MiB gate case.
+    payload_mib = int(os.environ.get("HERMES_WEBUI_RUN_JOURNAL_BIG_REGRESSION", "8"))
+    jsonl_path = _run_path(session_id, run_id, session_dir=tmp_path)
+
+    # Count PHYSICAL bytes read from the JSONL only (the sidecar is a different
+    # path, so sidecar reads are excluded — proving the payload is never scanned).
+    jsonl_read_bytes = {"bytes": 0}
+    real_path_open = pathlib.Path.open
+
+    class _CountingRead:
+        def __init__(self, fh):
+            self._fh = fh
+
+        def read(self, n=-1):
+            data = self._fh.read(n)
+            jsonl_read_bytes["bytes"] += len(data)
+            return data
+
+        def __getattr__(self, name):
+            return getattr(self._fh, name)
+
+    def selective_open(self, *args, **kwargs):
+        fh = real_path_open(self, *args, **kwargs)
+        # Wrap only positional "rb" opens of the JSONL path. The sidecar is read
+        # via Path.read_bytes() (mode passed as kwarg, different path) so it is
+        # NOT counted — exactly what we want to isolate.
+        if self == jsonl_path and args and args[0] == "rb":
+            return _CountingRead(fh)
+        return fh
+
+    pathlib.Path.open = selective_open
+    try:
+        writer = RunJournalWriter(session_id, run_id, session_dir=tmp_path)
+        writer.append_sse_event("token", {"text": "first"})
+        big_blob = "x" * (payload_mib * 1024 * 1024)
+        writer.append_sse_event(
+            "done",
+            {"terminal_state": "tool_limit_reached", "transcript": big_blob},
+        )
+
+        assert _summary_sidecar_path(jsonl_path).exists(), "writer must produce a sidecar"
+
+        with _SUMMARY_CACHE_LOCK:
+            _SUMMARY_CACHE.clear()
+        t0 = time.perf_counter()
+        summary = latest_run_summary(session_id, run_id, session_dir=tmp_path)
+        elapsed = time.perf_counter() - t0
+    finally:
+        pathlib.Path.open = real_path_open
+
+    # Terminal identity preserved exactly.
+    assert summary["terminal_state"] == "tool_limit_reached"
+    assert summary["terminal"] is True
+    assert summary["last_seq"] == 2
+
+    # CRITICAL: physical JSONL reads must be bounded (< 1 MiB) regardless of the
+    # payload size — the sidecar is the authority, the transcript is never scanned.
+    assert jsonl_read_bytes["bytes"] < 1 * 1024 * 1024, (
+        f"physical JSONL reads ({jsonl_read_bytes['bytes']} bytes) must be < 1 MiB "
+        f"regardless of the {payload_mib} MiB payload — the sidecar must be used"
+    )
+    # Well under the UI's 30s API timeout (pre-fix this was 30s+ at 144 MiB).
+    assert elapsed < 5.0, (
+        f"cold summary read took {elapsed:.2f}s; must stay fast (not scale with payload)"
+    )
+
+
+def test_sidecar_journal_size_mismatch_falls_back_to_tail(tmp_path):
+    """Test that a stale sidecar (journal_size != current JSONL size) triggers
+    fallback to the tail reader, which recovers the hand-appended event."""
+    from api.run_journal import _run_path, _summary_sidecar_path
+    import json
+
+    session_id = "session_stale"
+    run_id = "run_stale"
+    writer = RunJournalWriter(session_id, run_id, session_dir=tmp_path)
+
+    # Write token(seq=1) + done(seq=2) via writer (sidecar created)
+    writer.append_sse_event("token", {"text": "first"})
+    writer.append_sse_event("done", {"session": {"session_id": session_id}})
+
+    path = _run_path(session_id, run_id, session_dir=tmp_path)
+    sidecar_path = _summary_sidecar_path(path)
+
+    # Verify sidecar exists and reflects seq=2
+    assert sidecar_path.exists()
+    with sidecar_path.open("r", encoding="utf-8") as f:
+        sidecar_v1 = json.load(f)
+    assert sidecar_v1["last"]["seq"] == 2
+    original_journal_size = sidecar_v1["journal_size"]
+
+    # Hand-append a seq=3 stream_end line (JSONL grows, sidecar now stale)
+    with path.open("a", encoding="utf-8") as f:
+        seq3_line = json.dumps({
+            "version": 1,
+            "event_id": f"{run_id}:3",
+            "seq": 3,
+            "run_id": run_id,
+            "session_id": session_id,
+            "event": "stream_end",
+            "type": "stream_end",
+            "created_at": 999999.0,
+            "terminal": True,
+            "terminal_state": "closed",
+            "payload": {}
+        }, separators=(",", ":")) + "\n"
+        f.write(seq3_line)
+
+    # Clear cache
+    from api.run_journal import _SUMMARY_CACHE, _SUMMARY_CACHE_LOCK
+    with _SUMMARY_CACHE_LOCK:
+        _SUMMARY_CACHE.clear()
+
+    # latest_run_summary must recover seq=3 via fallback (tail reader)
+    summary = latest_run_summary(session_id, run_id, session_dir=tmp_path)
+    assert summary["last_seq"] == 3, (
+        f"fallback must recover hand-appended seq=3; got last_seq={summary['last_seq']}"
+    )
+
+    # Sidecar file still exists (not deleted) but is stale
+    assert sidecar_path.exists()
+    with sidecar_path.open("r", encoding="utf-8") as f:
+        sidecar_stale = json.load(f)
+    assert sidecar_stale["journal_size"] == original_journal_size, (
+        "stale sidecar must not be updated"
+    )
+
+
+def test_sidecar_authoritative_terminal_fold(tmp_path):
+    """Test the fold logic matches select_authoritative_terminal_event across
+    the 5 cases: [done, stream_end], [done, cancel], [stream_end],
+    [stream_end(a), stream_end(b)], [token, token, done(tool_limit_reached)]."""
+    from api.run_journal import _read_jsonl, _summary_from_events
+
+    test_cases = [
+        # (events, expected_terminal_state, description)
+        ([{"event": "done", "terminal": True, "terminal_state": "tool_limit_reached", "seq": 1, "event_id": "r:1", "run_id": "r", "session_id": "s"},
+          {"event": "stream_end", "terminal": True, "terminal_state": "closed", "seq": 2, "event_id": "r:2", "run_id": "r", "session_id": "s"}],
+         "tool_limit_reached", "done(tool_limit_reached) then stream_end -> done wins (stream_end must NOT override a semantic terminal)"),
+
+        ([{"event": "done", "terminal": True, "terminal_state": "completed", "seq": 1, "event_id": "r:1", "run_id": "r", "session_id": "s"},
+          {"event": "cancel", "terminal": True, "terminal_state": "interrupted-by-user", "seq": 2, "event_id": "r:2", "run_id": "r", "session_id": "s"}],
+         "interrupted-by-user", "done then cancel -> cancel wins"),
+
+        ([{"event": "stream_end", "terminal": True, "terminal_state": "closed", "seq": 1, "event_id": "r:1", "run_id": "r", "session_id": "s"}],
+         "completed", "single stream_end -> completed (terminal_state only extracts tool_limit_reached)"),
+
+        ([{"event": "stream_end", "terminal": True, "terminal_state": "closed_a", "seq": 1, "event_id": "r:1", "run_id": "r", "session_id": "s"},
+          {"event": "stream_end", "terminal": True, "terminal_state": "closed_b", "seq": 2, "event_id": "r:2", "run_id": "r", "session_id": "s"}],
+         "completed", "multiple stream_ends -> latest wins (but all resolve to 'completed')"),
+
+        ([{"event": "token", "terminal": False, "seq": 1, "event_id": "r:1", "run_id": "r", "session_id": "s"},
+          {"event": "token", "terminal": False, "seq": 2, "event_id": "r:2", "run_id": "r", "session_id": "s"},
+          {"event": "done", "terminal": True, "terminal_state": "tool_limit_reached", "seq": 3, "event_id": "r:3", "run_id": "r", "session_id": "s"}],
+         "tool_limit_reached", "tokens then done(tool_limit_reached) -> tool_limit_reached"),
+    ]
+
+    for i, (events, expected_state, description) in enumerate(test_cases):
+        session_id = f"session_fold_{i}"
+        run_id = f"run_fold_{i}"
+        writer = RunJournalWriter(session_id, run_id, session_dir=tmp_path)
+
+        # Append events via writer (builds sidecar)
+        for event in events:
+            payload = {}
+            if event["event"] == "done" and event.get("terminal_state") == "tool_limit_reached":
+                payload = {"terminal_state": "tool_limit_reached"}
+            elif event["event"] == "done":
+                payload = {"session": {"session_id": session_id}}
+            elif event["event"] == "cancel":
+                payload = {"message": "Cancelled"}
+            elif event["event"] == "stream_end":
+                # Pass terminal_state in payload so writer uses it
+                payload = {"terminal_state": event.get("terminal_state", "closed")}
+
+            writer.append_sse_event(event["event"], payload)
+
+        # Get sidecar-derived summary
+        sidecar_summary = latest_run_summary(session_id, run_id, session_dir=tmp_path)
+
+        # Get full-read summary for comparison
+        from api.run_journal import _run_path
+        path = _run_path(session_id, run_id, session_dir=tmp_path)
+        full_events, _, _ = _read_jsonl(path)
+        full_summary = _summary_from_events(session_id, run_id, full_events)
+
+        # Both must agree on expected_state
+        assert sidecar_summary["terminal_state"] == expected_state, (
+            f"case {i} ({description}): sidecar terminal_state={sidecar_summary['terminal_state']}, "
+            f"expected {expected_state}"
+        )
+        assert full_summary["terminal_state"] == expected_state, (
+            f"case {i} ({description}): full terminal_state={full_summary['terminal_state']}, "
+            f"expected {expected_state}"
+        )
+
+        # Sidecar and full must match
+        assert sidecar_summary["terminal_state"] == full_summary["terminal_state"], (
+            f"case {i} ({description}): sidecar and full terminal_state mismatch"
+        )
+
+
+def test_find_run_summary_uses_sidecar(tmp_path):
+    """Test that find_run_summary uses the sidecar and returns the correct summary."""
+    from api.run_journal import _summary_sidecar_path
+
+    session_id = "session_find"
+    run_id = "run_find"
+    writer = RunJournalWriter(session_id, run_id, session_dir=tmp_path)
+
+    writer.append_sse_event("token", {"text": "first"})
+    writer.append_sse_event("done", {"session": {"session_id": session_id}})
+
+    path = writer._path
+    sidecar_path = _summary_sidecar_path(path)
+
+    # Verify sidecar exists
+    assert sidecar_path.exists()
+
+    # Clear cache
+    from api.run_journal import _SUMMARY_CACHE, _SUMMARY_CACHE_LOCK
+    with _SUMMARY_CACHE_LOCK:
+        _SUMMARY_CACHE.clear()
+
+    # find_run_summary must return the sidecar-derived summary
+    summary = find_run_summary(run_id, session_dir=tmp_path)
+    assert summary is not None
+    assert summary["terminal_state"] == "completed"
+    assert summary["terminal"] is True
+    assert summary["last_seq"] == 2
+    assert "path" in summary
+    assert summary["path"] == str(path)
+
+
+def test_read_run_events_does_not_use_sidecar(tmp_path):
+    """Test that read_run_events returns ALL full events (replay needs full events),
+    not a short-circuited sidecar result."""
+    from api.run_journal import _run_path, _summary_sidecar_path
+
+    session_id = "session_replay"
+    run_id = "run_replay"
+    writer = RunJournalWriter(session_id, run_id, session_dir=tmp_path)
+
+    # Write multiple events
+    writer.append_sse_event("token", {"text": "first"})
+    writer.append_sse_event("token", {"text": "second"})
+    writer.append_sse_event("done", {"session": {"session_id": session_id}})
+
+    path = _run_path(session_id, run_id, session_dir=tmp_path)
+    sidecar_path = _summary_sidecar_path(path)
+
+    # Verify sidecar exists
+    assert sidecar_path.exists()
+
+    # read_run_events must return ALL 3 events (not sidecar summary)
+    replay = read_run_events(session_id, run_id, session_dir=tmp_path)
+    assert len(replay["events"]) == 3, (
+        f"read_run_events must return all 3 events for replay; got {len(replay['events'])}"
+    )
+
+    # Verify events are full (have payloads)
+    for event in replay["events"]:
+        assert "payload" in event
+        assert isinstance(event["payload"], dict)
+        # The done event should have the session payload
+        if event["event"] == "done":
+            assert "session" in event["payload"]
+
+
+def test_sidecar_absent_falls_back_to_tail_correctness(tmp_path):
+    """Test that a journal with no sidecar (hand-written) still produces a correct
+    summary via the fallback tail reader."""
+    from api.run_journal import _run_path, _summary_sidecar_path
+    import json
+
+    session_id = "session_nosidecar"
+    run_id = "run_nosidecar"
+    path = _run_path(session_id, run_id, session_dir=tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Hand-write journal (no sidecar)
+    events = [
+        {"version": 1, "event_id": f"{run_id}:1", "seq": 1, "run_id": run_id,
+         "session_id": session_id, "event": "token", "type": "token",
+         "terminal": False, "terminal_state": None, "created_at": 100.0,
+         "payload": {"text": "first"}},
+        {"version": 1, "event_id": f"{run_id}:2", "seq": 2, "run_id": run_id,
+         "session_id": session_id, "event": "done", "type": "done",
+         "terminal": True, "terminal_state": "completed", "created_at": 200.0,
+         "payload": {"session": {"session_id": session_id}}},
+    ]
+
+    with path.open("w", encoding="utf-8") as f:
+        for event in events:
+            f.write(json.dumps(event, separators=(",", ":")) + "\n")
+
+    # Verify no sidecar exists
+    sidecar_path = _summary_sidecar_path(path)
+    assert not sidecar_path.exists()
+
+    # Clear cache
+    from api.run_journal import _SUMMARY_CACHE, _SUMMARY_CACHE_LOCK
+    with _SUMMARY_CACHE_LOCK:
+        _SUMMARY_CACHE.clear()
+
+    # latest_run_summary must still produce correct summary via fallback
+    summary = latest_run_summary(session_id, run_id, session_dir=tmp_path)
+    assert summary["terminal_state"] == "completed"
+    assert summary["terminal"] is True
+    assert summary["last_seq"] == 2
+    assert summary["event_count"] == 2

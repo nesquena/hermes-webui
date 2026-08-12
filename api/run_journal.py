@@ -56,6 +56,145 @@ _SNAPSHOT_ARGS_MAX_DEPTH = 8
 _SNAPSHOT_ARGS_MAX_STRING_CHARS = 8192
 _SNAPSHOT_ARGS_MAX_TOTAL_CHARS = 64 * 1024
 _SNAPSHOT_ARGS_TRUNCATED_SUFFIX = "...[truncated]"
+_RUN_SUMMARY_SIDECAR_VERSION = 1
+
+
+def _summary_sidecar_path(path: Path) -> Path:
+    """Return the sidecar summary path for a given JSONL journal path."""
+    return path.with_name(f"{path.stem}.summary.json")
+
+
+def _safe_replace(src: Path, dst: Path) -> None:
+    """Atomic file replace with Windows PermissionError retry (mirrors api/models.py:165)."""
+    max_retries = 3
+    for i in range(max_retries):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if i == max_retries - 1:
+                raise
+            time.sleep(0.01)
+
+
+def _atomic_write_json(path: Path, payload: dict, *, fsync: bool) -> None:
+    """Write a JSON payload to a temp file, fsync if requested, then replace atomically."""
+    temp_path = None
+    try:
+        # Create temp sibling with unique name
+        temp_path = path.parent / f"{path.name}.tmp.{os.getpid()}_{threading.get_ident()}"
+        raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
+        with temp_path.open("w", encoding="utf-8") as fh:
+            fh.write(raw)
+            fh.flush()
+            if fsync:
+                os.fsync(fh.fileno())
+        _safe_replace(temp_path, path)
+    finally:
+        if temp_path and temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+
+
+def _new_sidecar_state() -> dict:
+    """Return a fresh sidecar state for an empty journal."""
+    return {"event_count": 0, "last": None, "terminal": None}
+
+
+def _fold_event_into_state(state: dict, event: dict) -> dict:
+    """Fold one event into a sidecar state (mutates+returns state).
+
+    Matches select_authoritative_terminal_event: stream_end is transport
+    closure, so a preceding semantic terminal (done/cancel/apperror/error)
+    stays authoritative; a later semantic terminal overrides; among multiple
+    stream_ends with no semantic terminal, the LATEST wins.
+    """
+    name = str(event.get("event") or "")
+    seq = int(event.get("seq") or 0)
+    eid = event.get("event_id")
+    tstate = event.get("terminal_state")  # None for non-terminal
+    state["event_count"] = int(state.get("event_count") or 0) + 1
+    state["last"] = {"seq": seq, "event_id": eid, "event": name}
+    if tstate is not None:  # terminal event
+        cur = state.get("terminal")
+        if name != "stream_end":
+            state["terminal"] = {"event": name, "state": tstate, "seq": seq, "event_id": eid}
+        elif cur is None or cur.get("event") == "stream_end":
+            state["terminal"] = {"event": name, "state": tstate, "seq": seq, "event_id": eid}
+        # else: stream_end but we already hold a semantic terminal -> keep it
+    return state
+
+
+def _serialize_sidecar(state: dict, journal_size: int) -> dict:
+    """Serialize sidecar state to the on-disk JSON format."""
+    return {
+        "version": _RUN_SUMMARY_SIDECAR_VERSION,
+        "journal_size": int(journal_size),
+        "event_count": int(state.get("event_count") or 0),
+        "last": state.get("last"),
+        "terminal": state.get("terminal")
+    }
+
+
+def _read_sidecar(sidecar_path: Path) -> dict | None:
+    """Read+json.loads the sidecar. Return the parsed dict, or None if absent
+    or invalid (missing version / wrong shape). NEVER raises."""
+    try:
+        raw = sidecar_path.read_bytes()
+    except (FileNotFoundError, OSError):
+        return None
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict) or int(data.get("version") or 0) != _RUN_SUMMARY_SIDECAR_VERSION:
+        return None
+    return data
+
+
+def _summary_from_sidecar(session_id, run_id, data: dict) -> dict:
+    """Build the public summary dict from a validated sidecar. Field-for-field
+    identical to _summary_from_events."""
+    count = int(data.get("event_count") or 0)
+    last = data.get("last") or {}
+    term = data.get("terminal")
+    if isinstance(term, dict):
+        terminal_state = term.get("state")
+    else:
+        terminal_state = "running" if count > 0 else "unknown"
+    return {
+        "session_id": str(session_id),
+        "run_id": str(run_id),
+        "stream_id": str(run_id),
+        "event_count": count,
+        "last_seq": int(last.get("seq") or 0),
+        "last_event_id": last.get("event_id"),
+        "terminal": isinstance(term, dict),
+        "terminal_state": terminal_state,
+        "last_event": last.get("event"),
+    }
+
+
+def _try_summary_from_sidecar(path, session_id, run_id) -> tuple[dict | None, bool]:
+    """Return (summary, ok). ok=False means 'do not cache' (transient I/O).
+    summary is None when no usable sidecar -> caller falls back to tail."""
+    try:
+        jsonl_stat = path.stat()
+    except (FileNotFoundError, OSError):
+        return None, True  # missing jsonl -> let the tail reader handle (returns empty)
+    sidecar_path = _summary_sidecar_path(path)
+    data = _read_sidecar(sidecar_path)  # never raises
+    if data is None:
+        return None, True
+    try:
+        journal_size = int(data.get("journal_size") or -1)
+    except (TypeError, ValueError):
+        journal_size = -1
+    if journal_size != int(jsonl_stat.st_size):
+        return None, True  # stale (crash-mid-append / hand-edit / replacement) -> fallback
+    return _summary_from_sidecar(session_id, run_id, data), True
 
 
 class _ReadBudget:
@@ -2011,6 +2150,7 @@ def append_run_event(
     if not event_name:
         raise ValueError("event_name is required")
     with _lock_for(path):
+        # 1. Reserve seq and build event dict
         if seq is not None:
             assigned_seq = int(seq)
             _note_assigned_seq(path, assigned_seq)
@@ -2030,6 +2170,33 @@ def append_run_event(
             "terminal_state": terminal_state,
             "payload": payload,
         }
+
+        # 2. Compute sidecar path and read prior state
+        sidecar_path = _summary_sidecar_path(path)
+        prior = _read_sidecar(sidecar_path)
+        if prior is not None:
+            state = {
+                "event_count": prior["event_count"],
+                "last": prior["last"],
+                "terminal": prior["terminal"]
+            }
+        else:
+            # No sidecar yet - rebuild from tail if this is an existing run
+            pre_size = path.stat().st_size if path.exists() else 0
+            if pre_size > 0:
+                # Old run, no sidecar: rebuild by folding the bounded tail
+                tail_events, _, _ = _read_jsonl_tail(
+                    path, max_bytes=_SESSION_REPLAY_MAX_BYTES,
+                    max_rows=_SESSION_REPLAY_MAX_ROWS, attribute_lines=False
+                )
+                state = _new_sidecar_state()
+                for ev in tail_events:
+                    _fold_event_into_state(state, ev)
+            else:
+                # Fresh run
+                state = _new_sidecar_state()
+
+        # 3. Write the JSONL line (existing logic unchanged)
         path.parent.mkdir(parents=True, exist_ok=True)
         created_file = not path.exists()
         line = json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
@@ -2039,6 +2206,26 @@ def append_run_event(
             fh.flush()
             if _should_fsync_event(terminal_state):
                 os.fsync(fh.fileno())
+
+        # 4. Fold the new event into state, then persist the sidecar atomically.
+        # The sidecar write is BEST-EFFORT: a failure here MUST NOT abort the
+        # append, because the JSONL line is already durably written above. On any
+        # sidecar failure/absence the summary readers fall back to the existing
+        # tail reader, so terminal identity stays correct regardless. The parent
+        # directory is fsynced by the JSONL ``created_file`` path below on the
+        # first event (the sidecar lives in the SAME directory), covering the
+        # sidecar's first rename; later events reuse the already-durable name.
+        _fold_event_into_state(state, event)
+        try:
+            post_size = path.stat().st_size
+            payload_dict = _serialize_sidecar(state, post_size)
+            _atomic_write_json(
+                sidecar_path, payload_dict, fsync=_should_fsync_event(terminal_state)
+            )
+        except OSError:
+            pass
+
+        # 7. Discard cached summary (existing logic unchanged)
         _discard_cached_summary(path)
         if created_file:
             _fsync_parent_dir(path)
@@ -2147,11 +2334,17 @@ def latest_run_summary(
     cached = _get_cached_summary(path)
     if cached is not None:
         return cached
-    # Summary derives last_seq / last_event_id / terminal_state from the LAST
-    # events, so read the bounded TAIL (not the whole file) — a large completed
-    # run's terminal marker lives at the end and must not require parsing the
-    # full history. Callers needing head/all events use read_run_events().
+    # Capture the pre-read signature BEFORE any read so a concurrent append
+    # during the sidecar/tail read is detected and the stale result is NOT
+    # cached under the post-append signature (#6139 r14 finding 3; the sidecar
+    # path reuses the same guard so the TOCTOU contract holds on both paths).
     pre_read_signature = _summary_cache_signature(path)
+    # Try the compact sidecar first (O(1) read, no transcript-payload scan).
+    sidecar_summary, _sidecar_ok = _try_summary_from_sidecar(path, session_id, run_id)
+    if sidecar_summary is not None:
+        _cache_summary(path, sidecar_summary, expected_signature=pre_read_signature)
+        return sidecar_summary
+    # FALLBACK: existing tail-reader path unchanged.
     events, _malformed, ok = _read_jsonl(
         path, max_bytes=max_bytes, max_rows=max_rows, tail=True, attribute_lines=False
     )
@@ -2214,19 +2407,28 @@ def find_run_summary(
         session_id = path.parent.name
         summary = _get_cached_summary(path)
         if summary is None:
+            # Capture the pre-read signature BEFORE any read so a concurrent
+            # append during the sidecar/tail read is detected (#6139 r14 finding 3).
             pre_read_signature = _summary_cache_signature(path)
-            # Tail read: summary needs the terminal/last events (see
-            # latest_run_summary), so bound memory on large completed runs.
-            events, _malformed, ok = _read_jsonl(
-                path, max_bytes=max_bytes, max_rows=max_rows, tail=True, attribute_lines=False
-            )
-            summary = _summary_from_events(session_id, rid, events)
-            # #6139 r14 finding 3: a transient OSError during the boundary scan
-            # produces a best-effort/failed summary. Caching it under the matching
-            # inode signature would make subsequent calls return the stale failure
-            # instead of retrying. Skip caching when the read faulted.
-            if ok:
-                _cache_summary(path, summary, expected_signature=pre_read_signature)
+            # Try the compact sidecar first (O(1) read, no transcript-payload scan).
+            sidecar_summary, _sidecar_ok = _try_summary_from_sidecar(path, session_id, rid)
+            if sidecar_summary is not None:
+                _cache_summary(path, sidecar_summary, expected_signature=pre_read_signature)
+                summary = sidecar_summary
+            else:
+                # FALLBACK: existing tail-reader path unchanged.
+                # Tail read: summary needs the terminal/last events (see
+                # latest_run_summary), so bound memory on large completed runs.
+                events, _malformed, ok = _read_jsonl(
+                    path, max_bytes=max_bytes, max_rows=max_rows, tail=True, attribute_lines=False
+                )
+                summary = _summary_from_events(session_id, rid, events)
+                # #6139 r14 finding 3: a transient OSError during the boundary scan
+                # produces a best-effort/failed summary. Caching it under the matching
+                # inode signature would make subsequent calls return the stale failure
+                # instead of retrying. Skip caching when the read faulted.
+                if ok:
+                    _cache_summary(path, summary, expected_signature=pre_read_signature)
         summary["path"] = str(path)
         return summary
     return None
