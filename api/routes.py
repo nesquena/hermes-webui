@@ -18465,8 +18465,9 @@ def _etag_and_snapshot(fd, *, file_size: int) -> tuple[str | None, bytes | None,
     and the body can never diverge under TOCTOU (the file may change on disk after read).
 
     Returns (None, None, file_size) for files above the cap or on unexpected I/O failure.
-    Returns (None, None, actual_size) if the file was truncated mid-read (short snapshot).
-    The caller must use actual_size (not the original file_size) for Content-Length/Range
+    Returns (None, data, actual_size) if the file was truncated mid-read (short snapshot):
+    the captured bytes are preserved so the caller serves them directly (no ETag), and the
+    caller must use actual_size (not the original file_size) for Content-Length/Range
     calculations to avoid header/body mismatch.
     """
     if file_size > _ETAG_SIZE_CAP:
@@ -18489,9 +18490,9 @@ def _etag_and_snapshot(fd, *, file_size: int) -> tuple[str | None, bytes | None,
         return None, None, 0
 
     # If the file was truncated after fstat (short snapshot), return the actual
-    # size but no ETag — caller will fall back to streaming without ETag.
-    # Round-6 fix: keep the captured `data` so the body path serves the immutable
-    # snapshot instead of re-reading the fd after headers are committed.
+    # size and the captured bytes but no ETag. Keep the captured `data` so the
+    # body path serves the immutable snapshot instead of re-reading the fd after
+    # headers are committed.
     # Content-Length derives from actual_size == len(data), so header/body match.
     if actual_size != file_size:
         return None, data, actual_size
@@ -18537,8 +18538,9 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
             # so Content-Length/Range match the body we can actually send.
             if actual_size != file_size:
                 file_size = actual_size  # reconcile to avoid header/body mismatch
-                # snapshot is None in truncation case, so we'll fall back to streaming
-                # from the fd (re-read from actual file, now at the truncated size).
+                # snapshot holds the captured bytes (short read), so the body path
+                # serves them directly from memory — no re-read of the fd, which
+                # closes the shrink-again window between the snapshot and transmission.
 
         # RFC 7232 §3.2: If-None-Match uses weak comparison (W/ prefixes ignored)
         # and "*" matches any existing resource. On match, GET/HEAD is

@@ -382,15 +382,15 @@ def test_short_read_truncation_uses_actual_size(routes, tmp_path, monkeypatch):
     # The response should use actual_size=5 for Content-Length
     assert handler.status == 200
     content_length = int(handler.header("Content-Length") or "0")
-    # Since snapshot is None (short read), it falls back to streaming from fd
-    # which would read the actual file (still 10 bytes on disk).
-    # But the key invariant: Content-Length must match body length.
+    # Short read: the captured snapshot is preserved and served directly from
+    # memory (no re-read of the fd). The key invariant either way: Content-Length
+    # must match the body length.
     assert content_length == len(handler.body), \
         f"Content-Length {content_length} != body length {len(handler.body)}"
 
 
 def test_short_read_no_etag_on_truncation(routes, tmp_path, monkeypatch):
-    """When the file is truncated mid-read, no ETag is sent (streaming fallback)."""
+    """When the file is truncated mid-read, no ETag is sent (snapshot served, no revalidation)."""
     target = tmp_path / "img.png"
     target.write_bytes(b"0123456789")
     
@@ -406,10 +406,9 @@ def test_short_read_no_etag_on_truncation(routes, tmp_path, monkeypatch):
         elif snapshot_reads[0] == 2:
             return b"345"
         else:
-            # All subsequent reads (streaming path after snapshot failure)
-            # return empty, so body is only what fake_read returned during snapshot attempt
-            # BUT: snapshot is None, so the code falls back to fdopen streaming
-            # which calls f.read(), not os.read(). So this branch is never hit.
+            # After the truncated snapshot read, the captured 6 bytes are served
+            # directly from memory (no fdopen streaming re-read), so os.read is
+            # not called again for the body. This branch is defensive only.
             return b""
     
     # Patch api.routes.os.read to only affect the snapshot-read loop
