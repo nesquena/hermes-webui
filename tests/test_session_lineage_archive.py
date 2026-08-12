@@ -1,173 +1,52 @@
 import json
+import sqlite3
 import subprocess
 from pathlib import Path
 
+from api.agent_sessions import read_session_lineage_ids
 
 ROOT = Path(__file__).resolve().parents[1]
 SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 
 
-def _run_node(source: str) -> str:
-    proc = subprocess.run(
-        ["node"],
-        cwd=ROOT,
-        input=source,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert proc.returncode == 0, proc.stderr
-    return proc.stdout.strip()
+def test_lineage_ids_enumerates_complete_continuation_tree_only(tmp_path):
+    db = tmp_path / "state.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE sessions (id TEXT, parent_session_id TEXT, end_reason TEXT, started_at REAL, ended_at REAL, source TEXT, session_source TEXT)")
+    rows = [
+        ("root", None, "compression", 1, 2, "cli", None),
+        ("tip-a", "root", None, 3, None, "cli", None),
+        ("mid-b", "root", "compression", 3, 4, "cli", None),
+        ("tip-b", "mid-b", None, 5, None, "cli", None),
+        ("fork", "root", None, 3, None, "cli", "fork"),
+        ("child", "root", None, 1, None, "cli", None),
+        ("cross-source", "root", None, 3, None, "tui", None),
+    ]
+    conn.executemany("INSERT INTO sessions VALUES (?,?,?,?,?,?,?)", rows)
+    conn.commit()
+    conn.close()
+
+    assert set(read_session_lineage_ids(db, "tip-b")) == {"root", "tip-a", "mid-b", "tip-b"}
 
 
-def test_collapsed_lineage_archive_and_restore_mutate_only_safe_segments():
-    source = f"""
-const src = {SESSIONS_JS!r};
-function extractFunc(name) {{
-  const syncStart = src.indexOf('function ' + name + '(');
-  const asyncStart = src.indexOf('async function ' + name + '(');
-  const starts = [syncStart, asyncStart].filter(index => index >= 0);
-  const start = starts.length ? Math.min(...starts) : -1;
-  if (start < 0) throw new Error('missing function ' + name);
-  let brace = src.indexOf('{{', start);
-  let depth = 0;
-  for (let i = brace; i < src.length; i++) {{
-    if (src[i] === '{{') depth++;
-    else if (src[i] === '}}') {{
-      depth--;
-      if (depth === 0) return src.slice(start, i + 1);
-    }}
-  }}
-  throw new Error('unterminated function ' + name);
-}}
-
-eval(extractFunc('_sessionArchiveTargets'));
-eval(extractFunc('_archiveSession'));
-
-const calls = [];
-const toasts = [];
-const local = new Map([['hermes-webui-session', 'tip']]);
-globalThis.localStorage = {{
-  getItem: key => local.has(key) ? local.get(key) : null,
-  removeItem: key => local.delete(key),
-}};
-globalThis.S = {{session: {{session_id:'tip', archived:false}}}};
-globalThis._lineageReportCache = new Map([['root', {{segments:[
-  {{session_id:'old', profile:'default'}},
-  {{session_id:'foreign-report', profile:'other-profile'}},
-]}}]]);
-globalThis._sidebarLineageKeyForRow = session => session._lineage_key || session._lineage_root_id || session.session_id;
-globalThis._lineageReportCacheKey = (_session, lineageKey) => lineageKey;
-globalThis._sessionSegmentCount = session => Number(session._compression_segment_count || (session._lineage_segments || []).length || 0);
-globalThis._lineageReportNeedsFetch = () => false;
-globalThis._fetchLineageReportForRow = async () => null;
-globalThis._allSessions = [
-  {{session_id:'tip', profile:'default', archived:false}},
-  {{session_id:'mid', profile:'default', archived:false}},
-  {{session_id:'root', profile:'default', archived:false}},
-  {{session_id:'old', profile:'default', archived:false}},
-  {{session_id:'fork', profile:'default', archived:false}},
-  {{session_id:'child', profile:'default', archived:false}},
-  {{session_id:'foreign', profile:'other-profile', archived:false}},
-  {{session_id:'unrelated', profile:'default', archived:false}},
-];
-globalThis._showArchived = false;
-globalThis._sessionSwipeReturnOffsets = new Map();
-globalThis._pendingSessionReflowPositions = null;
-globalThis._isReadOnlySession = () => false;
-globalThis._captureSessionReflowPositions = () => new Map();
-globalThis._sessionPrefersReducedMotion = () => true;
-globalThis._sessionArchiveToast = () => 'archived';
-globalThis.t = key => key;
-globalThis.showToast = value => toasts.push(value);
-globalThis.renderSessionListFromCache = () => {{}};
-globalThis.renderSessionList = async () => {{}};
-globalThis.api = async (path, options) => {{
-  const body = JSON.parse(options.body);
-  calls.push({{path, body}});
-  return {{ok:true}};
-}};
-
-const row = {{
-  session_id:'tip',
-  profile:'default',
-  archived:false,
-  _lineage_key:'root',
-  _compression_segment_count:4,
-  _lineage_segments:[
-    {{session_id:'tip', profile:'default'}},
-    {{session_id:'mid', profile:'default'}},
-    {{session_id:'root', profile:'default'}},
-    {{session_id:'fork', profile:'default', session_source:'fork'}},
-    {{session_id:'child', profile:'default', relationship_type:'child_session'}},
-    {{session_id:'foreign', profile:'other-profile'}},
-    {{session_id:'mid', profile:'default'}},
-  ],
-  _child_sessions:[{{session_id:'unrelated', profile:'default'}}],
-}};
-
-(async () => {{
-  const archived = await _archiveSession(row, true);
-  const archivedCalls = calls.splice(0).map(call => call.body);
-  const archiveState = Object.fromEntries(_allSessions.map(s => [s.session_id, s.archived]));
-  const restored = await _archiveSession(row, false);
-  const restoredCalls = calls.splice(0).map(call => call.body);
-  const restoreState = Object.fromEntries(_allSessions.map(s => [s.session_id, s.archived]));
-  const directTargets = {{
-    fork: _sessionArchiveTargets({{session_id:'fork', profile:'default', session_source:'fork'}}).map(s => s.session_id),
-    child: _sessionArchiveTargets({{session_id:'child', profile:'default', relationship_type:'child_session'}}).map(s => s.session_id),
-  }};
-  _lineageReportCache.clear();
-  const incomplete = await _archiveSession({{
-    session_id:'incomplete-tip',
-    profile:'default',
-    archived:false,
-    _lineage_key:'incomplete-root',
-    _compression_segment_count:2,
-  }}, true);
-  const incompleteCalls = calls.splice(0).map(call => call.body);
-  console.log(JSON.stringify({{
-    archived,
-    restored,
-    incomplete,
-    incompleteCalls,
-    archivedCalls,
-    restoredCalls,
-    archiveState,
-    restoreState,
-    directTargets,
-    savedPointer: local.get('hermes-webui-session') || null,
-  }}));
-}})().catch(error => {{ console.error(error); process.exit(1); }});
+def test_collapsed_archive_uses_one_backend_lineage_operation():
+    assert "const payload=collapsed?{session_id:session.session_id,archived,lineage:true}" in SESSIONS_JS
+    assert "Promise.all(targets.map" not in SESSIONS_JS
+    script = f"""
+const src={SESSIONS_JS!r};
+const start=src.indexOf('async function _archiveSession('); let brace=src.indexOf('{{',start), depth=0, end=-1;
+for(let i=brace;i<src.length;i++){{if(src[i]==='{{')depth++;else if(src[i]==='}}'&&--depth===0){{end=i+1;break;}}}}
+eval(src.slice(start,end));
+const calls=[];
+Object.assign(globalThis,{{
+  _isReadOnlySession:()=>false,_captureSessionReflowPositions:()=>new Map(),_sessionSegmentCount:()=>3,
+  api:async(p,o)=>{{calls.push(JSON.parse(o.body));return {{session_ids:['root','tip']}};}},
+  _allSessions:[],S:{{session:null}},localStorage:{{getItem:()=>null,removeItem:()=>{{}}}},showToast:()=>{{}},
+  _sessionArchiveToast:()=>'',t:x=>x,_showArchived:false,_sessionPrefersReducedMotion:()=>true,
+  _sessionSwipeReturnOffsets:new Map(),renderSessionListFromCache:()=>{{}},renderSessionList:async()=>{{}}
+}});
+_archiveSession({{session_id:'tip',archived:false}},true).then(()=>console.log(JSON.stringify(calls)));
 """
-    result = json.loads(_run_node(source))
-
-    assert result["archived"] is True
-    assert result["restored"] is True
-    assert result["incomplete"] is False
-    assert result["incompleteCalls"] == []
-    assert result["archivedCalls"] == [
-        {"session_id": "tip", "archived": True},
-        {"session_id": "mid", "archived": True},
-        {"session_id": "root", "archived": True},
-        {"session_id": "old", "archived": True},
-    ]
-    assert result["restoredCalls"] == [
-        {"session_id": "tip", "archived": False},
-        {"session_id": "mid", "archived": False},
-        {"session_id": "root", "archived": False},
-        {"session_id": "old", "archived": False},
-    ]
-    assert result["archiveState"] == {
-        "tip": True,
-        "mid": True,
-        "root": True,
-        "old": True,
-        "fork": False,
-        "child": False,
-        "foreign": False,
-        "unrelated": False,
-    }
-    assert result["restoreState"] == {key: False for key in result["archiveState"]}
-    assert result["directTargets"] == {"fork": ["fork"], "child": ["child"]}
-    assert result["savedPointer"] is None
+    proc = subprocess.run(["node"], input=script, text=True, capture_output=True, cwd=ROOT)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == [{"session_id": "tip", "archived": True, "lineage": True}]

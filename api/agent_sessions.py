@@ -988,6 +988,38 @@ def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops:
     }
 
 
+def read_session_lineage_ids(db_path: Path, session_id: str | None) -> list[str]:
+    """Resolve the complete continuation tree represented by a collapsed row."""
+    sid = str(session_id or '').strip()
+    db_path = Path(db_path)
+    if not sid or not db_path.exists():
+        return []
+    with closing(open_state_db_readonly(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = [dict(row) for row in conn.execute(
+            "SELECT id, parent_session_id, end_reason, started_at, ended_at, source, session_source FROM sessions"
+        )]
+    rows_by_id = {row['id']: row for row in rows}
+    if sid not in rows_by_id:
+        return []
+    root_id = _continuation_root_id(rows_by_id, sid) or sid
+    children: dict[str, list[dict]] = {}
+    for row in rows:
+        if row.get('parent_session_id'):
+            children.setdefault(row['parent_session_id'], []).append(row)
+    result: list[str] = []
+    stack = [rows_by_id[root_id]]
+    seen: set[str] = set()
+    while stack:
+        row = stack.pop()
+        if row['id'] in seen:
+            continue
+        seen.add(row['id'])
+        result.append(row['id'])
+        stack.extend(child for child in children.get(row['id'], []) if _is_continuation_session(row, child))
+    return result
+
+
 def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[str]) -> dict[str, dict]:
     """Return compression-lineage metadata for known WebUI sidebar sessions.
 

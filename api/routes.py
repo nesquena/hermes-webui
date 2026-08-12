@@ -45,6 +45,7 @@ from api.agent_sessions import (
     is_cli_session_row,
     is_cli_session_row_visible,
     read_session_lineage_report,
+    read_session_lineage_ids,
 )
 from api.compression_anchor import visible_messages_for_anchor
 from api.compression_recovery import (
@@ -16346,6 +16347,38 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as e:
             return bad(handler, str(e))
         sid = body["session_id"]
+        if body.get("lineage"):
+            lineage_ids = read_session_lineage_ids(_active_state_db_path(), sid)
+            if not lineage_ids:
+                return bad(handler, "Session lineage not found", 404)
+            archived = bool(body.get("archived", True))
+            sessions = []
+            try:
+                for lineage_sid in lineage_ids:
+                    if _session_is_subagent_view_only(lineage_sid):
+                        raise PermissionError("Subagent sessions are view-only")
+                    sessions.append(_get_or_materialize_session(lineage_sid))
+            except (KeyError, PermissionError) as exc:
+                return bad(handler, str(exc), 400)
+            previous = [bool(getattr(session, "archived", False)) for session in sessions]
+            saved = []
+            try:
+                for session in sessions:
+                    with _get_session_agent_lock(session.session_id):
+                        session.archived = archived
+                        session.save(touch_updated_at=False)
+                    saved.append(session)
+            except Exception:
+                for session, old_archived in zip(saved, previous):
+                    try:
+                        with _get_session_agent_lock(session.session_id):
+                            session.archived = old_archived
+                            session.save(touch_updated_at=False)
+                    except Exception:
+                        logger.exception("Failed to roll back lineage archive for %s", session.session_id)
+                raise
+            publish_session_list_changed("session_archive", profile=getattr(sessions[0], "profile", None), session_id=sid)
+            return j(handler, {"ok": True, "session": sessions[0].compact(), "session_ids": lineage_ids})
         if _session_is_subagent_view_only(sid):
             return bad(handler, "Subagent sessions are view-only and cannot be archived from WebUI", 400)
         try:

@@ -36,7 +36,7 @@ def test_archive_action_repaints_sidebar_before_full_refresh():
     menu_body = _function_block(SESSIONS_JS, "_openSessionActionMenu")
     helper_body = _function_block(SESSIONS_JS, "_archiveSession")
 
-    api_call = "const results=await Promise.all(targets.map(target=>api('/api/session/archive'"
+    api_call = "const response=await api('/api/session/archive'"
     optimistic = "if(cached) cached.archived=archived;"
     related_optimistic = "if(related&&targetIds.has(related.session_id)) related.archived=archived;"
     cached_render = "renderSessionListFromCache();"

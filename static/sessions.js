@@ -4857,39 +4857,15 @@ function _playSessionActionMenuEntrance(menu){
   menu.classList.add('open-animated');
 }
 
-function _sessionArchiveTargets(session){
-  if(!session||!session.session_id) return [];
-  const representativeProfile=session.profile||null;
-  const lineageKey=_sidebarLineageKeyForRow(session);
-  const cachedReport=_lineageReportCache.get(_lineageReportCacheKey(session,lineageKey));
-  const reportSegments=cachedReport&&Array.isArray(cachedReport.segments)?cachedReport.segments:[];
-  const candidates=[session,...(Array.isArray(session._lineage_segments)?session._lineage_segments:[]),...reportSegments];
-  const seen=new Set();
-  const targets=[];
-  for(const candidate of candidates){
-    if(!candidate||!candidate.session_id||seen.has(candidate.session_id)) continue;
-    const isRepresentative=candidate.session_id===session.session_id;
-    if(!isRepresentative&&(candidate.relationship_type==='child_session'||candidate.session_source==='fork')) continue;
-    if(!isRepresentative&&representativeProfile&&candidate.profile&&candidate.profile!==representativeProfile) continue;
-    seen.add(candidate.session_id);
-    targets.push(candidate);
-  }
-  return targets;
-}
-
 async function _archiveSession(session, archived=true, beforeListRender=null){
   if(_isReadOnlySession(session)){ if(typeof showToast==='function') showToast('Read-only imported sessions cannot be modified.',3000); return false; }
   const reflowPositions=_captureSessionReflowPositions();
   const renderHold=beforeListRender?Promise.resolve().then(beforeListRender):null;
   try{
-    const lineageKey=_sidebarLineageKeyForRow(session);
-    const expectedCount=_sessionSegmentCount(session);
-    if(_lineageReportNeedsFetch(session,lineageKey,expectedCount)) await _fetchLineageReportForRow(session,lineageKey);
-    const targets=_sessionArchiveTargets(session);
-    if(expectedCount>targets.length) throw new Error('Incomplete session lineage');
-    const results=await Promise.all(targets.map(target=>api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:target.session_id,archived})})));
-    const response=results[0];
-    const targetIds=new Set(targets.map(target=>target.session_id));
+    const collapsed=_sessionSegmentCount(session)>1;
+    const payload=collapsed?{session_id:session.session_id,archived,lineage:true}:{session_id:session.session_id,archived};
+    const response=await api('/api/session/archive',{method:'POST',body:JSON.stringify(payload)});
+    const targetIds=new Set(Array.isArray(response.session_ids)?response.session_ids:[session.session_id]);
     session.archived=archived;
     const cached=(_allSessions||[]).find(s=>s&&s.session_id===session.session_id);
     if(cached) cached.archived=archived;
