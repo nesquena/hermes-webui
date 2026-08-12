@@ -163,6 +163,30 @@ def _run_commands_js(script_body: str) -> dict:
                   aliases: ['plugin_review'],
                   cli_only: false,
                   gateway_only: false
+                }},
+                {{
+                  name: 'agents',
+                  description: 'Manage background agents',
+                  category: 'Session',
+                  aliases: ['tasks'],
+                  cli_only: false,
+                  gateway_only: false
+                }},
+                {{
+                  name: 'sessions',
+                  description: 'List sessions',
+                  category: 'Session',
+                  aliases: [],
+                  cli_only: false,
+                  gateway_only: false
+                }},
+                {{
+                  name: 'resume',
+                  description: 'Resume a session',
+                  category: 'Session',
+                  aliases: [],
+                  cli_only: false,
+                  gateway_only: false
                 }}
               ]
             }};
@@ -356,8 +380,8 @@ def test_cli_only_slugs_reserve_skill_autocomplete_namespace():
     assert result["delegate_names"] == []
     assert result["incident_names"] == ["incident-review"]
     assert result["incident_sources"] == ["bundle"]
-    assert result["triage_names"] == ["triage-review"]
-    assert result["triage_sources"] == ["agent"]
+    assert result["triage_names"] == []
+    assert result["triage_sources"] == []
     assert result["plugin_names"] == ["plugin-review"]
     assert result["plugin_sources"] == ["plugin"]
     assert "skills" in result["skills_names"]
@@ -659,3 +683,79 @@ def test_builtin_command_opt_outs_do_not_hit_agent_metadata_lookup():
     assert optout_idx != -1
     assert metadata_idx != -1
     assert "if(_parsedCmd&&!_cmd)" in intercept[optout_idx:metadata_idx + 120]
+
+
+# ── #6951: autocomplete must only announce commands the WebUI dispatches ─────
+
+
+def test_non_dispatchable_agent_command_hidden_from_autocomplete():
+    """#6951: registry commands the WebUI does not dispatch (e.g. /agents) must
+    not be advertised, since submitting them would fall through to plain chat."""
+    result = _run_commands_js(
+        """
+        await loadAgentCommandMetadata(true);
+        const agents = await getSlashAutocompleteMatches('/agents');
+        const ag = await getSlashAutocompleteMatches('/ag');
+        return {
+          agents_names: agents.map(item => item.name),
+          ag_names: ag.map(item => item.name)
+        };
+        """
+    )
+    assert result["agents_names"] == []
+    assert result["ag_names"] == []
+
+
+def test_dispatchable_agent_commands_stay_in_autocomplete():
+    """#6951: commands the WebUI does dispatch -- backend exec allowlist and
+    native WebUI behaviors -- must keep appearing in autocomplete."""
+    result = _run_commands_js(
+        """
+        await loadAgentCommandMetadata(true);
+        const reload = await getSlashAutocompleteMatches('/reload');
+        const sessions = await getSlashAutocompleteMatches('/sessions');
+        const resume = await getSlashAutocompleteMatches('/resume');
+        const plugin = await getSlashAutocompleteMatches('/plugin');
+        return {
+          reload_names: reload.map(item => item.name),
+          reload_sources: reload.map(item => item.source),
+          sessions_names: sessions.map(item => item.name),
+          resume_names: resume.map(item => item.name),
+          plugin_names: plugin.map(item => item.name)
+        };
+        """
+    )
+    assert result["reload_names"] == ["reload-skills"]
+    assert result["reload_sources"] == ["agent"]
+    assert result["sessions_names"] == ["sessions"]
+    assert result["resume_names"] == ["resume"]
+    assert result["plugin_names"] == ["plugin-review"]
+
+
+def test_autocomplete_allowlist_covers_backend_exec_allowlist():
+    """#6951: every canonical backend-exec name from messages.js must be in the
+    commands.js dispatchable allowlist (announced list is a subset of the
+    dispatched list -- fail-closed)."""
+    assert "const _WEBUI_DISPATCHABLE_AGENT_COMMANDS=new Set([" in COMMANDS_JS
+    for slug in (
+        "'reload-mcp'",
+        "'reload_mcp'",
+        "'reload-skills'",
+        "'reload_skills'",
+        "'codex-runtime'",
+        "'codex_runtime'",
+        "'credits'",
+    ):
+        assert slug in COMMANDS_JS
+
+
+def test_busy_path_intercepts_stop_before_mode_routing():
+    """#6951: while busy, /stop must cancel the active run immediately instead
+    of being steered/queued as the literal text '/stop'."""
+    busy_idx = MESSAGES_JS.find("Busy-control slash commands must be intercepted")
+    assert busy_idx != -1
+    mode_idx = MESSAGES_JS.find("const defaultMessageMode=", busy_idx)
+    assert mode_idx != -1
+    busy_block = MESSAGES_JS[busy_idx:mode_idx]
+    assert "['steer','interrupt','queue','terminal','goal','yolo','stop']" in busy_block
+    assert "cmdStop" in busy_block or "COMMANDS.find(c=>c.name===_pc.name)" in busy_block
