@@ -2929,7 +2929,24 @@ function _modelStateForSelect(sel, modelId){
     opt=Array.from(sel.options).find(o=>String(o.value||'')===value)||null;
   }
   const provider=String(_getOptionProviderId(opt)||'').trim();
-  return {model:value,model_provider:(provider&&provider!=='default')?provider:null};
+  // Catalog-rendered OpenRouter preset options carry the provider prefix baked
+  // into their value ("openrouter/@preset/<name>") but never set data-model
+  // (that attribute is only set by the fallback injection path
+  // _ensureModelOptionInDropdown), so the raw value would otherwise be sent as
+  // the model id. Split a "<provider>/<qualified-id>" value on its FIRST slash
+  // when the prefix matches the option's own provider group and the remainder
+  // is a qualified id (e.g. "@preset/<name>") — send the qualified id as model
+  // with the provider split out (#6936). Vendor-prefixed model ids (e.g.
+  // "kilo/minimax/minimax-m3") are left untouched: their group provider does
+  // not equal their first-slash prefix, and their remainder is not '@'-qualified.
+  let resolvedModel=value;
+  const slashAt=value.indexOf('/');
+  const valuePrefix=slashAt>0?value.slice(0,slashAt):'';
+  const valueRest=slashAt>0?value.slice(slashAt+1):'';
+  if(valuePrefix&&valueRest.startsWith('@')&&provider&&valuePrefix.toLowerCase()===provider.toLowerCase()){
+    resolvedModel=valueRest;
+  }
+  return {model:resolvedModel,model_provider:(provider&&provider!=='default')?provider:null};
 }
 function _captureModelDropdownSelection(sel){
   if(!sel||!sel.value) return null;

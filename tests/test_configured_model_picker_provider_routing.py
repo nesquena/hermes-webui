@@ -160,6 +160,121 @@ def test_colon_bearing_missing_fallback_keeps_authoritative_provider():
     }
 
 
+# OpenRouter preset dropdown entries are rendered by the catalog with the
+# provider prefix baked into the option value ("openrouter/@preset/<name>") and
+# NEVER set data-model (that attribute is only set by the fallback injection
+# path _ensureModelOptionInDropdown). Regression for #6936: the model id sent
+# must be the qualified "@preset/<name>" with model_provider "openrouter" — NOT
+# the raw "openrouter/@preset/<name>" value (which the backend rejects with
+# HTTP 400 'openrouter/ is not a valid model ID').
+_OPENROUTER_PRESET_DRIVER = r"""
+const fs = require('fs');
+const uiSrc = fs.readFileSync(process.argv[1], 'utf8');
+
+function extractFunction(source, name) {
+  const marker = 'function ' + name + '(';
+  const start = source.indexOf(marker);
+  if (start < 0) throw new Error('not found: ' + name);
+  const brace = source.indexOf('{', source.indexOf(')', start));
+  let depth = 0;
+  for (let i = brace; i < source.length; i++) {
+    if (source[i] === '{') depth += 1;
+    else if (source[i] === '}') {
+      depth -= 1;
+      if (depth === 0) return source.slice(start, i + 1);
+    }
+  }
+  throw new Error('unterminated: ' + name);
+}
+
+eval([
+  '_getOptionProviderId',
+  '_providerFromModelValue',
+  '_modelStateForSelect',
+].map(name => extractFunction(uiSrc, name)).join('\n'));
+
+globalThis.document = {
+  createElement(tag) {
+    return {
+      tagName: String(tag).toUpperCase(),
+      value: '',
+      textContent: '',
+      dataset: {},
+      parentElement: null,
+    };
+  },
+};
+globalThis.getModelLabel = value => String(value || '');
+globalThis.window = { _configuredModelBadges: {} };
+
+const openrouterGroup = {tagName: 'OPTGROUP', dataset: {provider: 'openrouter'}};
+const preset = {
+  value: 'openrouter/@preset/deepseek-v4-flash',
+  textContent: '@preset/deepseek-v4-flash',
+  dataset: {},  // no data-model — normal catalog render path
+  parentElement: openrouterGroup,
+};
+const select = {
+  id: 'modelSelect',
+  options: [preset],
+  querySelectorAll() { return []; },
+  get selectedOptions() { return [preset]; },
+  get value() { return preset.value; },
+  set value(value) {},
+};
+
+// Sanity: a vendor-prefixed model id under a slash-bearing provider group must
+// NOT be stripped — its first-slash prefix ('kilo') does not match the group
+// provider ('kilo/minimax') and the remainder is not '@'-qualified.
+const kiloGroup = {tagName: 'OPTGROUP', dataset: {provider: 'kilo/minimax'}};
+const kilo = {
+  value: 'kilo/minimax/minimax-m3',
+  textContent: 'kilo/minimax/minimax-m3',
+  dataset: {},
+  parentElement: kiloGroup,
+};
+const kiloSelect = {
+  id: 'modelSelect',
+  options: [kilo],
+  querySelectorAll() { return []; },
+  get selectedOptions() { return [kilo]; },
+  get value() { return kilo.value; },
+  set value(value) {},
+};
+
+process.stdout.write(JSON.stringify({
+  preset: _modelStateForSelect(select, 'openrouter/@preset/deepseek-v4-flash'),
+  vendorPrefixed: _modelStateForSelect(kiloSelect, 'kilo/minimax/minimax-m3'),
+}));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_openrouter_preset_entry_strips_provider_prefix_from_model_id():
+    assert NODE is not None
+    result = subprocess.run(
+        [NODE, "-e", _OPENROUTER_PRESET_DRIVER, str(UI_JS)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+
+    # #6936: the catalog-rendered preset option carries "openrouter/" baked into
+    # its value, so the model id must be the qualified "@preset/<name>" with the
+    # provider split out — not the raw "openrouter/@preset/<name>" value.
+    assert payload["preset"] == {
+        "model": "@preset/deepseek-v4-flash",
+        "model_provider": "openrouter",
+    }
+    # Sanity: vendor-prefixed model ids must keep their full value untouched.
+    assert payload["vendorPrefixed"] == {
+        "model": "kilo/minimax/minimax-m3",
+        "model_provider": "kilo/minimax",
+    }
+
+
 _RENDERED_CLICK_DRIVER = r"""
 
 const fs = require('fs');
