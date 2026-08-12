@@ -3204,6 +3204,22 @@ def get_effective_default_model(config_data: dict | None = None) -> str:
 # Keep this WebUI-visible set aligned with hermes-agent#29248.
 VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max")
 
+# GPT-5-family model ids that DO accept 'max' on the OpenAI-family lanes.
+# The blanket `gpt-5*` -> strip-'max' rule below predates GPT-5.6, whose
+# published capabilities list 'max' explicitly (and whose Codex transport maps
+# the 'ultra' tier onto the 'max' wire value). Fail-closed: an unrecognised
+# future gpt-5.6-* id does NOT inherit 'max' until it is listed here.
+_OPENAI_MAX_REASONING_MODELS = frozenset({
+    "gpt-5.6-sol", "gpt-5.6-sol-pro",
+    "gpt-5.6-terra", "gpt-5.6-terra-pro",
+    "gpt-5.6-luna", "gpt-5.6-luna-pro",
+})
+_CODEX_MAX_REASONING_MODELS = frozenset({
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+})
+
 
 def parse_reasoning_effort(effort):
     """Parse an effort level into the dict the agent expects.
@@ -3527,12 +3543,17 @@ def _filter_reasoning_efforts_for_provider(
     normalized = list(dict.fromkeys(normalized))
     provider = _resolve_provider_alias(str(provider_id or "").strip().lower())
     bare = _strip_provider_hint_for_reasoning(model_id).lower().rsplit("/", 1)[-1]
-    # OpenAI-family lanes (Codex, direct OpenAI, Azure Foundry) cap GPT-5 at xhigh
-    # and o-series at high — 'max' is a WebUI-only level none of them accept.
+    # OpenAI-family lanes (Codex, direct OpenAI, Azure Foundry) cap o-series at
+    # high and GPT-5 at xhigh unless the exact lane/model pair is allowlisted.
     if provider in {"openai-codex", "openai", "openai-api", "azure-foundry", "azure-openai", "azure"}:
         if bare.startswith(("o1", "o3", "o4")):
             return [eff for eff in normalized if eff in {"low", "medium", "high"}]
-        if bare.startswith("gpt-5"):
+        max_models = (
+            _CODEX_MAX_REASONING_MODELS
+            if provider == "openai-codex"
+            else _OPENAI_MAX_REASONING_MODELS
+        )
+        if bare.startswith("gpt-5") and bare not in max_models:
             return [eff for eff in normalized if eff != "max"]
     # 'max' is a WebUI-level ceiling; providers whose native ladder tops out lower
     # must NOT advertise it, otherwise a stored/CLI 'max' degrades WORSE than the
