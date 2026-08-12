@@ -92,6 +92,16 @@ def _normalize_limit(limit: Any) -> int:
     return min(value, _MAX_LIMIT)
 
 
+def _normalize_include_archived(include_archived: Any) -> bool:
+    if type(include_archived) is not bool:
+        raise ValueError("include_archived must be a boolean")
+    return include_archived
+
+
+def _persisted_profile_matches(value: Any, profile: str) -> bool:
+    return (value is None or isinstance(value, str)) and _profiles_match(value, profile)
+
+
 def _cursor_scope(project_id: str, profile: str, roles: tuple[str, ...], include_archived: bool) -> str:
     payload = json.dumps(
         [_CLASSIFIER_VERSION, project_id, profile, sorted(roles), bool(include_archived)],
@@ -150,7 +160,7 @@ def _project_for_profile(projects_file: Path, project_id: str, profile: str) -> 
             row
             for row in _load_json_list(projects_file)
             if str(row.get("project_id") or "") == project_id
-            and _profiles_match(row.get("profile"), profile)
+            and _persisted_profile_matches(row.get("profile"), profile)
         ),
         None,
     )
@@ -174,6 +184,8 @@ def _eligible_session_metadata(
         "missing_sidecars": 0,
         "unreadable_sidecars": 0,
         "membership_mismatches": 0,
+        "invalid_sidecar_rows": 0,
+        "invalid_archive_rows": 0,
         "archived_sessions_excluded": 0,
     }
     eligible: dict[str, dict[str, Any]] = {}
@@ -183,13 +195,20 @@ def _eligible_session_metadata(
     for row in index_rows:
         if "project_id" in row and row.get("project_id") != project_id:
             continue
-        if "profile" in row and not _profiles_match(row.get("profile"), profile):
+        row_profile = row.get("profile")
+        if "profile" in row and not (row_profile is None or isinstance(row_profile, str)):
+            diagnostics["invalid_index_rows"] += 1
+            continue
+        if "profile" in row and not _persisted_profile_matches(row_profile, profile):
+            continue
+        if "archived" in row and type(row["archived"]) is not bool:
+            diagnostics["invalid_archive_rows"] += 1
             continue
         sid = str(row.get("session_id") or "")
         if not is_safe_session_id(sid):
             diagnostics["invalid_index_rows"] += 1
             continue
-        if row.get("project_id") != project_id or not _profiles_match(row.get("profile"), profile):
+        if row.get("project_id") != project_id or not _persisted_profile_matches(row_profile, profile):
             continue
         diagnostics["index_rows_considered"] += 1
         sidecar_path = session_dir / f"{sid}.json"
@@ -200,14 +219,21 @@ def _eligible_session_metadata(
         if sidecar is None:
             diagnostics["unreadable_sidecars"] += 1
             continue
+        sidecar_profile = sidecar.get("profile")
+        if not (sidecar_profile is None or isinstance(sidecar_profile, str)):
+            diagnostics["invalid_sidecar_rows"] += 1
+            continue
+        if "archived" in sidecar and type(sidecar["archived"]) is not bool:
+            diagnostics["invalid_archive_rows"] += 1
+            continue
         if (
             str(sidecar.get("session_id") or "") != sid
             or sidecar.get("project_id") != project_id
-            or not _profiles_match(sidecar.get("profile"), profile)
+            or not _persisted_profile_matches(sidecar_profile, profile)
         ):
             diagnostics["membership_mismatches"] += 1
             continue
-        archived = bool(sidecar.get("archived", row.get("archived", False)))
+        archived = sidecar.get("archived", row.get("archived", False))
         if archived and not include_archived:
             diagnostics["archived_sessions_excluded"] += 1
             continue
@@ -277,6 +303,23 @@ def _message_tail_sql(
     return sql, params
 
 
+def _invalid_timestamp_probe_sql(roles: tuple[str, ...], *, has_active: bool) -> tuple[str, list[Any]]:
+    role_placeholders = ",".join("?" for _ in roles)
+    clauses = [
+        f"LOWER(role) IN ({role_placeholders})",
+        "(timestamp IS NULL OR typeof(timestamp) NOT IN ('integer', 'real') "
+        "OR timestamp > 1.7976931348623157e308 OR timestamp < -1.7976931348623157e308)",
+    ]
+    if has_active:
+        clauses.append("(active IS NULL OR active != 0)")
+    sql = (
+        "SELECT timestamp FROM messages WHERE session_id = ? AND "
+        + " AND ".join(clauses)
+        + " LIMIT ?"
+    )
+    return sql, list(roles)
+
+
 def recent_project_messages(
     *,
     project_id: str,
@@ -302,7 +345,7 @@ def recent_project_messages(
         raise ValueError("project_id is required")
     normalized_roles = _normalize_roles(roles)
     normalized_limit = _normalize_limit(limit)
-    include_archived = bool(include_archived)
+    include_archived = _normalize_include_archived(include_archived)
     cursor_scope = _cursor_scope(project_id, profile, normalized_roles, include_archived)
     decoded_before = _decode_cursor(before, cursor_scope)
     projects_path = Path(projects_file)
@@ -325,6 +368,7 @@ def recent_project_messages(
             "candidate_rows_read": 0,
             "classifier_scan_saturated_sessions": 0,
             "invalid_timestamp_rows": 0,
+            "invalid_timestamp_probe_saturated_sessions": 0,
         }
     )
 
@@ -350,12 +394,31 @@ def recent_project_messages(
                         source = sources.get(sid)
                         if source is None or source in _SYNTHETIC_SESSION_SOURCES:
                             continue
+                        has_active = "active" in message_columns
+                        scan_limit = max(_MIN_SCAN_ROWS, normalized_limit * _SCAN_MULTIPLIER)
+                        probe_sql, probe_params = _invalid_timestamp_probe_sql(
+                            normalized_roles,
+                            has_active=has_active,
+                        )
+                        invalid_timestamp_rows = conn.execute(
+                            probe_sql,
+                            [sid, *probe_params, scan_limit + 1],
+                        ).fetchall()
+                        for invalid_row in invalid_timestamp_rows[:scan_limit]:
+                            try:
+                                probe_timestamp = float(invalid_row["timestamp"])
+                            except (TypeError, ValueError):
+                                diagnostics["invalid_timestamp_rows"] += 1
+                                continue
+                            if not math.isfinite(probe_timestamp):
+                                diagnostics["invalid_timestamp_rows"] += 1
+                        if len(invalid_timestamp_rows) > scan_limit:
+                            diagnostics["invalid_timestamp_probe_saturated_sessions"] += 1
                         sql, tail_params = _message_tail_sql(
                             normalized_roles,
                             decoded_before,
-                            has_active="active" in message_columns,
+                            has_active=has_active,
                         )
-                        scan_limit = max(_MIN_SCAN_ROWS, normalized_limit * _SCAN_MULTIPLIER)
                         fetched = conn.execute(
                             sql,
                             [sid, *tail_params, scan_limit + 1],
@@ -368,10 +431,8 @@ def recent_project_messages(
                             try:
                                 timestamp = float(row["timestamp"])
                             except (TypeError, ValueError):
-                                diagnostics["invalid_timestamp_rows"] += 1
                                 continue
                             if not math.isfinite(timestamp):
-                                diagnostics["invalid_timestamp_rows"] += 1
                                 continue
                             rows.append(
                                 {
@@ -425,12 +486,15 @@ def recent_project_messages(
         "missing_sidecars",
         "unreadable_sidecars",
         "membership_mismatches",
+        "invalid_sidecar_rows",
+        "invalid_archive_rows",
         "missing_state_db_sessions",
         "state_db_schema_unavailable",
         "state_db_read_error",
         "state_db_unavailable",
         "classifier_scan_saturated_sessions",
         "invalid_timestamp_rows",
+        "invalid_timestamp_probe_saturated_sessions",
     )
     partial = any(int(diagnostics.get(key, 0) or 0) > 0 for key in partial_keys)
     return {

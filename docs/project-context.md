@@ -25,7 +25,8 @@ The tool accepts:
 - `limit` (optional): defaults to 5 and is capped at 20.
 - `before` (optional): the opaque `next_before` value from a prior response.
 - `include_archived` (optional): defaults to `false`. Set it to `true` to include
-  sessions whose authoritative sidecar metadata is archived.
+  sessions whose authoritative sidecar metadata is archived. Only JSON booleans
+  are accepted; strings and numbers are rejected.
 
 ## Response and ordering
 
@@ -88,7 +89,11 @@ Missing, malformed, deleted, foreign-profile, unassigned, or conflicting rows
 fail closed and contribute only count diagnostics. Diagnostics never contain
 excluded session IDs or content. `partial` is true when a candidate cannot be
 confirmed because a sidecar, database row/schema, read, bounded classifier
-window, or timestamp is unavailable.
+window, archive flag, or timestamp is unavailable. Persisted profile values must
+be strings or null, and persisted archive values must be booleans. A bounded,
+cursor-independent probe counts NULL timestamps (including NaN values normalized
+to NULL by SQLite); saturation is reported as partial rather than scanning an
+unbounded transcript.
 Missing or malformed session indexes are likewise partial, never a silently
 complete empty result. Opaque cursors are bound to the project, profile, roles,
 archive policy, and classifier version that created them; cross-scope or

@@ -228,6 +228,47 @@ def test_profile_and_project_ownership_fail_closed(project_store):
         )
 
 
+@pytest.mark.parametrize("malformed_profile", [["research"], {"name": "research"}])
+def test_malformed_project_profile_is_generic_not_found(project_store, malformed_profile):
+    _write_json(
+        project_store["projects_file"],
+        [{"project_id": PROJECT_ID, "name": "Example", "profile": malformed_profile}],
+    )
+
+    with pytest.raises(LookupError, match="^Project not found$"):
+        _read(project_store)
+
+
+@pytest.mark.parametrize("metadata_source", ["index", "sidecar"])
+def test_malformed_matching_scope_session_profile_is_excluded_and_counted(
+    project_store, metadata_source
+):
+    _seed(
+        project_store,
+        [{"session_id": "valid"}, {"session_id": "malformed"}],
+        [
+            ("valid", "user", "safe", 1.0),
+            ("malformed", "user", "must not leak", 2.0),
+        ],
+    )
+    if metadata_source == "index":
+        index = json.loads(project_store["session_index_file"].read_text(encoding="utf-8"))
+        index[1]["profile"] = [PROFILE]
+        _write_json(project_store["session_index_file"], index)
+    else:
+        sidecar_path = project_store["session_dir"] / "malformed.json"
+        sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        sidecar["profile"] = {"name": PROFILE}
+        _write_json(sidecar_path, sidecar)
+
+    result = _read(project_store)
+
+    assert [message["content"] for message in result["messages"]] == ["safe"]
+    assert result["partial"] is True
+    diagnostic = "invalid_index_rows" if metadata_source == "index" else "invalid_sidecar_rows"
+    assert result["diagnostics"][diagnostic] == 1
+
+
 def test_missing_or_disagreeing_sidecars_are_excluded_with_count_only_diagnostics(project_store):
     _seed(
         project_store,
@@ -425,6 +466,40 @@ def test_archived_sessions_are_opt_in(project_store):
     ]
 
 
+@pytest.mark.parametrize("include_archived", ["false", 0, 1, None, [], {}])
+def test_include_archived_accepts_only_real_booleans(project_store, include_archived):
+    with pytest.raises(ValueError, match="include_archived must be a boolean"):
+        _read(project_store, include_archived=include_archived)
+
+
+@pytest.mark.parametrize("metadata_source", ["index", "sidecar"])
+def test_malformed_persisted_archive_value_is_excluded_and_counted(project_store, metadata_source):
+    _seed(
+        project_store,
+        [{"session_id": "valid"}, {"session_id": "malformed"}],
+        [
+            ("valid", "user", "safe", 1.0),
+            ("malformed", "user", "must not leak", 2.0),
+        ],
+    )
+    index = json.loads(project_store["session_index_file"].read_text(encoding="utf-8"))
+    sidecar_path = project_store["session_dir"] / "malformed.json"
+    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    if metadata_source == "index":
+        index[1]["archived"] = "false"
+        sidecar.pop("archived")
+        _write_json(project_store["session_index_file"], index)
+    else:
+        sidecar["archived"] = "false"
+    _write_json(sidecar_path, sidecar)
+
+    result = _read(project_store)
+
+    assert [message["content"] for message in result["messages"]] == ["safe"]
+    assert result["partial"] is True
+    assert result["diagnostics"]["invalid_archive_rows"] == 1
+
+
 def test_large_corpus_reads_only_a_bounded_tail_per_eligible_session(project_store):
     sessions = [{"session_id": f"session_{i}"} for i in range(3)]
     messages = []
@@ -461,6 +536,20 @@ def test_compacted_inactive_messages_are_not_returned(project_store):
     result = _read(project_store, limit=5)
 
     assert [m["content"] for m in result["messages"]] == ["active"]
+
+
+def test_legacy_null_active_messages_remain_visible(project_store):
+    with sqlite3.connect(project_store["state_db_path"]) as conn:
+        conn.execute("ALTER TABLE messages ADD COLUMN active INTEGER")
+    _seed(
+        project_store,
+        [{"session_id": "session_a"}],
+        [("session_a", "user", "legacy-null-active", 1.0)],
+    )
+
+    result = _read(project_store)
+
+    assert [message["content"] for message in result["messages"]] == ["legacy-null-active"]
 
 
 def test_synthetic_tail_saturation_fails_bounded_and_reports_partial(project_store):
@@ -587,6 +676,67 @@ def test_malformed_and_non_finite_timestamps_fail_closed_per_row(project_store):
     decoded = json.loads(cursor_json, parse_constant=reject_non_standard_constant)
     assert decoded[0] == 2
     assert decoded[2] == 1.0
+
+
+@pytest.mark.parametrize("stored_timestamp", [None, float("nan")])
+def test_null_and_sqlite_nan_timestamps_are_counted_on_initial_and_cursor_pages(
+    project_store, stored_timestamp
+):
+    _seed(
+        project_store,
+        [{"session_id": "session_a"}],
+        [
+            ("session_a", "user", "new", 2.0),
+            ("session_a", "user", "old", 1.0),
+            ("session_a", "user", "invalid", stored_timestamp),
+        ],
+    )
+
+    first = _read(project_store, limit=1)
+    second = _read(project_store, limit=1, before=first["next_before"])
+
+    assert [message["content"] for message in first["messages"]] == ["new"]
+    assert [message["content"] for message in second["messages"]] == ["old"]
+    for page in (first, second):
+        assert page["partial"] is True
+        assert page["diagnostics"]["invalid_timestamp_rows"] == 1
+
+
+def test_malformed_timestamp_diagnostics_are_cursor_independent(project_store):
+    _seed(
+        project_store,
+        [{"session_id": "session_a"}],
+        [
+            ("session_a", "user", "new", 2.0),
+            ("session_a", "user", "old", 1.0),
+            ("session_a", "user", "invalid", "not-a-timestamp"),
+        ],
+    )
+
+    first = _read(project_store, limit=1)
+    second = _read(project_store, limit=1, before=first["next_before"])
+
+    for page in (first, second):
+        assert page["partial"] is True
+        assert page["diagnostics"]["invalid_timestamp_rows"] == 1
+
+
+def test_invalid_timestamp_probe_is_bounded_and_saturation_is_partial(project_store):
+    _seed(
+        project_store,
+        [{"session_id": "session_a"}],
+        [
+            ("session_a", "user", "valid", 1.0),
+            *[("session_a", "user", f"invalid-{index}", None) for index in range(21)],
+        ],
+    )
+
+    result = _read(project_store, limit=1)
+
+    assert [message["content"] for message in result["messages"]] == ["valid"]
+    assert result["partial"] is True
+    assert result["diagnostics"]["invalid_timestamp_rows"] == 20
+    assert result["diagnostics"]["invalid_timestamp_probe_saturated_sessions"] == 1
 
 
 def test_limit_contract_is_default_five_and_max_twenty(project_store):

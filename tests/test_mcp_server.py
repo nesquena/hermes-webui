@@ -270,6 +270,23 @@ async def _call(mod, tool_name, **kwargs):
     return json.loads(result[0].text)
 
 
+async def test_recent_project_messages_rejects_non_boolean_include_archived():
+    state_dir = _fresh_state_dir()
+    try:
+        mod, _profiles = _reimport_mcp()
+
+        result = await _call(
+            mod,
+            "recent_project_messages",
+            project_id="project00001",
+            include_archived="false",
+        )
+
+        assert result == {"error": "include_archived must be a boolean"}
+    finally:
+        _cleanup_state_dir(state_dir)
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 #  Project CRUD
 # ═══════════════════════════════════════════════════════════════════════════
