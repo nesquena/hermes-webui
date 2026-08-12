@@ -5,6 +5,7 @@ import inspect
 import sys
 
 import api.config as config
+from api.gateway_chat import _gateway_reasoning_effort_for_request
 from api.models import Session
 
 
@@ -12,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ROUTES = (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
 STREAMING = (ROOT / "api" / "streaming.py").read_text(encoding="utf-8")
 UI = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+INDEX = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 
 
 def test_session_persists_reasoning_effort_in_compact_metadata(tmp_path, monkeypatch):
@@ -58,6 +60,29 @@ def test_effective_reasoning_has_standalone_fallback_without_agent_module(monkey
 
     assert config.resolve_effective_reasoning_effort(cfg, "@openai-codex:gpt-5.6-sol") == "low"
     assert config.resolve_effective_reasoning_effort(cfg, "other-model") == "medium"
+
+
+def test_standalone_fallback_skips_invalid_override_and_preserves_disabled_aliases(monkeypatch):
+    monkeypatch.setitem(sys.modules, "hermes_constants", None)
+    monkeypatch.setattr(config, "resolve_model_reasoning_efforts", lambda *a, **k: list(config.VALID_REASONING_EFFORTS))
+    cfg = {"agent": {"reasoning_effort": False, "reasoning_overrides": {"gpt-5-6-sol": "bogus"}}}
+
+    assert config.resolve_effective_reasoning_effort(cfg, "openai/gpt-5.6-sol") == "none"
+
+
+def test_ultra_is_valid_and_gateway_uses_session_aware_resolution(monkeypatch):
+    monkeypatch.setitem(sys.modules, "hermes_constants", None)
+    monkeypatch.setattr(config, "resolve_model_reasoning_efforts", lambda *a, **k: list(config.VALID_REASONING_EFFORTS))
+    cfg = {"agent": {"reasoning_effort": "medium", "reasoning_overrides": {"gpt-5.6-sol": "xhigh"}}}
+
+    assert config.parse_reasoning_effort("ultra") == {"enabled": True, "effort": "ultra"}
+    assert 'data-effort="ultra"' in INDEX
+    assert _gateway_reasoning_effort_for_request(
+        cfg, model="gpt-5.6-sol", model_provider="openai-codex", session_effort="ultra"
+    ) == "ultra"
+    assert _gateway_reasoning_effort_for_request(
+        cfg, model="gpt-5.6-sol", model_provider="openai-codex"
+    ) == "xhigh"
 
 
 def test_reasoning_parameter_does_not_shift_legacy_session_arguments():
