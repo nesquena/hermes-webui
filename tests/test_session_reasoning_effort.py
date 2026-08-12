@@ -118,6 +118,14 @@ def test_reasoning_chip_queries_session_and_writes_session_update():
     assert "reasoning_effort:effort" in UI
 
 
+def test_reasoning_chip_ignores_response_after_session_switch():
+    fetch = UI.split("function fetchReasoningChip(keyOverride){", 1)[1].split(
+        "function refreshProfileTransitionReasoningChip", 1
+    )[0]
+    assert "const requestedSessionId=" in fetch
+    assert fetch.count("currentSessionId!==requestedSessionId") == 2
+
+
 def test_clearing_session_effort_refetches_effective_model_override():
     click_handler = UI.split("if(e.target.closest('.reasoning-option')){", 1)[1].split("// ── Session toolsets chip", 1)[0]
     assert "if(!effort) fetchReasoningChip()" in click_handler
