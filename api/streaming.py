@@ -12586,10 +12586,7 @@ def cancel_stream(stream_id: str) -> bool:
                 logger.debug("Failed to clear session state on cancel for %s", _cancel_session_id)
 
     if _emit_cancel_event and q:
-        _payload = _cancel_event_payload(
-            'Cancelled by user',
-            session=_cancel_session_payload,
-        )
+        _payload = _cancel_event_payload('Cancelled by user', session=_cancel_session_payload)
         try:
             from api.run_journal import append_run_event
 

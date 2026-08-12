@@ -510,7 +510,9 @@ def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp
         [],
     )
     empty_event_names = [item[0] for item in empty_events]
-    assert "apperror" not in empty_event_names
+    assert "apperror" in empty_event_names
+    empty_apperror = next(item[1] for item in empty_events if item[0] == "apperror")
+    assert empty_apperror["type"] == "gateway_empty_response"
     assert empty_event_names[-2:] == ["done", "stream_end"]
     empty_saved = models.get_session(s.session_id)
     assert empty_saved.messages[-1].get("_error") is True
