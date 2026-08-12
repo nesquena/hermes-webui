@@ -284,6 +284,51 @@ def test_named_custom_provider_model_reasoning_efforts_take_precedence(monkeypat
             monkeypatch.setitem(cfg.cfg, "custom_providers", original)
 
 
+def test_model_only_top_tiers_remain_authoritative_in_public_filter(monkeypatch):
+    monkeypatch.setitem(cfg.cfg, "custom_providers", [{
+        "name": "llm-proxy",
+        "models": {"inkling": {"reasoning_efforts": ["high", "max", "ultra"]}},
+    }])
+    assert cfg.resolve_model_reasoning_efforts(
+        "inkling", provider_id="custom:llm-proxy"
+    ) == ["high", "max", "ultra"]
+    for effort in ("max", "ultra"):
+        assert cfg.coerce_reasoning_effort_for_model(
+            effort, "inkling", provider_id="custom:llm-proxy"
+        ) == effort
+
+
+def test_actual_metadata_ladder_retains_max(monkeypatch):
+    monkeypatch.setattr(
+        cfg, "_models_dev_reasoning_efforts",
+        lambda *args, **kwargs: ["minimal", "low", "medium", "high", "xhigh", "max"],
+    )
+    efforts = cfg.resolve_model_reasoning_efforts("glm-5.2-nvfp4", provider_id="actual")
+    assert "max" in efforts
+    assert cfg.coerce_reasoning_effort_for_model(
+        "max", "glm-5.2-nvfp4", provider_id="actual"
+    ) == "max"
+
+
+def test_copilot_standalone_fallback_caps_gpt56(monkeypatch):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fail_cli_models(name, *args, **kwargs):
+        if name == "hermes_cli.models":
+            raise ImportError("forced standalone fallback")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fail_cli_models)
+    efforts = cfg.resolve_model_reasoning_efforts("gpt-5.6-sol", provider_id="copilot")
+    assert efforts == ["minimal", "low", "medium", "high"]
+    for effort in ("xhigh", "max", "ultra"):
+        assert cfg.coerce_reasoning_effort_for_model(
+            effort, "gpt-5.6-sol", provider_id="copilot"
+        ) == "high"
+
+
 def test_model_reasoning_efforts_fall_back_to_provider_when_invalid(monkeypatch):
     original = cfg.cfg.get("providers")
     monkeypatch.setitem(
@@ -802,19 +847,12 @@ def test_aggregator_routes_cap_older_gpt5_and_o_series():
 
 
 def test_copilot_fallback_caps_max_ultra():
-    # Finding 3: the Copilot heuristic fallback handed out the full global list
-    # for ANY gpt-5 id; only GPT-5.6 may keep max/ultra.
-    efforts = cfg._heuristic_reasoning_efforts("gpt-5.5", "copilot")
-    assert efforts, "copilot gpt-5.5 fallback must keep the standard ladder"
-    assert "xhigh" in efforts
-    assert "max" not in efforts and "ultra" not in efforts
+    # The standalone fallback mirrors Agent's static high ceiling for every
+    # Copilot GPT-5 model, including GPT-5.6.
+    expected = ["minimal", "low", "medium", "high"]
+    assert cfg._heuristic_reasoning_efforts("gpt-5.5", "copilot") == expected
+    assert cfg._heuristic_reasoning_efforts("gpt-5.6-sol", "copilot") == expected
     assert cfg._heuristic_reasoning_efforts("o3", "github-copilot") == ["low", "medium", "high"]
-    efforts56 = cfg._heuristic_reasoning_efforts("gpt-5.6-sol", "copilot")
-    assert "max" in efforts56 and "ultra" in efforts56
-    # Coercion agrees even when the sourced list came from the fallback.
-    assert cfg.coerce_reasoning_effort_for_model(
-        "ultra", "gpt-5.5", provider_id="copilot"
-    ) == "xhigh"
 
 
 def test_metadata_unavailable_fallback_applies_gpt56_check(monkeypatch):

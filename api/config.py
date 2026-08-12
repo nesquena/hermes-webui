@@ -3589,7 +3589,9 @@ def _filter_reasoning_efforts_for_provider(
     # provider id skips this gate: the caller simply didn't name a provider,
     # which is not the same as naming one we don't recognize. (#6018)
     if provider and not _provider_known_reasoning_capable(provider):
-        allow = set(_provider_configured_reasoning_efforts(provider))
+        # The model-scoped allowlist is the most specific operator authority.
+        allow = set(_configured_model_reasoning_efforts(provider, model_id))
+        allow.update(_provider_configured_reasoning_efforts(provider))
         normalized = [
             eff for eff in normalized
             if eff not in {"max", "ultra"} or eff in allow
@@ -3611,7 +3613,7 @@ _KNOWN_REASONING_PROVIDERS = frozenset({
     # (Canonical post-alias slugs; e.g. xai-oauth is the xAI Grok OAuth lane.)
     "xai-oauth", "zai", "kimi-coding", "minimax", "minimax-cn",
     "opencode-zen", "opencode-go", "mistralai", "alibaba",
-    "nvidia", "xiaomi",
+    "nvidia", "xiaomi", "actual",
 })
 
 
@@ -3713,12 +3715,8 @@ def _heuristic_reasoning_efforts(model_id: str, provider_id: str) -> list[str]:
         if bare.startswith(("gpt-5", "o1", "o3", "o4")):
             if bare.startswith(("o1", "o3", "o4")):
                 return ["low", "medium", "high"]
-            # Copilot fallback: never hand out the generic top tiers for GPT-5
-            # generations that reject them — the filter applies the GPT-5.6
-            # model check so only 5.6 keeps max/ultra. (#6018)
-            return _filter_reasoning_efforts_for_provider(
-                list(VALID_REASONING_EFFORTS), model, provider
-            )
+            # Mirror Hermes Agent's static no-catalog Copilot GPT-5 ceiling.
+            return ["minimal", "low", "medium", "high"]
     prefixes = (
         "deepseek/",
         "anthropic/",
@@ -4057,6 +4055,35 @@ def _configured_reasoning_effort_lists(provider_entry, model_id: str) -> list:
 
     configured_lists.append(provider_entry.get("reasoning_efforts"))
     return configured_lists
+
+
+def _configured_model_reasoning_efforts(provider_id: str, model_id: str) -> list[str]:
+    """Return the explicit model-level effort allowlist for a provider route."""
+    provider = str(provider_id or "").strip().lower()
+    model = _strip_provider_hint_for_reasoning(model_id, provider)
+    provider_entry = None
+    try:
+        if provider.startswith("custom:"):
+            provider_entry = next(
+                (
+                    entry for entry in _custom_provider_entries()
+                    if _custom_provider_slug_from_name(entry.get("name")) == provider
+                ),
+                None,
+            )
+        else:
+            candidate = (cfg.get("providers") or {}).get(provider)
+            provider_entry = candidate if isinstance(candidate, dict) else None
+    except Exception:
+        return []
+    configured = _configured_reasoning_effort_lists(provider_entry, model)
+    if not configured or not isinstance(configured[0], list):
+        return []
+    return [
+        str(level).strip().lower()
+        for level in configured[0]
+        if str(level).strip().lower() in {*VALID_REASONING_EFFORTS, "none"}
+    ]
 
 
 def _resolve_model_reasoning_efforts_impl(
