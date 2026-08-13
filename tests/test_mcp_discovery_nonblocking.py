@@ -52,6 +52,36 @@ def test_discovery_call_is_inside_a_nested_function():
     )
 
 
+def test_discovery_thread_uses_context_local_home_not_env():
+    """The thread must assert the profile home via hermes-agent's contextvar.
+
+    Regression: the discovery thread originally re-wrote
+    ``os.environ['HERMES_HOME']``. The stream worker mutates that env var
+    under ``_ENV_LOCK`` and restores it at teardown, so a discovery thread
+    that outlives its stream (the whole point of backgrounding it — an
+    unreachable server holds the thread for the full connect timeout) would
+    write the stale profile into the process env and cross-contaminate other
+    streams. hermes-agent's ``get_hermes_home()`` resolves the context-local
+    override (`set_hermes_home_override`) before the env var, and that
+    override is thread-local — it dies with the discovery thread.
+    """
+    call_idx = _call_line_index()
+    preceding = LINES[max(0, call_idx - 16):call_idx]
+    assert any("set_hermes_home_override" in line for line in preceding), (
+        "The discovery thread must assert the profile home through the "
+        "context-local override (set_hermes_home_override), never by writing "
+        "os.environ['HERMES_HOME']."
+    )
+    assert not any(
+        "os.environ['HERMES_HOME']" in line
+        and "set_hermes_home_override" not in line
+        for line in preceding
+    ), (
+        "The discovery thread must not mutate os.environ['HERMES_HOME'] — "
+        "that env write races with the stream worker's _ENV_LOCK restore."
+    )
+
+
 def test_discovery_runs_in_a_daemon_background_thread():
     """The nested function must be spawned as a daemon thread, never joined."""
     call_idx = _call_line_index()

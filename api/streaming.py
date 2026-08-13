@@ -8726,15 +8726,36 @@ def _run_agent_streaming(
         # (`refresh_agent_mcp_tools`) folds tools from servers that finish
         # connecting mid-turn into this turn's first API call, so nothing is
         # lost — the turn just starts immediately.
+        #
+        # The thread re-asserts the stream's profile home through hermes-agent's
+        # CONTEXT-LOCAL override (`set_hermes_home_override`), which
+        # `get_hermes_home()` resolves before the env var.  It deliberately
+        # does NOT write `os.environ['HERMES_HOME']`: the worker mutates that
+        # under `_ENV_LOCK` and restores it at stream teardown, and a delayed
+        # discovery thread that outlives the stream would otherwise write the
+        # stale profile into the process env and cross-contaminate other
+        # streams (the same race as an unlocked env write).  The contextvar is
+        # thread-local — the discovery thread's override dies with the thread.
         try:
             from tools.mcp_tool import discover_mcp_tools
             _mcp_profile_home = os.environ.get('HERMES_HOME', '')
 
             def _discover_mcp_background():
                 try:
-                    if _mcp_profile_home:
-                        os.environ['HERMES_HOME'] = _mcp_profile_home
-                    discover_mcp_tools()
+                    from hermes_constants import (
+                        reset_hermes_home_override,
+                        set_hermes_home_override,
+                    )
+                    _mcp_home_token = (
+                        set_hermes_home_override(_mcp_profile_home)
+                        if _mcp_profile_home
+                        else None
+                    )
+                    try:
+                        discover_mcp_tools()
+                    finally:
+                        if _mcp_home_token is not None:
+                            reset_hermes_home_override(_mcp_home_token)
                 except Exception:
                     pass  # MCP not available or not configured — non-fatal
 
