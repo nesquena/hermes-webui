@@ -5970,12 +5970,14 @@ function _recordNonMessageScrollIntent(e){
       if(typeof _cancelBottomSettle==='function') _cancelBottomSettle();
     }
   }
-  // Any upward wheel that interrupts an active jump owner is a reader takeover,
-  // regardless of the programmatic-latch age (#6621): _cancelBottomSettle above
-  // restores the pre-jump snapshot, so without this a gentle wheel-up after the
+  // Any message-pane scroll input that interrupts an active jump owner is a
+  // reader takeover, regardless of direction or the programmatic-latch age
+  // (#6621): _cancelBottomSettle above restores the pre-jump snapshot, so
+  // without this a gentle wheel-up OR wheel-down (or a touch scroll) after the
   // latch expires would leave the reader pinned and let the next token snap to
-  // the bottom. Establish the unpinned reader-owned state explicitly.
-  if(jumpScrollOwned&&wheelUp){
+  // the bottom. Establish the unpinned reader-owned state explicitly; a reader
+  // who wants the bottom re-pins by reaching it (<=80px) or pressing End.
+  if(jumpScrollOwned&&(wheelUp||e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY!==0))){
     _messageUserUnpinned=true;
     _scrollPinned=false;
     _nearBottomCount=0;

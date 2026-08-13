@@ -715,3 +715,67 @@ console.log(JSON.stringify({
         "scrollPinned": False,
         "scrollTop": 707,
     }, "A wheel-up during the jump owner window must hand ownership to the reader unpinned, not leave them pinned mid-transcript (#6621)."
+
+
+def test_wheel_down_during_jump_owner_also_takes_reader_ownership():
+    """#6621 (Fable finding S3): a wheel-DOWN (or touch scroll) during the owner
+    window must ALSO hand ownership to the reader unpinned — not restore the
+    pinned snapshot and let the next streaming token yank to the bottom."""
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + r"""
+let _scrollPinned = true;
+let _messageUserUnpinned = false;
+let _nearBottomCount = 2;
+let _programmaticScroll = false;
+let _programmaticScrollSetAt = 0;
+let _messageJumpScrollGeneration = 0;
+let _messageJumpScrollOwner = null;
+let _messageJumpScrollSettleTimer = 0;
+let _lastScrollTop = null;
+let _lastMessageClientHeight = 0;
+let _newMessageCueVisible = false;
+let _messageScrollInputGeneration = 0;
+let _lastMessageWheelIntentMs = -Infinity;
+let _lastMessageScrollIntentMs = -Infinity;
+let _lastNonMessageScrollIntentMs = -Infinity;
+let _touchStartY = null;
+const performance = { now: () => 1000 };
+const PROGRAMMATIC_SCROLL_VALID_MS = 150;
+const container = { scrollHeight: 3510, clientHeight: 745, scrollTop: 707, contains: (t) => t === container };
+const messages = container;
+const document = { getElementById: (id) => (id === 'messages' ? messages : null) };
+const window = { _autoScrollFollow: true };
+function _messageJumpSessionId(){ return 'S1'; }
+function _cancelBottomSettle(){ _cancelMessageJumpScroll(); }
+function clearTimeout(){} function setTimeout(){ return 0; }
+function _scheduleMessageJumpScrollReconcile(){}
+function _syncScrollToBottomCue(){} function _updateSessionStartJumpButton(){}
+function _flushDeferredActiveSessionExternalRefresh(){}
+function _markMessageTouchScrollIntent(){}
+function _freshProgrammaticScrollActive(){
+  if (!_programmaticScroll) return false;
+  const a = performance.now() - _programmaticScrollSetAt;
+  if (!Number.isFinite(a) || a < 0 || a > PROGRAMMATIC_SCROLL_VALID_MS){ _programmaticScroll = false; return false; }
+  return true;
+}
+eval(extractFunc('_beginMessageJumpScroll'));
+eval(extractFunc('_finishMessageJumpScroll'));
+eval(extractFunc('_cancelMessageJumpScroll'));
+eval(extractFunc('_recordNonMessageScrollIntent'));
+
+_beginMessageJumpScroll(container);
+container.scrollTop = 707;
+_programmaticScrollSetAt = performance.now() - 200; // latch stale
+_recordNonMessageScrollIntent({ type: 'wheel', target: messages, deltaY: 5 }); // DOWNWARD
+console.log(JSON.stringify({
+  ownerCleared: _messageJumpScrollOwner === null,
+  messageUserUnpinned: _messageUserUnpinned,
+  scrollPinned: _scrollPinned,
+}));
+"""
+    result = json.loads(_run_node(source))
+    assert result == {
+        "ownerCleared": True,
+        "messageUserUnpinned": True,
+        "scrollPinned": False,
+    }, "A wheel-down during the jump owner window must also unpin the reader (#6621 S3)."
