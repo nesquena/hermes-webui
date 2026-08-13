@@ -69,10 +69,6 @@ services:
       # The agent's container detection (/.dockerenv) already auto-skips
       # credential chmod inside Docker, so HERMES_SKIP_CHMOD is redundant here.
       # - HERMES_HOME_MODE=0750
-      # Bind to 0.0.0.0 so that other services can reach the agent's api.
-      # We map the service to 127.0.0.1 with docker, so it won't be reachable
-      # outside the host
-      - API_SERVER_HOST=0.0.0.0
     restart: unless-stopped
     deploy:
       resources:
