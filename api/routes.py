@@ -11197,19 +11197,21 @@ def _handle_insights(handler, parsed) -> bool:
         idx = []
 
     for entry in idx:
-        created = entry.get("created_at", 0) or 0
-        updated = entry.get("updated_at", 0) or 0
-        # Session is relevant if it was created or updated within the calendar window.
-        if max(created, updated) < cutoff:
+        # One canonical timestamp (updated_at or created_at) drives BOTH
+        # admission and daily attribution, so totals and the daily series
+        # always describe the same window.  Interval-overlap admission
+        # previously let a crossing session into totals while its daily
+        # bucket fell outside the returned series.
+        ts = _session_usage_ts(entry)
+        # Session whose usage ts falls entirely before the window
+        if ts < cutoff:
             continue
-        # Session entirely after the window end - skip.  end_cutoff is an
-        # exclusive upper bound in absolute mode (next local midnight) and an
-        # inclusive one in trailing mode (now): equality is only excluded
-        # when the bound itself is exclusive.
-        if created and updated:
-            _sess_lo = min(created, updated)
-            if _sess_lo > end_cutoff or (end_exclusive and _sess_lo == end_cutoff):
-                continue
+        # Session whose usage ts falls entirely after the window.
+        # end_cutoff is an exclusive upper bound in absolute mode (next
+        # local midnight) and an inclusive one in trailing mode (now):
+        # equality is only excluded when the bound itself is exclusive.
+        if ts > end_cutoff or (end_exclusive and ts == end_cutoff):
+            continue
         sessions_data.append(entry)
 
     # Aggregate
@@ -11291,23 +11293,25 @@ def _handle_insights(handler, parsed) -> bool:
                         SELECT id, model, message_count, input_tokens, output_tokens,
                                estimated_cost_usd,
                                COALESCE(cache_read_tokens, 0) AS cache_read_tokens,
-                               started_at, ended_at
+                               started_at, ended_at,
+                               COALESCE(ended_at, started_at, 0) AS usage_ts
                         FROM sessions
-                        WHERE (started_at >= ? OR ended_at >= ?)
-                          AND (started_at {end_cmp} ? OR ended_at {end_cmp} ?)
+                        WHERE COALESCE(ended_at, started_at, 0) >= ?
+                          AND COALESCE(ended_at, started_at, 0) {end_cmp} ?
                           AND COALESCE(source, '') != 'webui'
-                    """, (cutoff, cutoff, end_cutoff, end_cutoff))
+                    """, (cutoff, end_cutoff))
                 except sqlite3.OperationalError:
                     cur.execute(f"""
                         SELECT id, model, message_count, input_tokens, output_tokens,
                                estimated_cost_usd,
                                0 AS cache_read_tokens,
-                               started_at, ended_at
+                               started_at, ended_at,
+                               COALESCE(ended_at, started_at, 0) AS usage_ts
                         FROM sessions
-                        WHERE (started_at >= ? OR ended_at >= ?)
-                          AND (started_at {end_cmp} ? OR ended_at {end_cmp} ?)
+                        WHERE COALESCE(ended_at, started_at, 0) >= ?
+                          AND COALESCE(ended_at, started_at, 0) {end_cmp} ?
                           AND COALESCE(source, '') != 'webui'
-                    """, (cutoff, cutoff, end_cutoff, end_cutoff))
+                    """, (cutoff, end_cutoff))
                 for row in cur.fetchall():
                     _input = _safe_usage_int(row["input_tokens"])
                     _output = _safe_usage_int(row["output_tokens"])
@@ -11335,7 +11339,7 @@ def _handle_insights(handler, parsed) -> bool:
                     bucket["cache_read_tokens"] += _cache_read
                     bucket["cost"] += _cost
 
-                    _ts = row["started_at"] or row["ended_at"] or 0
+                    _ts = row["usage_ts"] or 0
                     if _ts:
                         _dt = _time.localtime(_ts)
                         _day_key = _time.strftime("%Y-%m-%d", _dt)

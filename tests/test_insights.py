@@ -899,3 +899,71 @@ def test_insights_cache_hit_rate_is_none_without_cache_reads(monkeypatch, tmp_pa
     assert data["models"][0]["cache_hit_percent"] is None
     assert data["total_cache_hit_percent"] is None
 
+
+
+# ── #6970 review #3: single-timestamp admission contract ──────────────────
+# The API uses one canonical timestamp for both session admission and daily
+# attribution.  A session whose canonical timestamp falls outside the range
+# must be excluded even if the interval overlaps the range; a session whose
+# canonical timestamp falls inside must be included and its daily bucket
+# must land inside the returned series.  This guarantees totals and the
+# daily chart always describe the same window.
+
+
+def test_insights_absolute_range_webui_crossing_session_excluded(monkeypatch, tmp_path):
+    """A WebUI session crossing the boundary (created < cutoff, updated >=
+    end_cutoff) must be EXCLUDED: its canonical usage_ts = updated_at is
+    outside the window.  The old interval-overlap contract admitted it
+    (max>=cutoff, min<end_cutoff) but its daily bucket landed outside the
+    series.  Under the single-ts contract totals and daily series agree."""
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    start_ts = now - (10 * 86400)   # 10 days ago
+    end_ts = now - (2 * 86400)      # 2 days ago
+    entries = [
+        {
+            "session_id": "crossing",
+            "created_at": now - (15 * 86400),  # before cutoff
+            "updated_at": now,                   # after end_cutoff
+            "message_count": 5, "input_tokens": 500, "output_tokens": 200,
+            "estimated_cost": "0.0500", "model": "gpt-x",
+        },
+    ]
+    data = _call_insights(monkeypatch, tmp_path, entries,
+                          query=f"start={int(start_ts)}&end={int(end_ts)}", now=now)
+    # Crossing session is excluded.
+    assert data["total_sessions"] == 0
+    assert data["total_input_tokens"] == 0
+    # Daily series sum must agree with totals (both 0).
+    daily_sum = sum(d["sessions"] for d in data["daily_tokens"])
+    assert daily_sum == data["total_sessions"]
+
+
+def test_insights_absolute_range_state_db_crossing_session_included(monkeypatch, tmp_path):
+    """A CLI session started before the range and ended inside it must be
+    INCLUDED: its canonical usage_ts = ended_at falls inside the window.
+    The old contract admitted it (by overlap) but attributed to started_at
+    (outside the series).  Under the single-ts contract totals and daily
+    series agree."""
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    start_ts = now - (10 * 86400)   # 10 days ago
+    end_ts = now - (2 * 86400)      # 2 days ago
+    state_rows = [
+        {"id": "cli_crossing", "source": "cli", "model": "gpt-5.5",
+         "message_count": 3, "input_tokens": 300, "output_tokens": 150,
+         "estimated_cost_usd": 0.0300,
+         "started_at": now - (15 * 86400),       # before cutoff
+         "ended_at": now - (5 * 86400)},          # inside the range
+    ]
+    data = _call_insights_with_state_db(monkeypatch, tmp_path, [], state_rows,
+                                        query=f"start={int(start_ts)}&end={int(end_ts)}", now=now)
+    # Crossing session is included.
+    assert data["total_sessions"] == 1
+    assert data["total_input_tokens"] == 300
+    # Daily series must include the session's bucket.
+    daily_sum = sum(d["sessions"] for d in data["daily_tokens"])
+    assert daily_sum == data["total_sessions"]
+    # The session's bucket should be on the ended_at date.
+    ended_day = _day(now - (5 * 86400))
+    ended_bucket = next((d for d in data["daily_tokens"] if d["date"] == ended_day), None)
+    assert ended_bucket is not None, f"no bucket for ended day {ended_day}"
+    assert ended_bucket["input_tokens"] == 300
