@@ -2268,12 +2268,18 @@
   .workspace-toggle-btn:disabled{opacity:.38;cursor:not-allowed;}
   .chip.model{color:var(--accent-text);border-color:var(--accent-bg-strong);background:var(--accent-bg);}
   .messages-shell{flex:1;min-height:0;position:relative;display:flex;flex-direction:column;}
-    /* Chat todos tray (embedded task list inside the chat area).
-       Default alignment is LEFT: the right edge hosts the outline toggle
-       and the jump-to-start/end floating buttons. */
-    .chat-todos{margin:8px auto 0 16px;width:fit-content;min-width:260px;max-width:min(640px,calc(100% - 32px));flex-shrink:0;background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;box-shadow:0 1px 6px rgba(0,0,0,.12);z-index:5;}
-    .chat-todos[data-align="center"]{margin-left:auto;margin-right:auto;}
-    .chat-todos[data-align="right"]{margin-left:auto;margin-right:16px;}
+    /* Chat todos tray — floating panel at the top of the chat area.
+           Default alignment is LEFT: the right edge hosts the outline toggle
+           and the jump-to-start/end floating buttons.
+           Desktop (the default rule set): positioned ABSOLUTE so the tray does
+           NOT participate in the flex flow — it never pushes the message
+           stream down and never wastes vertical chat space. Collapsed by
+           default; expand on click.
+           Mobile (<=768px, see media query below): back to static full-width
+           in-flow placement, which is the natural phone layout. */
+        .chat-todos{position:absolute;top:8px;left:16px;right:auto;width:fit-content;min-width:260px;max-width:min(640px,calc(100% - 32px));background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;box-shadow:0 1px 6px rgba(0,0,0,.12);z-index:5;}
+        .chat-todos[data-align="center"]{left:50%;right:auto;transform:translateX(-50%);}
+        .chat-todos[data-align="right"]{left:auto;right:16px;transform:none;}
     .chat-todos-head{display:flex;align-items:center;gap:8px;width:100%;padding:9px 12px;background:transparent;border:none;cursor:pointer;color:var(--text);font-size:13px;font-weight:600;text-align:left;transition:background .12s;}
     .chat-todos-head:hover{background:var(--hover-bg);}
     .chat-todos-title{display:inline-flex;align-items:center;gap:7px;min-width:0;flex:1;}
@@ -2292,11 +2298,13 @@
     .chat-todos-row .todos-meta{font-size:10.5px;color:var(--muted);opacity:.65;margin-top:1px;}
     .chat-todos-empty{font-size:12px;color:var(--muted);padding:8px 2px;}
     @media(max-width:768px){
-      .chat-todos{margin:6px 10px 0;width:auto;min-width:0;max-width:none;}
-      .chat-todos[data-align="left"],.chat-todos[data-align="center"],.chat-todos[data-align="right"]{margin:6px 10px 0;}
-      .chat-todos-body{max-height:200px;}
-      .chat-todos-head{padding:8px 10px;}
-    }
+          .chat-todos{position:static;top:auto;left:auto;right:auto;transform:none;margin:6px 10px 0;width:auto;min-width:0;max-width:none;}
+          .chat-todos[data-align="left"],.chat-todos[data-align="center"],.chat-todos[data-align="right"]{transform:none;margin:6px 10px 0;}
+          .chat-todos[data-align="center"]{left:auto;right:auto;}
+          .chat-todos[data-align="right"]{left:auto;right:auto;}
+          .chat-todos-body{max-height:200px;}
+          .chat-todos-head{padding:8px 10px;}
+        }
     .messages{flex:1;overflow-y:auto;overflow-x:hidden;display:flex;flex-direction:column;min-height:0;position:relative;z-index:0;-webkit-overflow-scrolling:touch;touch-action:pan-y;overscroll-behavior-y:contain;overflow-anchor:auto;}
 @media (hover:hover) and (pointer:fine){.messages{overflow-anchor:none;}}
   /* Overlay scroll controls so they do not affect the transcript's native scroll geometry. */
@@ -3558,11 +3566,6 @@ body.tts-enabled .msg-tts-btn{display:inline-flex;align-items:center;}
 
 /* Empty state: add subtle gradient behind logo */
 .empty-state{background:radial-gradient(ellipse at 50% 20%,var(--accent-bg) 0%,transparent 60%);}
-/* When the chat todos tray is visible, it pushes the welcome panel down and
-   the gradient's 20% focus lands right under the tray, looking like a
-   full-width color band stuck behind it. Re-center the glow around the logo
-   so the area directly below the tray stays clean. */
-.messages-shell.has-chat-todos .empty-state{background:radial-gradient(ellipse at 50% 55%,var(--accent-bg) 0%,transparent 55%);}
 
 /* Remove old status-text from composer (kept for error messages only) */
 .status-text{font-size:11px;color:var(--muted);padding-left:2px;display:none;}

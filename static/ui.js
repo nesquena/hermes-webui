@@ -9237,10 +9237,6 @@ function _chatTodosReadPref(){
     return v==='1';
   }catch(_){return true;}
 }
-function _syncChatTodosShellClass(shell,on){
-  if(!shell) return;
-  shell.classList.toggle('has-chat-todos',!!on);
-}
 function _chatTodosWritePref(v){
   try{
     if(v)localStorage.setItem(CHAT_TODOS_LS_KEY,'1');
@@ -9332,21 +9328,16 @@ function renderChatTodos(){
   if(typeof $!=='function'||typeof document==='undefined') return;
   const tray=$('chatTodosPanel');
   if(!tray) return;
-  const shell=document.querySelector('.messages-shell');
   if(!chatTodosEnabled()||_chatTodosForceHidden){
     tray.hidden=true;
-    _syncChatTodosShellClass(shell,false);
     return;
   }
   const todos=_currentTodos();
   if(!todos.length){
     tray.hidden=true;
-    _syncChatTodosShellClass(shell,false);
     return;
   }
   tray.hidden=false;
-  _syncChatTodosShellClass(shell,true);
-  // welcome glow re-centers under .messages-shell.has-chat-todos (CSS)
   const summary=_chatTodosSummary(todos);
   const summaryEl=$('chatTodosSummary');
   if(summaryEl) summaryEl.textContent=summary.text;
@@ -9398,8 +9389,9 @@ function _initChatTodos(){
       return;
     }
     tray.hidden=false;
-    tray.classList.add('open');   // first load: expanded so it is discoverable
-    renderChatTodos();
+        // Desktop: tray floats; start collapsed so it never blocks the message
+        // stream. Users expand on demand (mobile keeps the same collapsed start).
+        renderChatTodos();
   }
 }
 
