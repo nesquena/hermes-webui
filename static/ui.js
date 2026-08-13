@@ -2802,10 +2802,32 @@ function _formatQuotaPercentShort(value){
   if(!Number.isFinite(n)) return '';
   return Math.max(0,Math.min(100,n)).toFixed(0)+'%';
 }
+// Provider of the model selected for this browser session, so the ambient
+// quota chip and the providers-panel quota card follow the session's provider
+// instead of always the global config default.
+function _sessionQuotaProvider(){
+  try{
+    // The provider actually running the open session wins over the picker's
+    // persisted state and the global config default.
+    if(typeof S!=='undefined'&&S&&S.session&&S.session.model_provider){
+      return String(S.session.model_provider);
+    }
+  }catch(_e){}
+  try{
+    const st=(typeof _readPersistedModelState==='function')?_readPersistedModelState():null;
+    if(st&&st.model_provider) return String(st.model_provider);
+  }catch(_e){}
+  return null;
+}
 function _providerQuotaIndicatorText(status){
   if(!status||status.status!=='available') return null;
   const provider=status.display_name||status.provider||'Provider';
   const accountLimits=status.account_limits||null;
+  // Flat subscriptions without a live quota API (e.g. Alibaba Token Plan)
+  // expose a compact volume label instead of a remaining percent.
+  if(accountLimits&&accountLimits.chip_label){
+    return {label:String(accountLimits.chip_label), title:provider+' — '+(status.message||'Provider usage loaded')};
+  }
   if(accountLimits&&Array.isArray(accountLimits.windows)&&accountLimits.windows.length){
     const w=accountLimits.windows.find(x=>x&&Number.isFinite(Number(x.remaining_percent)))||accountLimits.windows[0];
     const remaining=_formatQuotaPercentShort(w&&w.remaining_percent);
@@ -2871,7 +2893,8 @@ async function refreshProviderQuotaIndicator(){
   if(_providerQuotaRefreshInFlight) return;
   _providerQuotaRefreshInFlight=true;
   try{
-    const status=await api('/api/provider/quota');
+    const prov=_sessionQuotaProvider();
+    const status=await api('/api/provider/quota'+(prov?'?provider='+encodeURIComponent(prov):''));
     renderProviderQuotaIndicator(status);
   }catch(_e){
     renderProviderQuotaIndicator(null);

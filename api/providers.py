@@ -94,6 +94,9 @@ _ACCOUNT_USAGE_PROVIDERS = frozenset({
     "moonshot",
     "kimi-cn",
     "moonshot-cn",
+    # Alibaba Token Plan usage is computed locally by Hermes Agent from the
+    # recorded token history (the endpoint exposes no quota API).
+    "alibaba",
 })
 
 # Upper bound on simultaneous profile-isolated quota probe subprocesses.
@@ -1580,6 +1583,9 @@ def _serialize_account_usage_snapshot(snapshot: Any) -> dict[str, Any] | None:
     pool = getattr(snapshot, "pool", None)
     if isinstance(pool, dict):
         result["pool"] = pool
+    chip_label = str(getattr(snapshot, "chip_label", "") or "").strip()
+    if chip_label:
+        result["chip_label"] = chip_label
     return result
 
 
@@ -2108,6 +2114,41 @@ def _provider_account_usage_status(provider: str, display_name: str, *, refresh:
     }
 
 
+def _resolve_quota_provider(provider_id: str | None) -> str:
+    """Normalize a quota request slug onto a supported account-usage provider.
+
+    Custom provider slugs (e.g. ``qwen-cloud``) that point at the Alibaba
+    Token Plan endpoint should surface the alibaba local usage probe instead
+    of an unsupported status.
+    """
+    provider = (provider_id or "").strip().lower()
+    if not provider:
+        return provider
+    if provider in _ACCOUNT_USAGE_PROVIDERS:
+        return provider
+    markers = ("token-plan", "maas.aliyuncs.com")
+    try:
+        cfg = get_config()
+    except Exception:
+        return provider
+    providers_cfg = cfg.get("providers") or {}
+    candidates: list[str] = []
+    if isinstance(providers_cfg, dict):
+        pcfg = providers_cfg.get(provider)
+        if isinstance(pcfg, dict):
+            candidates.append(str(pcfg.get("api") or pcfg.get("base_url") or ""))
+    custom_providers = cfg.get("custom_providers", [])
+    if isinstance(custom_providers, list):
+        for cp in custom_providers:
+            if isinstance(cp, dict) and _custom_provider_name_matches(provider, cp.get("name")):
+                candidates.append(str(cp.get("base_url") or cp.get("api") or ""))
+    for base in candidates:
+        lowered = base.strip().lower()
+        if any(marker in lowered for marker in markers):
+            return "alibaba"
+    return provider
+
+
 def get_provider_quota(provider_id: str | None = None, *, refresh: bool = False) -> dict[str, Any]:
     """Return sanitized quota/rate-limit status for the active provider.
 
@@ -2115,7 +2156,9 @@ def get_provider_quota(provider_id: str | None = None, *, refresh: bool = False)
     providers reuse Hermes Agent's /usage account-limits abstraction so WebUI
     stays aligned with CLI/Gateway provider semantics.
     """
-    provider = (provider_id or _active_provider_id() or "").strip().lower()
+    provider = _resolve_quota_provider(
+        (provider_id or _active_provider_id() or "").strip().lower()
+    )
     if not provider:
         return {
             "ok": False,

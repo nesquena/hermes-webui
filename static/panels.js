@@ -11200,7 +11200,11 @@ const _SELF_HOSTED_DEFAULT_BASE_URLS = Object.freeze({
 });
 
 async function _fetchProviderQuotaStatus(force=false){
-  const endpoint=force?`/api/provider/quota?refresh=1&ts=${Date.now()}`:'/api/provider/quota';
+  const params=[];
+  if(force) params.push('refresh=1','ts='+Date.now());
+  const prov=(typeof _sessionQuotaProvider==='function')?_sessionQuotaProvider():null;
+  if(prov) params.push('provider='+encodeURIComponent(prov));
+  const endpoint='/api/provider/quota'+(params.length?'?'+params.join('&'):'');
   const status=await api(endpoint,{cache:'no-store'});
   if(status&&typeof status==='object') status.client_fetched_at=new Date().toISOString();
   return status;
