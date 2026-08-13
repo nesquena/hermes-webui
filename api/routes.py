@@ -44,6 +44,7 @@ from api.agent_sessions import (
     _looks_like_default_cli_title,
     is_cli_session_row,
     is_cli_session_row_visible,
+    read_session_lineage_metadata,
     read_session_lineage_report,
 )
 from api.compression_anchor import visible_messages_for_anchor
@@ -2526,6 +2527,7 @@ def _build_session_list_cache_payload(
         diag_stage("filter_archived_sessions")
     diag_stage("visible_lineage_metadata")
     _enrich_sidebar_lineage_metadata(scoped)
+    scoped = _dedupe_canonical_sidebar_lineages(scoped)
     # Delegated subagent children (#5307) are view-only, owned by the delegate
     # runner. Coerce their sidebar rows to read_only=True + is_cli_session=False
     # so the UI never offers delete / edit / truncate / pin affordances on them
@@ -9393,6 +9395,92 @@ def _session_lineage_ids(session: dict) -> set[str]:
     return ids
 
 
+def _canonical_sidebar_lineage_key(session: dict) -> tuple[str, str, str] | None:
+    """Return a validated compression-lineage key for final sidebar dedupe."""
+    if not isinstance(session, dict) or session.get("archived"):
+        return None
+    if str(session.get("relationship_type") or "").strip().lower() == "child_session":
+        return None
+    source = str(
+        _safe_first(
+            session.get("raw_source"),
+            session.get("source_tag"),
+            session.get("source"),
+        ) or ""
+    ).strip().lower()
+    session_source = str(session.get("session_source") or "").strip().lower()
+    if source == "subagent" or session_source == "fork":
+        return None
+    root_id = str(session.get("_lineage_root_id") or "").strip()
+    tip_id = str(session.get("_lineage_tip_id") or "").strip()
+    try:
+        segment_count = int(session.get("_compression_segment_count") or 0)
+    except (TypeError, ValueError):
+        return None
+    if not root_id or not tip_id or root_id == tip_id or segment_count < 2:
+        return None
+    return str(session.get("profile") or "default"), root_id, tip_id
+
+
+def _dedupe_canonical_sidebar_lineages(sessions: list[dict]) -> list[dict]:
+    """Collapse duplicate materialized rows after every sidebar source is merged."""
+    grouped: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
+    passthrough: list[dict] = []
+    for session in sessions:
+        key = _canonical_sidebar_lineage_key(session)
+        if key is None:
+            passthrough.append(session)
+        else:
+            grouped[key].append(session)
+
+    for (_profile, _root_id, tip_id), rows in grouped.items():
+        representative = max(
+            rows,
+            key=lambda row: (
+                str(row.get("session_id") or "") == tip_id,
+                _session_sort_timestamp(row),
+                _numeric_count(row.get("message_count")),
+            ),
+        )
+        merged = dict(representative)
+        for key in ("message_count", "actual_message_count", "user_message_count"):
+            values = [_numeric_count(row.get(key)) for row in rows]
+            if any(value > 0 for value in values):
+                merged[key] = max(values)
+        for key in ("last_message_at", "updated_at"):
+            values = []
+            for row in rows:
+                try:
+                    values.append(float(row.get(key) or 0))
+                except (TypeError, ValueError):
+                    continue
+            if values and max(values) > 0:
+                merged[key] = max(values)
+        merged["_compression_segment_count"] = max(
+            _numeric_count(row.get("_compression_segment_count")) for row in rows
+        )
+        passthrough.append(merged)
+
+    passthrough.sort(key=_session_sort_timestamp, reverse=True)
+    return passthrough
+
+
+def _canonical_session_detail_id(session_id: str, *, profile=None) -> str:
+    """Resolve an ordinary detail request to its validated compression tip."""
+    sid = str(session_id or "").strip()
+    if not sid:
+        return sid
+    try:
+        db_path = _agent_state_db_path(profile=profile)
+        if db_path is None:
+            return sid
+        metadata = read_session_lineage_metadata(db_path, {sid})
+    except Exception:
+        return sid
+    tip_id = str((metadata.get(sid) or {}).get("_lineage_tip_id") or "").strip()
+    return tip_id or sid
+
+
 def _is_duplicate_webui_state_projection(session: dict, represented_webui_ids: set[str]) -> bool:
     """Return True when a state.db row is only a duplicate WebUI-origin projection.
 
@@ -9614,6 +9702,7 @@ from api.models import (
     _write_session_index,
     SESSION_INDEX_FILE,
     _active_state_db_path,
+    _agent_state_db_path,
     load_projects,
     save_projects,
     import_cli_session,
@@ -12790,7 +12879,8 @@ def handle_get(handler, parsed) -> bool:
         # 5s slow-request timeout and emits a spurious "Slow WebUI request
         # still running" log. Idempotent — finish() no-ops if already called.
         query = parse_qs(parsed.query)
-        sid = query.get("session_id", [""])[0]
+        requested_sid = query.get("session_id", [""])[0]
+        sid = _canonical_session_detail_id(requested_sid)
         if not sid:
             if _diag: _diag.finish()
             return j(handler, {"error": "session_id is required"}, status=400)

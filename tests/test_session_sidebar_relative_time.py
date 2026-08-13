@@ -137,6 +137,31 @@ def test_relative_time_today_bucket():
     assert result["bucket"] == "Today"
 
 
+def test_canonical_compression_tip_activity_avoids_stale_root_bucket():
+    result = _run_session_time_case(
+        """
+        const now = Date.UTC(2026, 7, 11, 17, 0, 0);
+        const canonicalTip = {
+          session_id: '20260811_163454_515676',
+          _lineage_root_id: '67731d41a751',
+          _lineage_tip_id: '20260811_163454_515676',
+          created_at: Date.UTC(2026, 7, 2, 12, 0, 0) / 1000,
+          updated_at: Date.UTC(2026, 7, 11, 16, 34, 54) / 1000,
+          last_message_at: Date.UTC(2026, 7, 11, 16, 34, 54) / 1000,
+        };
+        const activity = _sessionTimestampMs(canonicalTip);
+        process.stdout.write(JSON.stringify({
+          bucket: _sessionTimeBucketLabel(activity, now),
+          activity,
+        }));
+        """
+    )
+    assert result == {
+        "bucket": "Today",
+        "activity": 1786466094000,
+    }
+
+
 def test_relative_time_handles_just_now_and_dst_safe_yesterday_boundary():
     result = _run_session_time_case(
         """

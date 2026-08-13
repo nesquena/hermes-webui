@@ -232,6 +232,13 @@ Session is a plain Python class (not a dataclass, not SQLAlchemy):
     With 10 sessions: negligible. With 1000+: will be slow.
     See Architecture Phase C for the index file fix.
 
+Compression lineages keep display history and persistence ownership separate.
+Each archived `pre_compression_snapshot` and live continuation sidecar owns only
+its canonical segment; `GET /api/session` stitches those segments for display.
+Streaming completion may project that stitched transcript in its SSE payload,
+but must not write the projection back into the live tip. This keeps repeated
+compression bounded instead of copying all ancestors into every descendant.
+
 title_from(): takes messages list, finds first user message, returns first 64 chars.
 Called after run_conversation() completes to set the session title retroactively.
 

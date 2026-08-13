@@ -321,7 +321,10 @@ function extractFunc(name) {{
   return src.slice(start, i);
 }}
 var _allSessions = [
-  {{session_id:'child', title:'Duplicate Assistant Text Blocks', parent_session_id:'parent', message_count:86, updated_at:200, last_message_at:200, _lineage_root_id:'parent', _compression_segment_count:2}},
+  {{session_id:'root', title:'Current WebUI conversation', message_count:86, updated_at:100, last_message_at:100, _lineage_root_id:'root', _lineage_tip_id:'tip', _compression_segment_count:4}},
+  {{session_id:'middle-1', title:'Current WebUI conversation', parent_session_id:'root', message_count:86, updated_at:150, last_message_at:150, _lineage_root_id:'root', _lineage_tip_id:'tip', _compression_segment_count:4}},
+  {{session_id:'middle-2', title:'Current WebUI conversation', parent_session_id:'middle-1', message_count:86, updated_at:175, last_message_at:175, _lineage_root_id:'root', _lineage_tip_id:'tip', _compression_segment_count:4}},
+  {{session_id:'tip', title:'Current WebUI conversation', parent_session_id:'middle-2', message_count:86, updated_at:200, last_message_at:200, _lineage_root_id:'root', _lineage_tip_id:'tip', _compression_segment_count:4}},
   {{session_id:'other', title:'Other', message_count:4, updated_at:100, last_message_at:100}},
 ];
 eval(extractFunc('_sessionTimestampMs'));
@@ -331,10 +334,16 @@ eval(extractFunc('_sessionLineageContainsSession'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
 eval(extractFunc('_collapseSessionLineageForSidebar'));
 eval(extractFunc('_resolveSessionIdFromSidebarLineage'));
-console.log(JSON.stringify({{parent:_resolveSessionIdFromSidebarLineage('parent'), child:_resolveSessionIdFromSidebarLineage('child'), other:_resolveSessionIdFromSidebarLineage('other')}}));
+console.log(JSON.stringify({{root:_resolveSessionIdFromSidebarLineage('root'), middle1:_resolveSessionIdFromSidebarLineage('middle-1'), middle2:_resolveSessionIdFromSidebarLineage('middle-2'), tip:_resolveSessionIdFromSidebarLineage('tip'), other:_resolveSessionIdFromSidebarLineage('other')}}));
 """
     result = json.loads(_run_node(source))
-    assert result == {"parent": "child", "child": "child", "other": "other"}
+    assert result == {
+        "root": "tip",
+        "middle1": "tip",
+        "middle2": "tip",
+        "tip": "tip",
+        "other": "other",
+    }
 
 
 def test_sidebar_attaches_child_sessions_to_collapsed_hidden_parent_lineage():
@@ -374,6 +383,99 @@ console.log(JSON.stringify(attached));
     assert [row["session_id"] for row in rows] == ["tip"]
     assert rows[0]["_child_session_count"] == 1
     assert rows[0]["_child_sessions"][0]["session_id"] == "child"
+
+
+def test_live_four_segment_lineage_is_one_current_sidebar_row_without_children():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionLineageKey'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_collapseSessionLineageForSidebar'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+const raw = [
+  {{session_id:'67731d41a751', updated_at:100, last_message_at:100, _lineage_root_id:'67731d41a751', _lineage_tip_id:'20260811_163454_515676', _compression_segment_count:4}},
+  {{session_id:'20260809_092619_1df4e5', parent_session_id:'67731d41a751', updated_at:150, last_message_at:150, _lineage_root_id:'67731d41a751', _lineage_tip_id:'20260811_163454_515676', _compression_segment_count:4}},
+  {{session_id:'20260809_153027_ecd2d0', parent_session_id:'20260809_092619_1df4e5', updated_at:175, last_message_at:175, _lineage_root_id:'67731d41a751', _lineage_tip_id:'20260811_163454_515676', _compression_segment_count:4}},
+  {{session_id:'20260811_163454_515676', parent_session_id:'20260809_153027_ecd2d0', updated_at:200, last_message_at:200, _lineage_root_id:'67731d41a751', _lineage_tip_id:'20260811_163454_515676', _compression_segment_count:4}},
+];
+const rows = _attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(raw), raw);
+const row = rows[0];
+console.log(JSON.stringify({{
+  ids: rows.map(item => item.session_id),
+  childCount: row._child_session_count || 0,
+  segmentCount: row._compression_segment_count,
+  timestampMs: _sessionTimestampMs(row),
+}}));
+"""
+    assert json.loads(_run_node(source)) == {
+        "ids": ["20260811_163454_515676"],
+        "childCount": 0,
+        "segmentCount": 4,
+        "timestampMs": 200000,
+    }
+
+
+def test_jouvence_sidebar_keeps_exactly_three_delegate_children_after_collapse():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionLineageKey'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_collapseSessionLineageForSidebar'));
+eval(extractFunc('_sessionDisplayTitle'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+const raw = [
+  {{session_id:'20260802_122018_e27695', updated_at:100, _lineage_root_id:'20260802_122018_e27695', _lineage_tip_id:'20260809_100052_0e8b4c', _compression_segment_count:2}},
+  {{session_id:'20260809_100052_0e8b4c', parent_session_id:'20260802_122018_e27695', updated_at:200, _lineage_root_id:'20260802_122018_e27695', _lineage_tip_id:'20260809_100052_0e8b4c', _compression_segment_count:2}},
+  ...[0,1,2].map(index => ({{session_id:`delegate-${{index}}`, parent_session_id:'20260802_122018_e27695', relationship_type:'child_session', raw_source:'subagent', _parent_lineage_root_id:'20260802_122018_e27695', _parent_lineage_tip_id:'20260809_100052_0e8b4c'}})),
+];
+const rows = _attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(raw), raw);
+console.log(JSON.stringify({{
+  ids: rows.map(item => item.session_id),
+  childIds: (rows[0]._child_sessions || []).map(item => item.session_id).sort(),
+  childCount: rows[0]._child_session_count,
+  segmentIds: (rows[0]._lineage_segments || []).map(item => item.session_id).sort(),
+}}));
+"""
+    assert json.loads(_run_node(source)) == {
+        "ids": ["20260809_100052_0e8b4c"],
+        "childIds": ["delegate-0", "delegate-1", "delegate-2"],
+        "childCount": 3,
+        "segmentIds": ["20260802_122018_e27695", "20260809_100052_0e8b4c"],
+    }
 
 
 def test_mixed_source_live_refresh_keeps_authoritative_tip_and_child_set():

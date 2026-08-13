@@ -1,5 +1,7 @@
 """Shared helpers for reading Hermes Agent sessions from state.db."""
+import json
 import logging
+import math
 import sqlite3
 from contextlib import closing
 from pathlib import Path
@@ -305,14 +307,49 @@ def is_cli_session_row_visible(row: dict) -> bool:
     return _count_user_turns(row) >= CLI_MIN_UNTITLED_USER_MESSAGE_COUNT
 
 
+def _session_lineage_identity(row: dict) -> dict[str, str] | None:
+    """Return validated branch/delegate identity, or None when it is ambiguous."""
+    raw_model_config = row.get('_lineage_model_config', row.get('model_config'))
+    if isinstance(raw_model_config, str):
+        raw_model_config = raw_model_config.strip()
+    if raw_model_config in (None, ''):
+        return {}
+    if isinstance(raw_model_config, str):
+        try:
+            parsed_model_config = json.loads(raw_model_config)
+        except (TypeError, ValueError):
+            return None
+    elif isinstance(raw_model_config, dict):
+        parsed_model_config = raw_model_config
+    else:
+        return None
+    if not isinstance(parsed_model_config, dict):
+        return None
+
+    identity = {}
+    for key in ('_branched_from', '_delegate_from'):
+        marker = parsed_model_config.get(key)
+        if marker is None:
+            continue
+        if not isinstance(marker, str):
+            return None
+        marker = marker.strip()
+        if marker:
+            identity[key] = marker
+    if len(identity) > 1:
+        return None
+    return identity
+
+
 def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
     """Return True when ``child`` is the next segment of the same conversation.
 
-    Compression rotates session ids automatically. A manual CLI close followed
-    by ``hermes -c`` also records a new child session; for sidebar projection it
-    should continue the same visible conversation rather than becoming a
-    separate child-session row. Plain parent/child links that started before the
-    parent's ended boundary remain child sessions.
+    Compression rotates session ids automatically. The durable writer inserts
+    the physical child and its handoff before stamping the parent closed, with no
+    elapsed wall-clock bound on that work. Once physical parent, identity, fork,
+    and source guards pass, compression is authoritative regardless of timestamp
+    overlap. A manual CLI close followed by ``hermes -c`` still requires the
+    child to start after the parent's ended boundary.
 
     Do not collapse lineage across raw sources. A WebUI session that continues
     from a Telegram/CLI/etc. parent must remain visible as its own surface-owned
@@ -323,11 +360,29 @@ def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
         return False
     if str(child.get('session_source') or '').strip().lower() == 'fork':
         return False
+
+    parent_id = str(parent.get('id') or '').strip()
+    child_parent_id = str(child.get('parent_session_id') or '').strip()
+    if parent_id and child_parent_id and parent_id != child_parent_id:
+        return False
+    edge_parent_id = child_parent_id or parent_id
+
+    parent_identity = _session_lineage_identity(parent)
+    child_identity = _session_lineage_identity(child)
+    if parent_identity is None or child_identity is None:
+        return False
+    for key, marker in child_identity.items():
+        if not edge_parent_id or marker == edge_parent_id:
+            return False
+        if parent_identity.get(key) != marker:
+            return False
+
     parent_source = str(parent.get('source') or '').strip().lower()
     child_source = str(child.get('source') or '').strip().lower()
     if parent_source and child_source and parent_source != child_source:
         return False
-    if parent.get('end_reason') not in {'compression', 'cli_close'}:
+    end_reason = parent.get('end_reason')
+    if end_reason not in {'compression', 'cli_close'}:
         return False
     ended_at = parent.get('ended_at')
     if ended_at is None:
@@ -335,10 +390,19 @@ def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
         # the historical contract that compression/cli_close parent links are
         # continuations when no boundary timestamp is available.
         return True
+    started_at = child.get('started_at')
+    if started_at is None:
+        return False
     try:
-        return float(child.get('started_at') or 0) >= float(ended_at)
+        child_started_at = float(started_at)
+        parent_ended_at = float(ended_at)
     except (TypeError, ValueError):
         return False
+    if not math.isfinite(child_started_at) or not math.isfinite(parent_ended_at):
+        return False
+    if end_reason == 'compression':
+        return True
+    return child_started_at >= parent_ended_at
 
 
 def _continuation_root_id(rows_by_id: dict[str, dict], session_id: str | None) -> str | None:
@@ -488,6 +552,8 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
         merged['_compression_segment_count'] = segment_count
         projected.append(merged)
 
+    for row in projected:
+        row.pop('_lineage_model_config', None)
     projected.sort(
         key=lambda row: _as_score(row.get('last_activity'), row.get('started_at')),
         reverse=True,
@@ -559,6 +625,11 @@ def read_importable_agent_session_rows(
 
         parent_expr = _optional_col('parent_session_id', session_cols)
         session_source_expr = _optional_col('session_source', session_cols)
+        model_config_expr = (
+            "s.model_config AS _lineage_model_config"
+            if 'model_config' in session_cols
+            else "NULL AS _lineage_model_config"
+        )
         ended_expr = _optional_col('ended_at', session_cols)
         end_reason_expr = _optional_col('end_reason', session_cols)
         user_id_expr = _optional_col('user_id', session_cols)
@@ -680,6 +751,7 @@ def read_importable_agent_session_rows(
             SELECT s.id, s.title, s.model, s.message_count,
                    s.started_at, s.source,
                    {session_source_expr},
+                   {model_config_expr},
                    {user_id_expr},
                    {chat_id_expr},
                    {chat_type_expr},
@@ -828,6 +900,11 @@ def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops:
 
             source_expr = _optional_col('source', session_cols)
             session_source_expr = _optional_col('session_source', session_cols)
+            model_config_expr = (
+                "s.model_config AS _lineage_model_config"
+                if 'model_config' in session_cols
+                else "NULL AS _lineage_model_config"
+            )
             title_expr = _optional_col('title', session_cols)
             started_expr = _optional_col('started_at', session_cols, '0')
             ended_expr = _optional_col('ended_at', session_cols)
@@ -842,6 +919,7 @@ def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops:
                     SELECT s.id,
                            {source_expr},
                            {session_source_expr},
+                           {model_config_expr},
                            {title_expr},
                            {started_expr},
                            {parent_expr},
@@ -888,6 +966,7 @@ def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops:
                     SELECT s.id,
                            {source_expr},
                            {session_source_expr},
+                           {model_config_expr},
                            {title_expr},
                            {started_expr},
                            {parent_expr},
@@ -965,6 +1044,11 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
                 return {}
             session_source_expr = _optional_col('session_source', session_cols)
             source_expr = _optional_col('source', session_cols)
+            model_config_expr = (
+                "s.model_config AS _lineage_model_config"
+                if 'model_config' in session_cols
+                else "NULL AS _lineage_model_config"
+            )
             message_count_expr = _optional_col('message_count', session_cols, '0')
             # Scoped fetch via PRIMARY KEY + idx_sessions_parent rather than a
             # full table scan. The sessions table grows unbounded over time
@@ -1001,7 +1085,7 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
                     placeholders = ','.join('?' * len(chunk))
                     cur.execute(
                         f"""
-                        SELECT s.id, {source_expr}, {session_source_expr}, s.title, s.started_at, s.parent_session_id, s.ended_at, s.end_reason, {message_count_expr}
+                        SELECT s.id, {source_expr}, {session_source_expr}, {model_config_expr}, s.title, s.started_at, s.parent_session_id, s.ended_at, s.end_reason, {message_count_expr}
                         FROM sessions s
                         WHERE s.id IN ({placeholders})
                         """,
@@ -1030,7 +1114,7 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
                     placeholders = ','.join('?' * len(chunk))
                     cur.execute(
                         f"""
-                        SELECT s.id, {source_expr}, {session_source_expr}, s.title, s.started_at, s.parent_session_id, s.ended_at, s.end_reason, {message_count_expr}
+                        SELECT s.id, {source_expr}, {session_source_expr}, {model_config_expr}, s.title, s.started_at, s.parent_session_id, s.ended_at, s.end_reason, {message_count_expr}
                         FROM sessions s
                         WHERE s.parent_session_id IN ({placeholders})
                         """,
@@ -1187,12 +1271,12 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
 
         root_id, segment_count = continuation_root_and_depth(sid)
 
-        if root_id != sid:
+        if root_id not in lineage_tip_cache:
+            lineage_tip_cache[root_id] = freshest_continuation_tip(root_id)
+        tip_id, tip_depth = lineage_tip_cache[root_id]
+        if root_id != sid or tip_id != sid:
             entry = metadata.setdefault(sid, {})
             entry['_lineage_root_id'] = root_id
-            if root_id not in lineage_tip_cache:
-                lineage_tip_cache[root_id] = freshest_continuation_tip(root_id)
-            tip_id, tip_depth = lineage_tip_cache[root_id]
             entry['_lineage_tip_id'] = tip_id
             entry['_compression_segment_count'] = max(segment_count, tip_depth)
 
