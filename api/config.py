@@ -8405,11 +8405,20 @@ def warm_models_catalog_provenance_if_cold() -> None:
     try:
         if _provenance_is_current():
             return  # published for this profile while we waited for the lock
+        disk_groups = None
         try:
             disk_groups = _load_models_cache_from_disk()
-        except Exception:
-            disk_groups = None
+        except Exception as exc:
+            logger.warning(
+                "warm_models_catalog_provenance_if_cold: disk load failed: %s", exc
+            )
         if disk_groups is None:
+            logger.debug(
+                "warm_models_catalog_provenance_if_cold: no usable disk cache "
+                "(path=%s, exists=%s)",
+                _get_models_cache_path(),
+                _get_models_cache_path().exists(),
+            )
             return  # no durable cache for this profile → stay cold, preserve verbatim
         _available_models_cache = disk_groups
         _available_models_cache_ts = time.monotonic()
@@ -8418,6 +8427,12 @@ def warm_models_catalog_provenance_if_cold() -> None:
         except Exception:
             _available_models_cache_source_fingerprint = None
         _sync_models_cache_provenance()
+        logger.debug(
+            "warm_models_catalog_provenance_if_cold: republished from disk "
+            "(groups=%d, fp=%s)",
+            len(disk_groups.get("groups", [])) if isinstance(disk_groups, dict) else -1,
+            _available_models_cache_source_fingerprint,
+        )
     except Exception:
         logger.debug("models catalog provenance warm failed", exc_info=True)
     finally:

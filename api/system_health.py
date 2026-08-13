@@ -159,19 +159,113 @@ def _safe_error(metric: str, exc: Exception) -> dict[str, str]:
     return {"metric": metric, "code": type(exc).__name__}
 
 
+_NET_PREV_RX: float | None = None
+_NET_PREV_TX: float | None = None
+_NET_PREV_TIME: float = 0.0
+_NET_MAX_BYTES_PER_SEC = 125_000_000  # ~1 Gbps reference for percent clamp
+
+
+def _net_percent() -> float:
+    """Estimate network utilization as % of 1 Gbps based on byte delta."""
+    rx, tx = _read_net_speed()
+    total = rx + tx
+    return _clamp_percent((total / _NET_MAX_BYTES_PER_SEC) * 100.0)
+
+
+def _read_net_speed() -> tuple[float, float]:
+    """Return (rx_bytes_per_sec, tx_bytes_per_sec) across non-loopback interfaces."""
+    global _NET_PREV_RX, _NET_PREV_TX, _NET_PREV_TIME
+    now = time.time()
+    rx_total = 0
+    tx_total = 0
+    with open("/proc/net/dev", "r", encoding="utf-8") as handle:
+        for line in handle:
+            if ":" not in line:
+                continue
+            iface, _, rest = line.partition(":")
+            iface = iface.strip()
+            if iface == "lo":
+                continue
+            parts = rest.split()
+            if len(parts) < 9:  # need rx bytes at [0] and tx bytes at [8]
+                continue
+            rx_total += int(parts[0])
+            tx_total += int(parts[8])
+    if _NET_PREV_RX is None or now - _NET_PREV_TIME < 0.1:
+        _NET_PREV_RX = rx_total
+        _NET_PREV_TX = tx_total
+        _NET_PREV_TIME = now
+        return (0, 0)
+    elapsed = now - _NET_PREV_TIME
+    if elapsed <= 0 or _NET_PREV_RX is None or _NET_PREV_TX is None:
+        return (0, 0)
+    rx_delta = max(0, rx_total - _NET_PREV_RX)
+    tx_delta = max(0, tx_total - _NET_PREV_TX)
+    _NET_PREV_RX = rx_total
+    _NET_PREV_TX = tx_total
+    _NET_PREV_TIME = now
+    return (rx_delta / elapsed, tx_delta / elapsed)
+
+
+_DISK_PREV: dict[str, int] | None = None
+_DISK_PREV_TIME: float = 0.0
+
+
+def _read_diskstats() -> dict[str, int]:
+    """Return {device: sectors_read+written} from /proc/diskstats."""
+    disks = {}
+    with open("/proc/diskstats", "r", encoding="utf-8") as handle:
+        for line in handle:
+            parts = line.split()
+            if len(parts) < 14:
+                continue
+            name = parts[2]
+            # Skip partitions (only show whole disks)
+            if name.startswith("loop") or name.startswith("sr"):
+                continue
+            # sectors read = parts[5], sectors written = parts[9]
+            sectors = int(parts[5]) + int(parts[9])
+            disks[name] = sectors
+    return disks
+
+
+def _disk_io() -> dict[str, int]:
+    """Return {device: bytes_per_sec} for disk IO."""
+    global _DISK_PREV, _DISK_PREV_TIME
+    now = time.time()
+    current = _read_diskstats()
+    if _DISK_PREV is None or now - _DISK_PREV_TIME < 0.1:
+        _DISK_PREV = current
+        _DISK_PREV_TIME = now
+        return {}
+    elapsed = now - _DISK_PREV_TIME
+    if elapsed <= 0:
+        return {}
+    result = {}
+    for name, sectors in current.items():
+        if name in _DISK_PREV:
+            delta = max(0, sectors - _DISK_PREV[name])
+            # sectors are 512 bytes each
+            result[name] = int((delta * 512) / elapsed)
+    _DISK_PREV = current
+    _DISK_PREV_TIME = now
+    return result
+
+
 def build_system_health_payload() -> dict[str, Any]:
-    metrics: dict[str, Any] = {"cpu": None, "memory": None, "disk": None}
+    metrics: dict[str, Any] = {"cpu": None, "memory": None, "disk": None, "net": None}
     errors: list[dict[str, str]] = []
 
     collectors = {
         "cpu": _cpu_percent,
         "memory": _memory_usage,
         "disk": _disk_usage,
+        "net": _net_percent,
     }
     for name, collect in collectors.items():
         try:
             value = collect()
-            if name == "cpu":
+            if name in ("cpu", "net"):
                 metrics[name] = {"percent": _clamp_percent(value)}
             else:
                 metrics[name] = {
@@ -182,6 +276,30 @@ def build_system_health_payload() -> dict[str, Any]:
         except Exception as exc:
             errors.append(_safe_error(name, exc))
 
+    # Additional metrics
+    try:
+        disk_io = _disk_io()
+        if disk_io:
+            total_io = sum(disk_io.values())
+            if metrics["disk"]:
+                metrics["disk"]["io_bytes_per_sec"] = total_io
+            else:
+                metrics["disk"] = {"io_bytes_per_sec": total_io}
+    except Exception:
+        pass
+
+    try:
+        net_speed = _read_net_speed()
+        if net_speed:
+            rx, tx = net_speed
+            if metrics["net"]:
+                metrics["net"]["rx_bytes_per_sec"] = rx
+                metrics["net"]["tx_bytes_per_sec"] = tx
+            else:
+                metrics["net"] = {"rx_bytes_per_sec": rx, "tx_bytes_per_sec": tx}
+    except Exception:
+        pass
+
     available = any(metrics[name] is not None for name in metrics)
     status = "ok" if available and not errors else "partial" if available else "unavailable"
     return {
@@ -191,5 +309,6 @@ def build_system_health_payload() -> dict[str, Any]:
         "cpu": metrics["cpu"],
         "memory": metrics["memory"],
         "disk": metrics["disk"],
+        "net": metrics["net"],
         "errors": errors,
     }
