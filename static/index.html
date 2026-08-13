@@ -1400,6 +1400,13 @@
               </label>
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_cron_sessions">Surface cron job output as conversations in the sidebar. Only active when non-WebUI sessions are enabled. Defaults off; high-frequency jobs can flood the sidebar.</div>
             </div>
+            <div class="settings-field" id="settingsShowMatrixSessionsField" style="margin-left:24px">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsShowMatrixSessions" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_matrix_sessions">Show Matrix sessions</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_matrix_sessions">Show imported Matrix conversations in the sidebar. Only active when non-WebUI sessions are enabled. Defaults off because active rooms can create a high-volume session list.</div>
+            </div>
             <div class="settings-field" id="settingsShowClaudeCodeSessionsField" style="margin-left:24px">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="settingsShowClaudeCodeSessions" style="width:15px;height:15px;accent-color:var(--accent)">
