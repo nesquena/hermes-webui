@@ -353,6 +353,32 @@ function _panelFromCurrentMainView(){
 }
 
 function _syncMobileSidebarPanelFromMainView(){
+  const mainEl=document.querySelector('main.main');
+  // Extension panels are intentionally outside MAIN_VIEW_PANELS: the host must
+  // not try to lazy-load or own their main view. They do, however, publish the
+  // visible view as `showing-x-<token>` and install a matching sidebar
+  // `.panel-view[data-panel-token]`. The mobile drawer is reopened through this
+  // sync helper, so treating that state as Chat deactivated the extension's
+  // sidebar view every time the operator opened the hamburger or edge drawer.
+  // The frame remained behind the drawer, but its content had no reachable
+  // navigation state on the phone.
+  const extensionClass=mainEl&&Array.from(mainEl.classList)
+    .find(name=>name.startsWith('showing-x-'));
+  const extensionToken=extensionClass&&extensionClass.slice('showing-x-'.length);
+  if(extensionToken){
+    const extensionView=Array.from(document.querySelectorAll('.sidebar .panel-view'))
+      .find(view=>view.dataset.panelToken===extensionToken);
+    if(extensionView){
+      const extensionPanel=`x-${extensionToken}`;
+      document.querySelectorAll('[data-panel]').forEach(t=>t.classList.toggle('active',t.dataset.panel===extensionPanel));
+      document.querySelectorAll('.panel-view').forEach(p=>p.classList.remove('active'));
+      extensionView.classList.add('active');
+      // Do not put an extension token in _currentPanel: switchPanel owns that
+      // state and only accepts its native panel names. Returning the token keeps
+      // this helper truthful without corrupting the host state machine.
+      return extensionPanel;
+    }
+  }
   const panel=_panelFromCurrentMainView();
   if(!panel)return _currentPanel||'chat';
   const panelEl=$('panel'+panel.charAt(0).toUpperCase()+panel.slice(1));
