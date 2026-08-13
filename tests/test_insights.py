@@ -221,6 +221,61 @@ def test_insights_absolute_range_dst_transition_daily_buckets(monkeypatch, tmp_p
             time.tzset()
 
 
+
+def test_insights_absolute_range_dst_end_boundary_next_local_midnight(monkeypatch, tmp_path):
+    """The exclusive end bound must be the NEXT local midnight, not fixed
+    end_midnight + 86400s.  Across a spring-forward transition the fixed
+    addition lands at 01:00 of the following date, so the final hour of the
+    selected day would be dropped; across fall-back it lands at 23:00,
+    leaking an hour of the next date in.  America/New_York 2026-03-08
+    springs forward 2:00 -> 3:00, so the next local midnight after the
+    2026-03-08 end day is 2026-03-09 00:00 EDT."""
+    import os
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset() required for DST test (not available on Windows)")
+
+    os.environ["TZ"] = "America/New_York"
+    time.tzset()
+    try:
+        now = time.mktime((2026, 3, 11, 12, 0, 0, 0, 0, -1))  # after spring-forward
+        # End day = 2026-03-08 (the spring-forward day).  Its final local hour is
+        # 3:00-4:00 EDT = 07:00-08:00 UTC (offset -4h after the transition).
+        end_day_last_hour = time.mktime((2026, 3, 8, 3, 30, 0, 0, 0, -1))  # 03:30 EDT
+        # First hour of the NEXT local day = 2026-03-09 00:00-01:00 EDT.
+        next_day_first_hour = time.mktime((2026, 3, 9, 0, 30, 0, 0, 0, -1))  # 00:30 EDT
+        start_ts = time.mktime((2026, 3, 6, 12, 0, 0, 0, 0, -1))
+        end_ts = time.mktime((2026, 3, 8, 12, 0, 0, 0, 0, -1))
+        assert end_day_last_hour > end_ts  # sanity: the final-hour probe is inside the selected day
+        assert next_day_first_hour > end_day_last_hour
+
+        entries = [
+            {
+                "session_id": "in_last_hour", "updated_at": end_day_last_hour, "created_at": end_day_last_hour,
+                "message_count": 1, "input_tokens": 10, "output_tokens": 5,
+                "estimated_cost": "0.0001", "model": "gpt-x",
+            },
+            {
+                "session_id": "out_next_day", "updated_at": next_day_first_hour, "created_at": next_day_first_hour,
+                "message_count": 1, "input_tokens": 10, "output_tokens": 5,
+                "estimated_cost": "0.0001", "model": "gpt-x",
+            },
+        ]
+        data = _call_insights(monkeypatch, tmp_path, entries,
+                              query=f"start={int(start_ts)}&end={int(end_ts)}", now=now)
+        # Spring-forward: the OLD fixed +86400s cutoff lands at 2026-03-09
+        # 01:00 EDT (Mar 9 00:00 EST + 86400s), so an 00:30 EDT session of
+        # the NEXT date would leak INTO the window.  The next-local-midnight
+        # cutoff (2026-03-09 00:00 EDT) keeps the next day out while still
+        # including the last hour (03:30 EDT) of the selected day.
+        assert data["total_sessions"] == 1   # only in_last_hour, not out_next_day
+        assert data["total_input_tokens"] == 10
+        assert data["period_days"] == 3   # Mar 6, Mar 7, Mar 8
+        dates = [d["date"] for d in data["daily_tokens"]]
+        assert dates == ["2026-03-06", "2026-03-07", "2026-03-08"]
+    finally:
+        os.environ.pop("TZ", None)
+        if hasattr(time, "tzset"):
+            time.tzset()
 def test_insights_absolute_range_beyond_366_days_keeps_series_in_sync(monkeypatch, tmp_path):
     now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
     start_ts = now - (400 * 86400)   # 400 days ago
