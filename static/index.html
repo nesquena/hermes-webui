@@ -1065,8 +1065,16 @@
                               <span data-i18n="settings_label_chat_todos_in_chat">Show task list in chat</span>
                             </label>
                             <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_chat_todos_in_chat">Show a collapsible task list at the top of the chat area. When enabled, the sidebar Todos panel is hidden to avoid duplication.</div>
-                          </div>
-                          <div class="settings-field" style="margin-top:8px">
+                                        </div>
+                                        <div class="settings-field">
+                                          <label style="display:flex;align-items:center;gap:8px;cursor:pointer" data-i18n="settings_label_chat_todos_align">Task list alignment</label>
+                                          <div class="chat-todos-align-group" role="radiogroup" aria-label="Task list alignment">
+                                            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px"><input type="radio" name="chatTodosAlign" value="left" onchange="_pickChatTodosAlign('left')" style="accent-color:var(--accent)"><span data-i18n="settings_option_chat_todos_align_left">Left</span></label>
+                                            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px"><input type="radio" name="chatTodosAlign" value="center" onchange="_pickChatTodosAlign('center')" style="accent-color:var(--accent)"><span data-i18n="settings_option_chat_todos_align_center">Center</span></label>
+                                            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px"><input type="radio" name="chatTodosAlign" value="right" onchange="_pickChatTodosAlign('right')" style="accent-color:var(--accent)"><span data-i18n="settings_option_chat_todos_align_right">Right</span></label>
+                                          </div>
+                                        </div>
+                                        <div class="settings-field" style="margin-top:8px">
               <label id="settingsChatActivityDisplayModeLabel" for="settingsChatActivityDisplayMode" data-i18n="settings_label_chat_activity_display_mode">Activity display</label>
               <div class="chat-activity-mode-toggle" role="group" aria-labelledby="settingsChatActivityDisplayModeLabel">
                 <button type="button" class="chat-activity-mode-btn active" data-chat-activity-mode="compact_worklog" onclick="_pickChatActivityDisplayMode('compact_worklog')">

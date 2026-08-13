@@ -2270,6 +2270,8 @@
   .messages-shell{flex:1;min-height:0;position:relative;display:flex;flex-direction:column;}
     /* Chat todos tray (embedded task list inside the chat area) */
     .chat-todos{margin:8px auto 0;width:fit-content;min-width:260px;max-width:min(640px,calc(100% - 32px));flex-shrink:0;background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;box-shadow:0 1px 6px rgba(0,0,0,.12);z-index:5;}
+    .chat-todos[data-align="left"]{margin-left:16px;margin-right:auto;}
+    .chat-todos[data-align="right"]{margin-left:auto;margin-right:16px;}
     .chat-todos-head{display:flex;align-items:center;gap:8px;width:100%;padding:9px 12px;background:transparent;border:none;cursor:pointer;color:var(--text);font-size:13px;font-weight:600;text-align:left;transition:background .12s;}
     .chat-todos-head:hover{background:var(--hover-bg);}
     .chat-todos-title{display:inline-flex;align-items:center;gap:7px;min-width:0;flex:1;}
@@ -2289,6 +2291,7 @@
     .chat-todos-empty{font-size:12px;color:var(--muted);padding:8px 2px;}
     @media(max-width:768px){
       .chat-todos{margin:6px 10px 0;width:auto;min-width:0;max-width:none;}
+      .chat-todos[data-align="left"],.chat-todos[data-align="right"]{margin:6px 10px 0;}
       .chat-todos-body{max-height:200px;}
       .chat-todos-head{padding:8px 10px;}
     }

@@ -9078,6 +9078,9 @@ async function loadSettingsPanel(){
             _scheduleAppearanceAutosave();
           };
         }
+        if(typeof _syncChatTodosAlignRadios==='function'&&typeof _chatTodosReadAlign==='function'){
+          _syncChatTodosAlignRadios(_chatTodosReadAlign());
+        }
     const autoScrollFollowCb=$('settingsAutoScrollFollow');
     if(autoScrollFollowCb){
       autoScrollFollowCb.checked=settings.auto_scroll_follow!==false;

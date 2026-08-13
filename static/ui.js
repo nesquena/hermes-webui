@@ -9283,6 +9283,34 @@ function _chatTodosToggleEnabled(checked){
   if(checked&&typeof renderMessages==='function') renderMessages({preserveScroll:true});
   if(typeof _scheduleAppearanceAutosave==='function') _scheduleAppearanceAutosave();
 }
+
+// ── Chat todos alignment (left / center / right), localStorage-backed ──
+const CHAT_TODOS_ALIGN_LS_KEY='hermes-webui-chat-todos-align';
+function _chatTodosReadAlign(){
+  try{
+    const v=localStorage.getItem(CHAT_TODOS_ALIGN_LS_KEY);
+    return (v==='left'||v==='right')?v:'center';
+  }catch(_){return 'center';}
+}
+function _applyChatTodosAlign(align){
+  const tray=$('chatTodosPanel');
+  if(!tray) return;
+  if(align==='left'||align==='right') tray.dataset.align=align;
+  else delete tray.dataset.align;          // center is the CSS default
+}
+function _pickChatTodosAlign(align){
+  const a=(align==='left'||align==='right')?align:'center';
+  try{localStorage.setItem(CHAT_TODOS_ALIGN_LS_KEY,a);}catch(_){}
+  _applyChatTodosAlign(a);
+  _syncChatTodosAlignRadios(a);
+  if(typeof _scheduleAppearanceAutosave==='function') _scheduleAppearanceAutosave();
+}
+function _syncChatTodosAlignRadios(value){
+  if(typeof document==='undefined') return;
+  document.querySelectorAll('input[name="chatTodosAlign"]').forEach(function(el){
+    el.checked=(el.value===value);
+  });
+}
 function _currentTodos(){
   if(Array.isArray(S.todos)) return S.todos;
   if(typeof _legacyTodosFromMessages==='function'){
@@ -9353,6 +9381,8 @@ function _initChatTodos(){
   if(typeof document==='undefined') return;
   _chatTodosEnabled=chatTodosEnabled();
   _syncChatTodosRailVisibility();
+  _applyChatTodosAlign(_chatTodosReadAlign());
+  _syncChatTodosAlignRadios(_chatTodosReadAlign());
   const tray=$('chatTodosPanel');
   if(tray){
     if(!chatTodosEnabled()){
