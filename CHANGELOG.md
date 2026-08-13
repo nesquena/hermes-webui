@@ -5,6 +5,8 @@
 
 ### Fixed
 
+- **Links ending in Chinese/Japanese full-width punctuation no longer swallow the punctuation into the URL.** When an assistant wrote a URL followed immediately by a CJK full-width mark (`）。，；：！？、`) — common in Chinese/Japanese prose — the autolink pass treated the mark as part of the link, so the rendered href included the trailing punctuation (and often 404'd). Both autolink passes now strip a single trailing CJK full-width mark the same way they already strip ASCII `.,;:!?)`, and a full-width close-paren also terminates the URL. ASCII behavior is unchanged. Thanks @happy5318. (#6792)
+
 - **Mobile: create forms opened from the sidebar drawer are no longer hidden behind it.** On phones the sidebar is a full-screen drawer over the main view; opening a new cron/skill/workspace/profile form from inside it left the drawer covering the form, so the tap looked like a no-op. The panel re-open on a rail tap now happens synchronously (before the panel's async data load, so a form that closes the drawer isn't re-covered), and the four create-form openers now close the drawer the same way their matching detail views already did. Desktop is unaffected. Thanks @silent-reader-cn. (#6921)
 
 - **Mobile: creating a conversation from a project chip now shows it instead of leaving the drawer open over it.** The project-chip quick-create ("+") created the new project conversation but never closed the full-screen mobile sidebar drawer, so on phones the new session was created but hidden underneath. The drawer now closes after the session is created and the sidebar repaints (the failure path keeps it open so the error toast stays visible for retry). Desktop is unaffected. Thanks @silent-reader-cn. (#6933)
