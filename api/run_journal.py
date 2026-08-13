@@ -11,8 +11,19 @@ import re
 import threading
 import time
 from collections import OrderedDict
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterable
+
+# Cross-platform file locking for run-journal writers (b3)
+try:
+    import fcntl as _fcntl
+except ImportError:
+    _fcntl = None
+try:
+    import msvcrt as _msvcrt
+except ImportError:
+    _msvcrt = None
 
 RUN_JOURNAL_DIR_NAME = "_run_journal"
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -56,7 +67,7 @@ _SNAPSHOT_ARGS_MAX_DEPTH = 8
 _SNAPSHOT_ARGS_MAX_STRING_CHARS = 8192
 _SNAPSHOT_ARGS_MAX_TOTAL_CHARS = 64 * 1024
 _SNAPSHOT_ARGS_TRUNCATED_SUFFIX = "...[truncated]"
-_RUN_SUMMARY_SIDECAR_VERSION = 1
+_RUN_SUMMARY_SIDECAR_VERSION = 2
 
 
 def _summary_sidecar_path(path: Path) -> Path:
@@ -127,10 +138,12 @@ def _fold_event_into_state(state: dict, event: dict) -> dict:
     return state
 
 
-def _serialize_sidecar(state: dict, journal_size: int) -> dict:
+def _serialize_sidecar(state: dict, journal_size: int, *, session_id: str, run_id: str) -> dict:
     """Serialize sidecar state to the on-disk JSON format."""
     return {
         "version": _RUN_SUMMARY_SIDECAR_VERSION,
+        "session_id": str(session_id),
+        "run_id": str(run_id),
         "journal_size": int(journal_size),
         "event_count": int(state.get("event_count") or 0),
         "last": state.get("last"),
@@ -152,7 +165,16 @@ def _validate_sidecar(data) -> dict | None:
     """
     if not isinstance(data, dict):
         return None
-    if data.get("version") != _RUN_SUMMARY_SIDECAR_VERSION:
+    version = data.get("version")
+    # Require version == 2 and reject bool aliasing (2 == True is False but be explicit)
+    if not (version == 2 and not isinstance(version, bool)):
+        return None
+    # session_id and run_id must be non-empty strings
+    sid = data.get("session_id")
+    rid = data.get("run_id")
+    if not (isinstance(sid, str) and sid.strip()):
+        return None
+    if not (isinstance(rid, str) and rid.strip()):
         return None
     if not _is_nonneg_int(data.get("journal_size")):
         return None
@@ -222,16 +244,33 @@ def _summary_from_sidecar(session_id, run_id, data: dict) -> dict:
 def _try_summary_from_sidecar(path, session_id, run_id) -> tuple[dict | None, bool]:
     """Return (summary, ok). ok=False means 'do not cache' (transient I/O).
     summary is None when no usable sidecar -> caller falls back to tail."""
-    try:
-        jsonl_stat = path.stat()
-    except (FileNotFoundError, OSError):
-        return None, True  # missing jsonl -> let the tail reader handle (returns empty)
     sidecar_path = _summary_sidecar_path(path)
     data = _read_sidecar(sidecar_path)  # strictly validated; never raises
     if data is None:
         return None, True
-    if int(data["journal_size"]) != int(jsonl_stat.st_size):
-        return None, True  # stale (crash-mid-append / hand-edit / replacement) -> fallback
+
+    # Open the JSONL once and fstat that pinned descriptor (b1)
+    jsonl_fh = None
+    try:
+        jsonl_fh = path.open("rb")
+        st = os.fstat(jsonl_fh.fileno())
+    except (FileNotFoundError, OSError):
+        return None, True  # missing jsonl -> let the tail reader handle (returns empty)
+    finally:
+        if jsonl_fh is not None:
+            try:
+                jsonl_fh.close()
+            except OSError:
+                pass
+
+    # Require identity + generation match (b1)
+    if (
+        data.get("session_id") != str(session_id)
+        or data.get("run_id") != str(run_id)
+        or int(data.get("journal_size", 0)) != int(st.st_size)
+    ):
+        return None, True  # foreign or stale -> fallback
+
     return _summary_from_sidecar(session_id, run_id, data), True
 
 
@@ -296,24 +335,97 @@ def _lock_for(path: Path) -> threading.Lock:
         return lock
 
 
-def _summary_cache_signature(path: Path) -> tuple[int, int, int, int, int] | None:
+@contextmanager
+def _journal_lock(path: Path):
+    """Cross-process file lock for run-journal writers (b3).
+
+    Mirrors api/models.py:_cleanup_manifest_process_lock exactly:
+    - Permanent .lock file alongside the journal
+    - POSIX: fcntl.flock(LOCK_EX) / LOCK_UN
+    - Windows: msvcrt.locking(LK_LOCK, 1) / LK_UNLCK
+    - Else: raise RuntimeError (fail-closed)
+
+    Advisory lock: readers never acquire it, so cold reads never block.
+    """
+    lock_path = path.with_name(f"{path.stem}.lock")
+    # Ensure parent directory exists (Windows test tmp_path may not have it yet)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_fh = None
+    try:
+        # Create/open the lock file
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        lock_fh = os.fdopen(lock_fd, "r+b", buffering=0)
+        if _fcntl is not None:
+            # POSIX: flock(LOCK_EX)
+            _fcntl.flock(lock_fh.fileno(), _fcntl.LOCK_EX)
+        elif _msvcrt is not None:
+            # Windows: only seed the lock byte when the file is empty, so a
+            # second waiter never writes the byte another process has locked
+            # (Windows mandatory locking would raise PermissionError on that
+            # write). Mirrors api/models.py:_cleanup_manifest_process_process.
+            if os.fstat(lock_fh.fileno()).st_size == 0:
+                lock_fh.write(b"\0")
+            lock_fh.seek(0)
+            _msvcrt.locking(lock_fh.fileno(), _msvcrt.LK_LOCK, 1)
+        else:
+            raise RuntimeError("cross-process journal locking is unavailable")
+        yield
+    finally:
+        if lock_fh is not None:
+            try:
+                if _fcntl is not None:
+                    _fcntl.flock(lock_fh.fileno(), _fcntl.LOCK_UN)
+                elif _msvcrt is not None:
+                    lock_fh.seek(0)
+                    _msvcrt.locking(lock_fh.fileno(), _msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+            finally:
+                try:
+                    lock_fh.close()
+                except OSError:
+                    pass
+
+
+def _descriptor_size(fh) -> int:
+    """Return the current size of the file backing an open descriptor.
+
+    Used to pin the journal generation on ONE descriptor across an append
+    (pre-state and post-state). Centralized so a pre-state fault is observable
+    and testable independently of the cross-process lock's own fstat. (#6139 r19)
+    """
+    return os.fstat(fh.fileno()).st_size
+
+
+def _summary_cache_signature(path: Path) -> tuple[int, int, int, int, int, int, int, int] | None:
     """Return the complete filesystem identity used for summary-cache validity.
 
     Includes ``st_ctime_ns`` so a same-inode, same-size rewrite that restores the
     original ``mtime_ns`` (e.g. an atomic replace) still invalidates the cache —
     ctime advances on any metadata/content change and cannot be forged back.
+
+    b1-cache: also includes the sidecar's (size, mtime_ns, ctime_ns) so a sidecar-only
+    replacement invalidates the cache (jsonl unchanged, sidecar changed -> new signature).
     """
     try:
         stat = path.stat()
     except OSError:
         return None
-    return (
+    jsonl_sig = (
         int(stat.st_dev),
         int(stat.st_ino),
         int(stat.st_size),
         int(stat.st_mtime_ns),
         int(stat.st_ctime_ns),
     )
+    # Add sidecar generation (or 0,0,0 if absent)
+    sidecar_path = _summary_sidecar_path(path)
+    try:
+        sc_stat = sidecar_path.stat()
+        sidecar_sig = (int(sc_stat.st_size), int(sc_stat.st_mtime_ns), int(sc_stat.st_ctime_ns))
+    except OSError:
+        sidecar_sig = (0, 0, 0)
+    return jsonl_sig + sidecar_sig
 
 
 def _get_cached_summary(path: Path) -> dict | None:
@@ -2187,102 +2299,144 @@ def append_run_event(
     event_name = str(event_name or "").strip()
     if not event_name:
         raise ValueError("event_name is required")
+
+    # b3: Hold both locks across the entire critical section
     with _lock_for(path):
-        # 1. Reserve seq and build event dict
-        if seq is not None:
-            assigned_seq = int(seq)
-            _note_assigned_seq(path, assigned_seq)
-        else:
-            assigned_seq = _reserve_next_seq(path)
-        terminal_state = _terminal_state_for_event(event_name, payload)
-        event = {
-            "version": 1,
-            "event_id": f"{run_id}:{assigned_seq}",
-            "seq": assigned_seq,
-            "run_id": str(run_id),
-            "session_id": str(session_id),
-            "event": event_name,
-            "type": event_name,
-            "created_at": float(created_at if created_at is not None else time.time()),
-            "terminal": bool(terminal_state),
-            "terminal_state": terminal_state,
-            "payload": payload,
-        }
+        with _journal_lock(path):
+            sidecar_path = _summary_sidecar_path(path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            created_file = not path.exists()
 
-        # 2. Resolve the fold base for the sidecar. The prior sidecar is a
-        # trustworthy fold base ONLY if its recorded journal_size matches the
-        # JSONL size BEFORE this append — a mismatch means a prior sidecar
-        # commit failed (or the JSONL changed out of band), so the sidecar is
-        # stale and must NOT be folded onto (else a lost interior event is
-        # permanently healed into the summary). (#6139 r18 b1)
-        sidecar_path = _summary_sidecar_path(path)
-        try:
-            pre_size = path.stat().st_size if path.exists() else 0
-        except OSError:
-            pre_size = 0
-        prior = _read_sidecar(sidecar_path)  # strictly validated; None if malformed (#6139 r18 b3)
-        base_trusted = False
-        if prior is not None and int(prior["journal_size"]) == pre_size:
-            state = {
-                "event_count": prior["event_count"],
-                "last": prior["last"],
-                "terminal": prior["terminal"],
-            }
-            base_trusted = True
-        elif pre_size > 0:
-            # Sidecar absent/stale/malformed for an existing run: rebuild from
-            # the bounded tail. Honor ``ok=False`` — a transient rebuild fault
-            # must NOT be published as current authority; readers keep falling
-            # back to the tail reader and a later append retries. (#6139 r18 b2)
-            tail_events, _tail_malformed, tail_ok = _read_jsonl_tail(
-                path,
-                max_bytes=_SESSION_REPLAY_MAX_BYTES,
-                max_rows=_SESSION_REPLAY_MAX_ROWS,
-                attribute_lines=False,
-            )
-            state = _new_sidecar_state()
-            for ev in tail_events:
-                _fold_event_into_state(state, ev)
-            base_trusted = bool(tail_ok)
-        else:
-            # Fresh run (no JSONL yet).
-            state = _new_sidecar_state()
-            base_trusted = True
-
-        # 3. Write the JSONL line (existing logic unchanged)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        created_file = not path.exists()
-        line = json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
-        fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
-        with os.fdopen(fd, "a", encoding="utf-8") as fh:
-            fh.write(line)
-            fh.flush()
-            if _should_fsync_event(terminal_state):
-                os.fsync(fh.fileno())
-
-        # 4. Fold the new event, then publish the sidecar ONLY from a trusted
-        # base — never publish a current-generation sidecar built on
-        # stale/missing/corrupt/faulted state. (#6139 r18 b1/b2) The sidecar
-        # write is BEST-EFFORT: a failure MUST NOT abort the append (the JSONL
-        # line is already durably written); readers fall back to the tail reader
-        # and the next append's pre-size check rebuilds from a clean read.
-        _fold_event_into_state(state, event)
-        if base_trusted:
+            # Open ONE pinned descriptor for the whole write (b3)
+            wfd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+            fh = None
             try:
-                post_size = path.stat().st_size
-                payload_dict = _serialize_sidecar(state, post_size)
-                _atomic_write_json(
-                    sidecar_path, payload_dict, fsync=_should_fsync_event(terminal_state)
-                )
-            except OSError:
-                pass
+                fh = os.fdopen(wfd, "a", encoding="utf-8")  # text mode preserves CRLF
 
-        # 5. Discard the cached summary: the JSONL (and sidecar, if published)
-        # both changed, so any cached summary for the old generation is stale.
-        _discard_cached_summary(path)
-        if created_file:
-            _fsync_parent_dir(path)
-        return event
+                # b2a: pre_size from the pinned descriptor (not path.stat()). On
+                # fault we still append (O_APPEND is safe) but publish no authority.
+                pre_size = None
+                try:
+                    pre_size = _descriptor_size(fh)
+                except OSError:
+                    pre_size = None
+
+                # Resolve the fold base for the sidecar (b1/b2a/b2b). One
+                # if/elif chain: every branch sets ``state``, ``durable_max``,
+                # and ``base_trusted`` exactly once, and a pre-state fault
+                # (pre_size is None) is NEVER promoted to a trusted base.
+                prior = _read_sidecar(sidecar_path)  # strictly validated; None if malformed
+                base_trusted = False
+                durable_max = 0
+                state = _new_sidecar_state()
+                if pre_size is None:
+                    # b2a: cannot establish the pre-state generation on the
+                    # pinned descriptor. Append the JSONL (O_APPEND is safe) but
+                    # publish NO compact authority; readers keep falling back to
+                    # the tail reader and a later append retries.
+                    base_trusted = False
+                elif (
+                    prior is not None
+                    and prior.get("session_id") == str(session_id)
+                    and prior.get("run_id") == str(run_id)
+                    and int(prior.get("journal_size", 0)) == int(pre_size)
+                ):
+                    # b1: a prior sidecar that names THIS run AND records the
+                    # pinned pre-append size is a trusted incremental fold base.
+                    state = {
+                        "event_count": prior["event_count"],
+                        "last": prior["last"],
+                        "terminal": prior["terminal"],
+                    }
+                    durable_max = int((prior.get("last") or {}).get("seq") or 0)
+                    base_trusted = True
+                elif int(pre_size) > 0:
+                    # b2b: no trusted sidecar for an existing run: rebuild from
+                    # the bounded tail. The rebuild is a COMPLETE accounting ONLY
+                    # if the whole journal fit in the byte window (max_rows=None
+                    # makes the byte cap the sole bound); a partial/capped
+                    # rebuild is folded but MUST NOT be published as authority.
+                    tail_events, _tail_malformed, tail_ok = _read_jsonl_tail(
+                        path,
+                        max_bytes=_SESSION_REPLAY_MAX_BYTES,
+                        max_rows=None,
+                        attribute_lines=False,
+                    )
+                    for ev in tail_events:
+                        _fold_event_into_state(state, ev)
+                    base_trusted = bool(tail_ok) and int(pre_size) <= _SESSION_REPLAY_MAX_BYTES
+                    durable_max = max((int(ev.get("seq") or 0) for ev in tail_events), default=0)
+                else:
+                    # pre_size == 0: a fresh, empty journal is a trusted base.
+                    base_trusted = True
+
+                # b3: reconcile the assigned seq against the durable journal max
+                # so a stale per-process cache cannot re-issue a seq another
+                # process already appended. ``_reserve_next_seq`` seeds the
+                # in-memory cache from disk exactly once per path (the seed-once
+                # contract); ``durable_max`` (from the trusted sidecar / rebuild)
+                # floors it so cross-process appends stay monotonic and gapless.
+                # A caller-supplied seq is floored for the same reason.
+                if seq is not None:
+                    assigned_seq = max(int(seq), int(durable_max) + 1)
+                else:
+                    assigned_seq = max(_reserve_next_seq(path), int(durable_max) + 1)
+                _note_assigned_seq(path, assigned_seq)
+
+                terminal_state = _terminal_state_for_event(event_name, payload)
+                event = {
+                    "version": 1,
+                    "event_id": f"{run_id}:{assigned_seq}",
+                    "seq": assigned_seq,
+                    "run_id": str(run_id),
+                    "session_id": str(session_id),
+                    "event": event_name,
+                    "type": event_name,
+                    "created_at": float(created_at if created_at is not None else time.time()),
+                    "terminal": bool(terminal_state),
+                    "terminal_state": terminal_state,
+                    "payload": payload,
+                }
+
+                # Write the JSONL line
+                line = json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
+                fh.write(line)
+                fh.flush()
+                if _should_fsync_event(terminal_state):
+                    os.fsync(fh.fileno())
+
+                # Post-state size from the SAME pinned descriptor (b1 generation pin).
+                post_size = None
+                try:
+                    post_size = _descriptor_size(fh)
+                except OSError:
+                    post_size = None
+
+            finally:
+                if fh is not None:
+                    try:
+                        fh.close()
+                    except OSError:
+                        pass
+
+            # Fold the new event and publish sidecar only from a trusted base
+            _fold_event_into_state(state, event)
+            if base_trusted and post_size is not None:
+                try:
+                    payload_dict = _serialize_sidecar(
+                        state, post_size, session_id=session_id, run_id=run_id
+                    )
+                    _atomic_write_json(
+                        sidecar_path, payload_dict, fsync=_should_fsync_event(terminal_state)
+                    )
+                except OSError:
+                    pass
+
+            # Discard the cached summary
+            _discard_cached_summary(path)
+            if created_file:
+                _fsync_parent_dir(path)
+            return event
 
 
 class RunJournalWriter:
@@ -2296,18 +2450,15 @@ class RunJournalWriter:
         self._lock = _lock_for(self._path)
 
     def append_sse_event(self, event_name: str, payload=None) -> dict:
-        # Draw from the shared module-level seq cache under the per-path lock so
-        # this writer and any direct append_run_event() call on the same path
-        # agree on one monotonic, gapless sequence.
-        with self._lock:
-            seq = _reserve_next_seq(self._path)
+        # b3: Thin wrapper calling append_run_event directly (seq=None)
+        # The seq is reserved inside append_run_event under the locks.
         return append_run_event(
             self.session_id,
             self.run_id,
             event_name,
             payload or {},
             session_dir=self.session_dir,
-            seq=seq,
+            seq=None,
         )
 
 

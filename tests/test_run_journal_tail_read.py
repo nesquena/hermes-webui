@@ -22,6 +22,7 @@ from api.run_journal import (
     find_run_summary,
     latest_run_summary,
     read_run_events,
+    append_run_event,
 )
 from api.run_journal import _SESSION_REPLAY_MAX_ROWS
 
@@ -3369,8 +3370,10 @@ def test_writer_produces_sidecar_and_summary_matches_full_read(tmp_path):
     with sidecar_path.open("r", encoding="utf-8") as f:
         sidecar_data = json.load(f)
 
-    # Verify sidecar structure
-    assert sidecar_data["version"] == 1
+    # Verify sidecar structure (b1: v2 schema with session_id/run_id)
+    assert sidecar_data["version"] == 2
+    assert sidecar_data["session_id"] == session_id
+    assert sidecar_data["run_id"] == run_id
     assert sidecar_data["event_count"] == 3
     assert sidecar_data["last"]["seq"] == 3
     assert sidecar_data["last"]["event"] == "done"
@@ -3394,6 +3397,325 @@ def test_writer_produces_sidecar_and_summary_matches_full_read(tmp_path):
     assert sidecar_summary["terminal"] == full_summary["terminal"]
     assert sidecar_summary["terminal_state"] == full_summary["terminal_state"]
     assert sidecar_summary["last_event"] == full_summary["last_event"]
+
+
+def test_foreign_same_size_sidecar_rejected_by_identity(tmp_path):
+    """b1: A v2 sidecar with foreign session_id/run_id (same journal_size) is rejected.
+    Both readers must fall back to the JSONL tail and return the TRUE tuple."""
+    from api.run_journal import _run_path, _summary_sidecar_path, _read_jsonl, _summary_from_events
+    import json
+
+    session_id = "session_1"
+    run_id = "run_foreign"
+    writer = RunJournalWriter(session_id, run_id, session_dir=tmp_path)
+
+    # Create a real journal with known events
+    writer.append_sse_event("token", {"text": "real"})
+    writer.append_sse_event("cancel", {})  # terminal_state = interrupted-by-user
+
+    path = _run_path(session_id, run_id, session_dir=tmp_path)
+    sidecar_path = _summary_sidecar_path(path)
+    journal_size = path.stat().st_size
+
+    # Overwrite sidecar with a FOREIGN one (wrong session_id/run_id, same journal_size, wrong terminal)
+    foreign_sidecar = {
+        "version": 2,
+        "session_id": "wrong_session",
+        "run_id": "wrong_run",
+        "journal_size": journal_size,
+        "event_count": 1,
+        "last": {"seq": 1, "event_id": "wrong_run:1", "event": "done"},
+        "terminal": {"event": "done", "state": "completed", "seq": 1, "event_id": "wrong_run:1"},
+    }
+    with sidecar_path.open("w", encoding="utf-8") as f:
+        json.dump(foreign_sidecar, f)
+
+    # Both readers must reject the foreign sidecar and fall back to JSONL
+    summary_latest = latest_run_summary(session_id, run_id, session_dir=tmp_path)
+    summary_find = find_run_summary(run_id, session_dir=tmp_path)
+
+    # Authoritative full read (baseline: must match this)
+    full_events, _, _ = _read_jsonl(path)
+    authoritative = _summary_from_events(session_id, run_id, full_events)
+
+    # Both readers must agree with the full reader (cancel/interrupted-by-user), NOT the foreign done/completed
+    for summary in (summary_latest, summary_find):
+        assert summary["terminal"] is True, "should be terminal (cancel)"
+        assert summary["terminal_state"] == "interrupted-by-user", (
+            f"should report interrupted-by-user, not foreign completed; got {summary['terminal_state']}"
+        )
+        assert summary["last_seq"] == 2, "should have seq 2 (cancel)"
+        assert summary["event_count"] == 2, "should have 2 events"
+
+    # Must match the authoritative full read exactly
+    assert summary_latest["terminal_state"] == authoritative["terminal_state"]
+    assert summary_find["terminal_state"] == authoritative["terminal_state"]
+
+
+def test_pre_state_fault_does_not_publish_sidecar(tmp_path):
+    """b2a: When pre-state fstat raises OSError, pre_size=None, base_trusted=False,
+    so no sidecar is published. JSONL gets the new line, readers return correct result."""
+    from api.run_journal import _run_path, _summary_sidecar_path
+    import json
+
+    session_id = "session_fault"
+    run_id = "run_fault"
+
+    path = _run_path(session_id, run_id, session_dir=tmp_path)
+    sidecar_path = _summary_sidecar_path(path)
+
+    # Populate journal + trusted sidecar manually (set up the initial state)
+    writer = RunJournalWriter(session_id, run_id, session_dir=tmp_path)
+    writer.append_sse_event("token", {"text": "existing"})
+    writer.append_sse_event("done", {"session": {"session_id": session_id}})
+
+    # Verify initial sidecar exists and is trusted
+    assert sidecar_path.exists()
+    with sidecar_path.open("r", encoding="utf-8") as f:
+        initial_sidecar = json.load(f)
+    assert initial_sidecar["event_count"] == 2
+
+    # Fault ONLY the pre-state size read. ``_descriptor_size`` is called exactly
+    # twice per append (pre-state then post-state) and is NOT used by the
+    # cross-process lock, so a one-call counter faults the pre-state read while
+    # leaving the post-state read (and the lock's own fstat) intact. The
+    # post-state MUST succeed, otherwise publish is blocked by ``post_size is
+    # None`` instead of by ``base_trusted`` and the test passes for the wrong
+    # reason.
+    import api.run_journal as rj_module
+    real_descriptor_size = rj_module._descriptor_size
+    calls = {"n": 0}
+
+    def faulting_descriptor_size(fh):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("simulated pre-state fault")
+        return real_descriptor_size(fh)
+
+    rj_module._descriptor_size = faulting_descriptor_size
+    try:
+        # Append one event; pre-state fault must prevent sidecar publication.
+        writer.append_sse_event("token", {"text": "after-fault"})
+    finally:
+        rj_module._descriptor_size = real_descriptor_size  # restore
+
+    # Assert: sidecar NOT republished (should still show event_count=2)
+    with sidecar_path.open("r", encoding="utf-8") as f:
+        final_sidecar = json.load(f)
+    assert final_sidecar["event_count"] == 2, (
+        f"sidecar should NOT be republished after pre-state fault; "
+        f"got event_count={final_sidecar['event_count']} (expected 2)"
+    )
+
+    # JSONL must have the new line (3 total lines)
+    lines = path.read_text(encoding="utf-8").strip().split("\n")
+    assert len(lines) == 3, f"JSONL should have 3 lines after append; got {len(lines)}"
+
+    # Both readers must return the correct result (event_count=3, not the stale sidecar's 2)
+    summary_latest = latest_run_summary(session_id, run_id, session_dir=tmp_path)
+    summary_find = find_run_summary(run_id, session_dir=tmp_path)
+
+    for summary in (summary_latest, summary_find):
+        assert summary["event_count"] == 3, (
+            f"reader should see all 3 events, not stale sidecar count 2; "
+            f"got {summary['event_count']}"
+        )
+        assert summary["last_seq"] == 3, f"last_seq should be 3; got {summary['last_seq']}"
+
+
+def test_sidecar_only_replacement_invalidates_warm_cache(tmp_path):
+    """b1-cache: Replacing ONLY the sidecar (different terminal, same jsonl) changes
+    the cache signature, so warm cache invalidates and next read returns fresh data."""
+    from api.run_journal import _run_path, _summary_sidecar_path
+    import json
+
+    session_id = "session_cache"
+    run_id = "run_cache"
+    writer = RunJournalWriter(session_id, run_id, session_dir=tmp_path)
+
+    writer.append_sse_event("token", {"text": "initial"})
+    writer.append_sse_event("done", {"session": {"session_id": session_id}})
+
+    path = _run_path(session_id, run_id, session_dir=tmp_path)
+    sidecar_path = _summary_sidecar_path(path)
+
+    # Warm the cache via a read
+    summary_1 = latest_run_summary(session_id, run_id, session_dir=tmp_path)
+    assert summary_1["terminal_state"] == "completed"
+
+    # Replace ONLY the sidecar (different terminal, same jsonl)
+    with sidecar_path.open("r", encoding="utf-8") as f:
+        sidecar_data = json.load(f)
+    sidecar_data["terminal"] = {"event": "cancel", "state": "interrupted-by-user", "seq": 2, "event_id": f"{run_id}:2"}
+    with sidecar_path.open("w", encoding="utf-8") as f:
+        json.dump(sidecar_data, f)
+
+    # Next read must NOT return the stale cached value (must re-read)
+    summary_2 = latest_run_summary(session_id, run_id, session_dir=tmp_path)
+    assert summary_2["terminal_state"] == "interrupted-by-user", (
+        "warm cache must invalidate after sidecar-only replacement; "
+        f"got stale {summary_2['terminal_state']}"
+    )
+
+
+def test_capped_rebuild_not_promoted_to_authority(tmp_path):
+    """b2b: A journal beyond the byte cap (capped rebuild) must NOT publish a sidecar.
+    Rebuild with max_rows=None only trusts when pre_size <= max_bytes."""
+    from api.run_journal import _SESSION_REPLAY_MAX_BYTES, _run_path, _summary_sidecar_path
+    import json
+
+    session_id = "session_capped"
+    run_id = "run_capped"
+
+    # Build an OVERSIZED journal directly (fast): a cancel(seq1) semantic
+    # terminal near the start, followed by a few large events so the total
+    # exceeds the 4 MiB byte cap. No sidecar is written, so the next append must
+    # rebuild from the bounded tail. Raw-written events use the writer's own
+    # record shape so the rebuild fold exercises the real parser.
+    large = "X" * (512 * 1024)  # 512 KiB per token payload
+    path = _run_path(session_id, run_id, session_dir=tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as fh:
+        specs = [(1, "cancel", {"message": "x"}, "interrupted-by-user")]
+        specs += [(seq, "token", {"text": large}, None) for seq in range(2, 11)]
+        for seq, name, payload, tstate in specs:
+            ev = {
+                "version": 1,
+                "event_id": f"{run_id}:{seq}",
+                "seq": seq,
+                "run_id": run_id,
+                "session_id": session_id,
+                "event": name,
+                "type": name,
+                "created_at": float(seq),
+                "terminal": tstate is not None,
+                "terminal_state": tstate,
+                "payload": payload,
+            }
+            fh.write(json.dumps(ev, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+    sidecar_path = _summary_sidecar_path(path)
+    assert not sidecar_path.exists(), "fixture must start with no sidecar"
+
+    # Sanity: the journal actually exceeds the byte cap (so the rebuild is capped).
+    journal_size = path.stat().st_size
+    assert journal_size > _SESSION_REPLAY_MAX_BYTES, (
+        f"test fixture must exceed byte cap; journal size={journal_size}, cap={_SESSION_REPLAY_MAX_BYTES}"
+    )
+
+    # Append one event (triggers a capped rebuild; must NOT publish a sidecar).
+    append_run_event(session_id, run_id, "token", {"text": "after-rebuild"}, session_dir=tmp_path)
+
+    assert not sidecar_path.exists(), (
+        "sidecar must NOT be published for a capped rebuild; "
+        "journal exceeds byte cap, so the rebuild is incomplete authority"
+    )
+
+    # Both readers must not raise (they fall back to the bounded tail reader).
+    assert latest_run_summary(session_id, run_id, session_dir=tmp_path) is not None
+    assert find_run_summary(run_id, session_dir=tmp_path) is not None
+
+
+def test_writer_free_function_interleaving_no_omission(tmp_path):
+    """b3: RunJournalWriter and free append_run_event() writing to the same journal
+    must not omit events (thread-safety + seq uniqueness). Uses actual threads."""
+    import threading
+    from api.run_journal import _run_path, _read_jsonl
+
+    session_id = "session_interleave"
+    run_id = "run_interleave"
+    path = _run_path(session_id, run_id, session_dir=tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    n = 50  # events per thread
+
+    def writer_thread():
+        w = RunJournalWriter(session_id, run_id, session_dir=tmp_path)
+        for i in range(n):
+            w.append_sse_event("token", {"text": f"writer-{i}"})
+
+    def free_func_thread():
+        for i in range(n):
+            append_run_event(session_id, run_id, "token", {"text": f"free-{i}"}, session_dir=tmp_path)
+
+    t1 = threading.Thread(target=writer_thread)
+    t2 = threading.Thread(target=free_func_thread)
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    # Read JSONL and verify
+    events, _, _ = _read_jsonl(path)
+    assert len(events) == 2 * n, f"expected {2*n} events, got {len(events)}"
+
+    # All seqs must be unique and in [1, 2*n]
+    seqs = sorted([int(e["seq"]) for e in events])
+    assert seqs == list(range(1, 2 * n + 1)), f"seqs not gapless: {seqs[:5]}...{seqs[-5:]}"
+
+
+def test_cross_process_concurrent_append_no_omission(tmp_path):
+    """b3: Two subprocesses appending to the SAME journal must not omit events.
+    Asserts sidecar event_count == durable JSONL line count (ground truth)."""
+    import subprocess
+    import sys
+    import api.run_journal as rj_module
+    from api.run_journal import _run_path, _summary_sidecar_path, _read_jsonl
+    import json
+
+    session_id = "session_crossproc"
+    run_id = "run_crossproc"
+    path = _run_path(session_id, run_id, session_dir=tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    # The helper runs in a fresh interpreter, so it needs the REPO root (where
+    # the ``api`` package lives) on sys.path -- not tmp_path.
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(rj_module.__file__)))
+    n_events = 30
+
+    helper_code = (
+        "import sys\n"
+        f"sys.path.insert(0, r{chr(34)}{repo_root}{chr(34)})\n"
+        "from api.run_journal import append_run_event\n"
+        f"sid = {session_id!r}\n"
+        f"rid = {run_id!r}\n"
+        f"sd = r{chr(34)}{tmp_path}{chr(34)}\n"
+        f"for i in range({n_events}):\n"
+        "    append_run_event(sid, rid, 'token', {'text': f'proc-{i}'}, session_dir=sd)\n"
+    )
+    helper_file = tmp_path / "cross_proc_helper.py"
+    helper_file.write_text(helper_code, encoding="utf-8")
+
+    # Spawn two subprocesses CONCURRENTLY, capturing stderr so an import/append
+    # failure in the helper surfaces instead of making the test pass vacuously.
+    p1 = subprocess.Popen([sys.executable, str(helper_file)], stderr=subprocess.PIPE)
+    p2 = subprocess.Popen([sys.executable, str(helper_file)], stderr=subprocess.PIPE)
+    out1, err1 = p1.communicate()
+    out2, err2 = p2.communicate()
+    assert p1.returncode == 0, f"helper proc1 failed: {err1.decode('utf-8', 'replace')}"
+    assert p2.returncode == 0, f"helper proc2 failed: {err2.decode('utf-8', 'replace')}"
+
+    # Ground truth: durable JSONL line count.
+    events, _, _ = _read_jsonl(path)
+    durable_count = len(events)
+    assert durable_count == 2 * n_events, (
+        f"expected {2 * n_events} durable events, got {durable_count}; "
+        f"proc1_err={err1.decode('utf-8', 'replace')!r} proc2_err={err2.decode('utf-8', 'replace')!r}"
+    )
+
+    # The published sidecar must agree with the durable line count (no omissions).
+    sidecar_path = _summary_sidecar_path(path)
+    assert sidecar_path.exists(), "trusted sidecar must be published for the concurrent run"
+    with sidecar_path.open("r", encoding="utf-8") as f:
+        sidecar_data = json.load(f)
+    assert sidecar_data["event_count"] == durable_count, (
+        f"sidecar event_count={sidecar_data['event_count']} != durable count={durable_count}; "
+        "cross-process serialization failed - accepted event(s) omitted from the sidecar"
+    )
+
+    # All seqs must be unique and gapless across the two processes.
+    seqs = sorted([int(e["seq"]) for e in events])
+    assert seqs == list(range(1, durable_count + 1)), f"seqs not gapless: {seqs[:5]}...{seqs[-5:]}"
 
 
 def test_oversized_terminal_summary_uses_sidecar_bounded_reads(tmp_path):
