@@ -7545,6 +7545,12 @@ function _attachProjectQuickCreateButton(chip, project){
       // project-assigned session appears deterministically.
       try{ if(typeof renderSessionListFromCache==='function') renderSessionListFromCache(); }catch(_){}
       try{ if(typeof renderSessionList==='function') void renderSessionList({deferWhileInteracting:false}); }catch(_){}
+      // Mobile: the sidebar is a full-screen drawer over the main view — close
+      // it after the project conversation is created so the user actually sees
+      // the new session (mirrors $('btnNewChat').onclick in boot.js and the
+      // #5409 close in _openSidebarSession). Failure path keeps the drawer open
+      // so the toast stays visible for retry.
+      if(typeof closeMobileSidebar==='function') closeMobileSidebar();
     }catch(err){
       _setActiveProjectFilter(previousProject);
       if(typeof showToast==='function') showToast('New conversation failed: '+(err&&err.message||err));
