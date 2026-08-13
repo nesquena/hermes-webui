@@ -43,7 +43,7 @@ def _call_insights(monkeypatch, tmp_path, entries, days="7", now=None, query=Non
     import api.routes as routes
 
     session_dir = tmp_path / "sessions"
-    session_dir.mkdir()
+    session_dir.mkdir(exist_ok=True)
     (session_dir / "_index.json").write_text(json.dumps(entries), encoding="utf-8")
     monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
     if now is not None:
@@ -127,6 +127,67 @@ def test_insights_absolute_range_invalid_falls_back_to_days(monkeypatch, tmp_pat
     data = _call_insights(monkeypatch, tmp_path, entries, query="start=notanum&end=abc", now=now)
     assert data["total_sessions"] == 1
     assert len(data["daily_tokens"]) == 30  # falls back to default trailing 30 days
+
+
+def test_insights_absolute_range_nonfinite_timestamps_do_not_500(monkeypatch, tmp_path):
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    entries = [
+        {
+            "session_id": "today", "updated_at": now, "created_at": now,
+            "message_count": 1, "input_tokens": 10, "output_tokens": 5,
+            "estimated_cost": "0.0001", "model": "gpt-x",
+        },
+    ]
+    # nan/inf are accepted by float() but would crash int()/localtime().
+    # They must be rejected so the handler falls back instead of returning 500.
+    data = _call_insights(monkeypatch, tmp_path, entries, query="start=nan&end=inf", now=now)
+    assert data["total_sessions"] == 1
+    assert len(data["daily_tokens"]) == 30
+
+    data = _call_insights(monkeypatch, tmp_path, entries, query="start=1640995200&end=nan", now=now)
+    # `end=nan` is rejected, so the range defaults to start..now (== 1585 days).
+    assert data["total_sessions"] == 1
+    assert len(data["daily_tokens"]) == 1585
+
+
+def test_insights_absolute_range_beyond_366_days_keeps_series_in_sync(monkeypatch, tmp_path):
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    start_ts = now - (400 * 86400)   # 400 days ago
+    end_ts = now - (10 * 86400)      # 10 days ago
+    entries = [
+        {
+            "session_id": "in_window", "updated_at": end_ts, "created_at": start_ts,
+            "message_count": 4, "input_tokens": 1200, "output_tokens": 300,
+            "estimated_cost": "0.0123", "model": "gpt-x",
+        },
+    ]
+    data = _call_insights(monkeypatch, tmp_path, entries, query=f"start={int(start_ts)}&end={int(end_ts)}", now=now)
+    # Filtering uses the FULL window (400+ days), so the session is counted.
+    assert data["total_sessions"] == 1
+    assert data["total_input_tokens"] == 1200
+    # The daily series must cover the same interval the totals were computed
+    # over - no silent 366-day truncation that leaves chart and totals mismatched.
+    assert len(data["daily_tokens"]) >= 390
+    assert _day(start_ts) == data["daily_tokens"][0]["date"]
+    assert _day(end_ts) == data["daily_tokens"][-1]["date"]
+
+
+def test_insights_absolute_range_absurd_window_is_capped(monkeypatch, tmp_path):
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    entries = [
+        {
+            "session_id": "today", "updated_at": now, "created_at": now,
+            "message_count": 1, "input_tokens": 10, "output_tokens": 5,
+            "estimated_cost": "0.0001", "model": "gpt-x",
+        },
+    ]
+    # start=1 (1970) to now spans ~56 years - the server must clamp to a sane
+    # window instead of generating a million daily buckets, and the totals
+    # must stay consistent with the (clamped) daily series.
+    data = _call_insights(monkeypatch, tmp_path, entries, query="start=1", now=now)
+    assert data["total_sessions"] == 1
+    assert len(data["daily_tokens"]) <= 1830  # clamped to the 5-year cap (+slack)
+    assert len(data["daily_tokens"]) > 0
 
 
 def test_insights_daily_tokens_zero_fills_selected_range_and_parses_cost(monkeypatch, tmp_path):
@@ -416,7 +477,7 @@ def _call_insights_with_state_db(monkeypatch, tmp_path, entries, state_rows, day
     import api.models as models
 
     session_dir = tmp_path / "sessions"
-    session_dir.mkdir()
+    session_dir.mkdir(exist_ok=True)
     (session_dir / "_index.json").write_text(json.dumps(entries), encoding="utf-8")
     monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
     if now is not None:

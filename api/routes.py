@@ -11054,6 +11054,7 @@ def _handle_llm_wiki_status(handler, parsed) -> bool:
 def _handle_insights(handler, parsed) -> bool:
     """Return usage analytics from local WebUI session data."""
     import collections
+    import math as _math
     import time as _time
 
     from api.usage import prompt_cache_hit_percent
@@ -11061,10 +11062,21 @@ def _handle_insights(handler, parsed) -> bool:
     query = parse_qs(parsed.query)
 
     def _pos_float_list(vals):
-        try:
-            return [float(v) for v in vals if v != ""]
-        except (TypeError, ValueError):
-            return []
+        # Reject non-finite values (nan/inf): float() accepts them but
+        # int()/localtime() later raise -> HTTP 500. Filter so the caller
+        # falls back to a sane default range.
+        out = []
+        for v in vals:
+            if v == "":
+                continue
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                continue
+            if not _math.isfinite(f):
+                continue
+            out.append(f)
+        return out
 
     # Absolute time-window mode: start/end Unix timestamps (seconds).
     # end defaults to "now"; start defaults to 30 days before end.
@@ -11082,10 +11094,16 @@ def _handle_insights(handler, parsed) -> bool:
             end_ts = now
         if start_ts > end_ts:
             start_ts, end_ts = end_ts, start_ts
+        # Cap absurd custom windows (accidental/malicious huge ranges) at 5
+        # years so the daily series cannot balloon into millions of buckets.
+        # The window is clamped BEFORE filtering so totals and the chart are
+        # always computed over the same interval.
+        max_window = 5 * 365 * 86400
+        if end_ts - start_ts > max_window:
+            start_ts = end_ts - max_window
         cutoff = start_ts
         end_cutoff = end_ts
         days = max(int((end_ts - start_ts) / 86400) + 1, 1)
-        days = min(days, 366)
         # Align start/end to nearest midnight so daily buckets are whole days.
         start_lo = _time.localtime(start_ts)
         start_ts = _time.mktime((start_lo.tm_year, start_lo.tm_mon, start_lo.tm_mday, 0, 0, 0, start_lo.tm_wday, start_lo.tm_yday, start_lo.tm_isdst))
