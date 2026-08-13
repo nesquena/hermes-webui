@@ -11095,6 +11095,19 @@ def _handle_insights(handler, parsed) -> bool:
             end_ts = now
         if start_ts > end_ts:
             start_ts, end_ts = end_ts, start_ts
+        # A custom window must never extend into the future.  An explicit
+        # future `end` is already clamped to now via min(end, now) above,
+        # but the swap can re-introduce a future value as the new end - e.g.
+        # a future `start` with no `end` becomes [now, future_start].
+        # Clamp the end to now again; if even the window START is at or
+        # after now the whole window lies in the future (every daily bucket
+        # zero-filled), so fail closed to the trailing `days` fallback and
+        # keep the analytics window ending at or before now.
+        if end_ts > now:
+            end_ts = now
+        if start_ts >= now:
+            start_values = []
+            end_values = []
         # Clamp both endpoints into the platform-safe localtime range so an
         # absurd-but-finite timestamp (e.g. 1e20, -1e20) cannot reach
         # localtime()/mktime() and return HTTP 500. Windows msvcrt localtime
