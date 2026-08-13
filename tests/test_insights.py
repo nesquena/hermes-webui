@@ -3,6 +3,8 @@ import json
 import pathlib
 import sys
 import time
+
+import pytest
 from types import SimpleNamespace
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
@@ -150,6 +152,75 @@ def test_insights_absolute_range_nonfinite_timestamps_do_not_500(monkeypatch, tm
     assert len(data["daily_tokens"]) == 1585
 
 
+def test_insights_absolute_range_finite_out_of_range_falls_back_to_trailing(monkeypatch, tmp_path):
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    entries = [
+        {
+            "session_id": "today", "updated_at": now, "created_at": now,
+            "message_count": 1, "input_tokens": 10, "output_tokens": 5,
+            "estimated_cost": "0.0001", "model": "gpt-x",
+        },
+    ]
+    # Huge positive finite timestamp (1e20) must not reach localtime -> 500;
+    # clamps to trailing mode instead.
+    data = _call_insights(monkeypatch, tmp_path, entries, query="start=1e20", now=now)
+    assert data["total_sessions"] == 1
+    assert len(data["daily_tokens"]) == 30  # fallback to trailing 30 days
+    assert data["period_days"] == len(data["daily_tokens"])
+    # Huge negative finite timestamp must similarly fall back.
+    data = _call_insights(monkeypatch, tmp_path, entries, query="start=-1e20", now=now)
+    assert data["total_sessions"] == 1
+    assert len(data["daily_tokens"]) == 30
+    # Both endpoints out of range -> fall back.
+    data = _call_insights(monkeypatch, tmp_path, entries, query="start=-1e20&end=1e20", now=now)
+    assert data["total_sessions"] == 1
+    assert len(data["daily_tokens"]) == 30
+    # end out of range with valid start -> end clamped to now by min(end,now),
+    # so the range start..now is valid (not fallback).
+    data = _call_insights(monkeypatch, tmp_path, entries, query="start=1640995200&end=1e20", now=now)
+    assert data["total_sessions"] == 1
+    assert data["period_days"] == len(data["daily_tokens"])
+    assert len(data["daily_tokens"]) > 30  # valid start..now range, not 30-day fallback
+
+
+def test_insights_absolute_range_dst_transition_daily_buckets(monkeypatch, tmp_path):
+    """Custom range straddling a DST transition must produce the correct
+    number of calendar-day buckets.  The old fixed-86400-step logic would
+    calculate days = int((end-start)/86400)+1, which is off by one across a
+    23-hour spring-forward day (March 8, 2026 in America/New_York)"""
+    import os
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset() required for DST test (not available on Windows)")
+
+    os.environ["TZ"] = "America/New_York"
+    time.tzset()
+    try:
+        now = time.mktime((2026, 3, 11, 12, 0, 0, 0, 0, -1))  # after spring-forward
+        # March 6 (EST, UTC-5) to March 10 (EDT, UTC-4), straddling the
+        # March 8 "spring forward" (2:00->3:00).  Old fixed-86400 stepping
+        # would produce 4 daily buckets; the DST-safe calendar-day iteration
+        # produces 5.
+        start_ts = time.mktime((2026, 3, 6, 12, 0, 0, 0, 0, -1))
+        end_ts = time.mktime((2026, 3, 10, 12, 0, 0, 0, 0, -1))
+        entries = [
+            {
+                "session_id": "s1", "updated_at": now, "created_at": now,
+                "message_count": 1, "input_tokens": 10, "output_tokens": 5,
+                "estimated_cost": "0.0001", "model": "gpt-x",
+            },
+        ]
+        data = _call_insights(monkeypatch, tmp_path, entries,
+                              query=f"start={int(start_ts)}&end={int(end_ts)}", now=now)
+        dates = [d["date"] for d in data["daily_tokens"]]
+        assert dates == ["2026-03-06", "2026-03-07", "2026-03-08", "2026-03-09", "2026-03-10"]
+        assert data["period_days"] == 5
+        assert data["period_days"] == len(data["daily_tokens"])
+    finally:
+        os.environ.pop("TZ", None)
+        if hasattr(time, "tzset"):
+            time.tzset()
+
+
 def test_insights_absolute_range_beyond_366_days_keeps_series_in_sync(monkeypatch, tmp_path):
     now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
     start_ts = now - (400 * 86400)   # 400 days ago
@@ -170,6 +241,8 @@ def test_insights_absolute_range_beyond_366_days_keeps_series_in_sync(monkeypatc
     assert len(data["daily_tokens"]) >= 390
     assert _day(start_ts) == data["daily_tokens"][0]["date"]
     assert _day(end_ts) == data["daily_tokens"][-1]["date"]
+    # period_days, series length, and calendar spread must all agree.
+    assert data["period_days"] == len(data["daily_tokens"])
 
 
 def test_insights_absolute_range_absurd_window_is_capped(monkeypatch, tmp_path):
@@ -188,6 +261,7 @@ def test_insights_absolute_range_absurd_window_is_capped(monkeypatch, tmp_path):
     assert data["total_sessions"] == 1
     assert len(data["daily_tokens"]) <= 1830  # clamped to the 5-year cap (+slack)
     assert len(data["daily_tokens"]) > 0
+    assert data["period_days"] == len(data["daily_tokens"])
 
 
 def test_insights_daily_tokens_zero_fills_selected_range_and_parses_cost(monkeypatch, tmp_path):

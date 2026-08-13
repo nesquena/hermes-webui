@@ -11056,6 +11056,7 @@ def _handle_insights(handler, parsed) -> bool:
     import collections
     import math as _math
     import time as _time
+    from datetime import datetime as _datetime, timedelta as _timedelta
 
     from api.usage import prompt_cache_hit_percent
 
@@ -11094,25 +11095,38 @@ def _handle_insights(handler, parsed) -> bool:
             end_ts = now
         if start_ts > end_ts:
             start_ts, end_ts = end_ts, start_ts
-        # Cap absurd custom windows (accidental/malicious huge ranges) at 5
-        # years so the daily series cannot balloon into millions of buckets.
-        # The window is clamped BEFORE filtering so totals and the chart are
-        # always computed over the same interval.
-        max_window = 5 * 365 * 86400
-        if end_ts - start_ts > max_window:
-            start_ts = end_ts - max_window
-        cutoff = start_ts
-        end_cutoff = end_ts
-        days = max(int((end_ts - start_ts) / 86400) + 1, 1)
-        # Align start/end to nearest midnight so daily buckets are whole days.
-        start_lo = _time.localtime(start_ts)
-        start_ts = _time.mktime((start_lo.tm_year, start_lo.tm_mon, start_lo.tm_mday, 0, 0, 0, start_lo.tm_wday, start_lo.tm_yday, start_lo.tm_isdst))
-        end_lo = _time.localtime(end_ts)
-        end_ts = _time.mktime((end_lo.tm_year, end_lo.tm_mon, end_lo.tm_mday, 0, 0, 0, end_lo.tm_wday, end_lo.tm_yday, end_lo.tm_isdst))
-        end_cutoff = end_ts + 86400  # inclusive end day
-        first_day_ts = start_ts
-        day_secs = 86400
-    else:
+        # Clamp both endpoints into the platform-safe localtime range so an
+        # absurd-but-finite timestamp (e.g. 1e20, -1e20) cannot reach
+        # localtime()/mktime() and return HTTP 500. Windows msvcrt localtime
+        # supports roughly 1970..~3000; 4102444800 = 2100-01-01 is a
+        # conservative upper bound, 0 = 1970-01-01 the lower bound (no
+        # sessions predate the Unix epoch). Out-of-range -> fail closed to
+        # the trailing `days` fallback.
+        if not (0 <= start_ts <= 4102444800) or not (0 <= end_ts <= 4102444800):
+            start_values = []
+            end_values = []
+        else:
+            # Cap absurd custom windows (accidental/malicious huge ranges) at 5
+            # years so the daily series cannot balloon into millions of buckets.
+            # The window is clamped BEFORE filtering so totals and the chart are
+            # always computed over the same interval.
+            max_window = 5 * 365 * 86400
+            if end_ts - start_ts > max_window:
+                start_ts = end_ts - max_window
+            cutoff = start_ts
+            end_cutoff = end_ts
+            # Operate on local calendar dates (DST-safe), not fixed 86400s, so
+            # a spring-forward/fall-back day yields exactly one bucket and the
+            # daily series stays aligned with the filtered totals.
+            start_day = _datetime.fromtimestamp(start_ts).date()
+            end_day = _datetime.fromtimestamp(end_ts).date()
+            days = max((end_day - start_day).days + 1, 1)
+            # Align start/end to local midnight so daily buckets are whole days.
+            start_ts = _time.mktime((start_day.year, start_day.month, start_day.day, 0, 0, 0, 0, 0, -1))
+            end_ts = _time.mktime((end_day.year, end_day.month, end_day.day, 0, 0, 0, 0, 0, -1))
+            end_cutoff = end_ts + 86400  # inclusive end day
+            first_day_ts = start_ts
+    if not (start_values or end_values):
         # Trailing-window mode (legacy): last N calendar days up to today.
         try:
             days = min(max(int(query.get("days", ["30"])[0]), 1), 365)
@@ -11124,6 +11138,7 @@ def _handle_insights(handler, parsed) -> bool:
         today_midnight = _time.mktime((today.tm_year, today.tm_mon, today.tm_mday, 0, 0, 0, today.tm_wday, today.tm_yday, today.tm_isdst))
         day_secs = 86400
         first_day_ts = today_midnight - ((days - 1) * day_secs)
+        start_day = _datetime.fromtimestamp(first_day_ts).date()
     cutoff = first_day_ts
 
     def _safe_usage_int(value) -> int:
@@ -11343,8 +11358,8 @@ def _handle_insights(handler, parsed) -> bool:
 
     daily_series = []
     for i in range(days):
-        day_ts = first_day_ts + (i * day_secs)
-        day_key = _time.strftime("%Y-%m-%d", _time.localtime(day_ts))
+        day = start_day + _timedelta(days=i)
+        day_key = day.isoformat()
         bucket = daily_tokens.get(day_key, {
             "input_tokens": 0,
             "output_tokens": 0,
