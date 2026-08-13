@@ -5774,7 +5774,6 @@ let _messageJumpScrollGeneration=0;
 let _messageJumpScrollOwner=null;
 let _messageJumpScrollSettleTimer=0;
 function _messageJumpSessionId(){
-  if(typeof currentSid!=='undefined'&&currentSid) return String(currentSid);
   if(typeof S!=='undefined'&&S.session&&S.session.session_id) return String(S.session.session_id);
   return '';
 }

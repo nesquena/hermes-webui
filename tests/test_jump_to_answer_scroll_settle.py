@@ -458,7 +458,7 @@ const staleIgnored = _messageJumpScrollOwner && _messageJumpScrollOwner.generati
 const preservedFromFirst = _messageJumpScrollOwner.preserved.scrollPinned === true
   && _messageJumpScrollOwner.preserved.messageUserUnpinned === false
   && _messageJumpScrollOwner.preserved.nearBottomCount === 2;
-currentSid = 'other';
+S.session.session_id = 'other';
 _finishMessageJumpScroll(second);
 console.log(JSON.stringify({
   staleIgnored,
