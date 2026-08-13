@@ -120,13 +120,19 @@ def test_oidc_callback_exchanges_code_and_sets_existing_session_cookie(monkeypat
         captured["request_base_url"] = request_base_url
         captured["state"] = state
         captured["code"] = code
-        return {"next_path": "/chat/123"}
+        return {"next_path": "/chat/123", "subject": "oidc-sub-1", "email": "a@example.test"}
 
     monkeypatch.setattr(
         "api.auth_oidc.complete_authorization_code_flow",
         fake_complete_authorization_code_flow,
     )
-    monkeypatch.setattr(auth, "create_session", lambda: "session-token.signature")
+    created = {}
+
+    def fake_create_session(**kwargs):
+        created.update(kwargs)
+        return "session-token.signature"
+
+    monkeypatch.setattr(auth, "create_session", fake_create_session)
 
     handler = RouteFakeHandler()
     routes.handle_get(
@@ -148,6 +154,11 @@ def test_oidc_callback_exchanges_code_and_sets_existing_session_cookie(monkeypat
     assert len(cookie_headers) == 1
     assert auth.COOKIE_NAME in cookie_headers[0]
     assert "session-token.signature" in cookie_headers[0]
+    # The OIDC identity must reach the session. Without it every OIDC user is
+    # an anonymous session and anything deriving a principal from it (artifact
+    # ownership) collapses distinct users onto one identity.
+    assert created["auth_type"] == "oidc"
+    assert created["username"] == "oidc-sub-1"
 
 
 def test_oidc_callback_rejects_invalid_state_without_setting_session_cookie(monkeypatch):

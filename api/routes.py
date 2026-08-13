@@ -669,6 +669,61 @@ def _guard_request_session_visibility(handler, parsed, body=None, method="GET") 
     return True
 
 
+def _artifact_owner_for_request(handler) -> str | None:
+    """Return the STABLE owner key used to own private artifacts.
+
+    Artifact ``session_id`` is client metadata and never authorization input.
+    Auth-enabled requests fail closed unless the server can resolve a verified
+    session; no-auth deployments retain historical shared artifact behavior.
+
+    The owner key is ``<principal>@<profile>``, NOT the session token. A random
+    session token rotates on every re-login and expiry, which made a user's own
+    durable artifacts unmanageable, while a single long-lived cookie carried the
+    same artifact ownership across a profile switch. The principal is the
+    authenticated identity (auth type + username — OIDC subject/email included,
+    rather than discarded); a single-secret deployment has exactly one operator
+    and resolves to ``local``.
+    """
+    from api.artifacts import owner_key
+    from api.auth import ensure_trusted_auth_session, get_session_info, is_auth_enabled, is_trusted_auth_enabled, parse_cookie
+
+    if not is_auth_enabled():
+        return None
+    if is_trusted_auth_enabled():
+        # /artifact/ deliberately bypasses check_auth() so public-safe links
+        # remain anonymous. Reconcile first here before resolving a private
+        # artifact owner: a valid but stale trusted cookie must not retain the
+        # previous proxy identity's authority.
+        try:
+            info = ensure_trusted_auth_session(handler)
+        except Exception:
+            logger.warning("Trusted auth reconciliation failed for artifact owner", exc_info=True)
+            return None
+    else:
+        cookie_value = parse_cookie(handler) or getattr(handler, "_trusted_auth_session_cookie_value", None)
+        info = get_session_info(cookie_value) if cookie_value else None
+    if not info:
+        return None
+    # A verified session must exist, but its TOKEN is not the identity.
+    if not str(info.get("token") or "").strip():
+        return None
+    username = str(info.get("username") or "").strip()
+    auth_type = str(info.get("auth_type") or "").strip() or "session"
+    principal = f"{auth_type}:{username}" if username else "local"
+    # A session bound to a profile (trusted-header group mapping, OIDC claim)
+    # carries its own profile authority; otherwise use the request's active
+    # profile. Either way the scope is a profile NAME, not a cookie.
+    profile = str(info.get("bound_profile") or "").strip()
+    if not profile:
+        try:
+            from api.profiles import get_active_profile_name
+
+            profile = get_active_profile_name() or "default"
+        except Exception:
+            profile = "default"
+    return owner_key(principal, profile)
+
+
 def _active_skills_dir() -> Path:
     """Return the skills directory for the request's active Hermes profile.
 
@@ -12334,7 +12389,16 @@ def handle_get(handler, parsed) -> bool:
             return j(handler, {"error": str(exc)}, status=404)
         except OIDCAuthError as exc:
             return j(handler, {"error": str(exc)}, status=exc.status_code)
-        cookie_val = create_session()
+        # Carry the OIDC identity into the session. Without it every OIDC user
+        # authenticates as an anonymous session, and any consumer that derives
+        # a principal from the session (artifact ownership) collapses all of
+        # them onto one identity — so one OIDC user could list, revoke and
+        # re-publish over another's private artifacts on the same profile.
+        cookie_val = create_session(
+            auth_type="oidc",
+            username=(str(result.get("subject") or "").strip()
+                      or str(result.get("email") or "").strip() or None),
+        )
         handler.send_response(302)
         handler.send_header(
             "Location",
@@ -13665,6 +13729,27 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/media":
         return _handle_media(handler, parsed)
 
+    if parsed.path.startswith("/artifact/"):
+        return _handle_artifact_get(handler, parsed)
+
+    if parsed.path == "/api/artifact/list":
+        from api.artifacts import artifacts_enabled, list_artifacts_page
+        if not artifacts_enabled():
+            return j(handler, {"error": "not found"}, status=404)
+        owner = _artifact_owner_for_request(handler)
+        from api.auth import is_auth_enabled
+        if is_auth_enabled() and not owner:
+            return j(handler, {"error": "not found"}, status=404)
+        # Bounded: an unbounded list is an O(N) scan whose response grows with
+        # every artifact ever published.
+        _aq = parse_qs(parsed.query)
+        page = list_artifacts_page(
+            owner=owner,
+            offset=_aq.get("offset", ["0"])[0],
+            limit=_aq.get("limit", [None])[0],
+        )
+        return j(handler, {"ok": True, **page})
+
     if parsed.path == "/api/file/raw":
         return _handle_file_raw(handler, parsed)
 
@@ -14129,6 +14214,14 @@ def _validate_session_toolsets_shape(toolsets):
         raise ValueError("each toolset must be a non-empty string")
     return toolsets
 
+class _ArtifactConsentTypeError(ValueError):
+    """A publication-consent field was not a literal JSON boolean."""
+
+    def __init__(self, field: str):
+        super().__init__(f"{field} must be true or false")
+        self.field = field
+
+
 def handle_post(handler, parsed) -> bool:
     """Handle all POST routes. Returns True if handled, False for 404."""
     diag = RequestDiagnostics.maybe_start("POST", parsed.path, logger=logger, print_fn=getattr(handler, '_safe_webui_print', None))
@@ -14372,6 +14465,97 @@ def handle_post(handler, parsed) -> bool:
         prompts.append(new_prompt)
         _save_saved_prompts(prompts)
         return j(handler, {"ok": True, "prompt": new_prompt})
+
+    if parsed.path == "/api/artifact/prepare":
+        # The ONLY place a browser-supplied path is turned into publish
+        # authority. Validation runs against roots derived from THIS request's
+        # profile, and the returned capability is an HMAC bound to the
+        # resolved path, this owner, this session and a short expiry — so the
+        # publish call below can no longer be handed an arbitrary readable file.
+        from api.artifacts import artifacts_enabled, prepare_source_capability
+        if not artifacts_enabled():
+            return j(handler, {"error": "not found"}, status=404)
+        owner = _artifact_owner_for_request(handler)
+        from api.auth import is_auth_enabled
+        if is_auth_enabled() and not owner:
+            return j(handler, {"error": "not found"}, status=404)
+        try:
+            prepared = prepare_source_capability(
+                str(body.get("path") or ""),
+                owner=owner,
+                session_id=str(body.get("session_id") or "") or None,
+            )
+        except ValueError as exc:
+            return bad(handler, str(exc), 400)
+        return j(handler, {"ok": True, "source": prepared})
+
+    if parsed.path == "/api/artifact/publish":
+        from api.artifacts import (
+            ArtifactCapabilityError,
+            ArtifactPublicUnsafe,
+            ArtifactQuotaExceeded,
+            artifacts_enabled,
+            publish_artifact,
+        )
+        if not artifacts_enabled():
+            return j(handler, {"error": "not found"}, status=404)
+        owner = _artifact_owner_for_request(handler)
+        from api.auth import is_auth_enabled
+        if is_auth_enabled() and not owner:
+            return j(handler, {"error": "not found"}, status=404)
+        # Publication consent must be a literal JSON boolean. bool() treated
+        # every non-empty value as true, so "false", "0" and 0.0-as-a-string all
+        # published an artifact to anonymous readers — the one field where a
+        # lenient cast decides who can read the bytes.
+        def _consent(key):
+            if key not in body:
+                return None
+            value = body[key]
+            if not isinstance(value, bool):
+                raise _ArtifactConsentTypeError(key)
+            return value
+
+        try:
+            result = publish_artifact(
+                str(body.get("path") or ""),
+                title=body.get("title"),
+                # Tri-state: omitted key preserves the artifact's current
+                # public flag (a plain re-publish must not un-share it).
+                public=_consent("public"),
+                session_id=str(body.get("session_id") or "") or None,
+                token=str(body.get("token") or "") or None,
+                owner=owner,
+                capability=body.get("capability"),
+                verbatim_public=bool(_consent("verbatim_public")),
+            )
+        except _ArtifactConsentTypeError as exc:
+            return bad(handler, f"{exc.field} must be true or false", 400)
+        except PermissionError:
+            return bad(handler, "unknown artifact token", 404)
+        except ArtifactCapabilityError as exc:
+            return j(handler, {"error": str(exc), "needs_capability": True}, status=403)
+        except ArtifactPublicUnsafe as exc:
+            return j(handler, {"error": str(exc), "needs_verbatim_ack": True}, status=409)
+        except ArtifactQuotaExceeded as exc:
+            return j(handler, {"error": str(exc), "quota_exceeded": True}, status=409)
+        except ValueError as exc:
+            return bad(handler, str(exc), 400)
+        return j(handler, {"ok": True, "artifact": result})
+
+    if parsed.path == "/api/artifact/revoke":
+        from api.artifacts import artifacts_enabled, revoke_artifact
+        if not artifacts_enabled():
+            return j(handler, {"error": "not found"}, status=404)
+        owner = _artifact_owner_for_request(handler)
+        from api.auth import is_auth_enabled
+        if is_auth_enabled() and not owner:
+            return j(handler, {"error": "not found"}, status=404)
+        token = str(body.get("token") or "").strip()
+        if not token:
+            return bad(handler, "token is required", 400)
+        if not revoke_artifact(token, owner=owner):
+            return bad(handler, "unknown artifact token", 404)
+        return j(handler, {"ok": True})
 
     if parsed.path == "/api/share/create":
         sid = str(body.get("session_id") or "").strip()
@@ -19334,6 +19518,107 @@ def _path_is_within_root(child: Path, root: Path) -> bool:
         return os.path.commonpath([str(child), str(root)]) == str(root)
     except ValueError:
         return False
+
+
+def _handle_artifact_get(handler, parsed):
+    """Serve a published artifact version under its stable URL.
+
+    Access model (see api/artifacts.py): public artifacts serve without auth;
+    non-public artifacts require a valid session cookie and return 404 (not
+    401) to anonymous callers so artifact tokens cannot be probed. HTML is
+    served inside a scripts-only CSP sandbox (same hardening as /api/media
+    inline previews); SVG gets a script-less sandbox.
+    """
+    from api.artifacts import artifacts_enabled, resolve_artifact_file
+
+    if not artifacts_enabled():
+        return j(handler, {"error": "not found"}, status=404)
+    token = parsed.path[len("/artifact/"):].strip().strip("/")
+    if not token or "/" in token:
+        return j(handler, {"error": "not found"}, status=404)
+    # keep_blank_values: `?v=` with no value is a MALFORMED version, not an
+    # absent one. Dropping blanks made it indistinguishable from no parameter
+    # at all, so it silently served "latest".
+    qs = parse_qs(parsed.query, keep_blank_values=True)
+    # `?v=` must be exactly one bounded positive ASCII decimal, or absent.
+    #
+    # A malformed value used to fall through to "latest", so ?v=garbage served
+    # a different version than the link promised — silently, which is the worst
+    # way for a pinned-URL feature to fail. str.isdigit() also accepts non-ASCII
+    # digits, and a long digit string reached int() and raised rather than 404.
+    # Duplicated parameters are ambiguous, so they are refused as well.
+    version = None
+    if "v" in qs:
+        v_values = qs.get("v") or []
+        if len(v_values) != 1:
+            return j(handler, {"error": "not found"}, status=404)
+        # No .strip(): surrounding whitespace is not part of a decimal, and
+        # accepting " 1" would mean two different URLs address one version.
+        v_raw = v_values[0]
+        if not (1 <= len(v_raw) <= 9) or not all("0" <= ch <= "9" for ch in v_raw):
+            return j(handler, {"error": "not found"}, status=404)
+        version = int(v_raw)
+        if version < 1:
+            return j(handler, {"error": "not found"}, status=404)
+    resolved = resolve_artifact_file(token, version)
+    if resolved is None:
+        return j(handler, {"error": "not found"}, status=404)
+    meta, ventry, fpath = resolved
+    # Anonymous access requires BOTH: artifact is public AND this specific
+    # version's stored copy is public-safe (redacted / non-redactable binary
+    # published while public). Versions published while private stay
+    # session-gated even after a later public toggle — otherwise ?v=N would
+    # resurrect unredacted bytes (audit finding, 18.07.2026).
+    anonymous_ok = bool(meta.get("public")) and bool(ventry.get("public_safe"))
+    if not anonymous_ok:
+        from api.auth import is_auth_enabled
+        if is_auth_enabled():
+            from api.artifacts import _meta_owned_by
+
+            # The same predicate list/re-publish/revoke use. This compared
+            # meta["owner"] directly, which is a THIRD reading of ownership:
+            # it disagreed with _meta_owned_by() for adopted records, so an
+            # artifact could be taken over and then be unreadable by the very
+            # principal that had just taken it.
+            owner = _artifact_owner_for_request(handler)
+            if not owner or not _meta_owned_by(meta, owner):
+                return j(handler, {"error": "not found"}, status=404)
+    mime = str(ventry.get("mime") or meta.get("mime") or "application/octet-stream")
+    csp = None
+    if mime == "text/html":
+        csp = "sandbox allow-scripts"
+    elif mime == "image/svg+xml":
+        csp = "sandbox"
+    inline = (
+        mime in ("text/html", "image/svg+xml", "application/pdf", "text/plain", "application/json")
+        or mime.startswith(("image/", "audio/", "video/"))
+    )
+    disposition = "inline" if inline else "attachment"
+    # Artifacts are REVOCABLE, so no response may be positively cacheable.
+    # `public, max-age=31536000, immutable` meant an intermediary could keep
+    # serving a revoked public URL for a year, and `private, max-age=3600` kept
+    # private bytes reachable for an hour after a logout or an ownership
+    # change — revoke_artifact() only timestamped the metadata, it never
+    # reached those caches. `no-store` is the contract that matches the
+    # promise; revocation now also deletes the stored bytes.
+    cache_control = "no-store"
+    # Anchor the read to this artifact's own directory: containment was checked
+    # against a resolved pathname, and without an anchored descriptor a
+    # component swapped to a symlink between that check and the open would
+    # escape the artifact root.
+    try:
+        anchor_root = _artifact_storage_root(token)
+    except Exception:
+        anchor_root = None
+    return _serve_file_bytes(
+        handler, fpath, mime, disposition, cache_control, csp=csp, anchor_root=anchor_root,
+    )
+
+
+def _artifact_storage_root(token: str):
+    from api.artifacts import _artifact_dir
+
+    return _artifact_dir(token).resolve()
 
 
 def _handle_media(handler, parsed):
