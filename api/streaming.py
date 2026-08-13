@@ -8714,11 +8714,38 @@ def _run_agent_streaming(
         # `_servers` by `(profile_home, name)` upstream in hermes-agent; that
         # lives outside this WebUI repo.  This change fixes the headline bug
         # for users who run a single non-default profile per WebUI process.
+        #
+        # Discovery runs on a BACKGROUND thread: `discover_mcp_tools()`
+        # connects every configured server synchronously (per-server
+        # `connect_timeout`, plus the cross-process discovery lock), so a slow
+        # or unreachable server (e.g. an SSH MCP to a sleeping laptop) stalls
+        # turn start by seconds-to-a-minute on EVERY message.  The CLI/TUI
+        # never pays this because it discovers once at agent startup; the
+        # WebUI builds a fresh worker per stream, so discovery must not sit on
+        # the turn's critical path.  hermes-agent's per-turn prologue
+        # (`refresh_agent_mcp_tools`) folds tools from servers that finish
+        # connecting mid-turn into this turn's first API call, so nothing is
+        # lost — the turn just starts immediately.
         try:
             from tools.mcp_tool import discover_mcp_tools
-            discover_mcp_tools()
+            _mcp_profile_home = os.environ.get('HERMES_HOME', '')
+
+            def _discover_mcp_background():
+                try:
+                    if _mcp_profile_home:
+                        os.environ['HERMES_HOME'] = _mcp_profile_home
+                    discover_mcp_tools()
+                except Exception:
+                    pass  # MCP not available or not configured — non-fatal
+
+            _mcp_thread = threading.Thread(
+                target=_discover_mcp_background,
+                name='mcp-discovery-%s' % (session_id or 'unknown'),
+                daemon=True,
+            )
+            _mcp_thread.start()
         except Exception:
-            pass  # MCP not available or not configured — non-fatal
+            pass  # MCP import itself failed — non-fatal
 
         # Register a gateway-style notify callback so the approval system can
         # push the `approval` SSE event the moment a dangerous command is
