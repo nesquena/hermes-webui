@@ -9,6 +9,7 @@ import sys
 import api.config as config
 from api.gateway_chat import _gateway_reasoning_effort_for_request
 from api.models import Session
+from api.streaming import _bind_session_reasoning_effort
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -85,6 +86,33 @@ def test_ultra_is_valid_and_gateway_uses_session_aware_resolution(monkeypatch):
     assert _gateway_reasoning_effort_for_request(
         cfg, model="gpt-5.6-sol", model_provider="openai-codex"
     ) == "xhigh"
+
+
+def test_session_reasoning_survives_fallback_and_model_switch(monkeypatch):
+    class Agent:
+        model = "primary"
+        provider = "provider"
+        base_url = None
+        reasoning_config = {"enabled": True, "effort": "low"}
+
+        def switch_model(self, model, provider):
+            self.model = model
+            self.provider = provider
+            self.reasoning_config = {"enabled": True, "effort": "medium"}
+
+        def _try_activate_fallback(self):
+            self.model = "fallback"
+            self.reasoning_config = {"enabled": True, "effort": "medium"}
+            return True
+
+    monkeypatch.setattr(config, "resolve_model_reasoning_efforts", lambda *a, **k: list(config.VALID_REASONING_EFFORTS))
+    agent = Agent()
+    _bind_session_reasoning_effort(agent, {}, "high")
+
+    assert agent._try_activate_fallback() is True
+    assert agent.reasoning_config == {"enabled": True, "effort": "high"}
+    agent.switch_model("switched", "other-provider")
+    assert agent.reasoning_config == {"enabled": True, "effort": "high"}
 
 
 def test_reasoning_parameter_does_not_shift_legacy_session_arguments():

@@ -22,6 +22,7 @@ import time
 import traceback
 import copy
 import inspect
+import types
 from pathlib import Path
 from typing import Optional
 
@@ -152,6 +153,41 @@ def get_stream_runtime_snapshot() -> dict[str, object]:
         # late unexpected failure must not discard successful sibling counts.
         return result
     return result
+
+
+def _bind_session_reasoning_effort(agent, config_data, session_effort):
+    """Keep a session override authoritative across Agent runtime model swaps."""
+    if not session_effort:
+        return
+    if getattr(agent, "_webui_session_reasoning_bound", False):
+        return
+    agent._webui_session_reasoning_bound = True
+
+    def apply():
+        effort = resolve_effective_reasoning_effort(
+            config_data,
+            getattr(agent, "model", None),
+            provider_id=getattr(agent, "provider", None),
+            base_url=getattr(agent, "base_url", None),
+            session_effort=session_effort,
+        )
+        agent.reasoning_config = parse_reasoning_effort(effort)
+
+    def bind(method_name):
+        original = getattr(agent, method_name, None)
+        if not callable(original):
+            return
+
+        def wrapped(self, *args, **kwargs):
+            result = original(*args, **kwargs)
+            if method_name != "_try_activate_fallback" or result:
+                apply()
+            return result
+
+        setattr(agent, method_name, types.MethodType(wrapped, agent))
+
+    bind("switch_model")
+    bind("_try_activate_fallback")
 
 
 def _session_payload_with_full_messages(session, *, tool_calls=None):
@@ -11664,6 +11700,8 @@ def _run_agent_streaming(
                 else:
                     agent = _AIAgent(**_agent_kwargs)
                     _cache_new_agent = True
+
+            _bind_session_reasoning_effort(agent, _cfg, _session_effort)
 
             if not _register_agent_if_current(agent, _agent_sig if _cache_new_agent else None):
                 with _agent_lock:
