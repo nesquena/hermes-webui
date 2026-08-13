@@ -9948,7 +9948,6 @@ from api.route_approvals import (  # noqa: F401 — re-exports for backward comp
     submit_gateway_pending_mirror,
     submit_pending,
     pending_head_for_session_locked,
-    resolve_child_approval_locked,
     child_approval_keys_for_session_locked,
     _queue_entries_locked,
 )
@@ -24341,22 +24340,17 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: st
     elif not approval_id:
         gateway_resolved = resolve_gateway_approval(sid, choice, resolve_all=False) or 0
     # Delegated-child approvals (#6943): the agent parks a child's approval
-    # under "subagent:<child_session_id>" (agent#82009 contract). Resolve it
-    # under the child's own key — session/permanent approval plus gateway
-    # wakeup — so the child's next guarded call proceeds instead of retrying
-    # forever while the UI believes the click was answered. Runs only when the
-    # parent's own queue had no match, and outside `_lock` (the child-side
-    # approve_session/resolve_gateway_approval acquire the agent lock).
-    child_resolved = False
-    if not pending:
-        child_resolved = resolve_child_approval_locked(sid, approval_id, choice)
+    # under "subagent:<child_session_id>" (agent#82009 contract). The WebUI
+    # surfaces those entries read-only under the parent session key; the
+    # coordinated exact-entry resolve plus agent-side waiter wakeup lands in
+    # the follow-up gated on the agent contract. A parent click therefore
+    # reports the count truthfully without claiming it resolved the child.
     # Keep the historical no-id response path truthy for old clients/tests while
     # making stale explicit ids bounded as not-active for Slice 3b.
     resolved = (
         bool(pending)
         or bool(gateway_resolved)
         or bool(local_gateway_resolved)
-        or bool(child_resolved)
         or not bool(approval_id)
     )
     if resolved:

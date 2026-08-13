@@ -17,26 +17,26 @@ logger = logging.getLogger(__name__)
 try:
     from tools.approval import (
         submit_pending as _submit_pending_raw,
-        approve_session,
-        approve_permanent,
-        save_permanent_allowlist,
+        approve_session,  # noqa: F401 — re-exported for api.routes backward compat
+        approve_permanent,  # noqa: F401 — re-exported for api.routes backward compat
+        save_permanent_allowlist,  # noqa: F401 — re-exported for api.routes backward compat
         is_approved,
         _pending,
         _lock,
         _permanent_approved,
         _gateway_queues,
-        resolve_gateway_approval,
+        resolve_gateway_approval,  # noqa: F401 — re-exported for api.routes backward compat
         enable_session_yolo,
         disable_session_yolo,
         is_session_yolo_enabled,
     )
 except ImportError:
     _submit_pending_raw = lambda *a, **k: None
-    approve_session = lambda *a, **k: None
-    approve_permanent = lambda *a, **k: None
-    save_permanent_allowlist = lambda *a, **k: None
+    approve_session = lambda *a, **k: None  # noqa: F401 — re-export for api.routes
+    approve_permanent = lambda *a, **k: None  # noqa: F401 — re-export for api.routes
+    save_permanent_allowlist = lambda *a, **k: None  # noqa: F401 — re-export for api.routes
     is_approved = lambda *a, **k: True
-    resolve_gateway_approval = lambda *a, **k: 0
+    resolve_gateway_approval = lambda *a, **k: 0  # noqa: F401 — re-export for api.routes
     enable_session_yolo = lambda *a, **k: None
     disable_session_yolo = lambda *a, **k: None
     is_session_yolo_enabled = lambda *a, **k: False
@@ -888,84 +888,4 @@ def _relay_child_change_to_parent_locked(child_key: str) -> None:
         return
     head, total = pending_head_for_session_locked(parent)
     _approval_sse_notify_locked(parent, head, total)
-
-
-def _relay_child_change_to_parent(child_key: str) -> None:
-    """Lock-safe wrapper around `_relay_child_change_to_parent_locked`.
-
-    Used from contexts that must NOT hold `_lock` (resolve_child_approval_locked
-    runs outside `_lock` because the child-side approve/resolve helpers acquire
-    the agent lock themselves).
-    """
-    with _lock:
-        _relay_child_change_to_parent_locked(child_key)
-
-
-def resolve_child_approval_locked(session_key: str, approval_id: str, choice: str) -> bool:
-    """Resolve a pending approval that lives under a delegated-child key.
-
-    CALLER MUST HOLD `_lock`. Returns True when an entry was found and
-    resolved under the child's own key — session/permanent approval applied to
-    the child key and the child's gateway queue woken — so the parent-session
-    respond path clears the card and the child's next guarded call proceeds
-    instead of retrying forever (#6943).
-    """
-    approval_id = str(approval_id or "").strip()
-    for child_key in child_approval_keys_for_session_locked(session_key):
-        if child_key == session_key:
-            continue
-        entries = _queue_entries_locked(child_key)
-        if not entries:
-            continue
-        if approval_id:
-            target = next(
-                (e for e in entries if e.get("approval_id") == approval_id), None
-            )
-            if target is None:
-                continue
-        else:
-            target = entries[0]
-
-        # Remove the entry from the source queue (list or legacy single dict).
-        q = _pending.get(child_key)
-        removed = False
-        if isinstance(q, list):
-            for i, entry in enumerate(q):
-                if (approval_id and entry.get("approval_id") == approval_id) or (
-                    not approval_id and i == 0
-                ):
-                    q.pop(i)
-                    removed = True
-                    break
-            if not q:
-                _pending.pop(child_key, None)
-        elif q is not None:
-            if not approval_id or q.get("approval_id") == approval_id:
-                _pending.pop(child_key, None)
-                removed = True
-        if not removed:
-            continue
-
-        pattern_keys = target.get("pattern_keys") or (
-            [target["pattern_key"]] if target.get("pattern_key") else []
-        )
-        if choice == "session":
-            for pattern_key in pattern_keys:
-                if pattern_key:
-                    approve_session(child_key, pattern_key)
-        elif choice == "always":
-            for pattern_key in pattern_keys:
-                if pattern_key:
-                    approve_session(child_key, pattern_key)
-                    approve_permanent(pattern_key)
-            save_permanent_allowlist(_permanent_approved)
-        # choice == "once": no persistence — the child's next matching guarded
-        # call re-prompts, exactly like the parent "once" contract.
-        resolve_gateway_approval(child_key, choice, resolve_all=False)
-        # Relay the resolved state to the parent's SSE subscribers (#6961 #6):
-        # the parent stream only got the initial snapshot with the child, so
-        # the card would otherwise stay up for pure-SSE consumers.
-        _relay_child_change_to_parent(child_key)
-        return True
-    return False
 

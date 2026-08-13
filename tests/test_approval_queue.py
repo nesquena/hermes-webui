@@ -255,8 +255,9 @@ def test_stale_explicit_approval_id_does_not_pop_oldest_entry():
 #
 # The agent rebinds a delegated child's approval authority to a child-owned
 # key "subagent:<child_session_id>" (hermes-agent #82009 contract). These
-# tests prove the WebUI surfaces and resolves those child-key approvals under
-# the parent session key instead of leaving the child stuck forever.
+# tests prove the WebUI surfaces those child-key approvals under the parent
+# session key. The coordinated exact-entry resolve plus agent-side waiter
+# wakeup lands in the follow-up gated on the agent contract.
 # ---------------------------------------------------------------------------
 
 def _seed_child_parent(child_session_id: str, parent_session_id: str) -> None:
@@ -300,55 +301,6 @@ def test_child_approval_surfaced_under_parent_key():
         with r._lock:
             assert not r._pending.get(parent)
             assert len(r._pending[child_key]) == 1
-    finally:
-        _clear_approval_state(parent, child_key)
-
-
-def test_child_approval_resolved_via_parent_respond_path():
-    """Responding from the parent session must resolve the child-key entry."""
-    from api import routes as r
-
-    parent = "test-child-parent-resolve"
-    child = "test-child-resolve"
-    child_key = f"subagent:{child}"
-    _clear_approval_state(parent, child_key)
-    _seed_child_parent(child, parent)
-    try:
-        r.submit_pending(
-            child_key,
-            {"command": "childcmd", "pattern_key": "cp", "pattern_keys": ["cp"], "description": "cd"},
-        )
-        with r._lock:
-            aid = r._pending[child_key][0]["approval_id"]
-
-        accepted = r._resolve_approval_legacy(parent, aid, "once")
-
-        assert accepted is True, "parent respond must resolve the child approval"
-        with r._lock:
-            assert child_key not in r._pending, "child entry must be removed on resolve"
-        # A stale second click must not be accepted (nothing pending anymore).
-        assert r._resolve_approval_legacy(parent, aid, "once") is False
-    finally:
-        _clear_approval_state(parent, child_key)
-
-
-def test_child_approval_no_id_respond_resolves_child_head():
-    """A legacy no-approval_id click from the parent resolves the child head."""
-    from api import routes as r
-
-    parent = "test-child-parent-noid"
-    child = "test-child-noid"
-    child_key = f"subagent:{child}"
-    _clear_approval_state(parent, child_key)
-    _seed_child_parent(child, parent)
-    try:
-        r.submit_pending(
-            child_key,
-            {"command": "childcmd", "pattern_key": "cp", "pattern_keys": ["cp"], "description": "cd"},
-        )
-        assert r._resolve_approval_legacy(parent, "", "once") is True
-        with r._lock:
-            assert child_key not in r._pending
     finally:
         _clear_approval_state(parent, child_key)
 
@@ -686,36 +638,6 @@ def test_parent_sse_subscriber_receives_child_enqueue():
             payload = q.get(timeout=2)
             assert payload["pending_count"] == 1
             assert payload["pending"]["command"] == "childcmd"
-        finally:
-            ra._approval_sse_unsubscribe(parent, q)
-    finally:
-        _clear_approval_state(parent, child_key)
-
-
-def test_parent_sse_subscriber_receives_child_resolve():
-    """#6: resolving a child approval must push the cleared aggregate to the parent."""
-    from api import routes as r
-    from api import route_approvals as ra
-
-    parent = "test-child-parent-sse-resolve"
-    child = "test-child-sse-resolve"
-    child_key = f"subagent:{child}"
-    _clear_approval_state(parent, child_key)
-    _seed_child_parent(child, parent)
-    try:
-        q = ra._approval_sse_subscribe(parent)
-        try:
-            r.submit_pending(
-                child_key,
-                {"command": "childcmd", "pattern_key": "cp", "pattern_keys": ["cp"], "description": "cd"},
-            )
-            q.get(timeout=2)  # enqueue push
-            with r._lock:
-                aid = r._pending[child_key][0]["approval_id"]
-            assert r._resolve_approval_legacy(parent, aid, "once") is True
-            payload = q.get(timeout=2)
-            assert payload["pending_count"] == 0
-            assert payload["pending"] is None
         finally:
             ra._approval_sse_unsubscribe(parent, q)
     finally:
