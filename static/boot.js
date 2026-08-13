@@ -2173,11 +2173,22 @@ function clearPreview(opts={}){
   const pm=$('previewMd');if(pm)pm.innerHTML='';
   const pc=$('previewCode');if(pc)pc.textContent='';
   const pp=$('previewPathText');if(pp)pp.textContent='';
-  const ft=$('fileTree');if(ft)ft.style.display='';
   _previewCurrentPath='';_previewCurrentMode='';_previewDirty=false;
   if(closePanelAfter)closeWorkspacePanel();
   else if(keepPanelOpen&&_workspacePanelMode==='preview')openWorkspacePanel('browse');
   else syncWorkspacePanelUI();
+  // Reconcile browse-state visibility from the refreshed model now that the
+  // preview is gone. renderFileTree() chooses between the rebuilt tree and
+  // the workspace empty-state placeholder (#703); without this call, a
+  // background refresh that emptied the directory while the preview was open
+  // would leave #wsEmptyState hidden (it was suppressed for the preview
+  // state) — closing the preview would reveal a blank panel. The renderer
+  // owns the tree/empty-state contract, so defer to it rather than
+  // duplicating placeholder rules here. Skip when the panel was closed: the
+  // next explicit open renders fresh state.
+  if(!closePanelAfter&&typeof renderFileTree==='function'){
+    try{renderFileTree();}catch(_){}
+  }
 }
 $('btnClearPreview').onclick=handleWorkspaceClose;
 // workspacePath click handler removed -- use topbar workspace chip dropdown instead
