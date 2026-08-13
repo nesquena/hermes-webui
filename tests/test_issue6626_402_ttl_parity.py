@@ -5,6 +5,10 @@ installed runtime contract (``agent.credential_pool._exhausted_ttl``): when the
 runtime exposes the 2-minute 402 cooldown, WebUI uses it; on mixed-version
 installs the one-hour fallback is preserved, so display/probe code never marks
 an entry usable earlier than ``CredentialPool.select()`` will.
+
+The WebUI test suite runs standalone (the Hermes Agent runtime is not
+installed in CI), so parity tests simulate the runtime contract with a fake
+``agent.credential_pool`` module instead of importing the real one.
 """
 
 import sys
@@ -30,8 +34,33 @@ def providers():
     return p
 
 
-def test_402_ttl_matches_installed_runtime(providers):
+@pytest.fixture
+def fake_runtime(monkeypatch):
+    """Install a fake ``agent.credential_pool`` module in ``sys.modules``.
+
+    Mirrors the standalone CI environment where the real Hermes Agent runtime
+    is not installed. Exposes ``_exhausted_ttl`` (default: 120s for 402, the
+    contract when ``EXHAUSTED_TTL_402_SECONDS`` is present in the runtime).
+    """
+
+    def _install(ttl_402):
+        agent_mod = types.ModuleType("agent")
+        agent_mod.__path__ = []
+        credential_pool_mod = types.ModuleType("agent.credential_pool")
+        credential_pool_mod._exhausted_ttl = (
+            lambda error_code: ttl_402 if error_code == 402 else 3600
+        )
+        monkeypatch.setitem(sys.modules, "agent", agent_mod)
+        monkeypatch.setitem(sys.modules, "agent.credential_pool", credential_pool_mod)
+        return credential_pool_mod
+
+    return _install
+
+
+def test_402_ttl_matches_installed_runtime(providers, fake_runtime):
     """Parity: WebUI eligibility must equal the installed runtime contract."""
+    fake_runtime(ttl_402=120)
+
     from agent.credential_pool import _exhausted_ttl as runtime_ttl
 
     assert providers._entry_exhausted_ttl_seconds(402) == runtime_ttl(402)
@@ -39,12 +68,12 @@ def test_402_ttl_matches_installed_runtime(providers):
     assert providers._entry_exhausted_ttl_seconds("402") == runtime_ttl(402)
 
 
-def test_402_boundary_not_one_hour(providers):
+def test_402_boundary_not_one_hour(providers, fake_runtime):
     """With a runtime that supports the 402 cooldown, WebUI is NOT 1h (and not 119s)."""
+    fake_runtime(ttl_402=120)
+
     from agent.credential_pool import _exhausted_ttl as runtime_ttl
 
-    if runtime_ttl(402) == 3600:
-        pytest.skip("installed runtime predates the 402 cooldown")
     ttl = providers._entry_exhausted_ttl_seconds("402")
     assert ttl == runtime_ttl(402)
     assert ttl == 120
@@ -52,12 +81,10 @@ def test_402_boundary_not_one_hour(providers):
     assert ttl != 3600
 
 
-def test_host_helper_402_boundary_119_120(providers, monkeypatch):
+def test_host_helper_402_boundary_119_120(providers, fake_runtime):
     """Host helper: with runtime TTL=120, an exhausted 402 entry stays unavailable
     at 119s and becomes available at 120s (both int and persisted-string codes)."""
-    import agent.credential_pool as cp
-
-    monkeypatch.setattr(cp, "_exhausted_ttl", lambda error_code: 120)
+    fake_runtime(ttl_402=120)
 
     assert providers._entry_exhausted_ttl_seconds(402) == 120
     assert providers._entry_exhausted_ttl_seconds("402") == 120
@@ -79,16 +106,17 @@ def test_401_and_default_unchanged(providers):
     assert providers._entry_exhausted_ttl_seconds("403") == 60 * 60
 
 
-def test_legacy_runtime_fallback_preserved(providers, monkeypatch):
+def test_legacy_runtime_fallback_preserved(providers, fake_runtime):
     """Older installed runtime (no 402 support) -> WebUI keeps the 1h fallback."""
-    import agent.credential_pool as cp
+    fake_runtime(ttl_402=3600)
 
-    monkeypatch.setattr(cp, "_exhausted_ttl", lambda error_code: 3600)
     assert providers._entry_exhausted_ttl_seconds("402") == 60 * 60
     assert providers._entry_exhausted_ttl_seconds(402) == 60 * 60
 
 
-def test_pool_exhausted_until_uses_402_ttl(providers):
+def test_pool_exhausted_until_uses_402_ttl(providers, fake_runtime):
+    fake_runtime(ttl_402=120)
+
     from agent.credential_pool import _exhausted_ttl as runtime_ttl
 
     status_at = datetime(2026, 8, 2, 12, 0, 0, tzinfo=timezone.utc)
