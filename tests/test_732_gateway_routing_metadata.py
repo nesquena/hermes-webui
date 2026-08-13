@@ -1,5 +1,7 @@
 """Regression coverage for #732 LLM Gateway routing metadata display."""
 
+import re
+import subprocess
 from pathlib import Path
 
 from api.models import Session
@@ -12,6 +14,41 @@ MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
 UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
 SESSIONS_JS = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
 STYLE_CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
+
+
+def _function_body(source, name):
+    start = source.index(f"function {name}(")
+    opening = source.index("{", start)
+    depth = 0
+    for index in range(opening, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[opening + 1:index]
+    raise AssertionError(f"Unterminated function: {name}")
+
+
+def _function_source(source, name):
+    start = source.index(f"function {name}(")
+    body = _function_body(source, name)
+    opening = source.index("{", start)
+    return source[start:opening + len(body) + 2]
+
+
+def _media_blocks(source):
+    for match in re.finditer(r"@media\s*([^\{]+)\{", source):
+        opening = match.end() - 1
+        depth = 0
+        for index in range(opening, len(source)):
+            if source[index] == "{":
+                depth += 1
+            elif source[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    yield match.group(1).strip(), source[opening + 1:index]
+                    break
 
 
 def test_gateway_routing_metadata_is_safely_normalized_from_response_metadata():
@@ -148,11 +185,7 @@ def test_routed_model_capture_cleanup_is_in_streaming_outer_finally():
         "# SECTION: HTTP Request Handler",
         1,
     )[0]
-    outer_finally = streaming_worker.split(
-        "\n    finally:\n"
-        "        # Stop the periodic checkpoint thread before the final recovery path.",
-        1,
-    )[1]
+    outer_finally = streaming_worker.rsplit("\n    finally:\n", 1)[1]
     reset_capture = outer_finally.find(
         "        if _routed_model_capture_token is not None:\n"
         "            try:\n"
@@ -177,3 +210,150 @@ def test_frontend_copies_and_formats_gateway_metadata_without_absent_noise():
     assert "if(!routing)return''" in UI_JS.replace(" ", "")
     assert "_formatSessionModelWithGateway" in SESSIONS_JS
     assert ".msg-model-warning-inline" in STYLE_CSS
+
+
+def test_sse_routed_model_footer_uses_three_safe_labelled_fields():
+    assert "function _routedModelObservationFields" in UI_JS
+    assert "msg-routed-model-inline" in UI_JS
+    assert "msg-routed-model-field" in UI_JS
+    assert ".msg-routed-model-inline" in STYLE_CSS
+    assert ".msg-routed-model-field" in STYLE_CSS
+
+    formatter = "".join(_function_body(UI_JS, "_routedModelObservationFields").split())
+    assert "{label:'Requested',value:requested}" in formatter
+    assert "{label:'Routed',value:routed}" in formatter
+    assert "{label:'Provider',value:provider}" in formatter
+
+    renderer = "".join(_function_body(UI_JS, "_appendRoutedModelObservation").split())
+    assert ".textContent=" in renderer
+    assert ".innerHTML" not in renderer
+
+
+def test_routed_model_footer_executes_real_formatter_and_safe_dom_renderer():
+    production_functions = "\n".join(
+        _function_source(UI_JS, name)
+        for name in (
+            "_gatewayProviderName",
+            "_routedModelObservationFields",
+            "_appendRoutedModelObservation",
+        )
+    )
+    harness = f"""
+'use strict';
+function assert(condition, message) {{
+  if (!condition) throw new Error(message);
+}}
+function elementStub() {{
+  return {{
+    className: '',
+    textContent: '',
+    children: [],
+    appendChild(child) {{ this.children.push(child); return child; }},
+    get firstChild() {{ return this.children[0] || null; }},
+    get innerHTML() {{ return ''; }},
+    set innerHTML(_value) {{ throw new Error('innerHTML must not be used'); }},
+  }};
+}}
+const document = {{ createElement: elementStub }};
+{production_functions}
+
+const complete = {{
+  source: 'openai-compatible-sse',
+  requested_model: 'auto',
+  used_model: 'gpt-5.6-sol',
+  requested_provider: 'Fallback Provider',
+  used_provider: 'TokenTable',
+}};
+const completeTarget = elementStub();
+assert(_appendRoutedModelObservation(completeTarget, complete) === true, 'complete append return');
+assert(completeTarget.children.length === 1, 'complete group count');
+const completeGroup = completeTarget.firstChild;
+assert(completeGroup.className === 'msg-routed-model-inline', 'complete group class');
+assert(completeGroup.children.length === 3, 'complete field count');
+assert(completeGroup.children.every(item => item.className === 'msg-routed-model-field'), 'field classes');
+assert(JSON.stringify(completeGroup.children.map(item => item.textContent)) === JSON.stringify([
+  'Requested: auto',
+  'Routed: gpt-5.6-sol',
+  'Provider: TokenTable',
+]), 'complete field text');
+
+const malicious = {{
+  source: 'openai-compatible-sse',
+  requested_model: '<img src=x onerror=alert(1)>',
+  used_model: '<script>alert(2)</script>',
+  used_provider: 'TokenTable',
+}};
+const maliciousTarget = elementStub();
+assert(_appendRoutedModelObservation(maliciousTarget, malicious) === true, 'malicious append return');
+assert(JSON.stringify(maliciousTarget.firstChild.children.map(item => item.textContent)) === JSON.stringify([
+  'Requested: <img src=x onerror=alert(1)>',
+  'Routed: <script>alert(2)</script>',
+  'Provider: TokenTable',
+]), 'malicious values remain literal text');
+
+const fallback = {{
+  source: 'openai-compatible-sse',
+  requested_model: 'auto',
+  used_model: 'gpt-5.6-sol',
+  requested_provider: 'TokenTable',
+}};
+assert(_routedModelObservationFields(fallback)[2].value === 'TokenTable', 'requested provider fallback');
+
+const missingRouted = {{source: 'openai-compatible-sse', requested_model: 'auto', used_model: ''}};
+const missingTarget = elementStub();
+assert(_routedModelObservationFields(missingRouted).length === 0, 'missing routed fields');
+assert(_appendRoutedModelObservation(missingTarget, missingRouted) === false, 'missing routed append return');
+assert(missingTarget.children.length === 0, 'missing routed does not append');
+
+const nonSse = {{source: 'gateway-response', requested_model: 'auto', used_model: 'gpt-5.6-sol'}};
+const nonSseTarget = elementStub();
+assert(_routedModelObservationFields(nonSse).length === 0, 'non-SSE fields');
+assert(_appendRoutedModelObservation(nonSseTarget, nonSse) === false, 'non-SSE append return');
+assert(nonSseTarget.children.length === 0, 'non-SSE does not append');
+"""
+
+    result = subprocess.run(
+        ["node", "-e", harness],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_non_sse_gateway_metadata_keeps_existing_footer_path():
+    compact = "".join(UI_JS.split())
+    assert "routing.source==='openai-compatible-sse'" in compact
+    assert "_formatGatewayModelLabel" in UI_JS
+    assert "_gatewayRoutingFailoverText" in UI_JS
+    assert "_gatewayModelWarningText" in UI_JS
+
+
+def test_sse_footer_suppresses_legacy_gateway_and_warning_but_preserves_failover():
+    compact = "".join(UI_JS.split())
+    assert "constgatewayText=isSseObservation?'':_formatGatewayModelLabel" in compact
+    assert "constmodelWarningText=isSseObservation?'':_gatewayModelWarningText" in compact
+    assert "constfailoverText=_gatewayRoutingFailoverText(routing)" in compact
+    assert "constroutedModelFields=_routedModelObservationFields(routing)" in compact
+
+
+def test_routed_model_footer_duplicate_guard_includes_new_selector():
+    footer_render = UI_JS.split("// Render per-turn duration and optional token usage", 1)[1]
+    duplicate_guard = footer_render.split("querySelector(", 1)[1].split(")", 1)[0]
+    assert ".msg-routed-model-inline" in duplicate_guard
+
+
+def test_routed_model_footer_has_exact_600px_mobile_stack_boundary():
+    routed_blocks = [
+        (header, body)
+        for header, body in _media_blocks(STYLE_CSS)
+        if ".msg-routed-model-inline" in body and ".msg-routed-model-field" in body
+    ]
+    assert len(routed_blocks) == 1
+    header, body = routed_blocks[0]
+    assert "".join(header.split()) == "(max-width:600px)"
+    mobile = "".join(body.split())
+    assert ".msg-routed-model-inline{flex:11100%;width:100%" in mobile
+    assert ".msg-routed-model-field{flex:11100%" in mobile
