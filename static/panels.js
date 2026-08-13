@@ -4442,9 +4442,20 @@ async function loadInsights(animate) {
     refreshBtn.disabled = true;
   }
   const period = ($('insightsPeriod') || {}).value || '30';
+    const qs = new URLSearchParams();
+    if (period === 'custom') {
+      const startEl = $('insightsStart');
+      const endEl = $('insightsEnd');
+      const startVal = startEl && startEl.value;
+      const endVal = endEl && endEl.value;
+      if (startVal) qs.set('start', String(Math.floor(new Date(startVal + 'T00:00:00').getTime() / 1000)));
+      if (endVal) qs.set('end', String(Math.floor(new Date(endVal + 'T00:00:00').getTime() / 1000)));
+    } else {
+      qs.set('days', period);
+    }
   try {
     const [data, wikiStatus, skillUsage] = await Promise.all([
-      api(`/api/insights?days=${period}`),
+      api(`/api/insights?${qs.toString()}`),
       api('/api/wiki/status').catch(err => ({status:'error', error: err.message || String(err)})),
       api('/api/skills/usage').catch(() => ({usage:{}, skill_names:[], total_invocations:0, unique_skills_used:0})),
     ]);
@@ -4459,6 +4470,36 @@ async function loadInsights(animate) {
       refreshBtn.disabled = false;
     }
   }
+}
+
+function insightsPeriodChange() {
+  const sel = $('insightsPeriod');
+  const customWrap = $('insightsCustomRange');
+  if (!sel || !customWrap) return;
+  const isCustom = sel.value === 'custom';
+  customWrap.style.display = isCustom ? 'flex' : 'none';
+  if (isCustom) {
+    // Default the range to the last 30 calendar days.
+    const startEl = $('insightsStart');
+    const endEl = $('insightsEnd');
+    if (startEl && endEl) {
+      const end = new Date();
+      const start = new Date();
+      start.setDate(start.getDate() - 29);  // inclusive: start..today = 30 days
+      endEl.value = _toDateLocal(end);
+      startEl.value = _toDateLocal(start);
+    }
+  }
+  loadInsights();
+}
+
+function insightsRangeInputs() {
+  loadInsights();
+}
+
+function _toDateLocal(d) {
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
 function _formatLlmWikiTimestamp(value) {
@@ -4821,23 +4862,28 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
       </div>
     </div>`;
 
-  box.innerHTML = `
-    ${_renderSystemHealthPanel()}
-    ${_renderLlmWikiStatus(wikiStatus)}
-    ${_renderSkillUsage(skillUsage)}
-    <div class="insights-grid">
-      ${overviewCards.map(c => `<div class="insights-stat"><div class="insights-stat-icon">${c.icon}</div><div class="insights-stat-info"><div class="insights-stat-value">${c.value}</div><div class="insights-stat-label">${esc(c.label)}</div></div></div>`).join('')}
-    </div>
-    ${dailyHtml}
-    ${modelHealthHtml}
-    <div class="insights-row insights-usage-grid">
-      ${tokenCards}
-      ${modelsHtml}
-    </div>
-    ${dowHtml}
-    ${hodHtml}
-    <div style="text-align:center;color:var(--muted);font-size:10px;margin-top:12px;opacity:.6">${esc(t('insights_footer').replace('{days}', d.period_days))}</div>
-  `;
+  const periodSel = $('insightsPeriod');
+    const isCustomRange = periodSel && periodSel.value === 'custom';
+    const rangeLabel = isCustomRange
+      ? (($('insightsStart') || {}).value || '…') + ' → ' + (($('insightsEnd') || {}).value || '…')
+      : t('insights_footer').replace('{days}', d.period_days);
+    box.innerHTML = `
+      ${_renderSystemHealthPanel()}
+      ${_renderLlmWikiStatus(wikiStatus)}
+      ${_renderSkillUsage(skillUsage)}
+      <div class="insights-grid">
+        ${overviewCards.map(c => `<div class="insights-stat"><div class="insights-stat-icon">${c.icon}</div><div class="insights-stat-info"><div class="insights-stat-value">${c.value}</div><div class="insights-stat-label">${esc(c.label)}</div></div></div>`).join('')}
+      </div>
+      ${dailyHtml}
+      ${modelHealthHtml}
+      <div class="insights-row insights-usage-grid">
+        ${tokenCards}
+        ${modelsHtml}
+      </div>
+      ${dowHtml}
+      ${hodHtml}
+      <div style="text-align:center;color:var(--muted);font-size:10px;margin-top:12px;opacity:.6">${esc(rangeLabel)}</div>
+    `;
 }
 
 async function clearConversation() {

@@ -11059,16 +11059,53 @@ def _handle_insights(handler, parsed) -> bool:
     from api.usage import prompt_cache_hit_percent
 
     query = parse_qs(parsed.query)
-    try:
-        days = min(max(int(query.get("days", ["30"])[0]), 1), 365)
-    except (ValueError, TypeError):
-        days = 30
 
+    def _pos_float_list(vals):
+        try:
+            return [float(v) for v in vals if v != ""]
+        except (TypeError, ValueError):
+            return []
+
+    # Absolute time-window mode: start/end Unix timestamps (seconds).
+    # end defaults to "now"; start defaults to 30 days before end.
+    # Falls back to trailing `days`-window mode when neither is present.
+    start_values = _pos_float_list(query.get("start", []))
+    end_values = _pos_float_list(query.get("end", []))
     now = _time.time()
-    today = _time.localtime(now)
-    today_midnight = _time.mktime((today.tm_year, today.tm_mon, today.tm_mday, 0, 0, 0, today.tm_wday, today.tm_yday, today.tm_isdst))
-    day_secs = 86400
-    first_day_ts = today_midnight - ((days - 1) * day_secs)
+
+    if start_values or end_values:
+        if end_values:
+            end_ts = min(end_values[0], now)
+            start_ts = start_values[0] if start_values else (end_ts - 30 * 86400)
+        else:
+            start_ts = start_values[0]
+            end_ts = now
+        if start_ts > end_ts:
+            start_ts, end_ts = end_ts, start_ts
+        cutoff = start_ts
+        end_cutoff = end_ts
+        days = max(int((end_ts - start_ts) / 86400) + 1, 1)
+        days = min(days, 366)
+        # Align start/end to nearest midnight so daily buckets are whole days.
+        start_lo = _time.localtime(start_ts)
+        start_ts = _time.mktime((start_lo.tm_year, start_lo.tm_mon, start_lo.tm_mday, 0, 0, 0, start_lo.tm_wday, start_lo.tm_yday, start_lo.tm_isdst))
+        end_lo = _time.localtime(end_ts)
+        end_ts = _time.mktime((end_lo.tm_year, end_lo.tm_mon, end_lo.tm_mday, 0, 0, 0, end_lo.tm_wday, end_lo.tm_yday, end_lo.tm_isdst))
+        end_cutoff = end_ts + 86400  # inclusive end day
+        first_day_ts = start_ts
+        day_secs = 86400
+    else:
+        # Trailing-window mode (legacy): last N calendar days up to today.
+        try:
+            days = min(max(int(query.get("days", ["30"])[0]), 1), 365)
+        except (ValueError, TypeError):
+            days = 30
+        end_cutoff = now
+
+        today = _time.localtime(now)
+        today_midnight = _time.mktime((today.tm_year, today.tm_mon, today.tm_mday, 0, 0, 0, today.tm_wday, today.tm_yday, today.tm_isdst))
+        day_secs = 86400
+        first_day_ts = today_midnight - ((days - 1) * day_secs)
     cutoff = first_day_ts
 
     def _safe_usage_int(value) -> int:
@@ -11108,6 +11145,9 @@ def _handle_insights(handler, parsed) -> bool:
         updated = entry.get("updated_at", 0) or 0
         # Session is relevant if it was created or updated within the calendar window.
         if max(created, updated) < cutoff:
+            continue
+        # Session entirely after the window end - skip.
+        if created and updated and min(created, updated) > end_cutoff:
             continue
         sessions_data.append(entry)
 
@@ -11191,8 +11231,9 @@ def _handle_insights(handler, parsed) -> bool:
                                started_at, ended_at
                         FROM sessions
                         WHERE (started_at >= ? OR ended_at >= ?)
+                          AND (started_at <= ? OR ended_at <= ?)
                           AND COALESCE(source, '') != 'webui'
-                    """, (cutoff, cutoff))
+                    """, (cutoff, cutoff, end_cutoff, end_cutoff))
                 except sqlite3.OperationalError:
                     cur.execute("""
                         SELECT id, model, message_count, input_tokens, output_tokens,
@@ -11201,8 +11242,9 @@ def _handle_insights(handler, parsed) -> bool:
                                started_at, ended_at
                         FROM sessions
                         WHERE (started_at >= ? OR ended_at >= ?)
+                          AND (started_at <= ? OR ended_at <= ?)
                           AND COALESCE(source, '') != 'webui'
-                    """, (cutoff, cutoff))
+                    """, (cutoff, cutoff, end_cutoff, end_cutoff))
                 for row in cur.fetchall():
                     _input = _safe_usage_int(row["input_tokens"])
                     _output = _safe_usage_int(row["output_tokens"])

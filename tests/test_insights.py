@@ -39,7 +39,7 @@ class _FakeHandler:
         return json.loads(bytes(self.body).decode("utf-8"))
 
 
-def _call_insights(monkeypatch, tmp_path, entries, days="7", now=None):
+def _call_insights(monkeypatch, tmp_path, entries, days="7", now=None, query=None):
     import api.routes as routes
 
     session_dir = tmp_path / "sessions"
@@ -50,7 +50,9 @@ def _call_insights(monkeypatch, tmp_path, entries, days="7", now=None):
         monkeypatch.setattr(time, "time", lambda: now)
 
     handler = _FakeHandler()
-    parsed = SimpleNamespace(query=f"days={days}")
+    if query is None:
+        query = f"days={days}"
+    parsed = SimpleNamespace(query=query)
     routes._handle_insights(handler, parsed)
     assert handler.status == 200
     return handler.json_body()
@@ -58,6 +60,73 @@ def _call_insights(monkeypatch, tmp_path, entries, days="7", now=None):
 
 def _day(ts):
     return time.strftime("%Y-%m-%d", time.localtime(ts))
+
+
+def test_insights_absolute_range_start_end_filters_by_window(monkeypatch, tmp_path):
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    start_ts = now - (10 * 86400)   # 10 days ago
+    end_ts = now - (2 * 86400)      # 2 days ago
+    entries = [
+        {
+            "session_id": "in_window", "updated_at": end_ts, "created_at": start_ts,
+            "message_count": 4, "input_tokens": 1200, "output_tokens": 300,
+            "estimated_cost": "$0.0123", "model": "gpt-x",
+        },
+        {
+            "session_id": "older", "updated_at": now - (30 * 86400), "created_at": now - (30 * 86400),
+            "message_count": 2, "input_tokens": 999, "output_tokens": 111,
+            "estimated_cost": "0.0100", "model": "gpt-x",
+        },
+        {
+            "session_id": "newer", "updated_at": now, "created_at": now,
+            "message_count": 1, "input_tokens": 50, "output_tokens": 10,
+            "estimated_cost": "0.0010", "model": "gpt-x",
+        },
+    ]
+    data = _call_insights(monkeypatch, tmp_path, entries, query=f"start={int(start_ts)}&end={int(end_ts)}", now=now)
+    # Session counts: in_window counted; older and newer excluded by the absolute window.
+    assert data["total_sessions"] == 1
+    assert data["total_input_tokens"] == 1200
+    assert data["total_output_tokens"] == 300
+    # Daily series spans from start day to end day (inclusive).
+    assert _day(start_ts) == data["daily_tokens"][0]["date"]
+    assert _day(end_ts) == data["daily_tokens"][-1]["date"]
+    assert len(data["daily_tokens"]) <= 30
+
+
+def test_insights_absolute_range_start_only_defaults_end_to_now(monkeypatch, tmp_path):
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    start_ts = now - (5 * 86400)
+    entries = [
+        {
+            "session_id": "s1", "updated_at": now, "created_at": start_ts,
+            "message_count": 3, "input_tokens": 300, "output_tokens": 100,
+            "estimated_cost": "0.0030", "model": "gpt-x",
+        },
+        {
+            "session_id": "old", "updated_at": now - (40 * 86400), "created_at": now - (40 * 86400),
+            "message_count": 1, "input_tokens": 700, "output_tokens": 200,
+            "estimated_cost": "0.0070", "model": "gpt-x",
+        },
+    ]
+    data = _call_insights(monkeypatch, tmp_path, entries, query=f"start={int(start_ts)}", now=now)
+    assert data["total_sessions"] == 1
+    assert data["total_input_tokens"] == 300
+
+
+def test_insights_absolute_range_invalid_falls_back_to_days(monkeypatch, tmp_path):
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    entries = [
+        {
+            "session_id": "today", "updated_at": now, "created_at": now,
+            "message_count": 1, "input_tokens": 10, "output_tokens": 5,
+            "estimated_cost": "0.0001", "model": "gpt-x",
+        },
+    ]
+    # Invalid start/end values should not crash; fall back to trailing days.
+    data = _call_insights(monkeypatch, tmp_path, entries, query="start=notanum&end=abc", now=now)
+    assert data["total_sessions"] == 1
+    assert len(data["daily_tokens"]) == 30  # falls back to default trailing 30 days
 
 
 def test_insights_daily_tokens_zero_fills_selected_range_and_parses_cost(monkeypatch, tmp_path):
@@ -165,8 +234,15 @@ def test_insights_frontend_has_daily_chart_styles_and_range_switching_hooks():
     assert 'option value="7"' in INDEX_HTML
     assert 'option value="30"' in INDEX_HTML
     assert 'option value="90"' in INDEX_HTML
-    assert "loadInsights()" in INDEX_HTML
-    assert "/api/insights?days=${period}" in PANELS_JS
+    assert 'option value="custom"' in INDEX_HTML
+    assert "insightsPeriodChange()" in INDEX_HTML
+    assert "/api/insights?" in PANELS_JS
+    assert "qs.set('days', period)" in PANELS_JS
+    assert "qs.set('start'" in PANELS_JS
+    assert "qs.set('end'" in PANELS_JS
+    assert "insightsCustomRange" in INDEX_HTML
+    assert 'type="date"' in INDEX_HTML
+    assert "new Date(startVal + 'T00:00:00')" in PANELS_JS
     assert ".insights-daily-token-chart" in STYLE_CSS
     assert ".insights-daily-bar-output" in STYLE_CSS
     assert ".insights-model-cost" in STYLE_CSS
