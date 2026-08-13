@@ -385,6 +385,109 @@ process.stdout.write(JSON.stringify({{
     return json.loads(proc.stdout)
 
 
+def _run_tail_scanner_boundary_probe() -> list[dict]:
+    prompt = "scan me"
+    canonical_helper = _optional_function_body(
+        UI_SRC, "function _isCanonicalAssistantToolCallEnvelope"
+    ) or "function _isCanonicalAssistantToolCallEnvelope(){return false;}"
+    ownership_helper = _optional_function_body(
+        UI_SRC, "function _isTailActivityOwnedByCandidateTurn"
+    ) or "function _isTailActivityOwnedByCandidateTurn(){return false;}"
+    helpers = "\n".join(
+        [
+            _function_body(UI_SRC, "function _timestampSeconds"),
+            _function_body(UI_SRC, "function _firstValidTimestampSeconds"),
+            ownership_helper,
+            canonical_helper,
+            _function_body(UI_SRC, "function _pendingCurrentTailUserMessage"),
+            _function_body(UI_SRC, "function msgContent"),
+            _function_body(UI_SRC, "function _isContextCompactionText"),
+            _function_body(UI_SRC, "function _isContextCompactionMessage"),
+            _function_body(SESSIONS_SRC, "function _currentTailUserMessage"),
+            _function_body(SESSIONS_SRC, "function _hasCurrentTailUserDuplicate"),
+            _function_body(SESSIONS_SRC, "function _mergeInflightTailMessages"),
+        ]
+    )
+    script = f"""
+{helpers}
+function _sameTranscriptMessage(a,b){{
+  return !!(a&&b&&a.role===b.role&&String(a.content||'').trim()===String(b.content||'').trim());
+}}
+const prompt = {json.dumps(prompt)};
+const priorUser = {{role:'user', content:'older prompt', _ts:1}};
+const currentUser = {{role:'user', content:prompt, _ts:10}};
+const canonicalCall = {{id:'call-1', type:'function', function:{{name:'inspect'}}}};
+const canonicalTopNameCall = {{call_id:'call-2', name:'inspect'}};
+const sameTurnEnvelope = {{role:'assistant', content:'', _ts:10, tool_calls:[canonicalCall]}};
+const topNameEnvelope = {{role:'assistant', content:'', _ts:10, tool_calls:[canonicalTopNameCall]}};
+const sameTurnTool = {{role:'tool', content:'result', tool_call_id:'call-1', _ts:11}};
+const ordinaryAssistant = {{role:'assistant', content:'done', _ts:12}};
+const liveAssistant = {{role:'assistant', content:'working', _live:true, _ts:12}};
+const compaction = {{role:'user', content:'[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted.', _ts:10.5}};
+
+const malformed = [
+  {{name:'empty array', msg:{{role:'assistant', _ts:10, tool_calls:[]}}}},
+  {{name:'non-array', msg:{{role:'assistant', _ts:10, tool_calls:'not-an-array'}}}},
+  {{name:'null entry', msg:{{role:'assistant', _ts:10, tool_calls:[null]}}}},
+  {{name:'primitive entry', msg:{{role:'assistant', _ts:10, tool_calls:[1]}}}},
+  {{name:'missing id', msg:{{role:'assistant', _ts:10, tool_calls:[{{function:{{name:'inspect'}}}}]}}}},
+  {{name:'missing name', msg:{{role:'assistant', _ts:10, tool_calls:[{{id:'call-3'}}]}}}},
+  {{name:'mixed valid and invalid', msg:{{role:'assistant', _ts:10, tool_calls:[canonicalCall,{{id:'call-4'}}]}}}},
+];
+const cases = [
+  {{name:'canonical envelope', messages:[priorUser,currentUser,sameTurnEnvelope], expect:prompt}},
+  {{name:'canonical top-level name', messages:[priorUser,currentUser,topNameEnvelope], expect:prompt}},
+  {{name:'canonical envelope plus tool result', messages:[priorUser,currentUser,sameTurnEnvelope,sameTurnTool], expect:prompt}},
+  {{name:'tool result only', messages:[priorUser,currentUser,sameTurnTool], expect:prompt}},
+  {{name:'ordinary assistant boundary', messages:[priorUser,currentUser,ordinaryAssistant], expect:null}},
+  {{name:'older envelope activity', messages:[priorUser,currentUser,{{...sameTurnEnvelope,_ts:9}}], expect:null}},
+  {{name:'older tool activity', messages:[priorUser,currentUser,sameTurnEnvelope,{{...sameTurnTool,_ts:9}}], expect:null}},
+  {{name:'missing envelope timestamp', messages:[priorUser,currentUser,{{...sameTurnEnvelope,_ts:undefined}}], expect:null}},
+  {{name:'missing tool timestamp', messages:[priorUser,currentUser,sameTurnEnvelope,{{...sameTurnTool,_ts:undefined}}], expect:null}},
+  {{name:'missing candidate timestamp', messages:[priorUser,currentUser,sameTurnEnvelope], candidateStart:null, expect:null}},
+  {{name:'same-turn activity', messages:[priorUser,currentUser,{{...sameTurnEnvelope,timestamp:10,_ts:undefined}},{{...sameTurnTool,timestamp:10.1,_ts:undefined}}], expect:prompt}},
+  {{name:'compaction marker', messages:[priorUser,currentUser,compaction,sameTurnEnvelope], expect:prompt}},
+  {{name:'live tail', messages:[priorUser,currentUser,liveAssistant], expect:prompt}},
+  ...malformed.map(tc=>({{name:tc.name, messages:[priorUser,currentUser,tc.msg], expect:null}})),
+];
+const tailPrompt = (row) => row&&row.role==='user' ? String(row.content||'') : null;
+const results = cases.map(tc=>({{
+  name:tc.name,
+  current:tailPrompt(_currentTailUserMessage(tc.messages,tc.candidateStart===undefined?10:tc.candidateStart)),
+  pending:tailPrompt(_pendingCurrentTailUserMessage(tc.messages,tc.candidateStart===undefined?10:tc.candidateStart)),
+  expect:tc.expect,
+}}));
+
+// A newer repeated prompt must survive an older no-final-assistant tool tail.
+const olderToolTail = [
+  {{role:'user',content:prompt,_ts:1}},
+  {{role:'assistant',content:'',_ts:2,tool_calls:[canonicalTopNameCall]}},
+  {{role:'tool',content:'old result',_ts:3,tool_call_id:'call-2'}},
+];
+const newerPrompt = {{role:'user',content:prompt,_ts:10}};
+const merged = _mergeInflightTailMessages(
+  olderToolTail,
+  [newerPrompt,{{role:'assistant',content:'working',_live:true,_ts:11}}]
+);
+const timestampOnlyCandidate = {{role:'user',content:prompt,timestamp:10}};
+results.push({{
+  name:'newer repeated prompt after older tool tail',
+  currentDuplicate:_hasCurrentTailUserDuplicate(olderToolTail,newerPrompt),
+  mergedUserTimestamps:merged.filter(m=>m&&m.role==='user').map(m=>m._ts),
+  expect:false,
+  mergedExpect:[1,10],
+}});
+results.push({{
+  name:'candidate timestamp field',
+  currentDuplicate:_hasCurrentTailUserDuplicate([currentUser,sameTurnEnvelope],timestampOnlyCandidate),
+  expect:true,
+}});
+process.stdout.write(JSON.stringify(results));
+"""
+    proc = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    return json.loads(proc.stdout)
+
+
 def test_reattach_path_uses_replay_when_status_reports_journal():
     reattach_pos = MESSAGES_SRC.index("let replayOnly=false;")
     # Window widened to 2200: the SSE-recovery follow-restore fix (the
@@ -603,6 +706,19 @@ def test_get_pending_session_message_keeps_deferred_repeat_prompt_by_behavior():
     assert result["tokenIdentityDedupe"] is True
     assert result["isContextCompactionText"] is True
     assert result["isContextCompactionMessage"] is True
+
+
+def test_tail_scanners_fail_closed_and_share_turn_ownership_rules():
+    for row in _run_tail_scanner_boundary_probe():
+        if row["name"] == "newer repeated prompt after older tool tail":
+            assert row["currentDuplicate"] is row["expect"]
+            assert row["mergedUserTimestamps"] == row["mergedExpect"]
+            continue
+        if row["name"] == "candidate timestamp field":
+            assert row["currentDuplicate"] is row["expect"]
+            continue
+        assert row["current"] == row["expect"], row["name"]
+        assert row["pending"] == row["expect"], row["name"]
 
 
 def test_live_tool_matching_uses_the_same_aliases_as_live_card_dedup():

@@ -64,7 +64,7 @@ def test_pending_user_message_dedup_checks_current_message_array():
         "Pending-message dedup must inspect the current S.messages/INFLIGHT "
         "array, not only session.messages from the metadata response"
     )
-    assert "_pendingCurrentTailUserMessage(messages)" in helper, (
+    assert "_pendingCurrentTailUserMessage(messages,session?.pending_started_at)" in helper.replace(" ", ""), (
         "Pending-message dedup must inspect only the current tail user row, "
         "not a historical same-text row"
     )
