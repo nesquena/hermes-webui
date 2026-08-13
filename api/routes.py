@@ -11124,7 +11124,11 @@ def _handle_insights(handler, parsed) -> bool:
             # Align start/end to local midnight so daily buckets are whole days.
             start_ts = _time.mktime((start_day.year, start_day.month, start_day.day, 0, 0, 0, 0, 0, -1))
             end_ts = _time.mktime((end_day.year, end_day.month, end_day.day, 0, 0, 0, 0, 0, -1))
-            end_cutoff = end_ts + 86400  # inclusive end day
+            # Exclusive upper bound = the NEXT local midnight, not end_day
+            # midnight + fixed 86400s.  Across a DST transition the fixed
+            # addition lands an hour off, which would either leak an hour of
+            # the following date in or drop the last hour of the selected day.
+            end_cutoff = _time.mktime((end_day + _timedelta(days=1)).timetuple())  # exclusive next local midnight
             first_day_ts = start_ts
     if not (start_values or end_values):
         # Trailing-window mode (legacy): last N calendar days up to today.
