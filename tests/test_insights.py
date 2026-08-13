@@ -277,6 +277,97 @@ def test_insights_absolute_range_dst_end_boundary_next_local_midnight(monkeypatc
         os.environ.pop("TZ", None)
         if hasattr(time, "tzset"):
             time.tzset()
+def test_insights_absolute_range_excludes_session_exactly_at_next_midnight(monkeypatch, tmp_path):
+    """end_cutoff is an EXCLUSIVE upper bound (next local midnight) in
+    absolute mode: a WebUI session stamped exactly AT that midnight belongs
+    to the following date and must NOT be counted, while one a second before
+    it is still inside the selected day.  Regression for Greptile P1
+    "Exclusive midnight remains included" (the `<`/`>` comparisons retained
+    equality at the explicitly exclusive cutoff)."""
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    start_ts = time.mktime((2026, 5, 1, 0, 0, 0, 0, 0, -1))   # selected start day
+    end_ts = time.mktime((2026, 5, 2, 0, 0, 0, 0, 0, -1))     # selected end day
+    next_midnight = time.mktime((2026, 5, 3, 0, 0, 0, 0, 0, -1))  # == end_cutoff
+    one_sec_before = next_midnight - 1
+    entries = [
+        {
+            "session_id": "in_last_second", "updated_at": one_sec_before, "created_at": one_sec_before,
+            "message_count": 1, "input_tokens": 10, "output_tokens": 5,
+            "estimated_cost": "0.0001", "model": "gpt-x",
+        },
+        {
+            "session_id": "at_next_midnight", "updated_at": next_midnight, "created_at": next_midnight,
+            "message_count": 1, "input_tokens": 999, "output_tokens": 999,
+            "estimated_cost": "0.9999", "model": "gpt-x",
+        },
+    ]
+    data = _call_insights(monkeypatch, tmp_path, entries,
+                          query=f"start={int(start_ts)}&end={int(end_ts)}", now=now)
+    # The session exactly at the exclusive next-midnight cutoff is excluded.
+    assert data["total_sessions"] == 1
+    assert data["total_input_tokens"] == 10
+    assert data["total_output_tokens"] == 5
+
+
+def test_insights_absolute_range_state_db_excludes_row_exactly_at_next_midnight(monkeypatch, tmp_path):
+    """The same exclusive-bound rule applies to the Hermes state.db CLI pass:
+    a session whose started_at/ended_at equals the next local midnight must
+    be excluded from an absolute range (SQL used <= before - equality at the
+    explicitly exclusive cutoff leaked the following date in)."""
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    start_ts = time.mktime((2026, 5, 1, 0, 0, 0, 0, 0, -1))
+    end_ts = time.mktime((2026, 5, 2, 0, 0, 0, 0, 0, -1))
+    next_midnight = time.mktime((2026, 5, 3, 0, 0, 0, 0, 0, -1))
+    one_sec_before = next_midnight - 1
+    state_rows = [
+        {"id": "cli_in", "source": "cli", "model": "gpt-5.5", "message_count": 1,
+         "input_tokens": 10, "output_tokens": 5, "estimated_cost_usd": 0.0001,
+         "started_at": one_sec_before, "ended_at": one_sec_before},
+        {"id": "cli_at_cutoff", "source": "cli", "model": "gpt-5.5", "message_count": 1,
+         "input_tokens": 999, "output_tokens": 999, "estimated_cost_usd": 0.9999,
+         "started_at": next_midnight, "ended_at": next_midnight},
+    ]
+    data = _call_insights_with_state_db(monkeypatch, tmp_path, [], state_rows,
+                                        query=f"start={int(start_ts)}&end={int(end_ts)}", now=now)
+    assert data["total_sessions"] == 1
+    assert data["total_input_tokens"] == 10
+    assert data["total_output_tokens"] == 5
+
+
+def test_insights_trailing_window_keeps_session_at_now(monkeypatch, tmp_path):
+    """Trailing mode end_cutoff = now is INCLUSIVE: a session stamped exactly
+    at the mock clock's `now` still belongs to the trailing window.  Guards
+    the end_exclusive flag so the absolute-mode exclusive bound fix cannot
+    regress the legacy days=N path."""
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    entries = [
+        {
+            "session_id": "at_now", "updated_at": now, "created_at": now,
+            "message_count": 2, "input_tokens": 200, "output_tokens": 80,
+            "estimated_cost": "0.0200", "model": "gpt-x",
+        },
+    ]
+    data = _call_insights(monkeypatch, tmp_path, entries, days="7", now=now)
+    assert data["total_sessions"] == 1
+    assert data["total_input_tokens"] == 200
+
+
+def test_insights_absolute_range_state_db_keeps_row_at_now_cutoff(monkeypatch, tmp_path):
+    """Absolute-mode SQL uses an exclusive `<` on end_cutoff, but trailing
+    mode keeps `<=` (now).  A state.db CLI row exactly at `now` must be
+    counted in the trailing window."""
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    state_rows = [
+        {"id": "cli_at_now", "source": "cli", "model": "gpt-5.5", "message_count": 1,
+         "input_tokens": 10, "output_tokens": 5, "estimated_cost_usd": 0.0001,
+         "started_at": now, "ended_at": now},
+    ]
+    data = _call_insights_with_state_db(monkeypatch, tmp_path, [], state_rows,
+                                        days="7", now=now)
+    assert data["total_sessions"] == 1
+    assert data["total_input_tokens"] == 10
+
+
 def test_insights_absolute_range_beyond_366_days_keeps_series_in_sync(monkeypatch, tmp_path):
     now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
     start_ts = now - (400 * 86400)   # 400 days ago
@@ -599,7 +690,7 @@ def test_insights_mobile_models_table_has_contained_overflow():
 # ── #3189: CLI/gateway sessions in Insights + webui double-count guard ──────
 
 
-def _call_insights_with_state_db(monkeypatch, tmp_path, entries, state_rows, days="7", now=None):
+def _call_insights_with_state_db(monkeypatch, tmp_path, entries, state_rows, days="7", now=None, query=None):
     """Like _call_insights but also seeds an agent state.db with `sessions` rows
     and points _active_state_db_path at it, so the CLI second-pass is exercised."""
     import sqlite3
@@ -639,7 +730,9 @@ def _call_insights_with_state_db(monkeypatch, tmp_path, entries, state_rows, day
     monkeypatch.setattr(models, "_active_state_db_path", lambda: db_path)
 
     handler = _FakeHandler()
-    parsed = SimpleNamespace(query=f"days={days}")
+    if query is None:
+        query = f"days={days}"
+    parsed = SimpleNamespace(query=query)
     routes._handle_insights(handler, parsed)
     assert handler.status == 200
     return handler.json_body()

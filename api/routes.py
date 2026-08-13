@@ -11129,6 +11129,9 @@ def _handle_insights(handler, parsed) -> bool:
             # addition lands an hour off, which would either leak an hour of
             # the following date in or drop the last hour of the selected day.
             end_cutoff = _time.mktime((end_day + _timedelta(days=1)).timetuple())  # exclusive next local midnight
+            # Absolute mode: end_cutoff is an EXCLUSIVE upper bound - a session
+            # stamped exactly at the next local midnight belongs to the next day.
+            end_exclusive = True
             first_day_ts = start_ts
     if not (start_values or end_values):
         # Trailing-window mode (legacy): last N calendar days up to today.
@@ -11137,6 +11140,9 @@ def _handle_insights(handler, parsed) -> bool:
         except (ValueError, TypeError):
             days = 30
         end_cutoff = now
+        # Trailing mode: end_cutoff = now is INCLUSIVE - sessions stamped
+        # exactly at "now" belong to the current trailing window.
+        end_exclusive = False
 
         today = _time.localtime(now)
         today_midnight = _time.mktime((today.tm_year, today.tm_mon, today.tm_mday, 0, 0, 0, today.tm_wday, today.tm_yday, today.tm_isdst))
@@ -11183,9 +11189,14 @@ def _handle_insights(handler, parsed) -> bool:
         # Session is relevant if it was created or updated within the calendar window.
         if max(created, updated) < cutoff:
             continue
-        # Session entirely after the window end - skip.
-        if created and updated and min(created, updated) > end_cutoff:
-            continue
+        # Session entirely after the window end - skip.  end_cutoff is an
+        # exclusive upper bound in absolute mode (next local midnight) and an
+        # inclusive one in trailing mode (now): equality is only excluded
+        # when the bound itself is exclusive.
+        if created and updated:
+            _sess_lo = min(created, updated)
+            if _sess_lo > end_cutoff or (end_exclusive and _sess_lo == end_cutoff):
+                continue
         sessions_data.append(entry)
 
     # Aggregate
@@ -11255,31 +11266,33 @@ def _handle_insights(handler, parsed) -> bool:
         from api.models import _active_state_db_path
         db_path = _active_state_db_path()
         if db_path and db_path.exists():
+            # end_cutoff is exclusive (absolute mode) or inclusive (trailing).
+            end_cmp = "<" if end_exclusive else "<="
             with closing(sqlite3.connect(str(db_path))) as conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.cursor()
                 # cache_read_tokens may not exist on older agent state DBs;
                 # fall back to a query without it if the column is missing.
                 try:
-                    cur.execute("""
+                    cur.execute(f"""
                         SELECT id, model, message_count, input_tokens, output_tokens,
                                estimated_cost_usd,
                                COALESCE(cache_read_tokens, 0) AS cache_read_tokens,
                                started_at, ended_at
                         FROM sessions
                         WHERE (started_at >= ? OR ended_at >= ?)
-                          AND (started_at <= ? OR ended_at <= ?)
+                          AND (started_at {end_cmp} ? OR ended_at {end_cmp} ?)
                           AND COALESCE(source, '') != 'webui'
                     """, (cutoff, cutoff, end_cutoff, end_cutoff))
                 except sqlite3.OperationalError:
-                    cur.execute("""
+                    cur.execute(f"""
                         SELECT id, model, message_count, input_tokens, output_tokens,
                                estimated_cost_usd,
                                0 AS cache_read_tokens,
                                started_at, ended_at
                         FROM sessions
                         WHERE (started_at >= ? OR ended_at >= ?)
-                          AND (started_at <= ? OR ended_at <= ?)
+                          AND (started_at {end_cmp} ? OR ended_at {end_cmp} ?)
                           AND COALESCE(source, '') != 'webui'
                     """, (cutoff, cutoff, end_cutoff, end_cutoff))
                 for row in cur.fetchall():
