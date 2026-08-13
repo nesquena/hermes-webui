@@ -593,3 +593,125 @@ console.log(JSON.stringify({
         "messageUserUnpinned": True,
         "intentRecorded": True,
     }
+
+
+def test_streaming_frame_during_jump_owner_does_not_snap_to_bottom():
+    """#6621 (Fable finding ii): a streaming render frame that fires INSIDE the
+    jump-owner window must not let scrollIfPinned() reclaim the bottom. Reproduces
+    the exact live-token snap the fix prevents."""
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + r"""
+let _scrollPinned = true;
+let _messageUserUnpinned = false;
+let _nearBottomCount = 0;
+let _programmaticScroll = false;
+let _programmaticScrollSetAt = 0;
+let _messageJumpScrollGeneration = 0;
+let _messageJumpScrollOwner = null;
+let _messageJumpScrollSettleTimer = 0;
+let _lastScrollTop = null;
+let _lastMessageClientHeight = 0;
+let _newMessageCueVisible = false;
+let bottomWrites = 0;
+const performance = { now: () => Date.now() };
+const TARGET_TOP = 707;
+const container = { scrollHeight: 3510, clientHeight: 745, scrollTop: 2765, contains: () => true };
+const window = { _autoScrollFollow: true };
+function _messageJumpSessionId(){ return 'S1'; }
+function clearTimeout(){} function setTimeout(){ return 0; }
+function _scheduleMessageJumpScrollReconcile(){}
+function _syncScrollToBottomCue(){} function _updateSessionStartJumpButton(){}
+function _flushDeferredActiveSessionExternalRefresh(){}
+function _recentNonMessageScrollIntent(){ return false; }
+function _recentMessageScrollIntent(){ return false; }
+function _recentMessageTouchScrollIntent(){ return false; }
+function _recentMessageWheelIntent(){ return false; }
+function _recentMessageKeyScrollIntent(){ return false; }
+function _messageBottomDistance(){ return container.scrollHeight - container.scrollTop - container.clientHeight; }
+function _setMessageScrollToBottom(){ bottomWrites++; container.scrollTop = container.scrollHeight - container.clientHeight; }
+function _settleMessageScrollToBottom(){ if (_scrollPinned){ bottomWrites++; container.scrollTop = container.scrollHeight - container.clientHeight; } }
+
+eval(extractFunc('_beginMessageJumpScroll'));
+eval(extractFunc('_finishMessageJumpScroll'));
+eval(extractFunc('_cancelMessageJumpScroll'));
+eval(extractFunc('scrollIfPinned'));
+
+_beginMessageJumpScroll(container);
+container.scrollTop = TARGET_TOP;
+const before = container.scrollTop;
+scrollIfPinned();
+scrollIfPinned();
+const after = container.scrollTop;
+console.log(JSON.stringify({ before, after, bottomWrites }));
+"""
+    result = json.loads(_run_node(source))
+    assert result == {"before": 707, "after": 707, "bottomWrites": 0}, (
+        "A streaming frame inside the jump-owner window must not snap the reader "
+        "back to the bottom (#6621)."
+    )
+
+
+def test_wheel_up_during_jump_owner_takes_reader_ownership_not_pinned_midtranscript():
+    """#6621 (Fable robustness): a gentle upward wheel during the jump-owner window
+    (after the programmatic latch stales) must leave the reader explicitly unpinned
+    at their position, NOT pinned mid-transcript where the next frame would yank them."""
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + r"""
+let _scrollPinned = true;
+let _messageUserUnpinned = false;
+let _nearBottomCount = 2;
+let _programmaticScroll = false;
+let _programmaticScrollSetAt = 0;
+let _messageJumpScrollGeneration = 0;
+let _messageJumpScrollOwner = null;
+let _messageJumpScrollSettleTimer = 0;
+let _lastScrollTop = null;
+let _lastMessageClientHeight = 0;
+let _newMessageCueVisible = false;
+let _messageScrollInputGeneration = 0;
+let _lastMessageWheelIntentMs = -Infinity;
+let _lastMessageScrollIntentMs = -Infinity;
+let _lastNonMessageScrollIntentMs = -Infinity;
+let _touchStartY = null;
+const performance = { now: () => 1000 };
+const PROGRAMMATIC_SCROLL_VALID_MS = 150;
+const container = { scrollHeight: 3510, clientHeight: 745, scrollTop: 707, contains: (t) => t === container };
+const messages = container;
+const document = { getElementById: (id) => (id === 'messages' ? messages : null) };
+const window = { _autoScrollFollow: true };
+function _messageJumpSessionId(){ return 'S1'; }
+function _cancelBottomSettle(){ _cancelMessageJumpScroll(); }
+function clearTimeout(){} function setTimeout(){ return 0; }
+function _scheduleMessageJumpScrollReconcile(){}
+function _syncScrollToBottomCue(){} function _updateSessionStartJumpButton(){}
+function _flushDeferredActiveSessionExternalRefresh(){}
+function _markMessageTouchScrollIntent(){}
+function _freshProgrammaticScrollActive(){
+  if (!_programmaticScroll) return false;
+  const a = performance.now() - _programmaticScrollSetAt;
+  if (!Number.isFinite(a) || a < 0 || a > PROGRAMMATIC_SCROLL_VALID_MS){ _programmaticScroll = false; return false; }
+  return true;
+}
+eval(extractFunc('_beginMessageJumpScroll'));
+eval(extractFunc('_finishMessageJumpScroll'));
+eval(extractFunc('_cancelMessageJumpScroll'));
+eval(extractFunc('_recordNonMessageScrollIntent'));
+
+_beginMessageJumpScroll(container);
+container.scrollTop = 707;
+_programmaticScrollSetAt = performance.now() - 200; // latch stale
+_recordNonMessageScrollIntent({ type: 'wheel', target: messages, deltaY: -5 });
+console.log(JSON.stringify({
+  ownerCleared: _messageJumpScrollOwner === null,
+  messageUserUnpinned: _messageUserUnpinned,
+  scrollPinned: _scrollPinned,
+  scrollTop: container.scrollTop,
+}));
+"""
+    result = json.loads(_run_node(source))
+    assert result == {
+        "ownerCleared": True,
+        "messageUserUnpinned": True,
+        "scrollPinned": False,
+        "scrollTop": 707,
+    }, "A wheel-up during the jump owner window must hand ownership to the reader unpinned, not leave them pinned mid-transcript (#6621)."
