@@ -7459,6 +7459,7 @@ def _load_cli_sessions_uncached(
     visible_session_limit: int | None = None,
     cron_project_limit: int | None | bool = CRON_PROJECT_CHIP_LIMIT,
     webhook_project_limit: int | None | bool = WEBHOOK_PROJECT_CHIP_LIMIT,
+    kanban_project_limit: int | None | bool = KANBAN_PROJECT_CHIP_LIMIT,
     include_claude_code: bool = True,
 ) -> list:
     cli_sessions = []
@@ -7565,7 +7566,10 @@ def _load_cli_sessions_uncached(
             else CLI_VISIBLE_SESSION_LIMIT
         ),
         log=logger,
-        exclude_sources=("cron", "webhook") if source_filter is None else None,
+        # Background sources have independent bounded passes below. Keeping them
+        # out of this 20-row interactive window prevents a busy worker source
+        # (especially kanban) from evicting every CLI/TUI/ACP conversation.
+        exclude_sources=("cron", "webhook", "kanban") if source_filter is None else None,
         include_sources=None if source_filter is None else (source_filter,),
     ):
         sid = row['id']
@@ -7776,6 +7780,70 @@ def _load_cli_sessions_uncached(
         except Exception:
             logger.debug("Webhook project-chip second pass failed", exc_info=True)
 
+    # --- Second pass: fetch kanban sessions without letting a kanban-heavy
+    # state.db consume the interactive CLI_VISIBLE_SESSION_LIMIT window.
+    if kanban_project_limit is not False:
+        existing_sids = {s['session_id'] for s in cli_sessions}
+        try:
+            for row in read_importable_agent_session_rows(
+                db_path,
+                limit=kanban_project_limit,
+                log=logger,
+                exclude_sources=None,
+                include_sources=("kanban",),
+            ):
+                sid = row['id']
+                if sid in existing_sids:
+                    continue
+                _source = row['source'] or 'kanban'
+                if _source != 'kanban':
+                    continue
+                _source_meta = normalize_agent_session_source(_source)
+                raw_ts = row['last_activity'] or row['started_at']
+                _title = row['title']
+                _sidecar_meta = _state_projection_sidecar_metadata(sid)
+                if _sidecar_meta.get('title'):
+                    _title = _sidecar_meta['title']
+                _archived = bool(_sidecar_meta.get('archived'))
+                cli_sessions.append({
+                    'session_id': sid,
+                    'title': _title or 'Kanban Session',
+                    'workspace': _cli_workspace(),
+                    'model': row['model'] or None,
+                    'message_count': row['message_count'] or row['actual_message_count'] or 0,
+                    'created_at': row['started_at'],
+                    'updated_at': raw_ts,
+                    'pinned': False,
+                    'archived': _archived,
+                    'project_id': _state_row_project_id(sid, _source),
+                    'profile': profile_value,
+                    'source_tag': 'kanban',
+                    'raw_source': row.get('raw_source') or _source_meta.get('raw_source'),
+                    'user_id': row.get('user_id'),
+                    'chat_id': row.get('chat_id') or row.get('origin_chat_id'),
+                    'chat_type': row.get('chat_type'),
+                    'thread_id': row.get('thread_id'),
+                    'session_key': row.get('session_key'),
+                    'platform': row.get('platform'),
+                    'session_source': row.get('session_source') or _source_meta.get('session_source'),
+                    'source_label': row.get('source_label') or _source_meta.get('source_label'),
+                    'parent_session_id': row.get('parent_session_id'),
+                    'parent_title': row.get('parent_title'),
+                    'parent_source': row.get('parent_source'),
+                    'relationship_type': row.get('relationship_type'),
+                    '_parent_lineage_root_id': row.get('_parent_lineage_root_id'),
+                    'end_reason': row.get('end_reason'),
+                    'actual_message_count': row.get('actual_message_count'),
+                    'user_message_count': row.get('actual_user_message_count'),
+                    '_lineage_root_id': row.get('_lineage_root_id'),
+                    '_lineage_tip_id': row.get('_lineage_tip_id'),
+                    '_compression_segment_count': row.get('_compression_segment_count'),
+                    'is_cli_session': is_cli_session_row({**row, **_source_meta}),
+                })
+                existing_sids.add(sid)
+        except Exception:
+            logger.debug("Kanban sidebar second pass failed", exc_info=True)
+
     return cli_sessions
 
 
@@ -7838,6 +7906,7 @@ def get_cli_sessions(
                     'visible_session_limit': None,
                     'cron_project_limit': None,
                     'webhook_project_limit': None,
+                    'kanban_project_limit': None,
                 }
                 if loader_supports_include_claude_code:
                     load_kwargs['include_claude_code'] = include_claude_code and idx == 0

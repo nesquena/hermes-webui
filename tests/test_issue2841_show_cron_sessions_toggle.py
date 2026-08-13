@@ -250,16 +250,18 @@ def test_kanban_source_filter_overrides_default_hide():
 
 def test_kanban_filtered_view_capped_at_chip_limit():
     """A filtered kanban-only view (source_filter=='kanban') is bounded by a
-    dedicated KANBAN_PROJECT_CHIP_LIMIT, mirroring cron/webhook. (Kanban is NOT
-    added to the general exclude_sources — the original PR intentionally lets
-    kanban load on the source_filter=None path so the toggle-on case works; the
-    hide is applied by _hide_from_default_sidebar only when the toggle is off.)"""
+    dedicated KANBAN_PROJECT_CHIP_LIMIT, mirroring cron/webhook. The default
+    interactive query excludes kanban so worker-heavy databases cannot evict
+    CLI rows; a separate kanban-only pass preserves toggle-on behavior."""
     src = _read("api/models.py")
     assert "KANBAN_PROJECT_CHIP_LIMIT if source_filter == 'kanban'" in src, (
         "a bounded kanban-only project-chip limit must exist for the filtered view"
     )
-    assert '("cron", "webhook") if source_filter is None' in src, (
-        "kanban must NOT be excluded from the general query (would break toggle-on)"
+    assert '("cron", "webhook", "kanban") if source_filter is None' in src, (
+        "kanban must not consume the bounded interactive-session query"
+    )
+    assert 'include_sources=("kanban",)' in src, (
+        "a separate bounded kanban pass must preserve toggle-on behavior"
     )
 
 
