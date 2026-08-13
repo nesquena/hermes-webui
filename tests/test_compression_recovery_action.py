@@ -81,6 +81,166 @@ def test_chat_start_blocks_generic_continue_after_compression_exhausted(monkeypa
     assert payload["compression_recovery"]["terminal_state"] == "compression_exhausted"
 
 
+def test_chat_start_resolves_stale_snapshot_to_live_state_db_tip(monkeypatch, tmp_path):
+    """A closed-tab follow-up must not append to a parent closed by compression."""
+    _isolate_sessions(monkeypatch, tmp_path)
+    monkeypatch.setattr(routes, "SESSION_DIR", models.SESSION_DIR)
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "browser-agent")
+    root_sid = "stalecompressionroot"
+    middle_sid = "stalecompressionmiddle"
+    tip_sid = "stalecompressiontip"
+    profile_home = tmp_path / "profiles" / "browser-agent"
+    profile_home.mkdir(parents=True)
+
+    root = Session(
+        session_id=root_sid,
+        title="Compressed task",
+        workspace=str(tmp_path),
+        model="gpt-4o",
+        model_provider="openai",
+        profile="browser-agent",
+        messages=[{"role": "user", "content": "start"}],
+        pre_compression_snapshot=True,
+    )
+    # Reproduce the real incident: the intermediate sidecar missed its snapshot
+    # marker even though state.db records that it ended by compression.
+    middle = Session(
+        session_id=middle_sid,
+        title="Compressed task",
+        workspace=str(tmp_path),
+        model="gpt-4o",
+        model_provider="openai",
+        profile="browser-agent",
+        messages=[{"role": "user", "content": "background wakeup"}],
+        parent_session_id=root_sid,
+        pre_compression_snapshot=False,
+    )
+    tip = Session(
+        session_id=tip_sid,
+        title="Compressed task",
+        workspace=str(tmp_path),
+        model="gpt-4o",
+        model_provider="openai",
+        profile="browser-agent",
+        messages=[{"role": "assistant", "content": "background work finished"}],
+        parent_session_id=middle_sid,
+    )
+    for session in (root, middle, tip):
+        session.save()
+        models.SESSIONS[session.session_id] = session
+        routes.SESSIONS[session.session_id] = session
+
+    from hermes_state import SessionDB
+
+    db = SessionDB(db_path=profile_home / "state.db")
+    try:
+        db.create_session(root_sid, source="webui", profile_name="browser-agent")
+        db.append_message(root_sid, "user", "start")
+        db.end_session(root_sid, "compression")
+        db.create_session(
+            middle_sid,
+            source="webui",
+            parent_session_id=root_sid,
+            profile_name="browser-agent",
+        )
+        db.append_message(middle_sid, "user", "background wakeup")
+        db.end_session(middle_sid, "compression")
+        db.create_session(
+            tip_sid,
+            source="webui",
+            parent_session_id=middle_sid,
+            profile_name="browser-agent",
+        )
+        db.append_message(tip_sid, "assistant", "background work finished")
+    finally:
+        db.close()
+
+    monkeypatch.setattr(
+        "api.profiles.get_hermes_home_for_profile",
+        lambda _profile: profile_home,
+    )
+    monkeypatch.setattr(routes, "_resolve_chat_workspace_with_recovery", lambda *_args, **_kwargs: str(tmp_path))
+    monkeypatch.setattr(routes, "_read_profile_model_config", lambda *_args, **_kwargs: (None, None, {}))
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda requested_model, requested_provider, **_kwargs: (requested_model or "gpt-4o", requested_provider or "openai", False),
+    )
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _config: False)
+    captured = {}
+
+    def _fake_start_run(run_session, **_kwargs):
+        captured["session_id"] = run_session.session_id
+        return {"session_id": run_session.session_id, "stream_id": "stream-tip", "_status": 200}
+
+    monkeypatch.setattr(routes, "_start_run", _fake_start_run)
+
+    handler = _JSONHandler()
+    routes._handle_chat_start(
+        handler,
+        {"session_id": root_sid, "message": "rank them by follower count"},
+    )
+    payload = _payload(handler)
+
+    assert handler.status == 200
+    assert captured["session_id"] == tip_sid
+    assert payload["session_id"] == tip_sid
+
+
+def test_browser_adopts_chat_start_continuation_before_opening_stream():
+    """The UI must subscribe with the canonical id returned by chat/start."""
+    messages_js = (
+        Path(__file__).resolve().parent.parent / "static" / "messages.js"
+    ).read_text(encoding="utf-8")
+    start = messages_js.index("const startData = postStartData || {};")
+    end = messages_js.index("// Open SSE stream and render tokens live", start)
+    block = messages_js[start:end + 200]
+
+    assert "const runSid=String((startData&&startData.session_id)||activeSid);" in block
+    assert "localStorage.setItem('hermes-webui-session',runSid)" in block
+    assert "_setActiveSessionUrl(runSid)" in block
+    assert "attachLiveStream(runSid, streamId, uploadedNames);" in block
+
+
+def test_chat_start_race_returns_canonical_retry_without_writing_parent_config(monkeypatch, tmp_path):
+    """A post-resolution rotation must retry, not overwrite the continuation."""
+    parent = Session(
+        session_id="compressionraceparent",
+        workspace=str(tmp_path / "parent"),
+        model="parent-model",
+        model_provider="parent-provider",
+        active_stream_id="stale-parent-stream",
+    )
+    tip = Session(
+        session_id="compressionracetip",
+        workspace=str(tmp_path / "tip"),
+        model="tip-model",
+        model_provider="tip-provider",
+        parent_session_id=parent.session_id,
+    )
+    monkeypatch.setattr(routes, "_resolve_writable_compression_tip", lambda _session: tip)
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _config: False)
+    stale_cleanup_calls = []
+    monkeypatch.setattr(routes, "_clear_stale_stream_state", lambda session: stale_cleanup_calls.append(session.session_id))
+
+    result = routes._start_chat_stream_for_session(
+        parent,
+        msg="continue",
+        workspace=parent.workspace,
+        model=parent.model,
+        model_provider=parent.model_provider,
+    )
+
+    assert result["_status"] == 409
+    assert result["type"] == "session_continuation_changed"
+    assert result["session_id"] == tip.session_id
+    assert tip.workspace == str(tmp_path / "tip")
+    assert tip.model == "tip-model"
+    assert tip.model_provider == "tip-provider"
+    assert tip.pending_user_message is None
+    assert stale_cleanup_calls == []
+
+
 def test_chat_start_keeps_recovery_when_substantive_prompt_fails_validation(monkeypatch, tmp_path):
     session_dir = _isolate_sessions(monkeypatch, tmp_path)
     sid = "recoverychat2"

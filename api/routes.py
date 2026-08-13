@@ -9870,6 +9870,60 @@ def _pre_compression_continuation_session_id(session) -> str | None:
     rows.extend(_child_rows_from_sidecars(memory_seen_ids))
     return _resolve_from_rows(rows)
 
+
+def _resolve_writable_compression_tip(session):
+    """Return the live WebUI sidecar for a stale compressed session id.
+
+    A server-side process wakeup can rotate the Agent session while no browser is
+    attached to consume the ``compressed`` SSE handoff. The browser then posts
+    its still-open root id on the next human turn. state.db is authoritative for
+    repeated compression rotations, including an intermediate sidecar that
+    missed its snapshot marker.
+
+    Fail closed to the requested sidecar on lookup errors. Accept a continuation
+    only when it has a persisted WebUI sidecar in the same profile.
+    """
+    requested_sid = _safe_first(getattr(session, "session_id", None))
+    profile = getattr(session, "profile", None)
+    if not requested_sid:
+        return session
+    db = None
+    try:
+        from api.profiles import get_hermes_home_for_profile
+        from hermes_state import SessionDB
+
+        db_path = Path(get_hermes_home_for_profile(str(profile or "default"))) / "state.db"
+        if not db_path.exists():
+            return session
+        db = SessionDB(db_path=db_path)
+        tip_sid = _safe_first(db.resolve_resume_session_id(requested_sid))
+        if not tip_sid or tip_sid == requested_sid or not is_safe_session_id(tip_sid):
+            return session
+        tip = get_session(tip_sid)
+        if not _profiles_match(getattr(tip, "profile", None), profile):
+            return session
+        if not (SESSION_DIR / f"{tip_sid}.json").exists():
+            return session
+        logger.info(
+            "Resolved stale compressed WebUI session %s to live continuation %s",
+            requested_sid,
+            tip_sid,
+        )
+        return tip
+    except Exception:
+        logger.debug(
+            "Failed to resolve writable compression continuation for %s",
+            requested_sid,
+            exc_info=True,
+        )
+        return session
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                logger.debug("Failed to close compression-tip SessionDB", exc_info=True)
+
 from api.workspace import (
     load_workspaces,
     save_workspaces,
@@ -22355,23 +22409,6 @@ def _start_chat_stream_for_session(
         stale_response["_status"] = 409
         return stale_response
     attachments = attachments or []
-    # Prevent duplicate runs in the same session while a stream is still active.
-    # This commonly happens after page refresh/reconnect races and can produce
-    # duplicated clarify cards for what appears to be a single user request.
-    diag.stage("active_stream_check") if diag else None
-    current_stream_id = getattr(s, "active_stream_id", None)
-    if current_stream_id:
-        if _active_stream_blocks_chat_start(s, current_stream_id):
-            diag.stage("response_write") if diag else None
-            return {
-                "error": "session already has an active stream",
-                "active_stream_id": current_stream_id,
-                "_status": 409,
-            }
-        # Stale stream id from a previous run; clear and continue.
-        diag.stage("stale_stream_cleanup") if diag else None
-        _clear_stale_stream_state(s)
-
     # #1932: check if this session has a pending goal continuation flag.
     # The streaming hook sets PENDING_GOAL_CONTINUATION when goal_continue fires,
     # so the next chat/start for this session is automatically treated as goal-related.
@@ -22391,6 +22428,18 @@ def _start_chat_stream_for_session(
     diag.stage("session_lock_wait") if diag else None
     while True:
         with session_lock:
+            writable = _resolve_writable_compression_tip(s)
+            if writable.session_id != s.session_id:
+                # Compression won after the caller derived workspace/model state.
+                # Do not start the continuation with values owned by its parent;
+                # return the canonical id and let the caller retry resolution.
+                return {
+                    "error": "session rotated during chat start; retry on continuation",
+                    "type": "session_continuation_changed",
+                    "session_id": writable.session_id,
+                    "retryable": True,
+                    "_status": 409,
+                }
             locked_stream_id = getattr(s, "active_stream_id", None)
             if locked_stream_id:
                 if _active_stream_blocks_chat_start(s, locked_stream_id):
@@ -22787,6 +22836,8 @@ def start_session_turn(
         s = get_session(session_id)
     except KeyError:
         return {"error": "Session not found", "_status": 404}
+    s = _resolve_writable_compression_tip(s)
+    session_id = s.session_id
 
     try:
         workspace = _resolve_chat_workspace_with_recovery(s, None)
@@ -23414,6 +23465,7 @@ def _handle_chat_start(handler, body, diag=None):
                 pass
         except PermissionError:
             return bad(handler, "Read-only imported sessions cannot be continued from WebUI", 403)
+        s = _resolve_writable_compression_tip(s)
         diag.stage("validate_profile") if diag else None
         requested_profile = str(body.get("profile") or "").strip()
         active_profile = _get_active_profile_name()

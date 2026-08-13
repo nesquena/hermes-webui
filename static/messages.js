@@ -1879,6 +1879,19 @@ async function send(){
   }
 
   const startData = postStartData || {};
+  // A server-side wakeup may have compressed this conversation while the tab
+  // was detached. Adopt /api/chat/start's canonical continuation before binding
+  // the live stream, or the tab would subscribe to the closed parent.
+  const runSid=String((startData&&startData.session_id)||activeSid);
+  if(runSid!==activeSid&&S.session&&S.session.session_id===activeSid){
+    S.session.session_id=runSid;
+    if(INFLIGHT[activeSid]&&!INFLIGHT[runSid]) INFLIGHT[runSid]=INFLIGHT[activeSid];
+    delete INFLIGHT[activeSid];
+    try{localStorage.setItem('hermes-webui-session',runSid);}catch(_){}
+    if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(runSid);
+    stopApprovalPolling();startApprovalPolling(runSid);
+    stopClarifyPolling();startClarifyPolling(runSid);
+  }
   streamId = postStartData ? postStartData.stream_id : null;
   S.activeStreamId = streamId;
   // setBusy(true) already ran with activeStreamId=null; refresh now that we
@@ -1888,7 +1901,7 @@ async function send(){
   _runOptionalPostStartUiStep('post-start ui/bookkeeping', ()=>{
     const _modelState=modelStateForPostStart || _chatPayloadModelState();
     const _explicitPick=explicitPickForPostStart;
-    if(startData&&startData.title) applySessionTitleUpdate(activeSid, startData.title, {provisionalText:displayText.slice(0,64), rememberProvisional:true});
+    if(startData&&startData.title) applySessionTitleUpdate(runSid, startData.title, {provisionalText:displayText.slice(0,64), rememberProvisional:true});
 
     if(startData&&startData.effective_model && S.session){
       const _sentModel=_modelState&&_modelState.model;
@@ -1918,27 +1931,27 @@ async function send(){
     // have a stream id so the primary button can switch to Stop (see
     // getComposerPrimaryAction).
     if(typeof updateSendBtn==='function') updateSendBtn();
-    if(S.session&&S.session.session_id===activeSid){
+    if(S.session&&S.session.session_id===runSid){
       S.session.active_stream_id = streamId;
     }
-    if(S.session&&S.session.session_id===activeSid&&typeof showLiveRunStatus==='function'){
+    if(S.session&&S.session.session_id===runSid&&typeof showLiveRunStatus==='function'){
       const _startedAt=typeof startData?.pending_started_at==='number'
         ? startData.pending_started_at
         : (S.session.pending_started_at||Date.now()/1000);
-      showLiveRunStatus(activeSid,{startedAt:_startedAt});
+      showLiveRunStatus(runSid,{startedAt:_startedAt});
     }
     if(typeof upsertActiveSessionForLocalTurn==='function'){
       // Third optimistic pass: stream_id is now known, so the row can reconcile
       // against real active-stream metadata before the background refresh lands.
       upsertActiveSessionForLocalTurn({title:S.session&&S.session.title||displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now()});
     }
-    if(!INFLIGHT[activeSid]){
-      INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]};
+    if(!INFLIGHT[runSid]){
+      INFLIGHT[runSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]};
     }
-    const currentInflight=INFLIGHT[activeSid];
-    markInflight(activeSid, streamId);
+    const currentInflight=INFLIGHT[runSid];
+    markInflight(runSid, streamId);
     if(typeof saveInflightState==='function'){
-      saveInflightState(activeSid,{streamId,messages:currentInflight.messages||optimisticMessages,uploaded:uploadedNames,toolCalls:currentInflight.toolCalls||[]});
+      saveInflightState(runSid,{streamId,messages:currentInflight.messages||optimisticMessages,uploaded:uploadedNames,toolCalls:currentInflight.toolCalls||[]});
     }
     // Refresh session list so background streaming indicators appear immediately for the
     // session that was just started and any others that may already be running.
@@ -1948,7 +1961,7 @@ async function send(){
   });
 
   // Open SSE stream and render tokens live
-  attachLiveStream(activeSid, streamId, uploadedNames);
+  attachLiveStream(runSid, streamId, uploadedNames);
 
   }finally{ _sendInProgress=false; _sendInProgressSid=null; }
 }
