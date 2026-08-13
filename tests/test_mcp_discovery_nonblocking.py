@@ -72,9 +72,16 @@ def test_discovery_thread_uses_context_local_home_not_env():
         "context-local override (set_hermes_home_override), never by writing "
         "os.environ['HERMES_HOME']."
     )
+    assert any("_resolve_hermes_home_override" in line for line in preceding), (
+        "The override must come from the webui's version-gated resolver "
+        "(api.profiles._resolve_hermes_home_override), not a direct "
+        "hermes_constants import — a direct import silently skips discovery "
+        "on older agents that lack the v0.18.0+ override API."
+    )
     assert not any(
         "os.environ['HERMES_HOME']" in line
         and "set_hermes_home_override" not in line
+        and not line.lstrip().startswith("#")
         for line in preceding
     ), (
         "The discovery thread must not mutate os.environ['HERMES_HOME'] — "

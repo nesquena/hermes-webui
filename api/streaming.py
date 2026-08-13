@@ -8736,26 +8736,31 @@ def _run_agent_streaming(
         # stale profile into the process env and cross-contaminate other
         # streams (the same race as an unlocked env write).  The contextvar is
         # thread-local — the discovery thread's override dies with the thread.
+        #
+        # The override is resolved through `api.profiles._resolve_hermes_home_override()`
+        # (the webui's version gate for the v0.18.0+ API) rather than imported
+        # directly, so OLDER agents fall back to the pre-existing env-mirror
+        # behavior instead of silently skipping discovery.  The profile home
+        # itself comes from the `_profile_home` local captured under `_ENV_LOCK`
+        # above — re-reading `os.environ['HERMES_HOME']` here would race with a
+        # concurrent stream's env mutation after the lock is released.
         try:
             from tools.mcp_tool import discover_mcp_tools
-            _mcp_profile_home = os.environ.get('HERMES_HOME', '')
 
             def _discover_mcp_background():
                 try:
-                    from hermes_constants import (
-                        reset_hermes_home_override,
-                        set_hermes_home_override,
-                    )
-                    _mcp_home_token = (
-                        set_hermes_home_override(_mcp_profile_home)
-                        if _mcp_profile_home
-                        else None
-                    )
+                    from api.profiles import _resolve_hermes_home_override
+                    _hc_mod = _resolve_hermes_home_override()
+                    _mcp_home_token = None
+                    if _hc_mod is not None and _profile_home:
+                        _mcp_home_token = _hc_mod.set_hermes_home_override(
+                            _profile_home
+                        )
                     try:
                         discover_mcp_tools()
                     finally:
                         if _mcp_home_token is not None:
-                            reset_hermes_home_override(_mcp_home_token)
+                            _hc_mod.reset_hermes_home_override(_mcp_home_token)
                 except Exception:
                     pass  # MCP not available or not configured — non-fatal
 
