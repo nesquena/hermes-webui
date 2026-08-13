@@ -2205,6 +2205,8 @@ from api.workspace import set_last_workspace
 # `reasoning_content` is provider-facing for reasoning-capable models. Display
 # metadata such as `reasoning`, `thinking`, and `_reasoning` stays omitted here.
 _API_SAFE_MSG_KEYS = {'role', 'content', 'tool_calls', 'tool_call_id', 'name', 'refusal', 'reasoning_content'}
+# Codex replay metadata is internal-Agent-only; it must never become API-safe.
+_CODEX_REPLAY_MSG_KEYS = {'codex_reasoning_items', 'codex_message_items'}
 
 _NATIVE_IMAGE_MAX_BYTES = 20 * 1024 * 1024
 
@@ -5013,6 +5015,7 @@ def _sanitize_messages_for_api(
     effective_provider: str | None = None,
     effective_base_url: str | None = None,
     preserve_api_content: bool = False,
+    preserve_codex_replay_items: bool = False,
     requested_provider: str = "",
 ):
     """Return a deep copy of messages with only API-safe fields.
@@ -5096,6 +5099,12 @@ def _sanitize_messages_for_api(
             preserve_message_api_content=preserve_api_content,
             message_records=True,
         )[0]
+        # These fields are intentionally restored after the public scrubber and
+        # only for assistant rows at the internal Agent boundary.
+        if preserve_codex_replay_items and msg.get('role') == 'assistant':
+            for key in _CODEX_REPLAY_MSG_KEYS:
+                if key in msg:
+                    sanitized[key] = copy.deepcopy(msg[key])
         if sanitized.get("role") not in {"user", "assistant"}:
             sanitized.pop("api_content", None)
         elif not isinstance(sanitized.get("api_content"), str) or not sanitized.get("api_content"):
@@ -5192,12 +5201,13 @@ def _sanitize_messages_for_agent(
     effective_base_url: str | None = None,
     requested_provider: str = "",
 ):
-    """Build the internal Agent replay projection with ``api_content`` intact.
+    """Build the internal Agent replay projection with replay metadata intact.
 
     ``api_content`` is a durable provider-facing sidecar, not a direct-provider
-    payload field.  Keep this opt-in at one named boundary so every Agent
-    history call uses the same contract while ordinary API/compression callers
-    continue to use the default-stripping sanitizer.
+    payload field, and Codex replay items are opaque provider metadata. Keep
+    both opt-ins at one named boundary so every Agent history call uses the same
+    contract while ordinary API/compression callers continue to use the
+    default-stripping sanitizer.
     """
     return _sanitize_messages_for_api(
         messages,
@@ -5206,6 +5216,7 @@ def _sanitize_messages_for_agent(
         effective_provider=effective_provider,
         effective_base_url=effective_base_url,
         preserve_api_content=True,
+        preserve_codex_replay_items=True,
         requested_provider=requested_provider,
     )
 
