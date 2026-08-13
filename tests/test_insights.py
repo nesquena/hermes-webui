@@ -183,6 +183,37 @@ def test_insights_absolute_range_finite_out_of_range_falls_back_to_trailing(monk
     assert len(data["daily_tokens"]) > 30  # valid start..now range, not 30-day fallback
 
 
+def test_insights_absolute_range_future_start_never_produces_future_window(monkeypatch, tmp_path):
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    entries = [
+        {
+            "session_id": "today", "updated_at": now, "created_at": now,
+            "message_count": 1, "input_tokens": 10, "output_tokens": 5,
+            "estimated_cost": "0.0001", "model": "gpt-x",
+        },
+    ]
+    future = now + (30 * 86400)
+    # A future start WITHOUT an end used to swap against the implicit now
+    # endpoint and return a zero-filled window running from now into the
+    # future.  It must fail closed to the trailing 30-day fallback.
+    data = _call_insights(monkeypatch, tmp_path, entries, query=f"start={int(future)}", now=now)
+    assert data["total_sessions"] == 1
+    assert len(data["daily_tokens"]) == 30  # trailing fallback, no future buckets
+    assert data["period_days"] == len(data["daily_tokens"])
+    assert data["daily_tokens"][-1]["date"] == _day(now)  # ends at today, never future
+    # Future start AND future end: still no window beyond now.
+    data = _call_insights(monkeypatch, tmp_path, entries, query=f"start={int(future)}&end={int(future + 86400)}", now=now)
+    assert data["total_sessions"] == 1
+    assert len(data["daily_tokens"]) == 30
+    # Future start + explicit past end: the forgiving order-swap is kept, the
+    # end is clamped to now, past days are preserved, nothing lies in future.
+    past = now - (2 * 86400)
+    data = _call_insights(monkeypatch, tmp_path, entries, query=f"start={int(future)}&end={int(past)}", now=now)
+    assert data["total_sessions"] == 1
+    assert data["daily_tokens"][0]["date"] == _day(past)
+    assert data["daily_tokens"][-1]["date"] == _day(now)
+
+
 def test_insights_absolute_range_dst_transition_daily_buckets(monkeypatch, tmp_path):
     """Custom range straddling a DST transition must produce the correct
     number of calendar-day buckets.  The old fixed-86400-step logic would
