@@ -238,9 +238,10 @@ def test_insights_absolute_range_dst_end_boundary_next_local_midnight(monkeypatc
     time.tzset()
     try:
         now = time.mktime((2026, 3, 11, 12, 0, 0, 0, 0, -1))  # after spring-forward
-        # End day = 2026-03-08 (the spring-forward day).  Its final local hour is
-        # 3:00-4:00 EDT = 07:00-08:00 UTC (offset -4h after the transition).
-        end_day_last_hour = time.mktime((2026, 3, 8, 3, 30, 0, 0, 0, -1))  # 03:30 EDT
+        # End day = 2026-03-08 (the spring-forward day).  Its LAST local hour is
+        # 23:00-24:00 EDT (EDT = UTC-4 after the 2:00-3:00 spring-forward jump),
+        # well after end_ts (noon Mar 8), so it probes the real end-of-day.
+        end_day_last_hour = time.mktime((2026, 3, 8, 23, 30, 0, 0, 0, -1))  # 23:30 EDT
         # First hour of the NEXT local day = 2026-03-09 00:00-01:00 EDT.
         next_day_first_hour = time.mktime((2026, 3, 9, 0, 30, 0, 0, 0, -1))  # 00:30 EDT
         start_ts = time.mktime((2026, 3, 6, 12, 0, 0, 0, 0, -1))
