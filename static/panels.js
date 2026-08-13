@@ -9062,14 +9062,22 @@ async function loadSettingsPanel(){
       };
     }
     const endlessScrollCb=$('settingsSessionEndlessScroll');
-    if(endlessScrollCb){
-      endlessScrollCb.checked=!!settings.session_endless_scroll;
-      window._sessionEndlessScrollEnabled=endlessScrollCb.checked;
-      endlessScrollCb.onchange=function(){
-        window._sessionEndlessScrollEnabled=this.checked;
-        _scheduleAppearanceAutosave();
-      };
-    }
+        if(endlessScrollCb){
+          endlessScrollCb.checked=!!settings.session_endless_scroll;
+          window._sessionEndlessScrollEnabled=endlessScrollCb.checked;
+          endlessScrollCb.onchange=function(){
+            window._sessionEndlessScrollEnabled=this.checked;
+            _scheduleAppearanceAutosave();
+          };
+        }
+        const chatTodosCb=$('settingsChatTodosInChat');
+        if(chatTodosCb){
+          chatTodosCb.checked=!!(typeof chatTodosEnabled==='function'&&chatTodosEnabled());
+          chatTodosCb.onchange=function(){
+            if(typeof _chatTodosToggleEnabled==='function') _chatTodosToggleEnabled(this.checked);
+            _scheduleAppearanceAutosave();
+          };
+        }
     const autoScrollFollowCb=$('settingsAutoScrollFollow');
     if(autoScrollFollowCb){
       autoScrollFollowCb.checked=settings.auto_scroll_follow!==false;
