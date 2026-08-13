@@ -70,3 +70,6 @@ First-time contributor RFCs should be discussed in an issue before opening a PR.
 - [`session-sse-contract-v1.md`](session-sse-contract-v1.md) — #4812 Proposed
   contract vocabulary, replay identity, event taxonomy, cursor/resume semantics,
   and implementation gates for `GET /api/sessions/{session_id}/events`.
+- [`exact-persisted-message-replay-guard.md`](exact-persisted-message-replay-guard.md)
+  — proposed persistence-boundary invariant that removes only byte-equivalent
+  replay rows carrying stable event identity before a session save.
