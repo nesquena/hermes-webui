@@ -3858,7 +3858,6 @@ function _legacyTodosFromMessages() {
 // ────────────────────────────────────────────────────────────────────────────
 let _contextBriefJob = null;       // {jobId, sid} — one narrative job at a time
 let _contextBriefPollTimer = null;
-let _contextBriefReqSeq = 0;       // generation counter: drops stale in-flight responses
 
 function _contextBriefSid(){
   return (typeof S!=='undefined' && S.session && S.session.session_id) || null;
@@ -3896,7 +3895,14 @@ function _ctxBriefMdLite(text){
 }
 
 async function loadContextBrief(force){
-  const panel = $('contextBriefPanel');
+  await _loadBriefInto($('contextBriefPanel'), force);
+}
+
+async function loadWorkspaceContextBrief(force){
+  await _loadBriefInto($('workspaceContextPanel'), force);
+}
+
+async function _loadBriefInto(panel, force){
   if (!panel) return;
   const sid = _contextBriefSid();
   if (!sid){
@@ -3908,25 +3914,27 @@ async function loadContextBrief(force){
   panel.dataset.briefSid = sid;
   panel.dataset.briefLoaded = '';
   panel.innerHTML = `<div class="ctx-brief-empty">${esc(t('loading'))}</div>`;
-  const seq = ++_contextBriefReqSeq;
+  // Per-panel generation counter: two visible panels must not cancel each other.
+  const seq = (panel._briefReqSeq = (panel._briefReqSeq || 0) + 1);
   try {
     const data = await api('/api/session/context-brief', {method:'POST', body: JSON.stringify({session_id: sid})});
     // The session may have switched (or a newer load started) in flight.
-    if (seq !== _contextBriefReqSeq) return;
+    if (panel._briefReqSeq !== seq) return;
     if (panel.dataset.briefSid !== sid) return;
     panel.dataset.briefLoaded = '1';
-    renderContextBrief(data && data.brief);
+    renderContextBrief(data && data.brief, panel);
   } catch(e){
-    if (seq !== _contextBriefReqSeq) return;
+    if (panel._briefReqSeq !== seq) return;
     if (panel.dataset.briefSid !== sid) return;
     panel.innerHTML = `<div class="ctx-brief-empty">${esc((e && e.message) || t('context_brief_error'))}</div>`;
   }
 }
 
-function renderContextBrief(brief){
-  const panel = $('contextBriefPanel');
+function renderContextBrief(brief, panel){
+  panel = panel || $('contextBriefPanel');
   if (!panel) return;
   if (!brief){ panel.innerHTML = `<div class="ctx-brief-empty">${esc(t('context_brief_error'))}</div>`; return; }
+  panel._briefData = brief;
   const meta = brief.meta || {};
   const parts = [];
 
@@ -3948,9 +3956,9 @@ function renderContextBrief(brief){
     const gen = llm.generated_at ? _ctxBriefTs(llm.generated_at) : '';
     const staleBadge = llm.stale ? `<span class="ctx-brief-badge-stale">${esc(t('context_brief_stale'))}</span>` : '';
     const fallbackNote = llm.source === 'fallback-template' ? ` · ${esc(t('context_brief_fallback'))}` : '';
-    parts.push(`<div class="ctx-brief-section ctx-brief-llm"><div class="ctx-brief-h">${esc(t('context_brief_summary'))} ${staleBadge}<span class="ctx-brief-dim ctx-brief-gen-date">${esc(gen)}${fallbackNote}</span></div><div class="ctx-brief-md">${_ctxBriefMdLite(llm.text)}</div><button type="button" class="ctx-brief-btn" onclick="_contextBriefRefresh()">${esc(t('context_brief_regenerate'))}</button></div>`);
+    parts.push(`<div class="ctx-brief-section ctx-brief-llm"><div class="ctx-brief-h">${esc(t('context_brief_summary'))} ${staleBadge}<span class="ctx-brief-dim ctx-brief-gen-date">${esc(gen)}${fallbackNote}</span></div><div class="ctx-brief-md">${_ctxBriefMdLite(llm.text)}</div><div class="ctx-brief-actions"><button type="button" class="ctx-brief-btn" onclick="_contextBriefRefresh(this)">${esc(t('context_brief_regenerate'))}</button><button type="button" class="ctx-brief-btn ctx-brief-btn-goal" onclick="_contextBriefGoalFinish(this)">${esc(t('context_goal_finish'))}</button></div></div>`);
   } else {
-    parts.push(`<div class="ctx-brief-section ctx-brief-llm"><div class="ctx-brief-h">${esc(t('context_brief_summary'))}</div><div class="ctx-brief-dim ctx-brief-summary-hint">${esc(t('context_brief_summary_hint'))}</div><button type="button" class="ctx-brief-btn" onclick="_contextBriefRefresh()">${esc(t('context_brief_generate'))}</button></div>`);
+    parts.push(`<div class="ctx-brief-section ctx-brief-llm"><div class="ctx-brief-h">${esc(t('context_brief_summary'))}</div><div class="ctx-brief-dim ctx-brief-summary-hint">${esc(t('context_brief_summary_hint'))}</div><div class="ctx-brief-actions"><button type="button" class="ctx-brief-btn" onclick="_contextBriefRefresh(this)">${esc(t('context_brief_generate'))}</button><button type="button" class="ctx-brief-btn ctx-brief-btn-goal" onclick="_contextBriefGoalFinish(this)">${esc(t('context_goal_finish'))}</button></div></div>`);
   }
 
   const reqs = Array.isArray(brief.requests) ? brief.requests : [];
@@ -3993,7 +4001,7 @@ function renderContextBrief(brief){
   panel.innerHTML = parts.join('');
 }
 
-async function _contextBriefRefresh(){
+async function _contextBriefRefresh(btn){
   const sid = _contextBriefSid();
   if (!sid) return;
   if (_contextBriefJob){
@@ -4001,20 +4009,65 @@ async function _contextBriefRefresh(){
     if (typeof showToast === 'function') showToast(t('context_brief_job_running'));
     return;
   }
-  const panel = $('contextBriefPanel');
+  // Feedback note goes to the panel hosting the clicked button (main rail or workspace tab).
+  const host = (btn && btn.closest) ? btn.closest('[data-brief-sid]') : null;
+  const panel = host || $('contextBriefPanel');
   try {
     const data = await api('/api/session/context-brief/refresh', {method:'POST', body: JSON.stringify({session_id: sid})});
     const jobId = data && data.job && data.job.job_id;
     if (!jobId) return;
     _contextBriefJob = {jobId, sid};
-    if (panel && !document.getElementById('ctxBriefGenerating')){
+    if (panel && !panel.querySelector('.ctx-brief-generating')){
       const note = document.createElement('div');
       note.className = 'ctx-brief-generating';
-      note.id = 'ctxBriefGenerating';
       note.textContent = t('context_brief_generating');
       panel.prepend(note);
     }
     _pollContextBriefJob();
+  } catch(e){
+    if (typeof showToast === 'function') showToast((e && e.message) || t('context_brief_error'));
+  }
+}
+
+// Compose a /goal from the brief's remaining (pending + in_progress) todos and
+// send it to the conversation, so the agent finishes the "reste à faire" work.
+async function _contextBriefGoalFinish(btn){
+  const sid = _contextBriefSid();
+  if (!sid) return;
+  const host = btn && btn.closest ? btn.closest('[data-brief-sid]') : null;
+  // Never post todos from a stale panel into a different conversation.
+  if (!host || host.dataset.briefSid !== sid){
+    if (host) _loadBriefInto(host, true);
+    if (typeof showToast === 'function') showToast(t('context_goal_finish_stale'));
+    return;
+  }
+  const brief = host._briefData;
+  const items = (brief && brief.todos && Array.isArray(brief.todos.items) ? brief.todos.items : [])
+    .filter(it => it && (it.status === 'pending' || it.status === 'in_progress'))
+    .map(it => String(it.content || '').trim())
+    .filter(Boolean);
+  if (!items.length){
+    if (typeof showToast === 'function') showToast(t('context_goal_finish_none'));
+    return;
+  }
+  const capped = items.slice(0, 12);
+  const list = capped.map(s => `- ${s}`).join('\n');
+  const goalText = `${t('context_goal_finish_prefix')}\n${list}`;
+  const question = t('context_goal_finish_confirm').replace('{n}', String(capped.length));
+  const ok = await showConfirmDialog({
+    title: t('context_goal_finish'),
+    message: question,
+    confirmLabel: t('context_goal_finish'),
+    focusCancel: true,
+  });
+  if (!ok) return;
+  try {
+    const r = await api('/api/goal', {method:'POST', body: JSON.stringify({session_id: sid, args: goalText})});
+    if (r && r.ok){
+      if (typeof showToast === 'function') showToast(t('context_goal_finish_started'));
+    } else if (typeof showToast === 'function'){
+      showToast((r && r.error) || t('context_brief_error'));
+    }
   } catch(e){
     if (typeof showToast === 'function') showToast((e && e.message) || t('context_brief_error'));
   }
@@ -4032,18 +4085,19 @@ async function _pollContextBriefJob(){
       return;
     }
     _contextBriefJob = null;
-    const note = document.getElementById('ctxBriefGenerating');
-    if (note) note.remove();
+    document.querySelectorAll('.ctx-brief-generating').forEach(n => n.remove());
     if (status && status.status === 'done'){
-      // Reload only when the panel still shows the job's session.
-      if (_contextBriefSid() === job.sid) loadContextBrief(true);
+      // Reload only when the panel still shows the job's session; refresh both host panels.
+      if (_contextBriefSid() === job.sid){
+        loadContextBrief(true);
+        loadWorkspaceContextBrief(true);
+      }
     } else if (typeof showToast === 'function'){
       showToast((status && status.error) || t('context_brief_error'));
     }
   } catch(e){
     _contextBriefJob = null;
-    const note = document.getElementById('ctxBriefGenerating');
-    if (note) note.remove();
+    document.querySelectorAll('.ctx-brief-generating').forEach(n => n.remove());
     // Poll failure (e.g. server restart mid-job) must not vanish silently.
     if (typeof showToast === 'function') showToast(t('context_brief_error'));
   }
