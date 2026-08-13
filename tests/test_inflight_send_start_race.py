@@ -163,10 +163,188 @@ def test_post_start_bookkeeping_errors_cannot_block_live_attach():
     )
 
 
+def test_delayed_chat_start_keeps_a_owned_state_out_of_visible_b_pane():
+    """A delayed A start must finish in A's recovery state after the pane switches to B."""
+    send_body = _function_body(MESSAGES_JS, "send")
+    script = f"""
+const assert = require('assert');
+let switched = false;
+let releaseStart;
+let startCalled;
+const startCalledPromise = new Promise(resolve => startCalled = resolve);
+const startResponse = new Promise(resolve => releaseStart = resolve);
+const calls = {{
+  attach: [], saved: [], marked: [], visibleAfterSwitch: [], persistedModels: [],
+  modelControls: [], worklog: 0, topbar: 0, busyUi: 0, sidebar: 0,
+}};
+const elements = {{
+  msg: {{value: 'A prompt'}},
+  modelSelect: {{value: 'A requested model'}},
+}};
+function $(id) {{ return elements[id] || null; }}
+const document = {{querySelector: () => null}};
+const localStorage = {{
+  values: Object.create(null),
+  getItem(key) {{ return this.values[key] || null; }},
+  setItem(key, value) {{ this.values[key] = String(value); }},
+  removeItem(key) {{ delete this.values[key]; }},
+}};
+const window = {{_defaultMessageMode: 'steer', _defaultModel: 'A requested model', _activeProvider: 'provider-a'}};
+const A = {{
+  session_id: 'A', title: 'A', model: 'A requested model', model_provider: 'provider-a',
+  workspace: '/a', active_turn_token: 'A-old-token', pending_started_at: 10,
+}};
+const B = {{
+  session_id: 'B', title: 'B', model: 'B visible model', model_provider: 'provider-b',
+  workspace: '/b', active_turn_token: 'B-token', pending_started_at: 20,
+  active_stream_id: 'B-stream',
+}};
+const S = {{
+  session: A,
+  messages: [{{role: 'assistant', content: 'A history'}}],
+  pendingFiles: [{{name: 'a.txt'}}],
+  busy: false,
+  activeStreamId: null,
+  activeProfile: 'profile-a',
+  toolCalls: [],
+  todos: [],
+  todoStateMeta: null,
+}};
+const INFLIGHT = Object.create(null);
+let _sendInProgress = false;
+let _sendInProgressSid = null;
+let _pendingSelections = [];
+let _forcedSkillDirectivePending = null;
+let _queueDrainSid = null;
+let _approvalSessionId = 'A';
+let _clarifySessionId = 'A';
+let uploadedName = 'a.txt';
+function visibleCall(name) {{
+  if (switched) calls.visibleAfterSwitch.push(name);
+}}
+function renderMessages() {{}}
+function renderTray() {{}}
+function autoResize() {{}}
+function setComposerStatus() {{}}
+function setStatus() {{}}
+function setBusy(value) {{ S.busy = value; visibleCall('busy'); }}
+function updateSendBtn() {{ calls.busyUi++; visibleCall('send'); }}
+function ensureLiveWorklogShell() {{ calls.worklog++; visibleCall('worklog'); }}
+function appendThinking() {{ calls.worklog++; visibleCall('worklog'); }}
+function syncTopbar() {{ calls.topbar++; visibleCall('topbar'); }}
+function syncModelChip() {{ calls.modelControls.push(['provider-chip', S.session && S.session.session_id]); visibleCall('model'); }}
+function _applyModelToDropdown() {{ calls.modelControls.push(['dropdown', S.session && S.session.session_id]); visibleCall('model'); }}
+function _writePersistedModelState(model, provider) {{ calls.persistedModels.push([model, provider, S.session && S.session.session_id]); }}
+function showLiveRunStatus() {{ visibleCall('worklog-status'); }}
+function upsertActiveSessionForLocalTurn() {{ calls.sidebar++; visibleCall('sidebar'); }}
+function applySessionTitleUpdate() {{ calls.sidebar++; visibleCall('sidebar'); }}
+function renderSessionList() {{ calls.sidebar++; return Promise.resolve(); }}
+function renderSessionListFromCache() {{ calls.sidebar++; visibleCall('sidebar'); }}
+function startApprovalPolling() {{}}
+function startClarifyPolling() {{}}
+function stopApprovalPolling() {{ visibleCall('approval'); }}
+function stopClarifyPolling() {{ visibleCall('clarify'); }}
+function stopApprovalPollingForSession() {{}}
+function stopClarifyPollingForSession() {{}}
+function hideApprovalCard() {{ visibleCall('approval'); }}
+function hideClarifyCard() {{ visibleCall('clarify'); }}
+function removeThinking() {{ visibleCall('worklog'); }}
+function clearLiveToolCards() {{}}
+function _fetchYoloState() {{}}
+function markInflight(sid, streamId) {{ calls.marked.push([sid, streamId]); }}
+function saveInflightState(sid, state) {{
+  calls.saved.push([sid, JSON.parse(JSON.stringify(state))]);
+}}
+function clearInflightState() {{}}
+function clearOptimisticSessionStreaming() {{}}
+function attachLiveStream(sid, streamId, uploaded) {{ calls.attach.push([sid, streamId, uploaded]); }}
+function _clearComposerDraft() {{ return Promise.resolve(); }}
+function uploadPendingFiles() {{ return Promise.resolve([{{name: uploadedName, path: uploadedName}}]); }}
+function _clearStaleBusyStateBeforeSend() {{}}
+function isCompressionUiRunning() {{ return false; }}
+function _composerTextWithPendingSelections() {{ return elements.msg.value; }}
+function _flushSelectionBlocksToComposer() {{}}
+function _chatPayloadModelState() {{
+  return {{model: S.session.model, model_provider: S.session.model_provider}};
+}}
+function _readPendingSessionModel() {{ return null; }}
+function _opaqueActiveTurnToken(value) {{ return typeof value === 'string' && value.trim() ? value : null; }}
+function _restoreComposerDraftAfterFailedSend() {{}}
+function _runOptionalPreStartUiStep(label, fn) {{ return fn(); }}
+function _runOptionalPostStartUiStep(label, fn) {{ return fn(); }}
+function api(path, options) {{
+  assert.strictEqual(path, '/api/chat/start');
+  startCalled();
+  return startResponse;
+}}
+const startResult = {{
+  stream_id: 'A-stream', active_turn_token: 'A-token', pending_started_at: 30,
+  title: 'A server title', effective_model: 'A effective model',
+  effective_model_provider: 'provider-a-effective',
+}};
+async function send() {{{send_body}}}
+
+(async () => {{
+  const sendPromise = send();
+  await startCalledPromise;
+
+  S.session = B;
+  S.messages = [{{role: 'user', content: 'B existing'}}, {{role: 'assistant', content: 'B reply'}}];
+  S.activeStreamId = 'B-stream';
+  S.busy = true;
+  S.activeProfile = 'profile-b';
+  INFLIGHT.B = {{
+    streamId: 'B-stream', activeTurnToken: 'B-token',
+    messages: S.messages.slice(), uploaded: [], toolCalls: [],
+  }};
+  const visibleSessionBefore = JSON.parse(JSON.stringify(S.session));
+  const visibleMessagesBefore = JSON.parse(JSON.stringify(S.messages));
+  const visibleInflightBefore = JSON.parse(JSON.stringify(INFLIGHT.B));
+  switched = true;
+
+  releaseStart(startResult);
+  await sendPromise;
+
+  assert.deepStrictEqual(S.session, visibleSessionBefore);
+  assert.deepStrictEqual(S.messages, visibleMessagesBefore);
+  assert.strictEqual(S.activeStreamId, 'B-stream');
+  assert.strictEqual(S.busy, true);
+  assert.deepStrictEqual(INFLIGHT.B, visibleInflightBefore);
+  assert.strictEqual(calls.attach.length, 0);
+  assert.strictEqual(calls.worklog, 1);
+  assert.strictEqual(calls.topbar, 0);
+  assert.strictEqual(calls.persistedModels.length, 0);
+  assert.strictEqual(calls.modelControls.length, 0);
+  assert.strictEqual(calls.busyUi, 1);
+  assert.deepStrictEqual(calls.visibleAfterSwitch, []);
+
+  const a = INFLIGHT.A;
+  assert(a);
+  assert.strictEqual(a.streamId, 'A-stream');
+  assert.strictEqual(a.activeTurnToken, 'A-token');
+  assert.strictEqual(a.reattach, true);
+  const aUser = a.messages.find(row => row && row.role === 'user' && row.content === 'A prompt');
+  assert(aUser);
+  assert.deepStrictEqual(aUser.attachments, ['a.txt']);
+  assert.strictEqual(aUser._active_turn_token, 'A-token');
+  assert.deepStrictEqual(calls.marked, [['A', 'A-stream']]);
+  const persisted = calls.saved.filter(item => item[0] === 'A').at(-1)[1];
+  assert.strictEqual(persisted.streamId, 'A-stream');
+  assert.strictEqual(persisted.activeTurnToken, 'A-token');
+  assert.deepStrictEqual(persisted.messages.find(row => row.content === 'A prompt').attachments, ['a.txt']);
+}})().catch(error => {{
+  console.error(error.stack || error);
+  process.exitCode = 1;
+}});
+"""
+    result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 def test_chat_start_stamps_shared_optimistic_row_with_server_turn_token():
     body = _function_body(MESSAGES_JS, "send")
-    stamp_start = body.index("const _stampActiveTurnRows=()=>{")
-    stamp_end = body.index("  _stampActiveTurnRows();", stamp_start)
+    stamp_start = body.index("const _stampActiveTurnRows=(messages, preferredRow=null)=>{")
+    stamp_end = body.index("  const _stampInflightTurnState=()=>{", stamp_start)
     stamp = body[stamp_start:stamp_end]
 
     script = f"""
@@ -186,10 +364,12 @@ const startData = {{pending_started_at:200}};
 const uploadedNames = [];
 const optimisticMessages = [];
 {stamp}
-_stampActiveTurnRows();
+_stampActiveTurnRows(S.messages);
+_stampActiveTurnRows(INFLIGHT.sid.messages);
 S.messages=[{{role:'user',content:'repeat me',_pending:true,_ts:100}}];
 INFLIGHT.sid.messages=[{{role:'user',content:'repeat me',_pending:true,_ts:100}}];
-_stampActiveTurnRows();
+_stampActiveTurnRows(S.messages);
+_stampActiveTurnRows(INFLIGHT.sid.messages);
 process.stdout.write(JSON.stringify({{
   visibleTokens:S.messages.filter(m=>m&&m.role==='user').map(m=>m._active_turn_token||null),
   inflightTokens:INFLIGHT.sid.messages.filter(m=>m&&m.role==='user').map(m=>m._active_turn_token||null),

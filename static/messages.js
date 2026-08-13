@@ -1612,6 +1612,7 @@ async function send(){
   if(!S.session){await newSession();await renderSessionList();}
 
   const activeSid=S.session.session_id;
+  const _ownsSendPane=()=>!!(S.session&&S.session.session_id===activeSid);
   _sendInProgressSid=activeSid;
 
   // Salvage of #4750 (@harryazj): capture the composer text and clear the
@@ -1766,9 +1767,11 @@ async function send(){
   let postStartData;
   let modelStateForPostStart;
   let explicitPickForPostStart;
+  let profileForPostStart;
   try{
     const _modelState=_chatPayloadModelState();
     modelStateForPostStart=_modelState;
+    profileForPostStart=S.activeProfile||S.session.profile||'default';
     const _pendingPick=(typeof _readPendingSessionModel==='function')
       ? _readPendingSessionModel(activeSid)
       : null;
@@ -1803,7 +1806,7 @@ async function send(){
       // matching provider fallback for the same outgoing model.
       model:_modelState.model,workspace:S.session.workspace,
       model_provider:_modelState.model_provider,
-      profile:S.activeProfile||S.session.profile||'default',
+      profile:profileForPostStart,
       explicit_model_pick:_explicitPick||undefined,
       attachments:uploaded.length?uploaded:undefined,
       moa_config:_pendingMoaConfig?true:undefined
@@ -1818,24 +1821,27 @@ async function send(){
     // re-inject the dead id via _sessionIdFromLocation(), then reset to the
     // empty state instead of pushing a confusing error bubble into the chat.
     if(e&&e.status===404){
-      try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
-      try{
-        if(typeof _appRootPath==='function') history.replaceState(null,'',_appRootPath());
-        else history.replaceState(null,'',window.location.pathname.replace(/\/session\/[^/]+/,'')+window.location.search);
-      }catch(_){ }
+      const _ownsPane=_ownsSendPane();
       delete INFLIGHT[activeSid];
       if(typeof clearInflightState==='function') clearInflightState(activeSid);
-      stopApprovalPolling();
-      stopClarifyPolling();
-      if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard(true);
-      if(!_clarifySessionId || _clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
-      removeThinking();
-      S.session=null;S.messages=[];
-      setBusy(false);setComposerStatus('');
+      stopApprovalPollingForSession(activeSid);
+      stopClarifyPollingForSession(activeSid);
+      if(_ownsPane){
+        try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
+        try{
+          if(typeof _appRootPath==='function') history.replaceState(null,'',_appRootPath());
+          else history.replaceState(null,'',window.location.pathname.replace(/\/session\/[^/]+/,'')+window.location.search);
+        }catch(_){ }
+        if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard(true);
+        if(!_clarifySessionId || _clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
+        removeThinking();
+        S.session=null;S.messages=[];
+        setBusy(false);setComposerStatus('');
+        if(typeof renderMessages==='function') renderMessages();
+        if($('emptyState')) $('emptyState').style.display='';
+        if($('msgInner')) $('msgInner').innerHTML='';
+      }
       if(typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
-      if(typeof renderMessages==='function') renderMessages();
-      if($('emptyState')) $('emptyState').style.display='';
-      if($('msgInner')) $('msgInner').innerHTML='';
       if(typeof renderSessionList==='function') void renderSessionList();
       return;
     }
@@ -1843,30 +1849,41 @@ async function send(){
     if(conflictActiveStream){
       delete INFLIGHT[activeSid];
       if(typeof clearInflightState==='function') clearInflightState(activeSid);
-      stopApprovalPolling();
-      stopClarifyPolling();
+      stopApprovalPollingForSession(activeSid);
+      stopClarifyPollingForSession(activeSid);
       // Keep the user's attempted turn by queueing it for after the current run.
-      const _retryModelState=_chatPayloadModelState();
-      queueSessionMessage(activeSid,{text:msgText,files:[],model:_retryModelState.model,model_provider:_retryModelState.model_provider,profile:S.activeProfile||'default'});
+      const _retryModelState=modelStateForPostStart||_chatPayloadModelState();
+      queueSessionMessage(activeSid,{text:msgText,files:[],model:_retryModelState.model,model_provider:_retryModelState.model_provider,profile:profileForPostStart||S.activeProfile||'default'});
+      if(!_ownsSendPane()){
+        if(typeof renderSessionList==='function') void renderSessionList();
+        return;
+      }
       updateQueueBadge(activeSid);
       showToast('Current session is still running. Reconnected and queued your message.',2600);
       try{
         await loadSession(activeSid);
-        setComposerStatus('');
+        if(_ownsSendPane()) setComposerStatus('');
         return;
       }catch(_){
         // Fall through to standard error handling if session reload fails.
       }
+      if(!_ownsSendPane()){
+        if(typeof renderSessionList==='function') void renderSessionList();
+        return;
+      }
     }
 
     delete INFLIGHT[activeSid];
-    stopApprovalPolling();
-    stopClarifyPolling();
-    // Only hide approval card if it belongs to the session that just finished
-    if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard(true);removeThinking();
-    if(!_clarifySessionId || _clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
-    S.messages.push({role:'assistant',content:`**Error:** ${errMsg}`});
-    _queueDrainSid=activeSid;renderMessages();setBusy(false);setComposerStatus(`Error: ${errMsg}`);
+    stopApprovalPollingForSession(activeSid);
+    stopClarifyPollingForSession(activeSid);
+    if(_ownsSendPane()){
+      // Only hide approval card if it belongs to the session that just finished
+      if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard(true);
+      removeThinking();
+      if(!_clarifySessionId || _clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
+      S.messages.push({role:'assistant',content:`**Error:** ${errMsg}`});
+      _queueDrainSid=activeSid;renderMessages();setBusy(false);setComposerStatus(`Error: ${errMsg}`);
+    }
     // #5472: the send was rejected before the turn was durably started, so the
     // composer text + attachments (cleared at send time) would otherwise be
     // lost. Put back the ORIGINAL captured draft (not the mutated /moa/bundle
@@ -1880,29 +1897,23 @@ async function send(){
 
   const startData = postStartData || {};
   streamId = postStartData ? postStartData.stream_id : null;
-  S.activeStreamId = streamId;
+  if(_ownsSendPane()) S.activeStreamId = streamId;
   const _activeTurnToken=typeof _opaqueActiveTurnToken==='function'
     ?_opaqueActiveTurnToken(startData.active_turn_token):null;
-  if(S.session) S.session.active_turn_token=_activeTurnToken;
-  const _stampActiveTurnRows=()=>{
-    if(!INFLIGHT[activeSid]){
-      INFLIGHT[activeSid]={messages:optimisticMessages||[...S.messages],uploaded:uploadedNames,toolCalls:[],activeTurnToken:null};
-    }
-    const currentInflight=INFLIGHT[activeSid];
-    if(!Array.isArray(currentInflight.messages)) currentInflight.messages=[];
-    currentInflight.activeTurnToken=_activeTurnToken;
-    if(!_activeTurnToken) return currentInflight;
-    const _findCurrentOptimisticRow=(messages)=>{
-      if(!Array.isArray(messages)) return null;
-      const direct=messages.find(row=>row===userMsg);
+  if(_ownsSendPane()) S.session.active_turn_token=_activeTurnToken;
+  const _stampActiveTurnRows=(messages, preferredRow=null)=>{
+    if(!Array.isArray(messages)||!_activeTurnToken) return null;
+    const _findCurrentOptimisticRow=(rows)=>{
+      if(!Array.isArray(rows)) return null;
+      const direct=rows.find(row=>row===userMsg);
       if(direct) return direct;
-      const exact=messages.filter(row=>row&&row.role==='user'
+      const exact=rows.filter(row=>row&&row.role==='user'
         &&row._active_turn_token===_activeTurnToken
         &&(row.timestamp===startData.pending_started_at
           ||row._ts===startData.pending_started_at));
       if(exact.length===1) return exact[0];
-      for(let i=messages.length-1;i>=0;i--){
-        const row=messages[i];
+      for(let i=rows.length-1;i>=0;i--){
+        const row=rows[i];
         if(!row) continue;
         if(row._live) continue;
         if(row.role==='user'&&row._pending===true&&row._ts===userMsg._ts) return row;
@@ -1910,40 +1921,48 @@ async function send(){
       }
       return null;
     };
-    const _insertCurrentOptimisticRow=(messages,row)=>{
-      if(!Array.isArray(messages)||!row||messages.includes(row)) return;
-      const liveIdx=messages.findIndex(item=>item&&item._live);
-      if(liveIdx>=0) messages.splice(liveIdx,0,row);
-      else messages.push(row);
+    const _insertCurrentOptimisticRow=(rows,row)=>{
+      if(!Array.isArray(rows)||!row||rows.includes(row)) return;
+      const liveIdx=rows.findIndex(item=>item&&item._live);
+      if(liveIdx>=0) rows.splice(liveIdx,0,row);
+      else rows.push(row);
     };
-    let visibleRow=_findCurrentOptimisticRow(S.messages);
-    let inflightRow=_findCurrentOptimisticRow(currentInflight.messages);
-    const currentRow=inflightRow||visibleRow||userMsg;
-    if(!visibleRow) _insertCurrentOptimisticRow(S.messages,currentRow);
-    if(!inflightRow) _insertCurrentOptimisticRow(currentInflight.messages,currentRow);
-    visibleRow=_findCurrentOptimisticRow(S.messages)||currentRow;
-    inflightRow=_findCurrentOptimisticRow(currentInflight.messages)||currentRow;
-    for(const row of [visibleRow,inflightRow]){
-      if(!row) continue;
-      row._active_turn_token=_activeTurnToken;
-      if(Array.isArray(userMsg.attachments)&&userMsg.attachments.length
-        &&(!Array.isArray(row.attachments)||!row.attachments.length)){
-        row.attachments=[...userMsg.attachments];
-      }
+    let currentRow=_findCurrentOptimisticRow(messages)||preferredRow||userMsg;
+    _insertCurrentOptimisticRow(messages,currentRow);
+    currentRow=_findCurrentOptimisticRow(messages)||currentRow;
+    currentRow._active_turn_token=_activeTurnToken;
+    if(Array.isArray(userMsg.attachments)&&userMsg.attachments.length
+      &&(!Array.isArray(currentRow.attachments)||!currentRow.attachments.length)){
+      currentRow.attachments=[...userMsg.attachments];
     }
+    return currentRow;
+  };
+  const _stampInflightTurnState=()=>{
+    if(!INFLIGHT[activeSid]){
+      INFLIGHT[activeSid]={messages:optimisticMessages||[...S.messages],uploaded:uploadedNames,toolCalls:[],activeTurnToken:null};
+    }
+    const currentInflight=INFLIGHT[activeSid];
+    if(!Array.isArray(currentInflight.messages)) currentInflight.messages=[];
+    currentInflight.activeTurnToken=_activeTurnToken;
+    currentInflight.streamId=streamId;
+    currentInflight.reattach=!_ownsSendPane();
+    const inflightRow=_stampActiveTurnRows(currentInflight.messages);
+    if(_ownsSendPane()) _stampActiveTurnRows(S.messages,inflightRow);
     return currentInflight;
   };
-  _stampActiveTurnRows();
+  _stampInflightTurnState();
   // setBusy(true) already ran with activeStreamId=null; refresh now that we
   // have a stream id so the primary button can switch to Stop (see
   // getComposerPrimaryAction).
-  if(typeof updateSendBtn==='function') updateSendBtn();
+  if(_ownsSendPane()){
+    if(typeof updateSendBtn==='function') updateSendBtn();
+  }
   _runOptionalPostStartUiStep('post-start ui/bookkeeping', ()=>{
     const _modelState=modelStateForPostStart || _chatPayloadModelState();
     const _explicitPick=explicitPickForPostStart;
-    if(startData&&startData.title) applySessionTitleUpdate(activeSid, startData.title, {provisionalText:displayText.slice(0,64), rememberProvisional:true});
+    if(_ownsSendPane()&&startData&&startData.title) applySessionTitleUpdate(activeSid, startData.title, {provisionalText:displayText.slice(0,64), rememberProvisional:true});
 
-    if(startData&&startData.effective_model && S.session){
+    if(_ownsSendPane()&&startData&&startData.effective_model && S.session){
       const _sentModel=_modelState&&_modelState.model;
       if(_explicitPick && _sentModel && startData.effective_model!==_sentModel && typeof showToast==='function'){
         showToast('Model '+_sentModel+' changed to '+startData.effective_model+' — profile provider mismatch', 5000);
@@ -1954,7 +1973,7 @@ async function send(){
       if(typeof _writePersistedModelState==='function') _writePersistedModelState(startData.effective_model,S.session.model_provider||null);
       if($('modelSelect')) _applyModelToDropdown(startData.effective_model, $('modelSelect'),S.session.model_provider||null);
       if(typeof syncTopbar==='function') syncTopbar();
-    }else if(startData&&startData.effective_model_provider && S.session){
+    }else if(_ownsSendPane()&&startData&&startData.effective_model_provider && S.session){
       S.session.model_provider=startData.effective_model_provider;
       if(typeof _writePersistedModelState==='function') _writePersistedModelState(S.session.model||'',S.session.model_provider||null);
       if($('modelSelect')&&typeof _applyModelToDropdown==='function') _applyModelToDropdown(S.session.model||'', $('modelSelect'), S.session.model_provider||null);
@@ -1962,15 +1981,19 @@ async function send(){
       if(typeof syncTopbar==='function') syncTopbar();
     }
 
-    if(S.session&&typeof startData.pending_started_at==='number'){
+    if(_ownsSendPane()&&S.session&&typeof startData.pending_started_at==='number'){
       S.session.pending_started_at=startData.pending_started_at;
     }
-    if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
-    else if(typeof appendThinking==='function') appendThinking('',{pending:true});
+    if(_ownsSendPane()){
+      if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
+      else if(typeof appendThinking==='function') appendThinking('',{pending:true});
+    }
     // setBusy(true) already ran with activeStreamId=null; refresh now that we
     // have a stream id so the primary button can switch to Stop (see
     // getComposerPrimaryAction).
-    if(typeof updateSendBtn==='function') updateSendBtn();
+    if(_ownsSendPane()){
+      if(typeof updateSendBtn==='function') updateSendBtn();
+    }
     if(S.session&&S.session.session_id===activeSid){
       S.session.active_stream_id = streamId;
     }
@@ -1980,12 +2003,12 @@ async function send(){
         : (S.session.pending_started_at||Date.now()/1000);
       showLiveRunStatus(activeSid,{startedAt:_startedAt});
     }
-    if(typeof upsertActiveSessionForLocalTurn==='function'){
+    if(_ownsSendPane()&&typeof upsertActiveSessionForLocalTurn==='function'){
       // Third optimistic pass: stream_id is now known, so the row can reconcile
       // against real active-stream metadata before the background refresh lands.
       upsertActiveSessionForLocalTurn({title:S.session&&S.session.title||displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now()});
     }
-    const currentInflight=_stampActiveTurnRows();
+    const currentInflight=_stampInflightTurnState();
     markInflight(activeSid, streamId);
     if(typeof saveInflightState==='function'){
       saveInflightState(activeSid,{streamId,messages:currentInflight.messages||optimisticMessages,uploaded:uploadedNames,toolCalls:currentInflight.toolCalls||[],activeTurnToken:currentInflight.activeTurnToken||null});
@@ -1998,7 +2021,7 @@ async function send(){
   });
 
   // Open SSE stream and render tokens live
-  attachLiveStream(activeSid, streamId, uploadedNames);
+  if(_ownsSendPane()) attachLiveStream(activeSid, streamId, uploadedNames);
 
   }finally{ _sendInProgress=false; _sendInProgressSid=null; }
 }
