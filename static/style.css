@@ -2269,7 +2269,7 @@
   .chip.model{color:var(--accent-text);border-color:var(--accent-bg-strong);background:var(--accent-bg);}
   .messages-shell{flex:1;min-height:0;position:relative;display:flex;flex-direction:column;}
     /* Chat todos tray (embedded task list inside the chat area) */
-    .chat-todos{margin:8px 16px 0;max-width:1100px;width:calc(100% - 32px);align-self:center;flex-shrink:0;background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;box-shadow:0 1px 6px rgba(0,0,0,.12);z-index:5;}
+    .chat-todos{margin:8px auto 0;width:fit-content;min-width:260px;max-width:min(640px,calc(100% - 32px));flex-shrink:0;background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;box-shadow:0 1px 6px rgba(0,0,0,.12);z-index:5;}
     .chat-todos-head{display:flex;align-items:center;gap:8px;width:100%;padding:9px 12px;background:transparent;border:none;cursor:pointer;color:var(--text);font-size:13px;font-weight:600;text-align:left;transition:background .12s;}
     .chat-todos-head:hover{background:var(--hover-bg);}
     .chat-todos-title{display:inline-flex;align-items:center;gap:7px;min-width:0;flex:1;}
@@ -2284,11 +2284,11 @@
     .chat-todos-row{display:flex;align-items:flex-start;gap:8px;padding:5px 0;border-bottom:1px solid var(--border);}
     .chat-todos-row:last-child{border-bottom:none;}
     .chat-todos-row .todos-status{flex-shrink:0;display:inline-flex;margin-top:1px;}
-    .chat-todos-row .todos-content{flex:1;min-width:0;font-size:12.5px;line-height:1.4;}
+    .chat-todos-row .todos-content{flex:1 1 auto;min-width:0;font-size:12.5px;line-height:1.4;}
     .chat-todos-row .todos-meta{font-size:10.5px;color:var(--muted);opacity:.65;margin-top:1px;}
     .chat-todos-empty{font-size:12px;color:var(--muted);padding:8px 2px;}
     @media(max-width:768px){
-      .chat-todos{margin:6px 10px 0;width:calc(100% - 20px);max-width:100%;}
+      .chat-todos{margin:6px 10px 0;width:auto;min-width:0;max-width:none;}
       .chat-todos-body{max-height:200px;}
       .chat-todos-head{padding:8px 10px;}
     }
