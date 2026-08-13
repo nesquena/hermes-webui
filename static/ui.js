@@ -5793,6 +5793,14 @@ function _beginMessageJumpScroll(container){
   clearTimeout(_messageJumpScrollSettleTimer);
   const generation=++_messageJumpScrollGeneration;
   _messageJumpScrollOwner={generation,container,sessionId:_messageJumpSessionId(),preserved};
+  // While the jump owner is active, temporarily release the reader pin so a
+  // live token arriving between smooth-scroll frames cannot let scrollIfPinned()
+  // reclaim the bottom and snap the reader off the jump target (#6621). The
+  // preserved snapshot above is what _finishMessageJumpScroll() reconciles
+  // against once the jump settles.
+  _scrollPinned=false;
+  _messageUserUnpinned=true;
+  _nearBottomCount=0;
   _programmaticScroll=true;
   _programmaticScrollSetAt=performance.now();
   _scheduleMessageJumpScrollReconcile(generation,300);
@@ -5833,6 +5841,16 @@ function _cancelMessageJumpScroll(){
   ++_messageJumpScrollGeneration;
   clearTimeout(_messageJumpScrollSettleTimer);
   _messageJumpScrollSettleTimer=0;
+  // _beginMessageJumpScroll temporarily unpins the reader for the ownership
+  // window (#6621); a cancel that isn't a reconcile must put the pre-jump pin
+  // state back, or the transient unpinned state would leak. Callers that want a
+  // different terminal pin state (e.g. scrollToBottom) set it right after this.
+  const owner=_messageJumpScrollOwner;
+  if(owner&&owner.preserved){
+    _scrollPinned=owner.preserved.scrollPinned;
+    _messageUserUnpinned=owner.preserved.messageUserUnpinned;
+    _nearBottomCount=owner.preserved.nearBottomCount;
+  }
   _messageJumpScrollOwner=null;
   _programmaticScroll=false;
 }
@@ -7075,6 +7093,11 @@ function _settleFinalScroll(token){
 }
 function scrollIfPinned(){
   if(!window._autoScrollFollow) return;
+  // A jump-to-question owner is mid-flight: it deliberately holds the reader at
+  // the jump target across smooth-scroll frames, so never let a live token
+  // reclaim the bottom while it is active (#6621). _finishMessageJumpScroll()
+  // reconciles the pin state once the jump settles.
+  if(_messageJumpScrollOwner) return;
   if(_messageUserUnpinned){
     // Only scrollToBottom() cleared this flag, so one scroll-up permanently
     // killed auto-follow. Re-pin ONLY when the reader has genuinely returned to
@@ -7099,6 +7122,13 @@ function scrollIfPinned(){
   _settleMessageScrollToBottom(false);
 }
 function scrollToBottom(){
+  // An explicit scroll-to-bottom (End button, or any definitive pin-to-bottom)
+  // supersedes a pending jump-to-question reconciliation: cancel the active jump
+  // owner first so its deferred _finishMessageJumpScroll() can't restore the
+  // pre-jump unpinned snapshot and silently undo this pin (#6621). The jump path
+  // itself never calls scrollToBottom(), and while a jump owner is active the
+  // reader is unpinned so the internal auto-follow callers don't reach here.
+  if(_messageJumpScrollOwner&&typeof _cancelMessageJumpScroll==='function') _cancelMessageJumpScroll();
   _clearNewMessageScrollCue();
   _scrollPinned=true;
   _messageUserUnpinned=false;
