@@ -9289,17 +9289,16 @@ const CHAT_TODOS_ALIGN_LS_KEY='hermes-webui-chat-todos-align';
 function _chatTodosReadAlign(){
   try{
     const v=localStorage.getItem(CHAT_TODOS_ALIGN_LS_KEY);
-    return (v==='left'||v==='right')?v:'center';
-  }catch(_){return 'center';}
+    return (v==='center'||v==='right')?v:'left';  // default: left (avoids the right-side outline/jump buttons)
+  }catch(_){return 'left';}
 }
 function _applyChatTodosAlign(align){
   const tray=$('chatTodosPanel');
   if(!tray) return;
-  if(align==='left'||align==='right') tray.dataset.align=align;
-  else delete tray.dataset.align;          // center is the CSS default
+  tray.dataset.align=(align==='center'||align==='right')?align:'left';
 }
 function _pickChatTodosAlign(align){
-  const a=(align==='left'||align==='right')?align:'center';
+  const a=(align==='center'||align==='right')?align:'left';
   try{localStorage.setItem(CHAT_TODOS_ALIGN_LS_KEY,a);}catch(_){}
   _applyChatTodosAlign(a);
   _syncChatTodosAlignRadios(a);
