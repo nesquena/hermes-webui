@@ -8621,6 +8621,82 @@ def _is_messaging_session_record(session) -> bool:
     return _is_known_messaging_source(raw)
 
 
+def _is_matrix_session_record(session) -> bool:
+    """Return True only for rows whose external source is Matrix."""
+    if not session:
+        return False
+    values = []
+    for key in ("source", "source_tag", "raw_source", "platform"):
+        value = (
+            getattr(session, key, None)
+            if not isinstance(session, dict)
+            else session.get(key)
+        )
+        normalized = str(value or "").strip().lower()
+        if normalized:
+            values.append(normalized)
+    return "matrix" in values
+
+
+def _apply_matrix_organization_metadata(session, cli_meta: dict) -> None:
+    """Stamp only source metadata on a WebUI-owned Matrix organization sidecar."""
+    session.is_cli_session = is_cli_session_row(cli_meta)
+    session.source_tag = cli_meta.get("source_tag") or cli_meta.get("source") or "matrix"
+    session.raw_source = cli_meta.get("raw_source") or session.source_tag
+    session.session_source = cli_meta.get("session_source") or "messaging"
+    session.source_label = cli_meta.get("source_label") or "Matrix"
+    session.profile = cli_meta.get("profile") or getattr(session, "profile", None) or "default"
+    session.read_only = True
+
+
+def _materialize_matrix_organization_metadata(sid: str, cli_meta: dict | None = None):
+    """Return a read-only WebUI sidecar for Matrix organization metadata.
+
+    Matrix transcripts remain owned by the external Agent state store. The
+    sidecar contains no transcript messages and is written only to the WebUI
+    session store so project/archive mutations cannot alter Agent state.db.
+    """
+    sid = str(sid or "").strip()
+    if not sid or not is_safe_session_id(sid):
+        raise KeyError(sid)
+    cli_meta = dict(cli_meta or _lookup_cli_session_metadata(sid))
+    if not cli_meta or cli_meta.get("session_id") not in (None, sid):
+        raise KeyError(sid)
+    if not _is_matrix_session_record(cli_meta):
+        raise PermissionError("read-only imported session")
+
+    try:
+        session = get_session(sid)
+    except KeyError:
+        session = None
+    if session is None:
+        session = Session(
+            session_id=sid,
+            title=cli_meta.get("title") or "Matrix Session",
+            workspace=cli_meta.get("workspace") or get_last_workspace(),
+            model=cli_meta.get("model") or "unknown",
+            messages=[],
+            created_at=cli_meta.get("created_at"),
+            updated_at=cli_meta.get("updated_at"),
+            profile=cli_meta.get("profile") or "default",
+            read_only=True,
+        )
+    elif getattr(session, "_loaded_metadata_only", False):
+        session = Session.load(sid) or session
+
+    if cli_meta.get("title") and not getattr(session, "manual_title", False):
+        session.title = cli_meta["title"]
+    if cli_meta.get("model") and not getattr(session, "model", None):
+        session.model = cli_meta["model"]
+    if cli_meta.get("created_at") is not None:
+        session.created_at = cli_meta["created_at"]
+    if cli_meta.get("updated_at") is not None:
+        session.updated_at = cli_meta["updated_at"]
+    _apply_matrix_organization_metadata(session, cli_meta)
+    session.save(touch_updated_at=False)
+    return session
+
+
 def _messages_include_tool_metadata(messages) -> bool:
     """Return true when returned messages can reconstruct their own tool cards."""
     if not isinstance(messages, list):
@@ -16274,6 +16350,12 @@ def handle_post(handler, parsed) -> bool:
         sid = body["session_id"]
         if _session_is_subagent_view_only(sid):
             return bad(handler, "Subagent sessions are view-only and cannot be archived from WebUI", 400)
+        _matrix_meta = _lookup_cli_session_metadata(sid)
+        if _is_matrix_session_record(_matrix_meta):
+            try:
+                _materialize_matrix_organization_metadata(sid, _matrix_meta)
+            except KeyError:
+                return bad(handler, "Session not found", 404)
         try:
             s = get_session(sid)
             # #1558: save() refuses metadata-only session stubs because their
@@ -16345,6 +16427,8 @@ def handle_post(handler, parsed) -> bool:
                 s.thread_id = cli_meta.get("thread_id")
                 s.session_key = cli_meta.get("session_key")
                 s.platform = cli_meta.get("platform")
+        if getattr(s, "read_only", False) and not _is_matrix_session_record(s):
+            return bad(handler, "Read-only imported sessions cannot be archived from WebUI", 403)
         with _get_session_agent_lock(sid):
             s.archived = bool(body.get("archived", True))
             s.save(touch_updated_at=False)
@@ -16361,14 +16445,27 @@ def handle_post(handler, parsed) -> bool:
             require(body, "session_id")
         except ValueError as e:
             return bad(handler, str(e))
+        sid = str(body["session_id"] or "").strip()
+        matrix_meta = _lookup_cli_session_metadata(sid)
+        target_pid = body.get("project_id") or None
+        if _is_matrix_session_record(matrix_meta) and target_pid:
+            matrix_profile = matrix_meta.get("profile") or get_active_profile_name()
+            matrix_target = next(
+                (p for p in load_projects() if p["project_id"] == target_pid),
+                None,
+            )
+            if not matrix_target or not _profiles_match(matrix_target.get("profile"), matrix_profile):
+                return bad(handler, "Project not found", 404)
         try:
-            s = _get_or_materialize_session(body["session_id"])
+            if _is_matrix_session_record(matrix_meta):
+                s = _materialize_matrix_organization_metadata(sid, matrix_meta)
+            else:
+                s = _get_or_materialize_session(sid)
         except KeyError:
             return bad(handler, "Session not found", 404)
         except PermissionError:
             return bad(handler, "Read-only imported sessions cannot be moved from WebUI", 403)
         # #1614: refuse moves into a project owned by another profile.
-        target_pid = body.get("project_id") or None
         if target_pid:
             # Use the session's own profile for authorization, not the global
             # active profile. A session belongs to a specific profile set at
@@ -16393,7 +16490,7 @@ def handle_post(handler, parsed) -> bool:
         # the wait converts that into an actionable HTTP 503 the client can retry.
         # We keep the lock (rather than dropping it for this metadata-only write)
         # because s.save() still races the streaming thread's atomic writer.
-        _move_lock = _get_session_agent_lock(body["session_id"])
+        _move_lock = _get_session_agent_lock(sid)
         if not _move_lock.acquire(timeout=5):
             return j(
                 handler,
@@ -22834,7 +22931,7 @@ def _handle_chat_start(handler, body, diag=None):
                     "type": "compression_recovery_required",
                     "recommended_recovery_action": recovery.get("recommended_action"),
                     "compression_recovery": recovery,
-                    "session_id": getattr(s, "session_id", body["session_id"]),
+            "session_id": getattr(s, "session_id", body["session_id"]),
                 },
                 status=409,
             )

@@ -2500,6 +2500,17 @@ function _isReadOnlySession(session) {
   return !!(session && (session.read_only || session.is_read_only));
 }
 
+function _isMatrixSession(session) {
+  if (!session) return false;
+  const sources = [session.source, session.source_tag, session.raw_source, session.platform]
+    .map(value => String(value || '').trim().toLowerCase());
+  return sources.includes('matrix');
+}
+
+function _isOrganizableReadOnlySession(session) {
+  return _isReadOnlySession(session) && _isMatrixSession(session);
+}
+
 function _isBranchableReadOnlySession(session) {
   if (!_isReadOnlySession(session)) return false;
   const sources = [
@@ -4810,7 +4821,7 @@ function _playSessionActionMenuEntrance(menu){
 }
 
 async function _archiveSession(session, archived=true, beforeListRender=null){
-  if(_isReadOnlySession(session)){ if(typeof showToast==='function') showToast('Read-only imported sessions cannot be modified.',3000); return false; }
+  if(_isReadOnlySession(session) && !_isOrganizableReadOnlySession(session)){ if(typeof showToast==='function') showToast('Read-only imported sessions cannot be modified.',3000); return false; }
   const reflowPositions=_captureSessionReflowPositions();
   const renderHold=beforeListRender?Promise.resolve().then(beforeListRender):null;
   try{
@@ -4840,12 +4851,36 @@ function _openSessionActionMenu(session, anchorEl){
   const isMessagingSession = _isMessagingSession(session);
   const isCliSession = _isCliSession(session);
   const isExternalSession = isMessagingSession || isCliSession;
+  const canOrganizeReadOnly = _isOrganizableReadOnlySession(session);
   const menu=document.createElement('div');
   menu.className='session-action-menu';
   menu.id='sessionActionMenu-'+(++_sessionActionMenuId);
   menu.setAttribute('role','menu');
   menu.setAttribute('aria-label', 'Conversation actions');
   _appendSessionCopyLinkAction(menu, session);
+  if(canOrganizeReadOnly){
+    menu.appendChild(_buildSessionAction(
+      t('session_move_project'),
+      session.project_id?t('session_move_project_desc_has'):t('session_move_project_desc_none'),
+      ICONS.folder,
+      ()=>{
+        closeSessionActionMenu();
+        _showProjectPicker(session, anchorEl);
+      }
+    ));
+    menu.appendChild(_buildSessionAction(
+      session.archived?t('session_restore'):t('session_archive'),
+      session.archived?t('session_restore_desc'):_sessionArchiveDescription(session),
+      session.archived?ICONS.unarchive:ICONS.archive,
+      async()=>{
+        closeSessionActionMenu();
+        await _archiveSession(session,!session.archived);
+      }
+    ));
+    _appendSessionExportHtmlAction(menu, session);
+    _mountSessionActionMenu(menu, session, anchorEl);
+    return;
+  }
   if(isReadOnly){
     _appendSessionExportHtmlAction(menu, session);
     _mountSessionActionMenu(menu, session, anchorEl);

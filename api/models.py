@@ -7423,7 +7423,7 @@ def _state_projection_sidecar_metadata(sid: str) -> dict:
     stops being true (metadata moves to another store), this gate would short-
     circuit before the real source — update both together.
     """
-    default = {"title": None, "archived": False}
+    default = {"title": None, "archived": False, "project_id": None}
     if not is_safe_session_id(sid):
         return dict(default)
     p = SESSION_DIR / f'{sid}.json'
@@ -7451,6 +7451,7 @@ def _state_projection_sidecar_metadata(sid: str) -> dict:
         if title:
             metadata["title"] = title
         metadata["archived"] = bool(getattr(webui_meta, 'archived', False))
+        metadata["project_id"] = getattr(webui_meta, 'project_id', None)
 
     with _SIDECAR_METADATA_CACHE_LOCK:
         # Re-check under lock in case a concurrent build populated it; either
@@ -7626,7 +7627,11 @@ def _load_cli_sessions_uncached(
             'updated_at': raw_ts,
             'pinned': False,
             'archived': _archived,
-            'project_id': _state_row_project_id(sid, _source),
+            'project_id': (
+                _sidecar_meta.get('project_id')
+                if _source == 'matrix'
+                else _state_row_project_id(sid, _source)
+            ),
             'profile': profile,
             'source_tag': _source,
             'raw_source': row.get('raw_source') or _source_meta.get('raw_source'),
