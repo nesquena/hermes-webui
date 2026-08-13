@@ -4992,7 +4992,14 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
         s.save()
     return s
 
-def _hide_from_default_sidebar(session: dict, *, show_cron: bool = False, show_webhook: bool = False, show_kanban: bool = False) -> bool:
+def _hide_from_default_sidebar(
+    session: dict,
+    *,
+    show_cron: bool = False,
+    show_matrix: bool = False,
+    show_webhook: bool = False,
+    show_kanban: bool = False,
+) -> bool:
     """Return True for internal/background sessions hidden from the default list."""
     sid = str(session.get('session_id') or '')
     source = (
@@ -5002,6 +5009,12 @@ def _hide_from_default_sidebar(session: dict, *, show_cron: bool = False, show_w
         or session.get('session_source')
     )
     if not show_cron and (source == 'cron' or sid.startswith('cron_')):
+        return True
+    matrix_sources = {
+        str(session.get(key) or '').strip().lower()
+        for key in ('source', 'source_tag', 'raw_source', 'session_source')
+    }
+    if not show_matrix and 'matrix' in matrix_sources:
         return True
     if not show_webhook and source == 'webhook':
         return True
@@ -5060,7 +5073,7 @@ def _is_intentionally_background_sidebar_session(session: dict) -> bool:
         or session.get('raw_source')
         or session.get('session_source')
     )
-    return source in {'cron', 'webhook', 'kanban'} or sid.startswith('cron_')
+    return source in {'cron', 'matrix', 'webhook', 'kanban'} or sid.startswith('cron_')
 
 
 def _include_project_hidden_background_sidebar_sessions(
@@ -5069,7 +5082,7 @@ def _include_project_hidden_background_sidebar_sessions(
 ) -> list[dict]:
     """Keep project-assigned background sessions addressable by project chips.
 
-    Cron and webhook sessions stay hidden from the default sidebar, but if they
+    Cron, Matrix, and webhook sessions stay hidden from the default sidebar, but if they
     have a project assignment they must still be present in the client cache so
     their dedicated project chips can reveal them (#3019).
     """
