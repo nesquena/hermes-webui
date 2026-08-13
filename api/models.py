@@ -8414,6 +8414,12 @@ _SESSION_MESSAGE_DISPLAY_METADATA_KEYS = (
     "_statusCard",
     "_anchor_stream_id",
     "_anchor_activity_scene",
+    # Map of absolute media path -> content-addressed snapshot digest, stamped
+    # at turn-settle time (api/media_snapshots.py) so historical previews keep
+    # showing the file bytes the turn emitted even after the file is
+    # overwritten in place. Display-only metadata: must survive the
+    # sidecar/state.db merge exactly like the other keys above.
+    "_media_snapshots",
 )
 
 

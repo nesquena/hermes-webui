@@ -1734,6 +1734,13 @@ async function loadSession(sid){
   _yoloEnabled=false;_updateYoloPill();
   if(typeof stopClarifyPolling==='function') stopClarifyPolling();
   if(typeof hideClarifyCard==='function') hideClarifyCard(forceReload, forceReload?'external-refresh':'dismissed');
+  // #6572: clear stale compression state when switching sessions.
+  // The compression UI state is per-session and must not leak across loads.
+  // Without this, a compression card from a prior session can appear as a
+  // phantom "Compressing context" barrier on a fresh session that never
+  // triggered compression.
+  if(typeof clearCompressionUi==='function') clearCompressionUi();
+  else window._compressionUi=null;
   // Show loading indicator immediately for responsiveness.
   // Cleared by renderMessages() once full session data arrives.
   // Persist the current composer draft before switching away so it can be
@@ -7538,6 +7545,12 @@ function _attachProjectQuickCreateButton(chip, project){
       // project-assigned session appears deterministically.
       try{ if(typeof renderSessionListFromCache==='function') renderSessionListFromCache(); }catch(_){}
       try{ if(typeof renderSessionList==='function') void renderSessionList({deferWhileInteracting:false}); }catch(_){}
+      // Mobile: the sidebar is a full-screen drawer over the main view — close
+      // it after the project conversation is created so the user actually sees
+      // the new session (mirrors $('btnNewChat').onclick in boot.js and the
+      // #5409 close in _openSidebarSession). Failure path keeps the drawer open
+      // so the toast stays visible for retry.
+      if(typeof closeMobileSidebar==='function') closeMobileSidebar();
     }catch(err){
       _setActiveProjectFilter(previousProject);
       if(typeof showToast==='function') showToast('New conversation failed: '+(err&&err.message||err));

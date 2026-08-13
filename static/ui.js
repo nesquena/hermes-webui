@@ -1514,6 +1514,53 @@ function _getCachedRender(text, isUser){
   _renderCache.set(key, rendered);
   return rendered;
 }
+// ── Message-level media snapshot stamping ─────────────────────────────────
+// /api/media serves a file's CURRENT bytes. Since ETag revalidation (#6922),
+// an in-place overwrite (same filename) also rewrites every historical chat
+// preview that referenced it — the old/new comparison is lost. At settle time
+// the backend freezes the bytes of each local-file MEDIA: reference into a
+// content-addressed store and stamps the message with
+// `_media_snapshots: {path: digest}`. This helper rewrites the rendered HTML
+// of ONE message to append `&snap=<digest>` to the matching /api/media URLs
+// (and `data-snap` on lazy-preview placeholders), so old previews keep
+// showing the file as it was when the message was emitted.
+// Runs AFTER the text-keyed render cache: the cache stays pure-text, and each
+// message stamps its own digests — two messages with identical text but
+// different snapshots (exactly the old/new case) resolve independently.
+function _stampMediaSnapshots(html, snaps){
+  if(!html || !snaps || typeof snaps !== 'object') return html;
+  let out = String(html);
+  // Direct media URLs: rewrite each COMPLETE `path=` query value atomically.
+  // Value-level parsing (decode the whole value, exact map lookup) instead of
+  // substring split/join: when one path is a PREFIX of another
+  // (/tmp/a.png vs /tmp/a.png.backup) the naive rewrite corrupts the longer
+  // URL and drops its own digest. Matching is boundary-aware — the value runs
+  // to the next `&` separator or an attribute quote/whitespace — so nothing
+  // outside the value ever moves.
+  out = out.replace(/api\/media[?&]path=([^&"'\s<>]+)/g, (match, encodedPath)=>{
+    let decoded;
+    try{ decoded = decodeURIComponent(encodedPath); }
+    catch(e){ return match; }
+    const digest = snaps[decoded];
+    if(typeof digest === 'string' && /^[0-9a-f]{64}$/.test(digest)){
+      return match + '&snap=' + digest;
+    }
+    return match;
+  });
+  // Lazy-preview placeholders: data-path="<html-escaped raw path>" — match the
+  // complete attribute value, unescape HTML entities, then exact lookup (same
+  // prefix-safety: a longer path's attribute can never be partially matched).
+  const _unescapeHtml=(s)=>String(s||'').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&amp;/g,'&');
+  out = out.replace(/data-path="([^"]*)"/g, (match, rawValue)=>{
+    const decoded = _unescapeHtml(rawValue);
+    const digest = snaps[decoded];
+    if(typeof digest === 'string' && /^[0-9a-f]{64}$/.test(digest)){
+      return match + ' data-snap="' + digest + '"';
+    }
+    return match;
+  });
+  return out;
+}
 function _currentMessageRenderWindowSize(){
   return Math.max(
     MESSAGE_RENDER_WINDOW_DEFAULT,
@@ -3195,7 +3242,34 @@ function _findModelInDropdown(modelId, sel, preferredProviderId){
   }
   const preferred=String(preferredProviderId||explicitProvider||'').toLowerCase();
   if(preferred){
-    const providerMatch=options.find(o=>norm(o.value)===target && _getOptionProviderId(o).toLowerCase()===preferred);
+    if(preferred==='custom'||preferred.startsWith('custom:')){
+      // A slash is part of a custom endpoint's upstream model ID, not a
+      // provider namespace. Match the exact routed ID (allowing only the
+      // WebUI's @provider: wrapper and dash/dot spelling compatibility).
+      const routeNorm=value=>{
+        let routed=String(value||'');
+        const prefix=`@${preferred}:`;
+        if(routed.toLowerCase().startsWith(prefix)) routed=routed.slice(prefix.length);
+        return routed.toLowerCase().replace(/-/g,'.');
+      };
+      const providerOptions=options.filter(o=>_getOptionProviderId(o).toLowerCase()===preferred);
+      const providerMatch=providerOptions.find(o=>routeNorm(o.value)===routeNorm(rawModel));
+      if(providerMatch) return providerMatch.value;
+      // Legacy sessions may store only the bare suffix of a routed custom
+      // option. Preserve #6195's provider-hinted repair, but only for an
+      // explicit @provider: row; an unwrapped slash ID belongs to the active
+      // endpoint and must not substitute for a distinct bare model.
+      if(!rawModel.includes('/')&&!rawModel.startsWith('@')){
+        const prefix=`@${preferred}:`;
+        const suffixMatches=providerOptions.filter(o=>
+          String(o.value||'').toLowerCase().startsWith(prefix)
+          &&norm(o.value)===target
+        );
+        if(suffixMatches.length===1) return suffixMatches[0].value;
+      }
+      return null;
+    }
+    const providerMatch=options.find(o=>norm(o.value)===target&&_getOptionProviderId(o).toLowerCase()===preferred);
     if(providerMatch) return providerMatch.value;
   }
   // 2. Normalized match — but ONLY when unambiguous. If the bare id
@@ -16537,6 +16611,13 @@ function renderMessages(options){
       }).join('')}</div>`;
     }
     let bodyHtml = _getCachedRender(displayContent, isUser);
+    // Message-level media snapshots: settled assistant messages carry a
+    // path→digest map (written at settle time) freezing the file bytes the
+    // turn emitted. Stamp it AFTER the text-keyed render cache so identical
+    // text with different snapshots (old/new comparison) never collides.
+    if(!isUser && m && m._media_snapshots && typeof m._media_snapshots==='object'){
+      bodyHtml = _stampMediaSnapshots(bodyHtml, m._media_snapshots);
+    }
     if(!isUser&&m.provider_details){
       const summary=m.provider_details_label||'Provider details';
       bodyHtml += `<details class="provider-error-details"><summary>${esc(String(summary))}</summary><pre><code>${esc(String(m.provider_details))}</code></pre></details>`;
@@ -16757,10 +16838,15 @@ function renderMessages(options){
         if(!firstSeg&&thinkingText&&window._showThinking!==false&&!((isCompactWorklogMode()||isTransparentStream())&&_assistantThinkingBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs))) orderedSeg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
         const isLastTextPart=partIdx===lastTextPartIdx;
         const partBodyHtml=_getCachedRender(partDisplayText,false);
+        // Message-level media snapshots: transparent ordered segments carry the
+        // same per-message path→digest map as the main transcript; stamp it so
+        // historical previews freeze (&snap=) instead of following overwrites.
+        // Inlined in the template (no intermediate variable) so test-harness
+        // block extraction of the ordered-segment slice stays self-contained.
         if(isLastTextPart&&statusHtml){
           orderedSeg.insertAdjacentHTML('beforeend', statusHtml);
         }
-        orderedSeg.insertAdjacentHTML('beforeend', `${isLastTextPart?filesHtml:''}<div class="msg-body">${partBodyHtml}</div>${isLastTextPart?footHtml:''}`);
+        orderedSeg.insertAdjacentHTML('beforeend', `${isLastTextPart?filesHtml:''}<div class="msg-body">${(typeof m!=='undefined'&&m&&m._media_snapshots&&typeof m._media_snapshots==='object')?_stampMediaSnapshots(partBodyHtml,m._media_snapshots):partBodyHtml}</div>${isLastTextPart?footHtml:''}`);
         blocks.appendChild(orderedSeg);
         if(!firstSeg) firstSeg=orderedSeg;
       });
@@ -19138,7 +19224,8 @@ function loadDiffInline(container){
   root.querySelectorAll('.diff-inline-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
-    fetch('api/media?path='+encodeURIComponent(path))
+    const snapQuery=_mediaSnapQuery(el);
+    fetch('api/media?path='+encodeURIComponent(path)+snapQuery)
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
         if(text.length>DIFF_MAX_SIZE){
@@ -19167,8 +19254,18 @@ function _mediaSessionQuery(){
   return mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'';
 }
 
+// Message-level media snapshots: lazy preview loaders (pdf/html/csv/diff/
+// excalidraw) build their fetch URL from data-path at load time. The stamping
+// pass in _stampMediaSnapshots carries the content digest in data-snap;
+// append it here so the preview shows the file as the message emitted it.
+function _mediaSnapQuery(el){
+  const snap=el&&el.dataset?el.dataset.snap:'';
+  return (snap&&/^[0-9a-f]{64}$/.test(snap))?('&snap='+snap):'';
+}
+
 function _csvMediaUrl(path, opts={}){
   let url='api/media?path='+encodeURIComponent(path)+_mediaSessionQuery();
+  if(opts.snap) url+='&snap='+encodeURIComponent(opts.snap);
   if(opts.download) url+='&download=1';
   return url;
 }
@@ -19208,8 +19305,9 @@ function loadCsvInline(container){
   root.querySelectorAll('.csv-inline-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
-    const mediaUrl=_csvMediaUrl(path);
-    const downloadUrl=_csvMediaUrl(path,{download:true});
+    const snap=_mediaSnapQuery(el).replace(/^&snap=/,'');
+    const mediaUrl=_csvMediaUrl(path,{snap:snap||undefined});
+    const downloadUrl=_csvMediaUrl(path,{download:true,snap:snap||undefined});
     fetch(mediaUrl)
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
@@ -19228,7 +19326,8 @@ function loadExcalidrawInline(container){
   root.querySelectorAll('.excalidraw-inline-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
-    fetch('api/media?path='+encodeURIComponent(path))
+    const snapQuery=_mediaSnapQuery(el);
+    fetch('api/media?path='+encodeURIComponent(path)+snapQuery)
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
         if(text.length>EXCALIDRAW_MAX_SIZE){
@@ -19357,14 +19456,15 @@ function loadPdfInline(container){
     const path=el.dataset.path;
     const fname=path.split('/').pop()||path;
     const mediaSessionId=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)?String(S.session.session_id):'';
+    const snapQuery=_mediaSnapQuery(el);
     const publicMediaUrl='api/media?path='+encodeURIComponent(path);
-    const mediaUrl=publicMediaUrl+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'');
+    const mediaUrl=publicMediaUrl+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'')+snapQuery;
     const loadPdf=(pdfjsLib)=>{
       fetch(mediaUrl)
         .then(r=>{if(!r.ok) throw new Error(r.status); return r.arrayBuffer();})
         .then(buf=>{
           if(buf.byteLength>PDF_MAX_SIZE){
-            const dlUrl=publicMediaUrl+'&download=1';
+            const dlUrl=publicMediaUrl+'&download=1'+snapQuery;
             el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_too_large')}</span></div>`;
             return;
           }
@@ -19372,7 +19472,7 @@ function loadPdfInline(container){
         })
         .then(pdf=>{
           if(!pdf) return;
-          const dlUrl=publicMediaUrl+'&download=1';
+          const dlUrl=publicMediaUrl+'&download=1'+snapQuery;
           const total=pdf.numPages;
           const pagesLabel=total>1?` · ${total} pages`:'';
           const wrap=document.createElement('div');
@@ -19411,7 +19511,7 @@ function loadPdfInline(container){
           renderPage(1);
         })
         .catch(()=>{
-          const dlUrl=publicMediaUrl+'&download=1';
+          const dlUrl=publicMediaUrl+'&download=1'+snapQuery;
           el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_error')}</span></div>`;
         });
     };
@@ -19431,7 +19531,7 @@ function loadPdfInline(container){
       window.addEventListener('pdfjs-ready',()=>{ _pdfjsReady=true; loadPdf(window._pdfjsLib); },{once:true});
       setTimeout(()=>{
         if(!_pdfjsReady){
-          const dlUrl=publicMediaUrl+'&download=1';
+          const dlUrl=publicMediaUrl+'&download=1'+snapQuery;
           if(el.parentNode){
             el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_error')}</span></div>`;
           }
@@ -19452,22 +19552,23 @@ function loadHtmlInline(container){
     const path=el.dataset.path;
     const fname=path.split('/').pop()||path;
     const mediaSessionId=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)?String(S.session.session_id):'';
+    const snapQuery=_mediaSnapQuery(el);
     const publicMediaUrl='api/media?path='+encodeURIComponent(path);
-    const mediaUrl=publicMediaUrl+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'');
+    const mediaUrl=publicMediaUrl+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'')+snapQuery;
     fetch(mediaUrl, {cache:'no-store'})
       .then(r=>{if(!r.ok) throw new Error(r.status); return r.text();})
       .then(html=>{
         if(html.length>HTML_MAX_SIZE){
-          const openUrl=publicMediaUrl+'&inline=1';
+          const openUrl=publicMediaUrl+'&inline=1'+snapQuery;
           el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${openUrl}" target="_blank" rel="noopener">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_too_large')}</span></div>`;
           return;
         }
-        const openUrl=publicMediaUrl+'&inline=1';
+        const openUrl=publicMediaUrl+'&inline=1'+snapQuery;
         const safeHtml=html.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
         el.outerHTML=`<div class="html-preview-wrap"><div class="html-preview-header"><span>${t('html_sandbox_label')}</span><a href="${openUrl}" target="_blank" rel="noopener" class="html-open-link">${t('html_open_full')} ↗</a></div><iframe srcdoc="${safeHtml}" sandbox="allow-scripts" class="html-preview-iframe" loading="lazy"></iframe></div>`;
       })
       .catch(()=>{
-        const dlUrl=publicMediaUrl+'&download=1';
+        const dlUrl=publicMediaUrl+'&download=1'+snapQuery;
         el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_error')}</span></div>`;
       });
   });

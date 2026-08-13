@@ -21,6 +21,7 @@ import threading
 import time
 import traceback
 import copy
+import inspect
 from pathlib import Path
 from typing import Optional
 
@@ -305,6 +306,19 @@ def _install_streaming_cronjob_profile_wrapper() -> None:
         dynamic_schema_overrides=entry.dynamic_schema_overrides,
     )
     _STREAMING_CRONJOB_WRAPPER_INSTALLED = True
+
+
+def _supports_kwarg(func, kwarg_name: str) -> bool:
+    """Return True if callable `func` accepts `kwarg_name` (explicitly or via **kwargs)."""
+    try:
+        sig = inspect.signature(func)
+        for param in sig.parameters.values():
+            if param.kind == param.VAR_KEYWORD or param.name == kwarg_name:
+                return True
+        return False
+    except Exception:
+        return True
+
 
 
 _PERSISTENT_MEMORY_FILES = (
@@ -1732,6 +1746,24 @@ def _prepare_marker_clean_writeback(
     return [], list(previous_context_messages or []), provenance
 
 
+def _annotate_media_snapshots_for_settled_messages(messages) -> None:
+    """Freeze local-file MEDIA: bytes at settle time so historical previews
+    keep showing the version the turn emitted, even after the file is
+    overwritten in place (#6922 follow-up).
+
+    Runs AFTER the display merge so the annotation rides the exact messages the
+    frontend will render. The store is content-addressed and the annotator is
+    idempotent (already-stored digests short-circuit), so re-settling the same
+    transcript is cheap. Never raises — snapshotting is best-effort durability.
+    """
+    try:
+        from api.media_snapshots import annotate_media_snapshots
+
+        annotate_media_snapshots(messages)
+    except Exception:
+        logger.debug("Media snapshot annotation failed during settle", exc_info=True)
+
+
 def _settle_result_messages(
     session,
     previous_messages,
@@ -1794,6 +1826,7 @@ def _settle_result_messages(
         source=source,
         verification_nudge_provenance=verification_nudge_provenance,
     )
+    _annotate_media_snapshots_for_settled_messages(session.messages)
     _compact_session_image_parts_for_persistence(session)
     _advance_truncation_watermark_after_commit(session)  # #3831
     return result_messages
@@ -4466,6 +4499,12 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
             else:
                 _put_title_status(put_event, session_id, source, llm_status, effective_title, raw_preview)
             put_event('title', {'session_id': session_id, 'title': effective_title})
+            # Sync the generated title to state.db so `hermes sessions list` shows it.
+            try:
+                from api.state_sync import sync_session_title
+                sync_session_title(session_id, effective_title, profile=getattr(s, 'profile', None) or 'default')
+            except Exception:
+                logger.debug("Failed to sync title to state.db after generation for %s", session_id)
         else:
             _put_title_status(put_event, session_id, 'skipped', source or 'unchanged', effective_title, raw_preview)
     finally:
@@ -4538,6 +4577,12 @@ def _run_background_title_refresh(session_id: str, user_text: str, assistant_tex
             s.save(touch_updated_at=False)
         _put_title_status(put_event, session_id, 'refreshed', llm_status, effective_title, raw_preview)
         put_event('title', {'session_id': session_id, 'title': effective_title})
+        # Sync the refreshed title to state.db so `hermes sessions list` stays current.
+        try:
+            from api.state_sync import sync_session_title
+            sync_session_title(session_id, effective_title, profile=getattr(s, 'profile', None) or 'default')
+        except Exception:
+            logger.debug("Failed to sync refreshed title to state.db for %s", session_id)
         logger.info("Adaptive title refresh: session=%s new_title=%r", session_id, effective_title)
     except Exception:
         logger.debug("Background title refresh failed for session %s", session_id, exc_info=True)
@@ -9559,6 +9604,12 @@ def _run_agent_streaming(
                     # field the cached agent silently retains the previous
                     # profile's SOUL.md (and any other profile-scoped context).
                     _profile_home or '',
+                    # Terminal backend identity: sessions switching between
+                    # remote (SSH) and local backends must not reuse a cached
+                    # agent that carries stale terminal env vars (#5937).
+                    _safe_profile_runtime_env.get('TERMINAL_ENV', '') or '',
+                    _safe_profile_runtime_env.get('TERMINAL_SSH_HOST', '') or '',
+                    _safe_profile_runtime_env.get('TERMINAL_SSH_USER', '') or '',
                 ], sort_keys=True)
                 _agent_sig = _hashlib.sha256(_sig_blob.encode()).hexdigest()[:16]
 
@@ -9884,8 +9935,9 @@ def _run_agent_streaming(
                 ),
                 task_id=session_id,
                 persist_user_message=msg_text,
-                persist_user_timestamp=getattr(s, 'pending_started_at', None),
             )
+            if _supports_kwarg(agent.run_conversation, 'persist_user_timestamp'):
+                _run_conversation_kwargs['persist_user_timestamp'] = getattr(s, 'pending_started_at', None)
             # Only pass moa_config when a /moa override is actually active, so a
             # normal send never trips a TypeError on an older hermes-agent whose
             # run_conversation() predates the moa_config kwarg.
@@ -10387,8 +10439,9 @@ def _run_agent_streaming(
                                     ),
                                     task_id=session_id,
                                     persist_user_message=msg_text,
-                                    persist_user_timestamp=getattr(s, 'pending_started_at', None),
                                 )
+                                if _supports_kwarg(agent.run_conversation, 'persist_user_timestamp'):
+                                    _heal_kwargs['persist_user_timestamp'] = getattr(s, 'pending_started_at', None)
                                 if moa_config is not None:
                                     _heal_kwargs["moa_config"] = moa_config
                                 _heal_result = agent.run_conversation(**_heal_kwargs)
@@ -11627,8 +11680,9 @@ def _run_agent_streaming(
                             ),
                             task_id=session_id,
                             persist_user_message=msg_text,
-                            persist_user_timestamp=getattr(s, 'pending_started_at', None),
                         )
+                        if _supports_kwarg(_heal_agent.run_conversation, 'persist_user_timestamp'):
+                            _heal_kwargs2['persist_user_timestamp'] = getattr(s, 'pending_started_at', None)
                         if moa_config is not None:
                             _heal_kwargs2["moa_config"] = moa_config
                         _heal_result = _heal_agent.run_conversation(**_heal_kwargs2)
