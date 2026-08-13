@@ -9938,13 +9938,16 @@ from api.route_approvals import (  # noqa: F401 — re-exports for backward comp
     _GATEWAY_MIRROR_FLAG,
     _GATEWAY_MIRROR_TOKEN,
     _gateway_mirror_entry_token,
+    begin_session_yolo_transition,
     claim_gateway_approval_relay_owner,
+    finish_session_yolo_transition,
     gateway_pending_mirror,
     release_gateway_approval_relay_owner,
     retire_gateway_pending_mirror,
     reconcile_gateway_pending_mirror_locked,
     resolve_gateway_pending_local,
     resolve_gateway_pending_local_no_run_mirror,
+    set_session_yolo_enabled,
     submit_gateway_pending_mirror,
     submit_pending,
 )
@@ -15596,8 +15599,8 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
         sid = body["session_id"]
         enabled = bool(body.get("enabled", True))
+        set_session_yolo_enabled(sid, enabled)
         if enabled:
-            enable_session_yolo(sid)
             # Also resolve any pending approvals for this session so the
             # agent doesn't stay stuck waiting on an already-dismissed card.
             try:
@@ -15607,8 +15610,6 @@ def handle_post(handler, parsed) -> bool:
             except Exception:
                 pass
             resolve_gateway_approval(sid, "once", resolve_all=True)
-        else:
-            disable_session_yolo(sid)
         return j(handler, {"ok": True, "yolo_enabled": enabled})
 
     if parsed.path == "/api/btw":
@@ -24865,20 +24866,23 @@ def _handle_approval_respond(handler, body):
                             status=409,
                         )
                 matched_mirror = current_mirror
-                yolo_was_enabled = is_session_yolo_enabled(sid)
-                if enable_yolo and not yolo_was_enabled:
+                yolo_transition = None
+                if enable_yolo:
                     # Set the WebUI flag before resuming this request so the
                     # SSE reader can auto-answer a prompt emitted immediately
-                    # afterward. Roll it back if the current relay fails.
-                    enable_session_yolo(sid)
+                    # afterward. The transition helper makes a failed relay's
+                    # rollback safe against overlapping enables from other tabs.
+                    yolo_transition = begin_session_yolo_transition(sid)
+                relay_succeeded = False
                 try:
                     HttpRunnerClient(base_url=_base, api_key=_key).respond_approval(
                         _run_id, matched_mirror["approval_id"] if identity_v1 else "", choice
                     )
+                    relay_succeeded = True
                 except (RunnerClientError, ValueError) as exc:
-                    if enable_yolo and not yolo_was_enabled:
-                        disable_session_yolo(sid)
                     return j(handler, {"ok": False, "choice": choice, "relayed": True, "error": str(exc)}, status=502)
+                finally:
+                    finish_session_yolo_transition(sid, yolo_transition, succeeded=relay_succeeded)
                 # The outbound relay only resumes the remote run; the local mirror
                 # still needs the same cleanup path so the parked entry, mirrored
                 # card, and agent signal all settle here too.
@@ -24906,7 +24910,7 @@ def _handle_approval_respond(handler, body):
             )
             if handled_no_run_mirror and resolved_count == 1:
                 if enable_yolo:
-                    enable_session_yolo(sid)
+                    set_session_yolo_enabled(sid, True)
                 return j(handler, {
                     "ok": True,
                     "choice": choice,
@@ -24949,7 +24953,7 @@ def _handle_approval_respond(handler, body):
         # the protective ok:false. `stale_cleared` lets the frontend log/branch
         # without showing an error toast.
         if enable_yolo:
-            enable_session_yolo(sid)
+            set_session_yolo_enabled(sid, True)
         return j(handler, {
             "ok": True,
             "choice": choice,
@@ -24957,7 +24961,7 @@ def _handle_approval_respond(handler, body):
             **({"yolo_enabled": True} if enable_yolo else {}),
         })
     if ok and enable_yolo:
-        enable_session_yolo(sid)
+        set_session_yolo_enabled(sid, True)
     return j(handler, {
         "ok": ok,
         "choice": choice,

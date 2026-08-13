@@ -265,3 +265,73 @@ def test_card_yolo_uses_plain_runs_approval_and_rolls_back_on_failure(monkeypatc
         with routes._lock:
             routes._pending.pop(sid, None)
             routes._gateway_queues.pop(sid, None)
+
+
+@pytest.mark.skipif(not APPROVAL_AVAILABLE, reason="tools.approval unavailable")
+def test_failed_relay_does_not_undo_concurrent_explicit_yolo_enable(monkeypatch):
+    from api import route_approvals, routes
+
+    sid = "webui-yolo-route-concurrent-enable"
+    stream_id = "stream-yolo-route-concurrent"
+    run_id = "run-yolo-route-concurrent"
+    relay_started = threading.Event()
+    release_relay = threading.Event()
+    response = {}
+    disable_session_yolo(sid)
+
+    def fake_respond(_self, _run_id, _approval_id, _choice):
+        relay_started.set()
+        assert release_relay.wait(timeout=5)
+        raise RunnerClientError("relay failed")
+
+    def fake_j(_handler, data, status=200, extra_headers=None):
+        response.update(payload=data, status=status)
+        return data
+
+    monkeypatch.setattr(routes, "j", fake_j)
+    monkeypatch.setattr(routes, "get_session", lambda _sid: SimpleNamespace(active_stream_id=stream_id))
+    monkeypatch.setattr("api.runner_client.HttpRunnerClient.respond_approval", fake_respond)
+    monkeypatch.setattr(config, "gateway_supports_approval_identity_v1", lambda *_a, **_k: True)
+    monkeypatch.setenv("HERMES_WEBUI_CHAT_BACKEND", "gateway")
+    gateway_chat._STREAM_RUN_IDS[stream_id] = run_id
+    route_approvals.submit_gateway_pending_mirror(sid, {
+        "command": "touch /tmp/webui-yolo-test",
+        "description": "test",
+        "approval_id": "approval-route-concurrent",
+        "run_id": run_id,
+        "_gateway_agent_identity_v1": True,
+    })
+
+    worker = threading.Thread(target=routes._handle_approval_respond, args=(
+        object(),
+        {
+            "session_id": sid,
+            "choice": "once",
+            "approval_id": "approval-route-concurrent",
+            "yolo": True,
+        },
+    ))
+    try:
+        worker.start()
+        assert relay_started.wait(timeout=5)
+        explicit_enable = getattr(
+            route_approvals,
+            "set_session_yolo_enabled",
+            lambda session_key, _enabled: route_approvals.enable_session_yolo(session_key),
+        )
+        explicit_enable(sid, True)
+        release_relay.set()
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+        assert response["status"] == 502
+        assert response["payload"]["ok"] is False
+        assert is_session_yolo_enabled(sid) is True
+    finally:
+        release_relay.set()
+        worker.join(timeout=5)
+        disable_session_yolo(sid)
+        gateway_chat._STREAM_RUN_IDS.pop(stream_id, None)
+        route_approvals.retire_gateway_pending_mirror(sid, run_id=run_id)
+        with routes._lock:
+            routes._pending.pop(sid, None)
+            routes._gateway_queues.pop(sid, None)

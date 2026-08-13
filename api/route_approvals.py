@@ -50,6 +50,66 @@ _GATEWAY_MIRROR_RETAINED = "_gateway_mirror_retained"
 _GATEWAY_ENTRY_DATA_TOKEN_KEY = "_webui_mirror_token"
 _GATEWAY_AGENT_IDENTITY_V1 = "_gateway_agent_identity_v1"
 _gateway_relay_owners: dict[tuple[str, str], str] = {}
+_yolo_transition_lock = threading.Lock()
+_yolo_transitions: dict[str, dict] = {}
+
+
+def begin_session_yolo_transition(session_key: str) -> object | None:
+    """Speculatively enable YOLO until one approval relay settles.
+
+    Multiple tabs may relay approvals for different runs in the same session.
+    Track every in-flight enable intent so one failed relay cannot undo another
+    successful or explicit enable.
+    """
+    session_key = str(session_key or "").strip()
+    if not session_key:
+        return None
+    token = object()
+    with _yolo_transition_lock:
+        transition = _yolo_transitions.get(session_key)
+        if transition is None:
+            transition = {
+                "was_enabled": bool(is_session_yolo_enabled(session_key)),
+                "tokens": set(),
+                "committed": False,
+            }
+            _yolo_transitions[session_key] = transition
+        transition["tokens"].add(token)
+        enable_session_yolo(session_key)
+    return token
+
+
+def finish_session_yolo_transition(session_key: str, token: object | None, *, succeeded: bool) -> None:
+    """Commit or roll back one speculative YOLO enable without stale writes."""
+    session_key = str(session_key or "").strip()
+    if not session_key or token is None:
+        return
+    with _yolo_transition_lock:
+        transition = _yolo_transitions.get(session_key)
+        if transition is None or token not in transition["tokens"]:
+            return
+        transition["tokens"].remove(token)
+        transition["committed"] = transition["committed"] or bool(succeeded)
+        if transition["tokens"]:
+            return
+        _yolo_transitions.pop(session_key, None)
+        if transition["committed"] or transition["was_enabled"]:
+            enable_session_yolo(session_key)
+        else:
+            disable_session_yolo(session_key)
+
+
+def set_session_yolo_enabled(session_key: str, enabled: bool) -> None:
+    """Apply an explicit YOLO choice and supersede in-flight rollbacks."""
+    session_key = str(session_key or "").strip()
+    if not session_key:
+        return
+    with _yolo_transition_lock:
+        _yolo_transitions.pop(session_key, None)
+        if enabled:
+            enable_session_yolo(session_key)
+        else:
+            disable_session_yolo(session_key)
 
 
 def _approval_sse_subscribe(session_id: str) -> queue.Queue:
