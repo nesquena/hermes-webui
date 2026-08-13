@@ -11,9 +11,18 @@ knows the Grok window. The leftover 272k came from:
    prefers a positive lastUsage value, so the ring snapped back to 272k.
 """
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+from urllib.parse import urlparse
+
+import api.helpers as helpers
+import api.models as models
+import api.routes as routes
+from api.models import SESSIONS
 
 from tests.test_issue3256_context_length_default_only_guard import (
     _install_fake_get_model_context_length,
+    _stub_route_session,
 )
 
 
@@ -23,15 +32,17 @@ SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 COMMANDS_JS = (ROOT / "static" / "commands.js").read_text(encoding="utf-8")
 
 
-def _session_get_block():
-    import api.routes as routes
+def _capture_json(monkeypatch, captured):
+    def _j(handler, payload, status=200, extra_headers=None):
+        captured.update(payload=payload, status=status)
+        return True
 
-    return Path(routes.__file__).read_text(encoding="utf-8")
+    monkeypatch.setattr(routes, "j", _j)
+    monkeypatch.setattr(helpers, "j", _j)
 
 
 def test_resolver_returns_grok46_window_not_codex_272k(monkeypatch):
     import api.config as config
-    import api.routes as routes
 
     rec = {}
     _install_fake_get_model_context_length(monkeypatch, rec, default_context=500_000)
@@ -51,16 +62,102 @@ def test_resolver_returns_grok46_window_not_codex_272k(monkeypatch):
     assert rec["config_context_length"] is None
 
 
-def test_new_session_resolves_context_length_for_selected_model():
-    src = _session_get_block()
-    new_start = src.find('if parsed.path == "/api/session/new":')
-    assert new_start != -1
-    new_end = src.find('if parsed.path == "/api/session/compression-recovery/start":', new_start)
-    block = src[new_start:new_end]
-    assert "_resolve_context_length_for_session_model" in block, (
-        "POST /api/session/new must resolve the selected model's context window "
-        "instead of leaving context_length unset"
+def test_new_session_persists_grok46_window(tmp_path, monkeypatch):
+    import api.config as config
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    SESSIONS.clear()
+
+    rec = {}
+    _install_fake_get_model_context_length(monkeypatch, rec, default_context=500_000)
+    monkeypatch.setattr(
+        config,
+        "get_config",
+        lambda *a, **k: {
+            "model": {
+                "default": "gpt-5.6-sol",
+                "provider": "openai-codex",
+            }
+        },
     )
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(
+        routes,
+        "read_body",
+        lambda handler: {
+            "workspace": str(tmp_path),
+            "profile": "default",
+            "model": "grok-4.6",
+            "model_provider": "xai-oauth",
+            "worktree": False,
+        },
+    )
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda raw: tmp_path)
+    monkeypatch.setattr(routes, "_worktree_default_from_config", lambda profile: False)
+
+    captured = {}
+    _capture_json(monkeypatch, captured)
+    try:
+        assert routes.handle_post(object(), SimpleNamespace(path="/api/session/new")) is True
+        session = captured["payload"]["session"]
+        assert captured["status"] == 200
+        assert rec["model"] == "grok-4.6"
+        assert session["context_length"] == 500_000
+        assert session["model"] in {"grok-4.6", "@xai-oauth:grok-4.6"}
+    finally:
+        SESSIONS.clear()
+
+
+def test_session_update_replaces_codex_272k_with_grok46_window(monkeypatch):
+    rec = {}
+    _install_fake_get_model_context_length(monkeypatch, rec, default_context=500_000)
+
+    s = _stub_route_session(context_length=272_000, threshold_tokens=190_400, model="gpt-5.6-sol")
+    s.model_provider = "openai-codex"
+    s.workspace = "/tmp"
+    s.save = MagicMock()
+    s.compact.return_value = {
+        **s.compact.return_value,
+        "model": "grok-4.6",
+        "model_provider": "xai-oauth",
+        "context_length": 500_000,
+        "threshold_tokens": 0,
+        "last_prompt_tokens": 0,
+        "messages": [],
+    }
+
+    captured = {}
+
+    def fake_j(h, data, status=200, extra_headers=None):
+        captured["data"] = data
+        captured["status"] = status
+        return True
+
+    body = {
+        "session_id": "test-4248",
+        "workspace": "/tmp",
+        "model": "grok-4.6",
+        "model_provider": "xai-oauth",
+    }
+    with patch("api.routes._check_csrf", return_value=True), \
+         patch("api.routes.read_body", return_value=body), \
+         patch("api.routes._get_or_materialize_session", return_value=s), \
+         patch("api.routes.resolve_trusted_workspace", return_value="/tmp"), \
+         patch("api.routes.j", side_effect=fake_j), \
+         patch("api.routes._get_session_agent_lock", return_value=MagicMock()):
+        assert routes.handle_post(object(), urlparse("/api/session/update")) is True
+
+    assert s.model == "grok-4.6"
+    assert s.model_provider == "xai-oauth"
+    assert rec["model"] == "grok-4.6"
+    assert s.context_length == 500_000
+    assert s.threshold_tokens == 0
+    assert s.last_prompt_tokens == 0
+    s.save.assert_called_once()
+    assert captured["data"]["session"]["context_length"] == 500_000
 
 
 def test_model_switch_updates_last_usage_context_window():
