@@ -91,6 +91,7 @@ LOAD_SESSION_SRC = _extract_function(SESSIONS_SRC, "loadSession")
 ENSURE_MESSAGES_LOADED_SRC = _extract_function(SESSIONS_SRC, "_ensureMessagesLoaded")
 INFLIGHT_HAS_VISIBLE_STATE_SRC = _extract_function(SESSIONS_SRC, "_inflightHasVisibleLiveState")
 SELECT_LIVE_RECOVERY_INFLIGHT_SRC = _extract_function(SESSIONS_SRC, "_selectLiveRecoveryInflight")
+OPAQUE_ACTIVE_TURN_TOKEN_SRC = _extract_function(SESSIONS_SRC, "_opaqueActiveTurnToken")
 MERGE_PENDING_SESSION_MESSAGE_SRC = _extract_function(SESSIONS_SRC, "_mergePendingSessionMessage")
 
 
@@ -349,6 +350,7 @@ let toastCalls = [];
 // Source under test
 __INFLIGHT_HAS_VISIBLE_STATE_SRC__
 __SELECT_LIVE_RECOVERY_INFLIGHT_SRC__
+__OPAQUE_ACTIVE_TURN_TOKEN_SRC__
 __MERGE_PENDING_SESSION_MESSAGE_SRC__
 __LOAD_SESSION_SRC__
 __ENSURE_MESSAGES_LOADED_SRC__
@@ -605,6 +607,7 @@ def test_loadsession_cross_session_ordering_and_stale_reject_behavior(tmp_path):
         .replace(
             "__SELECT_LIVE_RECOVERY_INFLIGHT_SRC__", SELECT_LIVE_RECOVERY_INFLIGHT_SRC
         )
+        .replace("__OPAQUE_ACTIVE_TURN_TOKEN_SRC__", OPAQUE_ACTIVE_TURN_TOKEN_SRC)
         .replace(
             "__MERGE_PENDING_SESSION_MESSAGE_SRC__", MERGE_PENDING_SESSION_MESSAGE_SRC
         )
