@@ -2911,10 +2911,14 @@ function _modelStateForSelect(sel, modelId){
     // Normally-rendered catalog options only carry the qualified
     // @custom:<slug>:<model> value — data-model is set solely by the fallback
     // injection path (_ensureModelOptionInDropdown). When it is missing, strip
-    // the same @<provider>: prefix already parsed as explicitProvider instead
-    // of sending the raw dropdown value as the model id (#6884).
+    // the @custom:<slug>: prefix already parsed as explicitProvider instead
+    // of sending the raw dropdown value as the model id (#6884). Only custom
+    // providers are affected: a non-custom qualified id like @safe:gpt-4o-mini
+    // is a real provider namespace and must be preserved (#1771).
+    const explicitProviderLc=explicitProvider.toLowerCase();
+    const isCustomProvider=explicitProviderLc==='custom'||explicitProviderLc.startsWith('custom:');
     const explicitPrefix=`@${explicitProvider}:`;
-    const strippedModel=value.toLowerCase().startsWith(explicitPrefix.toLowerCase())
+    const strippedModel=isCustomProvider&&value.toLowerCase().startsWith(explicitPrefix.toLowerCase())
       ?value.slice(explicitPrefix.length)
       :value;
     return {model:routedModel||strippedModel||value,model_provider:routedProvider||explicitProvider};
