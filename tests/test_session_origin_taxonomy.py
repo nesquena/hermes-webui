@@ -74,6 +74,37 @@ def test_sidebar_payload_exposes_origin_metadata_and_dynamic_filtering_contract(
     assert payload["session_origin_labels"]["matrix"] == "Matrix sessions"
 
 
+def test_sidebar_origin_counts_include_hidden_state_db_origins(monkeypatch, tmp_path):
+    import sqlite3
+    import api.routes as routes
+
+    db_path = tmp_path / "state.db"
+    con = sqlite3.connect(db_path)
+    con.execute("create table sessions (id text primary key, source text)")
+    con.executemany(
+        "insert into sessions (id, source) values (?, ?)",
+        [("matrix-1", "matrix"), ("telegram-1", "telegram")],
+    )
+    con.commit()
+    con.close()
+
+    monkeypatch.setattr(routes, "_active_state_db_path", lambda: db_path)
+    monkeypatch.setattr(routes, "all_sessions", lambda diag=None: [])
+    monkeypatch.setattr(routes, "_reconcile_stale_stream_state_for_session_rows", lambda _rows: False)
+    monkeypatch.setattr(routes, "get_cli_sessions", lambda **_kwargs: [])
+
+    payload = routes._build_session_list_cache_payload(
+        active_profile="default",
+        all_profiles=False,
+        show_cli_sessions=True,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+        show_matrix_sessions=False,
+    )
+
+    assert payload["session_origin_counts"] == {"matrix": 1, "telegram": 1}
+
+
 def test_sidebar_payload_exposes_origin_metadata_fields():
     routes = REPO_ROOT / "api" / "routes.py"
     source = routes.read_text(encoding="utf-8")

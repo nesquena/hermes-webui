@@ -1831,6 +1831,7 @@
 
   /* ── Batch select mode ── */
   .session-batch-dock{flex:0 0 auto;padding:6px 8px 8px;border-top:1px solid var(--border);background:var(--sidebar);}
+  .session-batch-dock:empty{display:none;}
   .session-select-toggle{font-size:11px;padding:6px 10px;color:var(--muted);cursor:pointer;text-align:center;opacity:.6;transition:opacity .15s;user-select:none;margin-top:4px;border-radius:6px;}
   .session-select-toggle:hover{opacity:1;background:var(--hover-bg);}
   .session-select-bar{display:flex;align-items:center;gap:6px;padding:6px 10px;margin-bottom:4px;flex-shrink:0;}
@@ -1856,6 +1857,7 @@
   .batch-action-btn:disabled:hover{background:var(--surface);border-color:var(--border);}
   .session-date-caret{font-size:9px;transition:transform .2s;flex-shrink:0;display:inline-block;transform:rotate(0deg);}
   .session-date-caret.collapsed{transform:rotate(-90deg);}
+  .session-group-select-toggle{margin-left:3px;width:13px;height:13px;accent-color:var(--accent);cursor:pointer;flex:0 0 auto;}
   .app-dialog-overlay{position:fixed;inset:0;background:rgba(7,12,19,.62);backdrop-filter:blur(6px);z-index:1100;display:none;align-items:center;justify-content:center;padding:24px;}
   .app-dialog{width:min(460px,100%);background:linear-gradient(180deg,rgba(21,31,45,.98),rgba(13,20,31,.98));border:1px solid var(--accent-bg-strong);border-radius:18px;box-shadow:0 18px 60px rgba(0,0,0,.45);padding:18px 18px 16px;color:var(--text);}
   .app-dialog-header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:10px;}

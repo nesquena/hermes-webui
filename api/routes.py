@@ -44,6 +44,7 @@ from api.agent_sessions import (
     _looks_like_default_cli_title,
     is_cli_session_row,
     is_cli_session_row_visible,
+    open_state_db_readonly,
     read_session_lineage_report,
 )
 from api.compression_anchor import visible_messages_for_anchor
@@ -2262,6 +2263,20 @@ def _build_session_list_cache_payload(
     show_matrix_sessions = bool(show_matrix_sessions)
     show_webhook_sessions = bool(show_webhook_sessions)
     show_kanban_sessions = bool(show_kanban_sessions)
+    # The sidebar's origin tabs are explicit requests for one high-level
+    # source. Opt into the external-session loader for any non-WebUI origin;
+    # the per-origin flags below still control the default mixed view.
+    sidebar_origin = str(sidebar_source or '').strip().lower()
+    if sidebar_origin and sidebar_origin != 'webui':
+        show_cli_sessions = True
+        if sidebar_origin == 'cron':
+            show_cron_sessions = True
+        elif sidebar_origin == 'matrix':
+            show_matrix_sessions = True
+        elif sidebar_origin == 'webhook':
+            show_webhook_sessions = True
+        elif sidebar_origin == 'kanban':
+            show_kanban_sessions = True
     webui_sessions = [_normalize_sidebar_source_flags(s) for s in webui_sessions]
     if show_cli_sessions:
         diag_stage("get_cli_sessions")
@@ -2508,6 +2523,10 @@ def _build_session_list_cache_payload(
         origin = _sidebar_session_origin(session)
         session_origin_counts[origin] += 1
         session_origin_labels.setdefault(origin, _sidebar_session_origin_label(origin))
+    if show_cli_sessions:
+        for origin, count in _sidebar_state_origin_counts().items():
+            session_origin_counts[origin] = max(session_origin_counts[origin], count)
+            session_origin_labels.setdefault(origin, _sidebar_session_origin_label(origin))
     visible_scoped_filtered = _filter_sidebar_source(visible_scoped)
     archived_scoped_filtered = _filter_sidebar_source(archived_scoped)
     scoped = _filter_sidebar_source(full_scoped_all_sources)
@@ -9447,6 +9466,7 @@ def _sidebar_session_origin(session: dict) -> str:
     """
     if not isinstance(session, dict):
         return "other"
+
     explicit = str(session.get("session_origin") or "").strip().lower()
     if explicit:
         return explicit.replace("-", "_").replace(" ", "_")
@@ -9497,6 +9517,30 @@ def _sidebar_session_origin_label(origin: str) -> str:
         normalized,
         f"{normalized.replace('_', ' ').title()} sessions",
     )
+
+
+def _sidebar_state_origin_counts() -> dict[str, int]:
+    """Return cheap source counts so hidden origins still get filter tabs."""
+    try:
+        db_path = _active_state_db_path()
+        if not db_path or not Path(db_path).exists():
+            return {}
+        with closing(open_state_db_readonly(Path(db_path))) as conn:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
+            if "source" not in columns:
+                return {}
+            rows = conn.execute(
+                "SELECT source, COUNT(*) FROM sessions "
+                "WHERE source IS NOT NULL AND trim(source) != '' GROUP BY source"
+            ).fetchall()
+        counts: dict[str, int] = defaultdict(int)
+        for raw_source, count in rows:
+            origin = _sidebar_session_origin({"source_tag": raw_source})
+            counts[origin] += int(count or 0)
+        return dict(counts)
+    except Exception:
+        logger.debug("Failed to read sidebar origin counts", exc_info=True)
+        return {}
 
 
 def _reconcile_session_detail_source_flags(session: dict, state_meta: dict) -> dict:

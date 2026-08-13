@@ -71,11 +71,11 @@ def test_batch_select_escape_handler():
 
 
 def test_batch_select_toggle_button():
-    """Verify select mode toggle button is rendered."""
+    """Verify the date-group checkbox is the select mode entry point."""
     with open('static/sessions.js', encoding="utf-8") as f:
         src = f.read()
-    assert 'session-select-toggle' in src, "Missing session-select-toggle class"
-    assert 'toggleSessionSelectMode' in src, "Missing toggleSessionSelectMode call"
+    assert 'session-group-select-toggle' in src, "Missing date-group selection checkbox"
+    assert '_enableSessionSelectMode' in src, "Missing selection-mode entry point"
 
 
 def test_batch_select_bar_element():
@@ -219,8 +219,7 @@ def test_batch_select_css_exists():
     with open('static/style.css', encoding="utf-8") as f:
         src = f.read()
     required_classes = [
-        'session-select-toggle',
-        'session-select-bar',
+        'session-group-select-toggle',
         'batch-exit-btn',
         'batch-select-all-btn',
         'session-select-cb-wrapper',
@@ -239,9 +238,9 @@ def test_batch_select_mode_flags():
     """Verify select mode properly toggles state."""
     with open('static/sessions.js', encoding="utf-8") as f:
         src = f.read()
-    # toggleSessionSelectMode should flip the flag
-    assert '_sessionSelectMode=!_sessionSelectMode' in src, \
-        "toggleSessionSelectMode should flip _sessionSelectMode"
+    # The date-group checkbox enters mode explicitly.
+    assert 'function _enableSessionSelectMode()' in src
+    assert '_sessionSelectMode=true' in src
     # exitSessionSelectMode should clear state
     assert '_sessionSelectMode=false' in src, \
         "exitSessionSelectMode should set _sessionSelectMode=false"

@@ -296,7 +296,8 @@ STEPS:
   1. Confirm the sidebar source controls identify origins separately (for example
      "WebUI sessions", "Matrix sessions", and "TUI sessions") and show counts.
   2. Select "Matrix sessions" and verify only Matrix rows appear.
-  3. Enter select mode from the persistent control below the scrolling history.
+  3. Click the checkbox beside a date heading (for example TODAY) to reveal
+     selection checkboxes across the session list.
   4. Verify Matrix rows have checkboxes; generic read-only foreign rows remain
      unselectable.
   5. Select multiple Matrix rows, scroll the history, and confirm the selection
@@ -310,7 +311,8 @@ STEPS:
      the safe-area inset without covering the final sidebar row.
 EXPECT:
   - Origin controls are independently filterable and the counts are stable.
-  - Selection works across multiple Matrix rows and persists while scrolling.
+  - The empty sidebar has no grey batch-action box; the action bar appears only
+    after one or more rows are selected and persists while scrolling.
   - Move and archive succeed for Matrix imports; delete remains disabled for them.
   - Ordinary read-only imported sessions still expose export-only actions.
 FAIL: Matrix rows cannot be selected, the dock scrolls away, another origin is

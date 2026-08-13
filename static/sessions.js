@@ -4271,7 +4271,12 @@ function _setActiveSessionUrl(sid){
 
 // ── Batch select mode ──
 function toggleSessionSelectMode(){
-  _sessionSelectMode=!_sessionSelectMode;
+  if(_sessionSelectMode) exitSessionSelectMode();
+  else _enableSessionSelectMode();
+}
+function _enableSessionSelectMode(){
+  if(_sessionSelectMode) return;
+  _sessionSelectMode=true;
   _selectedSessions.clear();
   renderSessionListFromCache();
 }
@@ -4426,12 +4431,11 @@ function _renderBatchActionBar(){
 function _renderSessionBatchDock(){
   const dock=$('sessionBatchDock');if(!dock)return;
   dock.innerHTML='';
-  if(!_sessionSelectMode){
-    const toggle=document.createElement('button');toggle.type='button';toggle.className='session-select-toggle';
-    toggle.textContent=t('session_select_mode');toggle.onclick=(e)=>{e.stopPropagation();toggleSessionSelectMode();};
-    dock.appendChild(toggle);
+  if(!_sessionSelectMode||!_selectedSessions.size){
+    dock.style.display='none';
     return;
   }
+  dock.style.display='block';
   const batchBar=document.createElement('div');batchBar.id='batchActionBar';batchBar.className='batch-action-bar';
   dock.appendChild(batchBar);
   _renderBatchActionBar();
@@ -8063,6 +8067,22 @@ function renderSessionListFromCache(){
     const label=document.createElement('span');
     label.textContent=g.label;
     hdr.appendChild(caret);hdr.appendChild(label);
+    if(!g.isPinned){
+      const groupSelect=document.createElement('input');
+      groupSelect.type='checkbox';
+      groupSelect.className='session-group-select-toggle';
+      groupSelect.checked=_sessionSelectMode;
+      groupSelect.title='Enable session selection';
+      groupSelect.setAttribute('aria-label','Enable session selection');
+      groupSelect.onclick=(e)=>{e.stopPropagation();};
+      groupSelect.onpointerup=(e)=>{e.stopPropagation();};
+      groupSelect.onchange=(e)=>{
+        e.stopPropagation();
+        if(groupSelect.checked) _enableSessionSelectMode();
+        else exitSessionSelectMode();
+      };
+      hdr.appendChild(groupSelect);
+    }
     const body=document.createElement('div');
     body.className='session-date-body';
     const isGroupCollapsed=Boolean(_groupCollapsed[g.label]);

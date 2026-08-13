@@ -45,6 +45,32 @@ def test_explicit_matrix_source_filter_reveals_rows_when_setting_is_off():
     assert [row["session_id"] for row in rows] == ["matrix-room-1"]
 
 
+def test_explicit_sidebar_origin_filter_reveals_hidden_rows_when_setting_is_off(monkeypatch):
+    import api.routes as routes
+
+    monkeypatch.setattr(routes, "all_sessions", lambda diag=None: [])
+    monkeypatch.setattr(routes, "_reconcile_stale_stream_state_for_session_rows", lambda _rows: False)
+    telegram_row = _matrix_row("telegram-1")
+    telegram_row.update({
+        "source": "telegram",
+        "raw_source": "telegram",
+        "source_tag": "telegram",
+    })
+    monkeypatch.setattr(routes, "get_cli_sessions", lambda **_kwargs: [telegram_row])
+
+    payload = routes._build_session_list_cache_payload(
+        active_profile="default",
+        all_profiles=False,
+        show_cli_sessions=True,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+        show_matrix_sessions=False,
+        sidebar_source="telegram",
+    )
+
+    assert [row["session_id"] for row in payload["sessions"]] == ["telegram-1"]
+
+
 def test_matrix_visibility_is_part_of_session_cache_key():
     from api.routes import _session_list_cache_key
 
@@ -86,4 +112,3 @@ def test_matrix_visibility_is_reported_by_session_list_builder(monkeypatch):
 
     assert payload["settings"]["show_matrix_sessions"] is False
     assert payload["sessions"] == []
-
