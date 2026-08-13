@@ -8602,6 +8602,96 @@ def get_sessions_cache_max(config_data: dict | None = None) -> int:
 CHAT_LOCK = threading.Lock()
 
 
+# Bounded traversal limits for _estimate_frame_bytes(). The estimator runs on
+# every offline-buffered frame (thousands per abandoned turn), so it must stay
+# cheap: strings and bytes report len() in O(1), containers are walked only to a
+# shallow depth and a fixed breadth, and a truncated walk EXTRAPOLATES from the
+# sampled elements rather than under-reporting. Over-estimating is the safe
+# direction for a memory guard (it evicts sooner); under-estimating would let
+# the very payloads this cap exists to bound slip through unaccounted.
+_FRAME_SIZE_MAX_DEPTH = 4
+_FRAME_SIZE_MAX_ITEMS = 64
+# Total objects visited per estimate, shared across the WHOLE walk. Depth and
+# breadth limits alone are not enough: nested containers multiply, so
+# depth 4 x breadth 64 would allow ~16.7M visits while holding the channel
+# lock. This budget is the actual hot-path guarantee — the walk is O(1)-bounded
+# regardless of payload shape.
+_FRAME_SIZE_MAX_NODES = 512
+# Flat per-object floor for anything not sized precisely (scalars, opaque
+# objects, and the container bookkeeping itself). Deliberately coarse: this is a
+# memory guard, not an allocator-accurate accounting.
+_FRAME_SIZE_OBJECT_OVERHEAD = 64
+
+
+def _estimate_frame_bytes(value, depth: int = 0, budget: list | None = None) -> int:
+    """Cheap bounded estimate of the retained size of one buffered SSE frame.
+
+    SSE frame payloads are arbitrary Python objects — token-delta strings, tool
+    results, base64 image data, metering dicts — so a frame-COUNT cap alone does
+    not bound memory. This returns an approximate retained byte size so
+    StreamChannel can bound its offline replay buffer by bytes as well.
+
+    Accuracy is deliberately traded for speed: str/bytes dominate real payloads
+    and are measured exactly, containers are sampled with extrapolation, and
+    everything else falls back to a flat per-object floor. The walk is bounded
+    by depth, per-container breadth, AND a total node budget shared across the
+    whole traversal, so it stays O(1) on the hot path for any payload shape.
+
+    ``budget`` is internal (a single-element list used as a shared mutable
+    counter across the recursion); callers pass only ``value``.
+    """
+    if budget is None:
+        budget = [_FRAME_SIZE_MAX_NODES]
+
+    if isinstance(value, str):
+        return len(value) + _FRAME_SIZE_OBJECT_OVERHEAD
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return len(value) + _FRAME_SIZE_OBJECT_OVERHEAD
+    if value is None or isinstance(value, (bool, int, float)):
+        return _FRAME_SIZE_OBJECT_OVERHEAD
+    if depth >= _FRAME_SIZE_MAX_DEPTH or budget[0] <= 0:
+        # Too deep, or the node budget is exhausted: charge the floor rather
+        # than 0 so the payload still counts toward the cap.
+        return _FRAME_SIZE_OBJECT_OVERHEAD
+
+    try:
+        if isinstance(value, dict):
+            total = _FRAME_SIZE_OBJECT_OVERHEAD
+            sampled = 0
+            for key, item in value.items():
+                if sampled >= _FRAME_SIZE_MAX_ITEMS or budget[0] <= 0:
+                    break
+                budget[0] -= 1
+                total += _estimate_frame_bytes(key, depth + 1, budget)
+                total += _estimate_frame_bytes(item, depth + 1, budget)
+                sampled += 1
+            return _extrapolate_sampled_bytes(total, sampled, len(value))
+        if isinstance(value, (list, tuple, set, frozenset)):
+            total = _FRAME_SIZE_OBJECT_OVERHEAD
+            sampled = 0
+            for item in value:
+                if sampled >= _FRAME_SIZE_MAX_ITEMS or budget[0] <= 0:
+                    break
+                budget[0] -= 1
+                total += _estimate_frame_bytes(item, depth + 1, budget)
+                sampled += 1
+            return _extrapolate_sampled_bytes(total, sampled, len(value))
+    except Exception:
+        # A payload with a hostile/lazy __len__ or __iter__ must never break
+        # event delivery — fall back to the floor.
+        logger.debug("frame size estimate failed; charging floor", exc_info=True)
+        return _FRAME_SIZE_OBJECT_OVERHEAD
+
+    return _FRAME_SIZE_OBJECT_OVERHEAD
+
+
+def _extrapolate_sampled_bytes(total: int, sampled: int, actual_len: int) -> int:
+    """Scale a partially-sampled container estimate up to its full length."""
+    if sampled <= 0 or actual_len <= sampled:
+        return total
+    return int(total * (actual_len / sampled))
+
+
 class StreamChannel:
     """Broadcast SSE events to every connected browser tab for a stream.
 
@@ -8624,6 +8714,28 @@ class StreamChannel:
     # the per-subscriber queue cap below (that queue drops on a *slow* reader;
     # this buffer must survive a legitimate reconnect gap).
     _OFFLINE_BUFFER_MAXLEN = 8192
+    # Byte ceiling for the offline replay buffer (drop-oldest), enforced
+    # alongside _OFFLINE_BUFFER_MAXLEN.
+    #
+    # The frame-count cap above bounds memory only if frames are small, and the
+    # comment's "a fixed number of small (event, data, id) tuples" does not hold
+    # in general: frame payloads are arbitrary objects — tool results, base64
+    # image data, large assistant messages — so 8192 frames × an arbitrarily
+    # large payload is still unbounded. That is the same abandoned-turn shape as
+    # #4633, which the count cap only partially closed, and it is the reported
+    # residual growth in #6351 (a backgrounded mobile/PWA client leaves a
+    # long agentic turn running with ZERO subscribers, so every frame of that
+    # turn lands here).
+    #
+    # 32 MiB is far above a legitimate reconnect tail while keeping the
+    # worst-case bounded. Eviction is drop-oldest and counts toward
+    # offline_dropped_events exactly like a count eviction, so a reconnecting
+    # tab still learns its replay tail was truncated and falls back to the run
+    # journal by last_event_id. One frame is always retained even if it alone
+    # exceeds the ceiling — dropping the newest frame would break the
+    # retained-tail contract, and a single frame is bounded by the upload and
+    # tool-result caps elsewhere.
+    _OFFLINE_BUFFER_MAXBYTES = 32 * 1024 * 1024
     # Per-subscriber queue cap (drop-oldest on full). Each connected tab gets its
     # own queue; a slow/backpressured or backgrounded tab used to hold an
     # UNBOUNDED queue.Queue that grew for the WHOLE turn (the producer is the
@@ -8652,6 +8764,15 @@ class StreamChannel:
         self._offline_buffer: collections.deque = collections.deque(
             maxlen=self._OFFLINE_BUFFER_MAXLEN
         )
+        # Per-frame size estimates, kept strictly parallel to _offline_buffer
+        # (same maxlen, appended and evicted in lockstep) so the running byte
+        # total can be maintained without re-walking payloads on eviction. A
+        # frame's estimate is computed once, on append.
+        self._offline_frame_bytes: collections.deque = collections.deque(
+            maxlen=self._OFFLINE_BUFFER_MAXLEN
+        )
+        # Running sum of _offline_frame_bytes.
+        self._offline_bytes = 0
         # Frames evicted at the cap from the CURRENT buffer content. Scoped to
         # the buffer, NOT to an attach cycle: it resets exactly when the buffer
         # itself is cleared (first live broadcast), never on subscribe/
@@ -8756,6 +8877,7 @@ class StreamChannel:
                 self._last_event_id = event_id
             subscribers = list(self._subscribers)
             if not subscribers:
+                frame_bytes = _estimate_frame_bytes(item)
                 # deque(maxlen) evicts the oldest frame automatically when full.
                 # Log once on the first eviction (debug: an abandoned/disconnected
                 # turn is expected to hit this) and keep a running dropped count
@@ -8769,13 +8891,47 @@ class StreamChannel:
                         )
                     self._offline_dropped += 1
                     self._offline_dropped_total += 1
+                    # The append below silently drops the head frame; discount
+                    # its bytes here so the running total stays exact. The
+                    # parallel deque shares maxlen, so it evicts in lockstep.
+                    if self._offline_frame_bytes:
+                        self._offline_bytes -= self._offline_frame_bytes[0]
                 self._offline_buffer.append(item)
+                self._offline_frame_bytes.append(frame_bytes)
+                self._offline_bytes += frame_bytes
+                # Byte ceiling: evict oldest until back under the cap. Always
+                # retain at least the newest frame — a single oversized frame
+                # cannot be evicted without breaking the retained-tail contract.
+                byte_dropped = 0
+                while (
+                    self._offline_bytes > self._OFFLINE_BUFFER_MAXBYTES
+                    and len(self._offline_buffer) > 1
+                ):
+                    self._offline_buffer.popleft()
+                    self._offline_bytes -= self._offline_frame_bytes.popleft()
+                    byte_dropped += 1
+                if byte_dropped:
+                    if self._offline_dropped == 0:  # first eviction this cycle
+                        logger.debug(
+                            "StreamChannel offline buffer over byte ceiling "
+                            "(cap=%d bytes); dropping %d oldest frame(s) while "
+                            "no subscriber is connected",
+                            self._OFFLINE_BUFFER_MAXBYTES,
+                            byte_dropped,
+                        )
+                    # Count toward the SAME truncation signal as count-based
+                    # eviction: a reconnecting tab must fall back to the run
+                    # journal regardless of which ceiling holed its tail.
+                    self._offline_dropped += byte_dropped
+                    self._offline_dropped_total += byte_dropped
                 return
             # A subscriber is live: events now broadcast directly, so the offline
             # tail is drained. Reset the per-cycle eviction count (which also
             # re-arms the one-shot log) so the NEXT disconnect/overflow cycle
             # reports and logs its own truncation, not a stale carry-over.
             self._offline_buffer.clear()
+            self._offline_frame_bytes.clear()
+            self._offline_bytes = 0
             self._offline_dropped = 0
         # Broadcast outside the lock so a slow put_nowait doesn't block other
         # subscribers or producers. The queue is bounded; on queue.Full drop the
@@ -8820,6 +8976,10 @@ class StreamChannel:
             return {
                 "subscriber_count": len(self._subscribers),
                 "offline_buffered_events": len(self._offline_buffer),
+                # Estimated retained bytes in the offline buffer — the signal an
+                # operator needs to tell a benign long tail from the runaway
+                # growth #6351 reports (count alone cannot distinguish them).
+                "offline_buffered_bytes": self._offline_bytes,
                 # Cumulative over the channel lifetime (ops visibility), vs. the
                 # per-cycle count subscribe_with_snapshot() reports for truncation.
                 "offline_dropped_events": self._offline_dropped_total,

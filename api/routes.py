@@ -11634,12 +11634,14 @@ def _stream_runtime_diagnostics() -> dict:
 
     The WebUI chat path can feel slow or stuck when streams are alive but no
     browser is attached, or when many events are buffering offline. This helper
-    exposes counts only — stream ids plus subscriber/buffer sizes — and avoids
-    event payloads, prompts, tool arguments, or paths.
+    exposes counts and sizes only — stream ids plus subscriber/buffer counts
+    and an estimated offline-buffer byte gauge — and avoids event payloads,
+    prompts, tool arguments, or paths.
     """
     streams = []
     total_subscribers = 0
     total_offline_buffered_events = 0
+    total_offline_buffered_bytes = 0
     with STREAMS_LOCK:
         items = list(STREAMS.items())
     for stream_id, stream in items:
@@ -11654,18 +11656,25 @@ def _stream_runtime_diagnostics() -> dict:
                 snapshot = {}
         subscriber_count = int(snapshot.get("subscriber_count") or 0)
         offline_buffered_events = int(snapshot.get("offline_buffered_events") or 0)
+        # Estimated retained bytes (#6351): frame count alone cannot distinguish
+        # a benign long tail from runaway growth, since frame payloads vary by
+        # orders of magnitude. This is the gauge an operator watches.
+        offline_buffered_bytes = int(snapshot.get("offline_buffered_bytes") or 0)
         total_subscribers += subscriber_count
         total_offline_buffered_events += offline_buffered_events
+        total_offline_buffered_bytes += offline_buffered_bytes
         streams.append({
             "stream_id": str(stream_id),
             "subscriber_count": subscriber_count,
             "offline_buffered_events": offline_buffered_events,
+            "offline_buffered_bytes": offline_buffered_bytes,
         })
     streams.sort(key=lambda item: item["stream_id"])
     return {
         "active_streams": len(streams),
         "total_subscribers": total_subscribers,
         "total_offline_buffered_events": total_offline_buffered_events,
+        "total_offline_buffered_bytes": total_offline_buffered_bytes,
         "streams": streams,
     }
 
