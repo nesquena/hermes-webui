@@ -602,6 +602,10 @@ def session_status(session_id: str) -> dict[str, Any]:
         # bookkeeping). Otherwise report None so the poller waits for a REAL
         # server_turn_started instead of latching a ghost.
         'active_stream_id': _live_active_stream_id(s),
+        'pending_user_source': getattr(s, 'pending_user_source', None) or None,
+        'pending_user_message': getattr(s, 'pending_user_message', None) or None,
+        'pending_started_at': getattr(s, 'pending_started_at', None) or None,
+        'pending_attachments': getattr(s, 'pending_attachments', None) or [],
         'input_tokens': inp,
         'output_tokens': out,
         'total_tokens': inp + out,

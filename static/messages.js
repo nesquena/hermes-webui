@@ -7736,7 +7736,7 @@ const _SESSION_STREAM_HIDDEN_POLL_MAX_FALSE = 20; // ~2 min at the 6s cadence
 // signal, a poll that fires while another session is in the current pane
 // would attach nothing AND stop polling, leaving the turn invisible until
 // the next user interaction.
-function _attachServerInitiatedStream(sid, streamId, recovered) {
+function _attachServerInitiatedStream(sid, streamId, recovered, source) {
   let handedOff = false;
   try {
     streamId = String(streamId || '');
@@ -7757,6 +7757,7 @@ function _attachServerInitiatedStream(sid, streamId, recovered) {
     if (S.session && S.session.session_id === sid) {
       S.session.active_stream_id = streamId;
       if (!S.session.pending_started_at) S.session.pending_started_at = Date.now()/1000;
+      if (source && !S.session.pending_user_source) S.session.pending_user_source = String(source);
     }
     if (typeof ensureLiveWorklogShell === 'function') ensureLiveWorklogShell();
     else if (typeof appendThinking === 'function') appendThinking();
@@ -7842,7 +7843,7 @@ function _startHiddenActiveStreamPoll(sid) {
               _sessionStreamHiddenPollFalseStreamId = streamKey;
               _sessionStreamHiddenPollFalseCount = 0;
             }
-            const attached = _attachServerInitiatedStream(sid, streamId, true);
+            const attached = _attachServerInitiatedStream(sid, streamId, true, d.pending_user_source);
             if (attached) {
               _stopHiddenActiveStreamPoll();
             } else {
@@ -8059,6 +8060,7 @@ function startSessionStream(sid) {
           S.session.active_stream_id = streamId;
           if (typeof d.pending_started_at === 'number') S.session.pending_started_at = d.pending_started_at;
           else if (!S.session.pending_started_at) S.session.pending_started_at = Date.now()/1000;
+          if (d.source && !S.session.pending_user_source) S.session.pending_user_source = String(d.source);
         }
         if (typeof ensureLiveWorklogShell === 'function') ensureLiveWorklogShell();
         else if (typeof appendThinking === 'function') appendThinking();

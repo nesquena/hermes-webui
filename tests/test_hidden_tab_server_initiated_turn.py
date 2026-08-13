@@ -38,6 +38,15 @@ def test_session_status_exposes_active_stream_id_field():
     assert "_live_active_stream_id(" in SESSION_OPS
 
 
+def test_session_status_exposes_pending_user_source_for_hidden_poll():
+    """session_status() must expose pending fields so the hidden-tab poller can
+    reconstruct the pending turn with the correct provenance."""
+    assert "'pending_user_source'" in SESSION_OPS
+    assert "'pending_user_message'" in SESSION_OPS
+    assert "'pending_started_at'" in SESSION_OPS
+    assert "'pending_attachments'" in SESSION_OPS
+
+
 def test_live_active_stream_id_is_stale_safe():
     """The helper only returns an id that is actually live in STREAMS/ACTIVE_RUNS.
 
@@ -76,7 +85,7 @@ def test_frontend_declares_hidden_poll_lifecycle():
     """The hidden-tab active-stream poll start/stop/attach functions exist."""
     assert "function _startHiddenActiveStreamPoll(sid)" in MESSAGES_JS
     assert "function _stopHiddenActiveStreamPoll()" in MESSAGES_JS
-    assert "function _attachServerInitiatedStream(sid, streamId, recovered)" in MESSAGES_JS
+    assert "function _attachServerInitiatedStream(sid, streamId, recovered, source)" in MESSAGES_JS
 
 
 def test_hidden_poll_hits_session_status_and_attaches_as_replay():
@@ -93,7 +102,7 @@ def test_hidden_poll_hits_session_status_and_attaches_as_replay():
     assert "api/session/status?session_id=" in body
     assert "d.active_stream_id" in body
     # attaches as replay (recovered=true) — turn is already mid-flight
-    assert "_attachServerInitiatedStream(sid, streamId, true)" in body
+    assert "_attachServerInitiatedStream(sid, streamId, true, d.pending_user_source)" in body
 
 
 def test_hidden_poll_started_on_both_hidden_paths():
@@ -138,7 +147,7 @@ def test_attach_returns_bool_and_bails_false_on_non_current_pane():
     false (so the poll keeps retrying for the right pane) — never a bare
     `return;` that the caller can't distinguish from success.
     """
-    fn_idx = MESSAGES_JS.find("function _attachServerInitiatedStream(sid, streamId, recovered)")
+    fn_idx = MESSAGES_JS.find("function _attachServerInitiatedStream(sid, streamId, recovered, source)")
     assert fn_idx != -1, "_attachServerInitiatedStream signature not found"
     body = MESSAGES_JS[fn_idx:fn_idx + 4000]
     # Non-current pane bails with an explicit false, not a bare return.
@@ -175,7 +184,7 @@ def test_poll_stops_only_when_attach_succeeds():
     # Window 2400: the multi-pane follow-up adds an explanatory comment block
     # before the attach call, pushing it past a narrower slice.
     body = MESSAGES_JS[start:start + 3200]
-    assert "const attached = _attachServerInitiatedStream(sid, streamId, true)" in body
+    assert "const attached = _attachServerInitiatedStream(sid, streamId, true, d.pending_user_source)" in body
     # Stop the poll only on a true attach (the false branch keeps polling within
     # the bounded-retry budget rather than stopping).
     assert "if (attached) {" in body

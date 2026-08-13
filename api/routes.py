@@ -20309,7 +20309,7 @@ def _handle_session_sse_stream(handler, parsed):
                     "session_id": sid,
                     "stream_id": recover_stream_id,
                     "pending_started_at": pending_started_at,
-                    "source": "subscribe_recovery",
+                    "source": getattr(recover_session, "pending_user_source", None) or "subscribe_recovery",
                     "recovered": True,
                 })
             else:
@@ -21928,6 +21928,7 @@ def _start_chat_stream_for_session(
                 "model": model,
                 "model_provider": model_provider,
                 "created_at": s.pending_started_at,
+                "source": s.pending_user_source or source or "webui",
             },
         )
     except Exception:
