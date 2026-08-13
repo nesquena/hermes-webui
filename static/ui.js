@@ -7117,7 +7117,7 @@ function scrollIfPinned(){
   // the jump target across smooth-scroll frames, so never let a live token
   // reclaim the bottom while it is active (#6621). _finishMessageJumpScroll()
   // reconciles the pin state once the jump settles.
-  if(_messageJumpScrollOwner) return;
+  if(typeof _messageJumpScrollOwner!=='undefined'&&_messageJumpScrollOwner) return;
   if(_messageUserUnpinned){
     // Only scrollToBottom() cleared this flag, so one scroll-up permanently
     // killed auto-follow. Re-pin ONLY when the reader has genuinely returned to
@@ -7148,7 +7148,7 @@ function scrollToBottom(){
   // pre-jump unpinned snapshot and silently undo this pin (#6621). The jump path
   // itself never calls scrollToBottom(), and while a jump owner is active the
   // reader is unpinned so the internal auto-follow callers don't reach here.
-  if(_messageJumpScrollOwner&&typeof _cancelMessageJumpScroll==='function') _cancelMessageJumpScroll();
+  if(typeof _messageJumpScrollOwner!=='undefined'&&_messageJumpScrollOwner&&typeof _cancelMessageJumpScroll==='function') _cancelMessageJumpScroll();
   _clearNewMessageScrollCue();
   _scrollPinned=true;
   _messageUserUnpinned=false;
