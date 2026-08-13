@@ -1,5 +1,74 @@
 """Test: session batch select mode functions exist in sessions.js (#568)"""
+import json
 import re
+import shutil
+import subprocess
+
+import pytest
+
+
+NODE = shutil.which("node")
+
+
+def _extract_function(source_text, function_name):
+    marker = f"function {function_name}("
+    start = source_text.index(marker)
+    brace_start = source_text.index("{", start)
+    depth = 0
+    for index in range(brace_start, len(source_text)):
+        char = source_text[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return source_text[start : index + 1]
+    raise AssertionError(f"Could not extract {function_name}")
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_selection_mode_renders_the_action_dock_before_any_row_is_selected():
+    """Hiding the zero-selection dock would remove the user's selection controls."""
+    src = open("static/sessions.js", encoding="utf-8").read()
+    render_fn = _extract_function(src, "_renderSessionBatchDock")
+    script = f"""
+const dock = {{innerHTML:'stale', style:{{display:'none'}}, children:[], appendChild(node){{this.children.push(node);}}}};
+global._sessionSelectMode = true;
+global._selectedSessions = new Set();
+global.$ = (id) => id === 'sessionBatchDock' ? dock : null;
+global.document = {{createElement(tag){{return {{tagName:tag.toUpperCase(), id:'', className:''}};}}}};
+global._renderBatchActionBar = () => {{ dock.renderedActions = true; }};
+{render_fn}
+_renderSessionBatchDock();
+console.log(JSON.stringify({{display:dock.style.display, childCount:dock.children.length, renderedActions:dock.renderedActions}}));
+"""
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=True)
+    assert json.loads(result.stdout) == {"display": "block", "childCount": 1, "renderedActions": True}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_date_heading_select_button_enters_mode_without_selecting_rows():
+    """The date affordance must enter selection without presenting checked group state."""
+    src = open("static/sessions.js", encoding="utf-8").read()
+    render_fn = _extract_function(src, "_renderSessionGroupSelectTrigger")
+    script = f"""
+global.document = {{createElement(tag){{return {{tagName:tag.toUpperCase(), type:'', className:'', textContent:'', title:'', attrs:{{}}, setAttribute(k,v){{this.attrs[k]=v;}}}};}}}};
+global._enableSessionSelectMode = () => {{ global.enabled = true; }};
+{render_fn}
+const button = _renderSessionGroupSelectTrigger();
+button.onclick({{stopPropagation(){{global.stopped=true;}}}});
+console.log(JSON.stringify({{tagName:button.tagName,type:button.type,className:button.className,text:button.textContent,label:button.attrs['aria-label'],enabled:global.enabled,stopped:global.stopped}}));
+"""
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=True)
+    assert json.loads(result.stdout) == {
+        "tagName": "BUTTON",
+        "type": "button",
+        "className": "session-group-select-trigger",
+        "text": "Select",
+        "label": "Select conversations",
+        "enabled": True,
+        "stopped": True,
+    }
 
 
 def test_batch_select_state_variables():
@@ -71,10 +140,10 @@ def test_batch_select_escape_handler():
 
 
 def test_batch_select_toggle_button():
-    """Verify the date-group checkbox is the select mode entry point."""
+    """Verify the date-group button is the select mode entry point."""
     with open('static/sessions.js', encoding="utf-8") as f:
         src = f.read()
-    assert 'session-group-select-toggle' in src, "Missing date-group selection checkbox"
+    assert 'session-group-select-trigger' in src, "Missing date-group selection button"
     assert '_enableSessionSelectMode' in src, "Missing selection-mode entry point"
 
 
@@ -219,7 +288,7 @@ def test_batch_select_css_exists():
     with open('static/style.css', encoding="utf-8") as f:
         src = f.read()
     required_classes = [
-        'session-group-select-toggle',
+        'session-group-select-trigger',
         'batch-exit-btn',
         'batch-select-all-btn',
         'session-select-cb-wrapper',
@@ -238,7 +307,7 @@ def test_batch_select_mode_flags():
     """Verify select mode properly toggles state."""
     with open('static/sessions.js', encoding="utf-8") as f:
         src = f.read()
-    # The date-group checkbox enters mode explicitly.
+    # The date-group button enters mode explicitly.
     assert 'function _enableSessionSelectMode()' in src
     assert '_sessionSelectMode=true' in src
     # exitSessionSelectMode should clear state
