@@ -9975,20 +9975,12 @@ except ImportError:
 
 def _session_attention_summary(session_id: str) -> dict | None:
     """Return sidebar attention metadata for pending approval/clarify work."""
-    approval_count = 0
     with _lock:
         reconcile_gateway_pending_mirror_locked(session_id)
-        queue_list = _pending.get(session_id)
-        if isinstance(queue_list, list):
-            approval_count = len(queue_list)
-        elif queue_list:
-            approval_count = 1
-        if approval_count == 0:
-            # Delegated-child approvals (agent#82009 child-key contract) must
-            # also light the parent's attention dot so a stuck child is
-            # visible from the sidebar (#6943).
-            _child_head, _child_total = pending_head_for_session_locked(session_id)
-            approval_count = _child_total
+        # One aggregate projection on every path (own queue + delegated-child
+        # queues, deduped by stable approval id) so a parent-with-1 +
+        # child-with-1 lights the dot with count 2, not 1 (#6961 #5).
+        _head, approval_count = pending_head_for_session_locked(session_id)
     if approval_count > 0:
         return {
             "kind": "approval",
@@ -19763,32 +19755,11 @@ def _read_anchored_file_bytes(ws_root: Path, target: Path) -> bytes:
 def _handle_approval_pending(handler, parsed):
     sid = parse_qs(parsed.query).get("session_id", [""])[0]
     with _lock:
-        _head, _total, _changed = reconcile_gateway_pending_mirror_locked(sid)
-        queue = _pending.get(sid)
-        # Support both the new list format and a legacy single-dict value.
-        if isinstance(queue, list):
-            p = queue[0] if queue else None
-            total = len(queue)
-        elif queue:
-            p = queue
-            total = 1
-        else:
-            p = None
-            total = 0
-        if p is None:
-            gw_queue = _gateway_queues.get(sid) or []
-            if gw_queue:
-                raw = getattr(gw_queue[0], "data", None) or {}
-                if raw:
-                    p = raw
-                    total = len(gw_queue)
-                else:
-                    logger.warning("Gateway queue entry for %s has no .data attribute", sid)
-        if p is None:
-            # Delegated-child approvals are parked under "subagent:<child_id>"
-            # keys (agent#82009 contract); surface them in the parent session
-            # so a dangerous child command never goes unanswered (#6943).
-            p, total = pending_head_for_session_locked(sid)
+        reconcile_gateway_pending_mirror_locked(sid)
+        # One aggregate projection on every path (own queue + delegated-child
+        # queues, deduped by stable approval id) so a parent-with-1 +
+        # child-with-1 reports count 2, not 1 (#6961 #5).
+        p, total = pending_head_for_session_locked(sid)
     if p:
         return j(handler, {"pending": dict(p), "pending_count": total})
     return j(handler, {"pending": None, "pending_count": 0})
@@ -19817,21 +19788,10 @@ def _handle_approval_sse_stream(handler, parsed):
     with _lock:
         _approval_sse_subscribers.setdefault(sid, []).append(q)
         reconcile_gateway_pending_mirror_locked(sid)
-        q_list = _pending.get(sid)
-        if isinstance(q_list, list):
-            initial_pending = dict(q_list[0]) if q_list else None
-            initial_count = len(q_list)
-        elif q_list:
-            initial_pending = dict(q_list)
-            initial_count = 1
-        if initial_pending is None:
-            # Include delegated-child approvals parked under child keys
-            # (agent#82009 contract) so a fresh stream snapshot matches the
-            # polling endpoint (#6943).
-            _child_head, _child_total = pending_head_for_session_locked(sid)
-            if _child_head is not None:
-                initial_pending = _child_head
-                initial_count = _child_total
+        # One aggregate projection on every path (own queue + delegated-child
+        # queues, deduped by stable approval id) so a parent-with-1 +
+        # child-with-1 opens the stream with count 2, not 1 (#6961 #5).
+        initial_pending, initial_count = pending_head_for_session_locked(sid)
 
     handler.send_response(200)
     handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')

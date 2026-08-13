@@ -390,6 +390,7 @@ def retire_gateway_pending_mirror(session_key: str, approval_id: str = "", run_i
         if not retired and not gateway_queue_changed:
             head, total, changed = reconcile_gateway_pending_mirror_locked(session_key)
             _approval_sse_notify_locked(session_key, head, total)
+            _relay_child_change_to_parent_locked(session_key)
             if changed:
                 publish_session_list_changed("attention_resolved")
             return changed
@@ -406,6 +407,7 @@ def retire_gateway_pending_mirror(session_key: str, approval_id: str = "", run_i
             _pending.pop(session_key, None)
         head, total, _changed = reconcile_gateway_pending_mirror_locked(session_key)
         _approval_sse_notify_locked(session_key, head, total)
+        _relay_child_change_to_parent_locked(session_key)
     publish_session_list_changed("attention_resolved")
     return True
 
@@ -530,6 +532,7 @@ def submit_gateway_pending_mirror(session_key: str, approval: dict) -> tuple[dic
                 _normalize_pending_queue_locked(session_key).append(mirror_entry)
         head, total, _changed = reconcile_gateway_pending_mirror_locked(session_key)
         _approval_sse_notify_locked(session_key, head, total)
+        _relay_child_change_to_parent_locked(session_key)
     publish_session_list_changed("attention_pending")
     return (dict(head) if head else None), total
 
@@ -553,6 +556,7 @@ def resolve_gateway_pending_local(
             _gateway_queues.pop(session_key, None)
         head, total, _changed = reconcile_gateway_pending_mirror_locked(session_key)
         _approval_sse_notify_locked(session_key, head, total)
+        _relay_child_change_to_parent_locked(session_key)
     if target is None:
         return 0, head, total
     target.result = choice
@@ -605,6 +609,7 @@ def resolve_gateway_pending_local_no_run_mirror(
             _pending.pop(session_key, None)
         head, total, _changed = reconcile_gateway_pending_mirror_locked(session_key)
         _approval_sse_notify_locked(session_key, head, total)
+        _relay_child_change_to_parent_locked(session_key)
     target.result = choice
     if reason:
         target.reason = reason
@@ -634,6 +639,11 @@ def submit_pending(session_key: str, approval: dict) -> None:
         # submit_pending calls can't deliver out-of-order (T2's later
         # notify arriving before T1's earlier notify with a stale count).
         _approval_sse_notify_locked(session_key, head, total)
+        # A child-key enqueue must also reach the parent's SSE subscribers
+        # (#6961 #6): the parent stream only gets the initial snapshot with
+        # the child, so later child enqueues would go stale for pure-SSE
+        # consumers.
+        _relay_child_change_to_parent_locked(session_key)
     publish_session_list_changed("attention_pending")
     # NOTE: We do NOT call _submit_pending_raw here — that function overwrites
     # _pending[session_key] with a single dict, which would undo the list we just
@@ -653,9 +663,48 @@ def submit_pending(session_key: str, approval: dict) -> None:
 # the parent session's UI and resolve them back under the child's key.
 _CHILD_APPROVAL_KEY_PREFIX = "subagent:"
 
-# child_session_id -> parent session key. Populated lazily on first sight of a
-# child approval key (state.db fallback below); seeded directly by tests.
-_child_approval_parents: dict[str, str] = {}
+# child id -> parent session key, scoped by canonical state-db/profile path.
+# Populated lazily on first sight of a child approval key (state.db fallback
+# below); seeded directly by tests via seed_child_parent().
+#
+# The cache key includes the canonical state-db path so one profile's child
+# resolution can never poison another profile's identical child id, and only
+# POSITIVE lookups are cached — a failed/missing lookup is never stored, so a
+# late state.db write is picked up on the next call instead of permanently
+# resolving to None (#6961 #4).
+_child_approval_parents: dict[tuple[str, str], str] = {}
+
+
+def _child_parent_cache_key(child_session_id: str) -> tuple[str, str]:
+    """Canonical cache key: (state-db/profile path, child session id)."""
+    from api.models import _active_state_db_path
+
+    try:
+        db_path = _active_state_db_path()
+    except Exception:
+        db_path = None
+    return (str(db_path or ""), child_session_id)
+
+
+def seed_child_parent(child_session_id: str, parent_session_id: str) -> None:
+    """Record a child->parent mapping (used by tests and early wiring)."""
+    with _lock:
+        _child_approval_parents[_child_parent_cache_key(child_session_id)] = parent_session_id
+
+
+def invalidate_child_parent_cache(child_session_id: str | None = None) -> None:
+    """Drop cached child->parent mappings (all, or for one child id).
+
+    Call when a child's ownership may have changed (e.g. the state.db row
+    lands after an early lookup, or the child is re-parented) so the next
+    lookup re-reads the authoritative row instead of a stale positive.
+    """
+    with _lock:
+        if child_session_id is None:
+            _child_approval_parents.clear()
+            return
+        for key in [k for k in _child_approval_parents if k[1] == child_session_id]:
+            _child_approval_parents.pop(key, None)
 
 
 def _is_child_approval_key(key: str) -> bool:
@@ -666,16 +715,21 @@ def _is_child_approval_key(key: str) -> bool:
 def _child_parent_session_id(child_session_id: str) -> str | None:
     """Return the parent WebUI session key for a delegated child session id.
 
-    Consults the in-process cache first, then falls back to the state.db
-    signals the sidebar uses to identify delegated children (#5307): the
-    ``model_config._delegate_from`` marker is authoritative, and
-    ``source='subagent'`` + ``parent_session_id`` is the legacy signal. Any
-    failure resolves to ``None`` (fail-closed: an unassociated child approval
-    is never surfaced in a session that does not own it).
+    Consults the in-process cache first (keyed by canonical state-db/profile
+    path + child id), then falls back to the state.db signals the sidebar uses
+    to identify delegated children (#5307): the ``model_config._delegate_from``
+    marker is authoritative, and ``source='subagent'`` + ``parent_session_id``
+    is the legacy signal. Only POSITIVE lookups are cached; a failed or
+    missing lookup is never cached, so a late state.db write is observed on
+    the next call and one profile's miss cannot poison another's identical
+    child id (#6961 #4). Any failure resolves to ``None`` (fail-closed: an
+    unassociated child approval is never surfaced in a session that does not
+    own it).
     """
-    cached = _child_approval_parents.get(child_session_id)
+    cache_key = _child_parent_cache_key(child_session_id)
+    cached = _child_approval_parents.get(cache_key)
     if cached is not None:
-        return cached or None
+        return cached
     parent: str | None = None
     try:
         from api.models import _active_state_db_path
@@ -707,7 +761,8 @@ def _child_parent_session_id(child_session_id: str) -> str | None:
                     parent = str(parent_session_id or "").strip() or None
     except Exception:
         logger.debug("child approval parent lookup failed", exc_info=True)
-    _child_approval_parents[child_session_id] = parent or ""
+    if parent:
+        _child_approval_parents[cache_key] = parent
     return parent
 
 
@@ -733,24 +788,60 @@ def child_approval_keys_for_session_locked(session_key: str) -> list[str]:
     return keys
 
 
+def _stable_entry_key(entry: dict) -> str | None:
+    """Return a stable dedupe identity for one approval entry, or ``None``.
+
+    Mirrors parked in ``_pending`` and their live ``_gateway_queues``
+    counterparts are the same approval surfaced twice; dedupe by stable
+    approval id first, then by the gateway mirror token when the id is
+    missing (legacy no-id entries). Entries with neither id nor token are
+    returned as ``None`` and are never deduped (each one is unique).
+    """
+    approval_id = str(entry.get("approval_id") or "").strip()
+    if approval_id:
+        return f"id:{approval_id}"
+    token = str(
+        entry.get(_GATEWAY_MIRROR_TOKEN)
+        or entry.get(_GATEWAY_ENTRY_DATA_TOKEN_KEY)
+        or ""
+    ).strip()
+    if token:
+        return f"token:{token}"
+    return None
+
+
 def _queue_entries_locked(key: str) -> list[dict]:
     """Return the pending entries for *key* as a list of dicts.
 
     Tolerates the agent's legacy single-dict ``_pending`` value and folds in
-    live gateway-queue heads (``_ApprovalEntry.data`` payloads).
+    live gateway-queue heads (``_ApprovalEntry.data`` payloads). The same
+    approval can appear both as a ``_pending`` mirror and as a live gateway
+    entry; entries are deduped by stable approval id / mirror token so the
+    aggregate count never double-counts one approval (#6961 #5).
 
     CALLER MUST HOLD `_lock`.
     """
     entries: list[dict] = []
+    seen: set[str] = set()
+
+    def _append(entry: dict) -> None:
+        stable = _stable_entry_key(entry)
+        if stable is not None:
+            if stable in seen:
+                return
+            seen.add(stable)
+        entries.append(dict(entry))
+
     q = _pending.get(key)
     if isinstance(q, list):
-        entries.extend(dict(entry) for entry in q)
+        for entry in q:
+            _append(entry)
     elif q:
-        entries.append(dict(q))
+        _append(q)
     for entry in _gateway_queues.get(key) or []:
         raw = getattr(entry, "data", None) or {}
         if raw:
-            entries.append(dict(raw))
+            _append(raw)
     return entries
 
 
@@ -772,6 +863,42 @@ def pending_head_for_session_locked(session_key: str) -> tuple[dict | None, int]
     if not entries:
         return None, 0
     return dict(entries[0]), len(entries)
+
+
+def _relay_child_change_to_parent_locked(child_key: str) -> None:
+    """Publish the parent's aggregate head/count after an owned child change.
+
+    The parent SSE subscriber only ever receives the initial snapshot that
+    includes the child (routes.py `_handle_approval_sse_stream`); later child
+    enqueue/resolve events under the child key never reached the parent's
+    stream, so a pure-SSE consumer went stale until the 1.5s HTTP poll fired
+    (#6961 #6). Whenever an owned child queue changes, push the aggregate
+    parent head/count to the parent's subscribers.
+
+    CALLER MUST HOLD `_lock`. No-op for non-child keys, unassociated children,
+    and parents without live SSE subscribers.
+    """
+    if not _is_child_approval_key(child_key):
+        return
+    child_id = child_key[len(_CHILD_APPROVAL_KEY_PREFIX):]
+    parent = _child_parent_session_id(child_id)
+    if not parent:
+        return
+    if not _approval_sse_subscribers.get(parent):
+        return
+    head, total = pending_head_for_session_locked(parent)
+    _approval_sse_notify_locked(parent, head, total)
+
+
+def _relay_child_change_to_parent(child_key: str) -> None:
+    """Lock-safe wrapper around `_relay_child_change_to_parent_locked`.
+
+    Used from contexts that must NOT hold `_lock` (resolve_child_approval_locked
+    runs outside `_lock` because the child-side approve/resolve helpers acquire
+    the agent lock themselves).
+    """
+    with _lock:
+        _relay_child_change_to_parent_locked(child_key)
 
 
 def resolve_child_approval_locked(session_key: str, approval_id: str, choice: str) -> bool:
@@ -835,6 +962,10 @@ def resolve_child_approval_locked(session_key: str, approval_id: str, choice: st
         # choice == "once": no persistence — the child's next matching guarded
         # call re-prompts, exactly like the parent "once" contract.
         resolve_gateway_approval(child_key, choice, resolve_all=False)
+        # Relay the resolved state to the parent's SSE subscribers (#6961 #6):
+        # the parent stream only got the initial snapshot with the child, so
+        # the card would otherwise stay up for pure-SSE consumers.
+        _relay_child_change_to_parent(child_key)
         return True
     return False
 

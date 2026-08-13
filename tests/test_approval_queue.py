@@ -262,8 +262,7 @@ def test_stale_explicit_approval_id_does_not_pop_oldest_entry():
 def _seed_child_parent(child_session_id: str, parent_session_id: str) -> None:
     from api import route_approvals as ra
 
-    with ra._lock:
-        ra._child_approval_parents[child_session_id] = parent_session_id
+    ra.seed_child_parent(child_session_id, parent_session_id)
 
 
 def _clear_approval_state(*session_keys: str) -> None:
@@ -461,5 +460,263 @@ def test_unassociated_child_approval_not_surfaced():
         assert r._resolve_approval_legacy(parent, aid, "once") is False
         with r._lock:
             assert child_key in r._pending, "unassociated child entry must stay parked"
+    finally:
+        _clear_approval_state(parent, child_key)
+
+
+# ---------------------------------------------------------------------------
+# Read/surface half of the #6961 review: cache scoping (#4), aggregate count
+# on all three surface paths (#5), and child-change SSE relay to the parent
+# (#6). The resolve half (#1/#2/#3) stays in the follow-up gated on the agent
+# contract, exactly as the maintainer suggested.
+# ---------------------------------------------------------------------------
+
+def test_child_parent_cache_scoped_by_state_db_profile(monkeypatch):
+    """#4: a cached parent lookup must never leak across state-db profiles."""
+    import pathlib
+    from api import route_approvals as ra
+    from api import models as api_models
+
+    child = "test-child-cache-scope"
+    profile_a = pathlib.Path("/tmp/__profile_a__/state.db")
+    profile_b = pathlib.Path("/tmp/__profile_b__/state.db")
+    _clear_approval_state()
+    try:
+        monkeypatch.setattr(api_models, "_active_state_db_path", lambda: profile_a)
+        ra.seed_child_parent(child, "parent-a")
+        assert ra._child_parent_session_id(child) == "parent-a"
+
+        # Switching profile must NOT see profile A's cached parent — the
+        # entry is keyed by canonical state-db path + child id (#6961 #4).
+        monkeypatch.setattr(api_models, "_active_state_db_path", lambda: profile_b)
+        assert ra._child_parent_session_id(child) is None
+
+        # Profile B can record its own mapping independently.
+        ra.seed_child_parent(child, "parent-b")
+        assert ra._child_parent_session_id(child) == "parent-b"
+
+        # Back on profile A, the original mapping is still intact.
+        monkeypatch.setattr(api_models, "_active_state_db_path", lambda: profile_a)
+        assert ra._child_parent_session_id(child) == "parent-a"
+    finally:
+        monkeypatch.undo()
+        _clear_approval_state()
+
+
+def test_child_parent_cache_does_not_cache_misses():
+    """#4: a failed lookup must not be cached, so a late DB write is seen."""
+    from api import route_approvals as ra
+
+    child = "test-child-cache-miss"
+    _clear_approval_state()
+    try:
+        # Unknown child -> None, and NOT cached (no negative-cache poison).
+        assert ra._child_parent_session_id(child) is None
+        assert ra._child_parent_cache_key(child) not in ra._child_approval_parents
+        # After the mapping is seeded (simulating a late state.db write),
+        # the next lookup succeeds — the miss was not cached.
+        ra.seed_child_parent(child, "parent-late")
+        assert ra._child_parent_session_id(child) == "parent-late"
+    finally:
+        _clear_approval_state()
+
+
+def test_child_parent_cache_invalidates_on_ownership_change():
+    """#4: invalidate_child_parent_cache must drop stale positives."""
+    from api import route_approvals as ra
+
+    child = "test-child-cache-invalidate"
+    _clear_approval_state()
+    try:
+        ra.seed_child_parent(child, "parent-old")
+        assert ra._child_parent_session_id(child) == "parent-old"
+        ra.invalidate_child_parent_cache(child)
+        assert ra._child_parent_cache_key(child) not in ra._child_approval_parents
+        ra.seed_child_parent(child, "parent-new")
+        assert ra._child_parent_session_id(child) == "parent-new"
+        # Full clear also works.
+        ra.invalidate_child_parent_cache()
+        assert not ra._child_approval_parents
+    finally:
+        _clear_approval_state()
+
+
+def test_aggregate_count_includes_child_when_parent_has_approval():
+    """#5: parent-1 + child-1 must count 2 on every surface path."""
+    from api import routes as r
+    from api import route_approvals as ra
+
+    parent = "test-child-parent-aggr"
+    child = "test-child-aggr"
+    child_key = f"subagent:{child}"
+    _clear_approval_state(parent, child_key)
+    _seed_child_parent(child, parent)
+    try:
+        r.submit_pending(
+            parent,
+            {"command": "parentcmd", "pattern_key": "pp", "pattern_keys": ["pp"], "description": "pd"},
+        )
+        r.submit_pending(
+            child_key,
+            {"command": "childcmd", "pattern_key": "cp", "pattern_keys": ["cp"], "description": "cd"},
+        )
+        # Aggregate projection: count 2 (parent 1 + child 1).
+        with r._lock:
+            head, total = ra.pending_head_for_session_locked(parent)
+        assert total == 2
+        assert head["command"] == "parentcmd"  # own head stays first
+        # Attention summary: count 2, not 1.
+        summary = r._session_attention_summary(parent)
+        assert summary is not None
+        assert summary["kind"] == "approval"
+        assert summary["count"] == 2
+    finally:
+        _clear_approval_state(parent, child_key)
+
+
+def test_aggregate_dedupes_mirror_and_gateway_representation():
+    """#5: the same approval in _pending (mirror) and _gateway_queues counts once."""
+    from api import routes as r
+    from api import route_approvals as ra
+
+    parent = "test-child-parent-dedupe"
+    _clear_approval_state(parent)
+    try:
+        r.submit_pending(
+            parent,
+            {"command": "cmd", "pattern_key": "pk", "pattern_keys": ["pk"], "description": "d"},
+        )
+        with r._lock:
+            q = r._pending[parent]
+            aid = q[0]["approval_id"]
+        with ra._lock:
+            # Simulate the gateway mirror representation of the SAME approval
+            # parked in _gateway_queues (data carries the same approval_id).
+            entry = type("Entry", (), {"data": {"command": "cmd", "approval_id": aid}})()
+            r._gateway_queues.setdefault(parent, []).append(entry)
+            head, total = ra.pending_head_for_session_locked(parent)
+        assert total == 1, "mirror + live gateway entry for one approval must dedupe to 1"
+        assert head["approval_id"] == aid
+    finally:
+        _clear_approval_state(parent)
+
+
+def test_polling_endpoint_reports_aggregate_count():
+    """#5: _handle_approval_pending must report 2 for parent-1 + child-1."""
+    from urllib.parse import urlparse
+    import io
+    from api import routes as r
+
+    parent = "test-child-parent-poll"
+    child = "test-child-poll"
+    child_key = f"subagent:{child}"
+    _clear_approval_state(parent, child_key)
+    _seed_child_parent(child, parent)
+    try:
+        r.submit_pending(
+            parent,
+            {"command": "parentcmd", "pattern_key": "pp", "pattern_keys": ["pp"], "description": "pd"},
+        )
+        r.submit_pending(
+            child_key,
+            {"command": "childcmd", "pattern_key": "cp", "pattern_keys": ["cp"], "description": "cd"},
+        )
+        handler = type("H", (), {
+            "wfile": io.BytesIO(),
+            "send_response": lambda self, s: None,
+            "send_header": lambda self, k, v: None,
+            "end_headers": lambda self: None,
+        })()
+        r._handle_approval_pending(handler, urlparse(f"/api/approval/pending?session_id={parent}"))
+        import json as _json
+        body = _json.loads(handler.wfile.getvalue().decode("utf-8"))
+        assert body["pending_count"] == 2
+        assert body["pending"]["command"] == "parentcmd"
+    finally:
+        _clear_approval_state(parent, child_key)
+
+
+def test_sse_initial_snapshot_reports_aggregate_count():
+    """#5: SSE initial snapshot must include child approvals with count 2."""
+    from api import routes as r
+    from api import route_approvals as ra
+
+    parent = "test-child-parent-sseinit"
+    child = "test-child-sseinit"
+    child_key = f"subagent:{child}"
+    _clear_approval_state(parent, child_key)
+    _seed_child_parent(child, parent)
+    try:
+        r.submit_pending(
+            parent,
+            {"command": "parentcmd", "pattern_key": "pp", "pattern_keys": ["pp"], "description": "pd"},
+        )
+        r.submit_pending(
+            child_key,
+            {"command": "childcmd", "pattern_key": "cp", "pattern_keys": ["cp"], "description": "cd"},
+        )
+        # The stream handler's initial snapshot uses the same aggregate
+        # projection as the polling endpoint.
+        with r._lock:
+            r.reconcile_gateway_pending_mirror_locked(parent)
+            initial_pending, initial_count = ra.pending_head_for_session_locked(parent)
+        assert initial_count == 2
+        assert initial_pending["command"] == "parentcmd"
+    finally:
+        _clear_approval_state(parent, child_key)
+
+
+def test_parent_sse_subscriber_receives_child_enqueue():
+    """#6: a parent SSE subscriber must get a push when a child approval lands."""
+    from api import routes as r
+    from api import route_approvals as ra
+
+    parent = "test-child-parent-sse-enqueue"
+    child = "test-child-sse-enqueue"
+    child_key = f"subagent:{child}"
+    _clear_approval_state(parent, child_key)
+    _seed_child_parent(child, parent)
+    try:
+        q = ra._approval_sse_subscribe(parent)
+        try:
+            r.submit_pending(
+                child_key,
+                {"command": "childcmd", "pattern_key": "cp", "pattern_keys": ["cp"], "description": "cd"},
+            )
+            payload = q.get(timeout=2)
+            assert payload["pending_count"] == 1
+            assert payload["pending"]["command"] == "childcmd"
+        finally:
+            ra._approval_sse_unsubscribe(parent, q)
+    finally:
+        _clear_approval_state(parent, child_key)
+
+
+def test_parent_sse_subscriber_receives_child_resolve():
+    """#6: resolving a child approval must push the cleared aggregate to the parent."""
+    from api import routes as r
+    from api import route_approvals as ra
+
+    parent = "test-child-parent-sse-resolve"
+    child = "test-child-sse-resolve"
+    child_key = f"subagent:{child}"
+    _clear_approval_state(parent, child_key)
+    _seed_child_parent(child, parent)
+    try:
+        q = ra._approval_sse_subscribe(parent)
+        try:
+            r.submit_pending(
+                child_key,
+                {"command": "childcmd", "pattern_key": "cp", "pattern_keys": ["cp"], "description": "cd"},
+            )
+            q.get(timeout=2)  # enqueue push
+            with r._lock:
+                aid = r._pending[child_key][0]["approval_id"]
+            assert r._resolve_approval_legacy(parent, aid, "once") is True
+            payload = q.get(timeout=2)
+            assert payload["pending_count"] == 0
+            assert payload["pending"] is None
+        finally:
+            ra._approval_sse_unsubscribe(parent, q)
     finally:
         _clear_approval_state(parent, child_key)
