@@ -1086,12 +1086,55 @@ def _start_async_delegation_wakeup_turn(
                 session_id,
                 exc_info=True,
             )
+        finally:
+            # The wakeup turn has resolved (accepted, rejected, or raised): the
+            # per-origin admission slot is free for the next backlogged
+            # completion. Never release earlier — the slot must stay reserved
+            # for the whole claim→turn window so siblings defer without
+            # consuming the finite delivery budget (#6959).
+            _release_async_delegation_wakeup_admission(session_id)
 
     threading.Thread(
         target=_runner,
         name=f"hermes-webui-delegation-wakeup-{str(session_id)[:8]}",
         daemon=True,
     ).start()
+
+
+# ── Per-origin wakeup admission reservation (#6959) ────────────────────────
+# A durable claim has a finite delivery-attempt budget, and the pre-claim busy
+# check is NOT atomic with turn publication: several completed delegations for
+# one idle origin can all pass it, each obtain a durable claim, then race for a
+# single ``start_session_turn`` admission slot. The losers' transient 409s
+# release already-counted claims, and repeated rounds can drive completed rows
+# to the terminal ``dropped`` state. Reserve the per-origin admission slot
+# ATOMICALLY before claiming so at most one async-delegation wakeup per session
+# is in flight at a time; siblings that lose the reservation defer WITHOUT
+# claiming (no delivery attempt consumed). The reservation is in-process only:
+# the wakeup thread releases it on every exit path and it vanishes on restart,
+# so it can never strand a durable claim.
+_ASYNC_DELEGATION_WAKEUP_ADMISSION_LOCK = threading.Lock()
+_ASYNC_DELEGATION_WAKEUP_ADMISSION_INFLIGHT: set[str] = set()
+
+
+def _try_reserve_async_delegation_wakeup_admission(session_id: str) -> bool:
+    """Atomically reserve the single in-flight wakeup slot for *session_id*.
+
+    Returns False when another async-delegation wakeup for the same origin is
+    already in flight (claimed but not yet resolved), so the caller can defer
+    without touching the finite delivery budget.
+    """
+    with _ASYNC_DELEGATION_WAKEUP_ADMISSION_LOCK:
+        if session_id in _ASYNC_DELEGATION_WAKEUP_ADMISSION_INFLIGHT:
+            return False
+        _ASYNC_DELEGATION_WAKEUP_ADMISSION_INFLIGHT.add(session_id)
+        return True
+
+
+def _release_async_delegation_wakeup_admission(session_id: str) -> None:
+    """Release the in-flight wakeup slot for *session_id* (idempotent)."""
+    with _ASYNC_DELEGATION_WAKEUP_ADMISSION_LOCK:
+        _ASYNC_DELEGATION_WAKEUP_ADMISSION_INFLIGHT.discard(session_id)
 
 
 def _process_async_delegation_event(
@@ -1114,14 +1157,30 @@ def _process_async_delegation_event(
         )
         return
 
+    # Atomic per-origin wakeup admission (#6959): the busy check above is a
+    # pre-check, not a reservation — several idle completions for one origin
+    # can all pass it together. Only one may own the in-flight wakeup slot; a
+    # sibling that loses this reservation must NOT claim, because a claim
+    # released by a transient 409 would count against the finite delivery
+    # budget. The admitted wakeup releases the slot when its turn resolves.
+    if not _try_reserve_async_delegation_wakeup_admission(session_id):
+        _retry_unclaimed_async_delegation_event(
+            process_registry,
+            evt,
+            keep_legacy_retrying=True,
+        )
+        return
+
     try:
         claim = claim_async_delegation_delivery(evt, "webui-background")
     except Exception:
+        _release_async_delegation_wakeup_admission(session_id)
         _requeue_async_delegation_event(process_registry, evt)
         return
     if claim is None:
         completion_queue = getattr(process_registry, "completion_queue", None)
         schedule_async_delegation_claim_retry(evt, completion_queue)
+        _release_async_delegation_wakeup_admission(session_id)
         return
 
     try:
@@ -1135,6 +1194,7 @@ def _process_async_delegation_event(
         # one-shot path — never keep_legacy_retrying, or it would loop forever.
         release_async_delegation_delivery(evt, claim)
         _retry_unclaimed_async_delegation_event(process_registry, evt)
+        _release_async_delegation_wakeup_admission(session_id)
         logger.warning(
             "async delegation completion could not be formatted for session %s",
             session_id,
@@ -1159,6 +1219,7 @@ def _process_async_delegation_event(
         _retry_unclaimed_async_delegation_event(
             process_registry, evt, keep_legacy_retrying=True
         )
+        _release_async_delegation_wakeup_admission(session_id)
         logger.warning(
             "server-side async delegation dispatch failed for session %s",
             session_id,
