@@ -19731,6 +19731,17 @@ def _media_deny_reason(target: Path) -> str | None:
         _ws_state = (_root / "webui_state")
         for _sub in _DENY_SUBDIRS:
             _deny_dirs.append((_ws_state / _sub).resolve())
+        # The default WebUI STATE_DIR is <root>/webui (api/config.py) — the base
+        # profile's state dir, and <root>/profiles/<name>/webui for each named
+        # profile. Only the ACTIVE STATE_DIR was previously denied (as a root
+        # above), so a base/sibling profile's <root>/webui state was servable
+        # through /api/media whenever a named profile was active (#6982). Deny
+        # its state subdirs for every enumerated root/profile-root too. The
+        # `webui` container itself is NOT denied: STATE_DIR/workspace is the
+        # legitimate default workspace and must keep serving. (Fail-closed.)
+        _webui_state = (_root / "webui")
+        for _sub in _DENY_SUBDIRS:
+            _deny_dirs.append((_webui_state / _sub).resolve())
     # The configured media-snapshot store root itself: blobs are internal and
     # only reachable through the validated `snap=` parameter on an authorized
     # path, so a bare `path=` request at or below the store is rejected

@@ -536,6 +536,121 @@ class TestMediaEndpointUnit(unittest.TestCase):
                     h4.status, 403,
                     "profile webui_state/sessions/*.json must be denied")
 
+    def test_sibling_base_profile_webui_state_dir_denied_when_named_profile_active(self):
+        """#6982: /api/media must NOT serve a base/sibling profile's WebUI state
+        dir (<root>/webui — the default STATE_DIR) when a NAMED profile is
+        active. Only the active STATE_DIR was previously denied (as a root), so
+        base `~/.hermes/webui/sessions/...` and sibling
+        `<root>/profiles/<other>/webui/sessions/...` were served with a 200.
+        Fail-closed: deny every enumerated root/profile-root's `<root>/webui`
+        state subtree, while `<root>/webui/workspace` media stays servable.
+        """
+        from api import routes
+
+        class _Handler:
+            def __init__(self):
+                self.status = None
+                self.headers = {}
+            def send_response(self, code):
+                self.status = code
+            def send_header(self, *a, **k):
+                pass
+            def end_headers(self):
+                pass
+            class _W:
+                def write(self_inner, b):
+                    pass
+                def flush(self_inner):
+                    pass
+            wfile = _W()
+
+        png_bytes = (
+            b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01'
+            b'\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00'
+            b'\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82'
+        )
+        with tempfile.TemporaryDirectory() as home:
+            base = pathlib.Path(home) / ".hermes"
+            # Base profile's WebUI state dir (~/.hermes/webui) and its workspace.
+            base_webui = base / "webui"
+            base_sessions = base_webui / "sessions"
+            base_ws = base_webui / "workspace"
+            base_sessions.mkdir(parents=True)
+            base_ws.mkdir(parents=True)
+            base_index = base_sessions / "_index.json"
+            base_index.write_text('{"sessions":[]}', encoding="utf-8")
+            base_shot = base_ws / "shot.png"
+            base_shot.write_bytes(png_bytes)
+            # Sibling named profile's WebUI state dir.
+            sibling = base / "profiles" / "other"
+            sibling_webui = sibling / "webui"
+            sibling_sessions = sibling_webui / "sessions"
+            sibling_sessions.mkdir(parents=True)
+            sibling_sess = sibling_sessions / "s1.json"
+            sibling_sess.write_text('{"messages":[]}', encoding="utf-8")
+            # Active named profile's own state dir + workspace.
+            active = base / "profiles" / "webui"
+            active_webui = active / "webui"
+            active_sessions = active_webui / "sessions"
+            active_ws = active_webui / "workspace"
+            active_sessions.mkdir(parents=True)
+            active_ws.mkdir(parents=True)
+            active_sess = active_sessions / "s2.json"
+            active_sess.write_text('{"messages":[]}', encoding="utf-8")
+            active_shot = active_ws / "shot.png"
+            active_shot.write_bytes(png_bytes)
+
+            env = {
+                "HERMES_HOME": str(active),
+                "HERMES_WEBUI_STATE_DIR": str(active_webui),
+            }
+            with mock.patch.dict(os.environ, env), \
+                 mock.patch.object(routes, "get_last_workspace", lambda: str(active_ws)), \
+                 mock.patch("api.auth.is_auth_enabled", lambda: False), \
+                 mock.patch("api.config.STATE_DIR", active_webui), \
+                 mock.patch("api.profiles._DEFAULT_HERMES_HOME", base):
+                # Base profile's WebUI session index → DENIED (was 200, #6982)
+                h1 = _Handler()
+                routes._handle_media(h1, SimpleNamespace(
+                    query=f"path={urllib.parse.quote(str(base_index.resolve()))}",
+                    path="/api/media"))
+                self.assertEqual(
+                    h1.status, 403,
+                    "base profile <root>/webui/sessions/_index.json must be denied "
+                    "when a named profile is active (#6982)")
+                # Sibling named profile's WebUI session file → DENIED
+                h2 = _Handler()
+                routes._handle_media(h2, SimpleNamespace(
+                    query=f"path={urllib.parse.quote(str(sibling_sess.resolve()))}",
+                    path="/api/media"))
+                self.assertEqual(
+                    h2.status, 403,
+                    "sibling profile <root>/profiles/other/webui/sessions must be denied")
+                # Active named profile's own state → still denied
+                h3 = _Handler()
+                routes._handle_media(h3, SimpleNamespace(
+                    query=f"path={urllib.parse.quote(str(active_sess.resolve()))}",
+                    path="/api/media"))
+                self.assertEqual(
+                    h3.status, 403,
+                    "active named profile's own webui/sessions must stay denied")
+                # Base profile's <root>/webui/workspace media → still servable
+                h4 = _Handler()
+                routes._handle_media(h4, SimpleNamespace(
+                    query=f"path={urllib.parse.quote(str(base_shot.resolve()))}&inline=1",
+                    path="/api/media"))
+                self.assertNotEqual(
+                    h4.status, 403,
+                    "base <root>/webui/workspace/shot.png must NOT be blocked (legit media)")
+                # Active profile's workspace media → still servable
+                h5 = _Handler()
+                routes._handle_media(h5, SimpleNamespace(
+                    query=f"path={urllib.parse.quote(str(active_shot.resolve()))}&inline=1",
+                    path="/api/media"))
+                self.assertNotEqual(
+                    h5.status, 403,
+                    "active profile's webui/workspace/shot.png must NOT be blocked")
+
     def test_media_allowed_roots_env_var_serves_outside_hermes_root(self):
         """MEDIA_ALLOWED_ROOTS must still allow legitimate outside-root media."""
         from api import routes
