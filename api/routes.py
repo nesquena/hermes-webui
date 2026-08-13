@@ -24699,6 +24699,7 @@ def _handle_approval_respond(handler, body):
     if choice not in ("once", "session", "always", "deny"):
         return bad(handler, f"Invalid choice: {choice}")
     approval_id = body.get("approval_id", "")
+    enable_yolo = body.get("yolo") is True
 
     # Gateway relay: forward choice to the runs API when session has an active run,
     # or recover the run_id from the mirrored gateway approval entry if the
@@ -24864,11 +24865,19 @@ def _handle_approval_respond(handler, body):
                             status=409,
                         )
                 matched_mirror = current_mirror
+                yolo_was_enabled = is_session_yolo_enabled(sid)
+                if enable_yolo and not yolo_was_enabled:
+                    # Set the WebUI flag before resuming this request so the
+                    # SSE reader can auto-answer a prompt emitted immediately
+                    # afterward. Roll it back if the current relay fails.
+                    enable_session_yolo(sid)
                 try:
                     HttpRunnerClient(base_url=_base, api_key=_key).respond_approval(
                         _run_id, matched_mirror["approval_id"] if identity_v1 else "", choice
                     )
                 except (RunnerClientError, ValueError) as exc:
+                    if enable_yolo and not yolo_was_enabled:
+                        disable_session_yolo(sid)
                     return j(handler, {"ok": False, "choice": choice, "relayed": True, "error": str(exc)}, status=502)
                 # The outbound relay only resumes the remote run; the local mirror
                 # still needs the same cleanup path so the parked entry, mirrored
@@ -24876,7 +24885,12 @@ def _handle_approval_respond(handler, body):
                 cleanup_approval_id = matched_mirror["approval_id"]
                 _resolve_approval_legacy(sid, cleanup_approval_id, choice, run_id=_run_id)
                 retire_gateway_pending_mirror(sid, approval_id=cleanup_approval_id, run_id=_run_id)
-                return j(handler, {"ok": True, "choice": choice, "relayed": True})
+                return j(handler, {
+                    "ok": True,
+                    "choice": choice,
+                    "relayed": True,
+                    **({"yolo_enabled": True} if enable_yolo else {}),
+                })
             finally:
                 release_gateway_approval_relay_owner(sid, _run_id, claimed_approval_id)
         if _candidate_run_id:
@@ -24891,7 +24905,14 @@ def _handle_approval_respond(handler, body):
                 sid, approval_id, choice
             )
             if handled_no_run_mirror and resolved_count == 1:
-                return j(handler, {"ok": True, "choice": choice, "local_retired": True})
+                if enable_yolo:
+                    enable_session_yolo(sid)
+                return j(handler, {
+                    "ok": True,
+                    "choice": choice,
+                    "local_retired": True,
+                    **({"yolo_enabled": True} if enable_yolo else {}),
+                })
             if handled_no_run_mirror:
                 return j(handler, {"ok": False, "choice": choice, "relayed": False,
                                    "code": "gateway_run_unavailable",
@@ -24927,8 +24948,21 @@ def _handle_approval_respond(handler, body):
         # card instead of dead-ending. When something IS still pending, keep
         # the protective ok:false. `stale_cleared` lets the frontend log/branch
         # without showing an error toast.
-        return j(handler, {"ok": True, "choice": choice, "stale_cleared": True})
-    return j(handler, {"ok": ok, "choice": choice})
+        if enable_yolo:
+            enable_session_yolo(sid)
+        return j(handler, {
+            "ok": True,
+            "choice": choice,
+            "stale_cleared": True,
+            **({"yolo_enabled": True} if enable_yolo else {}),
+        })
+    if ok and enable_yolo:
+        enable_session_yolo(sid)
+    return j(handler, {
+        "ok": ok,
+        "choice": choice,
+        **({"yolo_enabled": True} if ok and enable_yolo else {}),
+    })
 
 
 def _resolve_clarify_legacy(sid: str, clarify_id: str, response: str) -> bool:

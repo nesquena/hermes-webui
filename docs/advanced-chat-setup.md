@@ -102,6 +102,14 @@ HERMES_WEBUI_GATEWAY_USE_RUNS_API=true \
 
 Use this when the connected gateway advertises approval support and you want tool approval cards to appear in WebUI. Without `HERMES_WEBUI_GATEWAY_USE_RUNS_API=true`, gateway chat stays on the legacy chat-completions transport and approval-capable commands can remain pending in the agent without a WebUI approval card.
 
+When YOLO is enabled for a gateway-backed browser session, WebUI approves the
+current card and automatically answers later Runs API approval requests while
+the WebUI session flag remains active. This is client-managed compatibility
+behavior: the current Runs API has no session-YOLO toggle, so a request briefly
+reaches the approval boundary before WebUI answers it, and Agent-owned policy
+such as unrestricted computer-use mode is unchanged. Native API session YOLO
+is tracked in [Hermes Agent PR #61946](https://github.com/NousResearch/hermes-agent/pull/61946).
+
 `HERMES_WEBUI_CHAT_BACKEND` is intentionally strict: only `gateway`,
 `api_server`, or `api-server` enable the bridge. Generic truthy values such as
 `1` or `true` are ignored so existing deployments do not change execution

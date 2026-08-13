@@ -1905,6 +1905,10 @@ async function cmdYolo(){
     // Check current state first to toggle
     const status=await api('/api/session/yolo?session_id='+encodeURIComponent(sid));
     const enable=!status.yolo_enabled;
+    if(enable && typeof toggleYoloFromApproval==='function' && _approvalSessionId===sid && _approvalCurrentId){
+      await toggleYoloFromApproval();
+      return;
+    }
     await api('/api/session/yolo',{
       method:'POST',
       body:JSON.stringify({session_id:sid,enabled:enable}),

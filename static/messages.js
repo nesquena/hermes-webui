@@ -7265,17 +7265,14 @@ function _updateYoloPill() {
 
 async function toggleYoloFromApproval() {
   const sid = S.session && S.session.session_id;
-  if (!sid) return;
-  try {
-    await api('/api/session/yolo', {
-      method: 'POST',
-      body: JSON.stringify({ session_id: sid, enabled: true }),
-    });
+  if (!sid) return false;
+  const enabled = await respondApproval('once', {yolo: true});
+  if (enabled) {
     _yoloEnabled = true;
     _updateYoloPill();
-    hideApprovalCard(true);
     showToast(t('yolo_enabled'));
-  } catch (e) { showToast('YOLO: ' + e.message); }
+  }
+  return enabled;
 }
 
 // ── Approval polling ──
@@ -7593,17 +7590,23 @@ function toggleApprovalCardCollapsed(forceCollapsed) {
 }
 
 async function respondApproval(choice) {
+  const options = arguments[1] || {};
   const sid = _approvalSessionId || (S.session && S.session.session_id);
-  if (!sid) return;
+  if (!sid) return false;
   const approvalId = _approvalCurrentId;
-  if (_approvalResponseMatches(sid, approvalId)) return;
+  if (_approvalResponseMatches(sid, approvalId)) return false;
   _unmarkApprovalDismissed(sid, approvalId);
   _approvalResponding = {sid, approvalId: approvalId || null, choice};
   _setApprovalControlsDisabled(choice, true);
   try {
     const result = await api("/api/approval/respond", {
       method: "POST",
-      body: JSON.stringify({ session_id: sid, choice, approval_id: approvalId })
+      body: JSON.stringify({
+        session_id: sid,
+        choice,
+        approval_id: approvalId,
+        ...(options.yolo ? {yolo: true} : {}),
+      })
     });
     if (result && result.ok) {
       _approvalResponding = null;
@@ -7638,13 +7641,15 @@ async function respondApproval(choice) {
           })
           .catch(() => {});
       }
-      return;
+      return true;
     }
     const errMsg = (result && result.error) || "Approval response not accepted.";
     _restoreFailedApprovalResponse(sid, errMsg);
+    return false;
   } catch(e) {
     const errMsg = (e && e.message) || (t("approval_responding") + " failed");
     _restoreFailedApprovalResponse(sid, errMsg);
+    return false;
   }
 }
 
