@@ -278,14 +278,20 @@
           <button class="panel-head-btn has-tooltip has-tooltip--bottom" id="insightsRefreshBtn" onclick="loadInsights(true)" data-tooltip="Refresh" aria-label="Refresh"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
         </div>
       </div>
-      <div class="panel-head-sub" style="padding:0 12px 8px">
-        <select id="insightsPeriod" onchange="loadInsights()" style="width:100%;background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:12px">
-          <option value="7">7 days</option>
-          <option value="30" selected>30 days</option>
-          <option value="90">90 days</option>
-          <option value="365">365 days</option>
-        </select>
-      </div>
+      <div class="panel-head-sub insights-range-bar" style="padding:12px 12px 6px;display:flex;flex-direction:column;gap:8px">
+              <select id="insightsPeriod" onchange="insightsPeriodChange()" style="width:100%;background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 8px;font-size:12px">
+                <option value="7">7 days</option>
+                <option value="30" selected>30 days</option>
+                <option value="90">90 days</option>
+                <option value="365">365 days</option>
+                <option value="custom">Custom range…</option>
+              </select>
+              <div id="insightsCustomRange" style="display:none;align-items:center;gap:6px;flex-wrap:wrap">
+                        <input type="date" id="insightsStart" onchange="insightsRangeInputs()" style="flex:1;min-width:0;background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 8px;font-size:12px">
+                        <span style="color:var(--muted);font-size:12px">→</span>
+                        <input type="date" id="insightsEnd" onchange="insightsRangeInputs()" style="flex:1;min-width:0;background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 8px;font-size:12px">
+                      </div>
+            </div>
     </div>
     <!-- Workspaces panel -->
     <div class="panel-view" id="panelWorkspaces">
