@@ -3558,6 +3558,11 @@ body.tts-enabled .msg-tts-btn{display:inline-flex;align-items:center;}
 
 /* Empty state: add subtle gradient behind logo */
 .empty-state{background:radial-gradient(ellipse at 50% 20%,var(--accent-bg) 0%,transparent 60%);}
+/* When the chat todos tray is visible, it pushes the welcome panel down and
+   the gradient's 20% focus lands right under the tray, looking like a
+   full-width color band stuck behind it. Re-center the glow around the logo
+   so the area directly below the tray stays clean. */
+.messages-shell.has-chat-todos .empty-state{background:radial-gradient(ellipse at 50% 55%,var(--accent-bg) 0%,transparent 55%);}
 
 /* Remove old status-text from composer (kept for error messages only) */
 .status-text{font-size:11px;color:var(--muted);padding-left:2px;display:none;}
