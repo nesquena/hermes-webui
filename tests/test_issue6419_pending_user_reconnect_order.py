@@ -138,6 +138,7 @@ def test_merge_helper_repairs_malformed_order_and_is_idempotent():
             _function_source(SESSIONS_JS, "_stripForcedSkillEnvelope"),
             _function_source(SESSIONS_JS, "_normalizeUserTranscriptText"),
             _function_source(SESSIONS_JS, "_sameTranscriptMessage"),
+            _function_source(SESSIONS_JS, "_opaqueActiveTurnToken"),
             _function_source(SESSIONS_JS, "_currentTailUserMessage"),
             _function_source(SESSIONS_JS, "_hasCurrentTailUserDuplicate"),
             _function_source(SESSIONS_JS, "_mergePendingSessionMessage"),
@@ -148,17 +149,17 @@ def test_merge_helper_repairs_malformed_order_and_is_idempotent():
 function getPendingSessionMessage(session, messages){{
   const text=String(session.pending_user_message||'').trim();
   if(!text) return null;
-  return {{role:'user',content:text,_pending:true,_ts:session.pending_started_at}};
+  return {{role:'user',content:text,_pending:true,_ts:session.pending_started_at,_active_turn_token:session.active_turn_token}};
 }}
 const historical={{role:'user',content:'same prompt',_ts:1}};
 const settled={{role:'assistant',content:'old answer',_ts:2}};
 const live={{role:'assistant',content:'working',_live:true,_ts:4}};
 const misplaced={{
   role:'user',content:'same prompt',_pending:true,_ts:3,
-  attachments:[{{path:'proof.txt'}}],_source:'resume'
+  attachments:[{{path:'proof.txt'}}],_source:'resume',_active_turn_token:'opaque:turn-3'
 }};
 const messages=[historical,settled,live,misplaced];
-const session={{pending_user_message:'same prompt',pending_started_at:3}};
+const session={{pending_user_message:'same prompt',pending_started_at:3,active_turn_token:'opaque:turn-3'}};
 const first=_mergePendingSessionMessage(session,messages);
 const afterFirst=messages.map(m=>({{role:m.role,content:m.content,live:!!m._live,ts:m._ts,attachments:m.attachments,source:m._source}}));
 const second=_mergePendingSessionMessage(session,messages);
@@ -166,7 +167,7 @@ process.stdout.write(JSON.stringify({{first,second,afterFirst,final:messages}}))
 """
     result = _run_node(script)
 
-    assert result["first"] is True
+    assert result["first"] is False
     assert result["second"] is False
     assert [row["role"] for row in result["afterFirst"]] == [
         "user",
@@ -174,6 +175,8 @@ process.stdout.write(JSON.stringify({{first,second,afterFirst,final:messages}}))
         "user",
         "assistant",
     ]
+    assert result["afterFirst"][2]["live"] is False
+    assert result["afterFirst"][3]["live"] is True
     repaired = result["afterFirst"][2]
     assert repaired["ts"] == 3
     assert repaired["attachments"] == [{"path": "proof.txt"}]
@@ -192,6 +195,7 @@ def test_refresh_session_uses_canonical_helper_before_render():
             _function_source(SESSIONS_JS, "_stripForcedSkillEnvelope"),
             _function_source(SESSIONS_JS, "_normalizeUserTranscriptText"),
             _function_source(SESSIONS_JS, "_sameTranscriptMessage"),
+            _function_source(SESSIONS_JS, "_opaqueActiveTurnToken"),
             _function_source(SESSIONS_JS, "_currentTailUserMessage"),
             _function_source(SESSIONS_JS, "_hasCurrentTailUserDuplicate"),
             _function_source(SESSIONS_JS, "_mergePendingSessionMessage"),

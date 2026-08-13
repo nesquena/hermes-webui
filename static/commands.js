@@ -1265,12 +1265,15 @@ async function cmdGoal(args){
     if(S.session&&S.session.session_id===activeSid){
       S.session.active_stream_id=r.stream_id;
       if(typeof r.pending_started_at==='number')S.session.pending_started_at=r.pending_started_at;
+      S.session.active_turn_token=typeof _opaqueActiveTurnToken==='function'
+        ?_opaqueActiveTurnToken(r.active_turn_token):null;
       if(r.effective_model)S.session.model=r.effective_model;
       if(r.effective_model_provider)S.session.model_provider=r.effective_model_provider;
     }
-    INFLIGHT[activeSid]={messages:[...S.messages],uploaded:[],toolCalls:[]};
+    const activeTurnToken=S.session&&S.session.active_turn_token||null;
+    INFLIGHT[activeSid]={messages:[...S.messages],uploaded:[],toolCalls:[],activeTurnToken};
     if(typeof markInflight==='function')markInflight(activeSid,r.stream_id);
-    if(typeof saveInflightState==='function')saveInflightState(activeSid,{streamId:r.stream_id,messages:INFLIGHT[activeSid].messages,uploaded:[],toolCalls:[]});
+    if(typeof saveInflightState==='function')saveInflightState(activeSid,{streamId:r.stream_id,messages:INFLIGHT[activeSid].messages,uploaded:[],toolCalls:[],activeTurnToken});
     startApprovalPolling(activeSid);
     startClarifyPolling(activeSid);
     if(typeof _fetchYoloState==='function')_fetchYoloState(activeSid);

@@ -347,37 +347,37 @@ const assert = require('assert');
 {helper_src}
 
 let base = [
-  {{role:'user', content:'go'}},
+  {{role:'user', content:'go', _active_turn_token:'turn:1'}},
   {{role:'assistant', content:'First progress.'}},
   {{role:'tool', content:'{{}}'}},
   {{role:'assistant', content:'Second progress.'}},
 ];
 let inflight = [
-  {{role:'user', content:'go'}},
-  {{role:'assistant', _live:true, content:'First progress.\\n\\nSecond progress.\\n\\nSecond progress.'}},
+  {{role:'user', content:'go', _active_turn_token:'turn:1'}},
+  {{role:'assistant', _live:true, _active_turn_token:'turn:1', content:'First progress.\\n\\nSecond progress.\\n\\nSecond progress.'}},
 ];
-assert.strictEqual(_prepareRunningLiveTail(base, inflight), true);
+assert.strictEqual(_prepareRunningLiveTail(base, inflight, 'turn:1'), true);
 assert.strictEqual(inflight[1].content, 'First progress.\\n\\nSecond progress.');
-base = _dropCurrentTurnAssistantMessages(base);
-let merged = _mergeInflightTailMessages(base, inflight);
+base = _dropCurrentTurnAssistantMessages(base, 'turn:1');
+let merged = _mergeInflightTailMessages(base, inflight, 'turn:1');
 assert.strictEqual(merged.filter(m => m.role === 'assistant').length, 1);
 assert.strictEqual(merged[merged.length - 1]._live, true);
 assert.strictEqual(merged[merged.length - 1].content, 'First progress.\\n\\nSecond progress.');
 
 base = [
-  {{role:'user', content:'go'}},
+  {{role:'user', content:'go', _active_turn_token:'turn:1'}},
   {{role:'assistant', content:'First progress.'}},
   {{role:'tool', content:'{{}}'}},
   {{role:'assistant', content:'Second progress.'}},
 ];
 inflight = [
-  {{role:'user', content:'go'}},
-  {{role:'assistant', _live:true, content:'First progress.'}},
+  {{role:'user', content:'go', _active_turn_token:'turn:1'}},
+  {{role:'assistant', _live:true, _active_turn_token:'turn:1', content:'First progress.'}},
 ];
-assert.strictEqual(_prepareRunningLiveTail(base, inflight), true);
+assert.strictEqual(_prepareRunningLiveTail(base, inflight, 'turn:1'), true);
 assert.strictEqual(inflight[1].content, 'First progress.\\n\\nSecond progress.');
-base = _dropCurrentTurnAssistantMessages(base);
-merged = _mergeInflightTailMessages(base, inflight);
+base = _dropCurrentTurnAssistantMessages(base, 'turn:1');
+merged = _mergeInflightTailMessages(base, inflight, 'turn:1');
 assert.strictEqual(merged.filter(m => m.role === 'assistant').length, 1);
 assert.strictEqual(merged[merged.length - 1]._live, true);
 assert.strictEqual(merged[merged.length - 1].content, 'First progress.\\n\\nSecond progress.');
@@ -403,19 +403,20 @@ def test_running_reattach_rebuilds_live_assistant_from_last_text_before_activity
 const assert = require('assert');
 {helper_src}
 
-let base = [{{role:'user', content:'go'}}];
+let base = [{{role:'user', content:'go', _active_turn_token:'turn:1'}}];
 let inflightState = {{
   lastAssistantText:'Recovered progress text.',
   lastReasoningText:'',
-  messages:[{{role:'user', content:'go'}}],
+  activeTurnToken:'turn:1',
+  messages:[{{role:'user', content:'go', _active_turn_token:'turn:1'}}],
 }};
 assert.strictEqual(_ensureInflightLiveAssistantMessage(inflightState), true);
 assert.strictEqual(inflightState.messages.length, 2);
 assert.strictEqual(inflightState.messages[1]._live, true);
 assert.strictEqual(inflightState.messages[1].content, 'Recovered progress text.');
-assert.strictEqual(_prepareRunningLiveTail(base, inflightState.messages), true);
-base = _dropCurrentTurnAssistantMessages(base);
-const merged = _mergeInflightTailMessages(base, inflightState.messages);
+assert.strictEqual(_prepareRunningLiveTail(base, inflightState.messages, 'turn:1'), true);
+base = _dropCurrentTurnAssistantMessages(base, 'turn:1');
+const merged = _mergeInflightTailMessages(base, inflightState.messages, 'turn:1');
 assert.strictEqual(merged.filter(m => m.role === 'assistant').length, 1);
 assert.strictEqual(merged[merged.length - 1]._live, true);
 assert.strictEqual(merged[merged.length - 1].content, 'Recovered progress text.');
@@ -643,6 +644,7 @@ def test_upsert_live_tool_call_preserves_start_seq_for_complete():
         _function_decl(MESSAGES_JS, "_currentLiveToolAnchor"),
         _function_decl(MESSAGES_JS, "_findPendingLiveToolCallIndex"),
         _function_decl(MESSAGES_JS, "upsertLiveToolCall"),
+        _function_decl(SESSIONS_JS, "_opaqueActiveTurnToken"),
     ])
     script = (
         "const assert = require('assert');\n"
@@ -700,6 +702,7 @@ def test_upsert_live_tool_call_complete_matches_by_name_burst_without_tid():
         _function_decl(MESSAGES_JS, "_currentLiveToolAnchor"),
         _function_decl(MESSAGES_JS, "_findPendingLiveToolCallIndex"),
         _function_decl(MESSAGES_JS, "upsertLiveToolCall"),
+        _function_decl(SESSIONS_JS, "_opaqueActiveTurnToken"),
     ])
     script = (
         "const assert = require('assert');\n"
@@ -751,6 +754,7 @@ def test_upsert_flags_orphan_complete_but_not_normal_start_complete():
         _function_decl(MESSAGES_JS, "_currentLiveToolAnchor"),
         _function_decl(MESSAGES_JS, "_findPendingLiveToolCallIndex"),
         _function_decl(MESSAGES_JS, "upsertLiveToolCall"),
+        _function_decl(SESSIONS_JS, "_opaqueActiveTurnToken"),
     ])
     script = (
         "const assert = require('assert');\n"
@@ -856,9 +860,9 @@ def test_load_session_rebuilds_live_tail_before_snapshot_fallback():
     body = _function_body(SESSIONS_JS, "loadSession")
     ensure_pos = body.find("_ensureInflightLiveAssistantMessage(INFLIGHT[sid]);")
     inflight_pos = body.find("const inflightMessages=_projectInflightMessagesForActivityBursts(INFLIGHT[sid]);")
-    prepare_pos = body.find("const liveTailPrepared=_prepareRunningLiveTail(S.messages,inflightMessages);")
-    drop_assistant_pos = body.find("S.messages=_dropCurrentTurnAssistantMessages(S.messages);")
-    merge_pos = body.find("S.messages=_mergeInflightTailMessages(S.messages,inflightMessages);")
+    prepare_pos = body.find("const liveTailPrepared=_prepareRunningLiveTail(S.messages,inflightMessages,activeTurnToken);")
+    drop_assistant_pos = body.find("S.messages=_dropCurrentTurnAssistantMessages(S.messages,activeTurnToken);")
+    merge_pos = body.find("S.messages=_mergeInflightTailMessages(S.messages,inflightMessages,activeTurnToken);")
     restore_pos = body.find("restoreLiveTurnHtmlForSession(sid)")
     assert ensure_pos != -1 and inflight_pos != -1
     assert prepare_pos != -1
@@ -978,7 +982,7 @@ def test_merge_inflight_tail_preserves_all_segmented_live_progress():
     groups whose burst ids point to those anchors pile up at the bottom.
     """
     assert NODE, "node not on PATH"
-    helper_start = SESSIONS_JS.index("function _currentTailUserMessage")
+    helper_start = SESSIONS_JS.index("function _opaqueActiveTurnToken")
     fn_start = SESSIONS_JS.index("function _mergeInflightTailMessages")
     fn_end = SESSIONS_JS.index("// Load older messages", fn_start)
     tail_user_helpers = SESSIONS_JS[helper_start:fn_start]
@@ -998,7 +1002,7 @@ const inflight = [
   {{role:'assistant', _live:true, content:'second progress', _activityBurstId:2}},
   {{role:'assistant', _live:true, content:'third progress', _activityBurstId:3}},
 ];
-const merged = _mergeInflightTailMessages(base, inflight);
+const merged = _mergeInflightTailMessages(base, inflight, null);
 assert.deepStrictEqual(
   merged.filter(m => m.role === 'assistant').map(m => m.content),
   ['first progress', 'second progress', 'third progress']

@@ -9259,6 +9259,7 @@ function _compactInflightState(state){
   const todoStateMeta=(state.todoStateMeta&&typeof state.todoStateMeta==='object')?state.todoStateMeta:null;
   return _truncateInflightValue({
     streamId:state.streamId||null,
+    activeTurnToken:state.activeTurnToken??state.active_turn_token??null,
     messages,
     uploaded:Array.isArray(state.uploaded)?state.uploaded.slice(-20):[],
     toolCalls,
@@ -10649,7 +10650,7 @@ async function _waitForServerThenReload(opts){
   if(msgEl) msgEl.textContent='⚠️ Server is taking longer than expected — click Reload when ready';
 }
 
-function _pendingCurrentTailUserMessage(messages,candidateStart,candidateTimestamp){
+function _pendingCurrentTailUserMessage(messages,candidateStart,candidateTimestamp,activeTurnToken){
   const list=Array.isArray(messages)?messages:[];
   for(let i=list.length-1;i>=0;i--){
     const msg=list[i];
@@ -10661,6 +10662,11 @@ function _pendingCurrentTailUserMessage(messages,candidateStart,candidateTimesta
     }
     if((typeof _isCanonicalAssistantToolCallEnvelope==='function'&&_isCanonicalAssistantToolCallEnvelope(msg))
       ||String(msg.role||'')==='tool'){
+      if(msg._active_turn_token!==undefined){
+        if(typeof activeTurnToken!=='string'||!activeTurnToken.trim().length
+          ||msg._active_turn_token!==activeTurnToken) return null;
+        continue;
+      }
       if(typeof _isTailActivityOwnedByCandidateTurn!=='function'
         ||!_isTailActivityOwnedByCandidateTurn(msg,candidateStart,candidateTimestamp)) return null;
       continue;
@@ -10690,23 +10696,15 @@ function _messageTimestampSeconds(msg){
 }
 
 /**
- * Exact-identity match for the active turn's user row via its
- * `_active_turn_token`, mirroring the server's `build_active_turn_token`
- * ("{stream_id}:{started_at}") stamped by the eager-checkpoint path. The token
- * embeds the stream_id, which no other turn can share, so a row carrying the
- * current session's token IS the active turn — no timestamp tolerance needed.
+ * Exact-identity match for the active turn's user row via the opaque,
+ * server-issued `_active_turn_token`. JavaScript deliberately does not parse,
+ * trim, or reconstruct this value; trim() below only rejects blank spellings.
  */
 function _activeTurnTokenMatches(msg, session){
-  if(!msg||typeof msg._active_turn_token!=='string') return false;
-  const streamId=session&&session.active_stream_id;
-  const startedAt=Number(session&&session.pending_started_at);
-  if(!streamId||!Number.isFinite(startedAt)||startedAt<=0) return false;
-  const sep=msg._active_turn_token.lastIndexOf(':');
-  if(sep<=0) return false;
-  if(msg._active_turn_token.slice(0,sep).trim()!==String(streamId).trim()) return false;
-  const tokenStarted=Number(msg._active_turn_token.slice(sep+1));
-  return Number.isFinite(tokenStarted)&&tokenStarted>0
-    && Math.abs(tokenStarted-startedAt)<=_PENDING_ACTIVE_TURN_TS_EPSILON;
+  const activeToken=session&&(session.active_turn_token??session.activeTurnToken);
+  return !!(msg&&typeof msg._active_turn_token==='string'&&msg._active_turn_token.trim().length
+    &&typeof activeToken==='string'&&activeToken.trim().length
+    &&msg._active_turn_token===activeToken);
 }
 
 /**
@@ -10726,8 +10724,7 @@ function _activeTurnTokenMatches(msg, session){
  * same text twice in a row (a plain "继续" follow-up) legitimately gets two
  * identical user turns, and matching on text would swallow the new one. The
  * discriminator is therefore exact identity, never proximity: the active turn's
- * row either carries the server-stamped `_active_turn_token` (stream_id +
- * started_at — unique to this turn), or its timestamp equals `pending_started_at`
+ * row either carries the server-stamped opaque `_active_turn_token`, or its timestamp equals `pending_started_at`
  * within a precision-only epsilon that absorbs float/state.db drift but never a
  * full second. A whole-second (or sub-second) mismatch is ambiguous and returns
  * null so the caller materializes the pending turn — the transient duplicate is
@@ -10739,19 +10736,26 @@ function _pendingActiveTurnUserMessage(messages, session){
   const startedAt=Number(session?.pending_started_at);
   if(!Number.isFinite(startedAt)||startedAt<=0) return null;
   const list=Array.isArray(messages)?messages:[];
+  let tokenMatch=null;
+  let timestampMatch=null;
   for(let i=list.length-1;i>=0;i--){
     const msg=list[i];
     if(!msg||String(msg.role||'')!=='user') continue;
     if(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(msg)) continue;
     // Unambiguous: the row carries the active turn's exact token
-    // (stream_id + started_at) stamped by the server's eager-checkpoint path.
-    if(typeof _activeTurnTokenMatches==='function'&&_activeTurnTokenMatches(msg,session)) return msg;
+    // opaque token stamped by the server's eager-checkpoint path.
+    if(typeof _activeTurnTokenMatches==='function'&&_activeTurnTokenMatches(msg,session)){
+      if(tokenMatch) return null;
+      tokenMatch=msg;
+    }
     // Unambiguous: the row's timestamp IS pending_started_at within
     // precision-only float drift (never a whole second).
     const ts=_messageTimestampSeconds(msg);
     if(ts===null) continue;
-    if(Math.abs(ts-startedAt)<=_PENDING_ACTIVE_TURN_TS_EPSILON) return msg;
+    if(Math.abs(ts-startedAt)<=_PENDING_ACTIVE_TURN_TS_EPSILON&&!timestampMatch) timestampMatch=msg;
   }
+  if(tokenMatch) return tokenMatch;
+  if(timestampMatch) return timestampMatch;
   // Any wider drift (whole-second truncation, a rapid repeat ~1s later) is
   // ambiguous: return null so getPendingSessionMessage() materializes the
   // pending turn rather than guessing.
@@ -10765,8 +10769,15 @@ function getPendingSessionMessage(session, messagesOverride=null){
   const sourceMessages=Array.isArray(messagesOverride)?messagesOverride:session?.messages;
   const messages=Array.isArray(sourceMessages)?sourceMessages:[];
   const pendingCandidate={role:'user',content:text};
+  const activeTokenRows=typeof _activeTurnTokenMatches==='function'
+    ?messages.filter(row=>_activeTurnTokenMatches(row,session))
+    :[];
   const _matchesPending=(row)=>{
     if(!row) return false;
+    if(typeof _activeTurnTokenMatches==='function'
+      &&Object.prototype.hasOwnProperty.call(row,'_active_turn_token')){
+      return activeTokenRows.length===1&&activeTokenRows[0]===row;
+    }
     return typeof _sameTranscriptMessage==='function'
       ? _sameTranscriptMessage(row,pendingCandidate)
       : String(msgContent(row)||'').trim()===text;
@@ -10775,7 +10786,12 @@ function getPendingSessionMessage(session, messagesOverride=null){
     if(attachments.length&&!row.attachments?.length) row.attachments=attachments;
     return null;
   };
-  const currentTailUser=_pendingCurrentTailUserMessage(messages,session?.pending_started_at);
+  const currentTailUser=_pendingCurrentTailUserMessage(
+    messages,
+    session?.pending_started_at,
+    undefined,
+    session&&(session.active_turn_token??session.activeTurnToken),
+  );
   if(currentTailUser){
     const sameCurrentTurn=_matchesPending(currentTailUser);
     if(sameCurrentTurn) return _adoptExistingRow(currentTailUser);

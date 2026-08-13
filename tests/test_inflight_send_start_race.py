@@ -1,4 +1,6 @@
 """Regression coverage for send/start optimistic INFLIGHT races."""
+import json
+import subprocess
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -159,6 +161,72 @@ def test_post_start_bookkeeping_errors_cannot_block_live_attach():
     assert "S.messages.push({role:'assistant',content:`**Error:**" not in body[optional_idx : attach_idx], (
         "post-start optional failures should not append assistant error messages before stream attach"
     )
+
+
+def test_chat_start_stamps_shared_optimistic_row_with_server_turn_token():
+    body = _function_body(MESSAGES_JS, "send")
+    stamp_start = body.index("const _stampActiveTurnRows=()=>{")
+    stamp_end = body.index("  _stampActiveTurnRows();", stamp_start)
+    stamp = body[stamp_start:stamp_end]
+
+    script = f"""
+const userMsg = {{role:'user', content:'repeat me', _ts:50, _pending:true}};
+const S = {{messages:[
+  {{role:'user', content:'repeat me', _ts:100}},
+  {{role:'assistant', content:'completed', _ts:101}},
+]}};
+const INFLIGHT = {{sid:{{messages:[
+  {{role:'user', content:'repeat me', _ts:100}},
+  {{role:'assistant', content:'working', _live:true, _ts:102}},
+]}}}};
+const activeSid = 'sid';
+const streamId = 'new-stream';
+const _activeTurnToken = 'opaque-server-token';
+const startData = {{pending_started_at:200}};
+const uploadedNames = [];
+const optimisticMessages = [];
+{stamp}
+_stampActiveTurnRows();
+S.messages=[{{role:'user',content:'repeat me',_pending:true,_ts:100}}];
+INFLIGHT.sid.messages=[{{role:'user',content:'repeat me',_pending:true,_ts:100}}];
+_stampActiveTurnRows();
+process.stdout.write(JSON.stringify({{
+  visibleTokens:S.messages.filter(m=>m&&m.role==='user').map(m=>m._active_turn_token||null),
+  inflightTokens:INFLIGHT.sid.messages.filter(m=>m&&m.role==='user').map(m=>m._active_turn_token||null),
+  visibleAttachmentRow:S.messages.filter(m=>m&&m.role==='user').find(m=>m._active_turn_token===_activeTurnToken)===userMsg,
+  inflightAttachmentRow:INFLIGHT.sid.messages.filter(m=>m&&m.role==='user').find(m=>m._active_turn_token===_activeTurnToken)===userMsg,
+  replacedPendingRows:S.messages.filter(m=>m&&m.role==='user').map(m=>m._ts),
+  replacedPendingOwner:S.messages.find(m=>m&&m._active_turn_token===_activeTurnToken)===userMsg,
+}}));
+"""
+    result = json.loads(subprocess.run(
+        ["node", "-e", script], check=True, capture_output=True, text=True
+    ).stdout)
+
+    assert result == {
+        "visibleTokens": [None, "opaque-server-token"],
+        "inflightTokens": [None, "opaque-server-token"],
+        "visibleAttachmentRow": True,
+        "inflightAttachmentRow": True,
+        "replacedPendingRows": [100, 50],
+        "replacedPendingOwner": True,
+    }
+
+
+def test_inflight_storage_compaction_preserves_opaque_turn_token():
+    ui_src = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+    compact = _function_body(ui_src, "_compactInflightState")
+    script = f"""
+function _getInflightStateLimits(){{return {{messages:24, toolCalls:48, stringChars:60000}};}}
+function _truncateInflightValue(value){{return value;}}
+function _compactInflightState(state){{{compact}}}
+const state = _compactInflightState({{activeTurnToken:'opaque:token with spaces', messages:[], toolCalls:[]}});
+process.stdout.write(JSON.stringify(state));
+"""
+    result = json.loads(subprocess.run(
+        ["node", "-e", script], check=True, capture_output=True, text=True
+    ).stdout)
+    assert result["activeTurnToken"] == "opaque:token with spaces"
 
 
 def test_server_absent_optimistic_first_turn_rows_are_not_kept_forever():

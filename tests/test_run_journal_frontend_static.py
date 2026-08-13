@@ -59,6 +59,7 @@ def _run_session_identity_probe() -> dict:
             _function_body(SESSIONS_SRC, "function _stripForcedSkillEnvelope"),
             _function_body(SESSIONS_SRC, "function _normalizeUserTranscriptText"),
             _function_body(SESSIONS_SRC, "function _sameTranscriptMessage"),
+            _function_body(SESSIONS_SRC, "function _opaqueActiveTurnToken"),
             _function_body(SESSIONS_SRC, "function _currentTailUserMessage"),
             _function_body(SESSIONS_SRC, "function _hasCurrentTailUserDuplicate"),
             _function_body(SESSIONS_SRC, "function _inflightHasVisibleLiveState"),
@@ -102,6 +103,7 @@ def _run_current_turn_scope_probe() -> dict:
             _function_body(SESSIONS_SRC, "function _stripForcedSkillEnvelope"),
             _function_body(SESSIONS_SRC, "function _normalizeUserTranscriptText"),
             _function_body(SESSIONS_SRC, "function _sameTranscriptMessage"),
+            _function_body(SESSIONS_SRC, "function _opaqueActiveTurnToken"),
             _function_body(SESSIONS_SRC, "function _currentTailUserMessage"),
             _function_body(SESSIONS_SRC, "function _hasCurrentTailUserDuplicate"),
             _function_body(SESSIONS_SRC, "function _mergePendingSessionMessage"),
@@ -118,12 +120,14 @@ function getPendingSessionMessage(session, messages){{
     content:text,
     _ts:session.pending_started_at||10,
     _pending:true,
+    _active_turn_token:session.active_turn_token,
   }};
 }}
 const historical = {{role:'user', content:{json.dumps(historical_workspace_prompt)}, _ts:1}};
 const historicalAnswer = {{role:'assistant', content:'done', _ts:2}};
 const liveAssistant = {{role:'assistant', content:'working', _live:true, _ts:4}};
-const pendingSession = {{pending_user_message:{json.dumps(prompt)}, pending_started_at:3}};
+const activeTurnToken = 'turn-current:3';
+const pendingSession = {{pending_user_message:{json.dumps(prompt)}, pending_started_at:3, active_turn_token:activeTurnToken}};
 
 const pendingAfterHistory = [historical, historicalAnswer];
 const insertedAfterHistory = _mergePendingSessionMessage(pendingSession, pendingAfterHistory);
@@ -131,18 +135,20 @@ const insertedAfterHistory = _mergePendingSessionMessage(pendingSession, pending
 const pendingBeforeLive = [historical, historicalAnswer, liveAssistant];
 const insertedBeforeLive = _mergePendingSessionMessage(pendingSession, pendingBeforeLive);
 
-const optimisticCurrent = {{role:'user', content:{json.dumps(current_workspace_prompt)}, _ts:3}};
+const optimisticCurrent = {{role:'user', content:{json.dumps(current_workspace_prompt)}, _ts:3, _active_turn_token:activeTurnToken}};
 const pendingWithCurrent = [historical, historicalAnswer, optimisticCurrent, liveAssistant];
 const insertedWithCurrent = _mergePendingSessionMessage(pendingSession, pendingWithCurrent);
 
 const inflightAfterHistory = _mergeInflightTailMessages(
   [historical, historicalAnswer],
-  [{{role:'user', content:{json.dumps(prompt)}, _ts:3}}, liveAssistant]
+  [{{role:'user', content:{json.dumps(prompt)}, _ts:3, _active_turn_token:activeTurnToken}}, liveAssistant],
+  activeTurnToken
 );
 
 const inflightWithCurrent = _mergeInflightTailMessages(
   [historical, historicalAnswer, optimisticCurrent],
-  [{{role:'user', content:{json.dumps(prompt)}, _ts:3}}, liveAssistant]
+  [{{role:'user', content:{json.dumps(prompt)}, _ts:3, _active_turn_token:activeTurnToken}}, liveAssistant],
+  activeTurnToken
 );
 
 const compaction = {{
@@ -151,12 +157,13 @@ const compaction = {{
   _ts:3.5,
 }};
 const compactionBase = [historical, historicalAnswer, optimisticCurrent, compaction];
-const compactionCandidate = {{role:'user', content:{json.dumps(prompt)}, _ts:3}};
+const compactionCandidate = {{role:'user', content:{json.dumps(prompt)}, _ts:3, _active_turn_token:activeTurnToken}};
 const compactionCurrentTail = _currentTailUserMessage(compactionBase);
-const compactionTailDuplicate = _hasCurrentTailUserDuplicate(compactionBase, compactionCandidate);
+const compactionTailDuplicate = _hasCurrentTailUserDuplicate(compactionBase, compactionCandidate, activeTurnToken);
 const compactionMerged = _mergeInflightTailMessages(
   compactionBase,
-  [compactionCandidate, liveAssistant]
+  [compactionCandidate, liveAssistant],
+  activeTurnToken
 );
 const insertedAfterCompaction = _mergePendingSessionMessage(pendingSession, compactionMerged);
 const compactionPromptCount = compactionMerged.filter(
@@ -168,7 +175,8 @@ const compactionLiveAssistantRetained = compactionMerged.some(
 );
 const completedBoundaryDedupe = _hasCurrentTailUserDuplicate(
   [historical, historicalAnswer, compaction],
-  {{role:'user', content:{json.dumps(prompt)}, _ts:3}}
+  {{role:'user', content:{json.dumps(prompt)}, _ts:3, _active_turn_token:activeTurnToken}},
+  activeTurnToken
 );
 const distinctCompletedTurnPromptCount = inflightAfterHistory.filter(
   m=>m&&m.role==='user'&&_normalizeUserTranscriptText(m.content)==={json.dumps(prompt)}
@@ -210,6 +218,7 @@ def _run_pending_session_message_probe() -> dict:
             _function_body(SESSIONS_SRC, "function _stripForcedSkillEnvelope"),
             _function_body(SESSIONS_SRC, "function _normalizeUserTranscriptText"),
             _function_body(SESSIONS_SRC, "function _sameTranscriptMessage"),
+            _function_body(SESSIONS_SRC, "function _opaqueActiveTurnToken"),
             _function_body(UI_SRC, "function _pendingCurrentTailUserMessage"),
             _optional_function_body(UI_SRC, "function _messageTimestampSeconds"),
             _optional_function_body(UI_SRC, "function _activeTurnTokenMatches"),
@@ -354,7 +363,7 @@ const tokenIdentityTranscript = [
   {{role:'assistant', content:'partial', timestamp:560}},
 ];
 const tokenIdentityResult = getPendingSessionMessage(
-  {{pending_user_message:prompt, pending_started_at:midRunStartedAt, active_stream_id:'stream-abc'}},
+  {{pending_user_message:prompt, pending_started_at:midRunStartedAt, active_turn_token:'stream-abc:500'}},
   tokenIdentityTranscript
 );
 
@@ -403,6 +412,7 @@ def _run_tail_scanner_boundary_probe() -> list[dict]:
             _function_body(UI_SRC, "function msgContent"),
             _function_body(UI_SRC, "function _isContextCompactionText"),
             _function_body(UI_SRC, "function _isContextCompactionMessage"),
+            _function_body(SESSIONS_SRC, "function _opaqueActiveTurnToken"),
             _function_body(SESSIONS_SRC, "function _currentTailUserMessage"),
             _function_body(SESSIONS_SRC, "function _hasCurrentTailUserDuplicate"),
             _function_body(SESSIONS_SRC, "function _mergeInflightTailMessages"),
@@ -415,14 +425,15 @@ function _sameTranscriptMessage(a,b){{
 }}
 const prompt = {json.dumps(prompt)};
 const priorUser = {{role:'user', content:'older prompt', _ts:1}};
-const currentUser = {{role:'user', content:prompt, _ts:10}};
+const currentUser = {{role:'user', content:prompt, _ts:10, _active_turn_token:'turn-1:10'}};
+const currentCandidate = {{role:'user', content:prompt, _ts:10, _active_turn_token:'turn-1:10'}};
 const canonicalCall = {{id:'call-1', type:'function', function:{{name:'inspect'}}}};
 const canonicalTopNameCall = {{call_id:'call-2', name:'inspect'}};
 const sameTurnEnvelope = {{role:'assistant', content:'', _ts:10, tool_calls:[canonicalCall]}};
 const topNameEnvelope = {{role:'assistant', content:'', _ts:10, tool_calls:[canonicalTopNameCall]}};
 const sameTurnTool = {{role:'tool', content:'result', tool_call_id:'call-1', _ts:11}};
 const ordinaryAssistant = {{role:'assistant', content:'done', _ts:12}};
-const liveAssistant = {{role:'assistant', content:'working', _live:true, _ts:12}};
+const liveAssistant = {{role:'assistant', content:'working', _live:true, _ts:12, _active_turn_token:'turn-1:10'}};
 const compaction = {{role:'user', content:'[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted.', _ts:10.5}};
 
 const malformed = [
@@ -440,22 +451,31 @@ const cases = [
   {{name:'canonical envelope plus tool result', messages:[priorUser,currentUser,sameTurnEnvelope,sameTurnTool], expect:prompt}},
   {{name:'tool result only', messages:[priorUser,currentUser,sameTurnTool], expect:prompt}},
   {{name:'ordinary assistant boundary', messages:[priorUser,currentUser,ordinaryAssistant], expect:null}},
-  {{name:'older envelope activity', messages:[priorUser,currentUser,{{...sameTurnEnvelope,_ts:9}}], expect:null}},
-  {{name:'older tool activity', messages:[priorUser,currentUser,sameTurnEnvelope,{{...sameTurnTool,_ts:9}}], expect:null}},
-  {{name:'missing envelope timestamp', messages:[priorUser,currentUser,{{...sameTurnEnvelope,_ts:undefined}}], expect:null}},
-  {{name:'missing tool timestamp', messages:[priorUser,currentUser,sameTurnEnvelope,{{...sameTurnTool,_ts:undefined}}], expect:null}},
-  {{name:'missing candidate timestamp', messages:[priorUser,currentUser,sameTurnEnvelope], candidateStart:null, expect:null}},
+  {{name:'older envelope activity', messages:[priorUser,currentUser,{{...sameTurnEnvelope,_ts:9}}], currentExpect:prompt, pendingExpect:null}},
+  {{name:'older tool activity', messages:[priorUser,currentUser,sameTurnEnvelope,{{...sameTurnTool,_ts:9}}], currentExpect:prompt, pendingExpect:null}},
+  {{name:'missing envelope timestamp', messages:[priorUser,currentUser,{{...sameTurnEnvelope,_ts:undefined}}], currentExpect:prompt, pendingExpect:null}},
+  {{name:'missing tool timestamp', messages:[priorUser,currentUser,sameTurnEnvelope,{{...sameTurnTool,_ts:undefined}}], currentExpect:prompt, pendingExpect:null}},
+  {{name:'missing candidate timestamp', messages:[priorUser,currentUser,sameTurnEnvelope], candidateStart:null, currentExpect:prompt, pendingExpect:null}},
   {{name:'same-turn activity', messages:[priorUser,currentUser,{{...sameTurnEnvelope,timestamp:10,_ts:undefined}},{{...sameTurnTool,timestamp:10.1,_ts:undefined}}], expect:prompt}},
   {{name:'compaction marker', messages:[priorUser,currentUser,compaction,sameTurnEnvelope], expect:prompt}},
   {{name:'live tail', messages:[priorUser,currentUser,liveAssistant], expect:prompt}},
+  {{name:'live tail missing token', messages:[priorUser,currentUser,{{role:'assistant', content:'working', _live:true, _ts:12}}], currentExpect:null, pendingExpect:prompt}},
+  {{name:'live tail mismatched token', messages:[priorUser,currentUser,{{role:'assistant', content:'working', _live:true, _ts:12, _active_turn_token:'turn-2:10'}}], currentExpect:null, pendingExpect:prompt}},
   ...malformed.map(tc=>({{name:tc.name, messages:[priorUser,currentUser,tc.msg], expect:null}})),
 ];
 const tailPrompt = (row) => row&&row.role==='user' ? String(row.content||'') : null;
 const results = cases.map(tc=>({{
   name:tc.name,
-  current:tailPrompt(_currentTailUserMessage(tc.messages,tc.candidateStart===undefined?10:tc.candidateStart)),
+    current:tailPrompt(_currentTailUserMessage(
+    tc.messages,
+    tc.candidateStart===undefined?10:tc.candidateStart,
+    undefined,
+    tc.candidate===undefined?currentCandidate:tc.candidate,
+    tc.activeTurnToken===undefined?'turn-1:10':tc.activeTurnToken,
+  )),
   pending:tailPrompt(_pendingCurrentTailUserMessage(tc.messages,tc.candidateStart===undefined?10:tc.candidateStart)),
-  expect:tc.expect,
+  currentExpect:tc.currentExpect===undefined?tc.expect:tc.currentExpect,
+  pendingExpect:tc.pendingExpect===undefined?tc.expect:tc.pendingExpect,
 }}));
 
 // A newer repeated prompt must survive an older no-final-assistant tool tail.
@@ -467,7 +487,8 @@ const olderToolTail = [
 const newerPrompt = {{role:'user',content:prompt,_ts:10}};
 const merged = _mergeInflightTailMessages(
   olderToolTail,
-  [newerPrompt,{{role:'assistant',content:'working',_live:true,_ts:11}}]
+  [newerPrompt,{{role:'assistant',content:'working',_live:true,_ts:11}}],
+  'new-turn-token'
 );
 const timestampOnlyCandidate = {{role:'user',content:prompt,timestamp:10}};
 results.push({{
@@ -479,10 +500,315 @@ results.push({{
 }});
 results.push({{
   name:'candidate timestamp field',
-  currentDuplicate:_hasCurrentTailUserDuplicate([currentUser,sameTurnEnvelope],timestampOnlyCandidate),
+  currentDuplicate:_hasCurrentTailUserDuplicate([currentUser,sameTurnEnvelope],timestampOnlyCandidate,'turn-1:10'),
+  expect:false,
+}});
+results.push({{
+  name:'same-token candidate after tool activity',
+  currentDuplicate:_hasCurrentTailUserDuplicate([currentUser,sameTurnEnvelope],currentCandidate,'turn-1:10'),
   expect:true,
 }});
 process.stdout.write(JSON.stringify(results));
+"""
+    proc = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    return json.loads(proc.stdout)
+
+
+def _run_cross_clock_inflight_probe() -> dict:
+    """Exercise inflight dedupe with server-ahead persisted activity."""
+    helpers = "\n".join(
+        [
+            _function_body(UI_SRC, "function _timestampSeconds"),
+            _function_body(UI_SRC, "function _firstValidTimestampSeconds"),
+            _function_body(UI_SRC, "function _isTailActivityOwnedByCandidateTurn"),
+            _function_body(UI_SRC, "function _isCanonicalAssistantToolCallEnvelope"),
+            _function_body(UI_SRC, "function msgContent"),
+            _function_body(UI_SRC, "function _isContextCompactionText"),
+            _function_body(UI_SRC, "function _isContextCompactionMessage"),
+            _function_body(SESSIONS_SRC, "function _opaqueActiveTurnToken"),
+            _function_body(SESSIONS_SRC, "function _currentTailUserMessage"),
+            _function_body(SESSIONS_SRC, "function _hasCurrentTailUserDuplicate"),
+            _function_body(SESSIONS_SRC, "function _mergeInflightTailMessages"),
+        ]
+    )
+    script = f"""
+{helpers}
+function _sameTranscriptMessage(a,b){{
+  return !!(a&&b&&a.role===b.role&&String(a.content||'').trim()===String(b.content||'').trim());
+}}
+const prompt = {json.dumps("repeat me")};
+const oldCall = {{id:'old-call', function:{{name:'inspect'}}}};
+const streamId = 'new-stream';
+const pendingStartedAt = 200;
+const newToken = `${{streamId}}:${{pendingStartedAt}}`;
+const attachment = {{name:'new.txt', path:'new.txt', mime:'text/plain'}};
+const candidate = {{
+  role:'user', content:prompt, _ts:50, _pending:true,
+  _active_turn_token:newToken, attachments:[attachment],
+}};
+const priorActivity = [
+  {{role:'user', content:prompt, timestamp:100, _active_turn_token:'old-stream:100'}},
+  {{role:'assistant', content:'', timestamp:101, tool_calls:[oldCall]}},
+  {{role:'tool', content:'old result', timestamp:102, tool_call_id:'old-call'}},
+];
+const live = {{role:'assistant', content:'working', _live:true, _ts:51}};
+const skewMerged = _mergeInflightTailMessages(priorActivity, [candidate, live], newToken);
+const missingTokenCandidate = {{...candidate}};
+delete missingTokenCandidate._active_turn_token;
+const missingTokenMerged = _mergeInflightTailMessages(priorActivity, [missingTokenCandidate, live], newToken);
+
+const sameTurnActivity = [
+  {{role:'user', content:prompt, timestamp:100, _active_turn_token:newToken}},
+  {{role:'assistant', content:'', timestamp:101, tool_calls:[oldCall]}},
+  {{role:'tool', content:'current result', timestamp:102, tool_call_id:'old-call'}},
+];
+const sameTokenMerged = _mergeInflightTailMessages(sameTurnActivity, [candidate, live], newToken);
+process.stdout.write(JSON.stringify({{
+  skewUserCount:skewMerged.filter(m=>m&&m.role==='user').length,
+  skewAttachments:skewMerged.filter(m=>m&&m.role==='user').map(m=>m.attachments||[]),
+  missingTokenUserCount:missingTokenMerged.filter(m=>m&&m.role==='user').length,
+  sameTokenUserCount:sameTokenMerged.filter(m=>m&&m.role==='user').length,
+}}));
+"""
+    proc = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    return json.loads(proc.stdout)
+
+
+def _run_turn_ownership_adversarial_probe() -> dict:
+    """Exercise recovery, opaque-token dedupe, and fail-closed ownership."""
+    helpers = "\n".join(
+        [
+            _function_body(UI_SRC, "function _timestampSeconds"),
+            _function_body(UI_SRC, "function _firstValidTimestampSeconds"),
+            _function_body(UI_SRC, "function _isTailActivityOwnedByCandidateTurn"),
+            _function_body(UI_SRC, "function _isCanonicalAssistantToolCallEnvelope"),
+            _function_body(UI_SRC, "function _pendingCurrentTailUserMessage"),
+            _function_body(UI_SRC, "function _activeTurnTokenMatches"),
+            _function_body(UI_SRC, "function msgContent"),
+            _function_body(UI_SRC, "function _isContextCompactionText"),
+            _function_body(UI_SRC, "function _isContextCompactionMessage"),
+            _function_body(UI_SRC, "function getPendingSessionMessage"),
+            _function_body(SESSIONS_SRC, "function _messageComparableText"),
+            _function_body(SESSIONS_SRC, "function _stripAttachedFilesMarker"),
+            _function_body(SESSIONS_SRC, "function _stripForcedSkillEnvelope"),
+            _function_body(SESSIONS_SRC, "function _normalizeUserTranscriptText"),
+            _function_body(SESSIONS_SRC, "function _sameTranscriptMessage"),
+            _function_body(SESSIONS_SRC, "function _opaqueActiveTurnToken"),
+            _function_body(SESSIONS_SRC, "function _currentTailUserMessage"),
+            _function_body(SESSIONS_SRC, "function _hasCurrentTailUserDuplicate"),
+            _function_body(SESSIONS_SRC, "function _mergePendingSessionMessage"),
+            _function_body(SESSIONS_SRC, "function _currentTurnAssistantText"),
+            _function_body(SESSIONS_SRC, "function _compactTranscriptText"),
+            _function_body(SESSIONS_SRC, "function _dropCurrentTurnAssistantMessages"),
+            _function_body(SESSIONS_SRC, "function _prepareRunningLiveTail"),
+            _function_body(SESSIONS_SRC, "function _mergeInflightTailMessages"),
+        ]
+    )
+    script = f"""
+{helpers}
+const prompt = 'same prompt';
+const newToken = 'opaque:new-turn';
+const oldToken = 'opaque:old-turn';
+const attachment = {{name:'new.txt', path:'new.txt'}};
+const toolCall = {{id:'call-1', function:{{name:'inspect'}}}};
+
+// A: loadSession-style prepare -> drop -> inflight merge -> pending merge.
+const priorUser = {{role:'user', content:prompt, timestamp:100, _active_turn_token:oldToken}};
+const priorAssistant = {{role:'assistant', content:'completed', timestamp:101}};
+const newCandidate = {{
+  role:'user', content:prompt, _ts:50, _pending:true,
+  _active_turn_token:newToken, attachments:[attachment],
+}};
+const newLive = {{role:'assistant', content:'working', _live:true, _active_turn_token:newToken}};
+let recovery = [priorUser, priorAssistant];
+const prepared = _prepareRunningLiveTail(recovery, [newCandidate, newLive], newToken);
+if(prepared) recovery = _dropCurrentTurnAssistantMessages(recovery, newToken);
+recovery = _mergeInflightTailMessages(recovery, [newCandidate, newLive], newToken);
+const pendingMerge = _mergePendingSessionMessage(
+  {{pending_user_message:prompt, pending_started_at:200, active_turn_token:newToken, pending_attachments:[attachment]}},
+  recovery,
+);
+const recoveredUsers = recovery.filter(m=>m&&m.role==='user');
+
+// C: token ownership wins over transformed display/model text and adopts files.
+const sameTurnBase = [
+  {{role:'user', content:'upload-only', timestamp:100, _active_turn_token:newToken}},
+  {{role:'assistant', content:'', timestamp:101, tool_calls:[toolCall]}},
+  {{role:'tool', content:'result', timestamp:102, tool_call_id:'call-1'}},
+];
+const transformedCandidate = {{
+  role:'user', content:'/moa same prompt', _ts:50, _active_turn_token:newToken,
+  attachments:[attachment],
+}};
+const sameTokenMerged = _mergeInflightTailMessages(
+  sameTurnBase,
+  [transformedCandidate, {{role:'assistant', content:'live', _live:true}}],
+  newToken,
+);
+const sameTokenUsers = sameTokenMerged.filter(m=>m&&m.role==='user');
+const transformedDisplays = [
+  'upload-only',
+  '/moa same prompt',
+  '/bundle invoke same prompt',
+  '[FORCED SKILL CONTEXT: demo]\\ncontext\\n[/FORCED SKILL CONTEXT]\\nsame prompt',
+];
+const transformedTokenResults = transformedDisplays.map(content=>{{
+  const base=[
+    {{role:'user', content:'original prompt', timestamp:100, _active_turn_token:newToken}},
+    {{role:'assistant', content:'', timestamp:101, tool_calls:[toolCall]}},
+    {{role:'tool', content:'result', timestamp:102, tool_call_id:'call-1'}},
+  ];
+  const candidate={{role:'user', content, _ts:50, _active_turn_token:newToken, attachments:[attachment]}};
+  const users=_mergeInflightTailMessages(
+    base,
+    [candidate, {{role:'assistant', content:'live', _live:true}}],
+    newToken,
+  ).filter(m=>m&&m.role==='user');
+  return {{count:users.length, attachments:users[0]&&users[0].attachments||[]}};
+}});
+
+// B/D: old cross-clock activity and all uncertain token forms preserve the row.
+const oldToolBase = [
+  {{role:'user', content:prompt, timestamp:100, _active_turn_token:oldToken}},
+  {{role:'assistant', content:'', timestamp:101, tool_calls:[toolCall]}},
+  {{role:'tool', content:'old result', timestamp:102, tool_call_id:'call-1'}},
+];
+const skewMerged = _mergeInflightTailMessages(
+  oldToolBase,
+  [{{...newCandidate, attachments:[attachment]}}, {{role:'assistant', content:'live', _live:true}}],
+  newToken,
+);
+const uncertainTokens = [undefined, '', 'opaque:new-turn ', 'opaque:other-turn'];
+const uncertainUserCounts = uncertainTokens.map(token=>{{
+  const candidate={{...newCandidate}};
+  if(token===undefined) delete candidate._active_turn_token;
+  else candidate._active_turn_token=token;
+  return _mergeInflightTailMessages(
+    oldToolBase,
+    [candidate, {{role:'assistant', content:'live', _live:true}}],
+    newToken,
+  ).filter(m=>m&&m.role==='user').length;
+}});
+const liveBoundaryMerged = _mergeInflightTailMessages(
+  [{{role:'user', content:prompt, _active_turn_token:oldToken}}, {{role:'assistant', content:'live', _live:true}}],
+  [{{...newCandidate}}, {{role:'assistant', content:'new live', _live:true}}],
+  newToken,
+);
+const sameLiveMerged = _mergeInflightTailMessages(
+  [
+    {{role:'user', content:'original prompt', _active_turn_token:newToken}},
+    {{role:'assistant', content:'live', _live:true, _active_turn_token:newToken}},
+  ],
+  [{{...transformedCandidate}}, {{role:'assistant', content:'new live', _live:true, _active_turn_token:newToken}}],
+  newToken,
+);
+
+// No activity is still not permission for tokenless or ambiguous text dedupe.
+const noActivityBase = [
+  {{role:'user', content:'original prompt', _active_turn_token:newToken}},
+];
+const noActivityCounts = [undefined, '', '   ', oldToken, newToken].map(token=>{{
+  const candidate={{...transformedCandidate}};
+  if(token===undefined) delete candidate._active_turn_token;
+  else candidate._active_turn_token=token;
+  return _mergeInflightTailMessages(
+    noActivityBase,
+    [candidate, {{role:'assistant', content:'live', _live:true, _active_turn_token:newToken}}],
+    newToken,
+  ).filter(m=>m&&m.role==='user').length;
+}});
+const duplicateAdjacent = _mergeInflightTailMessages(
+  [
+    {{role:'user', content:'first', _active_turn_token:newToken}},
+    {{role:'user', content:'second', _active_turn_token:newToken}},
+  ],
+  [{{...transformedCandidate}}, {{role:'assistant', content:'live', _live:true, _active_turn_token:newToken}}],
+  newToken,
+).filter(m=>m&&m.role==='user').length;
+const duplicateSeparated = _mergeInflightTailMessages(
+  [
+    {{role:'user', content:'first', _active_turn_token:newToken}},
+    {{role:'assistant', content:'', timestamp:101, tool_calls:[toolCall]}},
+    {{role:'tool', content:'result', timestamp:102, tool_call_id:'call-1'}},
+    {{role:'user', content:'second', _active_turn_token:newToken}},
+  ],
+  [{{...transformedCandidate}}, {{role:'assistant', content:'live', _live:true, _active_turn_token:newToken}}],
+  newToken,
+).filter(m=>m&&m.role==='user').length;
+
+// H: duplicate imported rows with the same token are ambiguous and preserved.
+const ambiguousBase = [
+  {{role:'user', content:'first', _active_turn_token:newToken}},
+  {{role:'tool', content:'one', timestamp:101}},
+  {{role:'user', content:'imported duplicate', _active_turn_token:newToken}},
+  {{role:'tool', content:'two', timestamp:102}},
+];
+const ambiguousMerged = _mergeInflightTailMessages(
+  ambiguousBase,
+  [{{...transformedCandidate}}, {{role:'assistant', content:'live', _live:true}}],
+  newToken,
+);
+
+// I: a unique current-token user row can sit after a live boundary in a
+// recovered transcript; reconcile it before synthesizing the pending row.
+const pendingSession = {{
+  pending_user_message:prompt,
+  pending_started_at:200,
+  active_turn_token:newToken,
+  pending_attachments:[attachment],
+}};
+const pendingAfterLive = [
+  {{role:'user', content:'old prompt', _active_turn_token:oldToken}},
+  {{role:'assistant', content:'working', _live:true, _active_turn_token:newToken}},
+  {{role:'user', content:'/bundle transformed', _active_turn_token:newToken}},
+];
+const pendingUniqueInserted = _mergePendingSessionMessage(pendingSession, pendingAfterLive);
+const pendingZeroMatch = [
+  {{role:'user', content:prompt, _active_turn_token:oldToken}},
+  {{role:'assistant', content:'working', _live:true, _active_turn_token:newToken}},
+  {{role:'user', content:prompt}},
+];
+const pendingZeroMatchOriginal = pendingZeroMatch[2];
+const pendingZeroMatchInserted = _mergePendingSessionMessage(pendingSession, pendingZeroMatch);
+const pendingAmbiguous = [
+  {{role:'user', content:'old prompt', _active_turn_token:oldToken}},
+  {{role:'assistant', content:'working', _live:true, _active_turn_token:newToken}},
+  {{role:'user', content:'first imported', _active_turn_token:newToken}},
+  {{role:'user', content:'second imported', _active_turn_token:newToken}},
+];
+const pendingAmbiguousInserted = _mergePendingSessionMessage(pendingSession, pendingAmbiguous);
+
+process.stdout.write(JSON.stringify({{
+  prepared,
+  pendingMerge,
+  recoveredUserCount:recoveredUsers.length,
+  recoveredAttachments:recoveredUsers.map(m=>m.attachments||[]),
+  sameTokenUserCount:sameTokenUsers.length,
+  sameTokenContent:sameTokenUsers[0]&&sameTokenUsers[0].content,
+  sameTokenAttachments:sameTokenUsers[0]&&sameTokenUsers[0].attachments||[],
+  transformedTokenResults,
+  skewUserCount:skewMerged.filter(m=>m&&m.role==='user').length,
+  uncertainUserCounts,
+  liveBoundaryUserCount:liveBoundaryMerged.filter(m=>m&&m.role==='user').length,
+  ambiguousUserCount:ambiguousMerged.filter(m=>m&&m.role==='user').length,
+  sameLiveUserCount:sameLiveMerged.filter(m=>m&&m.role==='user').length,
+  sameLiveAttachments:sameLiveMerged.filter(m=>m&&m.role==='user').map(m=>m.attachments||[]),
+  opaqueWhitespace:_opaqueActiveTurnToken('   '),
+  noActivityCounts,
+  duplicateAdjacent,
+  duplicateSeparated,
+  pendingUniqueInserted,
+  pendingUniqueRoles:pendingAfterLive.map(m=>m.role),
+  pendingUniqueAttachments:pendingAfterLive.filter(m=>m&&m.role==='user').map(m=>m.attachments||[]),
+  pendingZeroMatchInserted,
+  pendingZeroMatchRoles:pendingZeroMatch.map(m=>m.role),
+  pendingZeroMatchUserCount:pendingZeroMatch.filter(m=>m&&m.role==='user').length,
+  pendingZeroMatchMoved:pendingZeroMatch.indexOf(pendingZeroMatchOriginal)
+    <pendingZeroMatch.findIndex(m=>m&&m.role==='assistant'&&m._live),
+  pendingZeroMatchSyntheticCount:pendingZeroMatch.filter(m=>m&&m.role==='user'&&m._pending).length,
+  pendingAmbiguousInserted,
+  pendingAmbiguousUserCount:pendingAmbiguous.filter(m=>m&&m.role==='user').length,
+}}));
 """
     proc = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
     return json.loads(proc.stdout)
@@ -714,11 +1040,58 @@ def test_tail_scanners_fail_closed_and_share_turn_ownership_rules():
             assert row["currentDuplicate"] is row["expect"]
             assert row["mergedUserTimestamps"] == row["mergedExpect"]
             continue
-        if row["name"] == "candidate timestamp field":
+        if row["name"] in {"candidate timestamp field", "same-token candidate after tool activity"}:
             assert row["currentDuplicate"] is row["expect"]
             continue
-        assert row["current"] == row["expect"], row["name"]
-        assert row["pending"] == row["expect"], row["name"]
+        assert row["current"] == row["currentExpect"], row["name"]
+        assert row["pending"] == row["pendingExpect"], row["name"]
+
+
+def test_inflight_dedupe_uses_active_turn_token_across_clock_skew():
+    result = _run_cross_clock_inflight_probe()
+
+    assert result["skewUserCount"] == 2
+    assert result["skewAttachments"] == [[], [{"name": "new.txt", "path": "new.txt", "mime": "text/plain"}]]
+    assert result["missingTokenUserCount"] == 2
+    assert result["sameTokenUserCount"] == 1
+
+
+def test_turn_ownership_adversarial_recovery_and_fail_closed_cases():
+    result = _run_turn_ownership_adversarial_probe()
+
+    assert result["prepared"] is False
+    assert result["pendingMerge"] is False
+    assert result["recoveredUserCount"] == 2
+    assert result["recoveredAttachments"] == [[], [{"name": "new.txt", "path": "new.txt"}]]
+    assert result["sameTokenUserCount"] == 1
+    assert result["sameTokenContent"] == "upload-only"
+    assert result["sameTokenAttachments"] == [{"name": "new.txt", "path": "new.txt"}]
+    assert result["transformedTokenResults"] == [
+        {"count": 1, "attachments": [{"name": "new.txt", "path": "new.txt"}]},
+        {"count": 1, "attachments": [{"name": "new.txt", "path": "new.txt"}]},
+        {"count": 1, "attachments": [{"name": "new.txt", "path": "new.txt"}]},
+        {"count": 1, "attachments": [{"name": "new.txt", "path": "new.txt"}]},
+    ]
+    assert result["skewUserCount"] == 2
+    assert result["uncertainUserCounts"] == [2, 2, 2, 2]
+    assert result["liveBoundaryUserCount"] == 2
+    assert result["ambiguousUserCount"] == 3
+    assert result["sameLiveUserCount"] == 1
+    assert result["sameLiveAttachments"] == [[{"name": "new.txt", "path": "new.txt"}]]
+    assert result["opaqueWhitespace"] is None
+    assert result["noActivityCounts"] == [2, 2, 2, 2, 1]
+    assert result["duplicateAdjacent"] == 3
+    assert result["duplicateSeparated"] == 3
+    assert result["pendingUniqueInserted"] is False
+    assert result["pendingUniqueRoles"] == ["user", "user", "assistant"]
+    assert result["pendingUniqueAttachments"] == [[], [{"name": "new.txt", "path": "new.txt"}]]
+    assert result["pendingZeroMatchInserted"] is True
+    assert result["pendingZeroMatchRoles"] == ["user", "user", "assistant", "user"]
+    assert result["pendingZeroMatchUserCount"] == 3
+    assert result["pendingZeroMatchMoved"] is False
+    assert result["pendingZeroMatchSyntheticCount"] == 1
+    assert result["pendingAmbiguousInserted"] is True
+    assert result["pendingAmbiguousUserCount"] == 4
 
 
 def test_live_tool_matching_uses_the_same_aliases_as_live_card_dedup():
@@ -727,7 +1100,7 @@ def test_live_tool_matching_uses_the_same_aliases_as_live_card_dedup():
     find_pos = MESSAGES_SRC.index("function _findPendingLiveToolCallIndex")
     find_block = MESSAGES_SRC[find_pos : find_pos + 900]
     upsert_pos = MESSAGES_SRC.index("function upsertLiveToolCall")
-    upsert_block = MESSAGES_SRC[upsert_pos : upsert_pos + 600]
+    upsert_block = MESSAGES_SRC[upsert_pos : upsert_pos + 1000]
 
     for key in ("tid", "id", "tool_call_id", "tool_use_id", "call_id"):
         assert key in live_tid_block

@@ -21,11 +21,28 @@ tests pinning the contract:
   tab that transitions to hidden via the ``visibilitychange`` hook.
 """
 
+import json
+import subprocess
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
+SESSIONS_JS = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 SESSION_OPS = (REPO_ROOT / "api" / "session_ops.py").read_text(encoding="utf-8")
+
+
+def _function_body(src: str, signature: str) -> str:
+    start = src.index(signature)
+    brace = src.index("{", start)
+    depth = 0
+    for idx in range(brace, len(src)):
+        if src[idx] == "{":
+            depth += 1
+        elif src[idx] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start : idx + 1]
+    raise AssertionError(signature)
 
 
 # ── Backend: session_status exposes a LIVE-validated active_stream_id ───────
@@ -36,6 +53,7 @@ def test_session_status_exposes_active_stream_id_field():
     # It is derived through the live-validation helper, not the raw attribute,
     # so a stale id from a crashed/restarted run is not surfaced.
     assert "_live_active_stream_id(" in SESSION_OPS
+    assert "'active_turn_token': build_active_turn_token(" in SESSION_OPS
 
 
 def test_live_active_stream_id_is_stale_safe():
@@ -76,7 +94,140 @@ def test_frontend_declares_hidden_poll_lifecycle():
     """The hidden-tab active-stream poll start/stop/attach functions exist."""
     assert "function _startHiddenActiveStreamPoll(sid)" in MESSAGES_JS
     assert "function _stopHiddenActiveStreamPoll()" in MESSAGES_JS
-    assert "function _attachServerInitiatedStream(sid, streamId, recovered)" in MESSAGES_JS
+    assert "function _attachServerInitiatedStream(sid, streamId, recovered, activeTurnToken=null)" in MESSAGES_JS
+
+
+def test_frontend_server_attach_propagates_exact_token_before_renderer():
+    attach = _function_body(
+        MESSAGES_JS,
+        "function _attachServerInitiatedStream(sid, streamId, recovered, activeTurnToken=null)",
+    )
+    script = f"""
+const S={{session:{{session_id:'sid',pending_attachments:[]}},messages:[],activeStreamId:null,busy:false}};
+const INFLIGHT={{}};
+const LIVE_STREAMS={{}};
+function _opaqueActiveTurnToken(value){{return typeof value==='string'&&value.trim().length?value:null;}}
+let rendererState=null;
+function attachLiveStream(sid,streamId,uploaded,options){{
+  rendererState={{token:S.session.active_turn_token,inflight:INFLIGHT[sid].activeTurnToken}};
+}}
+{attach}
+_attachServerInitiatedStream('sid','server-stream',true,'opaque:token with spaces');
+process.stdout.write(JSON.stringify({{session:S.session.active_turn_token,inflight:INFLIGHT.sid.activeTurnToken,renderer:rendererState}}));
+"""
+    result = json.loads(
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True).stdout
+    )
+    assert result == {
+        "session": "opaque:token with spaces",
+        "inflight": "opaque:token with spaces",
+        "renderer": {
+            "token": "opaque:token with spaces",
+            "inflight": "opaque:token with spaces",
+        },
+    }
+
+
+def test_late_server_token_stamps_attached_live_rows_and_persists():
+    attach = _function_body(
+        MESSAGES_JS,
+        "function _attachServerInitiatedStream(sid, streamId, recovered, activeTurnToken=null)",
+    )
+    sessions_helpers = "\n".join(
+        [
+            _function_body(SESSIONS_JS, "function _opaqueActiveTurnToken"),
+            _function_body(SESSIONS_JS, "function _currentTailUserMessage"),
+            _function_body(SESSIONS_JS, "function _hasCurrentTailUserDuplicate"),
+            _function_body(SESSIONS_JS, "function _mergeInflightTailMessages"),
+        ]
+    )
+    script = f"""
+{sessions_helpers}
+const token='opaque:late-token';
+const liveVisible={{role:'assistant',content:'working',_live:true}};
+const liveInflight={{role:'assistant',content:'working',_live:true}};
+const priorUser={{role:'user',content:'same prompt',_active_turn_token:token}};
+const candidate={{role:'user',content:'same prompt',_active_turn_token:token,attachments:[{{name:'new.txt'}}]}};
+const S={{
+  session:{{session_id:'sid',pending_attachments:[],active_turn_token:null}},
+  messages:[priorUser,liveVisible],activeStreamId:'stream-1',busy:true,
+  todos:[{{id:'todo-1'}}],todoStateMeta:{{version:1}},
+}};
+const INFLIGHT={{sid:{{
+  streamId:'stream-1',messages:[priorUser,liveInflight],uploaded:['old.txt'],
+  toolCalls:[{{id:'call-1'}}],lastAssistantText:'answer',lastReasoningText:'thinking',
+  lastRunJournalSeq:7,lastRunJournalEventId:'event-7',journalReplayFromStart:true,
+  anchorActivityScene:'scene',currentActivityBurstId:3,currentLiveSegmentSeq:4,
+  activityBurstAnchors:[{{seq:3}}],todos:[{{id:'todo-1'}}],todoStateMeta:{{version:1}},
+  activeTurnToken:null,
+}}}};
+const LIVE_STREAMS={{sid:{{streamId:'stream-1'}}}};
+const saved=[];
+function saveInflightState(sid,state){{saved.push({{sid,state:JSON.parse(JSON.stringify(state))}});}}
+function _opaqueActiveTurnToken(value){{return typeof value==='string'&&value.trim().length?value:null;}}
+function _sameTranscriptMessage(a,b){{return !!(a&&b&&a.role===b.role&&a.content===b.content);}}
+{attach}
+_attachServerInitiatedStream('sid','stream-1',true,token);
+_attachServerInitiatedStream('sid','stream-1',true,'   ');
+const merged=_mergeInflightTailMessages(
+  S.messages,
+  [candidate,{{role:'assistant',content:'working',_live:true,_active_turn_token:token}}],
+  token,
+);
+const missing={{...candidate}}; delete missing._active_turn_token;
+const preserved=_mergeInflightTailMessages(
+  S.messages,
+  [missing,{{role:'assistant',content:'working',_live:true,_active_turn_token:token}}],
+  token,
+);
+process.stdout.write(JSON.stringify({{
+  sessionToken:S.session.active_turn_token,
+  visibleToken:S.messages[1]._active_turn_token,
+  inflightToken:INFLIGHT.sid.activeTurnToken,
+  inflightRowToken:INFLIGHT.sid.messages[1]._active_turn_token,
+  savedToken:saved[0].state.activeTurnToken,
+  savedCount:saved.length,
+  savedStreamId:saved[0].state.streamId,
+  savedUploaded:saved[0].state.uploaded,
+  savedToolCalls:saved[0].state.toolCalls,
+  savedText:saved[0].state.lastAssistantText,
+  savedReasoning:saved[0].state.lastReasoningText,
+  savedJournal:[saved[0].state.lastRunJournalSeq,saved[0].state.lastRunJournalEventId],
+  savedReplay:saved[0].state.journalReplayFromStart,
+  savedAnchor:saved[0].state.anchorActivityScene,
+  savedActivity:[saved[0].state.currentActivityBurstId,saved[0].state.currentLiveSegmentSeq],
+  savedTodos:saved[0].state.todos,
+  savedTodoMeta:saved[0].state.todoStateMeta,
+  mergedUserCount:merged.filter(m=>m&&m.role==='user').length,
+  mergedAttachments:merged.filter(m=>m&&m.role==='user').map(m=>m.attachments||[]),
+  preservedUserCount:preserved.filter(m=>m&&m.role==='user').length,
+}}));
+"""
+    result = json.loads(
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True).stdout
+    )
+    assert result == {
+        "sessionToken": "opaque:late-token",
+        "visibleToken": "opaque:late-token",
+        "inflightToken": "opaque:late-token",
+        "inflightRowToken": "opaque:late-token",
+        "savedToken": "opaque:late-token",
+        "savedCount": 1,
+        "savedStreamId": "stream-1",
+        "savedUploaded": ["old.txt"],
+        "savedToolCalls": [{"id": "call-1"}],
+        "savedText": "answer",
+        "savedReasoning": "thinking",
+        "savedJournal": [7, "event-7"],
+        "savedReplay": True,
+        "savedAnchor": "scene",
+        "savedActivity": [3, 4],
+        "savedTodos": [{"id": "todo-1"}],
+        "savedTodoMeta": {"version": 1},
+        "mergedUserCount": 1,
+        "mergedAttachments": [[{"name": "new.txt"}]],
+        "preservedUserCount": 2,
+    }
 
 
 def test_hidden_poll_hits_session_status_and_attaches_as_replay():
@@ -93,7 +244,8 @@ def test_hidden_poll_hits_session_status_and_attaches_as_replay():
     assert "api/session/status?session_id=" in body
     assert "d.active_stream_id" in body
     # attaches as replay (recovered=true) — turn is already mid-flight
-    assert "_attachServerInitiatedStream(sid, streamId, true)" in body
+    assert "_attachServerInitiatedStream(" in body
+    assert "d.active_turn_token" in body
 
 
 def test_hidden_poll_started_on_both_hidden_paths():
@@ -138,9 +290,11 @@ def test_attach_returns_bool_and_bails_false_on_non_current_pane():
     false (so the poll keeps retrying for the right pane) — never a bare
     `return;` that the caller can't distinguish from success.
     """
-    fn_idx = MESSAGES_JS.find("function _attachServerInitiatedStream(sid, streamId, recovered)")
+    fn_idx = MESSAGES_JS.find(
+        "function _attachServerInitiatedStream(sid, streamId, recovered, activeTurnToken=null)"
+    )
     assert fn_idx != -1, "_attachServerInitiatedStream signature not found"
-    body = MESSAGES_JS[fn_idx:fn_idx + 4000]
+    body = MESSAGES_JS[fn_idx:MESSAGES_JS.index("\n}\n\n// Poll", fn_idx) + 2]
     # Non-current pane bails with an explicit false, not a bare return.
     assert "if (!isCurrent) return false;" in body
     # Bad/empty args also bail false; success paths return true.
@@ -175,7 +329,8 @@ def test_poll_stops_only_when_attach_succeeds():
     # Window 2400: the multi-pane follow-up adds an explanatory comment block
     # before the attach call, pushing it past a narrower slice.
     body = MESSAGES_JS[start:start + 3200]
-    assert "const attached = _attachServerInitiatedStream(sid, streamId, true)" in body
+    assert "const attached = _attachServerInitiatedStream(" in body
+    assert "d.active_turn_token" in body
     # Stop the poll only on a true attach (the false branch keeps polling within
     # the bounded-retry budget rather than stopping).
     assert "if (attached) {" in body
