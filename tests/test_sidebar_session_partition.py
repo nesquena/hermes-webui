@@ -57,8 +57,8 @@ def test_partition_helper_applies_message_source_project_and_archive_gates():
     assert "const serverArchivedCount=showCliOnly?_archivedCliCount:_archivedWebuiCount;" in block
     assert "archivedCount: Math.max(showCliOnly ? cliArchivedCount : webuiArchivedCount, Number(serverArchivedCount||0))," in block
     assert "return {" in block
-    assert "profileFiltered: showCliOnly ? cliProfileFiltered : webuiProfileFiltered," in block
-    assert "sessionsRaw: showCliOnly ? cliSessionsRaw : webuiSessionsRaw," in block
+    assert "profileFiltered: selectedProfileFiltered," in block
+    assert "sessionsRaw: selectedSessionsRaw," in block
 
 
 def test_partition_helper_keeps_raw_source_counts_while_render_owns_visible_counts():

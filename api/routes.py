@@ -2430,6 +2430,7 @@ def _build_session_list_cache_payload(
         deduped_cli = []
     diag_stage("sort_sessions")
     merged = webui_sessions + deduped_cli
+    merged = [_normalize_sidebar_source_flags(s) for s in merged]
     merged.sort(
         key=lambda s: s.get("last_message_at") or s.get("updated_at", 0) or 0,
         reverse=True,
@@ -2488,10 +2489,8 @@ def _build_session_list_cache_payload(
     )
     archived_count = archived_webui_count + archived_cli_count
     def _filter_sidebar_source(rows: list[dict]) -> list[dict]:
-        if sidebar_source == "webui":
-            return [s for s in rows if not _is_cli_session_for_settings(s)]
-        if sidebar_source == "cli":
-            return [s for s in rows if _is_cli_session_for_settings(s)]
+        if sidebar_source:
+            return [s for s in rows if _sidebar_session_origin(s) == sidebar_source]
         return list(rows)
 
     full_scoped_all_sources = archived_scoped if include_archived else visible_scoped
@@ -2503,6 +2502,12 @@ def _build_session_list_cache_payload(
         1 for s in full_scoped_all_sources
         if _is_cli_session_for_settings(s)
     )
+    session_origin_counts: dict[str, int] = defaultdict(int)
+    session_origin_labels: dict[str, str] = {}
+    for session in full_scoped_all_sources:
+        origin = _sidebar_session_origin(session)
+        session_origin_counts[origin] += 1
+        session_origin_labels.setdefault(origin, _sidebar_session_origin_label(origin))
     visible_scoped_filtered = _filter_sidebar_source(visible_scoped)
     archived_scoped_filtered = _filter_sidebar_source(archived_scoped)
     scoped = _filter_sidebar_source(full_scoped_all_sources)
@@ -2572,6 +2577,8 @@ def _build_session_list_cache_payload(
         "archived_cli_count": archived_cli_count,
         "webui_session_count": webui_session_count,
         "cli_session_count": cli_session_count,
+        "session_origin_counts": dict(session_origin_counts),
+        "session_origin_labels": session_origin_labels,
         "include_archived": include_archived,
         "archived_limit": archived_limit,
         "archived_offset": archived_offset,
@@ -2632,6 +2639,16 @@ def _session_list_payload_to_response(payload: dict) -> dict:
         response["webui_session_count"] = int(payload.get("webui_session_count", 0))
     if "cli_session_count" in payload:
         response["cli_session_count"] = int(payload.get("cli_session_count", 0))
+    if "session_origin_counts" in payload:
+        response["session_origin_counts"] = {
+            str(key): int(value or 0)
+            for key, value in dict(payload.get("session_origin_counts") or {}).items()
+        }
+    if "session_origin_labels" in payload:
+        response["session_origin_labels"] = {
+            str(key): str(value)
+            for key, value in dict(payload.get("session_origin_labels") or {}).items()
+        }
     if payload.get("archived_limit") is not None:
         response["archived_limit"] = int(payload.get("archived_limit") or 0)
         response["archived_offset"] = int(payload.get("archived_offset") or 0)
@@ -9392,7 +9409,94 @@ def _normalize_sidebar_source_flags(session: dict) -> dict:
         return session
     normalized = dict(session)
     normalized["is_cli_session"] = is_cli_session_row(normalized)
+    normalized["session_origin"] = _sidebar_session_origin(normalized)
     return normalized
+
+
+_SIDEBAR_ORIGIN_LABELS = {
+    "webui": "WebUI sessions",
+    "cli": "CLI sessions",
+    "tui": "TUI sessions",
+    "acp": "ACP sessions",
+    "matrix": "Matrix sessions",
+    "telegram": "Telegram sessions",
+    "slack": "Slack sessions",
+    "discord": "Discord sessions",
+    "email": "Email sessions",
+    "wecom": "WeCom sessions",
+    "wecom_callback": "WeCom Callback sessions",
+    "weixin": "Weixin sessions",
+    "cron": "Cron sessions",
+    "webhook": "Webhook sessions",
+    "kanban": "Kanban sessions",
+    "api": "API sessions",
+    "claude_code": "Claude Code sessions",
+    "tool": "Tool sessions",
+    "subagent": "Subagent sessions",
+    "other": "Other sessions",
+}
+
+
+def _sidebar_session_origin(session: dict) -> str:
+    """Return the durable high-level origin bucket for one sidebar row.
+
+    ``session_source`` is intentionally not the bucket: it is a broad
+    ownership/category field (for example, every gateway channel is
+    ``messaging``). The sidebar needs the raw origin so Matrix, Telegram,
+    Slack, TUI, and future channels can each be filtered independently.
+    """
+    if not isinstance(session, dict):
+        return "other"
+    explicit = str(session.get("session_origin") or "").strip().lower()
+    if explicit:
+        return explicit.replace("-", "_").replace(" ", "_")
+
+    markers = []
+    for key in ("source_tag", "raw_source", "source", "platform"):
+        value = _normalized_source_marker(session.get(key))
+        if value and value not in markers:
+            markers.append(value)
+    label_marker = _normalized_source_marker(session.get("source_label"))
+    if label_marker and label_marker not in markers:
+        markers.append(label_marker)
+
+    known = set(_SIDEBAR_ORIGIN_LABELS) | {"api_server", "external_agent", "messaging"}
+    for marker in markers:
+        if marker in known:
+            if marker == "api_server":
+                return "api"
+            if marker == "subagent":
+                continue
+            if marker in {"messaging", "external_agent"}:
+                continue
+            return marker
+
+    if markers and all(marker == "subagent" for marker in markers):
+        return "webui"
+    session_source = _normalized_source_marker(session.get("session_source"))
+    if session_source == "cli":
+        # Raw ``tui``/``acp`` markers were already handled above; blank raw
+        # metadata is the legacy CLI shape.
+        return "cli"
+    if session_source in {"cron", "webhook", "kanban", "tool", "api"}:
+        return session_source
+    if session_source in {"messaging", "external_agent", "other"}:
+        return "other"
+    if any(marker in {"cli", "tui", "acp"} for marker in markers):
+        return next(marker for marker in markers if marker in {"cli", "tui", "acp"})
+    if session.get("is_cli_session"):
+        return "cli"
+    if not markers and not session_source:
+        return "webui"
+    return markers[0] if markers else "other"
+
+
+def _sidebar_session_origin_label(origin: str) -> str:
+    normalized = _normalized_source_marker(origin) or "other"
+    return _SIDEBAR_ORIGIN_LABELS.get(
+        normalized,
+        f"{normalized.replace('_', ' ').title()} sessions",
+    )
 
 
 def _reconcile_session_detail_source_flags(session: dict, state_meta: dict) -> dict:
@@ -10112,6 +10216,7 @@ _SIDEBAR_SESSION_RESPONSE_FIELDS = {
     "source_tag",
     "raw_source",
     "session_source",
+    "session_origin",
     "source_label",
     "is_cli_session",
     "is_messaging_session",
@@ -13445,7 +13550,10 @@ def handle_get(handler, parsed) -> bool:
             archived_limit = _query_positive_int(parsed, "archived_limit", default=None, maximum=2000)
             archived_offset = _query_positive_int(parsed, "archived_offset", default=0, maximum=200000)
             sidebar_source = parse_qs(parsed.query).get("sidebar_source", [""])[0].strip().lower() or None
-            if sidebar_source not in ("webui", "cli"):
+            if sidebar_source and (
+                len(sidebar_source) > 48
+                or not re.fullmatch(r"[a-z0-9_]+", sidebar_source)
+            ):
                 sidebar_source = None
             # /api/sessions is the default sidebar contract, so keep the route-owned
             # visible-row filter in the shared cache builder for both cache hits and misses.

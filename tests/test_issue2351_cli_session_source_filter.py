@@ -25,8 +25,8 @@ def test_cli_filter_keeps_cli_rows_out_of_default_webui_list():
     assert "const cliProfileFiltered=[];" in src
     assert "const webuiSessionsRaw=[];" in src
     assert "const cliSessionsRaw=[];" in src
-    assert "profileFiltered: showCliOnly ? cliProfileFiltered : webuiProfileFiltered," in src
-    assert "sessionsRaw: showCliOnly ? cliSessionsRaw : webuiSessionsRaw," in src
+    assert "profileFiltered: selectedProfileFiltered," in src
+    assert "sessionsRaw: selectedSessionsRaw," in src
 
 
 def test_session_source_tabs_have_dedicated_sidebar_styles():

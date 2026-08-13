@@ -88,37 +88,41 @@ def test_batch_select_bar_element():
 
 
 def test_batch_action_bar_overrides_css_hidden_state():
-    """Selected sessions must make the fixed action bar visible."""
+    """The persistent action dock renders useful controls at zero selection."""
     with open('static/sessions.js', encoding="utf-8") as f:
         src = f.read()
-    assert "if(count>0){_renderBatchActionBar();}" in src, \
-        "Updating selected count must render action buttons, not just reveal an empty bar"
-    assert "t('session_selected_count',_selectedSessions.size)" in src, \
+    assert "_renderSessionBatchDock();" in src, \
+        "Updating selection state must rerender the persistent action dock"
+    assert "t('session_selected_count',count)" in src, \
         "Selected count must pass the selected session count to i18n"
     assert "t('session_batch_archive_confirm',ids.length)" in src, \
         "Batch archive confirmation must pass selected session count to i18n"
     assert "t('session_batch_delete_confirm',ids.length)" in src, \
         "Batch delete confirmation must pass selected session count to i18n"
-    assert "bar.innerHTML='';bar.style.display=_selectedSessions.size>0?'flex':'none'" in src, \
-        "Rendering the action bar must explicitly show it when selections exist"
-    assert "batchBar.style.display='flex'" in src, \
-        "Session list render must explicitly show the action bar in select mode"
+    assert "bar.innerHTML='';bar.style.display='flex'" in src, \
+        "Rendering the action bar must explicitly keep it visible in select mode"
 
 
-def test_batch_action_bar_is_sidebar_inline_not_global_footer():
-    """Batch actions should appear in the session list, not over the composer."""
+def test_batch_action_bar_is_in_a_persistent_sidebar_dock():
+    """Batch actions should stay visible outside the scrolling history."""
     with open('static/sessions.js', encoding="utf-8") as f:
         js = f.read()
     with open('static/style.css', encoding="utf-8") as f:
         css = f.read()
-    assert "list.appendChild(batchBar)" in js, \
-        "Batch action bar should be rendered inside the session list"
+    with open('static/index.html', encoding="utf-8") as f:
+        html = f.read()
+    assert 'id="sessionBatchDock"' in html, \
+        "Batch action bar needs a persistent dock sibling"
+    assert "dock.appendChild(batchBar)" in js, \
+        "Batch action bar should be rendered inside the persistent dock"
+    assert "list.appendChild(batchBar)" not in js, \
+        "Batch action bar must not be mounted in the scrolling session list"
     assert "document.body.appendChild(batchBar)" not in js, \
         "Batch action bar must not be mounted as a global footer"
-    assert ".batch-action-bar{display:none;margin:" in css, \
-        "Batch action bar should use inline sidebar spacing"
-    assert "position:fixed" not in css[css.find(".batch-action-bar{"):css.find(".batch-count{")], \
-        "Batch action bar must not be fixed to the bottom of the viewport"
+    assert ".session-batch-dock" in css, \
+        "Batch action bar should use dock spacing"
+    assert "overflow-y:auto" in css[css.find(".session-list{"):css.find(".session-list{")+300], \
+        "The session history must remain the only scrolling region"
 
 
 def test_batch_project_picker_is_anchored_to_batch_actions():

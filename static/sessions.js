@@ -2543,14 +2543,57 @@ function _isCliSession(session) {
   return session.is_cli_session === true;
 }
 
+const _SESSION_ORIGIN_ORDER=['webui','cli','tui','acp','matrix','telegram','slack','discord','email','wecom','wecom_callback','weixin','cron','webhook','kanban','api','claude_code','tool','subagent','other'];
+const _SESSION_ORIGIN_LABELS={
+  webui:'WebUI sessions',cli:'CLI sessions',tui:'TUI sessions',acp:'ACP sessions',
+  matrix:'Matrix sessions',telegram:'Telegram sessions',slack:'Slack sessions',
+  discord:'Discord sessions',email:'Email sessions',wecom:'WeCom sessions',
+  wecom_callback:'WeCom Callback sessions',weixin:'Weixin sessions',cron:'Cron sessions',
+  webhook:'Webhook sessions',kanban:'Kanban sessions',api:'API sessions',
+  claude_code:'Claude Code sessions',tool:'Tool sessions',subagent:'Subagent sessions',
+  other:'Other sessions',
+};
+function _sessionOrigin(session){
+  if(!session) return 'other';
+  const explicit=String(session.session_origin||'').trim().toLowerCase();
+  if(explicit) return explicit.replace(/[- ]/g,'_');
+  const raw=[session.source_tag,session.raw_source,session.source,session.platform,session.source_label]
+    .map(value=>String(value||'').trim().toLowerCase().replace(/[- ]/g,'_'));
+  const known=_SESSION_ORIGIN_ORDER.filter(origin=>origin!=='webui');
+  for(const marker of raw){
+    if(marker==='api_server') return 'api';
+    if(known.includes(marker)) return marker;
+  }
+  if(session.session_source==='cli'||_isCliSession(session)) return 'cli';
+  if(!raw.some(Boolean)&&!session.session_source) return 'webui';
+  return 'other';
+}
+function _sessionOriginKeys(){
+  const counts=(_serverSessionOriginCounts&&typeof _serverSessionOriginCounts==='object')?_serverSessionOriginCounts:{};
+  const keys=new Set(['webui']);
+  if(window._showCliSessions) keys.add('cli');
+  Object.keys(counts).forEach(key=>{if(Number(counts[key])>0)keys.add(key);});
+  if(_sessionSourceFilter) keys.add(_sessionSourceFilter);
+  return [...keys].sort((a,b)=>{
+    const ai=_SESSION_ORIGIN_ORDER.indexOf(a),bi=_SESSION_ORIGIN_ORDER.indexOf(b);
+    return (ai<0?999:ai)-(bi<0?999:bi)||a.localeCompare(b);
+  });
+}
 function _sessionSourceLabel(filter, count) {
   const n = Number(count) || 0;
-  return filter === 'cli' ? `CLI sessions (${n})` : `WebUI sessions (${n})`;
+  const serverLabel=_serverSessionOriginLabels&&_serverSessionOriginLabels[filter];
+  const label=serverLabel||_SESSION_ORIGIN_LABELS[filter]||`${String(filter||'Other').replace(/_/g,' ').replace(/\b\w/g,m=>m.toUpperCase())} sessions`;
+  return `${label} (${n})`;
+}
+function _sessionOriginLabel(filter) {
+  return _sessionSourceLabel(filter, 0).replace(/ \(0\)$/,'');
 }
 
 function _clearSessionSourceTabCounts() {
   _serverWebuiSessionCount = null;
   _serverCliSessionCount = null;
+  _serverSessionOriginCounts = null;
+  _serverSessionOriginLabels = null;
 }
 
 function _requestedSessionSidebarSource() {
@@ -2589,6 +2632,9 @@ function _sessionListQueryString() {
 }
 
 function _sessionSourceTabCount(filter, renderedWebuiSessionCount, renderedCliSessionCount) {
+  if(_serverSessionOriginCounts&&Object.prototype.hasOwnProperty.call(_serverSessionOriginCounts,filter)){
+    return Number(_serverSessionOriginCounts[filter])||0;
+  }
   const serverCount = filter === 'cli' ? _serverCliSessionCount : _serverWebuiSessionCount;
   if (Number.isFinite(serverCount)) return serverCount;
   return filter === 'cli' ? renderedCliSessionCount : renderedWebuiSessionCount;
@@ -2603,7 +2649,8 @@ function _setActiveProjectFilter(projectId) {
 }
 
 function _setSessionSourceFilter(filter) {
-  const next = filter === 'cli' ? 'cli' : 'webui';
+  const candidate=String(filter||'').trim().toLowerCase().replace(/[- ]/g,'_');
+  const next = /^[a-z0-9_]+$/.test(candidate)&&candidate ? candidate : 'webui';
   if (_sessionSourceFilter === next) return;
   _sessionSourceFilter = next;
   _activeProject = null;
@@ -2617,7 +2664,7 @@ function _setSessionSourceFilter(filter) {
 function _restoreSessionSourceFilter() {
   try {
     const raw = localStorage.getItem('hermes-session-source-filter');
-    if (raw === 'cli' || raw === 'webui') _sessionSourceFilter = raw;
+    if (/^[a-z0-9_]+$/.test(raw||'')) _sessionSourceFilter = raw;
   } catch (_e) {}
 }
 
@@ -3932,7 +3979,9 @@ let _archivedCliCount = 0;        // archived non-WebUI sessions not fetched unt
 let _archivedRowsLoadedLimit = SESSION_ARCHIVED_PAGE_SIZE;
 let _serverWebuiSessionCount = null;  // explicit server count for WebUI sessions
 let _serverCliSessionCount = null;    // explicit server count for CLI sessions
-let _sessionSourceFilter = 'webui';  // 'webui' keeps WebUI chats separate from read-only CLI sessions
+let _serverSessionOriginCounts = null;
+let _serverSessionOriginLabels = null;
+let _sessionSourceFilter = 'webui';  // one high-level origin: webui, tui, matrix, telegram, ...
 
 function _restoreShowAllProfiles(){
   try{
@@ -4229,11 +4278,34 @@ function toggleSessionSelectMode(){
 function exitSessionSelectMode(){
   _sessionSelectMode=false;
   _selectedSessions.clear();
-  const bar=$('batchActionBar');
-  if(bar) bar.style.display='none';
   renderSessionListFromCache();
 }
+function _isSessionSelectable(session){
+  return !!session && (!_isReadOnlySession(session) || _isOrganizableReadOnlySession(session));
+}
+function _sessionForSelectionId(sid){
+  if(!sid) return null;
+  const direct=_sessionSnapshotById(sid);
+  if(direct) return direct;
+  for(const session of (_allSessions||[])){
+    const child=(session&&Array.isArray(session._child_sessions))
+      ? session._child_sessions.find(item=>item&&item.session_id===sid)
+      : null;
+    if(child) return child;
+  }
+  return null;
+}
+function _sessionSelectionIds(){
+  return (_sessionVisibleSidebarIds||[]).filter(sid=>_isSessionSelectable(_sessionForSelectionId(sid)));
+}
+function _pruneSelectedSessions(){
+  const allowed=new Set(_sessionSelectionIds());
+  for(const sid of [..._selectedSessions]){
+    if(!allowed.has(sid)) _selectedSessions.delete(sid);
+  }
+}
 function toggleSessionSelect(sid){
+  if(!_isSessionSelectable(_sessionForSelectionId(sid))) return;
   if(_selectedSessions.has(sid)) _selectedSessions.delete(sid);
   else _selectedSessions.add(sid);
   _updateBatchActionBar();
@@ -4242,6 +4314,7 @@ function toggleSessionSelect(sid){
   if(item){item.classList.toggle('selected',_selectedSessions.has(sid));if(cb)cb.checked=_selectedSessions.has(sid);}
 }
 function setSessionSelected(sid, selected){
+  if(!_isSessionSelectable(_sessionForSelectionId(sid))) return;
   if(selected) _selectedSessions.add(sid);
   else _selectedSessions.delete(sid);
   _updateBatchActionBar();
@@ -4252,7 +4325,7 @@ function setSessionSelected(sid, selected){
 function selectAllSessions(){
   _selectedSessions.clear();
   const ids=Array.isArray(_sessionVisibleSidebarIds)&&_sessionVisibleSidebarIds.length
-    ? _sessionVisibleSidebarIds
+    ? _sessionSelectionIds()
     : Array.from(document.querySelectorAll('.session-select-cb')).map(cb=>cb.dataset.sid).filter(Boolean);
   ids.forEach(sid=>_selectedSessions.add(sid));
   document.querySelectorAll('.session-select-cb').forEach(cb=>{
@@ -4267,18 +4340,28 @@ function deselectAllSessions(){
   _updateBatchActionBar();
 }
 function _updateBatchActionBar(){
-  const bar=$('batchActionBar');if(!bar)return;
-  const count=_selectedSessions.size;
-  if(count>0){_renderBatchActionBar();}
-  else{bar.style.display='none';}
+  if(!_sessionSelectMode) return;
+  _renderSessionBatchDock();
 }
 function _renderBatchActionBar(){
   const bar=$('batchActionBar');if(!bar)return;
-  bar.innerHTML='';bar.style.display=_selectedSessions.size>0?'flex':'none';
+  const count=_selectedSessions.size;
+  const writableSelectionIds=[..._selectedSessions].filter(sid=>!_isOrganizableReadOnlySession(_sessionForSelectionId(sid)));
+  bar.innerHTML='';bar.style.display='flex';
+  const toolbar=document.createElement('div');toolbar.className='batch-toolbar';
+  const exitBtn=document.createElement('button');exitBtn.type='button';exitBtn.className='batch-exit-btn';
+  exitBtn.textContent='\u2715';exitBtn.title='Exit select mode';exitBtn.setAttribute('aria-label','Exit select mode');
+  exitBtn.onclick=(e)=>{e.stopPropagation();exitSessionSelectMode();};toolbar.appendChild(exitBtn);
   const countBadge=document.createElement('span');countBadge.className='batch-count';
-  countBadge.textContent=t('session_selected_count',_selectedSessions.size);bar.appendChild(countBadge);
+  countBadge.textContent=count?t('session_selected_count',count):t('session_no_selection');toolbar.appendChild(countBadge);
+  const selectAllBtn=document.createElement('button');selectAllBtn.type='button';selectAllBtn.className='batch-select-all-btn';
+  selectAllBtn.textContent=t('session_select_all');selectAllBtn.onclick=(e)=>{e.stopPropagation();selectAllSessions();};toolbar.appendChild(selectAllBtn);
+  const deselectBtn=document.createElement('button');deselectBtn.type='button';deselectBtn.className='batch-deselect-all-btn';
+  deselectBtn.textContent=t('session_deselect_all');deselectBtn.onclick=(e)=>{e.stopPropagation();deselectAllSessions();};toolbar.appendChild(deselectBtn);
+  bar.appendChild(toolbar);
   // Archive
   const archiveBtn=document.createElement('button');archiveBtn.className='batch-action-btn';
+  archiveBtn.disabled=!count;
   archiveBtn.textContent=t('session_batch_archive');
   archiveBtn.onclick=async()=>{
     const ids=[..._selectedSessions];
@@ -4301,13 +4384,16 @@ function _renderBatchActionBar(){
   };bar.appendChild(archiveBtn);
   // Move
   const moveBtn=document.createElement('button');moveBtn.className='batch-action-btn';
+  moveBtn.disabled=!count;
   moveBtn.textContent=t('session_batch_move');
   moveBtn.onclick=(e)=>{e.stopPropagation();_showBatchProjectPicker();};bar.appendChild(moveBtn);
   // Delete
   const deleteBtn=document.createElement('button');deleteBtn.className='batch-action-btn batch-action-btn-danger';
+  deleteBtn.disabled=!writableSelectionIds.length;
   deleteBtn.textContent=t('session_batch_delete');
   deleteBtn.onclick=async()=>{
-    const ids=[..._selectedSessions];
+    const ids=[...writableSelectionIds];
+    if(!ids.length){showToast('Imported Matrix sessions can only be archived or moved.',3000);return;}
     const wtCount=_worktreeSessionCount(ids);
     const sessionsById=new Map(ids.map(sid=>[sid,_sessionSnapshotById(sid)]));
     const ok=await showConfirmDialog({
@@ -4336,6 +4422,19 @@ function _renderBatchActionBar(){
       exitSessionSelectMode();await renderSessionList();
     }catch(e){showToast('Delete failed: '+(e.message||e));}
   };bar.appendChild(deleteBtn);
+}
+function _renderSessionBatchDock(){
+  const dock=$('sessionBatchDock');if(!dock)return;
+  dock.innerHTML='';
+  if(!_sessionSelectMode){
+    const toggle=document.createElement('button');toggle.type='button';toggle.className='session-select-toggle';
+    toggle.textContent=t('session_select_mode');toggle.onclick=(e)=>{e.stopPropagation();toggleSessionSelectMode();};
+    dock.appendChild(toggle);
+    return;
+  }
+  const batchBar=document.createElement('div');batchBar.id='batchActionBar';batchBar.className='batch-action-bar';
+  dock.appendChild(batchBar);
+  _renderBatchActionBar();
 }
 function _showBatchProjectPicker(){
   const ids=[..._selectedSessions];if(!ids.length)return;
@@ -5416,6 +5515,10 @@ function _applySessionListPayload(sessData, projData, opts){
   _serverCliSessionCount = Object.prototype.hasOwnProperty.call(sessData, 'cli_session_count')
     ? Number(sessData.cli_session_count)
     : null;
+  _serverSessionOriginCounts = sessData.session_origin_counts && typeof sessData.session_origin_counts === 'object'
+    ? sessData.session_origin_counts : null;
+  _serverSessionOriginLabels = sessData.session_origin_labels && typeof sessData.session_origin_labels === 'object'
+    ? sessData.session_origin_labels : null;
   if (!Number.isFinite(_serverWebuiSessionCount)) _serverWebuiSessionCount = null;
   if (!Number.isFinite(_serverCliSessionCount)) _serverCliSessionCount = null;
   // Capture server clock for clock-skew compensation (issue #1144).
@@ -7503,12 +7606,32 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
     _sessionSourceFilter='webui';
   }
   const showCliOnly=_sessionSourceFilter==='cli';
+  const selectedOrigin=_sessionSourceFilter;
+  const selectedProfileFiltered=selectedOrigin==='webui'
+    ? webuiProfileFiltered
+    : selectedOrigin==='cli'
+      ? cliProfileFiltered
+      : webuiProfileFiltered.concat(cliProfileFiltered).filter(s=>_sessionOrigin(s)===selectedOrigin);
+  const selectedSessionsRaw=selectedOrigin==='webui'
+    ? webuiSessionsRaw
+    : selectedOrigin==='cli'
+      ? cliSessionsRaw
+      : webuiSessionsRaw.concat(cliSessionsRaw).filter(s=>_sessionOrigin(s)===selectedOrigin);
+  const selectedReferenceRaw=selectedOrigin==='webui'
+    ? webuiReferenceRaw
+    : selectedOrigin==='cli'
+      ? cliReferenceRaw
+      : webuiReferenceRaw.concat(cliReferenceRaw).filter(s=>_sessionOrigin(s)===selectedOrigin);
   const serverArchivedCount=showCliOnly?_archivedCliCount:_archivedWebuiCount;
+  const selectedArchivedCount=selectedSessionsRaw.filter(s=>s.archived).length;
+  const originServerArchivedCount=selectedOrigin==='cli'?_archivedCliCount:_archivedWebuiCount;
   return {
     cliSessionCount,
-    profileFiltered: showCliOnly ? cliProfileFiltered : webuiProfileFiltered,
-    sessionsRaw: showCliOnly ? cliSessionsRaw : webuiSessionsRaw,
+    profileFiltered: selectedProfileFiltered,
+    sessionsRaw: selectedSessionsRaw,
+    referenceRaw: selectedReferenceRaw,
     archivedCount: Math.max(showCliOnly ? cliArchivedCount : webuiArchivedCount, Number(serverArchivedCount||0)),
+    originArchivedCount: Math.max(selectedArchivedCount, Number(originServerArchivedCount||serverArchivedCount||0)),
     webuiReferenceRaw,
     cliReferenceRaw,
     webuiSessionsRaw,
@@ -7526,8 +7649,10 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
 // project + source bucket as the render they feed before using them.
 function _scopedSidebarReferenceRows(isCli){
   if(typeof _sidebarReferenceSessions==='undefined'||!Array.isArray(_sidebarReferenceSessions)||!_sidebarReferenceSessions.length) return [];
+  const sourceFilter=typeof _sessionSourceFilter==='string'?_sessionSourceFilter:'webui';
   return _sidebarReferenceSessions.filter(s=>{
     if(!s) return false;
+    if(sourceFilter!=='webui'&&sourceFilter!=='cli'&&_sessionOrigin(s)!==sourceFilter) return false;
     // Source scope: only references in the same webui/cli bucket as this render.
     if(_isCliSession(s)!==!!isCli) return false;
     // Project scope: mirror _partitionSidebarSessionRows exactly.
@@ -7629,17 +7754,21 @@ function renderSessionListFromCache(){
   // session id into another conversation, that content hit should still appear.
   const searchMatches=_sessionSearchMergeMatches(sidebarRows,searchQueryRaw,_contentSearchResults);
   const allMatched=_ensureActiveSessionRowPresent(searchMatches,sidebarRows);
+  const sidebarPartition = {
+    ..._partitionSidebarSessionRows(allMatched, activeSidForSidebar),
+  };
   const {
     cliSessionCount,
     profileFiltered,
     sessionsRaw,
     archivedCount,
+    originArchivedCount,
     webuiReferenceRaw,
     cliReferenceRaw,
     webuiSessionsRaw,
     cliSessionsRaw,
-  }=_partitionSidebarSessionRows(allMatched, activeSidForSidebar);
-  const referenceRaw=_sessionSourceFilter==='cli'?cliReferenceRaw:webuiReferenceRaw;
+  }=sidebarPartition;
+  const referenceRaw=sidebarPartition.referenceRaw;
   const isCliView=_sessionSourceFilter==='cli';
   const sessions=_renderSidebarRowsFromRawSessions(sessionsRaw, [...referenceRaw, ..._scopedSidebarReferenceRows(isCliView)]);
   // Server-provided source bucket counts are authoritative for the current
@@ -7672,38 +7801,21 @@ function renderSessionListFromCache(){
   // this assignment as a defensive backstop for any future non-switch caller that
   // reaches a real paint with the flag somehow still set.
   _sessionListSkeletonActive=false;
-  // Batch select bar (when in select mode)
-  if(_sessionSelectMode){
-    const selectBar=document.createElement('div');selectBar.className='session-select-bar';
-    const exitBtn=document.createElement('button');exitBtn.className='batch-exit-btn';
-    exitBtn.textContent='\u2715';exitBtn.title='Exit select mode';
-    exitBtn.onclick=(e)=>{e.stopPropagation();exitSessionSelectMode();};
-    selectBar.appendChild(exitBtn);
-    const selectAllBtn=document.createElement('button');selectAllBtn.className='batch-select-all-btn';
-    selectAllBtn.textContent=t('session_select_all');
-    selectAllBtn.onclick=(e)=>{e.stopPropagation();selectAllSessions();};
-    selectBar.appendChild(selectAllBtn);
-    list.appendChild(selectBar);
-  }
-  // Ensure batch action bar exists in DOM
-  let batchBar=$('batchActionBar');
-  if(!batchBar){batchBar=document.createElement('div');batchBar.id='batchActionBar';batchBar.className='batch-action-bar';}
-  list.appendChild(batchBar);
-  if(_sessionSelectMode&&_selectedSessions.size>0){batchBar.style.display='flex';_renderBatchActionBar();}
-  else{batchBar.style.display='none';}
   if(_sessionListLoadError){
     const note=_renderSessionListLoadErrorNote();
     if(note) list.appendChild(note);
   }
-  if(window._showCliSessions || cliSessionCount>0){
+  if(window._showCliSessions || cliSessionCount>0 || _sessionOriginKeys().length>1){
     const sourceTabs=document.createElement('div');
     sourceTabs.className='session-source-tabs';
-    for(const filter of ['webui','cli']){
+    for(const filter of _sessionOriginKeys()){
       const count=filter==='cli'?cliSessionTabCount:webuiSessionTabCount;
+      const originCount=_sessionSourceTabCount(filter, renderedWebuiSessionCount, renderedCliSessionCount);
+      const displayCount=filter==='webui'||filter==='cli'?count:originCount;
       const btn=document.createElement('button');
       btn.type='button';
       btn.className='session-source-tab'+(_sessionSourceFilter===filter?' active':'');
-      btn.textContent=_sessionSourceLabel(filter,count);
+      btn.textContent=_sessionSourceLabel(filter,displayCount);
       btn.setAttribute('aria-pressed', _sessionSourceFilter===filter?'true':'false');
       btn.onclick=()=>_setSessionSourceFilter(filter);
       sourceTabs.appendChild(btn);
@@ -7830,10 +7942,10 @@ function renderSessionListFromCache(){
   }
   // Show/hide archived toggle if there are archived sessions. Archived rows
   // are fetched on demand so large histories do not bloat every sidebar poll.
-  if(archivedCount>0||_showArchived){
+  if((originArchivedCount??archivedCount)>0||_showArchived){
     const toggle=document.createElement('div');
     toggle.style.cssText='font-size:10px;padding:4px 10px;color:var(--muted);cursor:pointer;text-align:center;opacity:.7;';
-    toggle.textContent=_showArchived?'Hide archived':'Show '+archivedCount+' archived';
+    toggle.textContent=_showArchived?'Hide archived':'Show '+(originArchivedCount??archivedCount)+' archived';
     toggle.onclick=()=>{
       _showArchived=!_showArchived;
       if(_showArchived) _archivedRowsLoadedLimit=SESSION_ARCHIVED_PAGE_SIZE;
@@ -7842,10 +7954,12 @@ function renderSessionListFromCache(){
     list.appendChild(toggle);
   }
   // Empty state for active project filter
-  if(_sessionSourceFilter==='cli'&&sessions.length===0){
+  if(sessions.length===0&&_sessionSourceFilter!=='webui'){
     const empty=document.createElement('div');
     empty.className='session-empty-note';
-    empty.textContent=window._showCliSessions?'No CLI sessions found.':'Enable Show agent sessions in Settings to list CLI sessions here.';
+    empty.textContent=window._showCliSessions||_sessionSourceFilter!=='cli'
+      ? `No ${_sessionOriginLabel(_sessionSourceFilter).toLowerCase()} found.`
+      : 'Enable Show agent sessions in Settings to list CLI sessions here.';
     list.appendChild(empty);
   } else if(_activeProject&&sessions.length===0){
     const empty=document.createElement('div');
@@ -7888,11 +8002,13 @@ function renderSessionListFromCache(){
     const key=_sidebarLineageKeyForRow(s);
     if(!_expandedChildSessionKeys.has(key)&&!searchQueryRaw) continue;
     for(const child of s._child_sessions){
-      if(child&&child.session_source==='fork'&&child.session_id&&!_isReadOnlySession(child)){
+      if(child&&child.session_source==='fork'&&child.session_id&&_isSessionSelectable(child)){
         _sessionVisibleSidebarIds.push(child.session_id);
       }
     }
   }
+  _pruneSelectedSessions();
+  _renderSessionBatchDock();
   _ensureSessionVirtualScrollHandler(list);
   const activeIndex=flatSessionRows.findIndex(row=>_sessionLineageContainsSession(row.session,activeSidForSidebar));
   const shouldAnchorActive=activeSidForSidebar&&activeIndex>=0&&(
@@ -8008,13 +8124,6 @@ function renderSessionListFromCache(){
       list.appendChild(more);
     }
   }
-  // Select mode toggle button (only when NOT in select mode)
-  if(!_sessionSelectMode){
-    const toggleBtn=document.createElement('div');toggleBtn.className='session-select-toggle';
-    toggleBtn.textContent=t('session_select_mode');
-    toggleBtn.onclick=(e)=>{e.stopPropagation();toggleSessionSelectMode();};
-    list.appendChild(toggleBtn);
-  }
   // Refresh FLIP and queued archive/delete reflow both drive
   // --session-reflow-offset. Refresh wins so one render has one transform writer.
   const reflowBefore=animateRefresh?flipBefore:_pendingSessionReflowPositions;
@@ -8062,7 +8171,7 @@ function renderSessionListFromCache(){
       cleanTitle='Session';
     }
     // Checkbox for batch select mode
-    if(_sessionSelectMode&&!readOnly){
+    if(_sessionSelectMode&&_isSessionSelectable(s)){
       const cbWrapper=document.createElement('label');cbWrapper.className='session-select-cb-wrapper';
       const cb=document.createElement('input');cb.type='checkbox';cb.className='session-select-cb';
       cb.dataset.sid=s.session_id;cb.checked=_selectedSessions.has(s.session_id);
@@ -8458,7 +8567,7 @@ function renderSessionListFromCache(){
             +(childAttention?' needs-attention':'')
             +childAttentionClass;
           row.dataset.sid=child.session_id;
-          if(_sessionSelectMode&&!_isReadOnlySession(child)){
+          if(_sessionSelectMode&&_isSessionSelectable(child)){
             const cbW=document.createElement('label');cbW.className='session-select-cb-wrapper';
             const cb=document.createElement('input');cb.type='checkbox';cb.className='session-select-cb';
             cb.dataset.sid=child.session_id;cb.checked=_selectedSessions.has(child.session_id);
@@ -8851,7 +8960,7 @@ function renderSessionListFromCache(){
         return true;
       }
       if(target&&target.closest&&target.closest('.session-child-count,.session-child-sessions,.session-child-session,.session-lineage-count,.session-lineage-segments,.session-lineage-segment')) return false;
-      if(_sessionSelectMode){if(!readOnly)toggleSessionSelect(s.session_id);return true;}
+      if(_sessionSelectMode){if(_isSessionSelectable(s))toggleSessionSelect(s.session_id);return true;}
       if(wasDragging){
         clearTimeout(_tapTimer);_tapTimer=null;_lastTapTime=0;
         _gestureState='idle';
@@ -8918,7 +9027,7 @@ function renderSessionListFromCache(){
       if(e.pointerType==='mouse' && e.button!==0) return;
       if(_renamingSid) return;
       if(actions&&actions.contains(e.target)) return;
-      if(_sessionSelectMode){e.stopPropagation();if(!readOnly)toggleSessionSelect(s.session_id);return;}
+      if(_sessionSelectMode){e.stopPropagation();if(_isSessionSelectable(s))toggleSessionSelect(s.session_id);return;}
       // Guard: prevent renaming if session is currently being loaded
       if (_loadingSessionId && _loadingSessionId !== s.session_id) return;
       startRename();
