@@ -383,6 +383,51 @@ def test_insights_trailing_window_keeps_session_at_now(monkeypatch, tmp_path):
     assert data["total_input_tokens"] == 200
 
 
+def test_insights_trailing_window_dst_cutoff_at_local_midnight(monkeypatch, tmp_path):
+    """Trailing days=N fall-back across a DST transition must place
+    first_day_ts at LOCAL MIDNIGHT of the first calendar day, not at
+    01:00 like fixed 86400s subtraction does.  America/New_York
+    2026-11-01 falls back 2:00 -> 1:00, so today_midnight - (N-1)*86400
+    lands an hour LATE (01:00 of an ephemeral 25-hour day); a session
+    at 00:30 of that first day would then be dropped from the window
+    while its daily bucket still shows on the chart.  Regression for
+    Greptile P1 "Trailing DST cutoff mismatches buckets"."""
+    import os
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset() required for DST test (not available on Windows)")
+
+    os.environ["TZ"] = "America/New_York"
+    time.tzset()
+    try:
+        # 2026-11-02 12:00 EST, the day after the fall-back transition.
+        now = time.mktime((2026, 11, 2, 12, 0, 0, 0, 0, -1))
+        # 2026-11-01 00:30 EDT = 2026-11-01 04:30 UTC.  A fixed
+        # 86400s cutoff from Nov 2 midnight lands at Nov 1 01:00 EDT,
+        # which would EXCLUDE this 00:30 session (before 01:00) even
+        # though its calendar day is inside the 2-day window.
+        first_day = time.mktime((2026, 11, 1, 0, 30, 0, 0, 0, -1))
+        entries = [
+            {
+                "session_id": "first_day_early_hour", "updated_at": first_day, "created_at": first_day,
+                "message_count": 1, "input_tokens": 10, "output_tokens": 5,
+                "estimated_cost": "0.0001", "model": "gpt-x",
+            },
+        ]
+        data = _call_insights(monkeypatch, tmp_path, entries, days="2", now=now)
+        # The first-day 00:30 session MUST be inside the 2-day window
+        # (Nov 1 + Nov 2), so totals include it and its daily bucket
+        # matches the series.
+        assert data["total_sessions"] == 1
+        assert data["total_input_tokens"] == 10
+        dates = [d["date"] for d in data["daily_tokens"]]
+        assert dates == ["2026-11-01", "2026-11-02"]
+        assert data["daily_tokens"][0]["sessions"] == 1
+    finally:
+        os.environ.pop("TZ", None)
+        if hasattr(time, "tzset"):
+            time.tzset()
+
+
 def test_insights_absolute_range_state_db_keeps_row_at_now_cutoff(monkeypatch, tmp_path):
     """Absolute-mode SQL uses an exclusive `<` on end_cutoff, but trailing
     mode keeps `<=` (now).  A state.db CLI row exactly at `now` must be

@@ -11158,10 +11158,15 @@ def _handle_insights(handler, parsed) -> bool:
         end_exclusive = False
 
         today = _time.localtime(now)
-        today_midnight = _time.mktime((today.tm_year, today.tm_mon, today.tm_mday, 0, 0, 0, today.tm_wday, today.tm_yday, today.tm_isdst))
-        day_secs = 86400
-        first_day_ts = today_midnight - ((days - 1) * day_secs)
-        start_day = _datetime.fromtimestamp(first_day_ts).date()
+        # Walk back by CALENDAR days, not fixed 86400s intervals: across a
+        # DST transition a fixed-step subtraction lands first_day_ts at
+        # 23:00/01:00 instead of local midnight, admitting or dropping the
+        # boundary hour while the daily series still advances by calendar
+        # dates (totals disagree with the series).  The absolute branch
+        # above uses the same calendar-day arithmetic; keep them aligned.
+        today_midnight = _time.mktime((today.tm_year, today.tm_mon, today.tm_mday, 0, 0, 0, 0, 0, -1))
+        start_day = _datetime.fromtimestamp(today_midnight).date() - _timedelta(days=days - 1)
+        first_day_ts = _time.mktime(start_day.timetuple())
     cutoff = first_day_ts
 
     def _safe_usage_int(value) -> int:
