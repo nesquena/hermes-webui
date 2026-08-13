@@ -56,6 +56,31 @@ def test_gateway_routing_metadata_absent_returns_none_without_placeholder_noise(
     assert _normalize_gateway_routing_metadata(None, requested_model="gpt-5.5", requested_provider="openai-codex") is None
 
 
+def test_sse_routing_source_is_safely_normalized_and_persisted():
+    normalized = _normalize_gateway_routing_metadata(
+        {
+            "requested_model": "auto",
+            "requested_provider": "TokenTable",
+            "used_model": "gpt-5.6-sol",
+            "used_provider": "TokenTable",
+            "source": "openai-compatible-sse",
+            "api_key": "must-not-survive",
+        }
+    )
+
+    assert normalized == {
+        "requested_model": "auto",
+        "requested_provider": "TokenTable",
+        "used_model": "gpt-5.6-sol",
+        "used_provider": "TokenTable",
+        "source": "openai-compatible-sse",
+        "provider_changed": False,
+        "model_changed": True,
+        "has_failover": False,
+    }
+    assert "must-not-survive" not in repr(normalized)
+
+
 def test_session_persists_latest_gateway_routing_and_history_across_reload():
     routing = _normalize_gateway_routing_metadata(
         {
@@ -63,6 +88,7 @@ def test_session_persists_latest_gateway_routing_and_history_across_reload():
             "used_model": "model-b",
             "requested_provider": "provider-a",
             "requested_model": "model-a",
+            "source": "openai-compatible-sse",
             "routing": [
                 {"provider": "provider-a", "status": "failed"},
                 {"provider": "provider-b", "status": "selected"},
@@ -78,8 +104,11 @@ def test_session_persists_latest_gateway_routing_and_history_across_reload():
     reloaded = Session.load("732gateway")
 
     assert reloaded.gateway_routing == routing
+    assert reloaded.gateway_routing["source"] == "openai-compatible-sse"
     assert reloaded.gateway_routing_history == [routing]
+    assert reloaded.gateway_routing_history[0]["source"] == "openai-compatible-sse"
     assert reloaded.messages[-1]["_gatewayRouting"] == routing
+    assert reloaded.messages[-1]["_gatewayRouting"]["source"] == "openai-compatible-sse"
     compact = reloaded.compact()
     assert compact["gateway_routing"] == routing
     assert compact["gateway_routing_history"] == [routing]
@@ -90,6 +119,51 @@ def test_streaming_captures_gateway_metadata_into_usage_payload_and_assistant_tu
     assert "usage['gateway_routing']" in STREAMING_PY
     assert "_dm['_gatewayRouting']" in STREAMING_PY
     assert "s.gateway_routing_history" in STREAMING_PY
+
+
+def test_streaming_explicit_gateway_metadata_uses_display_requested_provider():
+    streaming_worker = STREAMING_PY.split("def _run_agent_streaming(", 1)[1]
+    persistence = streaming_worker.split(
+        "_gateway_routing = _extract_gateway_routing_metadata(", 1
+    )[1].split("if _gateway_routing:", 1)[0]
+
+    assert "requested_provider=_requested_provider_display" in persistence
+    assert persistence.count("requested_provider=_requested_provider_display") == 2
+
+    normalized = _normalize_gateway_routing_metadata(
+        {
+            "used_provider": "TokenTable",
+            "used_model": "gpt-5.6-sol",
+        },
+        requested_model="auto",
+        requested_provider="TokenTable",
+    )
+    assert normalized["requested_provider"] == "TokenTable"
+    assert normalized["provider_changed"] is False
+
+
+def test_routed_model_capture_cleanup_is_in_streaming_outer_finally():
+    streaming_worker = STREAMING_PY.split("def _run_agent_streaming(", 1)[1].split(
+        "# ============================================================\n"
+        "# SECTION: HTTP Request Handler",
+        1,
+    )[0]
+    outer_finally = streaming_worker.split(
+        "\n    finally:\n"
+        "        # Stop the periodic checkpoint thread before the final recovery path.",
+        1,
+    )[1]
+    reset_capture = outer_finally.find(
+        "        if _routed_model_capture_token is not None:\n"
+        "            try:\n"
+        "                reset_routed_model_capture(_routed_model_capture_token)"
+    )
+    clear_env = outer_finally.find(
+        "        _clear_thread_env()  # TD1: always clear thread-local context"
+    )
+
+    assert reset_capture >= 0
+    assert clear_env > reset_capture
 
 
 def test_frontend_copies_and_formats_gateway_metadata_without_absent_noise():
