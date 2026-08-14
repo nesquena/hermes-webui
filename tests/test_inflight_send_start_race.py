@@ -3,6 +3,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 SESSIONS_JS = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
@@ -163,7 +165,8 @@ def test_post_start_bookkeeping_errors_cannot_block_live_attach():
     )
 
 
-def test_delayed_chat_start_keeps_a_owned_state_out_of_visible_b_pane():
+@pytest.mark.parametrize("pane_state", ("assigned", "loading"))
+def test_delayed_chat_start_keeps_a_owned_state_out_of_visible_b_pane(pane_state):
     """A delayed A start must finish in A's recovery state after the pane switches to B."""
     send_body = _function_body(MESSAGES_JS, "send")
     script = f"""
@@ -219,6 +222,12 @@ let _queueDrainSid = null;
 let _approvalSessionId = 'A';
 let _clarifySessionId = 'A';
 let uploadedName = 'a.txt';
+let _loadingSessionId = null;
+function _isSessionCurrentPane(sid) {{
+  if(!sid || !S.session || S.session.session_id!==sid) return false;
+  if(typeof _loadingSessionId!=='undefined' && _loadingSessionId && _loadingSessionId!==sid) return false;
+  return true;
+}}
 function visibleCall(name) {{
   if (switched) calls.visibleAfterSwitch.push(name);
 }}
@@ -292,11 +301,17 @@ async function send() {{{send_body}}}
   const sendPromise = send();
   await startCalledPromise;
 
-  S.session = B;
-  S.messages = [{{role: 'user', content: 'B existing'}}, {{role: 'assistant', content: 'B reply'}}];
-  S.activeStreamId = 'B-stream';
-  S.busy = true;
-  S.activeProfile = 'profile-b';
+  const paneState = {json.dumps(pane_state)};
+  if (paneState === 'assigned') {{
+    S.session = B;
+    S.messages = [{{role: 'user', content: 'B existing'}}, {{role: 'assistant', content: 'B reply'}}];
+    S.activeStreamId = 'B-stream';
+    S.busy = true;
+    S.activeProfile = 'profile-b';
+  }} else {{
+    S.messages = [];
+    _loadingSessionId = 'B';
+  }}
   INFLIGHT.B = {{
     streamId: 'B-stream', activeTurnToken: 'B-token',
     messages: S.messages.slice(), uploaded: [], toolCalls: [],
@@ -305,6 +320,8 @@ async function send() {{{send_body}}}
   localStorage.setItem('hermes-webui-inflight', bMarker);
   const visibleSessionBefore = JSON.parse(JSON.stringify(S.session));
   const visibleMessagesBefore = JSON.parse(JSON.stringify(S.messages));
+  const visibleActiveStreamBefore = S.activeStreamId;
+  const visibleBusyBefore = S.busy;
   const visibleInflightBefore = JSON.parse(JSON.stringify(INFLIGHT.B));
   switched = true;
 
@@ -313,8 +330,12 @@ async function send() {{{send_body}}}
 
   assert.deepStrictEqual(S.session, visibleSessionBefore);
   assert.deepStrictEqual(S.messages, visibleMessagesBefore);
-  assert.strictEqual(S.activeStreamId, 'B-stream');
-  assert.strictEqual(S.busy, true);
+  assert.strictEqual(S.activeStreamId, visibleActiveStreamBefore);
+  assert.strictEqual(S.busy, visibleBusyBefore);
+  if (paneState === 'assigned') {{
+    assert.strictEqual(S.activeStreamId, 'B-stream');
+    assert.strictEqual(S.busy, true);
+  }}
   assert.deepStrictEqual(INFLIGHT.B, visibleInflightBefore);
   assert.strictEqual(localStorage.getItem('hermes-webui-inflight'), bMarker);
   assert.strictEqual(calls.attach.length, 0);

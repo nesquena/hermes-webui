@@ -1612,7 +1612,7 @@ async function send(){
   if(!S.session){await newSession();await renderSessionList();}
 
   const activeSid=S.session.session_id;
-  const _ownsSendPane=()=>!!(S.session&&S.session.session_id===activeSid);
+  const _ownsSendPane=()=>_isSessionCurrentPane(activeSid);
   _sendInProgressSid=activeSid;
 
   // Salvage of #4750 (@harryazj): capture the composer text and clear the
@@ -1994,10 +1994,10 @@ async function send(){
     if(_ownsSendPane()){
       if(typeof updateSendBtn==='function') updateSendBtn();
     }
-    if(S.session&&S.session.session_id===activeSid){
+    if(_ownsSendPane()){
       S.session.active_stream_id = streamId;
     }
-    if(S.session&&S.session.session_id===activeSid&&typeof showLiveRunStatus==='function'){
+    if(_ownsSendPane()&&typeof showLiveRunStatus==='function'){
       const _startedAt=typeof startData?.pending_started_at==='number'
         ? startData.pending_started_at
         : (S.session.pending_started_at||Date.now()/1000);
