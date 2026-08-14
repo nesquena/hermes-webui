@@ -847,8 +847,8 @@ def test_inflight_merge_dedupes_uploaded_user_message(cleanup_test_sessions):
     pending_end = src.find("\nfunction ", pending_idx + 1)
     assert pending_end > pending_idx, "pending session merge helper end not found"
     pending_block = src[pending_idx:pending_end]
-    assert "_hasCurrentTailUserDuplicate(currentTurnMessages,pendingMsg,activeTurnToken)" in pending_block, (
-        "pending-user merge should dedupe only against the current authoritative active-turn user row"
+    assert "_hasCurrentTailUserDuplicate(pendingSourceMessages,pendingMsg,activeTurnToken)" in pending_block, (
+        "pending-user identity and duplicate checks must share the selected source"
     )
     assert "matchingUsers.length===1" in pending_block, (
         "pending-user merge should adopt attachments only from one exact active-turn identity match"

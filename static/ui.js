@@ -10763,8 +10763,9 @@ function _pendingActiveTurnUserMessage(messages, session){
   const startedAt=Number(session?.pending_started_at);
   if(!Number.isFinite(startedAt)||startedAt<=0) return null;
   const list=Array.isArray(messages)?messages:[];
-  const activeToken=session&&(session.active_turn_token??session.activeTurnToken);
-  const hasActiveToken=typeof activeToken==='string'&&activeToken.trim().length>0;
+  const activeTokenValue=session&&(session.active_turn_token??session.activeTurnToken);
+  const activeToken=typeof activeTokenValue==='string'?activeTokenValue.trim():'';
+  const hasActiveToken=!!activeToken;
   for(let i=list.length-1;i>=0;i--){
     const msg=list[i];
     if(!msg) continue;
@@ -10772,9 +10773,8 @@ function _pendingActiveTurnUserMessage(messages, session){
       ||(typeof _isCanonicalAssistantToolCallEnvelope==='function'&&_isCanonicalAssistantToolCallEnvelope(msg))
       ||String(msg.role||'')==='tool');
     if(isActivity){
-      if(hasActiveToken){
-        if(msg._active_turn_token!==activeToken) return null;
-      }
+      const rowToken=typeof msg._active_turn_token==='string'?msg._active_turn_token.trim():'';
+      if(hasActiveToken?rowToken!==activeToken:!!rowToken) return null;
       continue;
     }
     if(String(msg.role||'')!=='user') continue;

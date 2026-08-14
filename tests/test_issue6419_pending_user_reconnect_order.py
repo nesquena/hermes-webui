@@ -273,6 +273,90 @@ process.stdout.write(JSON.stringify({{results,exactOwner:exactOwner&&exactOwner.
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_tokenless_tagged_activity_does_not_adopt_legacy_timestamp_owner():
+    """A tagged activity boundary is not tokenless legacy history.
+
+    Every case exercises the production merge helper, including tagged live
+    activity with and without a matching session token.
+    """
+    helpers = _merge_helpers()
+    script = f"""
+{helpers}
+function summarizePending(row){{
+  return row&&{{
+    role:row.role,
+    content:row.content,
+    pending:!!row._pending,
+    attachments:row.attachments,
+  }};
+}}
+function runCase(name, boundary, merge, activeTurnToken){{
+  const older={{id:name+'-older',role:'user',content:'same prompt',_ts:3,
+    attachments:[{{path:'older-'+name}}]}};
+  const messages=[older,boundary];
+  const session={{pending_user_message:'same prompt',pending_started_at:3,
+    pending_attachments:[{{path:'pending-'+name}}]}};
+  if(activeTurnToken) session.active_turn_token=activeTurnToken;
+  const before=JSON.stringify(older.attachments);
+  const pendingOwner=_pendingActiveTurnUserMessage(messages,session);
+  const pending=getPendingSessionMessage(session,messages);
+  const merged=merge?_mergePendingSessionMessage(session,messages):null;
+  return {{name,pendingOwner:pendingOwner&&pendingOwner.id,pending:summarizePending(pending),
+    merged,before,after:JSON.stringify(older.attachments),
+    pendingIndex:messages.findIndex(row=>row&&row._pending),
+    boundaryIndex:messages.indexOf(boundary),rows:messages.map(summarizePending)}};
+}}
+const cases=[
+  runCase('live',{{role:'assistant',content:'working',_live:true,_ts:4,
+    _active_turn_token:' tagged-live '}},true),
+  runCase('canonical-tool-call',{{role:'assistant',_ts:4,
+    tool_calls:[{{id:'call-1',function:{{name:'lookup'}}}}],
+    _active_turn_token:' tagged-call '}},true),
+  runCase('tool-result',{{role:'tool',content:'result',_ts:4,
+    _active_turn_token:' tagged-tool '}},true),
+  runCase('mismatched-live',{{role:'assistant',content:'working',_live:true,_ts:4,
+    _active_turn_token:' live-token '}},true,'session-token'),
+];
+const exactUser={{id:'exact-user',role:'user',content:'same prompt',_ts:3,
+  _active_turn_token:' exact-turn '}};
+const exactMessages=[exactUser,{{role:'assistant',content:'working',_live:true,_ts:4,
+  _active_turn_token:'exact-turn'}}];
+const exactSession={{pending_user_message:'same prompt',pending_started_at:3,
+  active_turn_token:' exact-turn '}};
+const legacyUser={{id:'legacy-user',role:'user',content:'same prompt',_ts:3}};
+const legacyMessages=[legacyUser,{{role:'assistant',content:'working',_live:true,_ts:4}}];
+const legacySession={{pending_user_message:'same prompt',pending_started_at:3}};
+process.stdout.write(JSON.stringify({{cases,
+  exactOwner:_pendingActiveTurnUserMessage(exactMessages,exactSession)?.id,
+  legacyOwner:_pendingActiveTurnUserMessage(legacyMessages,legacySession)?.id
+}}));
+"""
+    result = _run_node(script)
+
+    assert {case["name"] for case in result["cases"]} == {
+        "live",
+        "canonical-tool-call",
+        "tool-result",
+        "mismatched-live",
+    }
+    assert result["exactOwner"] == "exact-user"
+    assert result["legacyOwner"] == "legacy-user"
+    for case in result["cases"]:
+        assert case["pendingOwner"] is None, case
+        assert case["pending"] == {
+            "role": "user",
+            "content": "same prompt",
+            "pending": True,
+            "attachments": [{"path": f"pending-{case['name']}"}],
+        }, case
+        assert case["before"] == case["after"], case
+        assert case["merged"] is True, case
+        assert any(row == case["pending"] for row in case["rows"]), case
+        if "live" in case["name"]:
+            assert case["pendingIndex"] < case["boundaryIndex"], case
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_refresh_session_uses_canonical_helper_before_render():
     """The actual refresh path must project [user, live assistant] and render
     once when the canonical helper is available."""

@@ -3408,6 +3408,8 @@ function _mergePendingSessionMessage(session,messages){
   if(!Array.isArray(messages)) return false;
   const liveAssistantIdx=messages.findIndex(m=>m&&m.role==='assistant'&&m._live);
   const currentTurnMessages=liveAssistantIdx>=0?messages.slice(0,liveAssistantIdx):messages;
+  const liveAssistant=liveAssistantIdx>=0?messages[liveAssistantIdx]:null;
+  const liveBoundaryToken=_opaqueActiveTurnToken(liveAssistant&&liveAssistant._active_turn_token);
   const activeTurnToken=_opaqueActiveTurnToken(
     session&&(session.active_turn_token??session.activeTurnToken),
   );
@@ -3435,10 +3437,10 @@ function _mergePendingSessionMessage(session,messages){
       return false;
     }
   }
-  const pendingSourceMessages=ambiguousTokenRows?messages:currentTurnMessages;
+  const pendingSourceMessages=ambiguousTokenRows||liveBoundaryToken?messages:currentTurnMessages;
   const pendingMsg=typeof getPendingSessionMessage==='function'?getPendingSessionMessage(session,pendingSourceMessages):null;
   if(!pendingMsg) return false;
-  if(_hasCurrentTailUserDuplicate(currentTurnMessages,pendingMsg,activeTurnToken)) return false;
+  if(_hasCurrentTailUserDuplicate(pendingSourceMessages,pendingMsg,activeTurnToken)) return false;
   if(liveAssistantIdx>=0){
     const misplacedIdx=activeTurnToken?-1:messages.findIndex((m,idx)=>
       idx>liveAssistantIdx&&m&&m.role==='user'&&_sameTranscriptMessage(m,pendingMsg)
