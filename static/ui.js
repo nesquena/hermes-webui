@@ -10653,16 +10653,23 @@ async function _waitForServerThenReload(opts){
 function _pendingCurrentTailUserMessage(messages,candidateStart,candidateTimestamp,activeTurnToken){
   const list=Array.isArray(messages)?messages:[];
   let crossedActivity=false;
+  const authoritativeToken=typeof activeTurnToken==='string'&&activeTurnToken.trim().length
+    ?activeTurnToken:null;
   for(let i=list.length-1;i>=0;i--){
     const msg=list[i];
     if(!msg) continue;
     if(String(msg.role||'')==='user'){
       // Compaction rows are synthetic user-role markers, not submitted turns.
       if(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(msg)) continue;
+      if(authoritativeToken){
+        if(msg._active_turn_token!==authoritativeToken) return null;
+        const matchingUsers=list.filter(row=>row&&String(row.role||'')==='user'
+          &&row._active_turn_token===authoritativeToken);
+        if(matchingUsers.length!==1) return null;
+      }
       if(crossedActivity){
-        if(Object.prototype.hasOwnProperty.call(msg,'_active_turn_token')){
-          if(typeof activeTurnToken!=='string'||!activeTurnToken.trim().length
-            ||msg._active_turn_token!==activeTurnToken) return null;
+        if(authoritativeToken){
+          if(msg._active_turn_token!==authoritativeToken) return null;
         }else{
           const rowTimestamp=_messageTimestampSeconds(msg);
           const candidateTimestampValue=_firstValidTimestampSeconds(candidateStart,candidateTimestamp);
@@ -10674,18 +10681,21 @@ function _pendingCurrentTailUserMessage(messages,candidateStart,candidateTimesta
     }
     if((typeof _isCanonicalAssistantToolCallEnvelope==='function'&&_isCanonicalAssistantToolCallEnvelope(msg))
       ||String(msg.role||'')==='tool'){
-      if(msg._active_turn_token!==undefined){
-        if(typeof activeTurnToken!=='string'||!activeTurnToken.trim().length
-          ||msg._active_turn_token!==activeTurnToken) return null;
-        crossedActivity=true;
-        continue;
-      }
-      if(typeof _isTailActivityOwnedByCandidateTurn!=='function'
+      if(authoritativeToken){
+        if(msg._active_turn_token!==authoritativeToken) return null;
+      }else if(msg._active_turn_token!==undefined){
+        return null;
+      }else if(typeof _isTailActivityOwnedByCandidateTurn!=='function'
         ||!_isTailActivityOwnedByCandidateTurn(msg,candidateStart,candidateTimestamp)) return null;
       crossedActivity=true;
       continue;
     }
     if(msg._live){
+      if(authoritativeToken){
+        if(msg._active_turn_token!==authoritativeToken) return null;
+      }else if(msg._active_turn_token!==undefined){
+        return null;
+      }
       crossedActivity=true;
       continue;
     }
@@ -10753,34 +10763,44 @@ function _pendingActiveTurnUserMessage(messages, session){
   const startedAt=Number(session?.pending_started_at);
   if(!Number.isFinite(startedAt)||startedAt<=0) return null;
   const list=Array.isArray(messages)?messages:[];
-  let tokenMatch=null;
-  let timestampMatch=null;
-  let timestampAmbiguous=false;
+  const activeToken=session&&(session.active_turn_token??session.activeTurnToken);
+  const hasActiveToken=typeof activeToken==='string'&&activeToken.trim().length>0;
   for(let i=list.length-1;i>=0;i--){
     const msg=list[i];
-    if(!msg||String(msg.role||'')!=='user') continue;
+    if(!msg) continue;
+    const isActivity=!!(msg._live
+      ||(typeof _isCanonicalAssistantToolCallEnvelope==='function'&&_isCanonicalAssistantToolCallEnvelope(msg))
+      ||String(msg.role||'')==='tool');
+    if(isActivity){
+      if(hasActiveToken){
+        if(msg._active_turn_token!==activeToken) return null;
+      }
+      continue;
+    }
+    if(String(msg.role||'')!=='user') continue;
     if(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(msg)) continue;
-    // Unambiguous: the row carries the active turn's exact token
-    // opaque token stamped by the server's eager-checkpoint path.
-    if(typeof _activeTurnTokenMatches==='function'&&_activeTurnTokenMatches(msg,session)){
-      if(tokenMatch) return null;
-      tokenMatch=msg;
+    // The newest non-compaction user is the active-turn boundary. Never skip
+    // it to adopt an older repeated prompt when its identity is absent or
+    // contradictory.
+    if(hasActiveToken){
+      if(typeof _activeTurnTokenMatches==='function'&&_activeTurnTokenMatches(msg,session)){
+        const owners=list.filter(row=>row&&String(row.role||'')==='user'
+          &&!(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(row))
+          &&typeof _activeTurnTokenMatches==='function'&&_activeTurnTokenMatches(row,session));
+        return owners.length===1?msg:null;
+      }
+      return null;
     }
-    // Unambiguous: the row's timestamp IS pending_started_at within
-    // precision-only float drift (never a whole second).
     const ts=_messageTimestampSeconds(msg);
-    if(ts===null) continue;
-    if(Math.abs(ts-startedAt)<=_PENDING_ACTIVE_TURN_TS_EPSILON){
-      if(timestampMatch) timestampAmbiguous=true;
-      else timestampMatch=msg;
-    }
+    if(ts===null||Math.abs(ts-startedAt)>_PENDING_ACTIVE_TURN_TS_EPSILON)return null;
+    const owners=list.filter(row=>{
+      if(!row||String(row.role||'')!=='user')return false;
+      if(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(row))return false;
+      const rowTs=_messageTimestampSeconds(row);
+      return rowTs!==null&&Math.abs(rowTs-startedAt)<=_PENDING_ACTIVE_TURN_TS_EPSILON;
+    });
+    return owners.length===1?msg:null;
   }
-  if(tokenMatch) return tokenMatch;
-  if(timestampAmbiguous) return null;
-  if(timestampMatch) return timestampMatch;
-  // Any wider drift (whole-second truncation, a rapid repeat ~1s later) is
-  // ambiguous: return null so getPendingSessionMessage() materializes the
-  // pending turn rather than guessing.
   return null;
 }
 
@@ -21470,7 +21490,9 @@ function addFiles(files){
 }
 const _uploadPendingFilesProgressBySession=new Map();
 function _uploadPendingFilesCurrentSession(sessionId){
-  return !!(!sessionId||(S.session&&S.session.session_id===sessionId));
+  if(!sessionId) return true;
+  if(typeof _isSessionCurrentPane==='function') return _isSessionCurrentPane(sessionId);
+  return !!(S.session&&S.session.session_id===sessionId);
 }
 function _uploadPendingFilesHideProgressBar(){
   const bar=$('uploadBar');const barWrap=$('uploadBarWrap');
@@ -21540,7 +21562,10 @@ async function uploadPendingFiles(options={}){
       }else{
         names.push({name: data.filename, path: data.path, mime: data.mime, size: data.size, is_image: !!data.is_image});
       }
-    }catch(e){failures++;setStatus(`\u274c ${t('upload_failed')}${f.name} \u2014 ${e.message}`);}
+    }catch(e){
+      failures++;
+      if(_uploadPendingFilesCurrentSession(sessionId)) setStatus(`\u274c ${t('upload_failed')}${f.name} \u2014 ${e.message}`);
+    }
     _uploadPendingFilesUpdateProgress(sessionId,Math.round((i+1)/total*100));
   }
   _uploadPendingFilesUpdateProgress(sessionId,null);
@@ -21549,6 +21574,6 @@ async function uploadPendingFiles(options={}){
   if(failures===total&&total>0)throw new Error(t('all_uploads_failed',total));
   // Show extraction summary
   const extracted=names.filter(n=>n.extracted);
-  if(extracted.length)showToast(t('archive_extracted',extracted.reduce((s,n)=>s+n.extracted,0),extracted.length));
+  if(extracted.length&&_uploadPendingFilesCurrentSession(sessionId))showToast(t('archive_extracted',extracted.reduce((s,n)=>s+n.extracted,0),extracted.length));
   return names;
 }

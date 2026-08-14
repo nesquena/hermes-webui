@@ -1390,6 +1390,22 @@ async function newSession(flash, options={}){
   }
   _setNewSessionPending(true);
   _newSessionInFlight=(async()=>{
+    const _newSessionOwnerSid=S.session&&S.session.session_id||null;
+    const _newSessionOwnerGeneration=typeof _loadSessionGeneration!=='undefined'
+      ?_loadSessionGeneration:null;
+    const _newSessionOwnsPane=()=>{
+      if(typeof _loadSessionGeneration!=='undefined'
+        &&_loadSessionGeneration!==_newSessionOwnerGeneration) return false;
+      if(_newSessionOwnerSid){
+        return typeof _isSessionCurrentPane==='function'
+          ?_isSessionCurrentPane(_newSessionOwnerSid)
+          :!!(S.session&&S.session.session_id===_newSessionOwnerSid
+            &&!(typeof _loadingSessionId!=='undefined'&&_loadingSessionId
+              &&_loadingSessionId!==_newSessionOwnerSid));
+      }
+      return !(S.session&&S.session.session_id)
+        &&!(typeof _loadingSessionId!=='undefined'&&_loadingSessionId);
+    };
     // Starting a brand-new chat must not carry named context blocks selected in
     // the previous conversation (#2543). loadSession() clears these on a sidebar
     // switch, but the New Chat path replaces S.session here without going through
@@ -1488,6 +1504,9 @@ async function newSession(flash, options={}){
         ||null;
     }
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
+    if(!_newSessionOwnsPane()) return null;
+    _loadSessionGeneration++;
+    _loadingSessionId=null;
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
       _clearEmptyComposerModelOverride();
     }
@@ -1566,6 +1585,7 @@ async function newSession(flash, options={}){
     }
     // Refresh sidebar to include the newly created session (#3874).
     if(typeof refreshSessionList==='function'){Promise.resolve(refreshSessionList('new-session')).catch(()=>{})}
+    return S.session;
   })();
   try{
     return await _newSessionInFlight;
@@ -1727,7 +1747,10 @@ async function loadSession(sid){
   const _loadGeneration = ++_loadSessionGeneration;
   const _isCurrentLoad = () => _loadingSessionId === sid && _loadSessionGeneration === _loadGeneration;
   _loadingSessionId = sid;
-  if(currentSid!==sid&&typeof _uploadPendingFilesSyncProgressForSession==='function')_uploadPendingFilesSyncProgressForSession(sid);
+  if(currentSid!==sid){
+    if(typeof setComposerStatus==='function')setComposerStatus('');
+    if(typeof _uploadPendingFilesSyncProgressForSession==='function')_uploadPendingFilesSyncProgressForSession(sid);
+  }
   // Reset scroll state for fresh session navigation — the reader expects to
   // land at the bottom of the new transcript, not wherever a stale unpin flag
   // from a prior session or a stray touch event during loading would place them.
@@ -3342,6 +3365,8 @@ function _currentTailUserMessage(messages,candidateStart,candidateTimestamp,cand
       ||String(msg.role||'')==='tool'){
       if(Object.prototype.hasOwnProperty.call(msg,'_active_turn_token')){
         if(!authoritativeToken||msg._active_turn_token!==authoritativeToken) return null;
+      }else if(authoritativeToken){
+        return null;
       }else if(typeof _isTailActivityOwnedByCandidateTurn!=='function'
         ||!_isTailActivityOwnedByCandidateTurn(msg,candidateStart,candidateTimestamp)) return null;
       crossedActivity=true;
@@ -3391,8 +3416,10 @@ function _mergePendingSessionMessage(session,messages){
       &&_opaqueActiveTurnToken(row._active_turn_token)===activeTurnToken):[];
   const ambiguousTokenRows=!!(activeTurnToken&&matchingUsers.length>1);
   if(activeTurnToken&&pendingText){
-    if(matchingUsers.length===1){
-      const existing=matchingUsers[0];
+    const existing=matchingUsers.length===1?matchingUsers[0]:null;
+    const pendingOwner=typeof _pendingActiveTurnUserMessage==='function'
+      ?_pendingActiveTurnUserMessage(messages,session):null;
+    if(existing&&pendingOwner===existing){
       const pendingAttachments=Array.isArray(session.pending_attachments)
         ?session.pending_attachments.filter(Boolean):[];
       if(pendingAttachments.length&&(!Array.isArray(existing.attachments)||!existing.attachments.length)){

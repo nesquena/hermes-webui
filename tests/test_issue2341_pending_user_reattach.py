@@ -73,7 +73,7 @@ def test_pending_user_message_dedup_checks_current_message_array():
     tail_end = UI_JS.find("// Precision-only epsilon", tail_start)
     assert tail_start != -1 and tail_end > tail_start
     tail_helper = "".join(UI_JS[tail_start:tail_end].split())
-    assert "msg._active_turn_token!==activeTurnToken" in tail_helper, (
+    assert "msg._active_turn_token!==authoritativeToken" in tail_helper, (
         "Pending tool activity carrying a token must match the exact "
         "server-issued active-turn token"
     )

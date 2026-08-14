@@ -1295,8 +1295,9 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
   // Only mutate the VISIBLE composer / staged tray when the failed send belongs
   // to the session the user is currently looking at — otherwise a background
   // send failure would pollute another session's composer. (Codex #5484 catch.)
-  const visibleSid=(S.session&&S.session.session_id)||null;
-  const belongsToVisible=!(sid&&visibleSid&&sid!==visibleSid);
+  const belongsToVisible=typeof _isSessionCurrentPane==='function'
+    ?_isSessionCurrentPane(sid)
+    :!(sid&&S.session&&S.session.session_id&&sid!==S.session.session_id);
   let restoredVisible=false;
   if(belongsToVisible){
     const inp=$('msg');
@@ -1326,7 +1327,9 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
   if(sid&&typeof _saveComposerDraftNow==='function'){
     const _persist=()=>{
       try{
-        const stillVisible=(S.session&&S.session.session_id)===sid;
+        const stillVisible=typeof _isSessionCurrentPane==='function'
+          ?_isSessionCurrentPane(sid)
+          :(S.session&&S.session.session_id)===sid;
         if(stillVisible){
           const inp=$('msg');
           const liveText=inp?String(inp.value||''):restore;
@@ -1334,7 +1337,7 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
         } else if(!restoredVisible){
           // Background failure (sid was never the visible session): no live
           // composer to read, so persist the captured snapshot — it's the only copy.
-          _saveComposerDraftNow(sid, restore, []);
+          _saveComposerDraftNow(sid, restore, files);
         }
         // else: restored the visible composer, then the user switched away — the
         // session-switch save path already saved sid's composer; skip stale write.
@@ -1406,7 +1409,7 @@ async function send(){
   // If busy or a manual compression is still running, handle based on default_message_mode
   if(S.busy||compressionRunning){
     if(text||S.pendingFiles.length){
-      if(!S.session){await newSession();await renderSessionList();}
+      if(!S.session){const _createdSession=await newSession();if(!_createdSession)return;await renderSessionList();}
       // Busy-control slash commands must be intercepted HERE, before the
       // defaultMessageMode routing block, so the user can always type /steer, /interrupt,
       // /queue, /terminal, /goal, or /yolo while the agent is running and have
@@ -1470,6 +1473,34 @@ async function send(){
   }
   let _slashDisplayTextOverride=null;
   let _pendingMoaConfig=null;
+  const _captureSlashPane=()=>({
+    sessionId:S.session&&S.session.session_id||null,
+    loadingSessionId:typeof _loadingSessionId!=='undefined'?_loadingSessionId:null,
+    loadGeneration:typeof _loadSessionGeneration!=='undefined'?_loadSessionGeneration:null,
+  });
+  const _slashPaneStillCurrent=(owner)=>{
+    const currentGeneration=typeof _loadSessionGeneration!=='undefined'?_loadSessionGeneration:null;
+    if(owner.loadGeneration!==null&&currentGeneration!==owner.loadGeneration) return false;
+    if(owner.sessionId){
+      const currentLoadingSessionId=typeof _loadingSessionId!=='undefined'?_loadingSessionId:null;
+      return typeof _isSessionCurrentPane==='function'
+        ?_isSessionCurrentPane(owner.sessionId)
+        :!!(S.session&&S.session.session_id===owner.sessionId
+          &&(!currentLoadingSessionId||currentLoadingSessionId===owner.sessionId));
+    }
+    return !(S.session&&S.session.session_id)
+      &&!(typeof _loadingSessionId!=='undefined'&&_loadingSessionId);
+  };
+  const _ensureSlashSession=async()=>{
+    if(S.session)return true;
+    const _createdSession=await newSession();
+    if(!_createdSession)return false;
+    const _generation=typeof _loadSessionGeneration!=='undefined'?_loadSessionGeneration:null;
+    await renderSessionList();
+    if(typeof _loadSessionGeneration!=='undefined'&&_loadSessionGeneration!==_generation)return false;
+    if(typeof _loadingSessionId!=='undefined'&&_loadingSessionId)return false;
+    return !!S.session;
+  };
   // Slash command intercept -- local commands handled without agent round-trip.
   // We push the user message BEFORE running the handler for echo-worthy
   // commands so chat order is correct: some handlers (e.g. cmdHelp) push
@@ -1482,7 +1513,7 @@ async function send(){
     if(_cmd){
       let _pushedUser=false;
       if(!_cmd.noEcho){
-        if(!S.session){await newSession();await renderSessionList();}
+        if(!S.session){const _createdSession=await newSession();if(!_createdSession)return;await renderSessionList();}
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         _pushedUser=true;
         renderMessages();
@@ -1500,7 +1531,7 @@ async function send(){
     }
     if(_parsedCmd&&!_cmd){
       if(_parsedCmd.name==='pet'){
-        if(!S.session){await newSession();await renderSessionList();}
+        if(!S.session){const _createdSession=await newSession();if(!_createdSession)return;await renderSessionList();}
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         let _petOutput=null;
         try{
@@ -1525,11 +1556,13 @@ async function send(){
         if(typeof renderSessionList==='function') await renderSessionList();
         $('msg').value='';autoResize();hideCmdDropdown();return;
       }
+      const _agentCmdPane=_captureSlashPane();
       const _agentCmd=typeof getAgentCommandMetadata==='function'
         ? await getAgentCommandMetadata(_parsedCmd.name)
         : null;
+      if(!_slashPaneStillCurrent(_agentCmdPane)) return;
       if(_agentCmd&&_agentCmd.cli_only){
-        if(!S.session){await newSession();await renderSessionList();}
+        if(!(await _ensureSlashSession()))return;
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         S.messages.push({role:'assistant',content:cliOnlyCommandResponse(_parsedCmd.name,_agentCmd),_ts:Date.now()/1000});
         renderMessages();
@@ -1537,14 +1570,17 @@ async function send(){
       }
       const _agentCmdName=String(_agentCmd&&_agentCmd.name||_parsedCmd&&_parsedCmd.name||'').trim().toLowerCase();
       if(_AGENT_COMMANDS_RUN_ON_WEBUI.has(_agentCmdName)){
-        if(!S.session){await newSession();await renderSessionList();}
+        if(!(await _ensureSlashSession()))return;
+        const _agentRunPane=_captureSlashPane();
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         let _agentOutput='(no output)';
         try{
           _agentOutput=typeof executeAgentCommand==='function'
             ? await executeAgentCommand(text,_agentCmd||{name:_agentCmdName})
             : 'Agent command runtime unavailable in WebUI.';
+          if(!_slashPaneStillCurrent(_agentRunPane))return;
         }catch(e){
+          if(!_slashPaneStillCurrent(_agentRunPane))return;
           _agentOutput=`Agent command error: ${e&&e.message||e}`;
         }
         S.messages.push({role:'assistant',content:String(_agentOutput||'(no output)'),_ts:Date.now()/1000});
@@ -1552,14 +1588,17 @@ async function send(){
         $('msg').value='';autoResize();hideCmdDropdown();return;
       }
       if(_agentCmd&&_agentCmd.category==='Plugin'){
-        if(!S.session){await newSession();await renderSessionList();}
+        if(!(await _ensureSlashSession()))return;
+        const _pluginRunPane=_captureSlashPane();
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         let _pluginOutput='(no output)';
         try{
           _pluginOutput=typeof executeAgentPluginCommand==='function'
             ? await executeAgentPluginCommand(text,_agentCmd)
             : 'Plugin command runtime unavailable in WebUI.';
+          if(!_slashPaneStillCurrent(_pluginRunPane))return;
         }catch(e){
+          if(!_slashPaneStillCurrent(_pluginRunPane))return;
           _pluginOutput=`Plugin command error: ${e&&e.message||e}`;
         }
         S.messages.push({role:'assistant',content:String(_pluginOutput||'(no output)'),_ts:Date.now()/1000});
@@ -1568,39 +1607,48 @@ async function send(){
       }
       if(_agentCmdName==='moa'){
         const _moaArgs=(text.split(/\s+/).slice(1).join(' ')||'').trim();
-        if(!S.session){await newSession();await renderSessionList();}
+        if(!(await _ensureSlashSession()))return;
         if(!_moaArgs){
           let _moaUsage='/moa <prompt>';
-          try{const _moaCfgU=await api('/api/commands/moa/resolve');_moaUsage=_moaCfgU.usage||_moaUsage;}catch(_eu){}
+          const _moaUsagePane=_captureSlashPane();
+          try{const _moaCfgU=await api('/api/commands/moa/resolve');if(!_slashPaneStillCurrent(_moaUsagePane))return;_moaUsage=_moaCfgU.usage||_moaUsage;}catch(_eu){if(!_slashPaneStillCurrent(_moaUsagePane))return;}
           S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
           S.messages.push({role:'assistant',content:_moaUsage,_ts:Date.now()/1000});
           renderMessages();$('msg').value='';autoResize();hideCmdDropdown();return;
         }
+        const _moaResolvePane=_captureSlashPane();
         try{
           await api('/api/commands/moa/resolve');
+          if(!_slashPaneStillCurrent(_moaResolvePane))return;
           _slashDisplayTextOverride=text;
           text=_moaArgs;
           _pendingMoaConfig=true;
         }catch(_e){
+          if(!_slashPaneStillCurrent(_moaResolvePane))return;
           S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
           S.messages.push({role:'assistant',content:'MoA unavailable: '+(_e&&_e.message||_e),_ts:Date.now()/1000});
           renderMessages();$('msg').value='';autoResize();hideCmdDropdown();return;
         }
       }
+      const _bundleMetadataPane=_captureSlashPane();
       const _bundleCmd=!_agentCmd&&typeof getBundleCommandMetadata==='function'
         ? await getBundleCommandMetadata(_parsedCmd.name)
         : null;
+      if(!_slashPaneStillCurrent(_bundleMetadataPane)) return;
       if(_bundleCmd){
+        const _bundleResolvePane=_captureSlashPane();
         try{
           const _bundleResolved=typeof resolveBundleCommand==='function'
             ? await resolveBundleCommand(text,_bundleCmd)
             : null;
+          if(!_slashPaneStillCurrent(_bundleResolvePane))return;
           const _bundleMessage=String(_bundleResolved&&_bundleResolved.message||'').trim();
           if(!_bundleMessage) throw new Error('Bundle command runtime returned no invocation text.');
           _slashDisplayTextOverride=text;
           text=_bundleMessage;
         }catch(e){
-          if(!S.session){await newSession();await renderSessionList();}
+          if(!_slashPaneStillCurrent(_bundleResolvePane))return;
+          if(!(await _ensureSlashSession()))return;
           S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
           S.messages.push({role:'assistant',content:`Bundle command error: ${e&&e.message||e}`,_ts:Date.now()/1000});
           renderMessages();
@@ -1609,11 +1657,33 @@ async function send(){
       }
     }
   }
-  if(!S.session){await newSession();await renderSessionList();}
+  if(!(await _ensureSlashSession()))return;
 
   const activeSid=S.session.session_id;
   const _ownsSendPane=()=>_isSessionCurrentPane(activeSid);
   _sendInProgressSid=activeSid;
+  const _submittedText=text;
+  const _submittedSessionWorkspace=S.session.workspace;
+  const _submittedProfile=S.activeProfile||S.session.profile||'default';
+  const _submittedModelState={..._chatPayloadModelState()};
+  const _submittedTranscript=Array.isArray(S.messages)
+    ?S.messages.map(row=>row&&typeof row==='object'?{...row}:row):[];
+  const _submittedPendingPick=typeof _readPendingSessionModel==='function'
+    ?_readPendingSessionModel(activeSid):null;
+  const _submittedDefaultModel=(typeof window!=='undefined'&&window._defaultModel)||'';
+  const _submittedActiveProvider=(typeof window!=='undefined'&&window._activeProvider)||null;
+  const _pendingPickMatch=!!(_submittedPendingPick
+    &&_submittedPendingPick.model===_submittedModelState.model
+    &&String(_submittedPendingPick.model_provider||'')===String(_submittedModelState.model_provider||''));
+  const _submittedCrossProviderPick=!!(_submittedModelState.model
+    &&_submittedModelState.model_provider
+    &&_submittedDefaultModel
+    &&_submittedActiveProvider
+    &&_submittedModelState.model!==_submittedDefaultModel
+    &&String(_submittedModelState.model_provider||'')!==String(_submittedActiveProvider||''));
+  const _submittedPickFlag=_pendingPickMatch||_submittedCrossProviderPick;
+  const _submittedMoaConfig=!!_pendingMoaConfig;
+  const _submittedForcedSkill=_forcedSkillDirectivePending;
 
   // Salvage of #4750 (@harryazj): capture the composer text and clear the
   // textarea NOW — immediately after capture and BEFORE the uploadPendingFiles()
@@ -1650,22 +1720,22 @@ async function send(){
   setComposerStatus(_submittedFiles.length?'Uploading…':'');
   let uploaded=[];
   try{uploaded=await uploadPendingFiles({files:_submittedFiles, sessionId:activeSid, clearPending:false});}
-  catch(e){if(!text){setComposerStatus(`Upload error: ${e.message}`);return;}}
+  catch(e){if(!_submittedText){if(_ownsSendPane()) setComposerStatus(`Upload error: ${e.message}`);return;}}
   // Clear the uploading status now that upload is done — if we don't clear here
   // it stays visible for the entire duration of the agent stream, since
   // setComposerStatus('') is only called in setBusy(false), not setBusy(true).
-  setComposerStatus('');
+  if(_ownsSendPane()) setComposerStatus('');
 
   const uploadedNames=uploaded.map(u=>u.name||u);
   const uploadedPaths=uploaded.map(u=>u&&u.path?u.path:(u&&u.name?u.name:(u&&u.filename?u.filename:u)));
-  let msgText=text;
+  let msgText=_submittedText;
   if(uploaded.length&&!msgText)msgText=`I've uploaded ${uploaded.length} file(s): ${uploadedPaths.join(', ')}`;
-  else if(uploaded.length)msgText=`${text}\n\n[Attached files: ${uploadedPaths.join(', ')}]`;
-  if(_forcedSkillDirectivePending){
-    const _pending=_forcedSkillDirectivePending;
+  else if(uploaded.length)msgText=`${_submittedText}\n\n[Attached files: ${uploadedPaths.join(', ')}]`;
+  if(_submittedForcedSkill){
+    const _pending=_submittedForcedSkill;
     if(!_pending.sessionId||_pending.sessionId===activeSid){
+      if(_forcedSkillDirectivePending===_pending)_forcedSkillDirectivePending=null;
       const _directivePayload = await _pending.promise;
-      if(_forcedSkillDirectivePending===_pending)_forcedSkillDirectivePending = null;
       if(_directivePayload){
         const _directive = typeof _directivePayload==='string'
           ? _directivePayload
@@ -1683,135 +1753,114 @@ async function send(){
       }
     }
   }
-  if(!msgText){setComposerStatus('Nothing to send');return;}
+  if(!msgText){if(_ownsSendPane()) setComposerStatus('Nothing to send');return;}
   // Composer textarea + persisted draft were already captured and cleared
   // immediately after capture (above, salvage of #4750 + #5912 gate fix) to close
   // the re-entrant double-send race AND avoid clobbering a draft typed during the
   // upload window. _composerDraftClearPromise / _submittedDraftFilesForClear are
   // set there; nothing to re-declare here.
-  const displayText=_slashDisplayTextOverride||text||(uploaded.length?`Uploaded: ${uploadedNames.join(', ')}`:'(file upload)');
+  const displayText=_slashDisplayTextOverride||_submittedText||(uploaded.length?`Uploaded: ${uploadedNames.join(', ')}`:'(file upload)');
   const userMsg={role:'user',content:displayText,attachments:uploaded.length?uploadedNames:undefined,_ts:Date.now()/1000,_pending:true};
-  S.toolCalls=[];  // clear tool calls from previous turn
-  clearLiveToolCards();  // clear any leftover live cards from last turn
-  let optimisticMessages;
-  try{
-    S.messages.push(userMsg);renderMessages();setBusy(true);
-    if(S.session&&!S.session.pending_started_at) S.session.pending_started_at=Date.now()/1000;
-    if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
-    else appendThinking('',{pending:true});
-    // First optimistic pass: make the local user turn visible before /api/chat/start
-    // can save pending state on the server.
-    _runOptionalPreStartUiStep('upsertActiveSessionForLocalTurn.initial', ()=>{
-      if(typeof upsertActiveSessionForLocalTurn==='function'){
-        upsertActiveSessionForLocalTurn({title:displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now()});
-      }
-    });
-    optimisticMessages=[...S.messages];
-    INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[],activeTurnToken:null};
-    if(typeof saveInflightState==='function'){
-      saveInflightState(activeSid,{streamId:null,messages:INFLIGHT[activeSid].messages,uploaded:uploadedNames,toolCalls:[],activeTurnToken:null});
-    }
-    _runOptionalPreStartUiStep('renderSessionListFromCache.initial', ()=>{
-      if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
-    });
-    _runOptionalPreStartUiStep('startApprovalPolling.prestart', ()=>startApprovalPolling(activeSid));
-    _runOptionalPreStartUiStep('startClarifyPolling.prestart', ()=>startClarifyPolling(activeSid));
-    _runOptionalPreStartUiStep('fetchYoloState.prestart', ()=>_fetchYoloState(activeSid));  // sync YOLO pill with backend state
-    S.activeStreamId = null;  // will be set after stream starts
-    _runOptionalPreStartUiStep('updateSendBtn.prestart', ()=>{
-      if(typeof updateSendBtn==='function') updateSendBtn();
-    });
-
-    // Set provisional title from user message immediately so session appears
-    // in the sidebar right away with a meaningful name. /api/chat/start persists
-    // the server-side provisional title and may refine this optimistic text.
-    if(S.session&&(S.session.title==='Untitled'||!S.session.title)){
-      const provisionalTitle=displayText.slice(0,64);
-      _runOptionalPreStartUiStep('applySessionTitleUpdate.provisional', ()=>{
-        applySessionTitleUpdate(activeSid, provisionalTitle, {force:true, rememberProvisional:true});
-      });
-      _runOptionalPreStartUiStep('upsertActiveSessionForLocalTurn.provisional', ()=>{
+  let optimisticMessages=[..._submittedTranscript,userMsg];
+  if(_ownsSendPane()){
+    try{
+      S.toolCalls=[];  // clear tool calls from previous turn
+      clearLiveToolCards();  // clear any leftover live cards from last turn
+      S.messages.push(userMsg);renderMessages();setBusy(true);
+      if(S.session&&!S.session.pending_started_at) S.session.pending_started_at=Date.now()/1000;
+      if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
+      else appendThinking('',{pending:true});
+      // First optimistic pass: make the local user turn visible before /api/chat/start
+      // can save pending state on the server.
+      _runOptionalPreStartUiStep('upsertActiveSessionForLocalTurn.initial', ()=>{
         if(typeof upsertActiveSessionForLocalTurn==='function'){
-          // Second optimistic pass: carry the provisional title into the cached row
-          // without re-fetching /api/sessions before pending state exists server-side.
-          upsertActiveSessionForLocalTurn({title:provisionalTitle,messageCount:S.messages.length,timestampMs:Date.now()});
+          upsertActiveSessionForLocalTurn({title:displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now()});
         }
       });
-    } else if(typeof upsertActiveSessionForLocalTurn==='function'){
-      _runOptionalPreStartUiStep('upsertActiveSessionForLocalTurn.titled', ()=>{
-        upsertActiveSessionForLocalTurn({title:S.session&&S.session.title||displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now()});
+      optimisticMessages=[...S.messages];
+      _runOptionalPreStartUiStep('renderSessionListFromCache.initial', ()=>{
+        if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
       });
-    } else {
-      _runOptionalPreStartUiStep('renderSessionListFromCache.prestart', ()=>{
-        renderSessionListFromCache();  // ensure it's visible even if already titled
+      _runOptionalPreStartUiStep('startApprovalPolling.prestart', ()=>startApprovalPolling(activeSid));
+      _runOptionalPreStartUiStep('startClarifyPolling.prestart', ()=>startClarifyPolling(activeSid));
+      _runOptionalPreStartUiStep('fetchYoloState.prestart', ()=>_fetchYoloState(activeSid));  // sync YOLO pill with backend state
+      S.activeStreamId = null;  // will be set after stream starts
+      _runOptionalPreStartUiStep('updateSendBtn.prestart', ()=>{
+        if(typeof updateSendBtn==='function') updateSendBtn();
+      });
+
+      // Set provisional title from user message immediately so session appears
+      // in the sidebar right away with a meaningful name. /api/chat/start persists
+      // the server-side provisional title and may refine this optimistic text.
+      if(S.session&&(S.session.title==='Untitled'||!S.session.title)){
+        const provisionalTitle=displayText.slice(0,64);
+        _runOptionalPreStartUiStep('applySessionTitleUpdate.provisional', ()=>{
+          applySessionTitleUpdate(activeSid, provisionalTitle, {force:true, rememberProvisional:true});
+        });
+        _runOptionalPreStartUiStep('upsertActiveSessionForLocalTurn.provisional', ()=>{
+          if(typeof upsertActiveSessionForLocalTurn==='function'){
+            // Second optimistic pass: carry the provisional title into the cached row
+            // without re-fetching /api/sessions before pending state exists server-side.
+            upsertActiveSessionForLocalTurn({title:provisionalTitle,messageCount:S.messages.length,timestampMs:Date.now()});
+          }
+        });
+      } else if(typeof upsertActiveSessionForLocalTurn==='function'){
+        _runOptionalPreStartUiStep('upsertActiveSessionForLocalTurn.titled', ()=>{
+          upsertActiveSessionForLocalTurn({title:S.session&&S.session.title||displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now()});
+        });
+      } else {
+        _runOptionalPreStartUiStep('renderSessionListFromCache.prestart', ()=>{
+          renderSessionListFromCache();  // ensure it's visible even if already titled
+        });
+      }
+    }catch(preStartError){
+      // The user turn must reach /api/chat/start even if local optimistic UI
+      // bookkeeping (render cache, storage quota, sidebar reconciliation, etc.)
+      // throws. Otherwise the pane can show a user bubble + spinner while the
+      // backend never receives the turn.
+      const message=preStartError&&preStartError.message?preStartError.message:String(preStartError||'unknown error');
+      try{console.warn('[webui] pre-start optimistic UI failed; continuing to /api/chat/start', message);}catch(_){ }
+      if(!S.messages.includes(userMsg)) S.messages.push(userMsg);
+      optimisticMessages=[...S.messages];
+      try{setBusy(true);}catch(_){S.busy=true;}
+      if(S.session&&!S.session.pending_started_at) S.session.pending_started_at=Date.now()/1000;
+      S.activeStreamId=null;
+      _runOptionalPreStartUiStep('ensureLiveWorklogShell.fallback',()=>{
+        if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
       });
     }
-  }catch(preStartError){
-    // The user turn must reach /api/chat/start even if local optimistic UI
-    // bookkeeping (render cache, storage quota, sidebar reconciliation, etc.)
-    // throws. Otherwise the pane can show a user bubble + spinner while the
-    // backend never receives the turn.
-    const message=preStartError&&preStartError.message?preStartError.message:String(preStartError||'unknown error');
-    try{console.warn('[webui] pre-start optimistic UI failed; continuing to /api/chat/start', message);}catch(_){ }
-    if(!S.messages.includes(userMsg)) S.messages.push(userMsg);
-    optimisticMessages=[...S.messages];
-    INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[],activeTurnToken:null};
-    try{setBusy(true);}catch(_){S.busy=true;}
-    if(S.session&&!S.session.pending_started_at) S.session.pending_started_at=Date.now()/1000;
-    S.activeStreamId=null;
-    if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
+  }
+  INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[],activeTurnToken:null};
+  if(typeof saveInflightState==='function'){
+    saveInflightState(activeSid,{streamId:null,messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[],activeTurnToken:null});
   }
 
   // Start the agent via POST, get a stream_id back
   let streamId;
   let postStartData;
-  let modelStateForPostStart;
-  let explicitPickForPostStart;
-  let profileForPostStart;
+  let modelStateForPostStart=_submittedModelState;
+  let profileForPostStart=_submittedProfile;
+  const _explicitPick=_submittedPickFlag;
   try{
-    const _modelState=_chatPayloadModelState();
-    modelStateForPostStart=_modelState;
-    profileForPostStart=S.activeProfile||S.session.profile||'default';
-    const _pendingPick=(typeof _readPendingSessionModel==='function')
-      ? _readPendingSessionModel(activeSid)
-      : null;
-    const _pendingPickMatch=_pendingPick
-      && _pendingPick.model===_modelState.model
-      && String(_pendingPick.model_provider||'')===String(_modelState.model_provider||'');
-    // ── Persisted cross-provider pick (#3737 follow-up) ──
-    // The onchange marker is consumed after the first send, so subsequent sends
-    // lose explicit_model_pick and the server "repairs" the model back to the
-    // profile default.  When the session has a non-default model from a different
-    // provider than the profile's active provider, treat every send as explicit
-    // so the server honors the user's choice across the entire conversation.
-    const _defaultModel=(typeof window!=='undefined' && window._defaultModel)||'';
-    const _activeProvider=(typeof window!=='undefined' && window._activeProvider)||null;
-    const _isCrossProviderPick = _modelState.model
-      && _modelState.model_provider
-      && _defaultModel
-      && _activeProvider
-      && _modelState.model !== _defaultModel
-      && String(_modelState.model_provider||'') !== String(_activeProvider||'');
-    const _explicitPick = _pendingPickMatch || _isCrossProviderPick;
     // Consume the pending explicit-pick marker for THIS send only. The marker is
     // recorded on modelSelect.onchange and intentionally kept (not cleared on
     // session-update) so it survives the normal pick→update→send flow; clear it here
     // once read so a later send of an unchanged dropdown isn't treated as an explicit
     // pick. (#3739/#3737, Codex catch)
-    if(_pendingPickMatch && typeof _clearPendingSessionModel==='function') _clearPendingSessionModel(activeSid);
-    explicitPickForPostStart=_explicitPick;
+    if(_pendingPickMatch&&typeof _clearPendingSessionModel==='function'){
+      _clearPendingSessionModel(activeSid);
+    }
     const startData=await api('/api/chat/start',{method:'POST',body:JSON.stringify({
       session_id:activeSid,message:msgText,
       // S.session.model remains authoritative; the helper only resolves a
       // matching provider fallback for the same outgoing model.
-      model:_modelState.model,workspace:S.session.workspace,
-      model_provider:_modelState.model_provider,
+      model:_submittedModelState.model,workspace:_submittedSessionWorkspace,
+      model_provider:_submittedModelState.model_provider,
       profile:profileForPostStart,
       explicit_model_pick:_explicitPick||undefined,
       attachments:uploaded.length?uploaded:undefined,
-      moa_config:_pendingMoaConfig?true:undefined
+      moa_config:_submittedMoaConfig?true:undefined
     })});
-    _pendingMoaConfig=null;
     postStartData = startData;
   }catch(e){
     const errMsg=String((e&&e.message)||'');
@@ -1841,8 +1890,8 @@ async function send(){
         if($('emptyState')) $('emptyState').style.display='';
         if($('msgInner')) $('msgInner').innerHTML='';
       }
-      if(typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
-      if(typeof renderSessionList==='function') void renderSessionList();
+      if(_ownsPane&&typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
+      if(_ownsPane&&typeof renderSessionList==='function') void renderSessionList();
       return;
     }
     const conflictActiveStream=/session already has an active stream/i.test(errMsg);
@@ -1852,10 +1901,9 @@ async function send(){
       stopApprovalPollingForSession(activeSid);
       stopClarifyPollingForSession(activeSid);
       // Keep the user's attempted turn by queueing it for after the current run.
-      const _retryModelState=modelStateForPostStart||_chatPayloadModelState();
-      queueSessionMessage(activeSid,{text:msgText,files:[],model:_retryModelState.model,model_provider:_retryModelState.model_provider,profile:profileForPostStart||S.activeProfile||'default'});
+      const _retryModelState=modelStateForPostStart;
+      queueSessionMessage(activeSid,{text:msgText,files:[],model:_retryModelState.model,model_provider:_retryModelState.model_provider,profile:profileForPostStart});
       if(!_ownsSendPane()){
-        if(typeof renderSessionList==='function') void renderSessionList();
         return;
       }
       updateQueueBadge(activeSid);
@@ -1868,7 +1916,6 @@ async function send(){
         // Fall through to standard error handling if session reload fails.
       }
       if(!_ownsSendPane()){
-        if(typeof renderSessionList==='function') void renderSessionList();
         return;
       }
     }
@@ -1889,9 +1936,9 @@ async function send(){
     // lost. Put back the ORIGINAL captured draft (not the mutated /moa/bundle
     // payload) and re-stage files so the user can re-send without retyping.
     _restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, activeSid, _composerDraftClearPromise);
-    if(typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
+    if(_ownsSendPane()&&typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
     // Reconcile with server truth after immediately clearing the optimistic spinner.
-    if(typeof renderSessionList==='function') void renderSessionList();
+    if(_ownsSendPane()&&typeof renderSessionList==='function') void renderSessionList();
     return;
   }
 
@@ -1958,13 +2005,13 @@ async function send(){
     if(typeof updateSendBtn==='function') updateSendBtn();
   }
   _runOptionalPostStartUiStep('post-start ui/bookkeeping', ()=>{
-    const _modelState=modelStateForPostStart || _chatPayloadModelState();
-    const _explicitPick=explicitPickForPostStart;
+    const _modelState=modelStateForPostStart;
+    const _postStartExplicitPick=_explicitPick;
     if(_ownsSendPane()&&startData&&startData.title) applySessionTitleUpdate(activeSid, startData.title, {provisionalText:displayText.slice(0,64), rememberProvisional:true});
 
     if(_ownsSendPane()&&startData&&startData.effective_model && S.session){
       const _sentModel=_modelState&&_modelState.model;
-      if(_explicitPick && _sentModel && startData.effective_model!==_sentModel && typeof showToast==='function'){
+      if(_postStartExplicitPick && _sentModel && startData.effective_model!==_sentModel && typeof showToast==='function'){
         showToast('Model '+_sentModel+' changed to '+startData.effective_model+' — profile provider mismatch', 5000);
       }
       S.session.model=startData.effective_model;
@@ -2011,11 +2058,11 @@ async function send(){
     const currentInflight=_stampInflightTurnState();
     if(_ownsSendPane()) markInflight(activeSid, streamId);
     if(typeof saveInflightState==='function'){
-      saveInflightState(activeSid,{streamId,messages:currentInflight.messages||optimisticMessages,uploaded:uploadedNames,toolCalls:currentInflight.toolCalls||[],activeTurnToken:currentInflight.activeTurnToken||null});
+      saveInflightState(activeSid,{streamId,messages:currentInflight.messages||optimisticMessages,uploaded:uploadedNames,toolCalls:currentInflight.toolCalls||[],activeTurnToken:currentInflight.activeTurnToken||null,reattach:!!currentInflight.reattach});
     }
     // Refresh session list so background streaming indicators appear immediately for the
     // session that was just started and any others that may already be running.
-    if(typeof renderSessionList === 'function') {
+    if(_ownsSendPane()&&typeof renderSessionList === 'function') {
       void renderSessionList();
     }
   });
