@@ -345,6 +345,51 @@ def test_more_than_two_hundred_assigned_conversations_survive_across_projects(
     assert counts == {"project-a": 150, "project-b": 150}
 
 
+def test_model_bounds_a_skewed_project_inside_a_wider_scan_window(
+    fake_hermes_home, tmp_path
+):
+    """The per-project budget, not the query LIMIT, is what bounds a project.
+
+    The recovery query asks for ``PROJECT_ASSIGNED_CLI_LIMIT * len(projects)``
+    conversations, so with two registered projects its window is 400 — wide
+    enough to hand back all 250 of project-a's on its own. Only the per-project
+    accounting keeps project-a at 200, so a skewed distribution is the case that
+    actually exercises it (a single-project profile has query_limit == the bound
+    and would pass either way).
+    """
+    _register_projects(tmp_path, "project-a", "project-b")
+
+    rows = [
+        _session(f"a-{index:04d}", BASE_TS + index, project_id="project-a")
+        for index in range(250)
+    ]
+    rows.extend(
+        _session(f"b-{index:04d}", BASE_TS + 5000 + index, project_id="project-b")
+        for index in range(5)
+    )
+    rows.extend(
+        _session(f"recent-{index:02d}", BASE_TS + 9000 + index) for index in range(25)
+    )
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    sessions = models.get_cli_sessions()
+    counts: dict[str, int] = {}
+    for session in sessions:
+        if session["project_id"]:
+            counts[session["project_id"]] = counts.get(session["project_id"], 0) + 1
+    assigned_ids = {s["session_id"] for s in sessions if s["project_id"] == "project-a"}
+
+    assert counts == {"project-a": models.PROJECT_ASSIGNED_CLI_LIMIT, "project-b": 5}
+    # The budget spends newest-first, so the dropped rows are the oldest 50.
+    assert "a-0249" in assigned_ids
+    assert "a-0050" in assigned_ids
+    assert "a-0049" not in assigned_ids
+    # The smaller project is untouched by its neighbour's overflow.
+    assert {s["session_id"] for s in sessions if s["project_id"] == "project-b"} == {
+        f"b-{index:04d}" for index in range(5)
+    }
+
+
 # ── Finding 2: assigned rows must not spend the unassigned quota ──────────────
 
 
@@ -638,6 +683,37 @@ def test_assigned_filter_is_empty_on_schemas_without_project_id(tmp_path):
         db_path, limit=5, exclude_sources=None, project_assignment="unassigned"
     )
     assert [row["id"] for row in unassigned] == ["plain"]
+
+
+def test_schema_without_project_id_retains_prior_behavior(fake_hermes_home, tmp_path):
+    """An old state.db that cannot persist assignments is unchanged by all this.
+
+    The profile HAS a project registered, so the recovery pass is only skipped by
+    the schema probe. ``_state_db_supports_project_ids`` is asserted directly
+    because dropping the probe is behaviour-neutral (the assigned filter already
+    returns nothing for such a schema) — it is a query-budget guard, so the
+    contract worth pinning is the probe's own answer plus the unchanged output.
+    """
+    _register_projects(tmp_path, "project-live")
+
+    db_path = fake_hermes_home / "state.db"
+    rows = [_session(f"plain-{index:02d}", BASE_TS + index) for index in range(25)]
+    _write_state_db(db_path, rows, lineage_columns=False)
+    assert models._state_db_supports_project_ids(db_path) is True
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute("ALTER TABLE sessions DROP COLUMN project_id")
+    models.clear_cli_sessions_cache()
+
+    assert models._state_db_supports_project_ids(db_path) is False
+
+    sessions = models.get_cli_sessions()
+
+    assert len(sessions) == models.CLI_VISIBLE_SESSION_LIMIT == 20
+    assert all(session["project_id"] is None for session in sessions)
+    # Still the newest 20, in the pre-existing order.
+    assert [session["session_id"] for session in sessions][:3] == [
+        "plain-24", "plain-23", "plain-22",
+    ]
 
 
 # ── Rebase guard: upstream's kanban pass shares the system-chip helper ────────
