@@ -473,3 +473,213 @@ def test_apply_force_update_noop_clears_freeze(monkeypatch):
     assert resp.get("restart_scheduled") is None
     assert upd.update_in_progress() is False
     assert _serve("/static/messages.js?v=v-test-new").status == 200
+
+
+# ── Re-gate: drain bound must FAIL CLOSED, never proceed with mutation ──────
+#
+# Original defect: freeze_static_serving() waited at most 30s for active
+# readers, then logged "proceeding with mutation", broke out of the drain and
+# returned a token while _active_readers > 0 — both update callers then ran
+# their mutating git commands unconditionally. A reader held beyond the bound
+# could observe the NEW bytes under the OLD process version URL with
+# Cache-Control: immutable (mixed-revision cache poisoning, same class as the
+# issue). Required fix shape (maintainer re-gate): fail closed — raise a
+# dedicated timeout, cancel before the first mutating git operation, release
+# only the caller's freeze generation, and return a retryable non-success.
+
+
+def test_freeze_drain_timeout_raises_fail_closed(monkeypatch):
+    """freeze_static_serving() must NEVER return mutation authority while an
+    active reader remains: at the drain bound it raises a dedicated timeout
+    carrying the caller's own generation token. The freeze stays in place
+    until the caller releases exactly that generation; a later freeze/update
+    succeeds once the reader releases."""
+    import api.updates as upd
+
+    upd.reset_update_freeze()
+    # A reader that never drains within the bound.
+    assert upd.begin_static_read() is True
+    try:
+        with pytest.raises(upd.StaticFreezeDrainTimeoutError) as excinfo:
+            upd.freeze_static_serving(max_drain_wait_s=0.1)
+        assert excinfo.value.token > 0
+        # The freeze is still set — the timeout did not silently clear it.
+        assert upd.update_in_progress() is True
+        assert _serve("/static/style.css?v=v-test-new").status == 503
+        # Release ONLY this caller's generation → coherent and retryable.
+        assert upd.unfreeze_static_serving(excinfo.value.token) is True
+        assert upd.update_in_progress() is False
+        assert _serve("/static/style.css?v=v-test-new").status == 200
+    finally:
+        upd.end_static_read()
+    # Once the reader released, a fresh freeze+unfreeze cycle works normally.
+    token = upd.freeze_static_serving(max_drain_wait_s=1.0)
+    assert upd.update_in_progress() is True
+    assert upd.unfreeze_static_serving(token) is True
+    assert upd.update_in_progress() is False
+
+
+def test_apply_update_drain_timeout_fails_closed(monkeypatch):
+    """Normal update path: with a real _serve_static() reader held past the
+    drain bound, apply_update('webui') must abort BEFORE any mutating
+    operation, release its own freeze generation, and return a retryable
+    non-success — the old-version immutable URL keeps serving the OLD bytes,
+    and a later update succeeds once the reader releases."""
+    import api.updates as upd
+    from api import config as api_config
+    from api import routes
+
+    monkeypatch.setattr(routes, "_STATIC_CACHE", {}, raising=True)
+    monkeypatch.setattr(upd, "WEBUI_VERSION", "v-test-1")
+    # Production-composed: the real callers call freeze_static_serving() with
+    # the default bound, resolved at call time from this constant.
+    monkeypatch.setattr(upd, "_FREEZE_DRAIN_MAX_WAIT_S", 0.2)
+    expected_old_bytes = (api_config.get_static_root() / "messages.js").read_bytes()
+
+    reader_started = threading.Event()
+    reader_release = threading.Event()
+    real_read_bytes = pathlib.Path.read_bytes
+
+    def gated_read_bytes(self, *args, **kwargs):
+        if str(self).endswith("messages.js"):
+            reader_started.set()
+            assert reader_release.wait(10), "test timed out releasing the reader"
+        return real_read_bytes(self, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "read_bytes", gated_read_bytes)
+
+    inner_calls = []
+
+    def recording_inner(target, channel):
+        inner_calls.append((target, channel))
+        return {"ok": True, "message": "fake ok", "target": target,
+                "restart_scheduled": True}
+
+    monkeypatch.setattr(upd, "_apply_update_inner", recording_inner)
+
+    result = {}
+
+    def do_request():
+        handler = _serve("/static/messages.js?v=v-test-1")
+        result["status"] = handler.status
+        result["body"] = bytes(handler.body)
+
+    reader = threading.Thread(target=do_request)
+    reader.start()
+    assert reader_started.wait(10), "reader never reached read_bytes"
+
+    resp = upd.apply_update("webui")
+
+    # Fail-closed: retryable non-success, and NOTHING mutating ran.
+    assert resp["ok"] is False
+    assert resp.get("drain_timeout") is True
+    assert resp.get("retryable") is True
+    assert "reader" in resp["message"].lower()
+    assert inner_calls == [], \
+        f"update proceeded despite an undrained reader: {inner_calls}"
+    # Freeze released for THIS caller's generation → serving is coherent again
+    # (the tree was never touched). style.css is not gated, so this read is
+    # safe while the messages.js reader is still held.
+    assert upd.update_in_progress() is False
+    assert _serve("/static/style.css?v=v-test-new").status == 200
+
+    # Release the reader: it finishes serving the OLD revision's bytes under
+    # the old token — the mixed-revision immutable exposure cannot happen.
+    reader_release.set()
+    reader.join(10)
+    assert result["status"] == 200
+    assert result["body"] == expected_old_bytes
+    old_token = _serve("/static/messages.js?v=v-test-1")
+    assert old_token.status == 200
+    assert old_token.body == expected_old_bytes
+    assert "immutable" in old_token.header("Cache-Control")
+
+    # A later update succeeds once the reader released.
+    resp2 = upd.apply_update("webui")
+    assert resp2["ok"] is True and resp2.get("restart_scheduled") is True
+    assert len(inner_calls) == 1
+    upd.reset_update_freeze()
+
+
+def test_apply_force_update_drain_timeout_fails_closed(monkeypatch):
+    """Force update path: with a real _serve_static() reader held past the
+    drain bound, apply_force_update('webui') must abort before ANY git command
+    (not even the pre-flight fetch), release its own freeze generation, and
+    return a retryable non-success — old-version immutable serving keeps
+    binding to the old bytes, and a later force update succeeds once the
+    reader releases."""
+    import api.updates as upd
+    from api import config as api_config
+    from api import routes
+
+    monkeypatch.setattr(routes, "_STATIC_CACHE", {}, raising=True)
+    monkeypatch.setattr(upd, "WEBUI_VERSION", "v-test-1")
+    monkeypatch.setattr(upd, "_FREEZE_DRAIN_MAX_WAIT_S", 0.2)
+    expected_old_bytes = (api_config.get_static_root() / "messages.js").read_bytes()
+
+    reader_started = threading.Event()
+    reader_release = threading.Event()
+    real_read_bytes = pathlib.Path.read_bytes
+
+    def gated_read_bytes(self, *args, **kwargs):
+        if str(self).endswith("messages.js"):
+            reader_started.set()
+            assert reader_release.wait(10), "test timed out releasing the reader"
+        return real_read_bytes(self, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "read_bytes", gated_read_bytes)
+
+    git_calls = []
+
+    def recording_run_git(args, cwd, timeout=10):
+        git_calls.append(list(args))
+        return ("", True)
+
+    monkeypatch.setattr(upd, "_run_git", recording_run_git)
+    monkeypatch.setattr(
+        upd, "_select_apply_compare_ref",
+        lambda path, channel, target: "origin/master",
+    )
+    monkeypatch.setattr(upd, "_head_contains_ref", lambda path, ref: False)
+    monkeypatch.setattr(upd, "_can_fast_forward_to", lambda path, ref: True)
+    monkeypatch.setattr(upd, "_schedule_restart", lambda *a, **k: None)
+
+    result = {}
+
+    def do_request():
+        handler = _serve("/static/messages.js?v=v-test-1")
+        result["status"] = handler.status
+        result["body"] = bytes(handler.body)
+
+    reader = threading.Thread(target=do_request)
+    reader.start()
+    assert reader_started.wait(10), "reader never reached read_bytes"
+
+    resp = upd.apply_force_update("webui")
+
+    # Fail-closed: retryable non-success, and NO git command ran at all — the
+    # abort happens before the first mutating operation inside _locked().
+    assert resp["ok"] is False
+    assert resp.get("drain_timeout") is True
+    assert resp.get("retryable") is True
+    assert "reader" in resp["message"].lower()
+    assert git_calls == [], \
+        f"force update ran git despite an undrained reader: {git_calls}"
+    assert upd.update_in_progress() is False
+    assert _serve("/static/style.css?v=v-test-new").status == 200
+
+    reader_release.set()
+    reader.join(10)
+    assert result["status"] == 200
+    assert result["body"] == expected_old_bytes
+    old_token = _serve("/static/messages.js?v=v-test-1")
+    assert old_token.status == 200
+    assert old_token.body == expected_old_bytes
+    assert "immutable" in old_token.header("Cache-Control")
+
+    # A later force update succeeds once the reader released.
+    resp2 = upd.apply_force_update("webui")
+    assert resp2["ok"] is True and resp2.get("restart_scheduled") is True
+    assert any(args[0] == "reset" for args in git_calls)
+    assert upd.update_in_progress() is True
+    upd.reset_update_freeze()

@@ -81,8 +81,14 @@ _frozen = False
 _freeze_generation = 0
 _active_readers = 0
 # Bounded drain: a pathological reader (e.g. a client stalling mid-download
-# while we hold a ticket) must not hang the update forever. After the bound we
-# proceed with a warning — mirroring _wait_until_restart_safe()'s policy.
+# while we hold a ticket) must not hang the update forever. When the bound is
+# reached the update FAILS CLOSED: freeze_static_serving() raises
+# StaticFreezeDrainTimeoutError instead of returning mutation authority, so
+# no git command ever runs while a reader could still serve the OLD revision's
+# bytes under an immutable version URL (mixed-revision cache poisoning, #6992).
+# The caller releases only its own freeze generation and returns a retryable
+# non-success; the reader finishes serving the old bytes and a later update
+# retries cleanly.
 _FREEZE_DRAIN_MAX_WAIT_S = 30.0
 CACHE_TTL = 1800  # 30 minutes
 _AGENT_GATEWAY_RESTART_RETRY_DELAY_S = 1.0
@@ -1977,12 +1983,29 @@ def _discard_local_changes(path: Path, reset_ref: str) -> bool:
     return ok
 
 
-def freeze_static_serving(max_drain_wait_s: float = _FREEZE_DRAIN_MAX_WAIT_S) -> int:
+class StaticFreezeDrainTimeoutError(Exception):
+    """The freeze drain reached its bound while static readers were still active.
+
+    Raised by :func:`freeze_static_serving` INSTEAD of returning mutation
+    authority: while any reader can still serve the OLD revision's bytes, the
+    updater must not run a single mutating git command (issue #6992 —
+    mixed-revision immutable cache). The caller — still under the update lock —
+    must release exactly this freeze generation via ``unfreeze_static_serving``
+    (``token``) and return a retryable non-success response.
+    """
+
+    def __init__(self, message: str, token: int):
+        super().__init__(message)
+        self.token = token
+
+
+def freeze_static_serving(max_drain_wait_s: float | None = None) -> int:
     """Freeze /static/* serving and drain in-flight readers (issue #6992).
 
     Sets the freeze flag (new requests get 503 from _serve_static), bumps the
     generation and returns the new generation as an ownership token, then
-    waits — bounded by *max_drain_wait_s* — until every reader admitted before
+    waits — bounded by *max_drain_wait_s* (default
+    ``_FREEZE_DRAIN_MAX_WAIT_S``) — until every reader admitted before
     the freeze has released its read ticket. Only after the drain returns is
     it safe for the caller to run the first mutating git command: no request
     can read bytes written by the updater under the old version token.
@@ -1991,11 +2014,20 @@ def freeze_static_serving(max_drain_wait_s: float = _FREEZE_DRAIN_MAX_WAIT_S) ->
     is cleared only while the token is still the current generation, so a
     stale owner can never clear a newer update's freeze.
 
+    FAIL-CLOSED drain bound: if *max_drain_wait_s* elapses while readers are
+    still active, raises :class:`StaticFreezeDrainTimeoutError` (carrying the
+    generation token) instead of returning — mutation authority is NEVER
+    granted while a reader could still serve the old revision's bytes. The
+    caller must not run any git command; it should release its own freeze
+    generation and return a retryable non-success.
+
     On a SUCCESSFUL update the caller must NOT unfreeze — the freeze persists
     until the scheduled ``os.execv`` replaces the process. Callers should
     unfreeze only when the attempt failed or was a no-op (no restart
     scheduled), i.e. when the working tree is coherent again.
     """
+    if max_drain_wait_s is None:
+        max_drain_wait_s = _FREEZE_DRAIN_MAX_WAIT_S
     global _freeze_generation, _frozen
     with _UPDATE_FREEZE_LOCK:
         _freeze_generation += 1
@@ -2005,12 +2037,17 @@ def freeze_static_serving(max_drain_wait_s: float = _FREEZE_DRAIN_MAX_WAIT_S) ->
         while _active_readers > 0:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                logger.warning(
-                    "update freeze drain timed out after %.0fs with %d active "
-                    "static reader(s); proceeding with mutation",
-                    max_drain_wait_s, _active_readers,
+                # Fail-closed: never hand out mutation authority while an
+                # active reader can still read the old revision's bytes. Raise
+                # (with the caller's own token) so no mutating git command
+                # ever runs; the caller unfreezes exactly this generation.
+                raise StaticFreezeDrainTimeoutError(
+                    'update freeze drain timed out after %.1fs with %d active '
+                    'static reader(s); aborting before any mutation — retry '
+                    'once the reader(s) release'
+                    % (max_drain_wait_s, _active_readers),
+                    token,
                 )
-                break
             _UPDATE_FREEZE_DRAINED.wait(remaining)
     return token
 
@@ -2214,7 +2251,23 @@ def apply_force_update(target: str, channel=None) -> dict:
         # the first mutating git command, so a request admitted just before
         # the freeze can never read bytes written by the updater.
         if target == 'webui':
-            freeze_token = freeze_static_serving()
+            try:
+                freeze_token = freeze_static_serving()
+            except StaticFreezeDrainTimeoutError as exc:
+                # Fail-closed (issue #6992): a reader that did not drain within
+                # the bound means we MUST NOT mutate — the old process could
+                # otherwise serve the new bytes under the old immutable version
+                # URL. Still under the update lock: release ONLY this caller's
+                # freeze generation (a newer update's freeze stays intact) and
+                # return a retryable non-success; no git command has run.
+                unfreeze_static_serving(exc.token)
+                return {
+                    'ok': False,
+                    'message': str(exc),
+                    'target': target,
+                    'drain_timeout': True,
+                    'retryable': True,
+                }
         response = _locked(channel)
         # Lifecycle (issue #6992): on SUCCESS the freeze persists until the
         # scheduled restart replaces this process (static stays 503 through
@@ -2246,7 +2299,23 @@ def apply_update(target, channel=None):
         # the first mutating git command, so a request admitted just before
         # the freeze can never read bytes written by the updater.
         if target == 'webui':
-            freeze_token = freeze_static_serving()
+            try:
+                freeze_token = freeze_static_serving()
+            except StaticFreezeDrainTimeoutError as exc:
+                # Fail-closed (issue #6992): a reader that did not drain within
+                # the bound means we MUST NOT mutate — the old process could
+                # otherwise serve the new bytes under the old immutable version
+                # URL. Still under the update lock: release ONLY this caller's
+                # freeze generation (a newer update's freeze stays intact) and
+                # return a retryable non-success; no git command has run.
+                unfreeze_static_serving(exc.token)
+                return {
+                    'ok': False,
+                    'message': str(exc),
+                    'target': target,
+                    'drain_timeout': True,
+                    'retryable': True,
+                }
         response = _apply_update_inner(target, channel)
         # Lifecycle (issue #6992): on SUCCESS the freeze persists until the
         # scheduled restart replaces this process (static stays 503 through
