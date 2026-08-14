@@ -351,8 +351,14 @@ def build_deterministic_brief(session, sid: str, *, source: str) -> dict:
 
 # ── persisted LLM brief ──────────────────────────────────────────────────
 
+def _session_attr(session, name, default=None):
+    if isinstance(session, dict):
+        return session.get(name, default)
+    return getattr(session, name, default)
+
+
 def _brief_store_path(session, sid: str) -> Path | None:
-    session_path = getattr(session, "path", None)
+    session_path = _session_attr(session, "path")
     if session_path is not None:
         try:
             root = Path(session_path).parent.parent
@@ -362,9 +368,18 @@ def _brief_store_path(session, sid: str) -> Path | None:
         root = None
     if root is None:
         try:
+            # Prefer the runtime state dir (what the writer uses for resolved
+            # sessions) so dict-shaped probes from the auto worker hit the
+            # same store; profile home remains the last-resort fallback.
+            from api.config import STATE_DIR
+            root = Path(STATE_DIR)
+        except Exception:
+            root = None
+    if root is None:
+        try:
             from api.profiles import get_hermes_home_for_profile
 
-            home = get_hermes_home_for_profile(getattr(session, "profile", None) or "default")
+            home = get_hermes_home_for_profile(_session_attr(session, "profile") or "default")
             root = Path(home) / "webui"
         except Exception:
             return None
@@ -481,7 +496,9 @@ def _fallback_brief_text(deterministic: dict, reason: str) -> str:
     return "\n".join(lines)
 
 
-def _generate_llm_brief(session, sid: str, deterministic: dict) -> tuple[str, str]:
+def _generate_llm_brief(
+    session, sid: str, deterministic: dict, *, model: str | None = None, effort: str | None = None
+) -> tuple[str, str]:
     """Return (text, source). source ∈ auxiliary-llm | fallback-template."""
     distilled = _distill_transcript(session)
     title = (deterministic.get("meta") or {}).get("title") or sid
@@ -494,6 +511,13 @@ def _generate_llm_brief(session, sid: str, deterministic: dict) -> tuple[str, st
     try:
         from agent.auxiliary_client import call_llm
 
+        call_kwargs: dict = {}
+        # Selectable low-cost model (panel dropdown, settings-persisted).
+        # "auxiliary" keeps the historical task-routed behaviour.
+        if model and model != "auxiliary":
+            call_kwargs["model"] = model
+            if effort:
+                call_kwargs["reasoning_config"] = {"effort": effort}
         response = call_llm(
             task="compression",
             messages=[
@@ -502,6 +526,7 @@ def _generate_llm_brief(session, sid: str, deterministic: dict) -> tuple[str, st
             ],
             max_tokens=2048,
             timeout=180,
+            **call_kwargs,
         )
         text = _extract_llm_content(response)
         if len(text) >= MIN_BRIEF_CHARS:
@@ -565,7 +590,10 @@ def _run_brief_job(job: dict) -> None:
     try:
         session, source = _resolve_session(sid)
         deterministic = build_deterministic_brief(session, sid, source=source)
-        text, brief_source = _generate_llm_brief(session, sid, deterministic)
+        cfg = get_auto_config()
+        text, brief_source = _generate_llm_brief(
+            session, sid, deterministic, model=cfg["model"], effort=cfg["effort"]
+        )
         payload = _save_llm_brief(
             session,
             sid,
@@ -595,3 +623,189 @@ def _run_brief_job(job: dict) -> None:
     except Exception as exc:
         logger.exception("context brief job failed for %s", sid)
         _finish_job(job, error=f"internal error: {exc}")
+
+
+# ── automatic end-of-turn regeneration (validated 2026-08-14) ────────────
+#
+# A daemon worker regenerates the LLM narrative after a turn ends, so the
+# brief is already fresh when the user opens the panel. Cost guards, all
+# evaluated before any LLM call:
+#   - gated on config.LAST_RUN_FINISHED_AT: no scan unless a run just ended;
+#   - no regeneration when the stored brief still matches the transcript
+#     (no new messages since the last generation);
+#   - never while the session has an active run (fail-closed on doubt);
+#   - per-session minimum interval (default 60 s, bounded 30–600 s);
+#   - single brief job per session (registry single-flight);
+#   - burst cap: at most _AUTO_MAX_PER_TICK jobs enqueued per tick, so a
+#     downtime backlog drains slowly instead of storming the provider.
+
+_AUTO_MODEL_CHOICES = ("auxiliary", "gpt-5.6-luna")  # bounded selector values
+_AUTO_DEFAULT_MODEL = "gpt-5.6-luna"
+_AUTO_DEFAULT_EFFORT = "low"
+_AUTO_DEFAULT_ENABLED = True
+_AUTO_DEFAULT_MIN_INTERVAL = 60.0
+_AUTO_MIN_INTERVAL_BOUNDS = (30.0, 600.0)
+_AUTO_TICK_SECONDS = 20.0
+_AUTO_MAX_PER_TICK = 2
+
+_AUTO_LIFECYCLE_LOCK = threading.Lock()
+_AUTO_STOP = threading.Event()
+_AUTO_WAKE = threading.Event()
+_AUTO_THREAD = None
+_AUTO_LAST_ENQUEUE_AT: dict[str, float] = {}  # sid -> monotonic enqueue time
+_AUTO_LAST_SEEN_FINISH = 0.0
+
+
+def get_auto_config() -> dict:
+    """Effective auto-brief configuration (settings.json, clamped/bounded)."""
+    from api.config import load_settings
+
+    try:
+        settings = load_settings() or {}
+    except Exception:
+        settings = {}
+    raw_model = str(settings.get("context_brief_model") or "").strip()
+    model = raw_model if raw_model in _AUTO_MODEL_CHOICES else _AUTO_DEFAULT_MODEL
+    try:
+        min_interval = float(
+            settings.get("context_brief_min_interval_seconds") or _AUTO_DEFAULT_MIN_INTERVAL
+        )
+    except (TypeError, ValueError):
+        min_interval = _AUTO_DEFAULT_MIN_INTERVAL
+    lo, hi = _AUTO_MIN_INTERVAL_BOUNDS
+    min_interval = min(max(min_interval, lo), hi)
+    enabled = settings.get("context_brief_auto", _AUTO_DEFAULT_ENABLED)
+    if not isinstance(enabled, bool):
+        enabled = bool(enabled)
+    return {
+        "enabled": enabled,
+        "model": model,
+        "effort": _AUTO_DEFAULT_EFFORT,
+        "min_interval_seconds": min_interval,
+        "choices": list(_AUTO_MODEL_CHOICES),
+    }
+
+
+def _session_has_active_run(sid: str) -> bool:
+    """True when the run registry holds an active run for the session.
+
+    Fail-closed: any registry error means 'assume active' so a turn in
+    progress is never interrupted by a brief job competing for the session.
+    """
+    try:
+        from api import config as _cfg
+
+        with _cfg.ACTIVE_RUNS_LOCK:
+            for raw in (_cfg.ACTIVE_RUNS or {}).values():
+                if isinstance(raw, dict) and raw.get("session_id") == sid:
+                    return True
+    except Exception:
+        return True
+    return False
+
+
+def _auto_tick() -> None:
+    global _AUTO_LAST_SEEN_FINISH
+    cfg = get_auto_config()
+    if not cfg["enabled"]:
+        return
+    from api import config as _cfg
+
+    last_finished = float(getattr(_cfg, "LAST_RUN_FINISHED_AT", 0.0) or 0.0)
+    if last_finished <= _AUTO_LAST_SEEN_FINISH:
+        return  # no turn ended since the previous scan — nothing to do
+    try:
+        from api import models as _models
+
+        sessions = _models.all_sessions(include_lineage_metadata=False)
+    except Exception:
+        logger.exception("auto brief: session scan failed")
+        return
+    _AUTO_LAST_SEEN_FINISH = last_finished
+    now = time.monotonic()
+    # Prune debounce entries older than one hour so the map stays bounded.
+    for old_sid, ts in list(_AUTO_LAST_ENQUEUE_AT.items()):
+        if now - ts > 3600.0:
+            _AUTO_LAST_ENQUEUE_AT.pop(old_sid, None)
+    enqueued = 0
+    for s in sessions:
+        if enqueued >= _AUTO_MAX_PER_TICK:
+            break
+        # all_sessions() returns metadata dicts: session_id, message_count,
+        # updated_at — messages are NOT loaded here (that would be expensive).
+        if not isinstance(s, dict):
+            continue
+        sid = str(s.get("session_id") or "")
+        count = int(s.get("message_count") or 0)
+        if not sid or count <= 0:
+            continue
+        stored = load_llm_brief(s, sid)
+        try:
+            stored_count = int(stored.get("message_count_at_generation") or 0) if stored else 0
+        except (TypeError, ValueError):
+            continue  # hand-corrupted sidecar — skip rather than abort the tick
+        if stored and stored_count == count:
+            continue  # fresh — no new messages since the last generation
+        if _session_has_active_run(sid):
+            continue  # turn in progress
+        if now - _AUTO_LAST_ENQUEUE_AT.get(sid, 0.0) < cfg["min_interval_seconds"]:
+            continue  # debounce window
+        with _JOBS_LOCK:
+            duplicate = any(
+                str(j.get("session_id")) == sid and j.get("status") == "running"
+                for j in _JOBS.values()
+            )
+        if duplicate:
+            continue
+        try:
+            start_brief_job(sid)
+        except BriefError:
+            continue  # e.g. racing manual regenerate — fine
+        except Exception:
+            logger.exception("auto brief: enqueue failed for %s", sid)
+            continue
+        _AUTO_LAST_ENQUEUE_AT[str(sid)] = now
+        enqueued += 1
+
+
+def _auto_loop() -> None:
+    while not _AUTO_STOP.is_set():
+        try:
+            _auto_tick()
+        except Exception:
+            logger.exception("auto brief tick failed")
+        _AUTO_WAKE.wait(_AUTO_TICK_SECONDS)
+        _AUTO_WAKE.clear()
+
+
+def start_auto_brief_worker() -> bool:
+    """Start the end-of-turn brief worker (idempotent)."""
+    global _AUTO_THREAD
+    with _AUTO_LIFECYCLE_LOCK:
+        if _AUTO_THREAD is not None and _AUTO_THREAD.is_alive():
+            return False
+        _AUTO_STOP.clear()
+        _AUTO_WAKE.clear()
+        _AUTO_THREAD = threading.Thread(
+            target=_auto_loop, name="hermes-webui-context-auto-brief", daemon=True
+        )
+        try:
+            _AUTO_THREAD.start()
+        except BaseException:
+            _AUTO_THREAD = None
+            raise
+        return True
+
+
+def stop_auto_brief_worker(timeout: float = 2.0) -> bool:
+    global _AUTO_THREAD
+    _AUTO_STOP.set()
+    _AUTO_WAKE.set()
+    thread = _AUTO_THREAD
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=timeout)
+    alive = bool(thread is not None and thread.is_alive())
+    with _AUTO_LIFECYCLE_LOCK:
+        if not alive and thread is _AUTO_THREAD:
+            _AUTO_THREAD = None
+    return not alive

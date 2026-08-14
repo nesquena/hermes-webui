@@ -668,6 +668,8 @@ def main() -> None:
     httpd = QuietHTTPServer((HOST, PORT), Handler)
     from api.goal_continuations import start_goal_continuation_worker
     start_goal_continuation_worker()
+    from api.context_brief import start_auto_brief_worker
+    start_auto_brief_worker()
 
     from api.config import TLS_ENABLED, TLS_CERT, TLS_KEY
     scheme = 'https' if TLS_ENABLED else 'http'

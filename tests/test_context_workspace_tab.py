@@ -88,3 +88,13 @@ def test_workspace_context_refresh_hooks():
     # Non-forced refresh: the briefLoaded guard dedupes (no POST per render).
     assert UI.count("loadWorkspaceContextBrief()") >= 2
     assert "loadWorkspaceContextBrief(true)" not in UI
+
+
+def test_stale_badge_has_inline_refresh_button():
+    # The regenerate affordance must sit next to the stale badge (mobile reach),
+    # visible only when the brief is stale, wired to the same refresh handler.
+    assert "ctx-brief-btn-inline" in PANELS
+    assert "staleRefresh" in PANELS
+    assert "llm.stale ? `<button" in PANELS
+    assert "${staleBadge}${staleRefresh}" in PANELS
+    assert ".ctx-brief-btn-inline" in STYLE

@@ -9414,6 +9414,11 @@ _SETTINGS_DEFAULTS = {
     "dashboard_plugins": {},  # plugin_name -> bool, opt-in per plugin (default off per PF-10b)
     "sidebar_density": "compact",  # compact | detailed
     "auto_title_refresh_every": "0",  # adaptive title refresh: 0=off, 5/10/20=every N exchanges
+    # Context brief auto-regeneration (validated 2026-08-14): worker settings,
+    # selectable low-cost model and per-session debounce interval.
+    "context_brief_auto": True,
+    "context_brief_model": "gpt-5.6-luna",
+    "context_brief_min_interval_seconds": 60,
     "default_message_mode": "steer",  # behavior when sending while agent is running: queue | interrupt | steer
     "password_hash": None,  # PBKDF2-HMAC-SHA256 hash; None = auth disabled
     "auth_disabled_acknowledged": False,  # user acknowledged unauthenticated risk
@@ -9655,6 +9660,7 @@ _SETTINGS_ENUM_VALUES = {
     "update_channel": {"stable", "experimental"},
     "font_size": {"small", "default", "large", "xlarge"},
     "auto_title_refresh_every": {"0", "5", "10", "20"},
+    "context_brief_model": {"auxiliary", "gpt-5.6-luna"},
     "default_message_mode": {"queue", "interrupt", "steer"},
     "chat_activity_display_mode": {"compact_worklog", "transparent_stream", "transparent_live_compact_settled", "hide_all_activity"},
     "structured_code_default_view": {"auto", "on", "off"},

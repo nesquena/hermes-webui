@@ -15455,7 +15455,7 @@ def handle_post(handler, parsed) -> bool:
         sid = str(body["session_id"]).strip()
         if not is_safe_session_id(sid):
             return bad(handler, "Invalid session id", 400)
-        from api.context_brief import BriefError, get_brief_payload
+        from api.context_brief import BriefError, get_auto_config, get_brief_payload
         try:
             brief = get_brief_payload(sid)
         except BriefError as exc:
@@ -15463,6 +15463,7 @@ def handle_post(handler, parsed) -> bool:
         except Exception:
             logger.exception("context brief build failed for %s", sid)
             return bad(handler, "Failed to build context brief", status=500)
+        brief["auto"] = get_auto_config()
         return j(handler, {"ok": True, "brief": brief})
 
     if parsed.path == "/api/session/context-brief/refresh":
