@@ -53,6 +53,13 @@ MESSAGING_SOURCES = {
 CLI_MIN_UNTITLED_MESSAGE_COUNT = 6
 CLI_MIN_UNTITLED_USER_MESSAGE_COUNT = 2
 
+# Raw-row oversample factors for the bounded candidate window. ``limit`` counts
+# LOGICAL conversations, but compression segments and the post-projection
+# visibility filters are spent from the raw window first, so a single 8x pass can
+# come up short on a lineage-heavy profile. The second factor is only paid when
+# the first window was fully consumed AND still under-delivered.
+CANDIDATE_WINDOW_MULTIPLIERS = (8, 32)
+
 SOURCE_LABELS = {
     'acp': 'ACP',
     'api_server': 'API',
@@ -550,11 +557,12 @@ def read_importable_agent_session_rows(
     therefore iterate the result rather than assume ``len(rows) <= limit``.
 
     That recovery is deliberately bounded by the oversampled candidate set
-    (``limit * 8`` newest sessions): it re-uses rows the projection already
-    fetched and never issues an extra query, so an ancestor older than the
-    oversample stays unresolved and its children render top-level, exactly as
-    they did before. Widening that window is a ``candidate_limit`` change, not
-    a change to this walk.
+    (the ``CANDIDATE_WINDOW_MULTIPLIERS`` window that actually ran — ``limit *
+    8``, or ``limit * 32`` when the first window was consumed and re-widened):
+    it re-uses rows the projection already fetched and never issues an extra
+    query, so an ancestor older than the oversample stays unresolved and its
+    children render top-level, exactly as they did before. Widening that window
+    is a ``CANDIDATE_WINDOW_MULTIPLIERS`` change, not a change to this walk.
     """
     db_path = Path(db_path)
     if not db_path.exists():
@@ -782,6 +790,12 @@ def read_importable_agent_session_rows(
                    {user_message_count_expr} AS actual_user_message_count,
                    {last_activity_expr} AS last_activity
         """
+
+        def _project(raw_rows: list[dict]) -> list[dict]:
+            projected = _project_agent_session_rows(raw_rows)
+            projected = [_with_normalized_source(row) for row in projected]
+            return [row for row in projected if is_cli_session_row_visible(row)]
+
         if limit is not None:
             result_limit = max(0, int(limit))
             if result_limit == 0:
@@ -794,7 +808,6 @@ def read_importable_agent_session_rows(
             # can be resumed days later and should still surface at the top.
             # Oversampling preserves room for hidden compression segments or
             # other rows filtered after projection.
-            candidate_limit = max(result_limit * 8, result_limit)
             if latest_messages_cte:
                 candidate_cte = (
                     "WITH {latest_messages_cte}, candidates AS (\n"
@@ -824,8 +837,7 @@ def read_importable_agent_session_rows(
                     candidate_order_clause=candidate_order_clause,
                 )
 
-            cur.execute(
-                f"""
+            candidate_sql = f"""
                 {candidate_cte}
                 {select_sql}
                 FROM sessions s
@@ -833,63 +845,75 @@ def read_importable_agent_session_rows(
                 {join_clause}
                 {group_by_clause}
                 {order_by_clause}
-                """,
-                [*params, candidate_limit],
-            )
-        else:
-            cur.execute(
-                f"""
-                {select_sql}
-                FROM sessions s
-                {join_clause}
-                WHERE {' AND '.join(where_clauses)}
-                {group_by_clause}
-                {order_by_clause}
-                """,
-                params,
-            )
-        projected = _project_agent_session_rows([dict(row) for row in cur.fetchall()])
-        projected = [_with_normalized_source(row) for row in projected]
-        projected = [row for row in projected if is_cli_session_row_visible(row)]
-        if limit is None:
-            return projected
-        selected = projected[:max(0, int(limit))]
+                """
+            # Compression segments and the post-projection visibility filters are
+            # spent from the RAW candidate window before the logical slice below,
+            # so a lineage-heavy profile can return far fewer conversations than
+            # asked for (greptile P1 on #6659). Widen the window once when it was
+            # fully consumed and still came up short instead of silently
+            # truncating the caller's request.
+            projected: list[dict] = []
+            for multiplier in CANDIDATE_WINDOW_MULTIPLIERS:
+                candidate_limit = max(result_limit * multiplier, result_limit)
+                cur.execute(candidate_sql, [*params, candidate_limit])
+                raw_rows = [dict(row) for row in cur.fetchall()]
+                projected = _project(raw_rows)
+                if len(projected) >= result_limit or len(raw_rows) < candidate_limit:
+                    # Either the request is satisfied or the window was not the
+                    # binding constraint (the db has nothing more to give).
+                    break
+            selected = projected[:result_limit]
 
-        # The recency slice is per-row, but subagent rows are only renderable as
-        # children: the sidebar nests a child under its parent solely when that
-        # parent row is present in the same payload. A frozen orchestrator stops
-        # writing while its leaves keep streaming, so the leaves win the recency
-        # race and the parent falls outside the window — leaving the leaves to be
-        # promoted to top-level sidebar rows. Re-add subagent parents that the
-        # oversampled candidate set already projected (no extra query); webui
-        # ancestors are left out because that sidebar bucket already has them.
-        #
-        # Bounded by construction: ``by_id`` only holds the ``limit * 8``
-        # newest candidates, so an ancestor older than that oversample is not
-        # recovered and its children stay top-level — the pre-existing
-        # behaviour, narrowed rather than fixed. Resolving those would need an
-        # unbounded per-row ancestor query on the hot sidebar path; widen
-        # ``candidate_limit`` instead if the window proves too tight.
-        # NOTE: this can return more than ``limit`` rows (see docstring).
-        have = {row.get('id') for row in selected}
-        by_id = {row.get('id'): row for row in projected if row.get('id')}
-        pending = list(selected)
-        while pending:
-            row = pending.pop()
-            if str(row.get('raw_source') or row.get('source') or '').strip().lower() != 'subagent':
-                continue
-            parent_id = row.get('parent_session_id')
-            if not parent_id or parent_id in have:
-                continue
-            parent = by_id.get(parent_id)
-            if parent is None:
-                continue
-            if str(parent.get('raw_source') or parent.get('source') or '').strip().lower() != 'subagent':
-                continue
-            selected.append(parent)
-            have.add(parent_id)
-            pending.append(parent)
-        return selected
+            # The recency slice is per-row, but subagent rows are only renderable as
+            # children: the sidebar nests a child under its parent solely when that
+            # parent row is present in the same payload. A frozen orchestrator stops
+            # writing while its leaves keep streaming, so the leaves win the recency
+            # race and the parent falls outside the window — leaving the leaves to be
+            # promoted to top-level sidebar rows. Re-add subagent parents that the
+            # oversampled candidate set already projected (no extra query); webui
+            # ancestors are left out because that sidebar bucket already has them.
+            #
+            # Bounded by construction: ``by_id`` only holds the candidates of the
+            # window that was actually executed (``limit * 8``, or ``limit * 32``
+            # when the re-widening pass above had to run), so an ancestor older
+            # than that oversample is not recovered and its children stay
+            # top-level — the pre-existing behaviour, narrowed rather than fixed.
+            # Resolving those would need an unbounded per-row ancestor query on
+            # the hot sidebar path; widen ``CANDIDATE_WINDOW_MULTIPLIERS`` instead
+            # if the window proves too tight.
+            # NOTE: this can return more than ``limit`` rows (see docstring).
+            have = {row.get('id') for row in selected}
+            by_id = {row.get('id'): row for row in projected if row.get('id')}
+            pending = list(selected)
+            while pending:
+                row = pending.pop()
+                if str(row.get('raw_source') or row.get('source') or '').strip().lower() != 'subagent':
+                    continue
+                parent_id = row.get('parent_session_id')
+                if not parent_id or parent_id in have:
+                    continue
+                parent = by_id.get(parent_id)
+                if parent is None:
+                    continue
+                if str(parent.get('raw_source') or parent.get('source') or '').strip().lower() != 'subagent':
+                    continue
+                selected.append(parent)
+                have.add(parent_id)
+                pending.append(parent)
+            return selected
+
+        cur.execute(
+            f"""
+            {select_sql}
+            FROM sessions s
+            {join_clause}
+            WHERE {' AND '.join(where_clauses)}
+            {group_by_clause}
+            {order_by_clause}
+            """,
+            params,
+        )
+        return _project([dict(row) for row in cur.fetchall()])
 
 
 
