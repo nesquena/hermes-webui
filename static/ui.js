@@ -16068,7 +16068,7 @@ function renderMessages(options){
   // rather than a load-more button. Only render at the top of the window so it
   // does not repeat per virtual page.
   const _cliTruncated=!!(S.session&&S.session.cli_transcript_truncated&&S.messages.length>0);
-  if(_cliTruncated&&!hasServerOlder&&!virtualWindow.virtualized){
+  if(_cliTruncated&&!hasServerOlder){
     const notice=document.createElement('div');
     notice.className='cli-transcript-truncated-notice';
     notice.textContent=(typeof t==='function'&&t('earlier_turns_omitted'))
