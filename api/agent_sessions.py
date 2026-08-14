@@ -466,7 +466,14 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
             continue
 
         if tip is row:
-            projected.append(dict(row))
+            # The root can still be the freshest *importable* segment while a
+            # newer EMPTY continuation carries the project assignment. Applying
+            # the resolved lineage id here too keeps that assignment instead of
+            # silently dropping it on the early-return path (#6659).
+            root_only = dict(row)
+            if lineage_project_id:
+                root_only['project_id'] = lineage_project_id
+            projected.append(root_only)
             continue
 
         merged = dict(row)
