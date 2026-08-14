@@ -210,11 +210,19 @@ def _agent_visible_attachment_path(host_path) -> str:
         container_base = '/root/.hermes'
     try:
         from api.profiles import get_active_hermes_home
-        from hermes_constants import get_hermes_dir
 
-        host_root = Path(
-            get_hermes_dir('cache/documents', 'document_cache', home=get_active_hermes_home())
-        ).resolve()
+        host_root = Path(get_active_hermes_home()).resolve() / 'cache' / 'documents'
+        # Prefer the agent's canonical resolver when available (it honors
+        # operator-configured document-cache overrides), falling back to the
+        # WebUI-local default under the active profile home.
+        try:
+            from hermes_constants import get_hermes_dir
+
+            host_root = Path(
+                get_hermes_dir('cache/documents', 'document_cache', home=get_active_hermes_home())
+            ).resolve()
+        except Exception:
+            pass
         candidate = Path(host_path).resolve()
         try:
             rel = candidate.relative_to(host_root)

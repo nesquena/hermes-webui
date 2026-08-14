@@ -136,16 +136,27 @@ def test_translate_survives_missing_agent_translation_api(monkeypatch, fake_home
     """Older agent builds without the translation helpers degrade to host path."""
     _set_terminal_backend(monkeypatch, "docker")
 
-    import hermes_constants
+    # Simulate an older agent build: the canonical resolver raises, so the
+    # function must fall back to the WebUI-local home-derived root and still
+    # translate (not crash). hermes_constants lives in hermes-agent, not in
+    # the WebUI tree, so this test must not import it directly.
+    import builtins
 
-    monkeypatch.setattr(
-        hermes_constants, "get_hermes_dir", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("old agent"))
-    )
+    real_import = builtins.__import__
+
+    def _fake_import(name, *args, **kwargs):
+        if name == "hermes_constants":
+            raise ImportError("No module named 'hermes_constants'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _fake_import)
 
     from api.upload import _agent_visible_attachment_path
 
     staged = fake_home / "cache" / "documents" / "webui-attachments" / "s" / "photo.jpg"
-    assert _agent_visible_attachment_path(staged) == str(staged)
+    assert _agent_visible_attachment_path(staged) == (
+        "/root/.hermes/cache/documents/webui-attachments/s/photo.jpg"
+    )
 
 
 # ── Upload/extract responses carry agent_path ───────────────────────────────
