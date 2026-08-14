@@ -88,17 +88,25 @@ def _claim_keys(page) -> list[list[str]]:
         """
         async () => new Promise((resolve, reject) => {
           const request = indexedDB.open('hermes-webui-notification-claims-v1', 1);
-          request.onerror = () => reject(request.error || new Error('claim database open failed'));
+          const fail = error => reject(error || new Error('claim database operation failed'));
+          request.onerror = () => fail(request.error || new Error('claim database open failed'));
+          request.onblocked = () => fail(new Error('claim database open blocked'));
           request.onsuccess = () => {
             const db = request.result;
+            const close = () => { try { db.close(); } catch (_) {} };
             if (!db.objectStoreNames.contains('event-identities')) {
-              db.close(); resolve([]); return;
+              close(); resolve([]); return;
             }
-            const transaction = db.transaction('event-identities', 'readonly');
-            const keys = transaction.objectStore('event-identities').getAllKeys();
-            keys.onerror = () => reject(keys.error || new Error('claim key read failed'));
-            keys.onsuccess = () => { db.close(); resolve(keys.result); };
-            transaction.onerror = () => reject(transaction.error || new Error('claim key transaction failed'));
+            try {
+              const transaction = db.transaction('event-identities', 'readonly');
+              const keys = transaction.objectStore('event-identities').getAllKeys();
+              keys.onerror = () => { close(); fail(keys.error || new Error('claim key read failed')); };
+              keys.onsuccess = () => { close(); resolve(keys.result); };
+              transaction.onerror = () => { close(); fail(transaction.error || new Error('claim key transaction failed')); };
+              transaction.onabort = () => { close(); fail(transaction.error || new Error('claim key transaction aborted')); };
+            } catch (error) {
+              close(); fail(error);
+            }
           };
         })
         """
@@ -263,7 +271,9 @@ def main() -> int:
         page_a.evaluate(
             """() => new Promise((resolve, reject) => {
               const request = indexedDB.deleteDatabase('hermes-webui-notification-claims-v1');
-              request.onsuccess = request.onerror = request.onblocked = () => resolve();
+              request.onsuccess = () => resolve();
+              request.onerror = () => reject(request.error || new Error('claim database delete failed'));
+              request.onblocked = () => reject(new Error('claim database delete blocked'));
             })"""
         )
 
@@ -291,9 +301,19 @@ def main() -> int:
             }) from error
         count_before_reload = _wait_for_notification_count(page_a, 1) if permission == "granted" else None
         urls_before_reload = _notification_urls(page_a)
+        page_b.close()
+        page_a.evaluate(
+            """async () => {
+              const registrations = await navigator.serviceWorker.getRegistrations();
+              await Promise.all(registrations.map(registration => registration.unregister()));
+            }"""
+        )
         page_a.reload(wait_until="domcontentloaded")
         page_a.wait_for_function(
-            """async () => Boolean((await navigator.serviceWorker.ready).active)""",
+            """async () => {
+              const registration = await navigator.serviceWorker.ready;
+              return Boolean(registration.active && navigator.serviceWorker.controller);
+            }""",
             timeout=15000,
         )
         _start_live_listener(page_a, "stream-6673")
