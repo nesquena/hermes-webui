@@ -1,17 +1,47 @@
-# Hermes WebUI — Python tooling config.
+[build-system]
+requires = ["setuptools>=80", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-webui"
+description = "Hermes WebUI server and static runtime"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [{name = "Hermes WebUI contributors"}]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+requires-python = ">=3.11"
+dynamic = ["version", "dependencies"]
+
+[project.urls]
+Repository = "https://github.com/nesquena/hermes-webui"
+Issues = "https://github.com/nesquena/hermes-webui/issues"
+
+[tool.setuptools]
+include-package-data = true
+packages = ["api", "static"]
+py-modules = ["bootstrap", "server", "mcp_server"]
+
+[tool.setuptools.package-data]
+static = ["**/*"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
+[tool.setuptools_scm]
+version_file = "api/_scm_version.py"
+
+# Hermes WebUI — build metadata plus Python tooling config.
 #
-# This project is NOT a packaged distribution. The app is a plain Python + vanilla
-# JavaScript server with no build step and no bundler (see AGENTS.md / README). This
-# file exists only to configure dev tooling — currently ruff, used as a curated,
-# forward-looking lint gate over the Python codebase. There is intentionally no
-# [build-system] section: nothing pip-installs this directory.
-#
-# The ruff gate is the Python twin of the ESLint runtime guard (package.json
-# `lint:runtime` + eslint.runtime-guard.config.mjs + tests/test_static_js_runtime_lint.py).
-# It is enforced on NEW/CHANGED code only — see scripts/ruff_lint.py and TESTING.md
-# > "Python lint gate (ruff)". The existing tree carries a cosmetic backlog (mostly
-# unused-import F401) that is deliberately NOT reformatted here; cleaning it is a
-# separate, maintainer-run, safe-fixes-only decision (tracked in #3273).
+# The project now exposes standard Python build metadata for the current flat
+# runtime layout while still keeping the source-checkout launch surface
+# (`bootstrap.py`, `start.sh`, `ctl.sh`) authoritative. The Ruff gate remains
+# forward-looking and line-scoped on NEW/CHANGED Python code; see
+# scripts/ruff_lint.py and TESTING.md > "Python lint gate (ruff)".
 
 [tool.ruff]
 # Match the Python versions exercised in CI (tests.yml matrix: 3.11–3.13).

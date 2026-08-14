@@ -97,6 +97,19 @@ There is currently no PR template in this repo, so include the important section
 - Risks / Follow-ups
 - Model Used
 
+Two things reviewers look for specifically in Verification, both detailed in
+[`docs/GUIDELINES.md`](docs/GUIDELINES.md):
+
+- When the issue pins the bug's shape — a session capture, a script, exact steps, or
+  a fenced JSON block / field-level trigger conditions — bind your test to *that* shape
+  rather than a fixture rebuilt from your reading of it, satisfying every condition it
+  names; otherwise the test can pass while the reported bug goes untouched. Reconstruct
+  the shape yourself only when the issue leaves it unpinned, and then say what you assumed.
+- For any claim the repo doesn't own (browser behavior, a provider's API, a registry,
+  an OS convention), name who owns the truth and confirm your proof is one they'd accept.
+  In-page automation proves page behavior, not browser behavior; a mock proves your
+  intent, not the provider's contract.
+
 If the change is user-visible, include screenshots or a short video.
 
 If the change is release-note-worthy, include concise release-note wording in

@@ -200,7 +200,7 @@
           </button>
         </div>
       </div>
-      <div class="session-search sidebar-search"><div class="session-search-field"><svg class="sidebar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg><input id="sessionSearch" placeholder="Filter conversations..." data-i18n-placeholder="filter_conversations" oninput="filterSessions()" autocomplete="off"><button type="button" id="sessionSearchClear" class="session-search-clear has-tooltip has-tooltip--bottom-right" aria-label="Clear conversation filter" data-tooltip="Clear conversation filter" onclick="clearSessionSearch()" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div></div>
+      <div class="session-search sidebar-search"><div class="session-search-field"><svg class="sidebar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg><input id="sessionSearch" type="search" placeholder="Filter conversations..." data-i18n-placeholder="filter_conversations" oninput="filterSessions()" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore="true" data-form-type="other"><button type="button" id="sessionSearchClear" class="session-search-clear has-tooltip has-tooltip--bottom-right" aria-label="Clear conversation filter" data-tooltip="Clear conversation filter" onclick="clearSessionSearch()" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div></div>
       <div class="session-list" id="sessionList"></div>
     </div>
     <!-- Tasks (cron) panel -->
@@ -225,7 +225,7 @@
         </div>
       </div>
       <div class="kanban-filter-stack">
-        <div class="sidebar-search"><svg class="sidebar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg><input id="kanbanSearch" placeholder="Search tasks" data-i18n-placeholder="kanban_search_tasks" oninput="filterKanban()"></div>
+        <div class="sidebar-search"><svg class="sidebar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg><input id="kanbanSearch" type="search" placeholder="Search tasks" data-i18n-placeholder="kanban_search_tasks" oninput="filterKanban()" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore="true" data-form-type="other"></div>
         <select id="kanbanAssigneeFilter" onchange="loadKanban(true)" aria-label="Assignee filter"></select>
         <select id="kanbanTenantFilter" onchange="loadKanban(true)" aria-label="Tenant filter"></select>
         <label class="kanban-check"><input id="kanbanIncludeArchived" type="checkbox" onchange="loadKanban(true)"> <span data-i18n="kanban_include_archived">Include archived</span></label>
@@ -253,7 +253,7 @@
           <button class="panel-head-btn has-tooltip has-tooltip--bottom" onclick="openSkillCreate()" data-tooltip="New skill" data-i18n-title="new_skill" aria-label="New skill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
         </div>
       </div>
-      <div class="skills-search sidebar-search"><svg class="sidebar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg><input id="skillsSearch" placeholder="Search skills..." data-i18n-placeholder="search_skills" oninput="filterSkills()"></div>
+      <div class="skills-search sidebar-search"><svg class="sidebar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg><input id="skillsSearch" type="search" placeholder="Search skills..." data-i18n-placeholder="search_skills" oninput="filterSkills()" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore="true" data-form-type="other"></div>
       <div class="skills-list" id="skillsList"><div style="padding:12px;color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
     </div>
     <!-- Memory panel -->
@@ -353,8 +353,9 @@
             <circle cx="11" cy="11" r="8"/>
             <path d="M21 21l-4.35-4.35"/>
           </svg>
-          <input id="settingsSearch" data-i18n-placeholder="settings_search_placeholder"
-            placeholder="Search settings…" oninput="filterSettings(this.value)" autocomplete="off">
+          <input id="settingsSearch" type="search" data-i18n-placeholder="settings_search_placeholder"
+            placeholder="Search settings…" oninput="filterSettings(this.value)" autocomplete="off"
+            data-1p-ignore data-lpignore="true" data-bwignore="true" data-form-type="other">
           <div id="settingsSearchResults" class="settings-search-results" style="display:none"></div>
         </div>
         <div class="settings-menu-items">
@@ -495,7 +496,7 @@
           </div>
           <div class="approval-desc" id="approvalDesc"></div>
           <div class="approval-cmd" id="approvalCmd"></div>
-          <div class="approval-counter" id="approvalCounter" style="display:none;font-size:0.75em;opacity:0.6;margin-top:4px;"></div>
+          <div class="approval-counter" id="approvalCounter" style="display:none;"></div>
           <div class="approval-btns" id="approvalBtns">
             <button class="approval-btn once" id="approvalBtnOnce" onclick="respondApproval('once')" title="Allow this one command (Enter)" data-i18n-title="approval_btn_once_title">
               <span class="approval-btn-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg></span>
@@ -753,6 +754,7 @@
           </div>
           <div class="ws-dropdown ws-dropdown-footer" id="composerWsDropdown" hidden aria-hidden="true" inert></div>
           <div class="composer-reasoning-dropdown" id="composerReasoningDropdown">
+            <div class="reasoning-option" data-effort="">Default</div>
             <div class="reasoning-option" data-effort="none">None</div>
             <div class="reasoning-option" data-effort="minimal">Minimal</div>
             <div class="reasoning-option" data-effort="low">Low</div>
@@ -1063,6 +1065,11 @@
                 <option value="hide_all_activity" data-i18n="settings_option_final_answer_only">Final answer only</option>
               </select>
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_chat_activity_display_mode">Compact Worklog groups supporting activity into a quiet summary. Transparent Stream keeps each thinking/tool event as its own chronological expandable row. Final answer only hides activity rows while keeping the final answer visible.</div>
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:8px">
+                <input type="checkbox" id="settingsTransparentEventTimestamps" checked onchange="_pickTransparentEventTimestamps(this.checked)" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_transparent_stream_event_timestamps">Show Transparent Stream event timestamps</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_transparent_stream_event_timestamps">Keeps the response footer time visible while hiding the per-event timestamp chips.</div>
             </div>
             <div class="settings-field" style="margin-top:8px">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
@@ -1168,6 +1175,13 @@
                 <span data-i18n="settings_label_hide_suggestions">Hide new-chat suggestions</span>
               </label>
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_hide_suggestions">Hide the three default suggestion buttons on the empty new-chat screen to avoid accidental taps.</div>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsHideEmptyStatePanel" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_hide_empty_state_panel">Hide new-chat welcome panel</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_hide_empty_state_panel">Hide the logo, heading, subtitle, and suggestion buttons on an empty new conversation.</div>
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
@@ -1400,6 +1414,13 @@
               </label>
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_webhook_sessions">Surface webhook runs as conversations in the sidebar. Only active when non-WebUI sessions are enabled. Defaults off; high-volume routes can flood the sidebar.</div>
             </div>
+            <div class="settings-field" id="settingsShowKanbanSessionsField" style="margin-left:24px">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsShowKanbanSessions" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_kanban_sessions">Show kanban sessions</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_kanban_sessions">Surface kanban worker runs as conversations in the sidebar. Only active when non-WebUI sessions are enabled. Defaults off; worker runs are internal and can flood the sidebar.</div>
+            </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="settingsShowPreviousMessagingSessions" style="width:15px;height:15px;accent-color:var(--accent)">
@@ -1541,11 +1562,20 @@
               <label for="settingsPassword" data-i18n="settings_label_password">Access Password</label>
               <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_password">Enter a new password to set or change it. Leave blank to keep current setting.</div>
               <div id="settingsAuthStatus" style="margin-bottom:8px;display:none"></div>
-              <input type="password" id="settingsPassword" placeholder="Enter new password…" data-i18n-placeholder="password_placeholder" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+              <!-- These password inputs need an explicit <form> owner. Without one they are
+                   "unowned" fields, so Chromium groups every field in the document into a
+                   single synthetic password form and picks the first text input in the DOM
+                   (the sidebar conversation filter) as the form's username field — which it
+                   then autofills with the saved account name. display:contents keeps the
+                   layout byte-identical; onsubmit is neutralised because the panel saves via
+                   JS, not a form submit. -->
+              <form id="settingsPasswordForm" style="display:contents" autocomplete="off" onsubmit="return false">
+              <input type="password" id="settingsPassword" autocomplete="new-password" placeholder="Enter new password…" data-i18n-placeholder="password_placeholder" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
               <div id="settingsCurrentPasswordBlock" style="display:none;margin-top:6px">
                 <label for="settingsCurrentPassword" style="font-size:11px;display:block;margin-bottom:4px" data-i18n="current_password_label">Current Password</label>
-                <input type="password" id="settingsCurrentPassword" placeholder="Enter current password…" data-i18n-placeholder="current_password_placeholder" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+                <input type="password" id="settingsCurrentPassword" autocomplete="current-password" placeholder="Enter current password…" data-i18n-placeholder="current_password_placeholder" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
               </div>
+              </form>
               <div id="settingsPasswordEnvLock" data-i18n="password_env_var_locked" style="display:none;margin-top:6px;padding:8px 10px;font-size:11px;color:var(--muted);background:var(--code-bg);border:1px solid var(--border2);border-radius:6px;line-height:1.45">The HERMES_WEBUI_PASSWORD environment variable is currently set and takes precedence. Unset it and restart the server to manage the password from here.</div>
             </div>
             <div id="settingsAuthDisabledWarning" style="display:none;margin-top:8px;padding:10px 12px;border-radius:8px;border:1px solid rgba(220,80,80,.35);background:rgba(220,80,80,.08)">
@@ -1695,7 +1725,7 @@
       <div class="preview-html-wrap" id="previewHtmlWrap" style="display:none;flex:1;border-radius:8px;overflow:hidden;border:1px solid var(--border2)">
         <iframe id="previewHtmlIframe" style="width:100%;height:100%;border:none;background:#fff" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" title="HTML preview"></iframe>
       </div>
-      <textarea id="previewEditArea" style="display:none;flex:1;width:100%;background:var(--code-bg);color:var(--pre-text);border:1px solid var(--border2);border-radius:8px;padding:12px;font-family:'SF Mono',ui-monospace,monospace;font-size:12px;line-height:1.6;resize:none;outline:none" oninput="_previewDirty=true;updateEditBtn()"></textarea>
+      <textarea id="previewEditArea" style="display:none;flex:1;width:100%;background:var(--code-bg);color:var(--pre-text);border:1px solid var(--border2);border-radius:8px;padding:12px;font-family:var(--font-mono);font-size:12px;line-height:1.6;resize:none;outline:none" oninput="_previewDirty=true;updateEditBtn()"></textarea>
     </div>
   </aside>
 </div>
@@ -1760,6 +1790,7 @@
     <h3 id="kanbanBoardModalTitle" data-i18n="kanban_new_board">New board</h3>
     <input type="hidden" id="kanbanBoardModalMode" value="create">
     <input type="hidden" id="kanbanBoardModalSlug" value="">
+    <input type="hidden" id="kanbanBoardModalOriginalDefaultWorkdir" value="">
     <div class="kanban-modal-row">
       <label for="kanbanBoardModalName" data-i18n="kanban_board_name">Name</label>
       <input type="text" id="kanbanBoardModalName" maxlength="64" placeholder="e.g. Experiments" autocomplete="off">
@@ -1771,6 +1802,11 @@
     <div class="kanban-modal-row">
       <label for="kanbanBoardModalDesc" data-i18n="kanban_board_description">Description (optional)</label>
       <textarea id="kanbanBoardModalDesc" maxlength="200"></textarea>
+    </div>
+    <div class="kanban-modal-row">
+      <label for="kanbanBoardModalDefaultWorkdir" data-i18n="kanban_board_default_workdir">Default workspace path</label>
+      <input type="text" id="kanbanBoardModalDefaultWorkdir" list="kanbanBoardModalWorkdirs" maxlength="255" data-i18n-placeholder="kanban_board_default_workdir_placeholder" placeholder="Workspace path (optional)" autocomplete="off">
+      <datalist id="kanbanBoardModalWorkdirs"></datalist>
     </div>
     <div class="kanban-modal-row-inline">
       <div class="kanban-modal-row">

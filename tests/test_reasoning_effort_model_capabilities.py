@@ -192,6 +192,63 @@ def test_named_custom_provider_config_reasoning_efforts(monkeypatch):
             monkeypatch.setitem(cfg.cfg, "custom_providers", original)
 
 
+def test_named_custom_provider_model_reasoning_efforts_take_precedence(monkeypatch):
+    original = cfg.cfg.get("custom_providers")
+    monkeypatch.setitem(
+        cfg.cfg,
+        "custom_providers",
+        [
+            {
+                "name": "llm-proxy",
+                "reasoning_efforts": ["high"],
+                "models": {
+                    "Inkling": {
+                        "reasoning_efforts": ["none", "low", "medium", "high", "xhigh"]
+                    }
+                },
+            }
+        ],
+    )
+    try:
+        assert cfg.resolve_model_reasoning_efforts(
+            "inkling",
+            provider_id="custom:llm-proxy",
+        ) == ["none", "low", "medium", "high", "xhigh"]
+        assert cfg.resolve_model_reasoning_efforts(
+            "another-model",
+            provider_id="custom:llm-proxy",
+        ) == ["high"]
+    finally:
+        if original is None:
+            cfg.cfg.pop("custom_providers", None)
+        else:
+            monkeypatch.setitem(cfg.cfg, "custom_providers", original)
+
+
+def test_model_reasoning_efforts_fall_back_to_provider_when_invalid(monkeypatch):
+    original = cfg.cfg.get("providers")
+    monkeypatch.setitem(
+        cfg.cfg,
+        "providers",
+        {
+            "wandb": {
+                "reasoning_efforts": ["none", "high"],
+                "models": {"inkling": {"reasoning_efforts": ["bogus", "typo"]}},
+            }
+        },
+    )
+    try:
+        assert cfg.resolve_model_reasoning_efforts(
+            "inkling",
+            provider_id="wandb",
+        ) == ["none", "high"]
+    finally:
+        if original is None:
+            cfg.cfg.pop("providers", None)
+        else:
+            monkeypatch.setitem(cfg.cfg, "providers", original)
+
+
 def test_acp_guards_win_over_configured_reasoning_efforts(monkeypatch):
     original = cfg.cfg.get("providers")
     monkeypatch.setitem(
@@ -216,7 +273,16 @@ def test_nested_route_deny_wins_over_configured_reasoning_efforts(monkeypatch):
     monkeypatch.setitem(
         cfg.cfg,
         "custom_providers",
-        [{"name": "agg", "reasoning_efforts": ["low", "high"]}],
+        [
+            {
+                "name": "agg",
+                "reasoning_efforts": ["low", "high"],
+                "models": {
+                    "vertex/gemini-image-1.0": {"reasoning_efforts": ["high"]},
+                    "vertex/gemini-embedding-001": {"reasoning_efforts": ["high"]},
+                },
+            }
+        ],
     )
     try:
         for model in ("vertex/gemini-image-1.0", "vertex/gemini-embedding-001"):
@@ -446,5 +512,52 @@ def test_datestamped_claude3_not_reasoning_capable_heuristic():
     ):
         assert cfg._candidate_supports_reasoning(model) is True, (
             f"{model} must remain reasoning-capable"
+        )
+
+
+def test_qwen_prefixed_alias_reasoning_detection():
+    """Prefixed Qwen IDs (e.g. New-API aliases) must still be detected.
+
+    Regression: "al-qwen3.8-max-preview" normalizes to tokens
+    ["al", "qwen3", "8", ...] where "qwen" is NOT a standalone token,
+    so the old exact-membership check silently failed.
+    """
+    # Prefixed Qwen 3+ → reasoning-capable
+    for model in (
+        "al-qwen3.8-max-preview",
+        "al-qwen3.7-max",
+        "al-qwen3.7-plus",
+        "al-qwen3.6-flash",
+        "sn-qwen3-235b-a22b",
+    ):
+        assert cfg._candidate_supports_reasoning(model) is True, (
+            f"{model} must be reasoning-capable (prefixed Qwen 3+)"
+        )
+    # Bare Qwen 3+ → still works
+    for model in (
+        "qwen3-235b-a22b",
+        "qwen3-32b",
+    ):
+        assert cfg._candidate_supports_reasoning(model) is True, (
+            f"{model} must be reasoning-capable (bare Qwen 3+)"
+        )
+    # Qwen 2.x → excluded regardless of prefix
+    for model in (
+        "al-qwen2.5-72b-instruct",
+        "qwen2.5-7b-instruct",
+        "qwen2-72b",
+    ):
+        assert cfg._candidate_supports_reasoning(model) is False, (
+            f"{model} must NOT be reasoning-capable (Qwen 2.x excluded)"
+        )
+    # Hybrid IDs with embedded Qwen 2.x must NOT be shadowed by the Qwen
+    # branch — they must fall through to the DeepSeek detector.
+    for model in (
+        "deepseek-r1-distill-qwen2.5-bakeneko-32b",
+        "rinna/deepseek-r1-distill-qwen2.5-bakeneko-32b",
+    ):
+        assert cfg._candidate_supports_reasoning(model) is True, (
+            f"{model} must remain reasoning-capable (DeepSeek-R1 hybrid, "
+            f"Qwen 2.x must not shadow the DeepSeek detector)"
         )
 

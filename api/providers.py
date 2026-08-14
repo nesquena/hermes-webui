@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import atexit
 import base64
+import copy
 import hashlib
 import json
 import logging
@@ -35,6 +36,7 @@ from api.config import (
     _PROVIDER_DISPLAY,
     _PROVIDER_MODELS,
     _coerce_provider_cost_budget,
+    _configured_model_ids,
     _custom_provider_slug_from_name,
     _get_label_for_model,
     _models_from_live_provider_ids,
@@ -78,6 +80,7 @@ _OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key"
 _PROVIDER_QUOTA_TIMEOUT_SECONDS = 3.0
 _ACCOUNT_USAGE_SUBPROCESS_TIMEOUT_SECONDS = 35.0
 _ACCOUNT_USAGE_CACHE_TTL_SECONDS = 45.0
+_PROVIDERS_CACHE_TTL_SECONDS = 30.0
 _ACCOUNT_USAGE_CACHE_MAX_ENTRIES = 64
 _ACCOUNT_USAGE_WORKER_IDLE_SECONDS = 5 * 60
 _ACCOUNT_USAGE_PROVIDERS = frozenset({"openai-codex", "anthropic"})
@@ -134,6 +137,8 @@ _account_usage_probe_semaphore: threading.BoundedSemaphore | None = None
 # represented as non-None snapshots and remain cacheable.
 _account_usage_status_cache: dict[tuple[str, str, str], tuple[float, Any]] = {}
 _account_usage_status_cache_lock = threading.Lock()
+_providers_cache: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
+_providers_cache_lock = threading.Lock()
 _account_usage_worker_pool: dict[str, list["_AccountUsageProbeWorker"]] = {}
 _account_usage_worker_pool_lock = threading.Lock()
 
@@ -420,6 +425,19 @@ def _entry_exhausted_ttl_seconds(error_code):
     code = str(error_code or "").strip()
     if code == "401":
         return 5 * 60
+    if code == "402":
+        # #6626: keep WebUI's eligibility decision tied to the installed
+        # runtime contract. The runtime routes 402 via
+        # credential_pool._exhausted_ttl() (120s when the new
+        # EXHAUSTED_TTL_402_SECONDS is present, 1h fallback otherwise).
+        # Hard-coding 120s here would let display/probe code mark an entry
+        # usable before CredentialPool.select() is willing to lease it on
+        # mixed-version installations.
+        try:
+            from agent.credential_pool import _exhausted_ttl as _runtime_exhausted_ttl
+            return _runtime_exhausted_ttl(int(code))
+        except Exception:
+            return 60 * 60
     return 60 * 60
 
 
@@ -819,6 +837,19 @@ def _entry_exhausted_ttl_seconds(error_code):
     code = str(error_code or "").strip()
     if code == "401":
         return 5 * 60
+    if code == "402":
+        # #6626: keep WebUI's eligibility decision tied to the installed
+        # runtime contract. The runtime routes 402 via
+        # credential_pool._exhausted_ttl() (120s when the new
+        # EXHAUSTED_TTL_402_SECONDS is present, 1h fallback otherwise).
+        # Hard-coding 120s here would let display/probe code mark an entry
+        # usable before CredentialPool.select() is willing to lease it on
+        # mixed-version installations.
+        try:
+            from agent.credential_pool import _exhausted_ttl as _runtime_exhausted_ttl
+            return _runtime_exhausted_ttl(int(code))
+        except Exception:
+            return 60 * 60
     return 60 * 60
 
 
@@ -965,6 +996,74 @@ def _get_hermes_home() -> Path:
         return get_active_hermes_home()
     except ImportError:
         return Path.home() / ".hermes"
+
+
+def _providers_file_mtime_ns(path: Path) -> int:
+    """Best-effort file mtime for providers-cache invalidation."""
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return 0
+
+
+def _providers_config_fingerprint(cfg: Any) -> str:
+    """Stable fingerprint for config fields that shape the Providers response."""
+    try:
+        return hashlib.sha256(
+            json.dumps(cfg, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+    except Exception:
+        return repr(cfg)
+
+
+def _providers_cache_key(cfg: Any) -> tuple[Any, ...]:
+    """Return a profile-scoped cache key for ``get_providers()`` (#6010).
+
+    The endpoint reads provider state from the active Hermes home plus the
+    current config.  Include the home path and the two files users commonly
+    mutate from Settings so a short TTL never crosses profile boundaries or
+    masks immediate credential/config changes.
+    """
+    home = _get_hermes_home()
+    try:
+        home_key = str(home.resolve())
+    except OSError:
+        home_key = str(home)
+    return (
+        home_key,
+        _providers_file_mtime_ns(home / ".env"),
+        _providers_file_mtime_ns(home / "config.yaml"),
+        _providers_config_fingerprint(cfg),
+    )
+
+
+def _get_cached_providers(cache_key: tuple[Any, ...]) -> dict[str, Any] | None:
+    now = time.monotonic()
+    with _providers_cache_lock:
+        cached = _providers_cache.get(cache_key)
+        if cached is None:
+            return None
+        ts, payload = cached
+        if now - ts >= _PROVIDERS_CACHE_TTL_SECONDS:
+            _providers_cache.pop(cache_key, None)
+            return None
+        return copy.deepcopy(payload)
+
+
+def _store_cached_providers(cache_key: tuple[Any, ...], payload: dict[str, Any]) -> dict[str, Any]:
+    with _providers_cache_lock:
+        # Single-entry by design: /api/providers is cacheable only for the
+        # active profile/config snapshot, so clear older snapshots to avoid
+        # retaining unbounded provider metadata across profile switches.
+        _providers_cache.clear()
+        _providers_cache[cache_key] = (time.monotonic(), copy.deepcopy(payload))
+    return payload
+
+
+def invalidate_providers_cache() -> None:
+    """Clear cached ``GET /api/providers`` responses."""
+    with _providers_cache_lock:
+        _providers_cache.clear()
 
 
 def _load_env_file(env_path: Path) -> dict[str, str]:
@@ -2459,14 +2558,18 @@ def get_providers() -> dict[str, Any]:
       ``config_yaml``, ``oauth``, ``none``)
     - ``models``: list of known model IDs for this provider
     """
-    providers = []
-
     # Collect all known provider IDs from multiple sources
     known_ids = set(_PROVIDER_DISPLAY.keys()) | set(_PROVIDER_MODELS.keys())
     known_ids.update(plugin_model_provider_ids())
 
     # Also detect providers from config.yaml providers section
     cfg = get_config()
+    cache_key = _providers_cache_key(cfg)
+    cached = _get_cached_providers(cache_key)
+    if cached is not None:
+        return cached
+
+    providers = []
     providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
         known_ids.update(providers_cfg.keys())
@@ -2733,12 +2836,20 @@ def get_providers() -> dict[str, Any]:
                     cp_name,
                 )
                 continue
-            # Collect models from `models` list or `model` single
-            cp_models = []
-            if isinstance(cp.get("models"), list):
-                cp_models = [{"id": str(m), "label": str(m)} for m in cp["models"]]
-            elif cp.get("model"):
-                cp_models = [{"id": cp["model"], "label": cp["model"]}]
+            # Build the model list using the same sticky-before-plural
+            # ordering as the model picker (api/config.py:7308-7314):
+            # the singular ``model`` field goes first, then unique IDs from
+            # the ``models`` catalog are appended via _configured_model_ids
+            # (which strips whitespace, drops empty IDs, and de-duplicates).
+            # This keeps the Providers card consistent with the picker.
+            cp_model_ids: list[str] = []
+            _singular_model = str(cp.get("model") or "").strip()
+            if _singular_model:
+                cp_model_ids.append(_singular_model)
+            for _mid in _configured_model_ids(cp.get("models")):
+                if _mid not in cp_model_ids:
+                    cp_model_ids.append(_mid)
+            cp_models = [{"id": mid, "label": mid} for mid in cp_model_ids]
             # Check for env var reference (${VAR_NAME} pattern)
             cp_api_key = str(cp.get("api_key") or "")
             cp_has_key = bool(cp_api_key.strip())
@@ -2783,10 +2894,11 @@ def get_providers() -> dict[str, Any]:
         return (3, pid)
     providers.sort(key=_provider_sort_key)
 
-    return {
+    result = {
         "providers": providers,
         "active_provider": active_provider,
     }
+    return _store_cached_providers(cache_key, result)
 
 
 def set_provider_key(provider_id: str, api_key: str | None) -> dict[str, Any]:
@@ -2839,6 +2951,7 @@ def set_provider_key(provider_id: str, api_key: str | None) -> dict[str, Any]:
     # disrupting active streaming sessions that may be reading config.cfg.
     invalidate_models_cache()
     invalidate_account_usage_status_cache(provider_id)
+    invalidate_providers_cache()
 
     return {
         "ok": True,
@@ -2941,5 +3054,6 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
         # reload_config() also acquires _cfg_lock internally.
         if changed:
             reload_config()
+            invalidate_providers_cache()
     except Exception:
         logger.exception("Failed to clean provider key from config.yaml for %s", provider_id)

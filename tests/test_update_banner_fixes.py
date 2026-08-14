@@ -1635,7 +1635,7 @@ class TestUpdateSummaryRouteModelSelection:
         assert '"update_summary"' not in src
         assert 'main_runtime=main_runtime' in src
         assert 'update summary auxiliary model failed; falling back to main model' in src
-        assert 'from run_agent import AIAgent' in src
+        assert 'require_ai_agent_class()' in src
 
     def test_summary_route_auxiliary_model_uses_active_profile_env(self, monkeypatch, tmp_path):
         import api.config as cfg
@@ -1785,8 +1785,8 @@ class TestUpdateSummaryRouteModelSelection:
             'SKILL_MODULE_DIR': profile_home / 'skills',
         }
         assert captured['aux_create']['model'] == 'profile-compression-model'
-        assert getattr(fake_skill_module, 'HERMES_HOME') == 'default-home'
-        assert getattr(fake_skill_module, 'SKILLS_DIR') == 'default-home/skills'
+        assert fake_skill_module.HERMES_HOME == 'default-home'
+        assert fake_skill_module.SKILLS_DIR == 'default-home/skills'
         assert os.environ.get('HERMES_HOME') == 'default-home'
         assert os.environ.get('HERMES_TEST_PROFILE_ENV') == 'default-runtime'
 

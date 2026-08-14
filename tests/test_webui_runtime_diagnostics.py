@@ -10,6 +10,7 @@ def test_stream_channel_exposes_buffer_and_subscriber_counts():
         "subscriber_count": 0,
         "offline_buffered_events": 1,
         "offline_dropped_events": 0,
+        "subscriber_dropped_events": 0,
     }
 
     subscriber = channel.subscribe()
