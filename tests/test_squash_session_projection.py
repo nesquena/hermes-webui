@@ -42,6 +42,41 @@ def test_squash_summary_watermark_blocks_older_state_db_replay():
     assert merged == [summary]
 
 
+def test_verified_manual_squash_uses_boundary_as_state_db_read_floor():
+    from api.routes import _manual_squash_state_db_since_timestamp
+
+    summary = _message(
+        "assistant",
+        "# Session compactée\n\nRésumé opérationnel vérifié.",
+        200.0,
+        message_id="squash-200",
+        _squash_summary=True,
+    )
+    session = SimpleNamespace(
+        messages=[summary],
+        parent_session_id=None,
+        truncation_watermark=200.0,
+        truncation_boundary=200.0,
+        compression_anchor_mode="manual",
+    )
+
+    assert _manual_squash_state_db_since_timestamp(session) == 200.0
+
+
+def test_ordinary_truncation_cannot_use_squash_state_db_read_floor():
+    from api.routes import _manual_squash_state_db_since_timestamp
+
+    session = SimpleNamespace(
+        messages=[_message("assistant", "réponse conservée", 200.0)],
+        parent_session_id=None,
+        truncation_watermark=200.0,
+        truncation_boundary=200.0,
+        compression_anchor_mode="manual",
+    )
+
+    assert _manual_squash_state_db_since_timestamp(session) is None
+
+
 def test_non_squash_short_sidecar_keeps_existing_merge_behavior():
     from api.routes import _merged_session_messages_for_display
 

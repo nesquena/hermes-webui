@@ -8870,6 +8870,27 @@ _SIDECAR_BYTE_TAIL_THRESHOLD = 500_000  # 500 KB
 _STATE_DB_DISPLAY_ROW_BACKSTOP = 50000
 
 
+def _manual_squash_state_db_since_timestamp(session) -> float | None:
+    """Return the durable post-squash SQLite floor for a verified squash sidecar."""
+    if getattr(session, "compression_anchor_mode", None) != "manual":
+        return None
+    if getattr(session, "parent_session_id", None) not in (None, ""):
+        return None
+    messages = list(getattr(session, "messages", None) or [])
+    if not messages or not isinstance(messages[0], dict):
+        return None
+    if messages[0].get("_squash_summary") is not True:
+        return None
+    try:
+        boundary = float(getattr(session, "truncation_boundary", None))
+        watermark = float(getattr(session, "truncation_watermark", None))
+    except (TypeError, ValueError):
+        return None
+    if boundary <= 0 or watermark != boundary:
+        return None
+    return boundary
+
+
 def _state_db_backstop_limit_for_display(session, msg_before) -> int | None:
     """Return the row backstop to apply to the display path's state.db read, or
     ``None`` for an uncapped (full-history) read.
@@ -12930,10 +12951,12 @@ def handle_get(handler, parsed) -> bool:
             metadata_summary = None
             limited_sidecar_messages = None
             state_db_since_timestamp = None
+            manual_squash_state_db_floor = None
             if is_messaging_session:
                 cli_messages = get_cli_session_messages(sid)
             elif load_messages:
-                if msg_limit is not None:
+                manual_squash_state_db_floor = _manual_squash_state_db_since_timestamp(s)
+                if msg_limit is not None and manual_squash_state_db_floor is None:
                     (
                         state_db_since_timestamp,
                         limited_sidecar_messages,
@@ -12943,7 +12966,9 @@ def handle_get(handler, parsed) -> bool:
                         msg_before=msg_before,
                     )
                 _state_db_reader_kwargs = {"profile": _session_profile}
-                if state_db_since_timestamp is not None:
+                if manual_squash_state_db_floor is not None:
+                    _state_db_reader_kwargs["since_timestamp"] = manual_squash_state_db_floor
+                elif state_db_since_timestamp is not None:
                     _state_db_reader_kwargs["since_timestamp"] = state_db_since_timestamp
                 # Apply the display-path row backstop ONLY on provably-safe
                 # reads where no truncation_boundary prefix is required for the

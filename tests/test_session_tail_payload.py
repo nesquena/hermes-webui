@@ -44,7 +44,7 @@ class _FakeSession:
         }
 
 
-def _invoke(session, query=None):
+def _invoke(session, query=None, state_db_reader=None):
     import api.routes as routes
 
     captured = {}
@@ -57,10 +57,13 @@ def _invoke(session, query=None):
     if query is None:
         query = "session_id=tail_payload_001&messages=1&resolve_model=0&msg_limit=1"
     parsed = urlparse(f"/api/session?{query}")
+    if state_db_reader is None:
+        state_db_reader = lambda *_args, **_kwargs: []
+
     with patch("api.routes.get_session", return_value=session), \
          patch("api.routes._clear_stale_stream_state", return_value=False), \
          patch("api.routes._lookup_cli_session_metadata", return_value={}), \
-         patch("api.routes.get_state_db_session_messages", return_value=[]), \
+         patch("api.routes.get_state_db_session_messages", side_effect=state_db_reader), \
          patch("api.routes.redact_session_data", side_effect=lambda raw: raw), \
          patch("api.routes.j", side_effect=fake_j):
         routes.handle_get(SimpleNamespace(), parsed)
@@ -116,6 +119,34 @@ def test_full_load_keeps_all_session_tool_calls_for_legacy_messages_without_meta
 
     assert payload["messages"] == session.messages
     assert payload["tool_calls"] == session.tool_calls
+
+
+def test_full_load_reads_only_state_db_rows_after_verified_manual_squash():
+    summary = {
+        "role": "assistant",
+        "content": "# Session compactée\n\nRésumé opérationnel vérifié.",
+        "timestamp": 200.0,
+        "_squash_summary": True,
+    }
+    session = _FakeSession([summary])
+    session.parent_session_id = None
+    session.compression_anchor_mode = "manual"
+    session.truncation_watermark = 200.0
+    session.truncation_boundary = 200.0
+    captured = {}
+
+    def state_db_reader(_session_id, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    payload = _invoke(
+        session,
+        query="session_id=tail_payload_001&messages=1&resolve_model=0",
+        state_db_reader=state_db_reader,
+    )
+
+    assert payload["messages"] == [summary]
+    assert captured["since_timestamp"] == 200.0
 
 
 def test_msg_before_window_keeps_only_that_page_session_tool_calls():
