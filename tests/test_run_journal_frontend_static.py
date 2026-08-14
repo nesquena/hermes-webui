@@ -273,6 +273,35 @@ const exactCurrentResult = getPendingSessionMessage(
   {{pending_user_message:prompt, pending_started_at:4, pending_attachments:attachments}},
   exactCurrentMessages
 );
+const activeTokenDirectTailAttachments = [{{name:'active-token.txt', path:'active-token.txt', mime:'text/plain'}}];
+const activeTokenOldDirectTail = {{role:'user', content:prompt, timestamp:100}};
+const activeTokenOldDirectTailResult = getPendingSessionMessage(
+  {{pending_user_message:prompt, pending_started_at:101, active_turn_token:'opaque:new', pending_attachments:activeTokenDirectTailAttachments}},
+  [activeTokenOldDirectTail]
+);
+const activeTokenCurrentDirectTail = {{role:'user', content:prompt, timestamp:101}};
+const activeTokenCurrentDirectTailResult = getPendingSessionMessage(
+  {{pending_user_message:prompt, pending_started_at:101, active_turn_token:'opaque:new', pending_attachments:activeTokenDirectTailAttachments}},
+  [activeTokenCurrentDirectTail]
+);
+const duplicateTimestampRows = [
+  {{role:'user', content:'other prompt', timestamp:101}},
+  {{role:'user', content:prompt, timestamp:101}},
+  {{role:'assistant', content:'partial', timestamp:110}},
+];
+const duplicateTimestampResult = getPendingSessionMessage(
+  {{pending_user_message:prompt, pending_started_at:101, pending_attachments:activeTokenDirectTailAttachments}},
+  duplicateTimestampRows
+);
+const tokenWinsDuplicateTimestampRows = [
+  {{role:'user', content:'other prompt', timestamp:101}},
+  {{role:'user', content:prompt, timestamp:101, _active_turn_token:'opaque:new'}},
+  {{role:'assistant', content:'partial', timestamp:110}},
+];
+const tokenWinsDuplicateTimestampResult = getPendingSessionMessage(
+  {{pending_user_message:prompt, pending_started_at:101, active_turn_token:'opaque:new', pending_attachments:activeTokenDirectTailAttachments}},
+  tokenWinsDuplicateTimestampRows
+);
 const workspaceCurrentResult = getPendingSessionMessage(
   {{pending_user_message:prompt, pending_started_at:4}},
   [historical, historicalAnswer, currentWorkspaceTail]
@@ -388,6 +417,14 @@ process.stdout.write(JSON.stringify({{
   historicalWorkspaceSurvives: !!fromHistoricalWorkspace && fromHistoricalWorkspace.content===prompt && fromHistoricalWorkspace._pending===true,
   exactCurrentTailDedupe: exactCurrentResult===null,
   exactCurrentTailAttachmentsCopied: Array.isArray(currentTail.attachments) && currentTail.attachments[0].name==='note.txt',
+  activeTokenOldDirectTailMaterializes: !!activeTokenOldDirectTailResult && activeTokenOldDirectTailResult._pending===true && Array.isArray(activeTokenOldDirectTailResult.attachments) && activeTokenOldDirectTailResult.attachments[0].name==='active-token.txt',
+  activeTokenOldDirectTailClean: !Array.isArray(activeTokenOldDirectTail.attachments),
+  activeTokenCurrentDirectTailDedupe: activeTokenCurrentDirectTailResult===null,
+  activeTokenCurrentDirectTailAttachmentsCopied: Array.isArray(activeTokenCurrentDirectTail.attachments) && activeTokenCurrentDirectTail.attachments[0].name==='active-token.txt',
+  duplicateTimestampMaterializes: !!duplicateTimestampResult && duplicateTimestampResult._pending===true,
+  tokenWinsDuplicateTimestampDedupe: tokenWinsDuplicateTimestampResult===null,
+  tokenWinsDuplicateTimestampAttachmentsCopied: Array.isArray(tokenWinsDuplicateTimestampRows[1].attachments) && tokenWinsDuplicateTimestampRows[1].attachments[0].name==='active-token.txt',
+  tokenWinsDuplicateTimestampTokenlessClean: !Array.isArray(tokenWinsDuplicateTimestampRows[0].attachments),
   workspaceCurrentTailDedupe: workspaceCurrentResult===null,
   liveAfterCurrentTailMaterializes: !!liveAfterCurrentResult && liveAfterCurrentResult._pending===true,
   liveBoundaryMaterializes: !!liveBoundaryResult && liveBoundaryResult._pending===true && liveBoundaryResult.content===prompt && Array.isArray(liveBoundaryResult.attachments) && liveBoundaryResult.attachments[0].name==='live-boundary.txt',
@@ -1043,6 +1080,14 @@ def test_get_pending_session_message_keeps_deferred_repeat_prompt_by_behavior():
     assert result["historicalWorkspaceSurvives"] is True
     assert result["exactCurrentTailDedupe"] is True
     assert result["exactCurrentTailAttachmentsCopied"] is True
+    assert result["activeTokenOldDirectTailMaterializes"] is True
+    assert result["activeTokenOldDirectTailClean"] is True
+    assert result["activeTokenCurrentDirectTailDedupe"] is True
+    assert result["activeTokenCurrentDirectTailAttachmentsCopied"] is True
+    assert result["duplicateTimestampMaterializes"] is True
+    assert result["tokenWinsDuplicateTimestampDedupe"] is True
+    assert result["tokenWinsDuplicateTimestampAttachmentsCopied"] is True
+    assert result["tokenWinsDuplicateTimestampTokenlessClean"] is True
     assert result["workspaceCurrentTailDedupe"] is True
     assert result["liveAfterCurrentTailMaterializes"] is True
     assert result["liveBoundaryMaterializes"] is True

@@ -10755,6 +10755,7 @@ function _pendingActiveTurnUserMessage(messages, session){
   const list=Array.isArray(messages)?messages:[];
   let tokenMatch=null;
   let timestampMatch=null;
+  let timestampAmbiguous=false;
   for(let i=list.length-1;i>=0;i--){
     const msg=list[i];
     if(!msg||String(msg.role||'')!=='user') continue;
@@ -10769,9 +10770,13 @@ function _pendingActiveTurnUserMessage(messages, session){
     // precision-only float drift (never a whole second).
     const ts=_messageTimestampSeconds(msg);
     if(ts===null) continue;
-    if(Math.abs(ts-startedAt)<=_PENDING_ACTIVE_TURN_TS_EPSILON&&!timestampMatch) timestampMatch=msg;
+    if(Math.abs(ts-startedAt)<=_PENDING_ACTIVE_TURN_TS_EPSILON){
+      if(timestampMatch) timestampAmbiguous=true;
+      else timestampMatch=msg;
+    }
   }
   if(tokenMatch) return tokenMatch;
+  if(timestampAmbiguous) return null;
   if(timestampMatch) return timestampMatch;
   // Any wider drift (whole-second truncation, a rapid repeat ~1s later) is
   // ambiguous: return null so getPendingSessionMessage() materializes the
@@ -10789,12 +10794,18 @@ function getPendingSessionMessage(session, messagesOverride=null){
   const activeTokenRows=typeof _activeTurnTokenMatches==='function'
     ?messages.filter(row=>_activeTurnTokenMatches(row,session))
     :[];
+  const activeTurnUser=typeof _pendingActiveTurnUserMessage==='function'
+    ?_pendingActiveTurnUserMessage(messages,session)
+    :null;
+  const activeToken=session&&(session.active_turn_token??session.activeTurnToken);
+  const hasActiveToken=typeof activeToken==='string'&&activeToken.trim().length>0;
   const _matchesPending=(row)=>{
     if(!row) return false;
     if(typeof _activeTurnTokenMatches==='function'
       &&Object.prototype.hasOwnProperty.call(row,'_active_turn_token')){
       return activeTokenRows.length===1&&activeTokenRows[0]===row;
     }
+    if(hasActiveToken&&row!==activeTurnUser) return false;
     return typeof _sameTranscriptMessage==='function'
       ? _sameTranscriptMessage(row,pendingCandidate)
       : String(msgContent(row)||'').trim()===text;
@@ -10819,9 +10830,6 @@ function getPendingSessionMessage(session, messagesOverride=null){
   // repeat the same text are unaffected. Guarded with typeof so a partial load
   // (or a static probe that extracts only some helpers) degrades to the
   // original strict-tail behaviour instead of throwing.
-  const activeTurnUser=typeof _pendingActiveTurnUserMessage==='function'
-    ? _pendingActiveTurnUserMessage(messages,session)
-    : null;
   if(activeTurnUser&&activeTurnUser!==currentTailUser&&_matchesPending(activeTurnUser)){
     return _adoptExistingRow(activeTurnUser);
   }
