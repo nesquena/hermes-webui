@@ -1551,7 +1551,6 @@ async function newSession(flash, options={}){
       });
     }
     updateQueueBadge(S.session.session_id);
-    if(typeof refreshProviderQuotaIndicator==='function') void refreshProviderQuotaIndicator(S.session.model_provider||null);
     syncTopbar();renderMessages();
     if(typeof _announceNewSessionWorkspace==='function') _announceNewSessionWorkspace(S.session);
     // Keep new-chat first paint instant. The workspace tree / git badge can
@@ -2005,7 +2004,6 @@ async function loadSession(sid){
     try { window._resetScrollDirectionTracker(); } catch (_) {}
   }
   if(typeof _applyPendingSessionModelForSession==='function') _applyPendingSessionModelForSession(sid);
-  if(typeof refreshProviderQuotaIndicator==='function') void refreshProviderQuotaIndicator(S.session.model_provider||null);
   _resolveSessionModelForDisplaySoon(sid);
   // Sync workspace display immediately so the chip label reflects the new session's workspace
   // before any async message-loading begins (mirrors how model is handled).
@@ -4317,6 +4315,7 @@ function _renderBatchActionBar(){
       ids.forEach(_clearHandoffStorageForSession);
       if(S.session&&ids.includes(S.session.session_id)){
         S.session=null;S.messages=[];S.entries=[];localStorage.removeItem('hermes-webui-session');
+        if(typeof _syncProviderQuotaForActiveContext==='function') _syncProviderQuotaForActiveContext();
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
         const remaining=await api('/api/sessions'+_sessionListQueryString());
         if(remaining.sessions&&remaining.sessions.length){await loadSession(remaining.sessions[0].session_id);}
@@ -9066,6 +9065,7 @@ async function deleteSession(sid, beforeDelete=null){
   }
   if(S.session&&S.session.session_id===sid){
     S.session=null;S.messages=[];S.entries=[];
+    if(typeof _syncProviderQuotaForActiveContext==='function') _syncProviderQuotaForActiveContext();
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
     localStorage.removeItem('hermes-webui-session');
     // load the most recent remaining session, or show blank if none left

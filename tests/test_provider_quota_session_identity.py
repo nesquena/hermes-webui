@@ -235,6 +235,18 @@ return {provider};
     assert report["provider"] == "anthropic"
 
 
+def test_current_quota_provider_does_not_fall_back_past_an_active_session():
+    report = _run_quota_scenario(
+        """
+S.session = {session_id: 's1', model_provider: null};
+_emptyComposerModelOverride = {model: 'ollama-cloud/llama-3.3', model_provider: 'ollama-cloud'};
+return {provider: _currentQuotaProvider()};
+"""
+    )
+
+    assert report["provider"] is None
+
+
 def test_current_quota_provider_returns_null_when_no_session_and_no_override():
     report = _run_quota_scenario(
         """
@@ -246,38 +258,114 @@ return {provider};
     assert report["provider"] is None
 
 
+def test_active_context_sync_refreshes_only_when_provider_identity_changes():
+    report = _run_quota_scenario(
+        """
+S._bootReady = false;
+S.session = {session_id: 's1', model_provider: 'openai-codex'};
+_syncProviderQuotaForActiveContext();
+const beforeBoot = requests.length;
+
+S._bootReady = true;
+_syncProviderQuotaForActiveContext();
+_syncProviderQuotaForActiveContext();
+S.session = {session_id: 's2', model_provider: 'anthropic'};
+_syncProviderQuotaForActiveContext();
+S.session = null;
+_emptyComposerModelOverride = {model: 'llama-3.3', model_provider: 'ollama-cloud'};
+_syncProviderQuotaForActiveContext();
+_emptyComposerModelOverride = null;
+_syncProviderQuotaForActiveContext();
+
+return {beforeBoot, requests, pendingCount: pending.length};
+"""
+    )
+
+    assert report == {
+        "beforeBoot": 0,
+        "requests": [
+            "/api/provider/quota?provider=openai-codex",
+            "/api/provider/quota?provider=anthropic",
+            "/api/provider/quota?provider=ollama-cloud",
+            "/api/provider/quota",
+        ],
+        "pendingCount": 4,
+    }
+
+
 def _between(source: str, start: str, end: str) -> str:
     start_at = source.index(start)
     return source[start_at : source.index(end, start_at)]
 
 
 def test_provider_quota_refresh_follows_each_authoritative_provider_transition():
+    ui_js = UI_JS.read_text(encoding="utf-8")
     boot = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
     sessions = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    messages = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
+
+    topbar = _between(ui_js, "function syncTopbar(){", "function msgContent")
+    empty_topbar = _between(topbar, "if(!S.session){", "const sessionTitle")
+    assert "_syncProviderQuotaForActiveContext()" in empty_topbar
+    assert topbar.rstrip().endswith("_syncProviderQuotaForActiveContext();\n}")
 
     onchange = _between(boot, "$('modelSelect').onchange=async()=>", "$('msg').addEventListener")
     active_assign = onchange.index("S.session.model_provider=modelState.model_provider||null;")
-    active_refresh = onchange.index("refreshProviderQuotaIndicator(S.session.model_provider||null)")
+    active_sync = onchange.index("syncTopbar()")
     update = onchange.index("await api('/api/session/update'")
-    assert active_assign < active_refresh < update
+    assert active_assign < active_sync < update
 
     empty_branch = _between(onchange, "if(!S.session){", "if(typeof _rememberPendingSessionModel")
-    assert "refreshProviderQuotaIndicator(modelState.model_provider||null)" in empty_branch
+    assert "_syncProviderQuotaForActiveContext()" in empty_branch
 
     load = _between(sessions, "async function loadSession", "activeStreamId=S.session.active_stream_id")
     pending_model = load.index("_applyPendingSessionModelForSession(sid)")
-    loaded_refresh = load.index("refreshProviderQuotaIndicator(S.session.model_provider||null)")
     first_topbar = load.index("syncTopbar()")
-    assert pending_model < loaded_refresh < first_topbar
+    assert pending_model < first_topbar
 
     new_session = _between(sessions, "async function newSession", "function _clearStuckSessionOnBoot")
     server_session = new_session.index("S.session=data.session;S.messages=data.session.messages||[];")
-    new_refresh = new_session.index("refreshProviderQuotaIndicator(S.session.model_provider||null)")
     new_topbar = new_session.index("syncTopbar();renderMessages();")
-    assert server_session < new_refresh < new_topbar
+    assert server_session < new_topbar
+
+    # Direct refreshes are reserved for explicit force-refresh events. Normal
+    # state transitions converge on the de-duplicated active-context helper.
+    assert "refreshProviderQuotaIndicator(" not in boot
+    assert "refreshProviderQuotaIndicator(" not in sessions
+    assert "refreshProviderQuotaIndicator(" not in messages
+
+    batch_clear = _between(sessions, "if(S.session&&ids.includes(S.session.session_id)){", "const remaining=await api")
+    single_clear = _between(sessions, "if(S.session&&S.session.session_id===sid){", "const remaining=await api")
+    terminal_clear = _between(messages, "if(e&&e.status===404){", "const conflictActiveStream")
+    assert "_syncProviderQuotaForActiveContext()" in batch_clear
+    assert "_syncProviderQuotaForActiveContext()" in single_clear
+    assert "_syncProviderQuotaForActiveContext()" in terminal_clear
 
     boot_prefix = boot[: boot.index("const saved=urlSession||savedLocal;")]
     assert "refreshProviderQuotaIndicator();" not in boot_prefix
+
+
+def test_reviewer_identified_direct_session_transitions_reach_sync_topbar():
+    ui_js = UI_JS.read_text(encoding="utf-8")
+    panels = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+    messages = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
+
+    start_correction = _between(
+        messages,
+        "if(startData&&startData.effective_model && S.session){",
+        "if(S.session&&typeof startData.pending_started_at==='number')",
+    )
+    assert start_correction.count("syncTopbar()") == 2
+    assert "S.session.model_provider=startData.effective_model_provider||S.session.model_provider||null;" in start_correction
+    assert "S.session.model_provider=startData.effective_model_provider;" in start_correction
+
+    new_file = _between(ui_js, "async function promptNewFile", "async function promptNewFolder")
+    new_folder = _between(ui_js, "async function promptNewFolder", "async function uploadPendingFiles")
+    workspace_prompt = _between(panels, "async function promptWorkspacePath", "async function switchToWorkspace")
+    workspace_switch = _between(panels, "async function switchToWorkspace", "// ── Profile panel + dropdown")
+    for transition in (new_file, new_folder, workspace_prompt, workspace_switch):
+        assert "S.session=r.session" in transition
+        assert "syncTopbar()" in transition
 
 
 def test_restored_empty_session_keeps_provider_through_boot_demotion():
@@ -298,10 +386,10 @@ def test_restored_empty_session_keeps_provider_through_boot_demotion():
         "S.session=data.session;",
         "// Loading a real existing session abandons",
     )
-    load_quota_refresh = "if(typeof refreshProviderQuotaIndicator==='function') void refreshProviderQuotaIndicator(S.session.model_provider||null);"
-    assert load_quota_refresh in sessions
+    direct_load_refresh = "if(typeof refreshProviderQuotaIndicator==='function') void refreshProviderQuotaIndicator(S.session.model_provider||null);"
+    assert direct_load_refresh not in sessions
     quota_provider = _between(ui_js, "function _currentQuotaProvider", "window.addEventListener('visibilitychange'")
-    refresh_helper = _between(boot, "const _refreshQuotaForEmptyComposer=()=>", "const urlSession")
+    refresh_helper = _between(boot, "const _syncQuotaForBootContext=()=>", "const urlSession")
     demotion = _between(
         boot,
         "if(S.session && (S.session.message_count||0) === 0 && !_restoredInFlight && !_restoredHasDraft){",
@@ -351,7 +439,6 @@ async function run(session) {{
   window._emptyComposerModelOverride = {{model: 'stale-model', model_provider: 'stale-provider'}};
   const data = {{session}};
   {load_transition}
-  {load_quota_refresh}
   const _restoredInFlight = false;
   const _restoredHasDraft = false;
   const prefillIntent = null;
@@ -368,14 +455,9 @@ async function main() {{
   await run({{session_id: 'saved-empty', message_count: 0, model: 'llama-3.3', model_provider: 'ollama-cloud'}});
   const retainedRequests = requests.splice(0);
   const retainedPending = pending.splice(0);
-  retainedPending[1].resolve({{
+  retainedPending[0].resolve({{
     status: 'available', display_name: 'Ollama Cloud',
     account_limits: {{windows: [{{remaining_percent: 25}}]}},
-  }});
-  await Promise.resolve();
-  retainedPending[0].resolve({{
-    status: 'available', display_name: 'Stale provider',
-    account_limits: {{windows: [{{remaining_percent: 50}}]}},
   }});
   await Promise.all(retainedPending);
   const retained = {{requests: retainedRequests, finalState: snapshot()}};
@@ -403,13 +485,12 @@ main().then(report => process.stdout.write(JSON.stringify(report))).catch(error 
     report = json.loads(result.stdout)
     assert report["retained"]["requests"] == [
         "/api/provider/quota?provider=ollama-cloud",
-        "/api/provider/quota?provider=ollama-cloud",
     ]
     assert report["retained"]["finalState"] == {
         "desktop": {"hidden": False, "label": "25%"},
         "mobile": {"hidden": False, "label": "25%"},
     }
-    assert report["fallback"]["requests"] == ["/api/provider/quota", "/api/provider/quota"]
+    assert report["fallback"]["requests"] == ["/api/provider/quota"]
 
 
 def test_visibility_and_settings_refresh_use_current_quota_provider_helper():

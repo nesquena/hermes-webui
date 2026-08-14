@@ -27,7 +27,11 @@ def test_quota_indicator_fetches_provider_quota_after_provider_state_is_known():
     assert "function refreshProviderQuotaIndicator" in UI_JS
     assert "'/api/provider/quota'+query" in UI_JS
     assert "encodeURIComponent(provider)" in UI_JS
-    assert "refreshProviderQuotaIndicator(S.session.model_provider||null)" in BOOT_JS
+    assert "function _syncProviderQuotaForActiveContext" in UI_JS
+    topbar_start = UI_JS.index("function syncTopbar(){")
+    topbar_end = UI_JS.index("function msgContent", topbar_start)
+    assert "_syncProviderQuotaForActiveContext()" in UI_JS[topbar_start:topbar_end]
+    assert "_syncProviderQuotaForActiveContext()" in BOOT_JS
 
 
 def test_quota_indicator_hides_unsupported_or_failed_statuses():
