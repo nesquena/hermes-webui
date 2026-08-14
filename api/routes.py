@@ -11110,6 +11110,15 @@ def _handle_insights(handler, parsed) -> bool:
     start_ts = None
     end_ts = None
 
+    # Whether the effective `end` collapses to the server clock ("now") rather
+    # than an explicit calendar day: true when `end` was omitted (start-only)
+    # or supplied but in the future (> now).  For those, the local-midnight
+    # alignment below must not roll end_cutoff up to the NEXT midnight, or
+    # same-day sessions stamped after the server clock (future from the
+    # server's point of view) would be admitted.  An explicit end date at or
+    # before today still keeps its full calendar day.
+    end_clamped_to_now = end_ts_v is None or (end_ts_v is not None and end_ts_v > now)
+
     if start_ts_v is not None or end_ts_v is not None:
         if end_ts_v is not None:
             end_ts = min(end_ts_v, now)
@@ -11169,6 +11178,14 @@ def _handle_insights(handler, parsed) -> bool:
             # Absolute mode: end_cutoff is an EXCLUSIVE upper bound - a session
             # stamped exactly at the next local midnight belongs to the next day.
             end_exclusive = True
+            if end_clamped_to_now:
+                # An omitted/future `end` collapsed to `now` above, so the
+                # exclusive bound must not extend into the rest of today (which
+                # has not happened yet from the server's view).  Drop it back to
+                # the server clock and treat it as INCLUSIVE, matching trailing
+                # mode: keep sessions at/behind `now`, exclude any stamped after.
+                end_cutoff = min(end_cutoff, now)
+                end_exclusive = False
             first_day_ts = start_ts
             # Effective bounds (server-local calendar days actually queried),
             # so the client footer always agrees with what was filtered even
