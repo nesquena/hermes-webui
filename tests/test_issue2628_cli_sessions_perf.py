@@ -215,7 +215,12 @@ def test_importable_agent_rows_push_sidebar_limit_into_sql(tmp_path):
     assert "CREATE INDEX IF NOT EXISTS idx_messages_session" in src
     assert "_CRON_PREAGGREGATE_CANDIDATE_ORDER_MIN_MESSAGES" not in src
     assert "MAX(mx.timestamp) FROM messages mx WHERE mx.session_id = s.id" in src
-    assert "candidate_limit = max(result_limit * 8, result_limit)" in src
+    assert "candidate_limit = max(result_limit * multiplier, result_limit)" in src
+    # The first (and normally only) candidate window is still 8x the requested
+    # limit. The wider retry in CANDIDATE_WINDOW_MULTIPLIERS only runs when that
+    # window was fully consumed AND still under-delivered conversations (#6659),
+    # so the capped-scan guarantee this test pins is unchanged.
+    assert agent_sessions.CANDIDATE_WINDOW_MULTIPLIERS[0] == 8
 
 
 def test_importable_agent_rows_candidate_ordering_stays_under_progress_budget(tmp_path, monkeypatch):
