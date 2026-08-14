@@ -83,14 +83,58 @@ def _notification_urls(page) -> list[str]:
     )
 
 
+def _claim_keys(page) -> list[list[str]]:
+    return page.evaluate(
+        """
+        async () => new Promise((resolve, reject) => {
+          const request = indexedDB.open('hermes-webui-notification-claims-v1', 1);
+          request.onerror = () => reject(request.error || new Error('claim database open failed'));
+          request.onsuccess = () => {
+            const db = request.result;
+            if (!db.objectStoreNames.contains('event-identities')) {
+              db.close(); resolve([]); return;
+            }
+            const transaction = db.transaction('event-identities', 'readonly');
+            const keys = transaction.objectStore('event-identities').getAllKeys();
+            keys.onerror = () => reject(keys.error || new Error('claim key read failed'));
+            keys.onsuccess = () => { db.close(); resolve(keys.result); };
+            transaction.onerror = () => reject(transaction.error || new Error('claim key transaction failed'));
+          };
+        })
+        """
+    )
+
+
+def _wait_for_claims(page, expected: list[list[str]], timeout: float = 5.0) -> list[list[str]]:
+    deadline = time.monotonic() + timeout
+    latest: list[list[str]] = []
+    while time.monotonic() < deadline:
+        latest = _claim_keys(page)
+        if sorted(latest) == sorted(expected):
+            return latest
+        time.sleep(0.05)
+    raise AssertionError(f"claim keys did not settle: expected={expected}, observed={latest}")
+
+
+def _wait_for_notification_count(page, expected: int, timeout: float = 5.0) -> int:
+    deadline = time.monotonic() + timeout
+    latest = 0
+    while time.monotonic() < deadline:
+        latest = _notification_count(page)
+        if latest == expected:
+            return latest
+        time.sleep(0.05)
+    raise AssertionError(f"notification count did not settle: expected={expected}, observed={latest}")
+
+
 def _start_live_listener(page, stream_id: str) -> None:
     page.evaluate(
         """
         streamId => {
           class BrowserBoundaryEventSource {
-            constructor() {
-              this.listeners = new Map(); this.readyState = 1;
-              window.__issue6673Source = this;
+            constructor(url) {
+              this.listeners = new Map(); this.readyState = 1; this.url = String(url || '');
+              if (this.url.includes('/api/chat/stream?stream_id=')) window.__issue6673Source = this;
             }
             addEventListener(name, handler) {
               const handlers = this.listeners.get(name) || [];
@@ -104,6 +148,7 @@ def _start_live_listener(page, stream_id: str) -> None:
             }
           }
           window.EventSource = BrowserBoundaryEventSource;
+          window._notificationsEnabled = true;
           window.__hermesSetBackgrounded(true);
           S.session = {...(S.session || {}), session_id: 'session-6673'};
           S.messages = Array.isArray(S.messages) ? S.messages : [];
@@ -126,6 +171,13 @@ def _emit_live_event(page, event_name: str, event_id: str) -> None:
         }
         """,
         {"eventName": event_name, "eventId": event_id},
+    )
+
+
+def _wait_for_live_listener(page, timeout: float = 15.0) -> None:
+    page.wait_for_function(
+        """() => Boolean(window.__issue6673Source?.listeners?.has('approval'))""",
+        timeout=int(timeout * 1000),
     )
 
 
@@ -152,14 +204,43 @@ def main() -> int:
         playwright = sync_playwright().start()
         browser = playwright.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage"],
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                f"--unsafely-treat-insecure-origin-as-secure={BASE}",
+            ],
         )
         context = browser.new_context(
             base_url=BASE,
             permissions=["notifications"],
         )
+        context.grant_permissions(["notifications"], origin=BASE)
+        context.add_init_script(
+            """
+            (() => {
+              const NativeNotification = window.Notification;
+              const nativePermission = NativeNotification.permission;
+              const TestNotification = function(...args) {
+                return new NativeNotification(...args);
+              };
+              Object.setPrototypeOf(TestNotification, NativeNotification);
+              Object.defineProperty(TestNotification, '__issue6673NativePermission', {
+                value: nativePermission,
+                configurable: false,
+              });
+              Object.defineProperty(TestNotification, 'permission', {
+                value: 'granted',
+                configurable: false,
+              });
+              window.Notification = TestNotification;
+            })();
+            """
+        )
         page_a = context.new_page()
         page_b = context.new_page()
+        browser_errors: list[str] = []
+        for page in (page_a, page_b):
+            page.on("pageerror", lambda error: browser_errors.append(str(error)))
         for page in (page_a, page_b):
             page.goto("/", wait_until="domcontentloaded")
             page.wait_for_function(
@@ -188,12 +269,27 @@ def main() -> int:
 
         _start_live_listener(page_a, "stream-6673")
         _start_live_listener(page_b, "stream-6673")
+        _wait_for_live_listener(page_a)
+        _wait_for_live_listener(page_b)
+        permission = page_a.evaluate("() => Notification.__issue6673NativePermission")
         _emit_live_event(page_a, "approval", "stream-6673:1")
         _emit_live_event(page_b, "approval", "stream-6673:1")
         _emit_live_event(page_a, "approval", "stream-6673:2")
         _emit_live_event(page_b, "approval", "stream-6673:2")
-        page_a.wait_for_timeout(250)
-        count_before_reload = _notification_count(page_a)
+        expected_claims = [["stream-6673", "stream-6673:1"], ["stream-6673", "stream-6673:2"]]
+        try:
+            claims_before_reload = _wait_for_claims(page_a, expected_claims)
+        except AssertionError as error:
+            raise AssertionError({
+                "permission": permission,
+                "effectivePermission": page_a.evaluate("() => Notification.permission"),
+                "listenerState": page_a.evaluate(
+                    "() => ({source: Boolean(window.__issue6673Source), listeners: [...(window.__issue6673Source?.listeners?.keys() || [])]})"
+                ),
+                "browserErrors": browser_errors,
+                "error": str(error),
+            }) from error
+        count_before_reload = _wait_for_notification_count(page_a, 1) if permission == "granted" else None
         urls_before_reload = _notification_urls(page_a)
         page_a.reload(wait_until="domcontentloaded")
         page_a.wait_for_function(
@@ -201,11 +297,11 @@ def main() -> int:
             timeout=15000,
         )
         _start_live_listener(page_a, "stream-6673")
+        _wait_for_live_listener(page_a)
         _emit_live_event(page_a, "approval", "stream-6673:1")
-        page_a.wait_for_timeout(250)
-        count = _notification_count(page_a)
+        claims_after_replay = _wait_for_claims(page_a, expected_claims)
+        count = _wait_for_notification_count(page_a, 1) if permission == "granted" else None
         urls = _notification_urls(page_a)
-        permission = page_a.evaluate("() => Notification.permission")
         expected_urls = [f"{BASE}/?session=session-6673"]
         if permission == "granted" and (
             count_before_reload != 1
@@ -218,7 +314,7 @@ def main() -> int:
                 "afterReplay": [count, urls],
                 "permission": permission,
             })
-        print({"scope": metadata["scope"], "scriptURL": metadata["scriptURL"], "permission": permission, "notificationCount": count, "urls": urls})
+        print({"scope": metadata["scope"], "scriptURL": metadata["scriptURL"], "permission": permission, "claimsBeforeReload": claims_before_reload, "claimsAfterReplay": claims_after_replay, "notificationCount": count, "urls": urls})
         return 0
     except Exception as error:
         print(f"REALITY GATE FAILED: {error}", file=sys.stderr)

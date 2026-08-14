@@ -443,11 +443,17 @@ def _no_worker_two_page_driver(mode: str) -> dict:
             objectStoreNames: {{contains: () => true}},
             createObjectStore: () => ({{}}),
             transaction: () => {{
+              if (mode === 'transaction-failure') throw new Error('transaction failed');
               const tx = {{oncomplete: null, onerror: null, onabort: null, error: null}};
               tx.objectStore = () => ({{
                 add(value) {{
                   const request = {{onsuccess: null, onerror: null, error: null}};
                   queueMicrotask(() => {{
+                    if (mode === 'abort') {{
+                      tx.error = new Error('transaction aborted');
+                      tx.onabort?.({{}});
+                      return;
+                    }}
                     const key = JSON.stringify([value.streamId, value.lastEventId]);
                     if (records.has(key)) {{
                       request.error = {{name: 'ConstraintError'}};
@@ -475,6 +481,15 @@ def _no_worker_two_page_driver(mode: str) -> dict:
           open() {{
             const request = {{onupgradeneeded: null, onsuccess: null, onerror: null, onblocked: null, result: makeDb()}};
             queueMicrotask(() => {{
+              if (mode === 'open-failure') {{
+                request.error = new Error('database open failed');
+                request.onerror?.({{}});
+                return;
+              }}
+              if (mode === 'blocked') {{
+                request.onblocked?.({{}});
+                return;
+              }}
               request.onupgradeneeded?.({{target: {{result: request.result}}}});
               request.onsuccess?.({{target: {{result: request.result}}}});
             }});
@@ -495,6 +510,7 @@ def _no_worker_two_page_driver(mode: str) -> dict:
           if (mode === 'rejected') registration = {{getRegistration: () => Promise.reject(new Error('registration rejected'))}};
           else if (mode === 'missing') registration = undefined;
           else if (mode === 'missing-api') registration = {{getRegistration: () => Promise.resolve({{active: {{}}}})}};
+          else if (mode === 'missing-registration') registration = {{getRegistration: () => Promise.resolve(undefined)}};
           else if (mode === 'activation-delay') {{
             registration = {{
               getRegistration: () => new Promise(resolve => setTimeout(
@@ -535,6 +551,118 @@ def _no_worker_two_page_driver(mode: str) -> dict:
           const firstResults = await Promise.all([pageA(first), pageB(first)]);
           const secondResults = await Promise.all([pageA(second), pageB(second)]);
           console.log(JSON.stringify({{firstResults, secondResults, directDeliveries, directTags, records: [...records]}}));
+        }})().catch(error => {{ console.error(error.stack || error); process.exitCode = 1; }});
+        """,
+    )
+    return _run_node(script)
+
+
+def _worker_page_collision_driver() -> dict:
+    notification_options = _notification_helper_source()
+    show_notification = extract_function(MESSAGES_JS, "_showPwaNotification")
+    request_permission = extract_function(MESSAGES_JS, "requestNotificationPermission")
+    send_notification = extract_function(MESSAGES_JS, "sendBrowserNotification")
+    page_source = json.dumps(
+        "\n".join([notification_options, show_notification, request_permission, send_notification]),
+    )
+    script = textwrap.dedent(
+        f"""
+        const vm = require('vm');
+        const records = new Set();
+        let workerDeliveries = 0;
+        let directDeliveries = 0;
+        function makeDb() {{
+          return {{
+            objectStoreNames: {{contains: () => true}},
+            createObjectStore: () => ({{}}),
+            transaction: () => {{
+              const tx = {{oncomplete: null, onerror: null, onabort: null, error: null}};
+              tx.objectStore = () => ({{
+                add(value) {{
+                  const request = {{onsuccess: null, onerror: null, error: null}};
+                  queueMicrotask(() => {{
+                    const key = JSON.stringify([value.streamId, value.lastEventId]);
+                    if (records.has(key)) {{
+                      request.error = {{name: 'ConstraintError'}};
+                      let prevented = false;
+                      request.onerror?.({{preventDefault: () => {{prevented = true;}}}});
+                      tx.error = request.error;
+                      tx.onerror?.({{preventDefault: () => {{}}}});
+                      if (prevented) queueMicrotask(() => tx.oncomplete?.({{}}));
+                      else tx.onabort?.({{}});
+                      return;
+                    }}
+                    records.add(key);
+                    request.onsuccess?.({{}});
+                    queueMicrotask(() => tx.oncomplete?.({{}}));
+                  }});
+                  return request;
+                }},
+              }});
+              return tx;
+            }},
+            close: () => {{}},
+          }};
+        }}
+        const indexedDB = {{
+          open() {{
+            const request = {{onupgradeneeded: null, onsuccess: null, onerror: null, onblocked: null, result: makeDb()}};
+            queueMicrotask(() => {{
+              request.onupgradeneeded?.({{target: {{result: request.result}}}});
+              request.onsuccess?.({{target: {{result: request.result}}}});
+            }});
+            return request;
+          }},
+        }};
+        class Port {{
+          constructor() {{ this.peer = null; this.onmessage = null; }}
+          postMessage(data) {{ queueMicrotask(() => this.peer?.onmessage?.({{data}})); }}
+          close() {{}}
+          start() {{}}
+        }}
+        class MessageChannel {{
+          constructor() {{
+            this.port1 = new Port(); this.port2 = new Port();
+            this.port1.peer = this.port2; this.port2.peer = this.port1;
+          }}
+        }}
+        const worker = {{
+          postMessage(message, transfer) {{
+            const port = transfer && transfer[0];
+            const key = JSON.stringify([message.identity.streamId, message.identity.lastEventId]);
+            if (records.has(key)) {{ port.postMessage({{status: 'duplicate'}}); return; }}
+            records.add(key);
+            workerDeliveries += 1;
+            port.postMessage({{status: 'shown'}});
+          }},
+        }};
+        function makePage(active) {{
+          const context = {{
+            Promise, MessageChannel, indexedDB, queueMicrotask, setTimeout, clearTimeout,
+            navigator: {{serviceWorker: {{getRegistration: () => Promise.resolve({{active}})}}}},
+            location: {{origin: 'https://webui.test', href: 'https://webui.test/'}},
+            S: {{session: {{}}}},
+            _sessionUrlForSid: sid => '/?session=' + encodeURIComponent(sid),
+            assistantDisplayName: () => 'Hermes',
+            window: {{_notificationsEnabled: true}},
+            _isBackgroundedForBrowserNotification: () => true,
+            showToast: () => {{}}, t: key => key,
+            Notification: function() {{ directDeliveries += 1; return {{}}; }},
+          }};
+          context.Notification.permission = 'granted';
+          context.window.Notification = context.Notification;
+          vm.runInNewContext({page_source}, context);
+          return identity => context.sendBrowserNotification(
+            'Response complete', 'The task finished.',
+            {{sid: '{FIXTURE['sid']}', forceHidden: true, eventIdentity: identity}},
+          );
+        }}
+        (async () => {{
+          const pageWithWorker = makePage(worker);
+          const pageWithoutWorkerApi = makePage({{}});
+          const identity = {{streamId: 'stream-6673', lastEventId: 'stream-6673:collision'}};
+          const results = await Promise.all([pageWithWorker(identity), pageWithoutWorkerApi(identity)]);
+          console.log(JSON.stringify({{results, workerDeliveries, directDeliveries, records: [...records]}}));
         }})().catch(error => {{ console.error(error.stack || error); process.exitCode = 1; }});
         """,
     )
@@ -592,7 +720,10 @@ def test_visible_tab_does_not_claim_an_ineligible_keyed_event():
     }
 
 
-@pytest.mark.parametrize("mode", ["missing", "missing-api", "inactive", "rejected", "activation-delay"])
+@pytest.mark.parametrize(
+    "mode",
+    ["missing", "missing-api", "missing-registration", "inactive", "rejected", "activation-delay"],
+)
 def test_no_worker_modes_share_page_claim_and_alert_each_distinct_identity(mode: str):
     result = _no_worker_two_page_driver(mode)
 
@@ -604,6 +735,24 @@ def test_no_worker_modes_share_page_claim_and_alert_each_distinct_identity(mode:
         '["stream-6673","stream-6673:1"]',
         '["stream-6673","stream-6673:2"]',
     ]
+
+
+@pytest.mark.parametrize("mode", ["open-failure", "blocked", "transaction-failure", "abort"])
+def test_page_claim_failures_fail_closed_without_direct_delivery(mode: str):
+    result = _no_worker_two_page_driver(mode)
+
+    assert result["firstResults"] == ["unavailable", "unavailable"]
+    assert result["secondResults"] == ["unavailable", "unavailable"]
+    assert result["directDeliveries"] == 0
+    assert result["records"] == []
+
+
+def test_worker_and_page_claims_share_one_atomic_identity_owner():
+    result = _worker_page_collision_driver()
+
+    assert sorted(result["results"]) == ["duplicate", "shown"]
+    assert result["workerDeliveries"] + result["directDeliveries"] == 1
+    assert result["records"] == ['["stream-6673","stream-6673:collision"]']
 
 
 @pytest.mark.parametrize("worker_response", ["timeout", "unknown"])

@@ -9180,11 +9180,12 @@ function _claimNotificationIdentity(db,identity){
 }
 function _claimAndShowPage(title,opts,identity,direct){
   if(typeof indexedDB==='undefined'||!indexedDB||typeof indexedDB.open!=='function') return Promise.resolve('unavailable');
-  return _openNotificationClaimDb().then(db=>_claimNotificationIdentity(db,identity).then(status=>{
-    try{db.close();}catch(_){ }
-    if(status!=='claimed')return status;
-    try{direct();return 'shown';}catch(_){return 'ambiguous';}
-  })).catch(()=> 'unavailable');
+  return _openNotificationClaimDb().then(db=>
+    _claimNotificationIdentity(db,identity).then(status=>{
+      if(status!=='claimed')return status;
+      try{direct();return 'shown';}catch(_){return 'ambiguous';}
+    }).catch(()=> 'unavailable').finally(()=>{try{db.close();}catch(_){ }}
+  )).catch(()=> 'unavailable');
 }
 function _claimAndShowNotification(active,title,opts,identity,direct){
   if(typeof MessageChannel!=='function') return Promise.resolve('unavailable');

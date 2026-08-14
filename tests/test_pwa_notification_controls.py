@@ -138,6 +138,7 @@ def test_page_and_worker_share_the_notification_claim_store():
     assert "const _NOTIFICATION_CLAIM_DB='hermes-webui-notification-claims-v1';" in MESSAGES_JS
     assert "const _NOTIFICATION_CLAIM_STORE='event-identities';" in MESSAGES_JS
     assert "function _claimAndShowPage(" in MESSAGES_JS
+    assert "keyPath:['streamId','lastEventId']" in MESSAGES_JS
     assert "const NOTIFICATION_CLAIM_DB = 'hermes-webui-notification-claims-v1';" in SW_JS
     assert "const NOTIFICATION_CLAIM_STORE = 'event-identities';" in SW_JS
     assert "keyPath: ['streamId', 'lastEventId']" in SW_JS
