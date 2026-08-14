@@ -90,6 +90,11 @@ function createHarness(options={}){
     }
     appendChild(child){
       if(!child) return null;
+      if(child.tagName === '#FRAGMENT'){
+        child.children.slice().forEach(grandchild=>this.appendChild(grandchild));
+        child.children = [];
+        return child;
+      }
       child.parentNode = this;
       this.children.push(child);
       return child;
@@ -117,7 +122,10 @@ function createHarness(options={}){
       return Object.prototype.hasOwnProperty.call(this.attributes, name) ? this.attributes[name] : null;
     }
     querySelector(selector){
-      if(selector === '.msg-body'){
+      if(selector === 'a.session-link' && String(this.innerHTML || '').includes('class="session-link"')){
+        return {className:'session-link'};
+      }
+      if(selector === '.msg-body' || selector.includes('.msg-body')){
         const direct = this.children.find((c)=>c.className && c.className.split(' ').includes('msg-body')) || null;
         if(direct) return direct;
         if(typeof this._innerHTML === 'string'){
@@ -158,6 +166,9 @@ function createHarness(options={}){
       node.textContent = String(value || '');
       return node;
     },
+    createDocumentFragment(){
+      return new FakeElement('#fragment');
+    },
   };
 
   function bindParser(renderer, parser, el){
@@ -168,8 +179,9 @@ function createHarness(options={}){
 
   global.window = {
     _fadeTextEffect: false,
-    _shouldUseLiveProseFade: ()=>false,
+    _shouldUseLiveProseFade: ()=>!!options.fade,
   };
+  global._shouldUseLiveProseFade = ()=>!!options.fade;
   window.__anchorProseIncrementalNode = null;
   window._anchorProseSmdCache = cache;
   window.smd = {
@@ -177,13 +189,24 @@ function createHarness(options={}){
     SRC: 'src',
     parser(){
       calls.created += 1;
-      return {id: calls.created, ended: false, pending: ''};
+      return {id: calls.created, ended: false, pending: '', text: ''};
     },
     parser_write(parser, text){
       calls.written += 1;
       if(!parser || parser.ended || !parser._body) return;
       const chunk = String(text || '');
       if(!chunk) return;
+      if(options.sessionReferenceMarkup){
+        parser.text += chunk;
+        const markup = parser.text.replace(
+          'Answer: [abc123](session://abc123?profile=p).',
+          'Answer: <a class="session-link" href="/app/session/abc123?profile=p">abc123</a>.');
+        parser._body.innerHTML = markup;
+        if(parser._body.parentNode){
+          parser._body.parentNode._innerHTML = '<div class="msg-body">' + markup + '</div>';
+        }
+        return;
+      }
       const flushNow = chunk.length > 1 ? chunk.slice(0, -1) : '';
       if(flushNow) parser._body.textContent += flushNow;
       parser.pending += chunk.slice(-1);
@@ -193,6 +216,10 @@ function createHarness(options={}){
       if(failParserEnd){
         calls.failedEnds += 1;
         throw new Error('parser_end failure');
+      }
+      if(options.sessionReferenceMarkup){
+        if(parser) parser.ended = true;
+        return;
       }
       if(!parser || parser.ended || !parser._body) return;
       parser._body.textContent += parser.pending || '';
@@ -228,6 +255,12 @@ function createHarness(options={}){
   eval(extractFunction('_anchorProseIncrementalNode'));
   eval(extractFunction('_finalizeAnchorProseIncrementalNode'));
   _extractSource = uiSrc;
+  eval(['_matchBacktickFenceLine', '_isBacktickFenceClose', '_transformBareSessionReferences',
+    '_transparentLiveRowAttributePairs', '_transparentLiveRowInteractiveState',
+    '_rehydrateTransparentLiveRow', '_refreshTransparentThinkingLiveRow',
+    '_bindTransparentFadeCleanup', '_appendTransparentFadeText',
+    '_refreshTransparentFadeProseRow', '_refreshTransparentLiveRow']
+    .filter(name=>hasFunction(uiSrc, name)).map(name=>extractFunction(name)).join('\n'));
   eval(extractFunction('_anchorSceneNodeForRow'));
   window.__anchorProseIncrementalNode = _anchorProseIncrementalNode;
 
@@ -235,6 +268,16 @@ function createHarness(options={}){
     calls,
     cache,
     anchorApi: window.HermesAssistantTurnAnchors,
+    renderAnchorProse(key, text, options){
+      return _anchorProseIncrementalNode(key, text, options);
+    },
+    refreshTransparentLive(existing, candidate){
+      return _refreshTransparentLiveRow(existing, candidate);
+    },
+    transformBareSessionReferences(text){
+      return typeof _transformBareSessionReferences === 'function'
+        ? _transformBareSessionReferences(text) : String(text || '');
+    },
     renderRow(row){
       return _anchorSceneNodeForRow(row, {settled:false});
     },
@@ -242,7 +285,8 @@ function createHarness(options={}){
 }
 
 function runCase(name){
-  const harness = createHarness();
+  const harness = createHarness(name === 'transparent_session_reference_reconciles'
+    ? {fade:true, sessionReferenceMarkup:true} : {});
   const row = (status, text)=>({role:'prose', local_id:'live-prose:1', status, text});
 
   if(name === 'running_row_does_not_finalize'){
@@ -250,6 +294,44 @@ function runCase(name){
     return {
       finalizeCount: harness.calls.ended,
       hasNode: !!node,
+    };
+  }
+
+  if(name === 'session_reference_rebuilds_from_full_text'){
+    harness.renderAnchorProse('session-ref', 'Answer: @session:p/', {});
+    const node = harness.renderAnchorProse(
+      'session-ref', 'Answer: @session:p/abc123.', {finalize:true});
+    const body = node && node.querySelector('.msg-body');
+    const state = harness.cache.get('session-ref');
+    return {
+      bodyText: body ? body.textContent : '',
+      writtenText: state ? state.writtenText : '',
+      createdParsers: harness.calls.created,
+      writeCalls: harness.calls.written,
+      finalizeCount: harness.calls.ended,
+    };
+  }
+
+  if(name === 'transparent_session_reference_reconciles'){
+    const full = 'Answer: @session:p/abc123.';
+    const existing = harness.renderAnchorProse('transparent-session', 'Answer: @session:p/', {});
+    const candidate = harness.renderAnchorProse('transparent-session', full, {finalize:true});
+    [existing, candidate].forEach(node=>{
+      node.setAttribute('data-anchor-row-role', 'prose');
+      node.setAttribute('data-anchor-row-id', 'transparent-session');
+      node.setAttribute('data-anchor-source-event-type', 'process_prose');
+      node.setAttribute('data-raw-text', node.dataset.rawText);
+    });
+    const refreshed = harness.refreshTransparentLive(existing, candidate);
+    const normal = harness.renderAnchorProse('transparent-normal', 'ordinary text.', {finalize:true});
+    return {
+      standard: harness.transformBareSessionReferences(full),
+      sameNode: refreshed === existing,
+      rawText: refreshed && refreshed.dataset.rawText,
+      html: refreshed && refreshed.innerHTML,
+      normalHtml: normal && normal.innerHTML,
+      createdParsers: harness.calls.created,
+      finalizeCount: harness.calls.ended,
     };
   }
 
@@ -400,6 +482,29 @@ def _messages_js_source() -> str:
 def test_running_anchor_prose_does_not_finalize_parser():
     data = _run_scenario("running_row_does_not_finalize")
     assert data["finalizeCount"] == 0
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for anchor prose incremental harness tests")
+def test_anchor_session_reference_rebuilds_from_full_authoritative_text():
+    data = _run_scenario("session_reference_rebuilds_from_full_text")
+    assert data["bodyText"] == "Answer: [abc123](session://abc123?profile=p)."
+    assert data["writtenText"] == "Answer: [abc123](session://abc123?profile=p)."
+    assert data["createdParsers"] == 2
+    assert data["writeCalls"] >= 2
+    assert data["finalizeCount"] == 1
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for anchor prose incremental harness tests")
+def test_transparent_anchor_session_reference_reconciles_after_split_and_finalize():
+    data = _run_scenario("transparent_session_reference_reconciles")
+    assert data["standard"] == "Answer: [abc123](session://abc123?profile=p)."
+    assert data["sameNode"] is True
+    assert data["rawText"] == "Answer: @session:p/abc123."
+    assert data["html"].count('class="session-link"') == 1
+    assert "@session:p/abc123" not in data["html"]
+    assert "session-link" not in data["normalHtml"]
+    assert data["createdParsers"] == 3
+    assert data["finalizeCount"] == 2
 
 
 @pytest.mark.skipif(NODE is None, reason="node is required for anchor prose incremental harness tests")

@@ -196,13 +196,17 @@ def test_static_sessions_js_switches_profile_before_opening_all_profiles_row():
     repo_root = Path(__file__).parent.parent
     src = (repo_root / 'static' / 'sessions.js').read_text(encoding='utf-8')
 
+    switch_idx = src.index("async function _switchToSessionProfile(targetProfile)")
     ensure_idx = src.index("async function _ensureSidebarSessionProfile(session)")
     open_idx = src.index("async function _openSidebarSession(session, loadOpts={})")
+    switch_body = src[switch_idx:ensure_idx]
     ensure_body = src[ensure_idx:open_idx]
     open_body = src[open_idx:src.index("function _isReadOnlySession", open_idx)]
 
-    assert "await switchToProfile(targetProfile);" in ensure_body
-    assert "_profileSwitchOpeningExistingSession=true;" in ensure_body
+    assert "switched=await switchToProfile(target);" in switch_body
+    assert "_profileSwitchOpeningExistingSession=true;" in switch_body
+    assert "return switched!==false&&_profileMatchesActiveProfile(target,S.activeProfile||'default');" in switch_body
+    assert "return _switchToSessionProfile(targetProfile);" in ensure_body
     assert open_body.index("await _ensureSidebarSessionProfile(session);") < open_body.index("await loadSession(session.session_id,")
     assert "await _openSidebarSession(s);" in src
     assert "await _openSidebarSession(seg, {skipLineageResolve:true});" in src
