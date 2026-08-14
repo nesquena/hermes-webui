@@ -3082,14 +3082,21 @@ def _resolve_custom_provider_fallback(
     canonical_slug: str,
     cfg_data: dict,
     resolve_key,
-) -> tuple[str | None, str | None]:
+) -> tuple[str | None, str | None, str | None]:
     """Fallback resolution paths for ``resolve_custom_provider_connection``.
 
     Tried only when no ``custom_providers[]`` entry slug-matches.
     Searches (in order):
       1. ``providers.<pid>``
       2. ``providers.custom``
-      3. ``model.*`` when ``model.provider`` matches ``custom`` / ``pid`` / slug
+      3. ``model.*`` when ``model.provider`` canonically matches the lane
+
+    Returns ``(api_key, base_url, source)`` where *source* is
+    ``"providers"`` or ``"model"`` (the identity-scoped authority that
+    produced the URL), or ``None`` when nothing matches.  ``model.base_url``
+    is gated by a matching canonical ``model.provider`` — an unrelated
+    model block must never be substituted for a missing custom target
+    (#6516 round-7).
     """
     providers_cfg = cfg_data.get("providers", {})
     if not isinstance(providers_cfg, dict):
@@ -3099,16 +3106,46 @@ def _resolve_custom_provider_fallback(
 
     model_cfg = cfg_data.get("model", {})
     model_provider = ""
+    model_provider_matches = False
     if isinstance(model_cfg, dict):
         model_provider = str(model_cfg.get("provider") or "").strip().lower()
+        # Canonicalize model.provider through the shared slug path so that
+        # custom:foo:bar matches custom:foo-bar when gating the model block's
+        # base_url on the requested lane (#6516 round-7).  A bare collapsed
+        # "custom" also maps here for a custom:* request.
+        _mp_canon = _canonicalize_custom_provider_id(model_provider)
+        _pid_canon = _canonicalize_custom_provider_id(pid)
+        model_provider_matches = bool(
+            _mp_canon
+            and (
+                _mp_canon == _pid_canon
+                or _mp_canon == canonical_slug
+                or _mp_canon == "custom"
+            )
+        )
 
     fallback_base: str | None = None
-    for candidate in (provider_specific, provider_custom, model_cfg):
+    fallback_base_source: str | None = None
+    # providers.<pid> and providers.custom are identity-scoped fallbacks.
+    for _source, candidate in (
+        ("providers", provider_specific),
+        ("providers", provider_custom),
+    ):
         if isinstance(candidate, dict):
             _base = str(candidate.get("base_url") or "").strip()
             if _base:
                 fallback_base = _base
+                fallback_base_source = _source
                 break
+    # model.base_url is ONLY authoritative when model.provider matches the
+    # requested custom lane.  Without this identity gate an unrelated
+    # model.base_url would be substituted for a missing custom:<slug> target
+    # (#6516 round-7).
+    if fallback_base is None and isinstance(model_cfg, dict) and model_provider_matches:
+        _base = str(model_cfg.get("base_url") or "").strip()
+        if _base:
+            fallback_base = _base
+            fallback_base_source = "model"
 
     fallback_key = None
     if isinstance(provider_specific, dict):
@@ -3123,7 +3160,7 @@ def _resolve_custom_provider_fallback(
             provider_custom.get("key_env"),
             pid,
         )
-    if not fallback_key and isinstance(model_cfg, dict) and model_provider in {"custom", pid, canonical_slug}:
+    if not fallback_key and isinstance(model_cfg, dict) and model_provider_matches:
         fallback_key = resolve_key(
             model_cfg.get("api_key"),
             model_cfg.get("key_env"),
@@ -3131,8 +3168,8 @@ def _resolve_custom_provider_fallback(
         )
 
     if fallback_key or fallback_base:
-        return fallback_key, fallback_base or None
-    return None, None
+        return fallback_key, fallback_base or None, fallback_base_source
+    return None, None, None
 
 
 def _resolve_custom_provider_ambiguous(
@@ -3272,15 +3309,47 @@ def _resolve_custom_provider_connection_inner(
     cfg_data: dict,
     resolve_key,
 ) -> tuple[str | None, str | None]:
-    """Inner worker for resolve_custom_provider_connection after env-guard setup."""
+    """Inner worker for resolve_custom_provider_connection after env-guard setup.
+
+    Returns just the ``(api_key, base_url)`` tuple for the public 2-tuple API.
+    The classification/provenance is computed by
+    ``_resolve_custom_provider_selection``; this wrapper keeps the legacy
+    public contract stable (#6516 round-7).
+    """
+    _status, api_key, base_url, _source = _classify_custom_provider_selection(
+        pid, suffix, canonical_slug, cfg_data, resolve_key,
+    )
+    return api_key, base_url
+
+
+def _classify_custom_provider_selection(
+    pid: str,
+    suffix: str,
+    canonical_slug: str,
+    cfg_data: dict,
+    resolve_key,
+) -> tuple[str, str | None, str | None, str | None]:
+    """Classify target authority for a ``custom:*`` request and return
+    ``(status, api_key, base_url, source)`` with EXPLICIT selection
+    provenance — never reconstructed from a truthy URL.
+
+    *status* (the authority verdict the caller must act on):
+      "selected"  - exactly one unique target endpoint was pinned, with the
+                    paired URL/key.  *source* names the authority row:
+                    ``"custom_providers"``, ``"providers"``, or ``"model"``.
+      "missing"   - no matching row and no identity-scoped fallback resolved
+                    the lane (a sole non-matching custom row must NOT be
+                    selected; ``model.base_url`` is identity-gated).
+      "ambiguous" - a lossy-slug collision with no unique expected-URL
+                    discriminator.
+
+    *api_key*/*base_url* are only meaningful when status == "selected".
+    """
     custom_providers = cfg_data.get("custom_providers", [])
     if not isinstance(custom_providers, list):
         custom_providers = []
 
     # Phase 1: count slug-equivalent entries before reading payload.
-    # Each entry whose *name* slugifies to canonical_slug is a candidate.
-    # If we cannot trust a bare slug match (multiple candidates with no
-    # base_url to break the tie), fail closed.
     slug_matches: list[dict] = []
     for entry in custom_providers:
         if not isinstance(entry, dict):
@@ -3293,37 +3362,93 @@ def _resolve_custom_provider_connection_inner(
             slug_matches.append(entry)
 
     if not slug_matches:
-        # Sole-custom-provider fallback: if exactly one custom provider is
-        # configured and its slug didn't match, use it as a pragmatic fallback
-        # for mismatched slugs (e.g. punctuation differences).  This was
-        # present in origin/master and must be preserved (#6516 re-gate).
-        if len(custom_providers) == 1 and isinstance(custom_providers[0], dict):
-            entry = custom_providers[0]
-            return (
-                resolve_key(entry.get("api_key"), entry.get("key_env"), pid),
-                str(entry.get("base_url") or "").strip() or None,
-            )
-        # Phase 2: no slug match — try fallback paths for setups that
-        # don't use custom_providers names directly.
-        return _resolve_custom_provider_fallback(
+        # No custom_providers[] entry slug-matches the requested lane.
+        # The legacy "sole-custom-provider fallback" that selected the single
+        # configured row regardless of name match is GONE: a missing slug must
+        # NOT be rewritten to an unrelated sole provider's endpoint/key — that
+        # pivots identity to generic "custom" with another endpoint's
+        # credentials instead of failing closed (#6516 round-7).  A genuinely
+        # matching sole row is returned via the Phase-1 single-match path.
+        # Fall through to identity-scoped fallbacks (providers.<pid>,
+        # providers.custom, identity-gated model.*) which never select a
+        # nonmatching row.
+        fb_key, fb_base, fb_source = _resolve_custom_provider_fallback(
             pid, suffix, canonical_slug, cfg_data, resolve_key,
         )
+        if fb_base or fb_key:
+            return "selected", fb_key, fb_base, fb_source
+        return "missing", None, None, None
 
-    # Phase 2: count candidates.  Single match => authoritative.
+    # Phase 2: single match => authoritative.
     if len(slug_matches) == 1:
         entry = slug_matches[0]
         base_url = str(entry.get("base_url") or "").strip() or None
         api_key = resolve_key(entry.get("api_key"), entry.get("key_env"), pid)
-        return api_key, base_url
+        return "selected", api_key, base_url, "custom_providers"
 
-    # Phase 2: multiple slug-equivalent entries (lossy-slug collision).
-    # If an expected URL discriminates uniquely, accept it.
-    # Otherwise fail closed: return None, None so the caller can decide.
-    return (
-        _resolve_custom_provider_ambiguous(
-            slug_matches, canonical_slug, resolve_key, pid, cfg_data,
-        )
+    # Phase 3: multiple slug-equivalent entries (lossy-slug collision).
+    # If an expected URL discriminates uniquely, accept it; else ambiguous.
+    _amb_key, _amb_base = _resolve_custom_provider_ambiguous(
+        slug_matches, canonical_slug, resolve_key, pid, cfg_data,
     )
+    if _amb_base or _amb_key:
+        return "selected", _amb_key, _amb_base, "custom_providers"
+    return "ambiguous", None, None, None
+
+
+def _resolve_custom_provider_selection(
+    provider_id: str,
+    config_data: dict | None = None,
+) -> tuple[str, str | None, str | None, str | None]:
+    """Return ``(status, api_key, base_url, source)`` for a ``custom:*`` id.
+
+    This is the provenance-rich root the streaming send path uses so it never
+    reconstructs a "selected" verdict from a truthy URL.  ``status`` is one of
+    ``"selected"`` / ``"missing"`` / ``"ambiguous"`` (#6516 round-7).
+
+    Mirrors ``resolve_custom_provider_connection``'s env-guard setup (blocking
+    the process-env fallback when a target-profile *config_data* is supplied)
+    and reuses the same classification worker, so the send path and the public
+    tuple API always agree.
+    """
+    pid = str(provider_id or "").strip().lower()
+    if not pid.startswith("custom:"):
+        return "missing", None, None, None
+    suffix = pid.split(":", 1)[1].strip()
+    if not suffix:
+        return "missing", None, None, None
+    canonical_slug = _custom_provider_slug_from_name(suffix)
+    if not canonical_slug:
+        return "missing", None, None, None
+
+    cfg_data = config_data if isinstance(config_data, dict) else get_config()
+
+    def _resolve_key(raw_api_key, raw_key_env, provider_hint=None) -> str | None:
+        api_key = None
+        if raw_api_key is not None:
+            key_text = str(raw_api_key).strip()
+            if key_text.startswith("${") and key_text.endswith("}") and len(key_text) > 3:
+                api_key = _thread_local_env_value(key_text[2:-1]).strip() or None
+            elif key_text:
+                api_key = key_text
+        if not api_key:
+            key_env = str(raw_key_env or "").strip()
+            if key_env:
+                api_key = _thread_local_env_value(key_env).strip() or None
+        if not api_key and provider_hint:
+            api_key = _lookup_custom_api_key_env(provider_hint)
+        return api_key
+
+    _prev_block = getattr(_thread_ctx, "block_process_env_fallback", False)
+    if isinstance(config_data, dict):
+        _thread_ctx.block_process_env_fallback = True
+    try:
+        return _classify_custom_provider_selection(
+            pid, suffix, canonical_slug, cfg_data, _resolve_key,
+        )
+    finally:
+        if isinstance(config_data, dict):
+            _thread_ctx.block_process_env_fallback = _prev_block
 
 
 # Subprocess ACP transports (Cursor/Copilot CLI). Model IDs often contain '/'

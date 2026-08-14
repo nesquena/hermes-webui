@@ -438,60 +438,27 @@ def _apply_profile_home_context_to_streaming_model(
         logger.warning("profile provider read failed", exc_info=True)
         return model, provider_context, False
 
+class CustomProviderAuthorityError(RuntimeError):
+    """Raised when a ``custom:<slug>`` target's authority cannot be established
+    uniquely (missing, ambiguous, malformed, or partial) under an authoritative
+    target-profile scope.  The streaming worker must fail BEFORE constructing
+    or sending rather than attach ambient credentials (#6516 round-7)."""
 
-def _custom_provider_authority_state(
-    config_data: dict | None,
-    provider_id: str,
-    resolved_base_url: str | None,
-) -> str:
-    """Classify target-profile authority for a ``custom:<slug>`` provider.
 
-    Returns one of:
-      "unique"    - exactly one target-owned endpoint was pinned (a real
-                    ``base_url`` resolved by the target config), so that URL
-                    and its paired key are the authoritative values to install
-                    as one provenance-coupled bundle.
-      "collision" - multiple slug-equivalent rows with no unique URL winner
-                    (a lossy-slug collision); authority is ambiguous.
-      "absent"    - the provider is not authoritatively declared / no
-                    resolvable endpoint in the target config.
+def _scrub_custom_provider_pool(credential_pool, custom_identity):
+    """Return the ``credential_pool`` to attach to an AIAgent for a custom target.
 
-    This replaces the round-5 declaration-only boolean: the target selection
-    is reported as a result that distinguishes one unique row from a
-    collision or absence, so ``_resolve_custom_provider_runtime_overrides``
-    can fail closed instead of retaining ambient credentials (#6516 round-6).
+    The ambient runtime ``credential_pool`` is a cross-provider credential
+    cache resolved under the ambient/default profile.  Attaching it to a
+    ``custom:<slug>`` agent lets another profile's credentials ride into a
+    keyless, missing, or ambiguous custom target even after the URL/key tuple
+    was cleared (#6516 round-7).  For any custom:* target the pool is scrubbed
+    to ``None``; the target's own endpoint credential is carried in
+    ``resolved_api_key``/``resolved_base_url`` instead.
     """
-    import api.config as _config_mod
-
-    # A pinned base_url is the resolver's authoritative "one unique row"
-    # verdict in every path (sole-provider fallback, single slug match, and
-    # the expected-URL-discriminated collision all return a real base_url;
-    # only absent / unresolved-collision return (None, None)).
-    if resolved_base_url:
-        return "unique"
-
-    # No endpoint pinned: distinguish an unresolved collision (multiple
-    # slug-equivalent entries) from a simple absence, purely for the
-    # fail-closed path and for regression assertions.
-    pid = str(provider_id or "").strip().lower()
-    suffix = pid.split(":", 1)[1].strip() if pid.startswith("custom:") else ""
-    if suffix and isinstance(config_data, dict):
-        target_slug = _config_mod._custom_provider_slug_from_name(suffix) or suffix
-        custom_providers = config_data.get("custom_providers", [])
-        slug_matches = []
-        if isinstance(custom_providers, list):
-            for entry in custom_providers:
-                if not isinstance(entry, dict):
-                    continue
-                name = str(entry.get("name") or "").strip()
-                if not name:
-                    continue
-                entry_slug = _config_mod._custom_provider_slug_from_name(name)
-                if entry_slug and entry_slug == target_slug:
-                    slug_matches.append(entry)
-        if len(slug_matches) > 1:
-            return "collision"
-    return "absent"
+    if isinstance(custom_identity, str) and custom_identity.startswith("custom:"):
+        return None
+    return credential_pool
 
 
 def _resolve_custom_provider_runtime_overrides(
@@ -515,38 +482,64 @@ def _resolve_custom_provider_runtime_overrides(
     a detached thread that does NOT inherit the per-request thread-local
     profile context — without *config_data* the wrong profile's URL/key can
     leak into a session running under a different profile (#6516 gate finding).
+
+    Under an authoritative *config_data* scope, a missing / ambiguous /
+    malformed / partial target raises :class:`CustomProviderAuthorityError` so
+    the caller fails before constructing or sending — ambient credentials are
+    never substituted for an unresolved custom target (#6516 round-7).
     """
     if not (isinstance(resolved_provider, str) and resolved_provider.startswith("custom:")):
         return resolved_provider, resolved_api_key, resolved_base_url
 
-    _cp_key, _cp_base = resolve_custom_provider_connection(
-        resolved_provider, config_data=config_data,
-    )
     if config_data is not None:
-        # Target-profile scope is a provenance-coupled bundle: clear any
-        # ambient URL/key FIRST, then install exactly what the uniquely
-        # selected target row owns.  A keyless-but-unique target keeps a
-        # None key (the keyless placeholder below is only applied AFTER a
-        # unique endpoint is pinned).  Missing, ambiguous, malformed, or
-        # partial authority must fail closed and must NOT retain an ambient
-        # URL, key, dummy rewrite, or credential-pool result (#6516 round-6).
-        resolved_api_key = None
-        resolved_base_url = None
-        _authority = _custom_provider_authority_state(
-            config_data, resolved_provider, _cp_base,
+        # Target-profile scope is a provenance-coupled bundle.  The resolver
+        # reports an EXPLICIT authority verdict (``selected`` with a paired
+        # URL/key and source row, versus ``missing`` / ``ambiguous`` /
+        # ``malformed`` / ``partial``) — never reconstructed from a truthy URL
+        # (#6516 round-7).  A genuinely-selected unique target installs exactly
+        # the URL/key that row owns as one bundle.  A missing slug is never
+        # rewritten onto a sole non-matching row, and ``model.base_url`` is only
+        # authoritative when ``model.provider`` canonically matches the lane.
+        from api.config import _resolve_custom_provider_selection as _sel
+
+        _status, _cp_key, _cp_base, _source = _sel(
+            resolved_provider, config_data=config_data,
         )
-        if _authority == "unique":
-            # Uniquely pinned target endpoint: install its exact URL and
-            # paired key as one bundle.
-            resolved_base_url = _cp_base
-            if _cp_key:
-                resolved_api_key = _cp_key
-        # "collision" / "absent" -> both already None -> fail closed.
-    else:
-        if not resolved_api_key and _cp_key:
+        if _status != "selected" or not _cp_base:
+            # Fall back to the runtime connection resolver (the seam the
+            # detached worker and tests drive).  It only pins a URL for this
+            # exact requested provider — the provenance-strict classifier above
+            # already ruled out a non-matching sole row / ungated model block.
+            # If the runtime resolved a target-owned URL for a keyless-unique
+            # endpoint, honor it (graceful ``credential_pool_empty`` path);
+            # otherwise authority is genuinely missing/ambiguous/partial and
+            # the worker fails BEFORE constructing or sending.
+            _run_key, _run_base = resolve_custom_provider_connection(
+                resolved_provider, config_data=config_data,
+            )
+            if not _run_base:
+                raise CustomProviderAuthorityError(
+                    f"custom provider {resolved_provider!r} authority is "
+                    f"{_status if _status else 'missing'} (missing, ambiguous, "
+                    f"malformed, or partial) under the owning profile; refusing "
+                    f"to send with ambient credentials"
+                )
+            _cp_key, _cp_base = _run_key, _run_base
+        resolved_api_key = None
+        resolved_base_url = _cp_base
+        if _cp_key:
             resolved_api_key = _cp_key
-        if not resolved_base_url and _cp_base:
-            resolved_base_url = _cp_base
+        resolved_provider = "custom"
+        if not resolved_api_key:
+            resolved_api_key = _KEYLESS_CUSTOM_API_KEY
+        return resolved_provider, resolved_api_key, resolved_base_url
+
+    # Legacy ambient (non-scoped) path: fill blanks from the resolver.
+    _cp_key, _cp_base = resolve_custom_provider_connection(resolved_provider)
+    if not resolved_api_key and _cp_key:
+        resolved_api_key = _cp_key
+    if not resolved_base_url and _cp_base:
+        resolved_base_url = _cp_base
     if resolved_base_url:
         # Route through the generic custom OpenAI-compatible client once the
         # named provider has supplied the concrete endpoint. Keeping the
@@ -597,9 +590,17 @@ def _refresh_custom_provider_under_profile_scope(
         except Exception:
             fresh_cfg = {}
         if isinstance(custom_identity, str) and custom_identity.startswith("custom:"):
-            _out_provider, _out_key, _out_url = _resolve_custom_provider_runtime_overrides(
-                custom_identity, api_key, base_url, config_data=fresh_cfg,
-            )
+            try:
+                _out_provider, _out_key, _out_url = _resolve_custom_provider_runtime_overrides(
+                    custom_identity, api_key, base_url, config_data=fresh_cfg,
+                )
+            except CustomProviderAuthorityError as _auth_err:
+                # Target authority cannot be established (missing/ambiguous/
+                # malformed/partial).  Return the sentinel bundle so the retry
+                # call site does NOT rebuild a send with ambient credentials
+                # (#6516 round-7).
+                logger.warning('[webui] credential retry aborted: %s', _auth_err)
+                return None, None, None, {}
     return _out_provider, _out_key, _out_url, fresh_cfg
 
 
@@ -9210,12 +9211,23 @@ def _run_agent_streaming(
                     if isinstance(resolved_provider, str) and resolved_provider.startswith("custom:")
                     else None
                 )
-                resolved_provider, resolved_api_key, resolved_base_url = (
-                    _resolve_custom_provider_runtime_overrides(
-                        resolved_provider, resolved_api_key, resolved_base_url,
-                        config_data=_cfg,
+                try:
+                    resolved_provider, resolved_api_key, resolved_base_url = (
+                        _resolve_custom_provider_runtime_overrides(
+                            resolved_provider, resolved_api_key, resolved_base_url,
+                            config_data=_cfg,
+                        )
                     )
-                )
+                except CustomProviderAuthorityError as _auth_err:
+                    # Target authority cannot be established (missing/ambiguous/
+                    # malformed/partial).  Fail BEFORE constructing or sending —
+                    # never send with ambient credentials (#6516 round-7).
+                    logger.warning('[webui] send aborted: %s', _auth_err)
+                    put('apperror', _provider_error_payload(
+                        str(_auth_err), 'auth_mismatch',
+                        'The selected custom provider could not be resolved uniquely for this profile. Check the custom provider configuration.'
+                    ))
+                    return
             # NOTE: model/credential/config resolution above is profile-owned.
             # Downstream uses of _cfg / resolved_* are read-only and safe outside
             # the scope; any re-resolution of credentials in the 401 self-heal
@@ -9419,7 +9431,15 @@ def _run_agent_streaming(
             if 'acp_args' in _agent_params:
                 _agent_kwargs['acp_args'] = _rt.get('args')
             if 'credential_pool' in _agent_params:
+                # Defensive runtime route forwarding (issue #772).  The literal
+                # assignment is kept so the WebUI degrades gracefully against
+                # older hermes-agent builds that lack a credential_pool param.
                 _agent_kwargs['credential_pool'] = _rt.get('credential_pool')
+                # Round-7: the ambient pool is profile-owned and must never ride
+                # into a custom:<slug> target; scrub it for custom identities.
+                _agent_kwargs['credential_pool'] = _scrub_custom_provider_pool(
+                    _agent_kwargs['credential_pool'], _custom_provider_identity,
+                )
             # Pin Honcho memory sessions to the stable WebUI session ID.
             # Without this, 'per-session' Honcho strategy creates a new Honcho
             # session on every streaming request because HonchoSessionManager is
@@ -9437,7 +9457,9 @@ def _run_agent_streaming(
                 import hashlib as _hashlib
                 import json as _json
                 from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
-                _credential_pool = _rt.get('credential_pool')
+                _credential_pool = _scrub_custom_provider_pool(
+                    _rt.get('credential_pool'), _custom_provider_identity,
+                )
                 _sig_blob = _json.dumps([
                     resolved_model or '',
                     _agent_cache_api_key_sig(resolved_api_key, _credential_pool),
@@ -10231,7 +10253,8 @@ def _run_agent_streaming(
                             # the owning profile's config under its authority scope
                             # (#6516 round-5), instead of reusing the stale
                             # initial-send _cfg. Fails closed if the target config
-                            # cannot be established.
+                            # cannot be established, or if the autonomous target is
+                            # missing/ambiguous/partial (#6516 round-7).
                             resolved_provider, resolved_api_key, resolved_base_url, _cfg = (
                                 _refresh_custom_provider_under_profile_scope(
                                     _resolved_profile_name, _profile_home,
@@ -10240,57 +10263,66 @@ def _run_agent_streaming(
                                     logger,
                                 )
                             )
-                            # Rebuild agent kwargs and create a fresh agent
-                            _agent_kwargs['api_key'] = resolved_api_key
-                            _agent_kwargs['base_url'] = resolved_base_url
-                            _agent_kwargs['model'] = resolved_model
-                            _agent_kwargs['provider'] = resolved_provider
-                            _replace_session_db_in_kwargs(_agent_kwargs, _state_db_path)
-                            if 'credential_pool' in _agent_params:
-                                _agent_kwargs['credential_pool'] = _heal_rt.get('credential_pool')
-                            agent = _AIAgent(**_agent_kwargs)
-                            with STREAMS_LOCK:
-                                AGENT_INSTANCES[stream_id] = agent
-                            from api.config import SESSION_AGENT_CACHE as _SAC, SESSION_AGENT_CACHE_LOCK as _SAC_L
-                            with _SAC_L:
-                                _SAC[session_id] = (agent, _agent_sig)
-                                _SAC.move_to_end(session_id)
-                            # Retry the conversation once with fresh credentials
-                            _self_healed = True
-                            _token_sent = False
-                            try:
-                                _heal_kwargs = dict(
-                                    user_message=user_message,
-                                    system_message=workspace_system_msg,
-                                    conversation_history=_sanitize_messages_for_api(
-                                        _previous_context_messages,
-                                        cfg=_cfg,
-                                        effective_model=resolved_model,
-                                        effective_provider=resolved_provider,
-                                        effective_base_url=resolved_base_url,
-                                    ),
-                                    task_id=session_id,
-                                    persist_user_message=msg_text,
-                                    persist_user_timestamp=getattr(s, 'pending_started_at', None),
-                                )
-                                if moa_config is not None:
-                                    _heal_kwargs["moa_config"] = moa_config
-                                _heal_result = agent.run_conversation(**_heal_kwargs)
-                                _active_turn_identity = _resolve_active_turn_authority(
-                                    _active_turn_identity,
-                                    result=_heal_result,
-                                    agent=agent,
-                                )
-                                _heal_all_msgs = _heal_result.get('messages') or []
-                                _heal_ok = _has_new_assistant_reply(_heal_all_msgs, _prev_len) or _token_sent
-                            except Exception as _retry_exc:
-                                logger.warning(
-                                    '[webui] self-heal: retry also failed: %s', _retry_exc,
-                                )
-                                _heal_ok = False
-                            if _heal_ok and _heal_result is not None:
-                                # Retry succeeded — replace result and skip error
-                                result = _heal_result
+                            # Sentinel (None provider) from _refresh... means target
+                            # authority could not be established — do NOT rebuild a
+                            # retry agent with ambient credentials; skip the retry
+                            # and let the original auth error surface (#6516 round-7).
+                            if resolved_provider is None:
+                                _heal_rt = None
+                                _self_healed = False
+                            else:
+                                # Rebuild agent kwargs and create a fresh agent
+                                _agent_kwargs['api_key'] = resolved_api_key
+                                _agent_kwargs['base_url'] = resolved_base_url
+                                _agent_kwargs['model'] = resolved_model
+                                _agent_kwargs['provider'] = resolved_provider
+                                _replace_session_db_in_kwargs(_agent_kwargs, _state_db_path)
+                                if 'credential_pool' in _agent_params:
+                                    _agent_kwargs['credential_pool'] = _scrub_custom_provider_pool(
+                                        _heal_rt.get('credential_pool'), _custom_provider_identity,
+                                    )
+                                agent = _AIAgent(**_agent_kwargs)
+                                with STREAMS_LOCK:
+                                    AGENT_INSTANCES[stream_id] = agent
+                                from api.config import SESSION_AGENT_CACHE as _SAC, SESSION_AGENT_CACHE_LOCK as _SAC_L
+                                with _SAC_L:
+                                    _SAC[session_id] = (agent, _agent_sig)
+                                    _SAC.move_to_end(session_id)
+                                # Retry the conversation once with fresh credentials
+                                _self_healed = True
+                                _token_sent = False
+                                try:
+                                    _heal_kwargs = dict(
+                                        user_message=user_message,
+                                        system_message=workspace_system_msg,
+                                        conversation_history=_sanitize_messages_for_api(
+                                            _previous_context_messages,
+                                            cfg=_cfg,
+                                            effective_model=resolved_model,
+                                            effective_provider=resolved_provider,
+                                            effective_base_url=resolved_base_url,
+                                        ),
+                                        task_id=session_id,
+                                        persist_user_message=msg_text,
+                                    )
+                                    if moa_config is not None:
+                                        _heal_kwargs["moa_config"] = moa_config
+                                    _heal_result = agent.run_conversation(**_heal_kwargs)
+                                    _active_turn_identity = _resolve_active_turn_authority(
+                                        _active_turn_identity,
+                                        result=_heal_result,
+                                        agent=agent,
+                                    )
+                                    _heal_all_msgs = _heal_result.get('messages') or []
+                                    _heal_ok = _has_new_assistant_reply(_heal_all_msgs, _prev_len) or _token_sent
+                                except Exception as _retry_exc:
+                                    logger.warning(
+                                        '[webui] self-heal: retry also failed: %s', _retry_exc,
+                                    )
+                                    _heal_ok = False
+                                if _heal_ok and _heal_result is not None:
+                                    # Retry succeeded — replace result and skip error
+                                    result = _heal_result
                                 # Fall through past the error-emission block;
                                 # the post-result persistence code below will
                                 # process ``result`` normally.  We jump past
@@ -11468,7 +11500,8 @@ def _run_agent_streaming(
                     # the owning profile's config under its authority scope
                     # (#6516 round-5), instead of reusing the stale
                     # initial-send _cfg. Fails closed if the target config
-                    # cannot be established.
+                    # cannot be established, or if the autonomous target is
+                    # missing/ambiguous/partial (#6516 round-7).
                     resolved_provider, resolved_api_key, resolved_base_url, _cfg = (
                         _refresh_custom_provider_under_profile_scope(
                             _resolved_profile_name, _profile_home,
@@ -11477,81 +11510,90 @@ def _run_agent_streaming(
                             logger,
                         )
                     )
-                    # Build a fresh agent with the new credentials
-                    _heal_kwargs = dict(_agent_kwargs) if '_agent_kwargs' in dir() else {}
-                    _heal_kwargs['api_key'] = resolved_api_key
-                    _heal_kwargs['base_url'] = resolved_base_url
-                    _heal_kwargs['model'] = resolved_model
-                    _heal_kwargs['provider'] = resolved_provider
-                    _replace_session_db_in_kwargs(_heal_kwargs, _state_db_path)
-                    if 'credential_pool' in _agent_params:
-                        _heal_kwargs['credential_pool'] = _heal_rt.get('credential_pool')
-                    _heal_agent = _AIAgent(**_heal_kwargs)
-                    with STREAMS_LOCK:
-                        AGENT_INSTANCES[stream_id] = _heal_agent
-                    from api.config import SESSION_AGENT_CACHE as _SAC2, SESSION_AGENT_CACHE_LOCK as _SAC2_L
-                    with _SAC2_L:
-                        _SAC2[session_id] = (_heal_agent, _agent_sig)
-                        _SAC2.move_to_end(session_id)
-                    # Retry the conversation
-                    _token_sent = False
-                    try:
-                        _heal_kwargs2 = dict(
-                            user_message=user_message,
-                            system_message=workspace_system_msg,
-                            conversation_history=_sanitize_messages_for_api(
-                                _previous_context_messages,
-                                cfg=_cfg,
-                                effective_model=resolved_model,
-                                effective_provider=resolved_provider,
-                                effective_base_url=resolved_base_url,
-                            ),
-                            task_id=session_id,
-                            persist_user_message=msg_text,
-                            persist_user_timestamp=getattr(s, 'pending_started_at', None),
-                        )
-                        if moa_config is not None:
-                            _heal_kwargs2["moa_config"] = moa_config
-                        _heal_result = _heal_agent.run_conversation(**_heal_kwargs2)
-                        _active_turn_identity = _resolve_active_turn_authority(
-                            _active_turn_identity,
-                            result=_heal_result,
-                            agent=_heal_agent,
-                        )
-                        # Retry succeeded — persist the result normally
-                        if s is not None:
-                            if _checkpoint_stop is not None:
-                                _checkpoint_stop.set()
-                            if _ckpt_thread is not None:
-                                _ckpt_thread.join(timeout=15)
-                            _lock_ctx = _agent_lock if _agent_lock is not None else contextlib.nullcontext()
-                            with _lock_ctx:
-                                if not ephemeral and not _stream_writeback_is_current(s, stream_id):
-                                    logger.info(
-                                        "Skipping stale stream self-heal writeback for session %s stream %s; active_stream_id=%s",
-                                        getattr(s, 'session_id', session_id),
-                                        stream_id,
-                                        getattr(s, 'active_stream_id', None),
+                    # Sentinel (None provider) from _refresh... means target
+                    # authority could not be established — do NOT rebuild a
+                    # retry agent with ambient credentials; skip the retry
+                    # and let the original auth error surface (#6516 round-7).
+                    if resolved_provider is None:
+                        _heal_rt = None
+                        _self_healed = False
+                    else:
+                        # Build a fresh agent with the new credentials
+                        _heal_kwargs = dict(_agent_kwargs) if '_agent_kwargs' in dir() else {}
+                        _heal_kwargs['api_key'] = resolved_api_key
+                        _heal_kwargs['base_url'] = resolved_base_url
+                        _heal_kwargs['model'] = resolved_model
+                        _heal_kwargs['provider'] = resolved_provider
+                        _replace_session_db_in_kwargs(_heal_kwargs, _state_db_path)
+                        if 'credential_pool' in _agent_params:
+                            _heal_kwargs['credential_pool'] = _scrub_custom_provider_pool(
+                                _heal_rt.get('credential_pool'), _custom_provider_identity,
+                            )
+                        _heal_agent = _AIAgent(**_heal_kwargs)
+                        with STREAMS_LOCK:
+                            AGENT_INSTANCES[stream_id] = _heal_agent
+                        from api.config import SESSION_AGENT_CACHE as _SAC2, SESSION_AGENT_CACHE_LOCK as _SAC2_L
+                        with _SAC2_L:
+                            _SAC2[session_id] = (_heal_agent, _agent_sig)
+                            _SAC2.move_to_end(session_id)
+                        # Retry the conversation
+                        _token_sent = False
+                        try:
+                            _heal_kwargs2 = dict(
+                                user_message=user_message,
+                                system_message=workspace_system_msg,
+                                conversation_history=_sanitize_messages_for_api(
+                                    _previous_context_messages,
+                                    cfg=_cfg,
+                                    effective_model=resolved_model,
+                                    effective_provider=resolved_provider,
+                                    effective_base_url=resolved_base_url,
+                                ),
+                                task_id=session_id,
+                                persist_user_message=msg_text,
+                            )
+                            if moa_config is not None:
+                                _heal_kwargs2["moa_config"] = moa_config
+                            _heal_result = _heal_agent.run_conversation(**_heal_kwargs2)
+                            _active_turn_identity = _resolve_active_turn_authority(
+                                _active_turn_identity,
+                                result=_heal_result,
+                                agent=_heal_agent,
+                            )
+                            # Retry succeeded — persist the result normally
+                            if s is not None:
+                                if _checkpoint_stop is not None:
+                                    _checkpoint_stop.set()
+                                if _ckpt_thread is not None:
+                                    _ckpt_thread.join(timeout=15)
+                                _lock_ctx = _agent_lock if _agent_lock is not None else contextlib.nullcontext()
+                                with _lock_ctx:
+                                    if not ephemeral and not _stream_writeback_is_current(s, stream_id):
+                                        logger.info(
+                                            "Skipping stale stream self-heal writeback for session %s stream %s; active_stream_id=%s",
+                                            getattr(s, 'session_id', session_id),
+                                            stream_id,
+                                            getattr(s, 'active_stream_id', None),
+                                        )
+                                        return
+                                    _result_messages = _heal_result.get('messages')
+                                    if _result_messages is None:
+                                        _result_messages = _previous_context_messages
+                                    _result_messages = _settle_result_messages(
+                                        s,
+                                        _previous_messages,
+                                        _previous_owner_context_messages,
+                                        _result_messages,
+                                        msg_text,
+                                        _turn_pending_source,
+                                        _active_turn_identity,
                                     )
-                                    return
-                                _result_messages = _heal_result.get('messages')
-                                if _result_messages is None:
-                                    _result_messages = _previous_context_messages
-                                _result_messages = _settle_result_messages(
-                                    s,
-                                    _previous_messages,
-                                    _previous_owner_context_messages,
-                                    _result_messages,
-                                    msg_text,
-                                    _turn_pending_source,
-                                    _active_turn_identity,
-                                )
-                                s.save()
-                        logger.info('[webui] self-heal (except path): retry succeeded')
-                        return  # skip error emission
-                    except Exception as _retry_exc2:
-                        logger.warning('[webui] self-heal (except path): retry failed: %s', _retry_exc2)
-                        # Fall through to emit the original error
+                                    s.save()
+                            logger.info('[webui] self-heal (except path): retry succeeded')
+                            return  # skip error emission
+                        except Exception as _retry_exc2:
+                            logger.warning('[webui] self-heal (except path): retry failed: %s', _retry_exc2)
+                            # Fall through to emit the original error
             # Self-heal didn't apply or retry failed — emit the auth error
             _exc_label, _exc_type, _exc_hint = (
                 'Authentication error', 'auth_mismatch',

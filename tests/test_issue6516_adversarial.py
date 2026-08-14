@@ -875,6 +875,15 @@ def _r5_make_session(tmp_path, session_id, model, msg):
     return session, session_dir
 
 
+def _msg_mentions_authority(payload) -> bool:
+    """True if an SSE ``apperror`` payload's message mentions custom-provider
+    authority failure (used to assert an abort surfaced a user-visible error
+    rather than silently dropping the request)."""
+    _text = str((payload or {}).get('message') or (payload or {}).get('details') or '')
+    _lower = _text.lower()
+    return ('authority' in _lower and 'custom' in _lower) or 'custom provider' in _lower
+
+
 def _r5_drive_streaming_401(
     tmp_path,
     monkeypatch,
@@ -883,6 +892,7 @@ def _r5_drive_streaming_401(
     ambient_key,
     ambient_url,
     mode="returned",
+    credential_pool=None,
 ):
     """Drive the real ``_run_agent_streaming()`` through a 401 self-heal path
     for a named custom:<slug> provider.
@@ -893,10 +903,12 @@ def _r5_drive_streaming_401(
       - ``"raised"``:  the agent raises an auth-classified exception (the
         except-path self-heal, ~line 10898/10969).
 
-    Returns ``(constructions, invalidated_ids)`` where *constructions* is the
-    list of AIAgent constructor-kwargs dicts (initial send and any retries) and
-    *invalidated_ids* is the list of provider ids handed to
-    ``invalidate_credential_pool_cache`` during self-heal.
+    Returns ``(constructions, invalidated_ids, apperrors)`` where
+    *constructions* is the list of AIAgent constructor-kwargs dicts (initial
+    send and any retries), *invalidated_ids* is the list of provider ids handed
+    to ``invalidate_credential_pool_cache`` during self-heal, and *apperrors*
+    is the list of ``apperror`` payloads emitted to the SSE stream (e.g. when
+    an unresolved custom-provider target aborts before constructing/sending).
     """
     session_id = "r5_stream_session"
     stream_id = "r5-stream"
@@ -972,11 +984,11 @@ def _r5_drive_streaming_401(
         # Runtime provider resolution — ambient sentinels that must NOT leak.
         m.setattr(
             "api.oauth.resolve_runtime_provider_with_anthropic_env_lock",
-            lambda resolver, *a, **k: {"provider": "custom", "api_key": ambient_key, "base_url": ambient_url},
+            lambda resolver, *a, **k: {"provider": "custom", "api_key": ambient_key, "base_url": ambient_url, "credential_pool": credential_pool},
         )
         m.setattr(
             "hermes_cli.runtime_provider.resolve_runtime_provider",
-            lambda requested=None, target_model=None: {"provider": "custom", "api_key": ambient_key, "base_url": ambient_url},
+            lambda requested=None, target_model=None: {"provider": "custom", "api_key": ambient_key, "base_url": ambient_url, "credential_pool": credential_pool},
         )
         # Self-heal needs a truthy auth store so the retry agent is rebuilt.
         m.setattr(
@@ -1006,9 +1018,12 @@ def _r5_drive_streaming_401(
             stream_id=stream_id,
         )
 
+    apperrors = []
     while not event_queue.empty():
-        event_queue.get_nowait()
-    return constructions, invalidated_ids
+        _item = event_queue.get_nowait()
+        if isinstance(_item, tuple) and _item and _item[0] == 'apperror':
+            apperrors.append(_item[1])
+    return constructions, invalidated_ids, apperrors
 
 
 def test_r5_returned_401_retry_keeps_target_url_key(monkeypatch, tmp_path):
@@ -1024,7 +1039,7 @@ def test_r5_returned_401_retry_keeps_target_url_key(monkeypatch, tmp_path):
              "api_key": "target-profile-key"},
         ],
     }
-    constructions, invalidated = _r5_drive_streaming_401(
+    constructions, invalidated, _app = _r5_drive_streaming_401(
         tmp_path, monkeypatch,
         target_cfg=target_cfg,
         ambient_key="ambient-key", ambient_url="http://ambient:8000/v1",
@@ -1071,7 +1086,7 @@ def test_r5_raised_401_retry_keeps_target_url_key(monkeypatch, tmp_path):
              "api_key": "target-profile-key"},
         ],
     }
-    constructions, invalidated = _r5_drive_streaming_401(
+    constructions, invalidated, _app = _r5_drive_streaming_401(
         tmp_path, monkeypatch,
         target_cfg=target_cfg,
         ambient_key="ambient-key", ambient_url="http://ambient:8000/v1",
@@ -1106,26 +1121,19 @@ def test_r5_raised_401_retry_keeps_target_url_key(monkeypatch, tmp_path):
 
 def test_r5_failed_target_config_fails_closed_no_ambient_leak():
     """When the owning profile's config cannot be established (represented by
-    an empty {} from the fail-closed path in the streaming worker), a truthy
-    ambient URL/key must NOT survive into the resolved bundle — the resolved
-    values are cleared (fail closed) rather than leaking the wrong profile's
-    endpoint (#6516 r5)."""
-    from api.streaming import _resolve_custom_provider_runtime_overrides
+    an empty {} from the fail-closed path in the streaming worker), the
+    authority is MISSING under the authoritative target-profile scope — the
+    resolver must FAIL BEFORE constructing/sending rather than leak a truthy
+    ambient URL/key or rewrite to an unrelated endpoint (#6516 r5 + round-7)."""
+    from api.streaming import CustomProviderAuthorityError, _resolve_custom_provider_runtime_overrides
 
-    provider, key, url = _resolve_custom_provider_runtime_overrides(
-        "custom:worker",
-        "ambient-key",
-        "http://ambient:8000/v1",
-        config_data={},
-    )
-    # Fail closed: no ambient key/url (resolved URL/key are cleared); the
-    # provider stays as custom:<slug> since no endpoint authority was resolved
-    # (collapse to 'custom' only happens once a concrete base_url is present).
-    assert url is None, f"expected fail-closed None URL, got {url!r}"
-    assert key is None, f"expected fail-closed None key, got {key!r}"
-    assert provider == "custom:worker", (
-        f"expected provider identity preserved with no endpoint, got {provider!r}"
-    )
+    with pytest.raises(CustomProviderAuthorityError):
+        _resolve_custom_provider_runtime_overrides(
+            "custom:worker",
+            "ambient-key",
+            "http://ambient:8000/v1",
+            config_data={},
+        )
 
 
 
@@ -1200,13 +1208,15 @@ def test_r6_keyless_target_clears_truthy_ambient_key():
 
 
 def test_r6_absent_provider_fails_closed_no_ambient_leak():
-    """A provider absent from the target config must clear a truthy ambient
-    URL/key (fail closed) — no endpoint authority, no placeholder, identity
-    preserved as custom:<slug>."""
-    from api.streaming import _resolve_custom_provider_runtime_overrides
+    """A provider absent from the target config must FAIL BEFORE constructing
+    (not silent-fill or rewrite identity) — no endpoint authority, no
+    placeholder, and never an ambient URL/key.  Round-7 replaces the old
+    fail-closed-with-None behavior with a hard fail before send."""
+    from api.streaming import CustomProviderAuthorityError, _resolve_custom_provider_runtime_overrides
 
     # Two unrelated custom providers disables the sole-provider fallback, so a
-    # genuinely absent provider resolves to (None, None) and must fail closed.
+    # genuinely absent provider classifies as MISSING and must fail before
+    # constructing/sending.
     target_cfg = {"model": {"default": "other-model", "provider": "openai"},
                   "custom_providers": [
                       {"name": "unrelated-a", "base_url": "http://other-a:9000/v1",
@@ -1214,72 +1224,66 @@ def test_r6_absent_provider_fails_closed_no_ambient_leak():
                       {"name": "unrelated-b", "base_url": "http://other-b:9000/v1",
                        "api_key": "key-b"},
                   ]}
-    provider, key, url = _resolve_custom_provider_runtime_overrides(
-        "custom:ghost",
-        "ambient-key",
-        "http://ambient:8000/v1",
-        config_data=target_cfg,
-    )
-    assert url is None, f"absent provider must fail closed (None URL), got {url!r}"
-    assert key is None, f"absent provider must fail closed (None key), got {key!r}"
-    assert provider == "custom:ghost", (
-        f"no endpoint -> identity preserved, got {provider!r}"
-    )
+    with pytest.raises(CustomProviderAuthorityError):
+        _resolve_custom_provider_runtime_overrides(
+            "custom:ghost",
+            "ambient-key",
+            "http://ambient:8000/v1",
+            config_data=target_cfg,
+        )
 
 
 def test_r6_slug_collision_clears_truthy_ambient_keyurl():
-    """An unresolved lossy-slug collision must fail closed and clear BOTH a
-    truthy ambient URL and key — the old code left them in place because
-    _custom_provider_declared_in_config returned True on the first slug
-    match."""
-    from api.streaming import _resolve_custom_provider_runtime_overrides
+    """An unresolved lossy-slug collision must FAIL BEFORE constructing/sending
+    (round-7) — a truthy ambient URL and key must never be substituted for an
+    ambiguous custom target."""
+    from api.streaming import CustomProviderAuthorityError, _resolve_custom_provider_runtime_overrides
 
     target_cfg = _r6_collision_target_cfg()
-    provider, key, url = _resolve_custom_provider_runtime_overrides(
-        "custom:worker-prod",
-        "ambient-key",
-        "http://ambient:8000/v1",
-        config_data=target_cfg,
-    )
-    # Ambiguous authority -> fail closed: NO ambient values may survive, and
-    # no dummy rewrite may be inserted (no unique endpoint was pinned).
-    assert url is None, f"collision must fail closed (None URL), got {url!r}"
-    assert key is None, f"collision must fail closed (None key), got {key!r}"
-    assert provider == "custom:worker-prod", (
-        f"no endpoint -> identity preserved, got {provider!r}"
-    )
+    with pytest.raises(CustomProviderAuthorityError):
+        _resolve_custom_provider_runtime_overrides(
+            "custom:worker-prod",
+            "ambient-key",
+            "http://ambient:8000/v1",
+            config_data=target_cfg,
+        )
 
 
 def test_r6_authority_state_classification():
-    """The new selection result distinguishes unique / collision / absent."""
-    import api.streaming as streaming
+    """The provenance-rich selection result distinguishes selected /
+    missing / ambiguous — never from a truthy URL alone (round-7)."""
+    from api.config import _resolve_custom_provider_selection
 
     keyless_cfg = _r6_keyless_target_cfg()
     collision_cfg = _r6_collision_target_cfg()
 
-    # Unique: resolver pinned a real base_url.
-    state = streaming._custom_provider_authority_state(
-        keyless_cfg, "custom:worker", "http://worker:9000/v1",
+    # Selected: one unique target row pinned, with the matching source.
+    status, key, url, source = _resolve_custom_provider_selection(
+        "custom:worker", config_data=keyless_cfg,
     )
-    assert state == "unique", f"expected unique, got {state!r}"
+    assert status == "selected", f"expected selected, got {status!r}"
+    assert url == "http://worker:9000/v1", f"unexpected url {url!r}"
+    assert key is None, f"keyless target should carry no key, got {key!r}"
+    assert source == "custom_providers", f"unexpected source {source!r}"
 
-    # Unique resolves via base_url presence regardless of key.
-    state = streaming._custom_provider_authority_state(
-        keyless_cfg, "custom:worker", "http://worker:9000/v1",
+    # Ambiguous: two slug-equivalent rows, no unique discriminator.
+    status, key, url, source = _resolve_custom_provider_selection(
+        "custom:worker-prod", config_data=collision_cfg,
     )
-    assert state == "unique"
+    assert status == "ambiguous", f"expected ambiguous, got {status!r}"
+    assert key is None and url is None and source is None, (
+        f"ambiguous must carry no bundle, got {key!r}/{url!r}/{source!r}"
+    )
 
-    # Collision: two slug-equivalent rows, no pinned URL.
-    state = streaming._custom_provider_authority_state(
-        collision_cfg, "custom:worker-prod", None,
+    # Missing: not declared, and a sole non-matching row must NOT be selected.
+    missing_cfg = {"custom_providers": [
+        {"name": "unrelated", "base_url": "http://u:9000/v1", "api_key": "k"},
+    ]}
+    status, key, url, source = _resolve_custom_provider_selection(
+        "custom:ghost", config_data=missing_cfg,
     )
-    assert state == "collision", f"expected collision, got {state!r}"
-
-    # Absent: not declared anywhere, no URL.
-    state = streaming._custom_provider_authority_state(
-        {"custom_providers": []}, "custom:ghost", None,
-    )
-    assert state == "absent", f"expected absent, got {state!r}"
+    assert status == "missing", f"expected missing, got {status!r}"
+    assert key is None and url is None, f"missing must not select, got {key!r}/{url!r}"
 
 
 # ── Production-composed: initial + 401 self-heal retry paths ──────────────
@@ -1290,7 +1294,7 @@ def test_r6_keyless_target_initial_and_returned_401_no_ambient_leak(monkeypatch,
     ambient key sentinel must never reach ANY AIAgent constructor; the keyless
     placeholder (applied only after the unique endpoint is pinned) is what the
     constructors see."""
-    constructions, _ = _r5_drive_streaming_401(
+    constructions, _inv, _app = _r5_drive_streaming_401(
         tmp_path, monkeypatch,
         target_cfg=_r6_keyless_target_cfg(),
         ambient_key="ambient-key", ambient_url="http://ambient:8000/v1",
@@ -1314,7 +1318,7 @@ def test_r6_keyless_target_initial_and_returned_401_no_ambient_leak(monkeypatch,
 
 def test_r6_keyless_target_raised_401_no_ambient_leak(monkeypatch, tmp_path):
     """Same as above but through the raised-401 (except-path) self-heal."""
-    constructions, _ = _r5_drive_streaming_401(
+    constructions, _inv, _app = _r5_drive_streaming_401(
         tmp_path, monkeypatch,
         target_cfg=_r6_keyless_target_cfg(),
         ambient_key="ambient-key", ambient_url="http://ambient:8000/v1",
@@ -1338,7 +1342,7 @@ def test_r6_keyless_target_raised_401_no_ambient_leak(monkeypatch, tmp_path):
 def test_r6_keyless_target_returned_401_invalidates_named_lane(monkeypatch, tmp_path):
     """Self-heal on a keyless target still invalidates the NAMED custom:<slug>
     lane (not the generic 'custom' collapse)."""
-    constructions, invalidated = _r5_drive_streaming_401(
+    constructions, invalidated, _app = _r5_drive_streaming_401(
         tmp_path, monkeypatch,
         target_cfg=_r6_keyless_target_cfg(),
         ambient_key="ambient-key", ambient_url="http://ambient:8000/v1",
@@ -1367,31 +1371,225 @@ def _r6_collision_on_worker_target_cfg():
 
 
 def test_r6_collision_initial_and_returned_401_no_ambient_leak(monkeypatch, tmp_path):
-    """End-to-end for an unresolved slug collision: the ambient URL/key
-    sentinels must never reach ANY AIAgent constructor — authority is
-    ambiguous so the bundle fails closed (no URL, no key, no placeholder)."""
+    """End-to-end for an unresolved slug collision: authority is ambiguous so
+    the worker must FAIL BEFORE constructing or sending — zero AIAgent
+    constructors, no ambient URL/key/credential-pool leak, and a user-visible
+    apperror emitted to the SSE stream (#6516 round-7)."""
     target_cfg = _r6_collision_on_worker_target_cfg()
-    constructions, _ = _r5_drive_streaming_401(
+    constructions, _inv, apperrors = _r5_drive_streaming_401(
         tmp_path, monkeypatch,
         target_cfg=target_cfg,
         ambient_key="ambient-key", ambient_url="http://ambient:8000/v1",
         mode="returned",
     )
+    assert len(constructions) == 0, (
+        f"ambiguous collision must not construct any agent; got {constructions!r}"
+    )
+    assert apperrors, (
+        f"expected an apperror to be emitted on abort; got {apperrors!r}"
+    )
+    assert any(
+        _msg_mentions_authority(p) for p in apperrors
+    ), f"apperror should mention the unresolved provider, got {apperrors!r}"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ── Round-7 re-gate (#6516): fail-before-construct + credential-pool scrub ─
+# The reviewer required (review 4837781398):
+#   1. Resolver returns EXPLICIT selection provenance (never reconstruct
+#      "selected" from a truthy URL).  A missing slug must NOT select a sole
+#      non-matching custom_providers row, and model.base_url must be gated by a
+#      matching canonical model.provider.
+#   2. The ambient credential_pool must not ride into a keyless/missing/
+#      ambiguous/partial custom target; the complete target-incompatible
+#      runtime bundle is scrubbed before EVERY constructor, and on
+#      missing/ambiguous/malformed/partial authority the worker fails BEFORE
+#      constructing or sending.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_r7_missing_slug_sole_nonmatching_row_fails():
+    """A missing requested slug must NOT be rewritten to a sole NON-matching
+    custom_providers row (the old identity-blind fallback).  Round-7 requires
+    this to fail before constructing, not pivot to an unrelated endpoint."""
+    from api.streaming import CustomProviderAuthorityError, _resolve_custom_provider_runtime_overrides
+
+    cfg = {"custom_providers": [
+        {"name": "unrelated", "base_url": "http://unrelated:9000/v1", "api_key": "key"},
+    ]}
+    with pytest.raises(CustomProviderAuthorityError):
+        _resolve_custom_provider_runtime_overrides(
+            "custom:ghost", "ambient-key", "http://ambient:8000/v1",
+            config_data=cfg,
+        )
+
+
+def test_r7_sole_matching_row_still_selected():
+    """The sole-provider behavior that round-5 restored must STILL work when the
+    sole row's name genuinely matches the requested slug (the fallback was only
+    removed for the NON-matching case)."""
+    from api.streaming import _resolve_custom_provider_runtime_overrides
+
+    cfg = {"custom_providers": [
+        {"name": "worker", "base_url": "http://worker:9000/v1", "api_key": "real-key"},
+    ]}
+    provider, key, url = _resolve_custom_provider_runtime_overrides(
+        "custom:worker", "ambient-key", "http://ambient:8000/v1",
+        config_data=cfg,
+    )
+    assert url == "http://worker:9000/v1", f"expected matched sole row URL, got {url!r}"
+    assert key == "real-key", f"expected matched sole row key, got {key!r}"
+    assert provider == "custom", f"expected collapsed custom, got {provider!r}"
+
+
+def test_r7_model_base_url_gated_by_matching_provider():
+    """model.base_url must be identity-gated: an unrelated model.provider must
+    NOT be able to supply the endpoint for a different custom:<slug> target
+    (round-7 Gap 1)."""
+    from api.streaming import CustomProviderAuthorityError, _resolve_custom_provider_runtime_overrides
+
+    unrelated = {"model": {"provider": "openai", "base_url": "http://ambient-model:7000/v1"},
+                 "custom_providers": []}
+    with pytest.raises(CustomProviderAuthorityError):
+        _resolve_custom_provider_runtime_overrides(
+            "custom:ghost", "ambient-key", "http://ambient:8000/v1",
+            config_data=unrelated,
+        )
+
+    # Matching model.provider supplies the endpoint via the model fallback.
+    matching = {"model": {"provider": "custom:worker", "base_url": "http://worker:9000/v1"},
+                "custom_providers": []}
+    provider, key, url = _resolve_custom_provider_runtime_overrides(
+        "custom:worker", "ambient-key", "http://ambient:8000/v1",
+        config_data=matching,
+    )
+    assert url == "http://worker:9000/v1", f"expected gated model URL, got {url!r}"
+    assert provider == "custom", f"expected collapsed custom, got {provider!r}"
+
+
+def test_r7_keyless_target_scrubs_ambient_credential_pool_returned(monkeypatch, tmp_path):
+    """A keyless custom target (unique endpoint, no key) must NOT carry the
+    ambient credential_pool into ANY AIAgent constructor on the initial send
+    or the returned-401 retry (round-7 Gap 2).  The primary api_key carries
+    the keyless placeholder; the ambient pool is scrubbed."""
+    ambient_pool = {"openai": [{"api_key": "ambient-pool-secret"}]}
+    constructions, _inv, _app = _r5_drive_streaming_401(
+        tmp_path, monkeypatch,
+        target_cfg=_r6_keyless_target_cfg(),
+        ambient_key="ambient-key", ambient_url="http://ambient:8000/v1",
+        mode="returned", credential_pool=ambient_pool,
+    )
     assert len(constructions) >= 2, (
-        f"expected initial + retry constructions, got {len(constructions)}: {constructions!r}"
+        f"expected initial + retry constructions, got {len(constructions)}"
     )
     for i, c in enumerate(constructions):
-        assert c.get("api_key") != "ambient-key", (
-            f"collision constructor[{i}] leaked ambient key: {c!r}"
+        assert c.get("credential_pool") is None, (
+            f"constructor[{i}] leaked ambient credential_pool into keyless target: {c.get('credential_pool')!r}"
+        )
+        assert c.get("api_key") == "dummy-key", (
+            f"constructor[{i}] expected keyless placeholder, got {c.get('api_key')!r}"
+        )
+
+
+def test_r7_keyless_target_scrubs_ambient_credential_pool_raised(monkeypatch, tmp_path):
+    """Same credential-pool scrub through the raised-401 self-heal path."""
+    ambient_pool = {"openai": [{"api_key": "ambient-pool-secret"}]}
+    constructions, _inv, _app = _r5_drive_streaming_401(
+        tmp_path, monkeypatch,
+        target_cfg=_r6_keyless_target_cfg(),
+        ambient_key="ambient-key", ambient_url="http://ambient:8000/v1",
+        mode="raised", credential_pool=ambient_pool,
+    )
+    assert len(constructions) >= 2
+    for i, c in enumerate(constructions):
+        assert c.get("credential_pool") is None, (
+            f"raised-401 constructor[{i}] leaked ambient credential_pool: {c.get('credential_pool')!r}"
+        )
+
+
+def test_r7_collision_aborts_no_constructor_no_pool(monkeypatch, tmp_path):
+    """An unresolved slug collision under an authoritative target scope aborts
+    BEFORE constructing/sending — no agent, no ambient URL/key, no
+    credential_pool, and a user-visible apperror (round-7 Gap 2)."""
+    ambient_pool = {"openai": [{"api_key": "ambient-pool-secret"}]}
+    constructions, _inv, apperrors = _r5_drive_streaming_401(
+        tmp_path, monkeypatch,
+        target_cfg=_r6_collision_on_worker_target_cfg(),
+        ambient_key="ambient-key", ambient_url="http://ambient:8000/v1",
+        mode="returned", credential_pool=ambient_pool,
+    )
+    assert len(constructions) == 0, (
+        f"ambiguous collision must construct no agent; got {constructions!r}"
+    )
+    assert apperrors, f"expected apperror on abort, got {apperrors!r}"
+
+
+def test_r7_collision_aborts_no_constructor_no_pool_raised(monkeypatch, tmp_path):
+    """The SAME fail-before-construct + pool-scrub guarantee through the
+    raised-401 (except-path) self-heal — the reviewer required regression
+    coverage for BOTH collision retry shapes (#6516 round-7)."""
+    ambient_pool = {"openai": [{"api_key": "ambient-pool-secret"}]}
+    constructions, _inv, apperrors = _r5_drive_streaming_401(
+        tmp_path, monkeypatch,
+        target_cfg=_r6_collision_on_worker_target_cfg(),
+        ambient_key="ambient-key", ambient_url="http://ambient:8000/v1",
+        mode="raised", credential_pool=ambient_pool,
+    )
+    assert len(constructions) == 0, (
+        f"raised-401 ambiguous collision must construct no agent; got {constructions!r}"
+    )
+    assert apperrors, f"expected apperror on raised-401 abort, got {apperrors!r}"
+
+
+def test_r7_malformed_sole_entry_fails_without_endpoint():
+    """A custom_providers row whose name matches but carries NO base_url is a
+    partial/malformed target — authority cannot be pinned, so it must fail
+    (never send a keyless placeholder to an unknown endpoint) (#6516 round-7)."""
+    from api.streaming import CustomProviderAuthorityError, _resolve_custom_provider_runtime_overrides
+
+    cfg = {"custom_providers": [
+        {"name": "worker", "api_key": "k"},  # no base_url -> partial/malformed
+    ]}
+    with pytest.raises(CustomProviderAuthorityError):
+        _resolve_custom_provider_runtime_overrides(
+            "custom:worker", "ambient-key", "http://ambient:8000/v1",
+            config_data=cfg,
+        )
+
+
+def _assert_scrub_invariant(constructions):
+    """Shared round-7 invariant: NO AIAgent constructor may receive the ambient
+    credential_pool for a custom target, and a truthy ambient URL/key must never
+    survive."""
+    assert constructions, "expected at least one construction"
+    for i, c in enumerate(constructions):
+        assert c.get("credential_pool") is None, (
+            f"constructor[{i}] leaked ambient credential_pool: {c.get('credential_pool')!r}"
         )
         assert c.get("base_url") != "http://ambient:8000/v1", (
-            f"collision constructor[{i}] leaked ambient URL: {c!r}"
+            f"constructor[{i}] leaked ambient URL: {c.get('base_url')!r}"
         )
-        # Fail closed: no colliding row may win, and no placeholder may be
-        # inserted because no unique endpoint was pinned.
-        assert c.get("api_key") is None, (
-            f"collision constructor[{i}] must fail closed (None key), got {c.get('api_key')!r}"
+        assert c.get("api_key") != "ambient-key", (
+            f"constructor[{i}] leaked ambient key: {c.get('api_key')!r}"
         )
-        assert c.get("base_url") is None, (
-            f"collision constructor[{i}] must fail closed (None base_url), got {c.get('base_url')!r}"
-        )
+
+
+def test_r7_matching_target_still_scrubs_ambient_pool(monkeypatch, tmp_path):
+    """Even a fully-matching custom target (unique endpoint with a real key)
+    must NOT carry the ambient credential_pool into its constructors — the pool
+    is ambient-profile-owned and never belongs on a custom:<slug> agent
+    (#6516 round-7 Gap 2)."""
+    ambient_pool = {"openai": [{"api_key": "ambient-pool-secret"}]}
+    target_cfg = {"model": {"default": "worker-model", "provider": "custom:worker"},
+                  "custom_providers": [
+                      {"name": "worker", "base_url": "http://worker:9000/v1",
+                       "api_key": "target-key"},
+                  ]}
+    constructions, _inv, _app = _r5_drive_streaming_401(
+        tmp_path, monkeypatch,
+        target_cfg=target_cfg,
+        ambient_key="ambient-key", ambient_url="http://ambient:8000/v1",
+        mode="returned", credential_pool=ambient_pool,
+    )
+    _assert_scrub_invariant(constructions)
+
