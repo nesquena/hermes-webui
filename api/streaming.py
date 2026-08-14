@@ -230,6 +230,61 @@ _STREAMING_CRON_PROFILE_HOME: contextvars.ContextVar[str | None] = contextvars.C
     "webui_streaming_cron_profile_home",
     default=None,
 )
+
+# ── MCP discovery: background thread + coalescing ──
+# The per-turn discovery spawn is coalesced per profile home so a busy
+# process never accumulates one daemon thread per message (each
+# `discover_mcp_tools()` can wait up to 120s on the cross-process
+# discovery lock / outer timeout).  `_MCP_DISCOVERY_TURN_JOIN_S` bounds how
+# long the stream worker waits for discovery to finish BEFORE it
+# builds/snapshots the agent, so reachable servers (HTTP/OAuth connects
+# routinely take 2-6s on a cold connect) still land in THIS turn's tool
+# snapshot.  Servers slower than the bound — or unreachable ones like an
+# SSH server pointing at an offline machine — leave the thread running in
+# the background (daemon) and their tools land on the next turn via
+# hermes-agent's per-turn prologue refresh (`agent/turn_context.py`
+# between-turns MCP refresh), matching the CLI/TUI semantics where
+# discovery runs once at agent startup.
+_MCP_DISCOVERY_TURN_JOIN_S = 4.0
+_MCP_DISCOVERY_THREADS: dict = {}
+_MCP_DISCOVERY_THREADS_LOCK = threading.Lock()
+
+
+def _run_mcp_discovery_background(
+    profile_home,
+    discover_fn,
+    thread_name,
+    join_timeout=None,
+):
+    """Run ``discover_fn`` on a coalesced daemon thread; optionally join it.
+
+    One background discovery thread is kept per profile home — a live
+    thread is reused rather than spawned anew, so N rapid messages cannot
+    accumulate N lock-waiting discovery daemons.  When ``join_timeout`` is
+    given, the caller waits up to that long for discovery to finish, which
+    lets the agent build that follows snapshot the freshly registered MCP
+    tools.  A thread that outlives the timeout keeps running in the
+    background (daemon) and its tools land on a later turn.
+
+    Returns the thread.
+    """
+    with _MCP_DISCOVERY_THREADS_LOCK:
+        _existing = _MCP_DISCOVERY_THREADS.get(profile_home)
+        if _existing is not None and _existing.is_alive():
+            _thread = _existing
+        else:
+            _thread = threading.Thread(
+                target=discover_fn,
+                name=thread_name,
+                daemon=True,
+            )
+            _MCP_DISCOVERY_THREADS[profile_home] = _thread
+            _thread.start()
+    if join_timeout is not None:
+        _thread.join(timeout=join_timeout)
+    return _thread
+
+
 _STREAMING_CRONJOB_WRAPPER_INSTALLED = False
 
 
@@ -8722,10 +8777,18 @@ def _run_agent_streaming(
         # turn start by seconds-to-a-minute on EVERY message.  The CLI/TUI
         # never pays this because it discovers once at agent startup; the
         # WebUI builds a fresh worker per stream, so discovery must not sit on
-        # the turn's critical path.  hermes-agent's per-turn prologue
-        # (`refresh_agent_mcp_tools`) folds tools from servers that finish
-        # connecting mid-turn into this turn's first API call, so nothing is
-        # lost — the turn just starts immediately.
+        # the turn's critical path.
+        #
+        # `_run_mcp_discovery_background` spawns (or reuses) a coalesced
+        # daemon thread and then JOINS it for a bounded window
+        # (`_MCP_DISCOVERY_TURN_JOIN_S`) before the agent is built further
+        # below — the agent's tool snapshot therefore includes tools from
+        # reachable servers that connect within that window (HTTP/OAuth
+        # cold connects routinely take 2-6s), preserving first-turn MCP
+        # completeness.  Servers slower than the bound, or unreachable ones,
+        # keep the thread running in the background; their tools land on the
+        # NEXT turn via hermes-agent's between-turns prologue refresh
+        # (`agent/turn_context.py`), matching CLI/TUI semantics.
         #
         # The thread re-asserts the stream's profile home through hermes-agent's
         # CONTEXT-LOCAL override (`set_hermes_home_override`), which
@@ -8764,12 +8827,12 @@ def _run_agent_streaming(
                 except Exception:
                     pass  # MCP not available or not configured — non-fatal
 
-            _mcp_thread = threading.Thread(
-                target=_discover_mcp_background,
-                name='mcp-discovery-%s' % (session_id or 'unknown'),
-                daemon=True,
+            _run_mcp_discovery_background(
+                _profile_home,
+                _discover_mcp_background,
+                'mcp-discovery-%s' % (session_id or 'unknown'),
+                join_timeout=_MCP_DISCOVERY_TURN_JOIN_S,
             )
-            _mcp_thread.start()
         except Exception:
             pass  # MCP import itself failed — non-fatal
 
