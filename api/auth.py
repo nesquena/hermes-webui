@@ -1189,11 +1189,18 @@ def check_auth(handler, parsed) -> bool:
 
 
 def check_auth_or_close(handler, parsed) -> bool:
-    """Check auth; close the connection when rejected so an unread body can't poison HTTP/1.1 reuse."""
-    if not check_auth(handler, parsed):
-        handler.close_connection = True
-        return False
-    return True
+    """Check auth; when rejected, close so an unread body can't poison HTTP/1.1 reuse.
+
+    The flag is armed BEFORE check_auth() writes its 401/302, so end_headers()
+    can advertise ``Connection: close``; success restores the prior flag so an
+    authenticated request keeps its keep-alive.
+    """
+    prior_close = handler.close_connection
+    handler.close_connection = True
+    if check_auth(handler, parsed):
+        handler.close_connection = prior_close
+        return True
+    return False
 
 
 def _is_loopback(addr: str) -> bool:

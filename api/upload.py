@@ -45,6 +45,12 @@ def _max_extracted_bytes() -> int:
 _MAX_EXTRACTED_BYTES = 10 * MAX_UPLOAD_BYTES
 
 
+def _reject_before_read(handler, message, status):
+    """Reject without reading the body; close so unread bytes can't poison HTTP/1.1 reuse."""
+    handler.close_connection = True
+    return j(handler, {'error': message}, status=status)
+
+
 def parse_multipart(rfile, content_type, content_length) -> tuple:
     import re as _re, email.parser as _ep
     # Imported locally (not just module-level) so the function stays
@@ -207,10 +213,21 @@ def handle_upload(handler):
     import traceback as _tb
     try:
         content_type = handler.headers.get('Content-Type', '')
-        content_length = int(handler.headers.get('Content-Length', 0) or 0)
+        try:
+            content_length = int(handler.headers.get('Content-Length', 0) or 0)
+        except (TypeError, ValueError):
+            # A non-numeric Content-Length is rejected before the body is read.
+            handler.close_connection = True
+            raise ValueError('Invalid Content-Length') from None
         if content_length > MAX_UPLOAD_BYTES:
-            return j(handler, {'error': f'File too large (max {MAX_UPLOAD_BYTES//1024//1024}MB)'}, status=413)
-        fields, files = parse_multipart(handler.rfile, content_type, content_length)
+            return _reject_before_read(handler, f'File too large (max {MAX_UPLOAD_BYTES//1024//1024}MB)', 413)
+        try:
+            fields, files = parse_multipart(handler.rfile, content_type, content_length)
+        except ValueError:
+            # parse_multipart validates Content-Length/boundary before reading;
+            # a ValueError here means the body was never consumed.
+            handler.close_connection = True
+            raise
         session_id = fields.get('session_id', '')
         if 'file' not in files:
             return j(handler, {'error': 'No file field in request'}, status=400)
@@ -385,10 +402,21 @@ def handle_upload_extract(handler):
     import traceback as _tb
     try:
         content_type = handler.headers.get('Content-Type', '')
-        content_length = int(handler.headers.get('Content-Length', 0) or 0)
+        try:
+            content_length = int(handler.headers.get('Content-Length', 0) or 0)
+        except (TypeError, ValueError):
+            # A non-numeric Content-Length is rejected before the body is read.
+            handler.close_connection = True
+            raise ValueError('Invalid Content-Length') from None
         if content_length > MAX_UPLOAD_BYTES:
-            return j(handler, {'error': f'File too large (max {MAX_UPLOAD_BYTES//1024//1024}MB)'}, status=413)
-        fields, files = parse_multipart(handler.rfile, content_type, content_length)
+            return _reject_before_read(handler, f'File too large (max {MAX_UPLOAD_BYTES//1024//1024}MB)', 413)
+        try:
+            fields, files = parse_multipart(handler.rfile, content_type, content_length)
+        except ValueError:
+            # parse_multipart validates Content-Length/boundary before reading;
+            # a ValueError here means the body was never consumed.
+            handler.close_connection = True
+            raise
         session_id = fields.get('session_id', '')
         if 'file' not in files:
             return j(handler, {'error': 'No file field in request'}, status=400)
@@ -417,10 +445,21 @@ def handle_transcribe(handler):
     temp_path = None
     try:
         content_type = handler.headers.get('Content-Type', '')
-        content_length = int(handler.headers.get('Content-Length', 0) or 0)
+        try:
+            content_length = int(handler.headers.get('Content-Length', 0) or 0)
+        except (TypeError, ValueError):
+            # A non-numeric Content-Length is rejected before the body is read.
+            handler.close_connection = True
+            raise ValueError('Invalid Content-Length') from None
         if content_length > MAX_UPLOAD_BYTES:
-            return j(handler, {'error': f'File too large (max {MAX_UPLOAD_BYTES//1024//1024}MB)'}, status=413)
-        fields, files = parse_multipart(handler.rfile, content_type, content_length)
+            return _reject_before_read(handler, f'File too large (max {MAX_UPLOAD_BYTES//1024//1024}MB)', 413)
+        try:
+            fields, files = parse_multipart(handler.rfile, content_type, content_length)
+        except ValueError:
+            # parse_multipart validates Content-Length/boundary before reading;
+            # a ValueError here means the body was never consumed.
+            handler.close_connection = True
+            raise
         if 'file' not in files:
             return j(handler, {'error': 'No file field in request'}, status=400)
         filename, file_bytes = files['file']
@@ -601,11 +640,22 @@ def handle_workspace_upload(handler):
     import traceback as _tb
     try:
         content_type = handler.headers.get('Content-Type', '')
-        content_length = int(handler.headers.get('Content-Length', 0) or 0)
+        try:
+            content_length = int(handler.headers.get('Content-Length', 0) or 0)
+        except (TypeError, ValueError):
+            # A non-numeric Content-Length is rejected before the body is read.
+            handler.close_connection = True
+            raise ValueError('Invalid Content-Length') from None
         if content_length > MAX_UPLOAD_BYTES:
-            return j(handler, {'error': f'File too large (max {MAX_UPLOAD_BYTES//1024//1024}MB)'}, status=413)
+            return _reject_before_read(handler, f'File too large (max {MAX_UPLOAD_BYTES//1024//1024}MB)', 413)
 
-        fields, files = parse_multipart(handler.rfile, content_type, content_length)
+        try:
+            fields, files = parse_multipart(handler.rfile, content_type, content_length)
+        except ValueError:
+            # parse_multipart validates Content-Length/boundary before reading;
+            # a ValueError here means the body was never consumed.
+            handler.close_connection = True
+            raise
         session_id = fields.get('session_id', '')
         subpath = fields.get('path', '')
 

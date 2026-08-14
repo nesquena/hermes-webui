@@ -5881,10 +5881,12 @@ def _handle_extension_sidecar_proxy(
     # DELETE fell through the CSRF compatibility path that intentionally admits
     # non-browser clients, giving unsafe methods weaker provenance than GET.
     if not _check_same_origin_browser_request(handler, require_provenance=True):
-        # Provenance rejection runs before read_body(); close rather than
-        # reusing an HTTP/1.1 connection whose unread body would corrupt the
-        # next request (same class as _check_csrf close-on-reject).
-        handler.close_connection = True
+        # Provenance rejection runs before read_body(); when a body is pending,
+        # close-and-advertise rather than reusing an HTTP/1.1 connection whose
+        # unread body would corrupt the next request (same class as _check_csrf).
+        # GET (read_request_body=False) has nothing unread — keep-alive survives.
+        if read_request_body:
+            handler.close_connection = True
         return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
     try:
         request_body = _read_body_bytes(handler) if read_request_body else None
@@ -6327,6 +6329,9 @@ def _handle_csp_report(handler) -> bool:
             "Dropped CSP report from %s: rate limit exceeded",
             _client_ip_for_rate_limit(handler),
         )
+        # Rate-limit rejection runs before the body is read; close-and-advertise
+        # so the unread report can't corrupt the next pooled request.
+        handler.close_connection = True
         return _send_no_content(handler)
 
     payload = _read_csp_report_payload(handler)
@@ -12142,6 +12147,9 @@ def _handle_shutdown(handler) -> bool:
 
 def _handle_health_restart(handler) -> bool:
     """Restart the Hermes messaging gateway service."""
+    # This endpoint never consumes its request body on any outcome; close so a
+    # supplied body can't corrupt the next pooled request.
+    handler.close_connection = True
     outcome = restart_active_profile_gateway()
 
     if outcome.get("status") == "completed":
@@ -14252,6 +14260,10 @@ def handle_post(handler, parsed) -> bool:
         if diag:
             diag.stage("process_complete_ack_deprecated")
         try:
+            # The 410 runs before the stale tab's JSON body is read;
+            # close-and-advertise so those unread bytes can't corrupt the next
+            # pooled request.
+            handler.close_connection = True
             j(
                 handler,
                 {
