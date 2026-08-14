@@ -320,10 +320,13 @@ def _count_user_turns(row: dict) -> int:
     if user_turns is None:
         messages = row.get("messages") or []
         if isinstance(messages, list):
+            # This fallback only gates coarse CLI-row visibility. Exact counts
+            # use the persisted projection above, which applies the canonical
+            # human-turn predicate and reports unknown for degraded schemas.
             return sum(
                 1
                 for msg in messages
-                if is_human_user_turn(msg)
+                if isinstance(msg, dict) and msg.get("role") == "user"
             )
         return 0
     return _as_positive_int(user_turns)

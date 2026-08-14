@@ -8895,7 +8895,7 @@ def _limited_webui_messages_for_display(session, state_db_messages) -> list:
     the sidecar yet.
     """
     stitch = _webui_sidecar_lineage_stitch(session)
-    sidecar_messages = stitch["messages"] if stitch["complete"] else []
+    sidecar_messages = stitch["messages"] if stitch["complete"] else list(getattr(session, "messages", []) or [])
     return _limited_webui_messages_for_display_with_sidecar(
         session,
         sidecar_messages,
@@ -9095,7 +9095,7 @@ def _webui_sidecar_lineage_stitch(session, *, max_hops: int = 20, load_session=N
 
 def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) -> list:
     result = _webui_sidecar_lineage_stitch(session, max_hops=max_hops)
-    return result["messages"] if result["complete"] else []
+    return result["messages"] if result["complete"] else list(getattr(session, "messages", []) or [])
 
 
 def _project_sidebar_lineage_user_counts(rows: list[dict]) -> None:
@@ -9103,7 +9103,7 @@ def _project_sidebar_lineage_user_counts(rows: list[dict]) -> None:
     operation_cache = {}
     from api.agent_sessions import is_human_user_turn
     for row in rows:
-        if not isinstance(row, dict) or not (row.get("_lineage_tip_id") or row.get("parent_session_id")):
+        if not isinstance(row, dict) or not row.get("_lineage_tip_id"):
             continue
         sid = str(row.get("_lineage_tip_id") or row.get("session_id") or "").strip()
         if not sid:
@@ -9154,9 +9154,7 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
     """
     cli_messages = list(cli_messages or [])
     lineage = _webui_sidecar_lineage_stitch(session)
-    if not lineage["complete"]:
-        return []
-    sidecar_messages = lineage["messages"]
+    sidecar_messages = lineage["messages"] if lineage["complete"] else list(getattr(session, "messages", []) or [])
     if cli_messages:
         if sidecar_messages and sidecar_messages != cli_messages:
             if len(sidecar_messages) >= len(cli_messages):
@@ -9200,9 +9198,7 @@ def _merged_webui_lineage_messages_for_display(session, messages=None) -> list:
     if source == "fork" or relationship == "child_session":
         return primary_messages
     lineage = _webui_sidecar_lineage_stitch(session)
-    if not lineage["complete"]:
-        return []
-    if messages is None:
+    if messages is None and lineage["complete"]:
         primary_messages = list(lineage["messages"])
     parent_id = str(getattr(session, "parent_session_id", "") or "").strip()
     if not parent_id:
@@ -13009,7 +13005,9 @@ def handle_get(handler, parsed) -> bool:
                 else:
                     _detail_stitch = _webui_sidecar_lineage_stitch(s)
                     _detail_sidecar_messages = (
-                        _detail_stitch["messages"] if _detail_stitch["complete"] else []
+                        _detail_stitch["messages"]
+                        if _detail_stitch["complete"]
+                        else list(getattr(s, "messages", []) or [])
                     )
                     _all_msgs = merge_session_messages_append_only(
                         _detail_sidecar_messages,

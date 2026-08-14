@@ -577,7 +577,7 @@ console.log(JSON.stringify({first:first.directCount, second:second.directCount, 
     assert result == {"first": 3, "second": 4, "different": True}
 
 
-def test_incomplete_sidecar_lineage_fails_closed_for_display(monkeypatch):
+def test_incomplete_sidecar_lineage_preserves_child_display_and_skips_count(monkeypatch):
     child = SimpleNamespace(
         session_id="missing-parent-child",
         parent_session_id="missing-parent",
@@ -585,7 +585,13 @@ def test_incomplete_sidecar_lineage_fails_closed_for_display(monkeypatch):
         messages=[{"role": "user", "content": "child only"}],
     )
     monkeypatch.setattr(routes.Session, "load", lambda _sid: None)
-    assert routes._webui_sidecar_lineage_messages_for_display(child) == []
+    assert routes._webui_sidecar_lineage_messages_for_display(child) == child.messages
+    assert routes._merged_session_messages_for_display(child) == child.messages
+    assert routes._merged_webui_lineage_messages_for_display(child, child.messages) == child.messages
+    row = {"session_id": child.session_id, "_lineage_tip_id": child.session_id}
+    monkeypatch.setattr(routes, "get_state_db_session_messages", lambda *args, **kwargs: [])
+    routes._project_sidebar_lineage_user_counts([row])
+    assert "_lineage_user_message_count" not in row
 
 
 def test_sidebar_lineage_count_matches_detail_merge_and_fails_closed_for_unknown_state_rows(monkeypatch):
@@ -808,7 +814,7 @@ def test_count_user_turns_fallback_does_not_reach_sidecar_or_index_rows():
     index_row = {"id": "s1", "title": "CLI Session", "message_count": 7,
                  "messages": [{"role": "user"}, {"role": "assistant"}]}
     assert "actual_user_message_count" not in index_row
-    assert agent_sessions._count_user_turns(index_row) == 0
+    assert agent_sessions._count_user_turns(index_row) == 1
 
     # A row that reached the projection and got NULL still uses the coarse total.
     projected = {"id": "s1", "title": "CLI Session",

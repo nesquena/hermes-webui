@@ -5253,7 +5253,8 @@ function _mergeOptimisticFirstTurnSessions(fetchedSessions){
     const ownerConfirmed=(owner.directCount!==null||owner.lineageCount!==null)
       &&directSatisfied&&lineageSatisfied;
     const locallyActive=S&&S.session&&S.session.session_id===sid&&S.busy;
-    if(ownerConfirmed||(_isServerIdleSessionRow(fetched)&&!locallyActive)){
+    const ownerHasKnownTarget=owner.directCount!==null||owner.lineageCount!==null;
+    if(ownerConfirmed||(!ownerHasKnownTarget&&_isServerIdleSessionRow(fetched)&&!locallyActive)){
       clearLocalTurnCountOwner(sid);
     }
   }
@@ -7153,14 +7154,10 @@ function _syncSidebarExpansionForActiveSession(rows, activeSid){
   }
 }
 
-// Server-side user_message_count (api/models.py:1664) is the only authority
-// for user turns; absent, null, non-numeric, or negative means unknown, while
-// 0 is a real count and still renders. Segment counts are not summable: a
-// compression continuation's sidecar sometimes replays its ancestors and
-// sometimes does not (api/routes.py:8848 returns the child as-is in the first
-// case and stitches the parent in the second) with no marker on the row to
-// tell them apart, so the tip's own count is used because it never exceeds
-// the true number of distinct user turns.
+// The server-projected direct or stitched count is authoritative. Absent, null,
+// non-numeric, or negative means unknown, while 0 is a real count and still
+// renders. Collapsed lineage rows require the stitched count because segment
+// snapshots may replay ancestors and cannot be summed safely in the client.
 function _sidebarUserTurnCount(row){
   if(!row) return null;
   const usable=(value)=>(typeof value==='number'&&Number.isFinite(value)&&value>=0)?value:null;
@@ -7241,9 +7238,9 @@ function resolveLocalTurnCountOwner(){
   if(existing) return existing;
   const row=(Array.isArray(_allSessions)?_allSessions:[]).find(s=>s&&s.session_id===sid)||S.session;
   const valid=v=>typeof v==='number'&&Number.isFinite(v)&&v>=0?v:null;
-  const direct=valid(S.session.user_message_count)!==null
-    ?valid(S.session.user_message_count)
-    :valid(row&&row.user_message_count);
+  const directCandidates=[valid(S.session.user_message_count),valid(row&&row.user_message_count)]
+    .filter(value=>value!==null);
+  const direct=directCandidates.length?Math.max(...directCandidates):null;
   const logical=valid(row&&row._lineage_user_message_count);
   const owner=Object.freeze({
     token: `${sid}:${Date.now()}:${Math.random().toString(36).slice(2)}`,
