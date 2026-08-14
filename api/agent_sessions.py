@@ -53,6 +53,9 @@ MESSAGING_SOURCES = {
 CLI_MIN_UNTITLED_MESSAGE_COUNT = 6
 CLI_MIN_UNTITLED_USER_MESSAGE_COUNT = 2
 
+# Accepted ``project_assignment`` values for read_importable_agent_session_rows.
+PROJECT_ASSIGNMENT_FILTERS = frozenset({'assigned', 'unassigned'})
+
 # Raw-row oversample factors for the bounded candidate window. ``limit`` counts
 # LOGICAL conversations, but compression segments and the post-projection
 # visibility filters are spent from the raw window first, so a single 8x pass can
@@ -532,7 +535,7 @@ def read_importable_agent_session_rows(
     log=None,
     exclude_sources: tuple[str, ...] | None = ("cron", "webui"),
     include_sources: tuple[str, ...] | None = None,
-    require_project_id: bool = False,
+    project_assignment: str | None = None,
 ) -> list[dict]:
     """Return agent sessions projected as importable conversations.
 
@@ -549,6 +552,17 @@ def read_importable_agent_session_rows(
     ``exclude_sources=None``. ``include_sources`` is an additional narrowing
     filter; callers that want an include-only query should explicitly pass
     ``exclude_sources=None`` so the default exclusions do not also apply.
+
+    ``project_assignment`` narrows to project-assigned (``'assigned'``) or
+    project-free (``'unassigned'``) conversations; ``None`` returns both. The
+    two are exact complements and key on the whole compression lineage, so a
+    caller can budget assigned and unassigned conversations independently
+    without either filter double-counting a lineage (#6659).
+
+    ``limit`` bounds LOGICAL conversations, not raw rows: the slice is applied
+    after lineage projection, and the raw candidate window is re-widened once
+    if compression segments consumed it before the projection could fill the
+    request.
 
     ``limit`` bounds the *recency slice*, not the returned row count. Subagent
     rows only render as children when their parent row is in the same payload,
@@ -696,10 +710,20 @@ def read_importable_agent_session_rows(
                 placeholders = ", ".join("?" for _ in excluded)
                 where_clauses.append(f"s.source NOT IN ({placeholders})")
                 params.extend(excluded)
-        if require_project_id:
+        if project_assignment is not None:
+            wanted = str(project_assignment).strip().lower()
+            if wanted not in PROJECT_ASSIGNMENT_FILTERS:
+                raise ValueError(
+                    "project_assignment must be one of "
+                    f"{sorted(PROJECT_ASSIGNMENT_FILTERS)} or None"
+                )
             if 'project_id' not in session_cols:
-                return []
-            if {'parent_session_id', 'end_reason'} <= session_cols:
+                # A schema that cannot persist assignments has no assigned rows,
+                # and every row it does have is unassigned. Keep both answers
+                # exact instead of emitting SQL against a missing column.
+                if wanted == 'assigned':
+                    return []
+            elif {'parent_session_id', 'end_reason'} <= session_cols:
                 continuation_checks = [
                     "parent.end_reason IN ('compression', 'cli_close')",
                     "(parent.source IS NULL OR child.source IS NULL "
@@ -714,9 +738,14 @@ def read_importable_agent_session_rows(
                         "LOWER(TRIM(COALESCE(child.session_source, ''))) != 'fork'"
                     )
                 continuation_where = " AND ".join(continuation_checks)
+                # An assignment anywhere in a compression lineage assigns the
+                # whole logical conversation, so both filters must key on the
+                # lineage, not the individual row: 'unassigned' is the exact
+                # complement of 'assigned' (#6659).
+                membership = "IN" if wanted == 'assigned' else "NOT IN"
                 where_clauses.append(
                     f"""
-                    s.id IN (
+                    s.id {membership} (
                         WITH RECURSIVE project_lineage(id) AS (
                             SELECT seed.id
                             FROM sessions seed
@@ -739,9 +768,13 @@ def read_importable_agent_session_rows(
                     )
                     """
                 )
-            else:
+            elif wanted == 'assigned':
                 where_clauses.append(
                     "s.project_id IS NOT NULL AND TRIM(s.project_id) != ''"
+                )
+            else:
+                where_clauses.append(
+                    "(s.project_id IS NULL OR TRIM(s.project_id) = '')"
                 )
 
         use_preaggregated_candidate_order = (
