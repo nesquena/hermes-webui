@@ -11062,36 +11062,51 @@ def _handle_insights(handler, parsed) -> bool:
 
     query = parse_qs(parsed.query)
 
-    def _pos_float_list(vals):
-        # Reject non-finite values (nan/inf): float() accepts them but
-        # int()/localtime() later raise -> HTTP 500. Filter so the caller
-        # falls back to a sane default range.
-        out = []
-        for v in vals:
-            if v == "":
-                continue
+    def _window_ts(vals):
+        # Accept either numeric epoch seconds (backward compat, tests) or an
+        # ISO date string 'YYYY-MM-DD'.  A date string is interpreted in the
+        # SERVER-local timezone (midnight of that calendar day) so a remote
+        # browser's timezone cannot shift the selected day.  This is the
+        # production path - the frontend now sends the raw date string instead
+        # of converting to browser-local epoch seconds.
+        if not vals:
+            return None
+        v = vals[0]
+        if not isinstance(v, str):
+            return None
+        v = v.strip()
+        if not v:
+            return None
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
             try:
-                f = float(v)
-            except (TypeError, ValueError):
-                continue
-            if not _math.isfinite(f):
-                continue
-            out.append(f)
-        return out
+                y, mo, d = map(int, v.split("-"))
+                return _time.mktime((y, mo, d, 0, 0, 0, 0, 0, -1))
+            except (OverflowError, ValueError, OSError):
+                return None
+        # Numeric epoch seconds.
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        if not _math.isfinite(f):
+            return None
+        return f
 
     # Absolute time-window mode: start/end Unix timestamps (seconds).
     # end defaults to "now"; start defaults to 30 days before end.
     # Falls back to trailing `days`-window mode when neither is present.
-    start_values = _pos_float_list(query.get("start", []))
-    end_values = _pos_float_list(query.get("end", []))
+    start_ts_v = _window_ts(query.get("start", []))
+    end_ts_v = _window_ts(query.get("end", []))
     now = _time.time()
+    start_ts = None
+    end_ts = None
 
-    if start_values or end_values:
-        if end_values:
-            end_ts = min(end_values[0], now)
-            start_ts = start_values[0] if start_values else (end_ts - 30 * 86400)
+    if start_ts_v is not None or end_ts_v is not None:
+        if end_ts_v is not None:
+            end_ts = min(end_ts_v, now)
+            start_ts = start_ts_v if start_ts_v is not None else (end_ts - 30 * 86400)
         else:
-            start_ts = start_values[0]
+            start_ts = start_ts_v
             end_ts = now
         if start_ts > end_ts:
             start_ts, end_ts = end_ts, start_ts
@@ -11106,8 +11121,8 @@ def _handle_insights(handler, parsed) -> bool:
         if end_ts > now:
             end_ts = now
         if start_ts >= now:
-            start_values = []
-            end_values = []
+            start_ts = None
+            end_ts = None
         # Clamp both endpoints into the platform-safe localtime range so an
         # absurd-but-finite timestamp (e.g. 1e20, -1e20) cannot reach
         # localtime()/mktime() and return HTTP 500. Windows msvcrt localtime
@@ -11115,10 +11130,10 @@ def _handle_insights(handler, parsed) -> bool:
         # conservative upper bound, 0 = 1970-01-01 the lower bound (no
         # sessions predate the Unix epoch). Out-of-range -> fail closed to
         # the trailing `days` fallback.
-        if not (0 <= start_ts <= 4102444800) or not (0 <= end_ts <= 4102444800):
-            start_values = []
-            end_values = []
-        else:
+        if start_ts is not None and (not (0 <= start_ts <= 4102444800) or not (0 <= end_ts <= 4102444800)):
+            start_ts = None
+            end_ts = None
+        if start_ts is not None:
             # Cap absurd custom windows (accidental/malicious huge ranges) at 5
             # years so the daily series cannot balloon into millions of buckets.
             # The window is clamped BEFORE filtering so totals and the chart are
@@ -11146,13 +11161,20 @@ def _handle_insights(handler, parsed) -> bool:
             # stamped exactly at the next local midnight belongs to the next day.
             end_exclusive = True
             first_day_ts = start_ts
-    if not (start_values or end_values):
+            # Effective bounds (server-local calendar days actually queried),
+            # so the client footer always agrees with what was filtered even
+            # after the server clamps/swaps the input range.
+            effective_start = start_day.isoformat()
+            effective_end = end_day.isoformat()
+    if start_ts is None and end_ts is None:
         # Trailing-window mode (legacy): last N calendar days up to today.
         try:
             days = min(max(int(query.get("days", ["30"])[0]), 1), 365)
         except (ValueError, TypeError):
             days = 30
         end_cutoff = now
+        effective_start = None
+        effective_end = None
         # Trailing mode: end_cutoff = now is INCLUSIVE - sessions stamped
         # exactly at "now" belong to the current trailing window.
         end_exclusive = False
@@ -11424,6 +11446,12 @@ def _handle_insights(handler, parsed) -> bool:
 
     return j(handler, {
         "period_days": days,
+        # Effective server-local calendar range actually queried (after
+        # clamping, swap, and DST alignment).  ISO date strings, or None
+        # in trailing-window mode.  The client footer uses these instead
+        # of raw input values, never disagreeing with the filtered window.
+        "effective_start": effective_start,
+        "effective_end": effective_end,
         "total_sessions": total_sessions,
         "total_messages": total_messages,
         "total_input_tokens": total_input_tokens,

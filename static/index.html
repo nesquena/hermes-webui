@@ -287,9 +287,9 @@
                 <option value="custom">Custom range…</option>
               </select>
               <div id="insightsCustomRange" style="display:none;align-items:center;gap:6px;flex-wrap:wrap">
-                        <input type="date" id="insightsStart" onchange="insightsRangeInputs()" style="flex:1;min-width:0;background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 8px;font-size:12px">
-                        <span style="color:var(--muted);font-size:12px">→</span>
-                        <input type="date" id="insightsEnd" onchange="insightsRangeInputs()" style="flex:1;min-width:0;background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 8px;font-size:12px">
+                        <input type="date" id="insightsStart" aria-label="Start date" onchange="insightsRangeInputs()" style="flex:1;min-width:0;background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 8px;font-size:12px">
+                        <span style="color:var(--muted);font-size:12px" aria-hidden="true">→</span>
+                        <input type="date" id="insightsEnd" aria-label="End date" onchange="insightsRangeInputs()" style="flex:1;min-width:0;background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 8px;font-size:12px">
                       </div>
             </div>
     </div>
