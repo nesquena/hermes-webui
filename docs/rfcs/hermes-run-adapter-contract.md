@@ -177,6 +177,14 @@ Required semantics:
 - Reconnect supports `Last-Event-ID` or `after_seq`.
 - Replay is at-least-once; WebUI deduplicates by `run_id` + `seq` or `event_id`.
 - Terminal runs can replay their final `done`, `cancelled`, or `error` state.
+- `stream_end` is transport closure only. It is never semantic terminal proof and
+  must not mark a run completed.
+- The first semantic terminal event settles the run. Later conflicting terminal
+  frames are ignored, so failure cannot become success and a committed success
+  cannot be replaced by a late provider/transport error.
+- Activity without an exact-turn durable final settles as `incomplete_final`;
+  a run with no observable prose, reasoning, or tool activity settles as
+  `no_response`. Neither state invents a provider diagnosis.
 
 ### Event Families
 

@@ -297,15 +297,30 @@ def _note_assigned_seq(path: Path, seq: int) -> None:
 
 def _terminal_state_for_event(event_name: str, payload) -> str | None:
     name = str(event_name or "")
-    if name == "done" or name == "stream_end":
+    if name == "stream_end":
+        return None
+    if name == "done":
         if isinstance(payload, dict):
             explicit_state = str(payload.get("terminal_state") or "").strip().lower()
-            if explicit_state in {"tool_limit_reached"}:
+            if explicit_state in {
+                "completed",
+                "tool_limit_reached",
+                "incomplete_final",
+                "no_response",
+                "error",
+            }:
                 return explicit_state
         return "completed"
     if name == "cancel":
         return "interrupted-by-user"
     if name in {"apperror", "error"}:
+        explicit_state = (
+            str((payload or {}).get("terminal_state") or "").strip().lower()
+            if isinstance(payload, dict)
+            else ""
+        )
+        if explicit_state in {"incomplete_final", "no_response", "error"}:
+            return explicit_state
         err_type = str((payload or {}).get("type") or "").strip().lower() if isinstance(payload, dict) else ""
         if err_type == "tool_limit_reached":
             return "tool_limit_reached"
@@ -313,6 +328,8 @@ def _terminal_state_for_event(event_name: str, payload) -> str | None:
             return "interrupted-by-user"
         if err_type == "interrupted":
             return "interrupted-by-crash"
+        if err_type in {"incomplete_final", "no_response"}:
+            return err_type
         return "errored"
     return None
 
@@ -487,23 +504,41 @@ def read_run_events(
 def select_authoritative_terminal_event(events: Iterable[dict]) -> dict | None:
     """Return the terminal event that owns the run's settled outcome.
 
-    ``stream_end`` is transport closure, so a preceding semantic terminal event
-    (done, cancel, or error) remains authoritative. Among semantic terminal
-    events, the latest journal row wins.
+    ``stream_end`` is transport closure and never settles a run. The first
+    semantic terminal event owns the outcome permanently: a late ``done``
+    cannot turn an observed failure into success, and a late transport/provider
+    failure cannot overwrite a completion whose final was already committed.
     """
     terminal_events = [
         event
         for event in events
-        if isinstance(event, dict) and event.get("terminal")
+        if (
+            isinstance(event, dict)
+            and event.get("event") != "stream_end"
+            and event.get("terminal")
+        )
     ]
-    return next(
-        (
-            event
-            for event in reversed(terminal_events)
-            if event.get("event") != "stream_end"
-        ),
-        terminal_events[-1] if terminal_events else None,
-    )
+    return terminal_events[0] if terminal_events else None
+
+
+def run_events_have_observable_activity(events: Iterable[dict]) -> bool:
+    """Return whether an exact run produced prose, reasoning, or tool activity."""
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        name = str(event.get("event") or event.get("type") or "").strip()
+        payload = event.get("payload")
+        if name in {"tool", "tool_complete"}:
+            return True
+        if name in {"token", "reasoning", "interim_assistant"}:
+            if not isinstance(payload, dict):
+                return bool(str(payload or "").strip())
+            if any(
+                str(payload.get(key) or "").strip()
+                for key in ("text", "content", "message")
+            ):
+                return True
+    return False
 
 
 def _summary_from_events(session_id: str, run_id: str, events: Iterable[dict]) -> dict:

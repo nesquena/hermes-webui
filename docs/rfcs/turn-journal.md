@@ -141,6 +141,34 @@ On startup, for each journal file:
   - add a visible interruption marker, not a fake assistant answer.
 - Existing `.json.bak` and `state.db` recovery still run first so the sidecar is as complete as possible before journal reconciliation.
 
+### Autonomous completion restart boundary
+
+Autonomous process/delegation completions additionally use a durable receipt.
+Both accepted-receipt repair and incorporated/pending replay scanning treat each
+receipt row as an independent recovery domain: a malformed, non-object, foreign,
+or identity-invalid row is preserved and reported with one bounded diagnostic,
+while unrelated validated rows continue. A malformed document envelope remains
+a store-wide fail-closed error because row boundaries cannot be established
+safely.
+
+An `incorporated` receipt with `execution_state: pending` may resume only at the
+exact delivery tip recorded when it was incorporated. Recovery carries that tip
+from enumeration into admission. Its initial `resolve_session_lineage()` may
+repair `recoverable -> committed` transition evidence before permit acquisition;
+recovery then acquires the stable-root permit and re-resolves before mutating the
+completion-delivery receipt or replay sidecar and before publishing the worker.
+The restart claim rotates ownership metadata without downgrading the durable
+receipt from `incorporated/pending`, and every pre-gate abort preserves the exact
+pending replay source for a later fresh restart.
+If the tip changed, recovery raises the typed `delivery_tip_moved` disposition;
+it does not rebind executable work to the new tip. Repeated restart scans keep
+the pending receipt visible with bounded diagnostic metadata and do not create a
+retry loop or duplicate provider execution.
+
+This restart contract does not redesign the paused-wakeup `409` ownership path,
+and it does not bound growth of the shared receipt document or per-completion
+lock files. Those completion-ownership and retention policies remain deferred.
+
 ## Audit additions
 
 `audit_session_recovery()` can report:

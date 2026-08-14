@@ -21,8 +21,14 @@ import pytest
 
 from api import background_process as bp
 from api import config as cfg
+from api import models, routes
 from api import process_event_utils as peu
 from api import streaming
+from api.models import Session
+from api.session_lineage import (
+    build_completion_delivery_context,
+    read_completion_delivery_receipt,
+)
 
 
 class _NoopLock:
@@ -588,11 +594,11 @@ def test_autonomous_wakeup_acks_after_successful_turn_acceptance(monkeypatch):
     delivery = _install_fake_durable_delivery_api(monkeypatch)
     from api import routes
 
-    monkeypatch.setattr(
-        routes,
-        "start_session_turn",
-        lambda *_args, **_kwargs: {"_status": 200, "stream_id": "stream-1"},
-    )
+    def accept_turn(*_args, **kwargs):
+        kwargs["completion_acceptance"]()
+        return {"_status": 200, "stream_id": "stream-1"}
+
+    monkeypatch.setattr(routes, "start_session_turn", accept_turn)
     monkeypatch.setattr(bp, "_emit_bg_task_complete_events_coalesced", lambda *_args: 1)
     evt = _async_delegation_event()
     claim = peu.claim_async_delegation_delivery(evt, "webui-background")
@@ -1292,5 +1298,101 @@ def test_next_turn_drain_respects_origin_over_session_key_index(monkeypatch):
     assert [consumer for _evt, consumer in delivery["claim"]] == ["webui-next-turn"]
     assert len(delivery["complete"]) == 1
     assert delivery["release"] == []
+
+
+def test_async_ack_follows_incorporated_receipt_and_restart_does_not_replay(
+    monkeypatch,
+    tmp_path,
+):
+    _reset_wakeup_state()
+    registry = _install_fake_process_registry(monkeypatch)
+    delivery = _install_fake_durable_delivery_api(monkeypatch)
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(cfg, "SESSION_DIR", tmp_path, raising=False)
+    with cfg.LOCK:
+        cfg.SESSIONS.clear()
+    with cfg.ACTIVE_RUNS_LOCK:
+        cfg.ACTIVE_RUNS.clear()
+    with routes.STREAMS_LOCK:
+        routes.STREAMS.clear()
+    session = Session(session_id="webui-session-1", title="async", profile="default")
+    session.save()
+    with cfg.LOCK:
+        cfg.SESSIONS[session.session_id] = session
+
+    event = _async_delegation_event(origin_ui_session_id=session.session_id)
+    context = build_completion_delivery_context(event, session.session_id, session_dir=tmp_path)
+    claim = peu.claim_async_delegation_delivery(event, "webui-background")
+    assert claim is not None
+    admission_box = {}
+
+    class ParkedThread:
+        def __init__(self, *args, **kwargs):
+            admission_box["admission"] = kwargs["kwargs"]["admission"]
+
+        def start(self):
+            admission_box["admission"].admitted.set()
+
+    class ImmediateThread:
+        def __init__(self, *args, target=None, **kwargs):
+            self.target = target
+            self.args = kwargs.pop("args", ())
+            self.kwargs = kwargs.pop("kwargs", {})
+
+        def start(self):
+            self.target(*self.args, **self.kwargs)
+
+    bp_threading = types.SimpleNamespace(**vars(bp.threading))
+    bp_threading.Thread = ImmediateThread
+    routes_threading = types.SimpleNamespace(**vars(routes.threading))
+    routes_threading.Thread = ParkedThread
+    monkeypatch.setattr(bp, "threading", bp_threading)
+    monkeypatch.setattr(routes, "threading", routes_threading)
+    monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda **_kwargs: None)
+    monkeypatch.setattr(routes, "_read_profile_model_config", lambda *_a, **_k: (None, None, {}))
+    monkeypatch.setattr(
+        routes,
+        "_resolve_chat_workspace_with_recovery",
+        lambda _session, _requested: str(tmp_path),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda *_a, **_k: ("test-model", None, False),
+    )
+    monkeypatch.setattr(routes, "create_stream_channel", queue.Queue)
+    monkeypatch.setattr(routes, "get_webui_session_save_mode", lambda: "deferred")
+    monkeypatch.setattr(routes, "publish_session_list_changed", lambda *_a, **_k: None)
+    monkeypatch.setattr(routes, "set_last_workspace", lambda _workspace: None)
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _config: False)
+
+    durable_api = sys.modules["tools.async_delegation"]
+    original_complete = durable_api.complete_event_delivery
+
+    def complete_after_incorporation(evt, claim_id):
+        receipt = read_completion_delivery_receipt(context, session_dir=tmp_path)
+        assert receipt is not None and receipt["state"] == "incorporated"
+        original_complete(evt, claim_id)
+
+    durable_api.complete_event_delivery = complete_after_incorporation
+    bp._start_async_delegation_wakeup_turn(
+        session.session_id,
+        "delegation result",
+        delegation_id=event["delegation_id"],
+        evt=event,
+        claim=claim,
+        process_registry=registry,
+    )
+
+    assert len(delivery["complete"]) == 1
+    assert delivery["release"] == []
+    receipt = read_completion_delivery_receipt(context, session_dir=tmp_path)
+    assert receipt is not None and receipt["state"] == "incorporated"
+    assert routes.recover_accepted_completion_delivery(context) is False
+    routes._abort_prepared_chat_turn(
+        session,
+        admission_box["admission"].stream_id,
+        admission_box["admission"],
+    )
 
 

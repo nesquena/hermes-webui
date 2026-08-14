@@ -30,8 +30,6 @@ from api.config import (
     gateway_approval_unavailable_reason,
     gateway_supports_approval,
     register_active_run,
-    unregister_active_run,
-    unregister_stream_owner,
     update_active_run,
 )
 from api.helpers import _redact_text, redact_session_data
@@ -732,7 +730,45 @@ def stop_gateway_run(run_id: str) -> bool:
         return False
 
 
-def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, model_provider, terminal_error):
+def _gateway_pending_turn_has_durable_final(session) -> bool:
+    """Return whether the exact pending gateway turn already has a saved final."""
+    pending_text = str(getattr(session, "pending_user_message", "") or "")
+    from api.process_event_utils import build_active_turn_token
+
+    expected_token = build_active_turn_token(
+        getattr(session, "active_stream_id", None),
+        getattr(session, "pending_started_at", None),
+    )
+    if not pending_text or not expected_token:
+        return False
+    turn_start = None
+    for idx in range(len(session.messages or []) - 1, -1, -1):
+        message = session.messages[idx]
+        if (
+            isinstance(message, dict)
+            and message.get("role") == "user"
+            and message.get("_active_turn_token") == expected_token
+            and str(message.get("content") or "") == pending_text
+        ):
+            turn_start = idx
+            break
+    if turn_start is None:
+        return False
+    from api.streaming import _session_lacks_final_assistant_answer
+
+    return not _session_lacks_final_assistant_answer(session.messages[turn_start:])
+
+
+def _settle_gateway_terminal_error(
+    session_id,
+    stream_id,
+    workspace,
+    model,
+    model_provider,
+    terminal_error,
+    *,
+    terminal_state=None,
+):
     from api.streaming import (
         _classify_provider_error,
         _materialize_pending_user_turn_before_error,
@@ -746,7 +782,44 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
         session = get_session(session_id)
         if not _stream_writeback_is_current(session, stream_id):
             return None
-        error_classification = _classify_provider_error(terminal_error)
+        if _gateway_pending_turn_has_durable_final(session):
+            session.active_stream_id = None
+            session.pending_user_message = None
+            session.pending_attachments = []
+            session.pending_started_at = None
+            session.pending_user_source = None
+            persisted = False
+            try:
+                session.save()
+                persisted = True
+            except Exception:
+                logger.debug("Failed to persist completed gateway settlement", exc_info=True)
+            return {
+                "type": "completed",
+                "terminal_state": "completed",
+                "session": redact_session_data(
+                    _session_payload_with_full_messages(session, tool_calls=[])
+                ),
+                "session_id": session.session_id,
+                "terminal_session_persisted": persisted,
+            }
+        if terminal_state == "incomplete_final":
+            error_classification = {
+                "type": "incomplete_final",
+                "label": "Response incomplete",
+                "hint": (
+                    "The run produced activity but did not commit a final answer. "
+                    "Retry or continue from the visible partial work."
+                ),
+            }
+        elif terminal_state == "no_response":
+            error_classification = {
+                "type": "no_response",
+                "label": "Gateway returned no response",
+                "hint": "Check that Hermes Gateway API server is running and reachable.",
+            }
+        else:
+            error_classification = _classify_provider_error(terminal_error)
         error_payload = _provider_error_payload(
             terminal_error,
             error_classification["type"],
@@ -771,6 +844,7 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
             ) + (f"\n\n*{error_payload['hint']}*" if error_payload.get("hint") else ""),
             "timestamp": int(time.time()),
             "_error": True,
+            "_terminal_state": error_classification["type"],
         }
         if turn_duration is not None:
             error_message["_turnDuration"] = turn_duration
@@ -792,6 +866,7 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
             _session_payload_with_full_messages(session, tool_calls=[])
         )
         error_payload["session_id"] = session.session_id
+        error_payload["terminal_state"] = error_classification["type"]
         error_payload["terminal_session_persisted"] = terminal_session_persisted
         if terminal_session_persisted:
             error_payload["terminal_session_persisted_session_id"] = session.session_id
@@ -824,7 +899,101 @@ def _cleanup_gateway_pending_mirror(session_id: str) -> None:
         logger.debug("Failed to reconcile gateway pending mirror during teardown", exc_info=True)
 
 
-def _run_gateway_chat_streaming(
+def _run_admitted_gateway_chat_streaming(
+    session_id,
+    msg_text,
+    model,
+    workspace,
+    stream_id,
+    attachments=None,
+    *,
+    admission,
+    completion_context=None,
+    completion_observer=None,
+    model_provider=None,
+    goal_related=False,
+):
+    """Park an admitted gateway worker and release its exact owner once."""
+    from api.session_lineage import (
+        TurnAdmission,
+        mark_completion_execution_delivered,
+        mark_completion_execution_started,
+        release_turn_admission,
+    )
+
+    if not isinstance(admission, TurnAdmission):
+        raise ValueError("gateway streaming requires an exact TurnAdmission")
+    try:
+        try:
+            register_active_run(
+                stream_id,
+                lineage_id=admission.root_session_id,
+                delivery_session_id=admission.delivery_session_id,
+                admission=admission,
+                session_id=session_id,
+                started_at=time.time(),
+                phase="gateway-parked",
+                workspace=str(workspace),
+                model=model,
+                provider=model_provider,
+                backend="gateway",
+            )
+        except (RuntimeError, ValueError):
+            admission.abort.set()
+            admission.admitted.set()
+            return
+        admission.admitted.set()
+        while not admission.gate.wait(timeout=0.05):
+            if admission.abort.is_set():
+                return
+        if admission.abort.is_set():
+            return
+        if completion_context is not None:
+            mark_completion_execution_started(
+                completion_context,
+                reservation_id=stream_id,
+            )
+        result = _run_gateway_chat_streaming_core(
+            session_id,
+            msg_text,
+            model,
+            workspace,
+            stream_id,
+            attachments,
+            model_provider=model_provider,
+            goal_related=goal_related,
+            lineage_root_session_id=admission.root_session_id,
+        )
+        if completion_context is not None:
+            mark_completion_execution_delivered(
+                completion_context,
+                reservation_id=stream_id,
+            )
+        return result
+    except BaseException:
+        admission.abort.set()
+        admission.admitted.set()
+        raise
+    finally:
+        try:
+            if callable(completion_observer):
+                completion_observer()
+        finally:
+            clear_session_writeback_owner_if_owned(session_id, stream_id)
+            release_turn_admission(admission)
+            try:
+                from api.background_process import drain_deferred_wakeups_for_session
+
+                drain_deferred_wakeups_for_session(admission.root_session_id)
+            except Exception:
+                logger.debug(
+                    "admitted gateway deferred-wakeup drain failed for lineage %s",
+                    admission.root_session_id,
+                    exc_info=True,
+                )
+
+
+def _run_gateway_chat_streaming_core(
     session_id,
     msg_text,
     model,
@@ -834,6 +1003,7 @@ def _run_gateway_chat_streaming(
     *,
     model_provider=None,
     goal_related=False,
+    lineage_root_session_id=None,
 ):
     """Bridge a WebUI chat turn through Hermes Gateway's API server.
 
@@ -847,24 +1017,33 @@ def _run_gateway_chat_streaming(
     if q is None:
         _finish_gateway_run_starting(stream_id, result="fallback")
         _clear_gateway_run_starting(stream_id)
-        # Cancelled before the worker started; release the owner entry the route
-        # layer registered so STREAM_SESSION_OWNERS does not leak (no teardown finally runs).
-        unregister_stream_owner(stream_id)
-        # Also release the writeback-owner entry the route layer registered, so
+        # Release the writeback-owner entry the route layer registered, so
         # SESSION_WRITEBACK_OWNERS does not leak on this pre-start cancellation
         # path (the teardown finally below never runs when we early-return here).
         clear_session_writeback_owner_if_owned(session_id, stream_id)
         return
-    register_active_run(
-        stream_id,
-        session_id=session_id,
-        started_at=time.time(),
-        phase="gateway-starting",
-        workspace=str(workspace),
-        model=model,
-        provider=model_provider,
-        backend="gateway",
-    )
+    if not lineage_root_session_id:
+        from api.session_lineage import resolve_session_lineage
+
+        try:
+            lineage_root_session_id = resolve_session_lineage(session_id).root_session_id
+        except Exception:
+            logger.error(
+                "gateway turn blocked because session lineage is unresolved: %s",
+                session_id,
+                exc_info=True,
+            )
+            try:
+                q.put_nowait(("apperror", {
+                    "type": "session_lineage_unresolved",
+                    "message": "Session lineage could not be verified; no gateway turn was started.",
+                    "retryable": True,
+                    "session_id": session_id,
+                }))
+            except Exception:
+                pass
+            clear_session_writeback_owner_if_owned(session_id, stream_id)
+            return
     try:
         run_journal = RunJournalWriter(session_id, stream_id)
     except Exception:
@@ -878,11 +1057,22 @@ def _run_gateway_chat_streaming(
         STREAM_LIVE_TOOL_CALLS[stream_id] = []
 
     success_writeback_committed = False
+    semantic_terminal_event: list[str | None] = [None]
     runs_api_pending_marked = True
 
     def put_gateway_event(event, data):
         if cancel_event.is_set() and not success_writeback_committed and event not in ("cancel", "error", "apperror"):
             return
+        if event in {"done", "cancel", "apperror", "error"}:
+            if semantic_terminal_event[0] is not None:
+                logger.warning(
+                    "Dropping conflicting gateway terminal event %s for stream %s after %s",
+                    event,
+                    stream_id,
+                    semantic_terminal_event[0],
+                )
+                return
+            semantic_terminal_event[0] = event
         if event == "apperror" and isinstance(data, dict):
             data = data.copy()
             data.setdefault("session_id", session_id)
@@ -1003,6 +1193,17 @@ def _run_gateway_chat_streaming(
                     str(exc),
                 )
                 if error_payload is None:
+                    return
+                if error_payload.get("terminal_state") == "completed":
+                    put_gateway_event(
+                        "done",
+                        {
+                            "session": error_payload["session"],
+                            "usage": {},
+                            "terminal_state": "completed",
+                        },
+                    )
+                    put_gateway_event("stream_end", {"session_id": session_id})
                     return
                 put_gateway_event("apperror", error_payload)
                 return
@@ -1178,15 +1379,50 @@ def _run_gateway_chat_streaming(
             )
             if error_payload is None:
                 return
+            if error_payload.get("terminal_state") == "completed":
+                put_gateway_event(
+                    "done",
+                    {
+                        "session": error_payload["session"],
+                        "usage": usage,
+                        "terminal_state": "completed",
+                    },
+                )
+                put_gateway_event("stream_end", {"session_id": session_id})
+                return
             put_gateway_event("apperror", error_payload)
             return
         if not assistant_text:
-            put_gateway_event("apperror", {
-                "label": "Gateway returned no response",
-                "type": "gateway_empty_response",
-                "message": "Gateway returned no assistant message for this turn.",
-                "hint": "Check that Hermes Gateway API server is running and reachable.",
-            })
+            from api.streaming import _stream_has_observable_activity
+
+            missing_state = (
+                "incomplete_final"
+                if _stream_has_observable_activity(session_id, stream_id)
+                else "no_response"
+            )
+            error_payload = _settle_gateway_terminal_error(
+                session_id,
+                stream_id,
+                workspace,
+                model,
+                model_provider,
+                "Gateway returned no assistant message for this turn.",
+                terminal_state=missing_state,
+            )
+            if error_payload is None:
+                return
+            if error_payload.get("terminal_state") == "completed":
+                put_gateway_event(
+                    "done",
+                    {
+                        "session": error_payload["session"],
+                        "usage": usage,
+                        "terminal_state": "completed",
+                    },
+                )
+                put_gateway_event("stream_end", {"session_id": session_id})
+                return
+            put_gateway_event("apperror", error_payload)
             return
         with _get_session_agent_lock(session_id):
             s = get_session(session_id)
@@ -1204,18 +1440,75 @@ def _run_gateway_chat_streaming(
             # same sort key; later transcript merges can then fall back to
             # role/content ordering instead of turn order.
             assistant_ts = now + 0.000001
-            user_msg = {"role": "user", "content": str(msg_text or ""), "timestamp": now}
+            previous_messages = list(getattr(s, "messages", None) or [])
+            previous_context = list(
+                getattr(s, "context_messages", None)
+                or getattr(s, "messages", None)
+                or []
+            )
             pending_source = getattr(s, "pending_user_source", None) or "webui"
-            if pending_source != "webui":
-                user_msg["_source"] = pending_source
-            if attachments:
-                user_msg["attachments"] = list(attachments)
+            raw_pending_completion_key = getattr(s, "pending_completion_key", "")
+            pending_completion_key = (
+                raw_pending_completion_key.strip()
+                if isinstance(raw_pending_completion_key, str)
+                else ""
+            )
+            checkpoint_user = None
+            if pending_completion_key:
+                raw_pending_correlation = getattr(
+                    s,
+                    "pending_completion_correlation_sha256",
+                    "",
+                )
+                pending_correlation = (
+                    raw_pending_correlation.strip()
+                    if isinstance(raw_pending_correlation, str)
+                    else ""
+                )
+                raw_pending_turn_id = getattr(s, "pending_turn_id", "")
+                pending_turn_id = (
+                    raw_pending_turn_id.strip()
+                    if isinstance(raw_pending_turn_id, str)
+                    else ""
+                )
+                checkpoint_matches = [
+                    row
+                    for row in previous_context
+                    if isinstance(row, dict)
+                    and row.get("role") == "user"
+                    and str(
+                        (row.get("_completion_delivery") or {}).get(
+                            "completion_key"
+                        )
+                        or ""
+                    )
+                    == pending_completion_key
+                    and row.get("_completion_correlation_sha256")
+                    == pending_correlation
+                    and row.get("_turn_id") == pending_turn_id
+                    and row.get("content") == str(msg_text or "")
+                ]
+                if len(checkpoint_matches) != 1:
+                    raise RuntimeError(
+                        "gateway completion context checkpoint is not exact"
+                    )
+                checkpoint_user = checkpoint_matches[0]
+            if checkpoint_user is None:
+                user_msg = {
+                    "role": "user",
+                    "content": str(msg_text or ""),
+                    "timestamp": now,
+                }
+                if pending_source != "webui":
+                    user_msg["_source"] = pending_source
+                if attachments:
+                    user_msg["attachments"] = list(attachments)
+            else:
+                user_msg = checkpoint_user
             assistant_msg = {"role": "assistant", "content": assistant_text, "timestamp": assistant_ts}
             saved_reasoning = STREAM_REASONING_TEXT.get(stream_id, "")
             if saved_reasoning:
                 assistant_msg["reasoning"] = saved_reasoning
-            previous_messages = list(getattr(s, "messages", None) or [])
-            previous_context = list(getattr(s, "context_messages", None) or getattr(s, "messages", None) or [])
             previous_process_wakeup_pause = dict(getattr(s, "process_wakeup_pause", {}) or {})
             # Stamp stable ids on the two new rows (shared with the display merge
             # below) so display and model-context copies share an id for the
@@ -1230,7 +1523,12 @@ def _run_gateway_chat_streaming(
                 )
             except Exception:
                 logger.debug("Failed to stamp stable ids on gateway turn rows", exc_info=True)
-            s.context_messages = previous_context + [user_msg, assistant_msg]
+            context_append_rows = (
+                [assistant_msg]
+                if checkpoint_user is not None
+                else [user_msg, assistant_msg]
+            )
+            s.context_messages = previous_context + context_append_rows
             try:
                 from api.streaming import _is_context_compression_marker
 
@@ -1266,7 +1564,11 @@ def _run_gateway_chat_streaming(
                         msg_norm = " ".join(str(msg_text or "").split())
                         if latest_text == msg_norm:
                             display = display[:-1]
-                s.messages = display + [user_msg, assistant_msg]
+                s.messages = display + (
+                    [assistant_msg]
+                    if checkpoint_user is not None
+                    else [user_msg, assistant_msg]
+                )
             s.active_stream_id = None
             s.pending_user_message = None
             s.pending_attachments = None
@@ -1399,8 +1701,6 @@ def _run_gateway_chat_streaming(
         if runs_api_pending_marked and gateway_run_id_pending(stream_id):
             _finish_gateway_run_starting(stream_id)
         _clear_gateway_run_starting(stream_id)
-        unregister_stream_owner(stream_id)
-        unregister_active_run(stream_id)
         # Release the writeback-owner entry the route layer registered for this
         # Gateway run so SESSION_WRITEBACK_OWNERS does not grow unbounded across
         # the process lifetime (compare-and-clear: only clears if still owned by

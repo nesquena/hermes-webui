@@ -121,6 +121,38 @@ and 5; it does not mark every run-state boundary implemented.
 8. **Every mutation names its layer.** A PR touching streaming, recovery,
    context reconstruction, compression, replay, or sidebar metadata should state
    which layer it changes and what regression proves the invariant still holds.
+9. **Persisted-session discovery is coherently fenced within one process.** The
+   directory-mtime snapshot used by lineage and recovery scanners is an
+   optimization, not a second source of truth. Snapshot validation, scanning,
+   and publication share one process-local fence with successful sidecar-save
+   invalidation and four successful-delete invalidations: two streaming sites
+   (`_cleanup_ephemeral_cancelled_turn` and ephemeral completion cleanup in
+   `_run_agent_streaming_core`) plus two routes sites (`_discard_hidden_session`
+   and the `_handle_background` completion cleanup). A failed atomic replace
+   must leave the prior snapshot valid; within one process, a successful save or
+   deletion must make an overlapping scan unable to republish stale membership
+   even when the filesystem reports a frozen or coarse directory mtime. This is
+   not global deletion or cross-process cache coherence: another process may
+   retain a stale snapshot when that directory mtime does not advance.
+10. **Autonomous completion restart is row-isolated and tip-stable.** Both
+    `accepted_completion_delivery_contexts()` and
+    `pending_completion_delivery_contexts()` isolate malformed, non-object,
+    foreign, or identity-invalid rows so they cannot starve an unrelated healthy
+    sibling. Corruption of the top-level receipt store remains globally
+    fail-closed because safe row boundaries cannot be established. Before a
+    pending incorporated turn reclaims execution, its initial lineage resolution
+    may repair `recoverable -> committed` transition evidence. It must then
+    validate the expected delivery tip, acquire the stable-root permit, and
+    re-resolve before completion-delivery receipt or replay-sidecar mutation and
+    worker publication. A moved tip is a typed `delivery_tip_moved` rejection:
+    the old receipt, source sidecar, and replacement tip remain untouched and no
+    worker is started.
+
+These invariants do not complete the background-completion ownership redesign.
+A paused-wakeup `409` can still retain a local dedupe gate without a deferred
+owner or requeue, and the shared receipt JSON plus per-completion lock files still
+lack a bounded retirement policy. Those ownership and storage-growth limits
+remain deferred.
 
 ## Review Checklist
 
@@ -139,6 +171,10 @@ context reconstruction, or session metadata:
 - Can this change move a session in the sidebar without meaningful user or
   assistant activity?
 - Can automatic compression or recovery text become visible active-turn content?
+- Can one malformed completion receipt starve unrelated restart work, or can a
+  pending completion mutate its receipt after its delivery tip moves?
+- Can a concurrent save/delete race republish stale persisted-session IDs when
+  directory mtime does not advance?
 - What test or manual evidence proves the invariant?
 
 ## Existing Issue Map

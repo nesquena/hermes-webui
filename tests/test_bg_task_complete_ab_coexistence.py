@@ -63,6 +63,9 @@ def test_b_sse_first_then_a_drain_skips_same_process_id(monkeypatch):
     from api import background_process as bp
     from api import streaming as st
     from api import config as _cfg
+    from tests._wakeup_helpers import install_fake_start_session_turn, wait_for_wakeup
+
+    holder = install_fake_start_session_turn(monkeypatch)
 
     # Map session_key -> WebUI session_id
     bp.register_process_session("sess-1", "sess-1")
@@ -77,8 +80,9 @@ def test_b_sse_first_then_a_drain_skips_same_process_id(monkeypatch):
     }
     # B path: process the event
     bp._process_one(evt)
+    assert wait_for_wakeup(holder)
 
-    # B must have marked the (session, process) seen and registry-consumed
+    # B marks the registry consumed only after durable incorporation accepts it.
     assert "p1" in _cfg.BG_TASK_COMPLETE_EVENTS_SEEN["sess-1"]
     assert fake.is_completion_consumed("p1")
 
@@ -215,7 +219,11 @@ def test_mark_registry_completion_consumed_fails_loud_on_rename(monkeypatch, cap
     from api import background_process as bp
 
     with caplog.at_level(logging.ERROR, logger="api.background_process"):
-        bp._mark_registry_completion_consumed("p-renamed")
+        with pytest.raises(
+            RuntimeError,
+            match="completion-consumed contract is unavailable",
+        ):
+            bp._mark_registry_completion_consumed("p-renamed")
 
     assert any(
         "coupling contract VIOLATED" in r.message and r.levelno >= logging.ERROR

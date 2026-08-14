@@ -34,6 +34,7 @@ from contextlib import closing
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
+from dataclasses import dataclass
 from api.agent_runtime import (
     AgentRuntimeChangedError,
     ensure_agent_runtime_current,
@@ -2849,8 +2850,8 @@ from api.config import (
     ACTIVE_RUNS_LOCK,
     register_stream_owner,
     register_session_writeback_owner,
+    clear_session_writeback_owner_if_owned,
     stream_owner_session_id,
-    unregister_stream_owner,
     CHAT_LOCK,
     _get_session_agent_lock,
     CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS,
@@ -9602,6 +9603,7 @@ def _keep_latest_messaging_session_per_source(
 
 from api.models import (
     Session,
+    _invalidate_persisted_session_ids_snapshot,
     get_session,
     get_session_for_scan,
     find_compression_recovery_session,
@@ -9662,173 +9664,29 @@ _COMPRESSION_RECOVERY_START_LOCK = threading.Lock()
 
 
 def _pre_compression_continuation_session_id(session) -> str | None:
-    """Return the newest visible descendant for a hidden compression snapshot.
-
-    Mobile browsers can miss the final SSE `done` handoff while backgrounded.
-    On reload they may request the archived pre-compression session id from the
-    stale URL/localStorage. The old snapshot is intentionally hidden from the
-    sidebar, so expose a lightweight recovery hint when a child continuation
-    exists either in memory or on disk. Follow bounded snapshot-to-snapshot hops
-    so repeated compression still lands on the latest visible continuation.
-    """
+    """Project a hidden compression snapshot to the shared resolver's tip."""
     if not getattr(session, "pre_compression_snapshot", False):
         return None
-    sid = _safe_first(getattr(session, "session_id", None))
-    if not sid:
+    session_id = str(getattr(session, "session_id", None) or "").strip()
+    if not session_id:
         return None
-    # #2980 hardening: the resolved continuation is written to the client's
-    # URL/localStorage, so it must stay within the requested snapshot's own
-    # profile. Children are matched only by parent_session_id below; a
-    # crafted/corrupt foreign-profile sidecar whose parent_session_id collided
-    # with this snapshot's id would otherwise leak cross-profile. Pin the
-    # snapshot's profile and reject any child that isn't profile-matched.
-    snapshot_profile = getattr(session, "profile", None)
+    try:
+        from api.session_lineage import resolve_session_lineage
 
-    def _child_rows_from_memory(seen_ids: set[str]) -> list:
-        rows = []
-        try:
-            with LOCK:
-                memory_sessions = list(SESSIONS.values())
-            for child in memory_sessions:
-                child_sid = _safe_first(getattr(child, "session_id", None))
-                if not child_sid or child_sid in seen_ids:
-                    continue
-                seen_ids.add(child_sid)
-                rows.append(child)
-        except Exception:
-            pass
-        return rows
-
-    def _child_rows_from_index(seen_ids: set[str]) -> list | None:
-        if not SESSION_INDEX_FILE.exists():
-            return None
-        try:
-            entries = json.loads(SESSION_INDEX_FILE.read_bytes())
-        except Exception:
-            return None
-        if not isinstance(entries, list):
-            return None
-        try:
-            persisted_sidecar_ids = {
-                path.stem
-                for path in SESSION_DIR.glob("*.json")
-                if not path.name.startswith("_") and is_safe_session_id(path.stem)
-            }
-        except Exception:
-            return None
-        indexed_ids: set[str] = set()
-        row_seen_ids = set(seen_ids)
-        rows = []
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            child_sid = _safe_first(entry.get("session_id"))
-            if not child_sid or not is_safe_session_id(child_sid):
-                continue
-            indexed_ids.add(child_sid)
-            if child_sid in row_seen_ids or not _safe_first(entry.get("parent_session_id")):
-                continue
-            row_seen_ids.add(child_sid)
-            rows.append(entry)
-        # Guarantee here is index MEMBERSHIP-completeness, not per-entry content
-        # freshness: if any persisted continuation sidecar is absent from the index
-        # we bail to the full scan. A sidecar that IS in the index but whose entry is
-        # content-stale (mid-write) still yields a valid continuation of the same
-        # snapshot; proving freshness would require reading every sidecar, defeating
-        # the optimization, so membership-completeness is the intended bar.
-        if persisted_sidecar_ids - indexed_ids - seen_ids:
-            return None
-        return rows
-
-    def _child_rows_from_sidecars(seen_ids: set[str]) -> list:
-        rows = []
-        try:
-            for path in SESSION_DIR.glob("*.json"):
-                if path.name.startswith("_"):
-                    continue
-                child_sid = path.stem
-                if not child_sid or child_sid in seen_ids:
-                    continue
-                child = Session.load_metadata_only(child_sid)
-                if child:
-                    seen_ids.add(child_sid)
-                    rows.append(child)
-        except Exception:
-            pass
-        return rows
-
-    def _row_value(row, key, default=None):
-        return row.get(key, default) if isinstance(row, dict) else getattr(row, key, default)
-
-    def _row_has_backing_state(row) -> bool:
-        child_sid = _safe_first(_row_value(row, "session_id"))
-        if not child_sid or not is_safe_session_id(child_sid):
-            return False
-        if not isinstance(row, dict):
-            return True
-        return (SESSION_DIR / f"{child_sid}.json").exists()
-
-    def _resolve_from_rows(rows: list) -> str | None:
-        children_by_parent: dict[str, list] = {}
-        for child in rows:
-            parent_sid = _safe_first(_row_value(child, "parent_session_id"))
-            child_sid = _safe_first(_row_value(child, "session_id"))
-            if not parent_sid or not child_sid or child_sid == sid:
-                continue
-            # Cross-profile guard: only follow continuations within the snapshot's profile.
-            if not _profiles_match(_row_value(child, "profile"), snapshot_profile):
-                continue
-            children_by_parent.setdefault(parent_sid, []).append(child)
-
-        candidates = []
-        frontier = [sid]
-        seen = {sid}
-        for _ in range(20):
-            if not frontier:
-                break
-            parent_sid = frontier.pop(0)
-            for child in children_by_parent.get(parent_sid, []):
-                child_sid = _safe_first(_row_value(child, "session_id"))
-                if not child_sid or child_sid in seen or not _row_has_backing_state(child):
-                    continue
-                seen.add(child_sid)
-                if _row_value(child, "pre_compression_snapshot", False):
-                    frontier.append(child_sid)
-                else:
-                    candidates.append(child)
-
-        if not candidates:
-            return None
-        latest = max(
-            candidates,
-            key=lambda child: (
-                float(
-                    _safe_first(
-                        _row_value(child, "updated_at"),
-                        _row_value(child, "created_at"),
-                        0,
-                    ) or 0
-                ),
-                # Secondary tiebreaker so the index-fast-path and the sidecar-scan
-                # path resolve byte-identically on an updated_at/created_at tie
-                # (otherwise the chosen sid could differ by iteration order).
-                str(_safe_first(_row_value(child, "session_id"), "") or ""),
-            ),
+        resolution = resolve_session_lineage(
+            session_id,
+            expected_profile=getattr(session, "profile", None),
         )
-        latest_sid = _safe_first(_row_value(latest, "session_id", None)) or None
-        # Only hand the client a well-formed session id (it gets written to URL/localStorage).
-        if latest_sid and not is_safe_session_id(latest_sid):
-            return None
-        return latest_sid
-
-    memory_seen_ids: set[str] = set()
-    rows = _child_rows_from_memory(memory_seen_ids)
-    index_rows = _child_rows_from_index(memory_seen_ids)
-    if index_rows is not None:
-        return _resolve_from_rows(rows + index_rows)
-
-    rows.extend(_child_rows_from_sidecars(memory_seen_ids))
-    return _resolve_from_rows(rows)
+    except Exception:
+        logger.warning(
+            "compression continuation resolution failed closed for %s",
+            session_id,
+            exc_info=True,
+        )
+        return None
+    if resolution.delivery_session_id == session_id:
+        return None
+    return resolution.delivery_session_id
 
 from api.workspace import (
     load_workspaces,
@@ -9875,14 +9733,14 @@ from api.upload import (
 from api.streaming import (
     _sse,
     _sse_set_write_deadline,
-    _run_agent_streaming,
+    _run_admitted_agent_streaming,
     cancel_stream,
     _materialize_pending_user_turn_before_error,
     generate_session_title_for_session,
     _compact_for_echo_compare,
     _strip_compact_echo_suffix,
 )
-from api.gateway_chat import _run_gateway_chat_streaming, webui_gateway_chat_enabled
+from api.gateway_chat import _run_admitted_gateway_chat_streaming, webui_gateway_chat_enabled
 from api.run_journal import (
     _parse_run_journal_event_id as _shared_parse_run_journal_event_id,
     bound_run_journal_snapshot_args,
@@ -11670,6 +11528,17 @@ def _stream_runtime_diagnostics() -> dict:
     }
 
 
+_RUN_LIFECYCLE_HEALTH_FIELDS = (
+    "started_at",
+    "phase",
+    "model",
+    "provider",
+    "ephemeral",
+    "backend",
+    "latest_tool",
+)
+
+
 def _run_lifecycle_health() -> dict:
     """Return active worker-run state independent of SSE stream presence."""
     # Import the module rather than relying only on imported scalar aliases so
@@ -11680,10 +11549,14 @@ def _run_lifecycle_health() -> dict:
     with _live_config.ACTIVE_RUNS_LOCK:
         runs = []
         for _stream_id, raw in (_live_config.ACTIVE_RUNS or {}).items():
-            item = dict(raw or {})
-            item.pop("session_id", None)
-            item.pop("stream_id", None)
-            item.pop("workspace", None)
+            source = raw if isinstance(raw, dict) else {}
+            item = {}
+            for key in _RUN_LIFECYCLE_HEALTH_FIELDS:
+                value = source.get(key)
+                if key in source and (
+                    value is None or isinstance(value, (str, int, float, bool))
+                ):
+                    item[key] = value
             started_at = item.get("started_at")
             try:
                 age = max(0.0, now - float(started_at))
@@ -21335,6 +21208,79 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
     return j(handler, {"ok": True, "cleaned": cleaned})
 
 
+def _discard_hidden_session(session) -> None:
+    """Remove a hidden session from cache and disk after failed admission."""
+    hidden_session_id = str(getattr(session, "session_id", "") or "")
+    with LOCK:
+        SESSIONS.pop(hidden_session_id, None)
+    try:
+        (SESSION_DIR / f"{hidden_session_id}.json").unlink(missing_ok=True)
+        _invalidate_persisted_session_ids_snapshot()
+    except Exception:
+        logger.debug("failed to remove hidden session %s", hidden_session_id, exc_info=True)
+
+
+def _start_hidden_admitted_turn(
+    session,
+    *,
+    message: str,
+    stream_id: str,
+    model,
+    workspace,
+    model_provider=None,
+    source: str,
+    ephemeral: bool,
+    completion_observer=None,
+    before_thread_start=None,
+):
+    """Prepare and gate one hidden-root turn through the local wrapper."""
+    admission = None
+    try:
+        admission = _reserve_turn_admission(session, stream_id)
+        prepared = _prepare_chat_start_session_for_stream(
+            session,
+            msg=message,
+            attachments=[],
+            workspace=str(workspace),
+            model=model,
+            model_provider=model_provider,
+            stream_id=stream_id,
+            source=source,
+            admission=admission,
+        )
+        stream = create_stream_channel()
+        with STREAMS_LOCK:
+            STREAMS[stream_id] = stream
+        if callable(before_thread_start):
+            before_thread_start()
+        worker = threading.Thread(
+            target=_run_admitted_agent_streaming,
+            args=(session.session_id, message, model, workspace, stream_id, None),
+            kwargs={
+                "admission": admission,
+                "completion_observer": completion_observer,
+                "ephemeral": ephemeral,
+                "model_provider": model_provider,
+            },
+            daemon=True,
+        )
+        worker.start()
+        if not admission.admitted.wait(timeout=5.0):
+            raise RuntimeError("hidden worker failed to park")
+        if admission.abort.is_set():
+            raise RuntimeError("hidden worker aborted before gate")
+        admission.gate.set()
+        return prepared
+    except Exception:
+        _abort_prepared_chat_turn(
+            session,
+            stream_id,
+            admission,
+            delete_hidden=True,
+        )
+        raise
+
+
 def _handle_btw(handler, body):
     """POST /api/btw — ephemeral side question using session context.
 
@@ -21358,13 +21304,15 @@ def _handle_btw(handler, body):
     question = str(body["question"]).strip()
     if not question:
         return bad(handler, "question is required")
-    # Duplicate-stream guard (same pattern as chat/start)
-    current_stream_id = getattr(s, "active_stream_id", None)
-    if current_stream_id:
-        with STREAMS_LOCK:
-            if current_stream_id in STREAMS:
-                return j(handler, {"error": "session already has an active stream"}, status=409)
-        s.active_stream_id = None
+    from api.session_lineage import resolve_session_lineage
+
+    try:
+        parent_lineage = resolve_session_lineage(
+            s.session_id,
+            expected_profile=getattr(s, "profile", None),
+        )
+    except Exception:
+        return bad(handler, "Parent session lineage could not be verified", 409)
     # Create ephemeral hidden session inheriting context
     from api.models import new_session as _new_session
     model_provider = getattr(s, 'model_provider', None)
@@ -21376,25 +21324,41 @@ def _handle_btw(handler, body):
     )
     # Copy conversation history for context (agent reads from messages)
     ephemeral.messages = list(s.messages or [])
+    try:
+        after_copy = resolve_session_lineage(
+            s.session_id,
+            expected_profile=getattr(s, "profile", None),
+        )
+    except Exception:
+        _discard_hidden_session(ephemeral)
+        return bad(handler, "Parent session lineage changed during BTW preparation", 409)
+    if (
+        after_copy.root_session_id != parent_lineage.root_session_id
+        or after_copy.delivery_session_id != parent_lineage.delivery_session_id
+    ):
+        _discard_hidden_session(ephemeral)
+        return bad(handler, "Parent session lineage changed during BTW preparation", 409)
     ephemeral.title = f"btw: {question[:60]}"
     ephemeral.save()
     stream_id = uuid.uuid4().hex
-    ephemeral.active_stream_id = stream_id
-    register_session_writeback_owner(ephemeral.session_id, stream_id)
-    ephemeral.save()
-    stream = create_stream_channel()
-    register_stream_owner(stream_id, ephemeral.session_id)
-    with STREAMS_LOCK:
-        STREAMS[stream_id] = stream
     from api.background import track_btw
-    track_btw(body["session_id"], ephemeral.session_id, stream_id, question)
-    thr = threading.Thread(
-        target=_run_agent_streaming,
-        args=(ephemeral.session_id, question, s.model, s.workspace, stream_id, None),
-        kwargs={"ephemeral": True, "model_provider": model_provider},
-        daemon=True,
-    )
-    thr.start()
+    try:
+        _start_hidden_admitted_turn(
+            ephemeral,
+            message=question,
+            stream_id=stream_id,
+            model=s.model,
+            workspace=s.workspace,
+            model_provider=model_provider,
+            source="btw",
+            ephemeral=True,
+            before_thread_start=lambda: track_btw(
+                body["session_id"], ephemeral.session_id, stream_id, question
+            ),
+        )
+    except Exception:
+        logger.exception("failed to start admitted BTW turn")
+        return bad(handler, "Failed to start BTW turn", 500)
     return j(handler, {"stream_id": stream_id, "session_id": ephemeral.session_id, "parent_session_id": body["session_id"]})
 
 
@@ -21430,35 +21394,14 @@ def _handle_background(handler, body):
     bg.title = f"bg: {prompt[:60]}"
     bg.save()
     stream_id = uuid.uuid4().hex
-    bg.active_stream_id = stream_id
-    register_session_writeback_owner(bg.session_id, stream_id)
-    bg.save()
-    stream = create_stream_channel()
-    register_stream_owner(stream_id, bg.session_id)
-    with STREAMS_LOCK:
-        STREAMS[stream_id] = stream
     task_id = uuid.uuid4().hex[:8]
     from api.background import track_background, complete_background
     parent_sid = body["session_id"]
     bg_sid = bg.session_id
-    track_background(parent_sid, bg_sid, stream_id, task_id, prompt)
 
-    def _run_bg_and_notify():
-        """Run the background agent, then mark the tracked task `done` with the
-        last assistant reply so `/api/background/status` can surface it.  Without
-        this, `complete_background()` is never called and the result is lost —
-        `get_results()` would see a forever-`running` task and return nothing.
-        """
+    def _observe_background_completion():
+        """Project the finished hidden turn into the background-task tracker."""
         try:
-            _run_agent_streaming(
-                bg_sid,
-                prompt,
-                s.model,
-                s.workspace,
-                stream_id,
-                None,
-                model_provider=model_provider,
-            )
             # Reload the bg session from disk and extract the final assistant reply.
             try:
                 from api.models import Session as _Session
@@ -21481,6 +21424,7 @@ def _handle_background(handler, body):
             # next rebuild via _index_entry_exists().
             try:
                 (SESSION_DIR / f"{bg_sid}.json").unlink(missing_ok=True)
+                _invalidate_persisted_session_ids_snapshot()
             except Exception:
                 pass
         except Exception:
@@ -21489,29 +21433,74 @@ def _handle_background(handler, body):
             except Exception:
                 pass
 
-    thr = threading.Thread(target=_run_bg_and_notify, daemon=True)
-    thr.start()
+    try:
+        _start_hidden_admitted_turn(
+            bg,
+            message=prompt,
+            stream_id=stream_id,
+            model=s.model,
+            workspace=s.workspace,
+            model_provider=model_provider,
+            source="background",
+            ephemeral=False,
+            completion_observer=_observe_background_completion,
+            before_thread_start=lambda: track_background(
+                parent_sid, bg_sid, stream_id, task_id, prompt
+            ),
+        )
+    except Exception:
+        logger.exception("failed to start admitted background turn")
+        try:
+            complete_background(parent_sid, task_id, "(background task failed)")
+        except Exception:
+            pass
+        return bad(handler, "Failed to start background turn", 500)
     return j(handler, {"task_id": task_id, "stream_id": stream_id, "session_id": bg.session_id})
 
 
-def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, started_at: float | None, source: str = "webui") -> None:
-    """Materialize the current user turn for eager first-turn persistence.
-
-    The streaming thread still receives ``pending_user_message`` so existing
-    cancel/recovery/final-merge paths keep their current contract. Eager mode
-    only adds a durable display-message checkpoint before the agent launches.
-    """
+def _checkpoint_user_message_for_eager_session_save(
+    s,
+    msg: str,
+    attachments,
+    started_at: float | None,
+    source: str = "webui",
+    completion_context=None,
+) -> None:
+    """Materialize one durable display checkpoint before the worker can run."""
     if not msg:
         return
     existing = list(getattr(s, "messages", None) or [])
-    if existing:
+    completion_key = str(getattr(completion_context, "completion_key", "") or "")
+    completion_metadata = None
+    if completion_key:
+        from api.session_lineage import completion_delivery_metadata
+
+        completion_metadata = completion_delivery_metadata(completion_context)
+    user_msg = None
+    if completion_key:
+        owned = [
+            row
+            for row in existing
+            if isinstance(row, dict)
+            and (
+                (row.get("_completion_delivery") or {}).get("completion_key")
+                == completion_key
+                or row.get("_completion_key") == completion_key
+            )
+        ]
+        if owned:
+            if len(owned) != 1 or str(owned[0].get("content") or "") != str(msg):
+                raise RuntimeError("conflicting completion user checkpoint")
+            user_msg = owned[0]
+    elif existing:
         latest = existing[-1]
         if isinstance(latest, dict) and latest.get("role") == "user":
             latest_text = " ".join(str(latest.get("content") or "").split())
             msg_text = " ".join(str(msg or "").split())
             if latest_text == msg_text:
                 return
-    user_msg = {"role": "user", "content": msg}
+    if user_msg is None:
+        user_msg = {"role": "user", "content": msg}
     from api.process_event_utils import build_active_turn_token, stamp_message_source
 
     stamp_message_source(
@@ -21523,14 +21512,39 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
         user_msg["timestamp"] = float(started_at)
     if attachments:
         user_msg["attachments"] = list(attachments)
-    s.messages.append(user_msg)
+    if completion_key:
+        user_msg["_completion_key"] = completion_key
+        user_msg["_completion_correlation_sha256"] = str(
+            getattr(completion_context, "correlation_sha256", "") or ""
+        )
+        user_msg["_turn_id"] = str(getattr(completion_context, "turn_id", "") or "")
+        user_msg["_completion_delivery"] = completion_metadata
+    if user_msg not in s.messages:
+        s.messages.append(user_msg)
+    if completion_key:
+        context_messages = getattr(s, "context_messages", None)
+        if not isinstance(context_messages, list):
+            context_messages = []
+            s.context_messages = context_messages
+        context_owned = [
+            row
+            for row in context_messages
+            if isinstance(row, dict)
+            and (
+                (row.get("_completion_delivery") or {}).get("completion_key")
+                == completion_key
+                or row.get("_completion_key") == completion_key
+            )
+        ]
+        if context_owned:
+            if len(context_owned) != 1 or str(context_owned[0].get("content") or "") != str(msg):
+                raise RuntimeError("conflicting completion context checkpoint")
+        else:
+            context_messages.append(dict(user_msg))
     # The new user turn is now committed to messages (#3831): advance the
     # truncation watermark to the new message's timestamp so that
     # merge_session_messages_append_only() still filters out replaced
     # pre-edit rows from state.db whose timestamps fall below the boundary.
-    # The merge's sidecar_advanced_past_watermark guard (models.py:5172)
-    # allows state.db rows newer than the watermark, so post-edit turns
-    # are not dropped. Never 0.0 (the truncate-to-empty sentinel, #2914).
     if getattr(s, "truncation_watermark", None):
         s.truncation_watermark = user_msg.get("timestamp") or time.time()
 
@@ -21546,6 +21560,150 @@ def _provisional_title_from_prompt(prompt: str, fallback: str = "Untitled") -> s
     return title_from([{"role": "user", "content": text}], fallback) or fallback
 
 
+@dataclass(frozen=True)
+class PreparedChatTurn:
+    """Durably prepared ordinary turn plus in-process admission authority."""
+
+    session_id: str
+    stream_id: str
+    turn_id: str
+    pending_started_at: float
+    title: str
+    admission: object | None
+    completion_context: object | None = None
+
+
+def _reserve_turn_admission(
+    s,
+    stream_id: str,
+    *,
+    expected_delivery_session_id: str | None = None,
+):
+    """Acquire and publish one exact, tip-stable lineage reservation."""
+    from threading import Event
+    from api import config as live_config
+    from api.session_lineage import (
+        TurnAdmission,
+        acquire_lineage_turn_permit,
+        resolve_session_lineage,
+    )
+
+    resolution = resolve_session_lineage(
+        s.session_id,
+        expected_profile=getattr(s, "profile", None),
+    )
+    expected_tip = str(expected_delivery_session_id or "").strip()
+    if expected_tip and resolution.delivery_session_id != expected_tip:
+        from api.session_lineage import CompletionDeliveryRestartError
+
+        raise CompletionDeliveryRestartError(
+            "delivery_tip_moved",
+            "pending completion delivery moved compression tips",
+        )
+    permit = acquire_lineage_turn_permit(resolution.root_session_id)
+    try:
+        locked_resolution = resolve_session_lineage(
+            s.session_id,
+            expected_profile=getattr(s, "profile", None),
+        )
+        if (
+            locked_resolution.root_session_id != resolution.root_session_id
+            or locked_resolution.delivery_session_id != resolution.delivery_session_id
+            or locked_resolution.profile != resolution.profile
+        ):
+            if expected_tip:
+                from api.session_lineage import CompletionDeliveryRestartError
+
+                raise CompletionDeliveryRestartError(
+                    "delivery_tip_moved",
+                    "pending completion delivery moved compression tips",
+                )
+            raise RuntimeError("session lineage changed while reserving turn")
+        if expected_tip and locked_resolution.delivery_session_id != expected_tip:
+            from api.session_lineage import CompletionDeliveryRestartError
+
+            raise CompletionDeliveryRestartError(
+                "delivery_tip_moved",
+                "pending completion delivery moved compression tips",
+            )
+        admission = TurnAdmission(
+            reservation_id=stream_id,
+            stream_id=stream_id,
+            owner_token=uuid.uuid4().hex,
+            root_session_id=locked_resolution.root_session_id,
+            delivery_session_id=locked_resolution.delivery_session_id,
+            permit=permit,
+            admitted=Event(),
+            gate=Event(),
+            abort=Event(),
+        )
+        register_stream_owner(stream_id, locked_resolution.delivery_session_id)
+        live_config.register_active_run(
+            stream_id,
+            lineage_id=locked_resolution.root_session_id,
+            delivery_session_id=locked_resolution.delivery_session_id,
+            admission=admission,
+            reservation_create=True,
+            session_id=s.session_id,
+            phase="reserved",
+        )
+    except Exception:
+        permit.release()
+        live_config.unregister_stream_owner(stream_id)
+        raise
+    return admission
+
+
+def _abort_prepared_chat_turn(
+    session,
+    stream_id: str,
+    admission,
+    *,
+    gateway: bool = False,
+    delete_hidden: bool = False,
+    preserve_pending_completion_replay: bool = False,
+) -> None:
+    """Abort every live owner while optionally retaining durable replay input."""
+    from api.session_lineage import release_turn_admission
+
+    if admission is not None:
+        admission.abort.set()
+        admission.gate.set()
+        release_turn_admission(admission)
+    with STREAMS_LOCK:
+        STREAMS.pop(stream_id, None)
+    STREAM_GOAL_RELATED.pop(stream_id, None)
+    if gateway:
+        try:
+            from api.gateway_chat import (
+                _clear_gateway_run_starting,
+                _finish_gateway_run_starting,
+            )
+
+            _finish_gateway_run_starting(stream_id)
+            _clear_gateway_run_starting(stream_id)
+        except Exception:
+            logger.debug(
+                "failed to retire gateway start lifecycle for %s",
+                stream_id,
+                exc_info=True,
+            )
+    try:
+        if getattr(session, "active_stream_id", None) == stream_id:
+            session.active_stream_id = None
+            if not preserve_pending_completion_replay:
+                session.pending_user_message = None
+                session.pending_attachments = []
+                session.pending_started_at = None
+                session.pending_user_source = None
+            session.save(touch_updated_at=False)
+    except Exception:
+        logger.debug("failed to roll back prepared turn %s", stream_id, exc_info=True)
+    clear_session_writeback_owner_if_owned(session.session_id, stream_id)
+    if delete_hidden:
+        _discard_hidden_session(session)
+
+
 def _prepare_chat_start_session_for_stream(
     s,
     *,
@@ -21557,6 +21715,9 @@ def _prepare_chat_start_session_for_stream(
     stream_id: str,
     started_at: float | None = None,
     source: str = "webui",
+    admission=None,
+    defer_journal: bool = False,
+    completion_context=None,
 ):
     """Persist chat-start state according to webui.session_save_mode.
 
@@ -21577,20 +21738,98 @@ def _prepare_chat_start_session_for_stream(
     s.pending_attachments = attachments
     s.pending_started_at = started_at if started_at is not None else time.time()
     s.pending_user_source = source
+    if completion_context is not None:
+        if (
+            str(getattr(completion_context, "delivery_session_id", "")) != str(s.session_id)
+            or str(getattr(completion_context, "profile", "default") or "default")
+            != str(getattr(s, "profile", "default") or "default")
+        ):
+            raise RuntimeError("completion context does not own the delivery session")
+        s.pending_turn_id = completion_context.turn_id
+        s.pending_completion_key = completion_context.completion_key
+        s.pending_completion_correlation_sha256 = completion_context.correlation_sha256
+    else:
+        s.pending_turn_id = None
+        s.pending_completion_key = None
+        s.pending_completion_correlation_sha256 = None
     current_title = getattr(s, "title", None)
     if _is_default_or_empty_session_title(current_title):
         provisional_title = _provisional_title_from_prompt(msg, current_title or "Untitled")
         if provisional_title and not _is_default_or_empty_session_title(provisional_title):
             s.title = provisional_title
-    if get_webui_session_save_mode() == "eager":
+    if completion_context is not None or get_webui_session_save_mode() == "eager":
         _checkpoint_user_message_for_eager_session_save(
             s,
             msg,
             attachments,
             s.pending_started_at,
             source=source,
+            completion_context=completion_context,
         )
     s.save()
+    if admission is not None:
+        sidecar_path = getattr(s, "path", None)
+        read_sidecar = getattr(sidecar_path, "read_text", None)
+        if completion_context is not None and not callable(read_sidecar):
+            raise RuntimeError("completion session sidecar is not durable")
+        if callable(read_sidecar):
+            try:
+                # Session.save() fsyncs the temporary payload before atomic
+                # replace.  Completion incorporation additionally flushes the
+                # replaced inode and, where supported, the parent directory so
+                # the subsequent re-open is a cross-process durability barrier
+                # rather than an in-process echo of the Session object.
+                descriptor = os.open(sidecar_path, os.O_RDONLY)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                if os.name != "nt":
+                    directory_descriptor = os.open(sidecar_path.parent, os.O_RDONLY)
+                    try:
+                        os.fsync(directory_descriptor)
+                    finally:
+                        os.close(directory_descriptor)
+                sidecar_text = read_sidecar(encoding="utf-8")
+                if not isinstance(sidecar_text, (str, bytes, bytearray)):
+                    raise TypeError("session sidecar read returned a non-text payload")
+                persisted = json.loads(sidecar_text)
+            except Exception as exc:
+                raise RuntimeError("prepared session sidecar read-back failed") from exc
+            if (
+                str(persisted.get("session_id") or "") != str(s.session_id)
+                or str(persisted.get("active_stream_id") or "") != stream_id
+                or str(persisted.get("pending_user_message") or "") != str(msg)
+            ):
+                raise RuntimeError("prepared session sidecar read-back mismatch")
+            if completion_context is not None and (
+                persisted.get("pending_turn_id") != completion_context.turn_id
+                or persisted.get("pending_completion_key")
+                != completion_context.completion_key
+                or persisted.get("pending_completion_correlation_sha256")
+                != completion_context.correlation_sha256
+            ):
+                raise RuntimeError("prepared completion sidecar identity mismatch")
+    prepared = PreparedChatTurn(
+        session_id=str(s.session_id),
+        stream_id=stream_id,
+        turn_id=(completion_context.turn_id if completion_context is not None else ""),
+        pending_started_at=float(s.pending_started_at),
+        title=str(s.title or ""),
+        admission=admission,
+        completion_context=completion_context,
+    )
+    if defer_journal:
+        return prepared
+    return _append_prepared_chat_turn_journal(
+        s,
+        prepared,
+        msg=msg,
+        attachments=attachments,
+        workspace=workspace,
+        model=model,
+        model_provider=model_provider,
+    )
 
 
 def _is_hidden_empty_session(s) -> bool:
@@ -21603,7 +21842,42 @@ def _is_hidden_empty_session(s) -> bool:
     )
 
 
-def _active_stream_blocks_chat_start(session, stream_id: str | None) -> bool:
+def _self_owned_start_matches(session, stream_id: str | None, admission) -> bool:
+    """Prove that one busy row belongs to this exact in-process admission."""
+    if admission is None or str(stream_id or "") != str(getattr(admission, "stream_id", "")):
+        return False
+    try:
+        from api import config as live_config
+        from api.session_lineage import TurnAdmission, resolve_session_lineage
+
+        if not isinstance(admission, TurnAdmission) or not admission.permit.acquired:
+            return False
+        resolution = resolve_session_lineage(
+            session.session_id,
+            expected_profile=getattr(session, "profile", None),
+        )
+        with live_config.ACTIVE_RUNS_LOCK:
+            row = live_config.ACTIVE_RUNS.get(admission.reservation_id)
+        return bool(
+            isinstance(row, dict)
+            and row.get("admission") is admission
+            and row.get("owner_token") == admission.owner_token
+            and row.get("permit") is admission.permit
+            and row.get("lineage_id") == resolution.root_session_id == admission.root_session_id
+            and row.get("delivery_session_id")
+            == resolution.delivery_session_id
+            == admission.delivery_session_id
+        )
+    except Exception:
+        return False
+
+
+def _active_stream_blocks_chat_start(
+    session,
+    stream_id: str | None,
+    *,
+    admission=None,
+) -> bool:
     """Return whether an active_stream_id still owns this session's next turn.
 
     ``active_stream_id`` is written before the SSE channel is registered, so a
@@ -21613,13 +21887,19 @@ def _active_stream_blocks_chat_start(session, stream_id: str | None) -> bool:
     """
     if not stream_id:
         return False
+    if _self_owned_start_matches(session, stream_id, admission):
+        return False
     with STREAMS_LOCK:
         if stream_id in STREAMS:
             return True
     try:
         from api import config as _live_config
         with _live_config.ACTIVE_RUNS_LOCK:
-            if stream_id in (_live_config.ACTIVE_RUNS or {}):
+            active_row = (_live_config.ACTIVE_RUNS or {}).get(stream_id)
+            if active_row is not None:
+                # ACTIVE_RUNS rows carry the stable root.  This exact stream-id
+                # lookup is already sufficient to block, and no timestamp can
+                # release that worker-owned lifecycle row.
                 return True
     except Exception:
         pass
@@ -21638,99 +21918,107 @@ def _active_stream_blocks_chat_start(session, stream_id: str | None) -> bool:
     return False
 
 
-def _active_run_stream_for_session(session_id: str | None) -> str | None:
-    """Return a live worker stream for this session even if sidecar stream id is clear.
+def _active_run_stream_for_session(
+    session_id: str | None,
+    *,
+    admission=None,
+) -> str | None:
+    """Return the worker that owns the requested session's stable lineage root.
 
-    cancel_stream() intentionally clears ``session.active_stream_id`` before the
-    worker thread fully exits so Stop remains responsive. During that unwind
-    window ACTIVE_RUNS is the worker-lifecycle truth; a successor chat/start for
-    the same session must wait or it can reuse the cached agent while the old
-    interrupt is still landing (#3808).
-
-    Bounded: the post-cancel unwind is short (dominated by the worker finally's
-    ``_ckpt_thread.join(timeout=15)``), and ``unregister_active_run`` runs in that
-    finally, so a healthy worker leaves ACTIVE_RUNS within seconds. A detached /
-    wedged worker that never reaches its finally (e.g. stuck in a provider call,
-    or leaked by SIGKILL without restart) must NOT 409 the session forever — so an
-    entry older than the unwind ceiling (180s) is treated as stale and ignored
-    here. For a phase="cancelling" row the ceiling is anchored on the cancel time
-    (``cancelled_at``), never on the original run start: cancel_stream() removes
-    STREAMS itself, so absence from STREAMS is not worker-death proof, and a
-    long-running turn that was just cancelled must not be reaped (and a successor
-    admitted) while the old worker is still alive (#6623). A legitimately
-    long-running turn keeps ``active_stream_id`` SET and is handled by
-    ``_active_stream_blocks_chat_start`` above; this guard only covers the
-    cleared-stream-id unwind window. (Codex brick-gate hardening, #3822.)
+    Tokenized admissions are authoritative for current workers and are never
+    expired by elapsed time.  A narrow compatibility path retains upstream's
+    cancelled-run cleanup only for legacy, un-tokenized rows after the stream
+    transport is gone; age alone can therefore never retire a current owner.
     """
-    sid = str(session_id or "").strip()
-    if not sid:
+    requested_session_id = str(session_id or "").strip()
+    if not requested_session_id:
         return None
-    ceiling = 180.0  # generous vs the 15s checkpoint-join unwind; finite to avoid permanent-409
-    now = time.time()
     try:
-        from api import config as _live_config
-        # Snapshot the live-worker set BEFORE taking ACTIVE_RUNS_LOCK (sequential,
-        # not nested, so no lock-ordering/deadlock risk). A long turn whose
-        # active_stream_id was already cleared during final writeback can still be
-        # mid-teardown — its STREAMS entry present — past the age ceiling, so age
-        # alone must NOT pop its lifecycle row (health / background-wakeup /
-        # active-agent-cache consumers read ACTIVE_RUNS as worker-lifecycle truth).
-        with _live_config.STREAMS_LOCK:
-            live_stream_ids = set(_live_config.STREAMS.keys())
-        stale_stream_ids = []
-        with _live_config.ACTIVE_RUNS_LOCK:
-            for run_stream_id, raw in list((_live_config.ACTIVE_RUNS or {}).items()):
-                stream_id = str((raw or {}).get("stream_id") or run_stream_id or "").strip()
-                run_sid = str((raw or {}).get("session_id") or "").strip()
-                if run_sid != sid or not stream_id:
-                    continue
+        from api import config as live_config
+        from api.session_lineage import resolve_session_lineage
+
+        try:
+            requested_root = resolve_session_lineage(
+                requested_session_id
+            ).root_session_id
+        except Exception:
+            requested_root = None
+
+        with STREAMS_LOCK:
+            live_stream_ids = set(STREAMS)
+        with live_config.ACTIVE_RUNS_LOCK:
+            active_rows = list((live_config.ACTIVE_RUNS or {}).items())
+        for run_stream_id, raw in active_rows:
+            metadata = raw if isinstance(raw, dict) else {}
+            stream_id = str(
+                metadata.get("stream_id") or run_stream_id or ""
+            ).strip()
+            if not stream_id:
+                continue
+            phase = str(metadata.get("phase") or "")
+            if (
+                metadata.get("admission") is None
+                and phase == "cancelling"
+                and stream_id not in live_stream_ids
+            ):
+                # Compatibility with pre-admission ACTIVE_RUNS rows.  Missing
+                # admission identity + explicit cancellation + absent STREAMS
+                # transport is the stale-owner evidence; the elapsed grace is
+                # only a conservative delay before that legacy cleanup.
                 try:
-                    started_at = float((raw or {}).get("started_at") or 0)
+                    cancel_anchor = float(
+                        metadata.get("cancelled_at")
+                        or metadata.get("started_at")
+                        or 0
+                    )
                 except (TypeError, ValueError):
-                    started_at = 0.0
-                # #6623 re-gate: cancel_stream() removes STREAMS itself, so a
-                # missing SSE channel is NOT proof that a cancelled worker is
-                # dead. For a phase="cancelling" row the unwind ceiling must be
-                # anchored on the CANCEL time (cancelled_at, started_at as a
-                # legacy fallback), never on the original run start: a turn that
-                # ran for minutes and was just cancelled would otherwise be
-                # reaped the instant its started_at crosses the ceiling and a
-                # successor admitted while the old worker is still alive. A
-                # recently cancelled run therefore keeps blocking a successor
-                # (this function returns its stream id) until the worker either
-                # unwinds (its finally unregisters the row within seconds) or
-                # the cancel itself has been outstanding past the ceiling.
-                _run_phase = str((raw or {}).get("phase") or "").strip()
-                if _run_phase == "cancelling":
-                    try:
-                        _age_anchor = float(
-                            (raw or {}).get("cancelled_at") or started_at or 0
-                        )
-                    except (TypeError, ValueError):
-                        _age_anchor = started_at
-                else:
-                    _age_anchor = started_at
-                # Past the unwind ceiling: never block a successor on it (the
-                # anti-permanent-409 guarantee, #3822). Additionally reconcile the
-                # zombie out of ACTIVE_RUNS so health/recovery polling stops seeing a
-                # half-alive run — but ONLY when the worker is truly gone from
-                # STREAMS, so a still-live / still-tearing-down worker keeps its
-                # lifecycle row. Pop by the real dict key. (Codex gate, #4492)
-                if _age_anchor and (now - _age_anchor) > ceiling:
-                    if run_stream_id not in live_stream_ids and stream_id not in live_stream_ids:
-                        stale_stream_ids.append(run_stream_id)
+                    cancel_anchor = 0.0
+                if cancel_anchor and time.time() - cancel_anchor >= 180.0:
+                    live_config.unregister_active_run(run_stream_id)
+                    live_config.unregister_stream_owner(stream_id)
                     continue
+            row_root = str(metadata.get("lineage_id") or "").strip()
+            row_session_id = str(
+                metadata.get("delivery_session_id")
+                or metadata.get("session_id")
+                or ""
+            ).strip()
+            try:
+                verified_row_root = resolve_session_lineage(
+                    row_session_id
+                ).root_session_id
+            except Exception:
+                # An unresolved active owner is not evidence of idleness.  Keep
+                # it foreign/busy rather than using age or cleanup as authority.
                 return stream_id
-            for stale_stream_id in stale_stream_ids:
-                (_live_config.ACTIVE_RUNS or {}).pop(stale_stream_id, None)
-                # The zombie run is pruned directly here (not via the normal teardown
-                # finally / unregister_active_run), so release its stream-owner entry too
-                # or STREAM_SESSION_OWNERS leaks for every reconciled zombie. (#5198 gate)
-                unregister_stream_owner(stale_stream_id)
+            admission_permit = getattr(admission, "permit", None)
+            if (
+                admission is not None
+                and phase != "cancelling"
+                and metadata.get("admission") is admission
+                and metadata.get("owner_token") == getattr(admission, "owner_token", None)
+                and metadata.get("permit") is admission_permit
+                and bool(getattr(admission_permit, "acquired", False))
+                and stream_id
+                == str(getattr(admission, "stream_id", "") or "")
+                == str(getattr(admission, "reservation_id", "") or "")
+                and row_root
+                == verified_row_root
+                == requested_root
+                == str(getattr(admission, "root_session_id", "") or "")
+                and row_session_id
+                == str(getattr(admission, "delivery_session_id", "") or "")
+            ):
+                continue
+            if row_root and row_root != verified_row_root:
+                return stream_id
+            if requested_root is None:
+                return stream_id
+            if verified_row_root == requested_root:
+                return stream_id
     except Exception:
         return None
     return None
-
 
 def _agent_runtime_barrier_response(
     *,
@@ -21771,6 +22059,8 @@ def _start_chat_stream_for_session(
     source: str = "webui",
     moa_config=None,
     external_runtime_owned: bool | None = None,
+    completion_context=None,
+    completion_acceptance=None,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn."""
     if external_runtime_owned is None:
@@ -21789,16 +22079,37 @@ def _start_chat_stream_for_session(
     diag.stage("active_stream_check") if diag else None
     current_stream_id = getattr(s, "active_stream_id", None)
     if current_stream_id:
-        if _active_stream_blocks_chat_start(s, current_stream_id):
+        with STREAMS_LOCK:
+            completion_stream_is_live = current_stream_id in STREAMS
+        try:
+            from api import config as live_config
+
+            with live_config.ACTIVE_RUNS_LOCK:
+                completion_stream_is_live = bool(
+                    completion_stream_is_live
+                    or current_stream_id in (live_config.ACTIVE_RUNS or {})
+                )
+        except Exception:
+            completion_stream_is_live = True
+        recovering_same_completion = bool(
+            completion_context is not None
+            and getattr(s, "pending_completion_key", None)
+            == getattr(completion_context, "completion_key", None)
+            and not completion_stream_is_live
+        )
+        if recovering_same_completion:
+            _clear_stale_stream_state(s)
+        elif _active_stream_blocks_chat_start(s, current_stream_id):
             diag.stage("response_write") if diag else None
             return {
                 "error": "session already has an active stream",
                 "active_stream_id": current_stream_id,
                 "_status": 409,
             }
-        # Stale stream id from a previous run; clear and continue.
-        diag.stage("stale_stream_cleanup") if diag else None
-        _clear_stale_stream_state(s)
+        else:
+            # Stale stream id from a previous run; clear and continue.
+            diag.stage("stale_stream_cleanup") if diag else None
+            _clear_stale_stream_state(s)
 
     # #1932: check if this session has a pending goal continuation flag.
     # The streaming hook sets PENDING_GOAL_CONTINUATION when goal_continue fires,
@@ -21812,16 +22123,78 @@ def _start_chat_stream_for_session(
     # discard it atomically here. Mirrors the goal_continue pattern (#1932).
     # The marker is server-internal telemetry; the actual wakeup is delivered
     # either server-side (Option Z) or via the PR #2279 next-turn drain.
-    if s.session_id in PENDING_BG_TASK_COMPLETIONS:
-        PENDING_BG_TASK_COMPLETIONS.discard(s.session_id)
+    try:
+        from api.session_lineage import resolve_session_lineage
+
+        pending_completion_key = resolve_session_lineage(
+            s.session_id,
+            expected_profile=getattr(s, "profile", None),
+        ).root_session_id
+    except Exception:
+        pending_completion_key = None
+    if pending_completion_key in PENDING_BG_TASK_COMPLETIONS:
+        PENDING_BG_TASK_COMPLETIONS.discard(pending_completion_key)
+
+    completion_claim = None
+    if completion_context is not None:
+        from api.session_lineage import read_completion_delivery_receipt
+
+        try:
+            existing_receipt = read_completion_delivery_receipt(completion_context)
+        except Exception:
+            logger.exception("failed to inspect durable completion delivery")
+            return {
+                "error": "completion delivery receipt unavailable",
+                "type": "completion_delivery_unavailable",
+                "retryable": True,
+                "_status": 503,
+            }
+        if (
+            existing_receipt is not None
+            and existing_receipt.get("state") == "incorporated"
+            and existing_receipt.get("execution_state") != "pending"
+        ):
+            try:
+                if callable(completion_acceptance):
+                    completion_acceptance()
+            except Exception:
+                logger.exception("failed to acknowledge incorporated completion")
+                return {
+                    "error": "completion acknowledgement failed",
+                    "type": "completion_ack_failed",
+                    "retryable": True,
+                    "_status": 503,
+                }
+            return {
+                "session_id": s.session_id,
+                "turn_id": completion_context.turn_id,
+                "completion_incorporated": True,
+                "completion_duplicate": True,
+                "_status": 200,
+            }
+
+    def release_completion_claim() -> None:
+        if completion_claim is not None:
+            from api.session_lineage import release_completion_delivery_claim
+
+            release_completion_delivery_claim(completion_claim)
+
+    def preserve_pending_completion_replay() -> bool:
+        return bool(
+            completion_claim is not None
+            and getattr(completion_claim, "state", None) == "incorporated"
+        )
 
     session_lock = _get_session_agent_lock(s.session_id)
     diag.stage("session_lock_wait") if diag else None
+    admission = None
+    prepared = None
     while True:
         with session_lock:
             locked_stream_id = getattr(s, "active_stream_id", None)
             if locked_stream_id:
                 if _active_stream_blocks_chat_start(s, locked_stream_id):
+                    release_completion_claim()
                     diag.stage("response_write") if diag else None
                     return {
                         "error": "session already has an active stream",
@@ -21832,6 +22205,7 @@ def _start_chat_stream_for_session(
             else:
                 blocking_run_stream_id = _active_run_stream_for_session(s.session_id)
                 if blocking_run_stream_id:
+                    release_completion_claim()
                     diag.stage("response_write") if diag else None
                     return {
                         "error": "session already has an active stream",
@@ -21840,23 +22214,118 @@ def _start_chat_stream_for_session(
                     }
                 needs_stale_cleanup = False
                 stream_id = uuid.uuid4().hex
+                if completion_context is not None:
+                    stream_id = str(
+                        getattr(completion_context, "correlation_sha256", "")
+                    )[:32]
                 diag.stage("save_pending_state") if diag else None
                 was_hidden_empty_session = _is_hidden_empty_session(s)
-                _prepare_chat_start_session_for_stream(
-                    s,
-                    msg=msg,
-                    attachments=attachments,
-                    workspace=workspace,
-                    model=model,
-                    model_provider=model_provider,
-                    stream_id=stream_id,
-                    source=source,
-                )
+                try:
+                    admission = _reserve_turn_admission(
+                        s,
+                        stream_id,
+                        expected_delivery_session_id=(
+                            getattr(completion_context, "delivery_session_id", None)
+                            if completion_context is not None
+                            else None
+                        ),
+                    )
+                    if completion_context is not None:
+                        from api.session_lineage import (
+                            CompletionDeliveryBusyError,
+                            claim_completion_delivery,
+                        )
+
+                        try:
+                            completion_claim = claim_completion_delivery(
+                                completion_context,
+                                reservation_id=stream_id,
+                                resume_incorporated=True,
+                            )
+                        except CompletionDeliveryBusyError:
+                            _abort_prepared_chat_turn(s, stream_id, admission)
+                            return {
+                                "error": "completion delivery is already being incorporated",
+                                "type": "completion_delivery_busy",
+                                "retryable": True,
+                                "_status": 409,
+                            }
+                        except Exception:
+                            logger.exception("failed to claim durable completion delivery")
+                            _abort_prepared_chat_turn(s, stream_id, admission)
+                            return {
+                                "error": "completion delivery receipt unavailable",
+                                "type": "completion_delivery_unavailable",
+                                "retryable": True,
+                                "_status": 503,
+                            }
+                        if completion_claim is None:
+                            _abort_prepared_chat_turn(s, stream_id, admission)
+                            try:
+                                if callable(completion_acceptance):
+                                    completion_acceptance()
+                            except Exception:
+                                logger.exception("failed to acknowledge incorporated completion")
+                                return {
+                                    "error": "completion acknowledgement failed",
+                                    "type": "completion_ack_failed",
+                                    "retryable": True,
+                                    "_status": 503,
+                                }
+                            return {
+                                "session_id": s.session_id,
+                                "turn_id": completion_context.turn_id,
+                                "completion_incorporated": True,
+                                "completion_duplicate": True,
+                                "_status": 200,
+                            }
+                    prepared = _prepare_chat_start_session_for_stream(
+                        s,
+                        msg=msg,
+                        attachments=attachments,
+                        workspace=workspace,
+                        model=model,
+                        model_provider=model_provider,
+                        stream_id=stream_id,
+                        source=source,
+                        admission=admission,
+                        defer_journal=True,
+                        completion_context=completion_context,
+                    )
+                except Exception as exc:
+                    _abort_prepared_chat_turn(
+                        s,
+                        stream_id,
+                        admission,
+                        preserve_pending_completion_replay=(
+                            preserve_pending_completion_replay()
+                        ),
+                    )
+                    from api.session_lineage import (
+                        CompletionDeliveryRestartError,
+                        LineageTurnBusyError,
+                    )
+
+                    if isinstance(exc, CompletionDeliveryRestartError):
+                        release_completion_claim()
+                        raise
+
+                    if isinstance(exc, LineageTurnBusyError):
+                        release_completion_claim()
+                        return {
+                            "error": "session already has an active stream",
+                            "active_stream_id": stream_id,
+                            "_status": 409,
+                        }
+                    logger.exception("failed to prepare admitted turn %s", stream_id)
+                    release_completion_claim()
+                    return {"error": "failed to prepare chat turn", "_status": 500}
                 break
         if needs_stale_cleanup:
             diag.stage("stale_stream_cleanup") if diag else None
             cleared = _clear_stale_stream_state(s)
             if not cleared and getattr(s, "active_stream_id", None):
+                release_completion_claim()
                 diag.stage("response_write") if diag else None
                 return {
                     "error": "session already has an active stream",
@@ -21870,73 +22339,406 @@ def _start_chat_stream_for_session(
             session_id=getattr(s, "session_id", None),
         )
     diag.stage("turn_journal_submitted") if diag else None
-    journal_event = {}
     try:
-        from api.turn_journal import append_turn_journal_event
-        journal_event = append_turn_journal_event(
-            s.session_id,
-            {
-                "event": "submitted",
-                "stream_id": stream_id,
-                "role": "user",
-                "content": msg,
-                "attachments": attachments,
-                "workspace": workspace,
-                "model": model,
-                "model_provider": model_provider,
-                "created_at": s.pending_started_at,
-            },
+        prepared = _append_prepared_chat_turn_journal(
+            s,
+            prepared,
+            msg=msg,
+            attachments=attachments,
+            workspace=workspace,
+            model=model,
+            model_provider=model_provider,
         )
     except Exception:
-        logger.warning("Failed to append submitted turn journal event", exc_info=True)
+        _abort_prepared_chat_turn(
+            s,
+            stream_id,
+            admission,
+            preserve_pending_completion_replay=preserve_pending_completion_replay(),
+        )
+        release_completion_claim()
+        return {"error": "failed to prepare chat turn", "_status": 500}
     diag.stage("set_last_workspace") if diag else None
     set_last_workspace(workspace)
     diag.stage("stream_registration") if diag else None
     stream = create_stream_channel()
-    register_stream_owner(stream_id, s.session_id)
     with STREAMS_LOCK:
         STREAMS[stream_id] = stream
     # #1932: mark stream as goal-related so the streaming hook evaluates the goal.
     if goal_related:
         STREAM_GOAL_RELATED[stream_id] = True
     diag.stage("worker_thread_start") if diag else None
-    worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
-    worker_kwargs = {"model_provider": model_provider, "goal_related": goal_related}
+    worker_target = (
+        _run_admitted_gateway_chat_streaming
+        if backend_is_gateway
+        else _run_admitted_agent_streaming
+    )
+    worker_kwargs = {
+        "admission": admission,
+        "completion_context": completion_context,
+        "model_provider": model_provider,
+        "goal_related": goal_related,
+    }
     if moa_config and not backend_is_gateway:
         worker_kwargs["moa_config"] = moa_config
     if backend_is_gateway:
         from api.gateway_chat import _mark_gateway_run_starting
         _mark_gateway_run_starting(stream_id)
-    thr = threading.Thread(
-        target=worker_target,
-        args=(s.session_id, msg, model, workspace, stream_id, attachments),
-        kwargs=worker_kwargs,
-        daemon=True,
-    )
     try:
+        thr = threading.Thread(
+            target=worker_target,
+            args=(s.session_id, msg, model, workspace, stream_id, attachments),
+            kwargs=worker_kwargs,
+            daemon=True,
+        )
         thr.start()
     except Exception:
-        if backend_is_gateway:
-            try:
-                from api.gateway_chat import _finish_gateway_run_starting
-                _finish_gateway_run_starting(stream_id)
-                from api.gateway_chat import _clear_gateway_run_starting
-                _clear_gateway_run_starting(stream_id)
-            except Exception:
-                logger.debug("Failed to record gateway run-start failure for stream %s", stream_id, exc_info=True)
+        _abort_prepared_chat_turn(
+            s,
+            stream_id,
+            admission,
+            gateway=backend_is_gateway,
+            preserve_pending_completion_replay=preserve_pending_completion_replay(),
+        )
+        release_completion_claim()
         raise
+    if not admission.admitted.wait(timeout=5.0):
+        _abort_prepared_chat_turn(
+            s,
+            stream_id,
+            admission,
+            gateway=backend_is_gateway,
+            preserve_pending_completion_replay=preserve_pending_completion_replay(),
+        )
+        release_completion_claim()
+        return {"error": "agent worker failed to park", "_status": 500}
+    if admission.abort.is_set():
+        _abort_prepared_chat_turn(
+            s,
+            stream_id,
+            admission,
+            gateway=backend_is_gateway,
+            preserve_pending_completion_replay=preserve_pending_completion_replay(),
+        )
+        release_completion_claim()
+        return {"error": "agent worker aborted before gate", "_status": 500}
+    if completion_claim is not None:
+        try:
+            from api.session_lineage import (
+                mark_completion_incorporated,
+                verify_completion_incorporation_artifacts,
+            )
+
+            verify_completion_incorporation_artifacts(
+                completion_claim,
+                turn_admission=admission,
+                message=msg,
+            )
+            if completion_claim.state == "accepted":
+                mark_completion_incorporated(
+                    completion_claim,
+                    execution_pending=True,
+                )
+            elif completion_claim.state != "incorporated":
+                raise RuntimeError("completion claim is not resumable")
+            if callable(completion_acceptance):
+                completion_acceptance()
+        except Exception:
+            logger.exception("completion incorporation failed before execution gate")
+            _abort_prepared_chat_turn(
+                s,
+                stream_id,
+                admission,
+                gateway=backend_is_gateway,
+                preserve_pending_completion_replay=True,
+            )
+            release_completion_claim()
+            return {
+                "error": "completion incorporation failed",
+                "type": "completion_incorporation_failed",
+                "retryable": True,
+                "_status": 503,
+            }
+        release_completion_claim()
+    admission.gate.set()
     response = {
         "stream_id": stream_id,
         "session_id": s.session_id,
-        "pending_started_at": s.pending_started_at,
-        "turn_id": journal_event.get("turn_id"),
-        "title": s.title,
+        "pending_started_at": getattr(prepared, "pending_started_at", s.pending_started_at),
+        "turn_id": getattr(prepared, "turn_id", None),
+        "title": getattr(prepared, "title", s.title),
     }
+    if completion_context is not None:
+        response["completion_incorporated"] = True
     if normalized_model:
         response["effective_model"] = model
     if model_provider:
         response["effective_model_provider"] = model_provider
     return response
+
+
+def _append_prepared_chat_turn_journal(
+    session,
+    prepared: PreparedChatTurn,
+    *,
+    msg: str,
+    attachments,
+    workspace: str,
+    model: str,
+    model_provider,
+) -> PreparedChatTurn:
+    """Append and re-open the exact submitted event after session mutation unlocks."""
+    try:
+        from api.turn_journal import (
+            append_turn_journal_event,
+            ensure_submitted_turn_journal_event,
+            read_turn_journal_event_bounded,
+        )
+
+        event = {
+            "event": "submitted",
+            "stream_id": prepared.stream_id,
+            "role": "user",
+            "content": msg,
+            "attachments": attachments,
+            "workspace": workspace,
+            "model": model,
+            "model_provider": model_provider,
+            "source": getattr(session, "pending_user_source", None) or "webui",
+            "created_at": prepared.pending_started_at,
+        }
+        completion_context = prepared.completion_context
+        if completion_context is not None:
+            from api.session_lineage import completion_delivery_metadata
+
+            event.update(
+                {
+                    "turn_id": completion_context.turn_id,
+                    "completion_key": completion_context.completion_key,
+                    "completion_correlation_sha256": completion_context.correlation_sha256,
+                    "_completion_delivery": completion_delivery_metadata(
+                        completion_context
+                    ),
+                }
+            )
+            journal_event = ensure_submitted_turn_journal_event(
+                session.session_id,
+                event,
+            )
+        else:
+            journal_event = append_turn_journal_event(session.session_id, event)
+        turn_id = str(journal_event.get("turn_id") or "").strip()
+        if not turn_id:
+            raise RuntimeError("submitted turn journal write returned no turn_id")
+        durable_event = journal_event
+        if completion_context is None:
+            durable_event = read_turn_journal_event_bounded(
+                session.session_id,
+                turn_id=turn_id,
+                stream_id=prepared.stream_id,
+            )
+        if not durable_event or str(durable_event.get("event") or "") != "submitted":
+            raise RuntimeError("prepared turn journal read-back mismatch")
+    except Exception:
+        logger.warning("Failed to append submitted turn journal event", exc_info=True)
+        raise
+    return PreparedChatTurn(
+        session_id=prepared.session_id,
+        stream_id=prepared.stream_id,
+        turn_id=turn_id,
+        pending_started_at=prepared.pending_started_at,
+        title=prepared.title,
+        admission=prepared.admission,
+        completion_context=prepared.completion_context,
+    )
+
+
+def recover_accepted_completion_delivery(completion_context) -> bool:
+    """Repair one accepted receipt into durable source rows without execution."""
+    from api.session_lineage import (
+        claim_completion_delivery,
+        mark_completion_incorporated,
+        release_completion_delivery_claim,
+        release_turn_admission,
+        verify_completion_incorporation_artifacts,
+    )
+
+    claim = claim_completion_delivery(completion_context)
+    if claim is None:
+        return False
+    admission = None
+    session = None
+    stream_id = str(completion_context.correlation_sha256)[:32]
+    try:
+        # Canonical get_session() may run stale-pending repair as a read-side
+        # effect.  An accepted receipt is the authority for this recovery pass,
+        # so load its durable checkpoint without clearing the prompt first.
+        session = Session.load(completion_context.delivery_session_id)
+        if session is None:
+            raise KeyError(completion_context.delivery_session_id)
+        recovery_message = str(getattr(session, "pending_user_message", "") or "")
+        recovery_attachments = list(getattr(session, "pending_attachments", None) or [])
+        recovery_source = str(
+            getattr(session, "pending_user_source", "") or "process_wakeup"
+        )
+        if not recovery_message:
+            raise RuntimeError("accepted completion has no recoverable source prompt")
+        session_lock = _get_session_agent_lock(session.session_id)
+        with session_lock:
+            active_stream_id = getattr(session, "active_stream_id", None)
+            if active_stream_id:
+                with STREAMS_LOCK:
+                    active_owner = active_stream_id in STREAMS
+                from api import config as live_config
+
+                with live_config.ACTIVE_RUNS_LOCK:
+                    active_owner = bool(
+                        active_owner or active_stream_id in (live_config.ACTIVE_RUNS or {})
+                    )
+                if (
+                    getattr(session, "pending_completion_key", None)
+                    != completion_context.completion_key
+                    or active_owner
+                ):
+                    return False
+                # We already hold the non-reentrant physical session lock and
+                # proved the persisted stream has no live owner.  Clear only
+                # that stale owner marker here; the accepted receipt still
+                # owns the pending prompt that recovery must incorporate.
+                session.active_stream_id = None
+            admission = _reserve_turn_admission(session, stream_id)
+            prepared = _prepare_chat_start_session_for_stream(
+                session,
+                msg=recovery_message,
+                attachments=recovery_attachments,
+                workspace=str(getattr(session, "workspace", "") or ""),
+                model=str(getattr(session, "model", "") or ""),
+                model_provider=getattr(session, "model_provider", None),
+                stream_id=stream_id,
+                source=recovery_source,
+                admission=admission,
+                defer_journal=True,
+                completion_context=completion_context,
+            )
+        prepared = _append_prepared_chat_turn_journal(
+            session,
+            prepared,
+            msg=recovery_message,
+            attachments=recovery_attachments,
+            workspace=str(session.workspace or ""),
+            model=str(session.model or ""),
+            model_provider=session.model_provider,
+        )
+        admission.admitted.set()
+        verify_completion_incorporation_artifacts(
+            claim,
+            turn_admission=admission,
+            message=recovery_message,
+        )
+        # Accepted-only startup repair never owned a parked provider worker.
+        # Preserve its historical no-replay terminality rather than exposing it
+        # as an execution-pending receipt.
+        mark_completion_incorporated(claim, execution_pending=False)
+        with session_lock:
+            if session.active_stream_id == stream_id:
+                session.active_stream_id = None
+            session.pending_user_message = None
+            session.pending_attachments = []
+            session.pending_started_at = None
+            session.pending_user_source = None
+            session.save()
+            with LOCK:
+                SESSIONS[session.session_id] = session
+                SESSIONS.move_to_end(session.session_id)
+        release_turn_admission(admission)
+        admission = None
+        return True
+    except Exception:
+        if admission is not None and session is not None:
+            try:
+                _abort_prepared_chat_turn(session, stream_id, admission)
+            except Exception:
+                logger.debug("accepted completion recovery rollback failed", exc_info=True)
+        raise
+    finally:
+        release_completion_delivery_claim(claim)
+
+
+def recover_incorporated_completion_delivery(completion_context) -> bool:
+    """Restart one exactly checkpointed worker that never crossed its gate."""
+    from api.session_lineage import (
+        CompletionDeliveryRestartError,
+        read_completion_delivery_receipt,
+    )
+
+    receipt = read_completion_delivery_receipt(completion_context)
+    if (
+        receipt is None
+        or receipt.get("state") != "incorporated"
+        or receipt.get("execution_state") != "pending"
+    ):
+        return False
+    session = Session.load(completion_context.delivery_session_id)
+    if session is None:
+        raise KeyError(completion_context.delivery_session_id)
+    recovery_message = str(getattr(session, "pending_user_message", "") or "")
+    recovery_attachments = list(getattr(session, "pending_attachments", None) or [])
+    recovery_source = str(
+        getattr(session, "pending_user_source", "") or "process_wakeup"
+    )
+    if not recovery_message:
+        raise CompletionDeliveryRestartError(
+            "source_prompt_missing",
+            "incorporated completion has no recoverable source prompt",
+        )
+    session_lock = _get_session_agent_lock(session.session_id)
+    with session_lock:
+        active_stream_id = getattr(session, "active_stream_id", None)
+        if active_stream_id:
+            with STREAMS_LOCK:
+                active_owner = active_stream_id in STREAMS
+            from api import config as live_config
+
+            with live_config.ACTIVE_RUNS_LOCK:
+                active_owner = bool(
+                    active_owner or active_stream_id in (live_config.ACTIVE_RUNS or {})
+                )
+            if active_owner:
+                return False
+            if active_stream_id != completion_context.correlation_sha256[:32]:
+                raise CompletionDeliveryRestartError(
+                    "source_identity_mismatch",
+                    "incorporated completion replay stream identity changed",
+                )
+            # The pending receipt plus exact sidecar identity supersedes generic
+            # young-pending grace after a fresh process has no live owner.
+            session.active_stream_id = None
+        if (
+            getattr(session, "pending_turn_id", None) != completion_context.turn_id
+            or getattr(session, "pending_completion_key", None)
+            != completion_context.completion_key
+            or getattr(session, "pending_completion_correlation_sha256", None)
+            != completion_context.correlation_sha256
+        ):
+            raise CompletionDeliveryRestartError(
+                "source_identity_mismatch",
+                "incorporated completion replay identity changed",
+            )
+    result = _start_chat_stream_for_session(
+        session,
+        msg=recovery_message,
+        attachments=recovery_attachments,
+        workspace=str(getattr(session, "workspace", "") or ""),
+        model=str(getattr(session, "model", "") or ""),
+        model_provider=getattr(session, "model_provider", None),
+        source=recovery_source,
+        completion_context=completion_context,
+    )
+    return bool(
+        isinstance(result, dict)
+        and int(result.get("_status") or 200) == 200
+        and not result.get("completion_duplicate")
+    )
 
 
 def _runtime_runner_client_factory():
@@ -22005,6 +22807,8 @@ def _start_run(
     diag=None,
     moa_config=None,
     gateway_chat_enabled: bool | None = None,
+    completion_context=None,
+    completion_acceptance=None,
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
 
@@ -22032,6 +22836,14 @@ def _start_run(
         runtime_adapter_runner_enabled,
     )
 
+    if completion_context is not None and runtime_adapter_runner_enabled():
+        return {
+            "error": "runner-local does not support durable completion incorporation",
+            "type": "completion_runner_unsupported",
+            "retryable": True,
+            "_status": 503,
+        }
+
     if runtime_adapter_enabled() or runtime_adapter_runner_enabled():
         def _legacy_start_run(request: StartRunRequest) -> dict:
             return _start_chat_stream_for_session(
@@ -22046,6 +22858,8 @@ def _start_run(
                 source=request.source or source,
                 moa_config=moa_config,
                 external_runtime_owned=gateway_chat_enabled,
+                completion_context=completion_context,
+                completion_acceptance=completion_acceptance,
             )
 
         def _legacy_adapter_factory():
@@ -22087,6 +22901,8 @@ def _start_run(
         source=source,
         moa_config=moa_config,
         external_runtime_owned=gateway_chat_enabled,
+        completion_context=completion_context,
+        completion_acceptance=completion_acceptance,
     )
 
 
@@ -22146,6 +22962,8 @@ def start_session_turn(
     message: str,
     *,
     source: str = "process_wakeup",
+    completion_context=None,
+    completion_acceptance=None,
 ):
     """Start a server-side agent turn for ``session_id`` with ``message``.
 
@@ -22337,6 +23155,8 @@ def start_session_turn(
         normalized_model=normalized_model,
         source=turn_source,
         route="start_session_turn",
+        completion_context=completion_context,
+        completion_acceptance=completion_acceptance,
     )
 
     # ── Defect B: live-view of server-initiated turns ──────────────────────
@@ -22681,6 +23501,24 @@ def _handle_chat_start(handler, body, diag=None):
             require(body, "session_id")
         except ValueError as e:
             return bad(handler, str(e))
+        internal_fields = {
+            "owner_token",
+            "reservation_id",
+            "root_session_id",
+            "delivery_session_id",
+            "admission_signal",
+            "completion_key",
+            "_completion_context",
+            "admission",
+        }
+        supplied_internal_fields = sorted(internal_fields.intersection(body))
+        if supplied_internal_fields:
+            return bad(
+                handler,
+                "server-owned turn admission fields are not accepted: "
+                + ", ".join(supplied_internal_fields),
+                400,
+            )
         # Reject a stale local Agent runtime before materialising, claiming, or
         # mutating any session state. Gateway-backed turns run in the gateway's
         # process and do not depend on this WebUI process's imported checkout.

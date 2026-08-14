@@ -239,9 +239,9 @@ Called after run_conversation() completes to set the session title retroactively
 
 This is the most architecturally interesting part. Two endpoints cooperate:
 
-    POST /api/chat/start     Receives the user message. Creates a queue.Queue, stores it
-                             in STREAMS[stream_id], spawns a daemon thread running
-                             _run_agent_streaming(), returns {stream_id} immediately.
+    POST /api/chat/start     Receives the user message, reserves its stable lineage,
+                             durably prepares one turn, parks an admitted backend
+                             wrapper, then opens its gate and returns {stream_id}.
 
     GET  /api/chat/stream    Long-lived SSE connection. Reads from STREAMS[stream_id]
                              and forwards events to the browser until 'done' or 'error'.
@@ -268,17 +268,142 @@ The SSE handler loop:
     - On 'done' or 'error' event: breaks the loop and returns
     - Catches BrokenPipeError and ConnectionResetError silently (browser disconnected)
 
-Stream cleanup: _run_agent_streaming() pops its stream_id from STREAMS in a finally
-block. If the browser disconnects mid-stream, the daemon thread runs to completion and
-then cleans up. The queue fills and the put_nowait() calls fail silently (queue.Full
-is caught).
+Stream cleanup: the backend core pops its stream_id from STREAMS in a finally block,
+while its admitted wrapper token-removes the active-run reservation and releases the
+lineage permit and stream owner on every exit. If the browser disconnects mid-stream,
+the daemon thread still runs to completion and performs the same cleanup. The queue
+fills and the put_nowait() calls fail silently (queue.Full is caught).
 
 Fallback sync endpoint: POST /api/chat still exists and holds the connection open until
 the agent finishes. The frontend never uses it but it can be useful for debugging.
 
-### 4.4 Agent Invocation (_run_agent_streaming)
+### 4.3.1 Stable Session Lineage Ownership
 
-    def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id):
+`api/session_lineage.py` is the single server-side authority for compression
+lineage identity. It verifies same-profile sidecar edges and resolves each
+logical conversation to two deliberately different values:
+
+- `root_session_id` is the oldest verified compression segment. It is the sole
+  identity for active-run busy checks, deferred wakeup claim/drain state, and
+  cross-process turn permits.
+- `delivery_session_id` is the newest verified committed continuation. It is a
+  delivery target only and must be re-resolved immediately before a wakeup is
+  started.
+
+Compression publishes a durable `pending` transition before moving the live
+session/cache/lock aliases and changes it to `committed` only after the new tip
+sidecar is saved. Pending transitions, forks, cycles, cross-profile edges,
+missing traversed sidecars, and chains over 20 hops fail closed. Permit files
+are hash-named, never unlinked, and held with nonblocking `flock` on POSIX or
+`msvcrt.locking` on Windows. Elapsed time, PID contents, and lock-file age are
+diagnostics only; they never establish or release turn ownership. The existing
+weak `_alias_session_agent_lock` remains the in-process mutation lock across a
+compression rotation and is not replaced by the lineage permit.
+
+### 4.3.2 Admitted and Prepared Turn Ownership
+
+Every WebUI-owned local or gateway turn has one immutable, in-process
+`TurnAdmission`. Its reservation ID equals the stream ID, while its opaque owner
+token, stable root, delivery tip, held permit, and `admitted`/`gate`/`abort`
+events never enter HTTP JSON, journal metadata, or a context variable. Browser
+chat-start bodies that try to supply internal ownership field names are rejected.
+
+The lifecycle is deliberately ordered:
+
+1. The route resolves the stable lineage, acquires its nonblocking permit, and
+   publishes one immutable `ACTIVE_RUNS` reservation plus stream owner.
+2. `_prepare_chat_start_session_for_stream` is the sole pending/eager user-turn
+   writer. It saves the sidecar, appends exactly one ordinary `submitted` turn
+   event, reads both durable stores back, and returns a frozen `PreparedChatTurn`.
+3. The route creates the stream channel and starts either
+   `_run_admitted_agent_streaming` or
+   `_run_admitted_gateway_chat_streaming`. The wrapper exact-owner merges worker
+   metadata, sets `admitted`, and parks until the route opens `gate`.
+4. The wrapper calls the corresponding lower-level `*_core` exactly once. Its
+   finalizer runs any completion observer, token-removes the reservation, and
+   releases the permit and stream owner outside `ACTIVE_RUNS_LOCK`.
+
+Thread construction/start, park timeout, preparation/read-back, and hidden-task
+tracker failures set `abort` and retire the row, permit, owner, channel, pending
+state, and hidden sidecar exactly once. A reconnect to an existing live stream
+only reattaches to that stream; it never reserves a second turn. BTW verifies the
+parent lineage before copying context and then admits its independent hidden
+root; background work likewise admits only its hidden root so the parent may run
+in parallel.
+
+### 4.3.3 Durable Completion Incorporation
+
+Process and async-delegation wakeups share one prompt-free
+`CompletionDeliveryContext`. The namespaced completion key determines the
+correlation hash and turn ID; the verified oldest lineage segment is immutable
+origin/ownership identity, while the verified current tip is the only delivery
+target. A single private receipt document lives at
+`SESSION_DIR/_completion_delivery_receipts.json` (schema version 2).
+
+Before completion content can reach a backend, the route acquires the lineage
+permit and a per-completion claim, writes an `accepted` receipt containing only
+identity/owner/reservation metadata, then uses the ordinary prepared-turn writer.
+The prepared sidecar is fsynced and re-opened, the deterministic `submitted`
+journal event is fsynced and re-read, and the admitted worker remains parked.
+Only an exact owner-token/attempt/reservation CAS may advance the receipt to
+`incorporated`. Durable process-consumed/async-ACK state and the worker gate
+follow that CAS; neither is allowed before it.
+
+An `accepted` receipt can be repaired once from its exact pending sidecar and
+journal checkpoint without starting a worker. Incorporation adds a durable
+execution fence: only `incorporated/pending` may resume after restart, and only
+from the exact pending prompt, attachments, completion identity, correlation,
+and delivery-tip checkpoint. A restart claim rotates only owner, attempt, and
+reservation fields while retaining `incorporated/pending`; it never downgrades
+the receipt to `accepted`. The route first calls `resolve_session_lineage()`,
+which may repair `recoverable -> committed` transition evidence before permit
+acquisition. It then checks the expected tip, acquires the stable-root permit,
+and re-resolves before completion-delivery receipt or replay-sidecar mutation
+and before publishing an active run. A moved tip therefore fails with
+`delivery_tip_moved` inside that completion-delivery boundary; the initial
+lineage resolution is not claimed to be mutation-free.
+`started` is terminal no-replay evidence even when
+the process died before recording `delivered`. A post-incorporation acceptance
+failure releases all live stream/admission owners but retains that exact durable
+replay input.
+
+Malformed, duplicate, cross-lineage, moved-tip, or conflicting receipt/journal
+evidence fails closed for that receipt. Startup enumeration in both
+`accepted_completion_delivery_contexts()` and
+`pending_completion_delivery_contexts()` isolates failures per row, so a
+malformed, non-object, foreign, or identity-invalid row cannot starve a distinct
+validated sibling. The poison row stays in its original lifecycle state and gets
+one bounded, prompt-free disposition. Object rows may carry the fixed-size
+`restart_diagnostic`; non-object rows remain byte-preserved and appear only in
+the deduplicated aggregate restart diagnostic. Corruption of the top-level store
+remains globally fail-closed because safe row boundaries cannot be established.
+Repeated restarts do not append duplicate diagnostics or rebind work to a newer
+compression tip.
+Receipt/lock files are private (`0600`), atomically replaced where applicable,
+and never contain prompts, tool output, provider payloads, credentials, or
+admission owner tokens in transcript/journal rows.
+
+Persisted-session membership used by lineage/recovery scans is an mtime-keyed
+optimization protected by one process-local fence. Stat/cache validation, glob,
+publication, and save/delete invalidation serialize on that fence, so within one
+process a successful sidecar mutation cannot race with an old scan and republish
+stale IDs even on filesystems with frozen or coarse directory mtimes. Successful
+delete invalidation is wired at two streaming sites
+(`_cleanup_ephemeral_cancelled_turn` and ephemeral completion cleanup in
+`_run_agent_streaming_core`) and two routes sites (`_discard_hidden_session` and
+the `_handle_background` completion cleanup). This is not global deletion or
+cross-process cache coherence: another process can retain stale membership when
+the directory mtime is frozen or too coarse to advance. Failed atomic replaces
+do not invalidate the still-correct prior snapshot.
+
+This work does not redesign every completion owner. A paused-wakeup `409` can
+still retain the local dedupe gate without a deferred entry or requeue, and the
+shared receipt JSON plus per-completion lock files still grow without a bounded
+retirement policy. Those ownership and retention limits remain deferred.
+
+### 4.4 Agent Invocation (`_run_agent_streaming_core`)
+
+    def _run_agent_streaming_core(session_id, msg_text, model, workspace, stream_id):
 
 1. Fetches session from SESSIONS (not from disk -- session was just updated by /api/chat/start)
 2. Sets TERMINAL_CWD, HERMES_EXEC_ASK, HERMES_SESSION_KEY env vars

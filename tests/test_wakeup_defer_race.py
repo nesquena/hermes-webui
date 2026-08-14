@@ -32,6 +32,7 @@ same way tests/test_session_channel_option_x.py does.
 from __future__ import annotations
 
 import queue
+import json
 import threading
 import types
 
@@ -128,6 +129,37 @@ def _reset_cfg_state():
     if hasattr(_cfg, "ACTIVE_RUNS"):
         with _cfg.ACTIVE_RUNS_LOCK:
             _cfg.ACTIVE_RUNS.clear()
+
+
+def _write_lineage_session(
+    session_dir,
+    session_id,
+    *,
+    parent_session_id=None,
+    pre_compression_snapshot=False,
+):
+    (session_dir / f"{session_id}.json").write_text(
+        json.dumps(
+            {
+                "session_id": session_id,
+                "profile": "default",
+                "parent_session_id": parent_session_id,
+                "pre_compression_snapshot": pre_compression_snapshot,
+                "session_source": "webui",
+                "messages": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _install_compressed_lineage(monkeypatch, tmp_path, *, root="lineageroot", tip="lineagetip"):
+    from api import config as cfg
+
+    _write_lineage_session(tmp_path, root, pre_compression_snapshot=True)
+    _write_lineage_session(tmp_path, tip, parent_session_id=root)
+    monkeypatch.setattr(cfg, "SESSION_DIR", tmp_path)
+    return root, tip
 
 
 def _completion_evt(process_id: str, session_key: str) -> dict:
@@ -279,10 +311,9 @@ def test_next_user_turn_drain_and_teardown_hook_dont_double_fire(monkeypatch):
             cfg.ACTIVE_RUNS[stream_id] = {"session_id": sid}
 
         bp._process_one(_completion_evt("proc-shared-1", sid))
-        # Shared dedupe contract: _process_one marked it seen + registry-
-        # consumed before deferring.
+        # The seen marker is diagnostic; durable incorporation owns the ACK.
         assert "proc-shared-1" in cfg.BG_TASK_COMPLETE_EVENTS_SEEN[sid]
-        assert fake.is_completion_consumed("proc-shared-1")
+        assert not fake.is_completion_consumed("proc-shared-1")
         assert sid in cfg.DEFERRED_PROCESS_WAKEUPS
 
         # A user turn comes: the next-turn drain runs. Even if a duplicate
@@ -299,6 +330,7 @@ def test_next_user_turn_drain_and_teardown_hook_dont_double_fire(monkeypatch):
         started = bp.drain_deferred_wakeups_for_session(sid)
         assert started == 1
         assert _wait_for_wakeup(holder)
+        assert fake.is_completion_consumed("proc-shared-1")
         assert len(holder["calls"]) == 1, (
             "deferred wakeup delivered more than once across next-turn drain "
             "+ teardown hook"
@@ -501,7 +533,14 @@ def test_paused_process_wakeup_409_does_not_requeue(monkeypatch):
     sid = "sess-paused-409"
     holder = {"calls": [], "event": threading.Event(), "requeued": []}
 
-    def _paused_start_session_turn(session_id, message, *, source="process_wakeup"):
+    def _paused_start_session_turn(
+        session_id,
+        message,
+        *,
+        source="process_wakeup",
+        completion_context=None,
+        completion_acceptance=None,
+    ):
         holder["calls"].append(
             {"session_id": session_id, "message": message, "source": source}
         )
@@ -677,4 +716,137 @@ def test_idle_path_409_redefer_carries_process_id_and_dedups(monkeypatch):
         )
     finally:
         bp.unregister_process_session(sid)
+        _reset_cfg_state()
+
+
+def test_compression_lineage_uses_root_for_busy_and_defer_but_tip_for_delivery(
+    monkeypatch, tmp_path
+):
+    from api import background_process as bp, config as cfg
+
+    _reset_cfg_state()
+    root, tip = _install_compressed_lineage(monkeypatch, tmp_path)
+    holder = _install_fake_start_session_turn(monkeypatch)
+    stream_id = "stream-lineage-busy"
+    try:
+        with cfg.ACTIVE_RUNS_LOCK:
+            cfg.ACTIVE_RUNS[stream_id] = {
+                "stream_id": stream_id,
+                "session_id": tip,
+                "lineage_id": root,
+                "delivery_session_id": tip,
+                "started_at": 1.0,
+            }
+
+        assert bp._session_has_active_turn(root) is True
+        assert bp._session_has_active_turn(tip) is True
+        assert bp.record_deferred_wakeup(tip, "proc-lineage", "lineage prompt")
+        assert root in cfg.DEFERRED_PROCESS_WAKEUPS
+        assert tip not in cfg.DEFERRED_PROCESS_WAKEUPS
+
+        cfg.unregister_active_run(stream_id)
+        assert bp.drain_deferred_wakeups_for_session(root) == 1
+        assert _wait_for_wakeup(holder)
+        assert [call["session_id"] for call in holder["calls"]] == [tip]
+    finally:
+        with cfg.ACTIVE_RUNS_LOCK:
+            cfg.ACTIVE_RUNS.pop(stream_id, None)
+        _reset_cfg_state()
+
+
+def test_active_run_older_than_180_seconds_still_proves_busy(monkeypatch, tmp_path):
+    import time
+
+    from api import config as cfg, routes
+
+    _reset_cfg_state()
+    sid = "oldlineageroot"
+    _write_lineage_session(tmp_path, sid)
+    monkeypatch.setattr(cfg, "SESSION_DIR", tmp_path)
+    stream_id = "stream-older-than-180"
+    try:
+        with cfg.ACTIVE_RUNS_LOCK:
+            cfg.ACTIVE_RUNS[stream_id] = {
+                "stream_id": stream_id,
+                "session_id": sid,
+                "lineage_id": sid,
+                "delivery_session_id": sid,
+                "started_at": time.time() - 181.0,
+            }
+
+        assert routes._active_run_stream_for_session(sid) == stream_id
+        with cfg.ACTIVE_RUNS_LOCK:
+            assert stream_id in cfg.ACTIVE_RUNS
+    finally:
+        with cfg.ACTIVE_RUNS_LOCK:
+            cfg.ACTIVE_RUNS.pop(stream_id, None)
+        _reset_cfg_state()
+
+
+def test_retryable_409_and_503_redefer_at_lineage_root(monkeypatch, tmp_path):
+    from api import background_process as bp, config as cfg, routes
+
+    _reset_cfg_state()
+    root, tip = _install_compressed_lineage(monkeypatch, tmp_path)
+    responses = [
+        {"_status": 409, "error": "session already has an active stream"},
+        {"_status": 503, "error": "runtime temporarily unavailable", "retryable": True},
+    ]
+    calls = []
+    event = threading.Event()
+
+    def _retryable_start(
+        session_id,
+        message,
+        *,
+        source="process_wakeup",
+        completion_context=None,
+        completion_acceptance=None,
+    ):
+        calls.append({"session_id": session_id, "message": message, "source": source})
+        response = responses[len(calls) - 1]
+        event.set()
+        return response
+
+    monkeypatch.setattr(routes, "start_session_turn", _retryable_start)
+    try:
+        for index, process_id in enumerate(("proc-409-root", "proc-503-root"), start=1):
+            event.clear()
+            bp._start_server_side_wakeup_turn(
+                tip, f"retry prompt {index}", process_id=process_id
+            )
+            assert event.wait(timeout=1.0)
+            assert _wait_for(
+                lambda _process_id=process_id: any(
+                    entry.get("process_id") == _process_id
+                    for entry in cfg.DEFERRED_PROCESS_WAKEUPS.get(root, [])
+                )
+            )
+            assert tip not in cfg.DEFERRED_PROCESS_WAKEUPS
+            with cfg.DEFERRED_PROCESS_WAKEUPS_LOCK:
+                cfg.DEFERRED_PROCESS_WAKEUPS.clear()
+
+        assert [call["session_id"] for call in calls] == [tip, tip]
+    finally:
+        _reset_cfg_state()
+
+
+def test_claim_first_and_drain_first_orders_share_one_lineage_key(monkeypatch, tmp_path):
+    from api import background_process as bp
+
+    _reset_cfg_state()
+    root, tip = _install_compressed_lineage(monkeypatch, tmp_path)
+    holder = _install_fake_start_session_turn(monkeypatch)
+    try:
+        assert bp.record_deferred_wakeup(tip, "proc-claim-first", "claim first")
+        claimed = bp.claim_deferred_wakeups(tip)
+        assert [entry["process_id"] for entry in claimed] == ["proc-claim-first"]
+        assert bp.drain_deferred_wakeups_for_session(root) == 0
+
+        assert bp.record_deferred_wakeup(root, "proc-drain-first", "drain first")
+        assert bp.drain_deferred_wakeups_for_session(tip) == 1
+        assert _wait_for_wakeup(holder)
+        assert bp.claim_deferred_wakeups(root) == []
+        assert [call["session_id"] for call in holder["calls"]] == [tip]
+    finally:
         _reset_cfg_state()
