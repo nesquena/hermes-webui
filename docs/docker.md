@@ -238,9 +238,10 @@ services:
 
 Do not copy only `API_SERVER_ENABLED=true` / `API_SERVER_HOST=0.0.0.0` into the
 agent service as a standalone fix. If you intentionally enable the agent API
-server, the agent also requires a real `API_SERVER_KEY` (at least 8 characters),
-and the WebUI still needs `HERMES_API_URL` or `HERMES_WEBUI_GATEWAY_BASE_URL` to
-reach that service from its container.
+server, the agent also requires a real `API_SERVER_KEY` (at least 16 characters,
+per the agent's `has_usable_secret` startup guard), and the WebUI still needs
+`HERMES_API_URL` or `HERMES_WEBUI_GATEWAY_BASE_URL` to reach that service from
+its container.
 
 **Verify**: Once the gateway is up, the System Settings pill should turn green and the Tasks banner disappear. From the host:
 
@@ -254,6 +255,69 @@ If the service name differs in your compose file, `docker compose -f docker-comp
 For container-to-container diagnostics, set one of `HERMES_API_URL` or `HERMES_WEBUI_GATEWAY_BASE_URL` in the WebUI environment, then restart WebUI.
 
 Refs #2785, #4483.
+
+## WebUI can't reach hermes-agent on port 8642
+
+**Symptom**: In a multi-container setup the WebUI loads but shows "Gateway
+endpoint not reachable", "can't reach hermes-agent", or fails to detect the
+agent's runs (`run_agents`) even though the agent container is running.
+From inside the WebUI container:
+
+```bash
+docker exec hermes-webui curl -v http://hermes-agent:8642
+# → connect to hermes-agent port 8642 ... failed: Connection refused
+```
+
+**Cause**: The gateway API listener is not running. The agent only starts the
+API server on port 8642 when `API_SERVER_KEY` is a usable value (>=16
+characters, per the agent's `has_usable_secret` startup guard in
+`gateway/platforms/api_server.py`). Two things must both be true:
+
+1. The `hermes-agent` service must enable the gateway API listener with the
+   real Agent contract — `API_SERVER_ENABLED=true`, `API_SERVER_HOST=0.0.0.0`,
+   `API_SERVER_PORT=8642` and a strong `API_SERVER_KEY` set in `.env` (the
+   shipped two- and three-container compose files do this). The agent consumes
+   no `HERMES_GATEWAY_*` environment variables — host and port alone
+   never enable this terminal-capable API, and a missing or weak key leaves
+   the service unhealthy on purpose so the setup gap is explicit.
+2. The WebUI must not start before the gateway is actually accepting
+   connections on 8642. A plain `depends_on: - hermes-agent` only waits for
+   the container to start, not for the gateway to be listening — the WebUI
+   health probe then races the agent boot and reports the gateway as down.
+
+**Fix**: Give the `hermes-agent` service a healthcheck that probes
+`http://127.0.0.1:8642/health` and start the WebUI (and dashboard) with
+`depends_on: { hermes-agent: { condition: service_healthy } }`. The shipped
+`docker-compose.two-container.yml` and `docker-compose.three-container.yml`
+files already do this.
+
+**Verify**: `docker compose ps` should show `hermes-agent` as `healthy`
+before `hermes-webui` starts. From the host, probe the published loopback
+endpoint (the container publishes `127.0.0.1:8642`):
+
+```bash
+curl -sS http://127.0.0.1:8642/health
+```
+
+`http://hermes-agent:8642/health` is Compose-network DNS and normally does not
+resolve from the host — use that service-name URL only inside a Compose
+container, e.g.:
+
+```bash
+docker compose -f docker-compose.two-container.yml exec hermes-agent \
+  python3 -c "import urllib.request; print(urllib.request.urlopen('http://hermes-agent:8642/health').status)"
+```
+
+If `hermes-agent` stays unhealthy, check `docker logs hermes-agent` — a stale
+`gateway.lock` from an unclean exit (e.g. `docker compose down` while the
+gateway was mid-tick, or an OOM kill) can make the gateway exit immediately
+with "Another gateway instance ... Exiting to avoid double-running". Remove
+the stale lock in the shared `hermes-home` volume and restart. If the API
+server was never enabled, the logs will also show that the listener was
+skipped for lack of a usable `API_SERVER_KEY` — set one in `.env` and re-run
+`docker compose up -d`.
+
+Refs #6986.
 
 ## Three-service unified setup (v0.14+)
 
