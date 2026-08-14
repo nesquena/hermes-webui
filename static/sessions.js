@@ -7788,6 +7788,18 @@ function _bindGroupedProjectDropTarget(hdr,targetProject,targetLabel){
   hdr.addEventListener('dragend',clear);
 }
 
+function _findGroupedActiveRow(list, activeSidForSidebar){
+  if(!list||!activeSidForSidebar||typeof list.querySelectorAll!=='function') return null;
+  const rows=[...list.querySelectorAll('.session-item[data-sid]')];
+  const exact=rows.find(row=>row.dataset.sid===activeSidForSidebar);
+  if(exact) return exact;
+  return rows.find(row=>{
+    const rowSid=row.dataset.sid;
+    const rowSession=Array.isArray(_allSessions)?_allSessions.find(item=>item&&item.session_id===rowSid):null;
+    return !!(rowSession&&_sessionLineageContainsSession(rowSession,activeSidForSidebar));
+  })||null;
+}
+
 function renderSessionListFromCache(){
   const GROUP_HEADER_HEIGHT=typeof SESSION_GROUP_HEADER_HEIGHT==='number'?SESSION_GROUP_HEADER_HEIGHT:28;
   // #4671: while a profile-switch skeleton is up, bail — _allSessions still holds the
@@ -7856,13 +7868,8 @@ function renderSessionListFromCache(){
   const listScrollTopBeforeRender=list.scrollTop||0;
   const groupedMode=!!window._sidebarGroupByProject;
   let groupedActiveWasVisibleBeforeRender=false;
-  if(groupedMode&&activeSidForSidebar&&typeof list.querySelectorAll==='function'&&typeof list.getBoundingClientRect==='function'){
-    const rows=[...list.querySelectorAll('.session-item[data-sid]')];
-    const activeRow=rows.find(row=>{
-      if(row.dataset.sid===activeSidForSidebar) return true;
-      const rowSession=Array.isArray(_allSessions)?_allSessions.find(item=>item&&item.session_id===row.dataset.sid):null;
-      return !!(rowSession&&_sessionLineageContainsSession(rowSession,activeSidForSidebar));
-    });
+  if(groupedMode&&activeSidForSidebar&&typeof list.getBoundingClientRect==='function'){
+    const activeRow=_findGroupedActiveRow(list,activeSidForSidebar);
     if(activeRow&&typeof activeRow.getBoundingClientRect==='function'){
       const listRect=list.getBoundingClientRect();
       const rowRect=activeRow.getBoundingClientRect();
@@ -8144,7 +8151,6 @@ function renderSessionListFromCache(){
       activeIndex:shouldMoveSidebarToActive?activeIndex:-1,
     });
   let virtualAnchorScrollTop=null;
-  let groupedActiveNeedsGeometry=groupedMode&&shouldMoveSidebarToActiveForMode;
   if(shouldMoveSidebarToActive&&virtualWindow.virtualized){
     list.dataset.sessionVirtualActiveAnchor=activeSidForSidebar;
     if(!groupedMode) virtualAnchorScrollTop=virtualWindow.topPad;
@@ -8249,13 +8255,21 @@ function renderSessionListFromCache(){
     }
     if(virtualWindow.end<groupedEntries.length) list.appendChild(_sessionVirtualSpacer(groupedOffsets[groupedEntries.length]-groupedOffsets[virtualWindow.end],'after'));
   }
-  if(groupedActiveNeedsGeometry){
-    if(activeIndex>=0&&activeIndex<groupedOffsets.length-1){
-      if(groupedOffsets[activeIndex]<listScrollTopBeforeRender) virtualAnchorScrollTop=groupedOffsets[activeIndex];
-      else if(groupedOffsets[activeIndex+1]>listScrollTopBeforeRender+(list.clientHeight||520)) virtualAnchorScrollTop=Math.max(0,groupedOffsets[activeIndex+1]-(list.clientHeight||520));
+  if(groupedMode){
+    list.scrollTop=listScrollTopBeforeRender;
+    if(shouldMoveSidebarToActiveForMode){
+      const activeRow=_findGroupedActiveRow(list,activeSidForSidebar);
+      if(activeRow&&typeof activeRow.getBoundingClientRect==='function'){
+        const listRect=list.getBoundingClientRect();
+        const rowRect=activeRow.getBoundingClientRect();
+        if(rowRect.top<listRect.top){
+          list.scrollTop=Math.max(0,list.scrollTop+rowRect.top-listRect.top);
+        }else if(rowRect.bottom>listRect.bottom){
+          list.scrollTop=Math.max(0,list.scrollTop+rowRect.bottom-listRect.bottom);
+        }
+      }
     }
-  }
-  if(virtualAnchorScrollTop!==null){
+  }else if(virtualAnchorScrollTop!==null){
     list.scrollTop=virtualAnchorScrollTop;
   }else if(listScrollTopBeforeRender>0){
     // Always restore the user's scroll position after re-render, regardless
