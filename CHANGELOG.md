@@ -5,6 +5,8 @@
 
 ### Fixed
 
+- **The workspace file-sort menu is now fully translated in all 14 non-English languages.** The six sort options (Sort by, Name A→Z / Z→A, Date created / modified, and the "creation time unavailable" note) were still showing English placeholder text in the non-English locales after they were added in #6091; they're now translated into German, Spanish, French, Italian, Portuguese, Czech, Turkish, Polish, Russian, Japanese, Korean, Chinese (Simplified and Traditional), and Vietnamese. Thanks @webtecnica. (#6910)
+
 - **Streaming text can no longer render into the wrong conversation when you switch sessions mid-response.** If one session was still streaming and you switched to another, a render that had already been scheduled could fire after the switch and briefly write the first session's tokens into the second session's pane. The live-stream render path now re-checks that its session is still the active one right before it writes to the DOM (including inside the deferred animation-frame/timeout window), so a scheduled render is dropped instead of leaking into the wrong pane; the streamed text is preserved and re-renders correctly when you switch back. Thanks @webtecnica. (#6502)
 
 - **Jumping to the first response no longer snaps back to the bottom while the answer is still streaming.** When you tapped "jump to answer" on the first response, the view scrolled to the answer but then got yanked back down as more of the response streamed in, so you couldn't read from the top. The jump now takes ownership of the scroll position and holds it where you put it — it only releases when you explicitly scroll down, press End, or switch sessions. Normal bottom-following (when you haven't jumped) is unchanged. Thanks @pxxD1998. (#6621)
