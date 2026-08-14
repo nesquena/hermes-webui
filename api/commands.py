@@ -277,18 +277,23 @@ def _run_reload_mcp_command() -> str:
             # observes the fresh outcome instead of a stale 'completed' /
             # 'failed' readiness recorded before this reload.  The command
             # waits on the shared readiness event so its synchronous
-            # report below is still accurate.  The profile home is taken
-            # from the exec-time env: inside a session that is the
-            # worker's env window; otherwise it resolves to the default
-            # profile (''), which is the authority the startup kickoff
-            # and default-profile turns consult.
+            # report below is still accurate.
+            #
+            # The authority is keyed deterministically at the DEFAULT
+            # profile (''), the same key the startup kickoff and
+            # default-profile turns consult.  /reload-mcp is a GLOBAL
+            # operation (it shuts down and reconnects every configured
+            # server), so it deliberately does NOT key off the exec-time
+            # HERMES_HOME env: a concurrent stream can mutate that
+            # process-global while the command runs, which would make the
+            # reload capture another profile (Greptile P1).
             from api.streaming import _mcp_retry_discovery, _mcp_wait_readiness
 
             def _reload_discover():
                 """Re-discover MCP tools; returns bool.
 
-                Installs the captured profile-home override exactly like
-                the stream worker's discovery closure, so a background
+                Installs the DEFAULT profile-home override (like the
+                stream worker's discovery closure), so a background
                 reload run can never read another stream's HERMES_HOME
                 after env mutation (Greptile P1).
                 """
@@ -297,11 +302,9 @@ def _run_reload_mcp_command() -> str:
                     from api.profiles import _resolve_hermes_home_override
                     _hc_mod = _resolve_hermes_home_override()
                     if _hc_mod is not None:
-                        _mcp_home = _profile_home
-                        if not _mcp_home:
-                            _mcp_home = getattr(
-                                _hc_mod, 'get_default_hermes_root', lambda: ''
-                            )()
+                        _mcp_home = getattr(
+                            _hc_mod, 'get_default_hermes_root', lambda: ''
+                        )()
                         if _mcp_home:
                             _mcp_home_token = _hc_mod.set_hermes_home_override(
                                 str(_mcp_home)
@@ -317,11 +320,25 @@ def _run_reload_mcp_command() -> str:
                 except Exception:
                     return False
 
-            _profile_home = str(os.environ.get("HERMES_HOME", "") or "")
-            _readiness = _mcp_retry_discovery(
-                _profile_home, _reload_discover, "mcp-reload"
-            )
-            _reload_status = _mcp_wait_readiness(_readiness)
+            try:
+                from api.profiles import _resolve_hermes_home_override
+                _reload_override_available = _resolve_hermes_home_override() is not None
+            except Exception:
+                _reload_override_available = False
+
+            if _reload_override_available:
+                _readiness = _mcp_retry_discovery(
+                    '', _reload_discover, "mcp-reload"
+                )
+                _reload_status = _mcp_wait_readiness(_readiness)
+            else:
+                # Older agent: no context-local override — a background
+                # reload would read the process env while other streams
+                # mutate it.  Run inline (pre-PR semantics), mirroring the
+                # stream worker's old-agent path (Greptile P1).
+                _reload_status = (
+                    "completed" if _reload_discover() else "failed"
+                )
 
             with _lock:
                 connected_servers = set(_servers.keys())

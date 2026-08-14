@@ -414,17 +414,20 @@ def test_reload_mcp_error_is_generic(monkeypatch):
     assert calls == ["shutdown"]
 
 
-def test_reload_mcp_installs_profile_override(monkeypatch):
-    """`/reload-mcp`'s re-discovery must assert the profile home.
+def test_reload_mcp_uses_default_profile_authority(monkeypatch):
+    """`/reload-mcp` re-discovery must use the DEFAULT profile, not env.
 
-    Greptile P1: the reload closure previously called discover_mcp_tools()
-    without a context-local override, so a concurrent stream mutating
-    HERMES_HOME could make the reload discover the WRONG profile's
-    servers.  The closure now installs the override exactly like the
-    stream worker's discovery closure.
+    Greptile P1: the reload previously keyed off the exec-time
+    HERMES_HOME env, which a concurrent stream can mutate — the reload
+    could capture another profile.  /reload-mcp is a global operation,
+    so its authority is deterministically the default profile (''):
+    even with HERMES_HOME set to another profile, the discovery closure
+    asserts the DEFAULT root override and the default readiness entry
+    is updated.
     """
     import os
     from api import profiles
+    from api import streaming
     from api.commands import execute_agent_command
 
     calls = []
@@ -458,39 +461,43 @@ def test_reload_mcp_installs_profile_override(monkeypatch):
 
     output = execute_agent_command("/reload-mcp")
 
-    assert ("set", "/profiles/alpha") in calls, (
-        "reload discovery must assert the captured profile home"
+    assert ("set", "/default/hermes/home") in calls, (
+        "reload discovery must assert the DEFAULT profile home, never the "
+        "exec-time env (a concurrent stream can mutate it)"
+    )
+    captured_homes = [
+        entry[1]
+        for entry in calls
+        if isinstance(entry, tuple) and len(entry) == 2 and entry[0] == "set"
+    ]
+    assert "/profiles/alpha" not in captured_homes, (
+        "reload must never key off another profile's env value"
     )
     assert "discover" in calls
     assert ("reset", override_token) in calls
     assert "Reloaded MCP servers from configuration." in output
+    default_readiness = streaming._MCP_READINESS.get("")
+    assert default_readiness is not None, (
+        "reload must update the DEFAULT profile readiness authority"
+    )
+    assert streaming._mcp_wait_readiness(default_readiness) == "completed"
 
 
-def test_reload_mcp_default_profile_uses_default_root(monkeypatch):
-    """With HERMES_HOME unset, the reload override falls back to the root."""
-    import os
+def test_reload_mcp_legacy_agent_runs_inline(monkeypatch):
+    """Without the override API, reload discovery runs INLINE, never daemon.
+
+    Greptile P1: on older agents the retry previously ran discovery on a
+    background thread with no profile-local override, so another stream
+    mutating HERMES_HOME could make it register that stream's servers.
+    The inline path mirrors the stream worker's old-agent fallback.
+    """
     from api import profiles
+    from api import streaming
     from api.commands import execute_agent_command
 
     calls = []
-    override_token = "tok-456"
 
-    class _FakeOverride:
-        def set_hermes_home_override(self, home):
-            calls.append(("set", home))
-            return override_token
-
-        def reset_hermes_home_override(self, token):
-            calls.append(("reset", token))
-
-        def get_default_hermes_root(self):
-            calls.append("default_root")
-            return "/default/hermes/home"
-
-    monkeypatch.setattr(
-        profiles, "_resolve_hermes_home_override", lambda: _FakeOverride()
-    )
-    monkeypatch.delenv("HERMES_HOME", raising=False)
+    monkeypatch.setattr(profiles, "_resolve_hermes_home_override", lambda: None)
 
     def shutdown():
         calls.append("shutdown")
@@ -501,11 +508,21 @@ def test_reload_mcp_default_profile_uses_default_root(monkeypatch):
 
     _install_fake_mcp_tool(monkeypatch, shutdown=shutdown, discover=discover, servers={})
 
-    execute_agent_command("/reload-mcp")
+    retry_calls = []
+    wait_calls = []
+    monkeypatch.setattr(
+        streaming, "_mcp_retry_discovery", lambda *a, **k: retry_calls.append(a)
+    )
+    monkeypatch.setattr(
+        streaming, "_mcp_wait_readiness", lambda *a, **k: wait_calls.append(a)
+    )
 
-    assert "default_root" in calls
-    assert ("set", "/default/hermes/home") in calls
-    assert ("reset", override_token) in calls
+    output = execute_agent_command("/reload-mcp")
+
+    assert not retry_calls, "old-agent reload must not background discovery"
+    assert not wait_calls
+    assert "discover" in calls
+    assert "Reloaded MCP servers from configuration." in output
 
 
 def test_reload_skills_command_formats_helper_diff(monkeypatch):
