@@ -301,6 +301,30 @@ class TestListProfilesSingleFlight:
         assert len(results) == n_threads
         assert all(r and r[0]["name"] == "default" for r in results)
 
+    def test_slow_build_gets_full_cache_ttl(self, mod, monkeypatch):
+        build_calls = []
+        clock = [0.0]
+
+        def _slow_build():
+            build_calls.append(1)
+            clock[0] += 0.08
+            return [{"name": "default", "path": "/x"}]
+
+        with (
+            patch.object(time, "time", side_effect=lambda: clock[0]),
+            patch.object(mod, "_is_isolated_profile_mode", return_value=False),
+            patch.object(mod, "get_active_profile_name", return_value="default"),
+            patch.object(mod, "_build_profile_rows_fast", side_effect=_slow_build),
+        ):
+            monkeypatch.setattr(mod, "_LIST_PROFILES_CACHE_TTL", 0.05)
+            mod._LIST_PROFILES_CACHE = None
+            mod.list_profiles_api()
+            mod.list_profiles_api()
+
+        assert len(build_calls) == 1, (
+            "cache age must start after a slow build completes, not before it starts"
+        )
+
 
 # ---------------------------------------------------------------------------
 # 4. #4783 contract preserved: the cheap mtime probe still runs on every call

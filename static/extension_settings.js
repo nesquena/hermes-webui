@@ -4,8 +4,13 @@
   const SETTINGS_PREFIX='hermes.ext.settings.';
   const STORAGE_PREFIX='hermes.ext.storage.';
   const FIELD_TYPES=new Set(['boolean','string','number','integer','enum']);
+  const TURN_LIFECYCLE_TYPES=new Set(['turn:start','turn:complete','turn:error','turn:cancel']);
+  const TURN_LIFECYCLE_STATE_LIMIT=512;
   const schemas=new Map();
   const trustedExtensions=new Map();
+  const registrations=new Map();
+  const turnLifecycleListeners=new Map();
+  const turnLifecycleStates=new Map();
   let trustedSeeded=false;
 
   function extensionId(value){
@@ -228,9 +233,7 @@
     return !!(meta&&meta.storage_owned&&Array.isArray(meta.settings_schema)&&meta.settings_schema.length);
   }
 
-  function settingsForExtension(id){
-    const clean=extensionId(id);
-    const meta=schemas.get(clean)||{id:clean,name:clean,storage_owned:false,settings_schema:[]};
+  function settingsAccessor(clean,meta,isTrusted){
     const schema=supportsSettings(meta)?meta.settings_schema:[];
     const key=settingsKey(clean);
     function current(){
@@ -248,7 +251,7 @@
     }
     return {
       extensionId:clean,
-      trusted:schemas.has(clean),
+      trusted:isTrusted,
       storageOwned:!!meta.storage_owned,
       supported:supportsSettings(meta),
       schema,
@@ -277,9 +280,13 @@
     };
   }
 
-  function storageForExtension(id){
+  function settingsForExtension(id){
     const clean=extensionId(id);
     const meta=schemas.get(clean)||{id:clean,name:clean,storage_owned:false,settings_schema:[]};
+    return settingsAccessor(clean,meta,schemas.has(clean));
+  }
+
+  function storageAccessor(clean,meta){
     const allowed=!!meta.storage_owned;
     const key=storageKey(clean);
     return {
@@ -309,12 +316,121 @@
     };
   }
 
+  function storageForExtension(id){
+    const clean=extensionId(id);
+    const meta=schemas.get(clean)||{id:clean,name:clean,storage_owned:false,settings_schema:[]};
+    return storageAccessor(clean,meta);
+  }
+
+  function eventAccessor(clean){
+    return Object.freeze({
+      on(type,handler){
+        if(!TURN_LIFECYCLE_TYPES.has(type)||typeof handler!=='function') return null;
+        let listenersByExtension=turnLifecycleListeners.get(type);
+        if(!listenersByExtension){
+          listenersByExtension=new Map();
+          turnLifecycleListeners.set(type,listenersByExtension);
+        }
+        let listeners=listenersByExtension.get(clean);
+        if(!listeners){
+          listeners=new Set();
+          listenersByExtension.set(clean,listeners);
+        }
+        listeners.add(handler);
+        let active=true;
+        return function unsubscribe(){
+          if(!active) return false;
+          active=false;
+          listeners.delete(handler);
+          if(!listeners.size) listenersByExtension.delete(clean);
+          if(!listenersByExtension.size) turnLifecycleListeners.delete(type);
+          return true;
+        };
+      },
+    });
+  }
+
+  function turnLifecycleKey(sessionId,streamId){
+    return `${sessionId}\u0000${streamId}`;
+  }
+
+  function rememberTurnLifecycleState(key,state){
+    if(turnLifecycleStates.has(key)) turnLifecycleStates.delete(key);
+    turnLifecycleStates.set(key,state);
+    while(turnLifecycleStates.size>TURN_LIFECYCLE_STATE_LIMIT){
+      turnLifecycleStates.delete(turnLifecycleStates.keys().next().value);
+    }
+  }
+
+  function dispatchTurnLifecycle(type,raw){
+    if(!TURN_LIFECYCLE_TYPES.has(type)||!raw||typeof raw!=='object') return false;
+    const sessionId=typeof raw.sessionId==='string'?raw.sessionId.trim():'';
+    const streamId=typeof raw.streamId==='string'?raw.streamId.trim():'';
+    if(!sessionId||!streamId) return false;
+
+    const key=turnLifecycleKey(sessionId,streamId);
+    const previous=turnLifecycleStates.get(key)||{started:false,terminal:false};
+    const terminal=type!=='turn:start';
+    if((type==='turn:start'&&(previous.started||previous.terminal))||(terminal&&previous.terminal)) return false;
+    rememberTurnLifecycleState(key,{
+      started:previous.started||type==='turn:start',
+      terminal:previous.terminal||terminal,
+    });
+
+    const now=Date.now()/1000;
+    const event={
+      type,
+      sessionId,
+      streamId,
+      timestamp:Number.isFinite(raw.timestamp)?raw.timestamp:now,
+    };
+    if(type==='turn:start') event.startedAt=Number.isFinite(raw.startedAt)?raw.startedAt:event.timestamp;
+    else event.endedAt=Number.isFinite(raw.endedAt)?raw.endedAt:event.timestamp;
+    if(typeof raw.status==='string'&&raw.status.trim()) event.status=raw.status.trim();
+    const frozenEvent=Object.freeze(event);
+    const listenersByExtension=turnLifecycleListeners.get(type);
+    if(!listenersByExtension) return true;
+    for(const [extensionId,listeners] of listenersByExtension){
+      for(const listener of [...listeners]){
+        try{
+          listener(frozenEvent);
+        }catch(error){
+          if(typeof console!=='undefined'&&typeof console.error==='function'){
+            try{
+              console.error(`[Hermes extensions] ${extensionId} ${type} listener failed:`,error);
+            }catch(_loggingError){ }
+          }
+        }
+      }
+    }
+    return true;
+  }
+
+  function registerExtension(id){
+    if(typeof id!=='string') return null;
+    const clean=extensionId(id);
+    if(!clean) return null;
+    const existing=registrations.get(clean);
+    if(existing) return existing;
+    const trusted=trustedExtensions.get(clean);
+    if(!trusted) return null;
+    const handle=Object.freeze({
+      id:clean,
+      settings:settingsAccessor(clean,trusted,true),
+      storage:storageAccessor(clean,trusted),
+      events:eventAccessor(clean),
+    });
+    registrations.set(clean,handle);
+    return handle;
+  }
+
   const api={
     normalizeSchemas,
     primeFromStatus,
     namespaceForExtension,
     settingsForExtension,
     storageForExtension,
+    _dispatchTurnLifecycle:dispatchTurnLifecycle,
     resetSettingsForExtension(id){return settingsForExtension(id).reset();},
     clearStorageForExtension(id){return storageForExtension(id).clear();},
   };
@@ -325,5 +441,6 @@
   window.hermesExt.storage=window.hermesExt.storage||{};
   window.hermesExt.settings.forExtension=settingsForExtension;
   window.hermesExt.storage.forExtension=storageForExtension;
+  window.hermesExt.register=registerExtension;
   primeFromStatus(window.__HERMES_EXTENSION_CONFIG__||{});
 })();

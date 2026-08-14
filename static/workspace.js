@@ -611,7 +611,7 @@ function renderSessionArtifacts(){
 
 async function _workspacePathExists(path){
   if(!S.session||!path) return false;
-  const parts=String(path).split('/').filter(Boolean);
+  const parts=String(path).replace(/\\/g,'/').split('/').filter(Boolean);
   const name=parts.pop();
   if(!name) return false;
   const dir=parts.length?parts.join('/'):'.';
@@ -622,9 +622,12 @@ async function _workspacePathExists(path){
 async function openArtifactPath(path){
   if(!path) return;
   switchWorkspacePanelTab('files');
-  let rel = path.replace(/^~\//,'').replace(/^\.\/+/,'');
+  // Normalize backslash separators to '/' first — Windows absolute paths
+  // (e.g. "D:\workspace\dir\file") otherwise break prefix-strip and the
+  // /api/list existence check (which splits on '/').
+  let rel = String(path).replace(/\\/g,'/').replace(/^~\//,'').replace(/^(?:\.\/)+/,'');
   // Strip workspace prefix so /api/list receives a workspace-relative path.
-  const ws = S.session && S.session.workspace;
+  const ws = (S.session && S.session.workspace || '').replace(/\\/g,'/');
   if(ws){
     const normWs = ws.replace(/\/+$/,'') + '/';
     if(rel.startsWith(normWs)) rel = rel.slice(normWs.length);
@@ -729,6 +732,7 @@ async function loadDir(path, opts={}){
                              // rejected here instead of painting the wrong profile's files.
   try{
     if(!path||path==='.'||refreshExpanded){
+      if(typeof _syncWorkspaceBirthtimeSupportScope==='function') _syncWorkspaceBirthtimeSupportScope((S.session&&S.session.workspace)||'');
       S._dirCache={};
       _restoreExpandedDirs();  // restore per-workspace expanded state after root and refresh resets
     }
