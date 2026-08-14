@@ -20,8 +20,9 @@ def _install_fake_models(monkeypatch, provider_fn):
 
 def _clear_cache(config):
     with config._PROVIDER_ENUM_CACHE_LOCK:
-        config._PROVIDER_ENUM_CACHE.clear()
-        config._PROVIDER_ENUM_CACHE_INFLIGHT.clear()
+        pending = config._clear_provider_enum_cache_locked()
+    for event in pending:
+        event.set()
 
 
 def test_concurrent_cold_misses_are_coalesced(monkeypatch):
@@ -130,4 +131,72 @@ def test_failed_refresh_releases_waiters_and_is_retryable(monkeypatch):
 
     assert calls == 2
     assert config._list_available_providers_cached("default") == []
+    assert calls == 2
+
+
+def test_invalidate_models_cache_drops_provider_enum_cache(monkeypatch):
+    import api.config as config
+
+    current = [{"id": "openai", "authenticated": True}]
+
+    def enumerate_providers():
+        return list(current)
+
+    _install_fake_models(monkeypatch, enumerate_providers)
+    _clear_cache(config)
+
+    assert config._list_available_providers_cached("default") == [
+        {"id": "openai", "authenticated": True}
+    ]
+
+    current[:] = [{"id": "anthropic", "authenticated": True}]
+    assert config._list_available_providers_cached("default") == [
+        {"id": "openai", "authenticated": True}
+    ]
+
+    config.invalidate_models_cache()
+    assert config._list_available_providers_cached("default") == [
+        {"id": "anthropic", "authenticated": True}
+    ]
+
+
+def test_invalidate_during_inflight_refresh_discards_stale_result(monkeypatch):
+    import api.config as config
+
+    calls = 0
+    calls_lock = threading.Lock()
+    started = threading.Event()
+    release = threading.Event()
+    current = [{"id": "anthropic", "authenticated": True}]
+
+    def enumerate_providers():
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+            call_no = calls
+        if call_no == 1:
+            started.set()
+            assert release.wait(timeout=5)
+            return [{"id": "openai", "authenticated": True}]
+        return list(current)
+
+    _install_fake_models(monkeypatch, enumerate_providers)
+    _clear_cache(config)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(config._list_available_providers_cached, "default")
+        assert started.wait(timeout=5)
+        config.invalidate_models_cache()
+        release.set()
+        first_result = first.result(timeout=5)
+        second_result = executor.submit(
+            config._list_available_providers_cached, "default"
+        ).result(timeout=5)
+
+    assert first_result == [{"id": "openai", "authenticated": True}]
+    assert second_result == [{"id": "anthropic", "authenticated": True}]
+    assert calls == 2
+    assert config._list_available_providers_cached("default") == [
+        {"id": "anthropic", "authenticated": True}
+    ]
     assert calls == 2

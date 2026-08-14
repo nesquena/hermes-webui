@@ -4864,22 +4864,42 @@ _available_models_cache_lock = threading.RLock()
 # webui re-runs it on every catalog rebuild even though auth status only
 # changes when the user edits credentials. Cache the enumeration briefly
 # (keyed by profile) so a rebuild after the first one skips the probes
-# entirely. Auth status changing within the TTL is harmless: it self-heals
-# on the next expiry, and the caller still re-checks ``get_auth_status``
-# per authenticated provider below.
+# entirely. Credential edits must call ``invalidate_models_cache()`` so
+# the next rebuild does not keep serving the old snapshot for the rest of
+# the TTL. The caller still re-checks ``get_auth_status`` per authenticated
+# provider below.
 _PROVIDER_ENUM_CACHE: dict[str, tuple[float, list]] = {}
 _PROVIDER_ENUM_CACHE_INFLIGHT: dict[str, threading.Event] = {}
 _PROVIDER_ENUM_CACHE_TTL_SECONDS = 120.0
 _PROVIDER_ENUM_CACHE_LOCK = threading.Lock()
+# Bumped by invalidate_models_cache() so an in-flight probe that started
+# before invalidation cannot write its stale result back into the cache.
+_PROVIDER_ENUM_CACHE_EPOCH = 0
+
+
+def _clear_provider_enum_cache_locked() -> list[threading.Event]:
+    """Drop cached enumerations and take ownership of in-flight waiters.
+
+    Caller must hold ``_PROVIDER_ENUM_CACHE_LOCK``.  The returned events
+    must be ``.set()`` *after* the lock is released so waiters can re-check
+    the now-empty cache without nesting lock acquisitions.
+    """
+    global _PROVIDER_ENUM_CACHE_EPOCH
+    _PROVIDER_ENUM_CACHE.clear()
+    pending = list(_PROVIDER_ENUM_CACHE_INFLIGHT.values())
+    _PROVIDER_ENUM_CACHE_INFLIGHT.clear()
+    _PROVIDER_ENUM_CACHE_EPOCH += 1
+    return pending
 
 
 def _list_available_providers_cached(profile_key: str) -> list:
     """Return ``list_available_providers()``, cached per profile for a short TTL.
 
     The uncached core call can take seconds (serial per-provider probes).
-    Keep the cache small and TTL-bounded so credential edits are picked up
-    within two minutes and memory stays flat.  Concurrent misses for the same
-    profile are coalesced so only one caller performs the expensive probe.
+    Keep the cache small and TTL-bounded so memory stays flat.  Concurrent
+    misses for the same profile are coalesced so only one caller performs
+    the expensive probe.  ``invalidate_models_cache()`` drops this cache
+    immediately after credential edits.
     """
     while True:
         with _PROVIDER_ENUM_CACHE_LOCK:
@@ -4891,6 +4911,7 @@ def _list_available_providers_cached(profile_key: str) -> list:
             if wait_for is None:
                 wait_for = threading.Event()
                 _PROVIDER_ENUM_CACHE_INFLIGHT[profile_key] = wait_for
+                epoch = _PROVIDER_ENUM_CACHE_EPOCH
                 break
         # A different caller owns this profile's cold refresh.  Do not hold
         # the cache lock while waiting; unrelated profiles remain independent.
@@ -4902,8 +4923,13 @@ def _list_available_providers_cached(profile_key: str) -> list:
         result = _lap()
         completed_at = time.monotonic()
         with _PROVIDER_ENUM_CACHE_LOCK:
-            _PROVIDER_ENUM_CACHE[profile_key] = (completed_at, result)
-            _PROVIDER_ENUM_CACHE_INFLIGHT.pop(profile_key).set()
+            # A concurrent invalidate_models_cache() bumps the epoch and
+            # drops inflight waiters.  Do not republish the stale probe.
+            if epoch == _PROVIDER_ENUM_CACHE_EPOCH:
+                _PROVIDER_ENUM_CACHE[profile_key] = (completed_at, result)
+            owner = _PROVIDER_ENUM_CACHE_INFLIGHT.pop(profile_key, None)
+            if owner is not None:
+                owner.set()
         return result
     except BaseException:
         # Never leave waiters blocked, and allow the next caller to retry after
@@ -6318,6 +6344,11 @@ def invalidate_models_cache():
     that call invalidate_models_cache() still get back the previous test's
     result from the disk cache because the disk hit is checked before the memory
     cache rebuild runs.
+
+    Also drops the provider-enumeration cache. Credential edits and the
+    autouse test fixture both go through this function; leaving the 120s
+    provider-auth snapshot in place would serve stale list_available_providers()
+    results after the outer catalog cache was cleared.
     """
     global _cache_build_in_progress, _available_models_cache, _available_models_cache_ts
     global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint, _cache_build_cv
@@ -6334,6 +6365,13 @@ def invalidate_models_cache():
         # prior auth_store payload — the test_credential_pool_providers suite was
         # hitting this directly. A full reset is intentionally profile-wide.
         _CREDENTIAL_POOL_CACHE.clear()
+    # Separate lock: do not nest _PROVIDER_ENUM_CACHE_LOCK under
+    # _available_models_cache_lock. Wake any in-flight waiters after
+    # releasing so they can start a fresh probe.
+    with _PROVIDER_ENUM_CACHE_LOCK:
+        pending_provider_enum = _clear_provider_enum_cache_locked()
+    for _event in pending_provider_enum:
+        _event.set()
     # Also delete the disk cache so the next cold build starts fresh.
     # Disk delete is outside the lock — file I/O shouldn't block other readers.
     _delete_models_cache_on_disk()
