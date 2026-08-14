@@ -12157,6 +12157,10 @@ async function checkUpdatesNow(channelOverride){
       const noGitParts=[];
       if(data.webui&&data.webui.no_git&&!data.webui.manual_update) noGitParts.push('WebUI');
       if(data.agent&&data.agent.no_git&&!data.agent.ignored) noGitParts.push('Agent');
+      const recoverableDirty=(typeof _updateTargetRecoverableDirty==='function')&&(
+        _updateTargetRecoverableDirty(data.webui,'webui')||
+        _updateTargetRecoverableDirty(data.agent,'agent')
+      );
       if(parts.length){
         let txt=t('settings_updates_available').replace('{count}',parts.join(', '));
         if(manualInstruction) txt+=' · '+manualInstruction;
@@ -12166,8 +12170,16 @@ async function checkUpdatesNow(channelOverride){
         if(typeof _showUpdateBanner==='function') _showUpdateBanner(data);
       } else if(errorParts.length){
         if(status){status.textContent=t('settings_update_check_failed')+': '+errorParts.join(', ');status.style.color='var(--error)';}
+        if(recoverableDirty&&typeof _showUpdateBanner==='function') _showUpdateBanner(data);
       } else if(noGitParts.length){
         if(status){status.textContent=t('settings_update_no_git');status.style.color='var(--muted)';}
+        if(recoverableDirty&&typeof _showUpdateBanner==='function') _showUpdateBanner(data);
+      } else if(recoverableDirty){
+        const dirtyParts=[];
+        if(_updateTargetRecoverableDirty(data.webui,'webui')) dirtyParts.push('WebUI');
+        if(_updateTargetRecoverableDirty(data.agent,'agent')) dirtyParts.push('Agent');
+        if(status){status.textContent=t('update_local_changes')+': '+dirtyParts.join(', ');status.style.color='var(--accent)';}
+        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data);
       } else {
         if(status){status.textContent=t('settings_up_to_date');status.style.color='var(--success)';}
         if(typeof _showUpdateBanner==='function') _showUpdateBanner(data);

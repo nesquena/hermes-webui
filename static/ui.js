@@ -10168,29 +10168,94 @@ function _renderUpdateWhatsNewLinks(data){
   }
   _appendUpdateDiffLinks(container,targets,"What's new: ");
 }
+function _updateTargetRecoverableDirty(info,target){
+  if(!info||info.dirty!==true) return false;
+  const booleanFlags=['no_git','manual_update','ignored','stale_check'];
+  if(booleanFlags.some((key)=>info[key]!==undefined&&typeof info[key]!=='boolean')) return false;
+  if(info.no_git===true) return false;
+  if(target==='webui'&&info.manual_update===true) return false;
+  if(target==='agent'&&info.ignored===true) return false;
+  return true;
+}
+function _updateActionModel(data,opts){
+  const excluded=new Set(Array.isArray(opts&&opts.excluded)?opts.excluded:[]);
+  const applyTargets=[];
+  const dirtyTargets=[];
+  ['agent','webui'].forEach((target)=>{
+    const info=data&&data[target];
+    if(!info||excluded.has(target)) return;
+    if(_updateTargetRecoverableDirty(info,target)) dirtyTargets.push(target);
+    const booleanFlags=['no_git','manual_update','ignored','stale_check'];
+    const invalidFlags=booleanFlags.some((key)=>info[key]!==undefined&&typeof info[key]!=='boolean');
+    const blocked=invalidFlags||info.error||info.stale_check||info.no_git||info.manual_update||info.ignored;
+    if(typeof info.behind==='number'&&Number.isFinite(info.behind)&&info.behind>0&&!blocked) applyTargets.push(target);
+  });
+  const forceTarget=dirtyTargets[0]||null;
+  return {applyTargets,dirtyTargets,forceTarget,hasApply:applyTargets.length>0,hasForce:!!forceTarget,hasAction:applyTargets.length>0||dirtyTargets.length>0};
+}
+function _applyUpdateActionModel(model){
+  const apply=$('btnApplyUpdate');
+  if(apply){
+    apply.disabled=!model.hasApply;
+    apply.style.display=model.hasApply?'':'none';
+  }
+  const force=$('btnForceUpdate');
+  if(force){
+    force.disabled=!model.hasForce;
+    force.style.display=model.hasForce?'inline-block':'none';
+    force.dataset.target=model.forceTarget||'';
+  }
+}
 function _showUpdateBanner(data){
+  data=data||{};
+  const opts=arguments.length>1&&arguments[1]?arguments[1]:{};
+  const model=typeof _updateActionModel==='function'
+    ?_updateActionModel(data,opts)
+    :(()=>{
+      const applyTargets=[];
+      const dirtyTargets=[];
+      ['agent','webui'].forEach((target)=>{
+        const info=data&&data[target];
+        if(!info||Array.isArray(opts&&opts.excluded)&&opts.excluded.includes(target)) return;
+        if(info.dirty===true&&!info.no_git&&!(target==='webui'&&info.manual_update===true)&&!(target==='agent'&&info.ignored===true)) dirtyTargets.push(target);
+        if(info.behind>0&&!info.error&&!info.stale_check&&!info.no_git&&!info.manual_update&&!info.ignored) applyTargets.push(target);
+      });
+      return {applyTargets,dirtyTargets,forceTarget:dirtyTargets[0]||null,hasApply:applyTargets.length>0,hasForce:dirtyTargets.length>0,hasAction:applyTargets.length>0||dirtyTargets.length>0};
+    })();
   const parts=[];
   const webuiPart=_formatUpdateTargetStatus('WebUI',data.webui);
   const agentPart=_formatUpdateTargetStatus('Agent',data.agent);
   if(webuiPart) parts.push(webuiPart);
   if(agentPart) parts.push(agentPart);
   window._updateData=data;
-  const btnApply=$('btnApplyUpdate');
-  if(btnApply){
-    const webuiManual=!!(data&&data.webui&&data.webui.manual_update&&data.webui.behind>0);
-    const webuiUpdatable=!!(data&&data.webui&&data.webui.behind>0&&!webuiManual);
-    const agentUpdatable=!!(data&&data.agent&&data.agent.behind>0);
-    const hasApplyTargets=webuiUpdatable||agentUpdatable;
-    btnApply.disabled=!hasApplyTargets;
-    btnApply.style.display=hasApplyTargets?'':'none';
-    if(webuiManual){
-      const forceBtn=$('btnForceUpdate');
-      if(forceBtn){forceBtn.disabled=true;forceBtn.style.display='none';forceBtn.dataset.target='';}
-      const clearLockBtn=$('btnClearUpdateLock');
-      if(clearLockBtn){clearLockBtn.disabled=true;clearLockBtn.style.display='none';clearLockBtn.dataset.target='';}
-    }
+  if(typeof _applyUpdateActionModel==='function') _applyUpdateActionModel(model);
+  else {
+    const apply=$('btnApplyUpdate');
+    if(apply){apply.disabled=!model.hasApply;apply.style.display=model.hasApply?'':'none';}
+    const force=$('btnForceUpdate');
+    if(force){force.disabled=!model.hasForce;force.style.display=model.hasForce?'inline-block':'none';force.dataset.target=model.forceTarget||'';}
+  }
+  const excludedTargets=Array.isArray(opts&&opts.excluded)?opts.excluded:[];
+  const clearLockBtn=$('btnClearUpdateLock');
+  const manualWebui=!!(data&&data.webui&&data.webui.no_git&&data.webui.manual_update&&data.webui.behind>0);
+  if(clearLockBtn&&(
+    excludedTargets.includes(clearLockBtn.dataset.target)||
+    manualWebui
+  )){
+    clearLockBtn.disabled=true;
+    clearLockBtn.style.display='none';
+    clearLockBtn.dataset.target='';
   }
   if(!parts.length){
+    const dirtyParts=model.dirtyTargets.map((target)=>target==='webui'?'WebUI':'Agent');
+    if(dirtyParts.length){
+      const msg=$('updateMsg');
+      if(msg) msg.textContent='⚠ '+_i18nUpdateText('update_local_changes','Local changes detected')+': '+dirtyParts.join(', ');
+      const banner=$('updateBanner');
+      if(banner) banner.classList.add('visible');
+      _renderUpdateWhatsNewLinks(data,{mode:'diff'});
+      return model;
+    }
     _renderUpdateWhatsNewLinks(data);
     const staleBanner=$('updateBanner');
     if(staleBanner) staleBanner.classList.remove('visible');
@@ -10205,6 +10270,7 @@ function _showUpdateBanner(data){
   if(banner) banner.classList.add('visible');
   const summaryMode=window._whatsNewSummaryEnabled===true?'summary':'diff';
   _renderUpdateWhatsNewLinks(data,{mode:summaryMode});
+  return model;
 }
 function _i18nUpdateText(key, fallback){
   if(typeof t==='function'){
@@ -10247,11 +10313,19 @@ async function applyUpdates(){
   if(errEl){errEl.style.display='none';errEl.textContent='';}
   // Hide any leftover force-update button from a prior conflict so a fresh
   // retry starts clean (otherwise stale state points at the wrong target).
-  const forceBtnReset=$('btnForceUpdate');
-  if(forceBtnReset){forceBtnReset.style.display='none';forceBtnReset.dataset.target='';}
-  const targets=[];
-  if(window._updateData?.agent?.behind>0) targets.push('agent');
-  if(window._updateData?.webui?.behind>0&&!window._updateData?.webui?.manual_update) targets.push('webui');
+  const updateData=window._updateData||{};
+  const actionModel=typeof _updateActionModel==='function'
+    ?_updateActionModel(updateData)
+    :{applyTargets:[
+      ...(updateData.agent&&updateData.agent.behind>0?['agent']:[]),
+      ...(updateData.webui&&updateData.webui.behind>0&&!updateData.webui.manual_update?['webui']:[]),
+    ]};
+  if(typeof _applyUpdateActionModel==='function') _applyUpdateActionModel(actionModel);
+  else {
+    const forceBtnReset=$('btnForceUpdate');
+    if(forceBtnReset){forceBtnReset.disabled=true;forceBtnReset.style.display='none';forceBtnReset.dataset.target='';}
+  }
+  const targets=actionModel.applyTargets;
   if(!targets.length){
     const msg=updateText('update_no_target','No update target selected. Refresh update status and retry.');
     if(errEl){errEl.textContent=msg;errEl.style.display='block';}
@@ -10261,8 +10335,11 @@ async function applyUpdates(){
   }
   try{
     const stashConflictMessages=[];
+    const completedTargets=[];
     const baselineServerIdentity = await _readHealthServerIdentity();
-    for(const target of targets){
+    let restartRequired=false;
+    for(let targetIndex=0;targetIndex<targets.length;targetIndex++){
+      const target=targets[targetIndex];
       // Send the channel the CHECK reported for this target (what was actually
       // offered in the banner), not a fresh settings read — otherwise a channel
       // switch whose debounced autosave hasn't landed yet races apply, which
@@ -10272,6 +10349,22 @@ async function applyUpdates(){
       const _ch=window._updateData?.[target]?.channel;
       if(_ch==='stable'||_ch==='experimental') _applyBody.channel=_ch;
       const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify(_applyBody),timeoutMs:120000});
+      if(res.up_to_date){
+        completedTargets.push(target);
+        const snapshot=window._updateData;
+        if(typeof _showUpdateBanner==='function') _showUpdateBanner(snapshot,{excluded:completedTargets});
+        if(btn) btn.textContent=updateText('update_now','Update Now');
+        const detail=res.message||('No changes were needed for '+target+'.');
+        if(errEl){errEl.textContent=detail;errEl.style.display='block';}
+        if(targetIndex<targets.length-1) continue;
+        if(restartRequired){
+          sessionStorage.removeItem('hermes-update-checked');
+          sessionStorage.removeItem('hermes-update-dismissed');
+          _waitForServerThenReload({baselineServerIdentity});
+        }
+        window._updateApplyInFlight=false;
+        return;
+      }
       if(!res.ok){
         _showUpdateError(target,res);
         resetApplyButton(0);
@@ -10281,6 +10374,8 @@ async function applyUpdates(){
         stashConflictMessages.push('Update applied ('+target+'): '+(res.message||'Local changes were preserved in git stash.'));
         if(errEl){errEl.textContent=stashConflictMessages.join('\n\n');errEl.style.display='block';}
       }
+      restartRequired=true;
+      completedTargets.push(target);
     }
     const stashConflictMessage=stashConflictMessages.join('\n\n');
     showToast(stashConflictMessage||'Update applied — restarting…',stashConflictMessages.length?10000:undefined,stashConflictMessages.length?'warning':undefined);
@@ -10329,15 +10424,36 @@ async function applyClearUpdateLock(btn){
   window._clearLockInFlight=true;
   btn.disabled=true;
   const originalLabel=btn.textContent;
+  let retainLockButton=false;
+  const retireLockButton=()=>{
+    [btn,$('btnClearUpdateLock')].forEach((candidate)=>{
+      if(!candidate) return;
+      candidate.disabled=true;
+      candidate.style.display='none';
+      candidate.dataset.target='';
+    });
+  };
   btn.textContent='Checking lock…';
   try{
     const res=await api('/api/updates/clear_lock',{method:'POST',body:JSON.stringify({target}),timeoutMs:60000});
     if(res.ok){
+      if(res.up_to_date){
+        window._clearLockInFlight=false;
+        const snapshot=window._updateData;
+        _showUpdateBanner(snapshot,{excluded:[target]});
+        retireLockButton();
+        const detail=res.message||('No changes were needed for '+target+'.');
+        const errEl=$('updateError');
+        if(errEl){errEl.textContent=detail;errEl.style.display='block';}
+        return;
+      }
+      retireLockButton();
       sessionStorage.removeItem('hermes-update-checked');
       sessionStorage.removeItem('hermes-update-dismissed');
       showToast('Update applied — restarting…');
       _waitForServerThenReload({});
     } else if(res.lock_held){
+      retainLockButton=true;
       // v2.2: server returns manual-instruction. Show the exact `rm`
       // command + a one-click "I've removed it, retry update" affordance
       // that POSTs the same endpoint a second time (now that the user
@@ -10345,19 +10461,21 @@ async function applyClearUpdateLock(btn){
       // runs the normal non-destructive apply).
       _renderLockManualInstruction(target, res);
     } else {
+      retireLockButton();
       const msg='Could not check the lock: '+(res.message||'unknown error');
       const errEl=$('updateError');
       if(errEl){errEl.textContent=msg;errEl.style.display='block';}
       else showToast(msg);
     }
   }catch(e){
+    retainLockButton=true;
     const msg='Lock-check request failed: '+((e&&e.message)||String(e));
     const errEl=$('updateError');
     if(errEl){errEl.textContent=msg;errEl.style.display='block';}
     else showToast(msg);
   }finally{
     window._clearLockInFlight=false;
-    btn.disabled=false;
+    btn.disabled=!retainLockButton;
     btn.textContent=originalLabel;
   }
 }
@@ -10474,6 +10592,17 @@ async function forceUpdate(btn){
   try{
     const baselineServerIdentity = await _readHealthServerIdentity();
     const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify((()=>{const b={target};const _ch=window._updateData?.[target]?.channel;if(_ch==='stable'||_ch==='experimental')b.channel=_ch;return b;})()),timeoutMs:120000});
+    if(res.up_to_date||res.refused_rewind){
+      const snapshot=window._updateData;
+      const model=_showUpdateBanner(snapshot,{excluded:[target]})||_updateActionModel(snapshot,{excluded:[target]});
+      const sibling=(model.forceTarget&&model.forceTarget!==target)
+        ?_i18nUpdateText('update_force_target','Force update {0}').replace('{0}',model.forceTarget)
+        :(model.applyTargets.length?_i18nUpdateText('update_apply_target','Update {0}').replace('{0}',model.applyTargets[0]):_i18nUpdateText('update_no_target','No update target selected.'));
+      const detail=(res.message||('No changes were needed for '+target+'.'))+' '+sibling;
+      if(errEl){errEl.textContent=detail;errEl.style.display='block';}
+      btn.textContent=_i18nUpdateText('update_force','Force update');
+      return;
+    }
     if(!res.ok){
       if(errEl){errEl.textContent='Force update failed: '+(res.message||'unknown error');errEl.style.display='block';}
       btn.disabled=false;btn.textContent='Force update';
