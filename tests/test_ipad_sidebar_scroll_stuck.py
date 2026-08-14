@@ -3694,6 +3694,33 @@ global.cancelAnimationFrame = function() {{}};
 function _isTouchPrimary() {{ return true; }}
 
 let appendCount = 0;
+// Per-token append ledger: each _appendTouchBatch call records the
+// _touchBatchToken that was current when its microtask ran. Used by the
+// token-supersession oracle to attribute appends to the schedule that
+// queued them (stale vs newer token). The stale microtask bails on
+// token mismatch BEFORE calling _appendTouchBatch, so any appendLog
+// entry with token===newerToken is proof the newer continuation ran.
+let appendLog = [];
+// Pending-transition ledger: every assignment to _touchBatchPending is
+// recorded with the current token, so the token-supersession oracle can
+// prove the stale microtask did NOT clear the newer owner's pending latch.
+// The stale microtask bails on token mismatch and therefore never enters
+// the `if(token===_touchBatchToken) _touchBatchPending=false;` branch —
+// any clear event MUST be attributed to the newer (matching-token) path.
+let pendingLog = [];
+// Shadow the production _touchBatchPending with an instrumented accessor
+// so we can attribute every transition. The underlying storage is the
+// same variable name via a closure-captured backing field.
+let _touchBatchPendingBacking = false;
+Object.defineProperty(globalThis, '_touchBatchPending', {{
+  get: function() {{ return _touchBatchPendingBacking; }},
+  set: function(v) {{
+    pendingLog.push({{ token: _touchBatchToken, from: _touchBatchPendingBacking, to: v }});
+    _touchBatchPendingBacking = v;
+  }},
+  configurable: true,
+  enumerable: true,
+}});
 
 window.IntersectionObserver = function(cb, opts) {{
   this.disconnect = function(){{}};
@@ -3730,9 +3757,15 @@ const renderOne = function(session, isPinned) {{
 
 eval(extractFunc('_setupTouchSentinel'));
 
-// Wrap _appendTouchBatch to count calls
+// Wrap _appendTouchBatch to count calls and record the token at call time.
+// The stale microtask bails on token mismatch BEFORE calling append, so
+// any appendLog entry is proof the newer (current-token) continuation ran.
 const _realAppend = _appendTouchBatch;
-_appendTouchBatch = function() {{ appendCount++; _realAppend(); }};
+_appendTouchBatch = function() {{
+  appendCount++;
+  appendLog.push({{ token: _touchBatchToken, loadedBefore: _sessionTouchLoadedCount }});
+  _realAppend();
+}};
 
 // Suppress the continuous batch chain so each scenario tests ONLY the
 // scroll-handler -> RAF -> microtask path. Without this, _scheduleContinuousBatch
@@ -3741,7 +3774,10 @@ _scheduleContinuousBatch = function() {{}};
 
 // ── Live-tree snapshot helper ──
 // Captures exact row references, SID order, count, group/body refs, and
-// settlement state (owner, listEl, gen, token, loaded, total, pending).
+// settlement state (owner, listEl, gen, token, loaded, total, pending),
+// plus scroll geometry (scrollTop/scrollHeight/clientHeight). The geometry
+// capture lets the ownership-revalidation oracle assert the full authority
+// set per schedule: owner, list, gen, token, loaded, total, geometry.
 function snapshotLiveTree() {{
   return {{
     items: list._items.slice(),
@@ -3756,6 +3792,9 @@ function snapshotLiveTree() {{
     token: _touchBatchToken,
     loaded: _sessionTouchLoadedCount,
     total: _sessionTouchTotalCount,
+    scrollTop: list.scrollTop,
+    scrollHeight: list.scrollHeight,
+    clientHeight: list.clientHeight,
   }};
 }}
 
@@ -3767,13 +3806,26 @@ function assertLiveTreeUntouched(snap) {{
   var c = snapshotLiveTree();
   return {{
     sameCount: c.count === snap.count,
+    countBefore: snap.count,
+    countAfter: c.count,
+    // Compare object identity only for the pre-snapshot rows (the first
+    // snap.count rows). Rows appended after the snapshot are not expected
+    // to be identical — they are the legitimate output of the newer
+    // continuation's append. sameRefs checks the prefix only.
     sameRefs: snap.items.every(function(ref, i) {{ return c.items[i] === ref; }}),
-    sameSids: JSON.stringify(c.sids) === JSON.stringify(snap.sids),
+    // sameSids checks the prefix SID order only.
+    sameSids: JSON.stringify(c.sids.slice(0, snap.sids.length)) === JSON.stringify(snap.sids),
     sameGroupWrapper: c.groupWrapper === snap.groupWrapper,
     sameBody: c.body === snap.body,
     pendingCleared: c.batchPending === false,
-    countBefore: snap.count,
-    countAfter: c.count,
+    // Authority completeness: compare every captured authority per schedule.
+    // The scenario-specific Python assertions check owner/listEl/gen/token/
+    // loaded/total individually; this comparator adds geometry parity so
+    // the full authority set (owner/list/gen/token/loaded/total/geometry)
+    // is verified per schedule.
+    sameScrollTop: c.scrollTop === snap.scrollTop,
+    sameScrollHeight: c.scrollHeight === snap.scrollHeight,
+    sameClientHeight: c.clientHeight === snap.clientHeight,
   }};
 }}
 
@@ -3863,55 +3915,80 @@ async function fireScrollDrainRAFMutateThenMicrotasks(mutator) {{
   }});
 
   // ── 4. Token supersession: stale callback cannot clear newer pending ownership;
-  //      newer owner then settles deliberately ──
-  // The RAF drains and sets token=T. Before the microtask runs, we bump
-  // _touchBatchToken to T+1. The stale microtask sees token!==_touchBatchToken
-  // and returns WITHOUT clearing _touchBatchPending (because token !==
-  // _touchBatchToken — the guard is `if(token===_touchBatchToken)` which is
-  // false, so it does NOT clear). This proves the stale microtask cannot
-  // clobber a newer owner's pending flag. We then manually settle the newer
-  // owner by calling _appendTouchBatch directly (simulating the newer owner's
-  // own microtask firing), which grows loaded 100→140 and clears pending.
+  //      newer owner settles deliberately through the REAL production scheduler ──
+  // The stale RAF drains and sets token=T. Before its microtask runs, we
+  // re-setup (which bumps gen+token via _invalidateTouchRender) and then fire
+  // the newer owner's scroll handler. The newer RAF queues its own Promise
+  // microtask (token=T+2). Draining both in order proves:
+  //   - the stale microtask neither appends nor clears the newer owner's
+  //     pending latch,
+  //   - the newer continuation appends exactly once and settles pending.
+  // Each microtask records the token it carried when it invoked
+  // _appendTouchBatch, so we can attribute the append to the newer schedule
+  // (not the stale one). We then re-setup to loaded=140 to restore the
+  // postcondition expected by subsequent scenarios.
   list.scrollTop = 19500;
   _setupTouchSentinel(list, {total}, flatRows, renderOne, null, 100);
-  appendCount = 0;
-  const snap4 = snapshotLiveTree();
+  const staleOwner4 = _touchScrollOwner;
   const tokenBefore4 = _touchBatchToken;
-  // Fire the scroll handler to arm RAF + microtask
+  // Reset append ledger for this scenario.
+  appendLog = [];
+  const snap4 = snapshotLiveTree();
+  // Fire the STALE scroll handler to arm stale RAF + microtask
   rafCallbacks = [];
   rafSchedules = 0;
   if (_touchScrollOwner && _touchScrollOwner.handler) _touchScrollOwner.handler();
-  // Drain the RAF callback — this sets token and arms the microtask
-  const rafCbs4 = rafCallbacks.splice(0);
-  for (const cb of rafCbs4) cb();
-  // BEFORE draining the microtask, supersede the token
-  _touchBatchToken++;
+  // Drain the stale RAF — this sets token=T and arms the stale microtask
+  const staleRafCbs = rafCallbacks.splice(0);
+  for (const cb of staleRafCbs) cb();
+  const staleToken4 = _touchBatchToken; // token the stale microtask captured
+  // BEFORE draining the stale microtask, supersede via re-setup (real
+  // production scheduler path: bumps gen + token, installs new owner).
+  _setupTouchSentinel(list, {total}, flatRows, renderOne, null, 100);
+  const newerOwner4 = _touchScrollOwner;
+  const tokenAfterSupersede4 = _touchBatchToken;
+  const snapAfterSupersede4 = snapshotLiveTree();
+  // Immediately fire the NEWER scroll handler (still near bottom)
+  if (_touchScrollOwner && _touchScrollOwner.handler) _touchScrollOwner.handler();
+  // Drain the newer RAF — this sets token=T+2 and arms the newer microtask
+  const newerRafCbs = rafCallbacks.splice(0);
+  for (const cb of newerRafCbs) cb();
+  const newerToken4 = _touchBatchToken; // token the newer microtask captured
+  // Drain BOTH microtasks in FIFO order (stale first, newer second)
   for (let i = 0; i < 10; i++) await Promise.resolve();
-  // The stale microtask ran and bailed on token mismatch WITHOUT clearing
-  // _touchBatchPending — so pending is still true.
-  const pendingAfterStale4 = _touchBatchPending;
-  const staleAppendCount4 = appendCount;
-  const tree4 = assertLiveTreeUntouched(snap4);
-  // Now model the newer owner settling: the newer token's microtask fires,
-  // calls _appendTouchBatch, and clears pending. We simulate this by directly
-  // calling _appendTouchBatch (the newer owner has valid state) and clearing
-  // pending afterward.
-  _touchBatchPending = false; // reset stale pending from the superseded token
-  appendCount = 0;
-  _appendTouchBatch();
-  const newerAppendCount4 = appendCount;
+  // Attribute appends to the schedule that queued them.
+  const staleAppends4 = appendLog.filter(function(e) {{ return e.token === staleToken4; }}).length;
+  const newerAppends4 = appendLog.filter(function(e) {{ return e.token === newerToken4; }}).length;
+  // Attribute pending transitions: the stale microtask bails on token
+  // mismatch, so it never enters the clear-pending branch. Any clear
+  // (true→false) with token===newerToken4 is proof the newer microtask
+  // settled its own latch.
+  const stalePendingClears4 = pendingLog.filter(function(e) {{ return e.token === staleToken4 && e.to === false; }}).length;
+  const newerPendingClears4 = pendingLog.filter(function(e) {{ return e.token === newerToken4 && e.to === false; }}).length;
   const newerLoaded4 = _sessionTouchLoadedCount;
-  _touchBatchPending = false;
+  const tree4 = assertLiveTreeUntouched(snap4);
+  // Re-setup to loaded=140 so subsequent scenarios start from the expected state.
+  _setupTouchSentinel(list, {total}, flatRows, renderOne, null, 140);
   results.push({{
     name: 'token_supersession',
-    staleNoAppend: staleAppendCount4 === 0,
-    staleDidNotClearPending: pendingAfterStale4 === true,
-    tokenWasSuperseded: _touchBatchToken !== tokenBefore4,
-    treeUntouched: tree4,
-    newerSettled: newerAppendCount4 === 1,
+    // Stale microtask carried token=staleToken4 and must NOT have appended:
+    staleNoAppend: staleAppends4 === 0,
+    // Stale microtask must NOT clear pending (newer owner owns it):
+    staleDidNotClearPending: stalePendingClears4 === 0,
+    tokenWasSuperseded: tokenAfterSupersede4 !== tokenBefore4,
+    staleTokenDistinct: staleToken4 !== newerToken4,
+    ownerWasReplaced: newerOwner4 !== staleOwner4,
+    // Newer continuation ran through the real scheduler and appended once:
+    newerSettled: newerAppends4 === 1,
+    newerClearedPending: newerPendingClears4 >= 1,
     newerLoaded: newerLoaded4,
     expectedNewerLoaded: 140,
     pendingClearedAfterSettlement: _touchBatchPending === false,
+    // Live-tree after BOTH microtasks drained: snapshot taken pre-stale must
+    // reflect the pre-supersede state (the re-setup invalidated the old
+    // generation's tree but the same underlying mock list/group/body objects
+    // persist across _setupTouchSentinel calls in this test harness).
+    treeUntouched: tree4,
   }});
 
   // ── 5. Loaded>=total terminal state AFTER RAF drains → no append ──
@@ -3990,6 +4067,10 @@ async function fireScrollDrainRAFMutateThenMicrotasks(mutator) {{
     geometryValid: list.scrollHeight - list.scrollTop - list.clientHeight < 200,
     tokenStill6: _touchBatchToken === token6,
     loadedStill6: _sessionTouchLoadedCount === loaded6,
+    // Total-state parity: owner-only replacement must not change the
+    // canonical row count (loaded) or the total authority. This closes
+    // the gap where the owner-only row could pass while totalstate drifted.
+    totalStill6: _sessionTouchTotalCount === 140,
     // Same-token rejection clears _touchBatchPending:
     pendingCleared: _touchBatchPending === false,
     tree: tree6,
@@ -4042,6 +4123,18 @@ async function fireScrollDrainRAFMutateThenMicrotasks(mutator) {{
     tokenUnchanged: _touchBatchToken === token7,
     // Unchanged owner/gen/token/count authorities:
     totalUnchanged: _sessionTouchTotalCount === total7,
+    // Gen/token/list/loaded/total/geometry authority completeness per
+    // schedule: the full authority set is pinned so the snapshot comparator
+    // cannot silently skip a captured dimension.
+    listUnchanged: _sessionTouchListEl === replacementList7, // replacement is the new current list
+    loadedStill7: _sessionTouchLoadedCount === loaded7,
+    geometryUnchanged: list.scrollHeight === 20000 && list.clientHeight === 800,
+    // Exact replacement list row identity/order pinned: the replacement
+    // list must start empty (no pre-populated rows) and its SID order
+    // must be empty — the test never painted rows into it.
+    replacementListEmpty: replacementList7._items.length === 0,
+    replacementListSids: replacementList7._items.map(function(i) {{ return i.dataset.sid; }}).join(','),
+    expectedReplacementSids: '',
     // Exact replacement list retained and current:
     replacementListRetained: _sessionTouchListEl === replacementList7,
     // Old list node state preserved:
@@ -4114,7 +4207,10 @@ async function fireScrollDrainRAFMutateThenMicrotasks(mutator) {{
         "Owner replacement: _touchBatchPending must be cleared after stale rejection"
 
     # 4. Token supersession: stale does not append, does not clear pending;
-    #    newer owner settles and clears it
+    #    newer owner settles and clears it. The stale snapshot is pre-append,
+    #    so the tree legitimately grows 100→140 via the newer continuation;
+    #    the live-tree oracle only requires that the STALE path did not
+    #    mutate the tree (same refs, same SIDs for the first 100 rows).
     s = scenarios["token_supersession"]
     assert s["staleNoAppend"], \
         "Token supersession: stale microtask must NOT append after token bumped — got appendCount=0 expected"
@@ -4123,12 +4219,17 @@ async function fireScrollDrainRAFMutateThenMicrotasks(mutator) {{
     assert s["tokenWasSuperseded"], \
         "Token supersession: _touchBatchToken must have been bumped"
     t = s["treeUntouched"]
-    assert t["sameCount"], \
-        f"Token supersession: live-tree count must be unchanged — before={t['countBefore']}, after={t['countAfter']}"
+    # The stale snapshot was taken at loaded=100; the newer append grew the
+    # tree to 140. We assert that the first 100 rows (the pre-append state)
+    # are identity-unchanged and that the newer rows are appended in order.
+    assert t["countBefore"] == 100, \
+        f"Token supersession: snapshot must be taken at loaded=100, got {t['countBefore']}"
+    assert t["countAfter"] == 140, \
+        f"Token supersession: live-tree must grow to 140 via newer append, got {t['countAfter']}"
     assert t["sameRefs"], \
-        "Token supersession: live-tree row object identities must be unchanged at every index"
+        "Token supersession: original 100 row object identities must be unchanged at every index"
     assert t["sameSids"], \
-        "Token supersession: live-tree SID order must be unchanged"
+        "Token supersession: original 100 SID order must be unchanged"
     assert s["newerSettled"], \
         "Token supersession: newer owner must settle (append succeeds after stale rejection)"
     assert s["newerLoaded"] == 140, \
@@ -4182,6 +4283,9 @@ async function fireScrollDrainRAFMutateThenMicrotasks(mutator) {{
         "Owner-only replacement: _touchBatchToken must still equal the captured token6"
     assert s["loadedStill6"], \
         "Owner-only replacement: loaded must still equal loaded6"
+    # Total-state parity: loaded and total must both be unchanged
+    assert s["totalStill6"], \
+        "Owner-only replacement: _sessionTouchTotalCount must still equal 140"
     # Same-token rejection clears _touchBatchPending
     assert s["pendingCleared"], \
         "Owner-only replacement: _touchBatchPending must be cleared (same-token rejection)"
@@ -4216,6 +4320,11 @@ async function fireScrollDrainRAFMutateThenMicrotasks(mutator) {{
     # Exact replacement list retained and current
     assert s["replacementListRetained"], \
         "List-only replacement: exact replacement list must remain current after settlement"
+    # Replacement list exact row identity/order pinned
+    assert s["replacementListEmpty"], \
+        "List-only replacement: replacement list must start empty (no pre-populated rows)"
+    assert s["replacementListSids"] == s["expectedReplacementSids"], \
+        "List-only replacement: replacement list SID order must be empty, got " + s["replacementListSids"]
     # Old list node state preserved
     assert s["oldListStatePreserved"], \
         "List-only replacement: old list node state (scrollTop, item count) must be preserved"
