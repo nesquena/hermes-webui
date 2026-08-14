@@ -198,4 +198,3 @@
 - [ ] **Step 6: Push and update the existing PR**
 
   Push `feat/matrix-session-management` to the user's fork. Update PR 6985 with repeated-parameter/API compatibility notes, RED/GREEN evidence, regression counts, desktop/narrow images, deployment hashes, and any manual-verification limitation stated explicitly.
-
