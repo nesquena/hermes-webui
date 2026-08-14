@@ -6729,10 +6729,10 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
   }
   .insights-usage-grid .insights-card {
     min-width: 0;
-    overflow-x: auto;
+    overflow-x: visible;
   }
   .insights-model-table {
-    min-width: 360px;
+    min-width: 0;
   }
 }
 

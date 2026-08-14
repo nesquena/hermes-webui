@@ -610,3 +610,75 @@ def test_models_table_overflow_contract_stays_together():
     assert "grid-template-columns" in joined, (
         f"head and row must keep the shared grid-template-columns; got: {joined}"
     )
+
+
+def test_models_table_mobile_single_scroll_owner():
+    """PR #6775 follow-up regression: the ≤640px mobile cascade must keep a
+    single scroll owner.
+
+    Before this fix, the mobile block combined
+    `.insights-usage-grid .insights-card{overflow-x:auto}` with
+    `.insights-model-table{min-width:360px}`. On very narrow screens (e.g.
+    390px) that produced a NESTED scroller: the card scrolled the table, and
+    the table scrolled its ~402px content — the final Share cell was only
+    reachable after a second scroll, which shifted the card title 32px left.
+
+    The contract: inside `@media (max-width: 640px)`, the card must NOT
+    claim overflow-x (leave it visible) and the model table must be allowed
+    to shrink (min-width:0), so the base `.insights-model-table{overflow-x:
+    auto;display:block}` rule is the table's single local scroller.
+    """
+    insights_mobile = "/* ── Mobile layout for Token Breakdown + Models"
+    assert insights_mobile in STYLE_CSS, "Issue #2104 mobile rules should exist in CSS"
+    section_start = STYLE_CSS.find(insights_mobile)
+    section_end = STYLE_CSS.find("/* ── Checkpoints", section_start)
+    section_block = STYLE_CSS[section_start:section_end]
+
+    # Card must not become its own scroller in the mobile cascade (that would
+    # nest a scroller inside the table scroller and shift the title on
+    # two-step scroll). `overflow-x: visible` is the explicit single-owner form.
+    card_block = [
+        l for l in section_block.splitlines()
+        if ".insights-usage-grid .insights-card" in l
+    ]
+    assert card_block, "mobile cascade must style .insights-usage-grid .insights-card"
+    # find declarations on the same line OR the 2-4 following lines
+    joined = card_block[0]
+    idx = section_block.splitlines().index(card_block[0])
+    all_lines = section_block.splitlines()
+    for j in range(idx + 1, min(idx + 4, len(all_lines))):
+        nxt = all_lines[j].strip()
+        if nxt.startswith(".") or nxt.startswith("}"):
+            break
+        joined += " " + nxt
+    assert "overflow-x: visible" in joined, (
+        f"mobile card must keep overflow-x: visible (single scroll owner on the table), got: {joined}"
+    )
+    assert "overflow-x: auto" not in joined, (
+        f"mobile card must NOT claim overflow-x:auto (nested scroller), got: {joined}"
+    )
+
+    # The mobile model-table rule must drop the 360px floor so the base
+    # table scroller sizes from the card width instead of overflowing past it.
+    model_block = [
+        l.strip() for l in all_lines
+        if l.strip().startswith(".insights-model-table")
+    ]
+    assert model_block, "mobile cascade must style .insights-model-table"
+    mline = model_block[0]
+    m_idx = next(
+        i for i, l in enumerate(all_lines)
+        if l.strip().startswith(".insights-model-table")
+    )
+    mj = mline
+    for j in range(m_idx + 1, min(m_idx + 4, len(all_lines))):
+        nxt = all_lines[j].strip()
+        if nxt.startswith(".") or nxt.startswith("}"):
+            break
+        mj += " " + nxt
+    assert "min-width: 0" in mj or "min-width:0" in mj, (
+        f"mobile .insights-model-table must be min-width:0 so the table owns the scroll; got: {mj}"
+    )
+    assert "min-width: 360px" not in mj and "min-width:360px" not in mj, (
+        f"mobile .insights-model-table must not keep the 360px floor; got: {mj}"
+    )
