@@ -15541,7 +15541,13 @@ def handle_post(handler, parsed) -> bool:
 
         from api.config import _evict_session_agent
         _evict_session_agent(sid)
-        return j(handler, {"ok": True, "session": s.compact() | {"messages": s.messages}})
+        return j(
+            handler,
+            {
+                "ok": True,
+                "session": public_session_projection(s.compact() | {"messages": s.messages}),
+            },
+        )
 
     if parsed.path == "/api/session/branch":
         # Fork a conversation from any message point (#465).

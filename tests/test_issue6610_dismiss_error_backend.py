@@ -97,6 +97,21 @@ def test_route_dismisses_exact_row_and_preserves_neighbors():
     assert session.save_count == 1
 
 
+def test_route_projects_returned_session_through_public_response_scrubber():
+    import api.routes as routes
+
+    session = _FakeSession([_message()])
+    body = {
+        "session_id": session.session_id,
+        "message_index": 0,
+        "expected_message": {"role": "assistant", "content": "provider failed", "timestamp": 7},
+    }
+    with patch.object(routes, "public_session_projection", return_value={"scrubbed": True}) as projection:
+        result = _post(session, body)
+    assert result["data"]["session"] == {"scrubbed": True}
+    projection.assert_called_once()
+
+
 def test_stale_expected_row_is_rejected_without_writing():
     messages = [_message()]
     session = _FakeSession(messages)
