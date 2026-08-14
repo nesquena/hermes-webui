@@ -144,6 +144,24 @@ def test_sidebar_origin_defaults_blank_rows_to_webui_and_unknown_rows_to_their_s
     assert _sidebar_session_origin({"session_source": "cli", "is_cli_session": True}) == "cli"
 
 
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_client_origin_preserves_legacy_webui_markers():
+    source = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    origin_fn = _extract_function(source, "_sessionOrigin")
+    script = f"""
+const _SESSION_ORIGIN_ORDER = ['webui','cli','subagent','other'];
+function _isCliSession() {{ return false; }}
+{origin_fn}
+console.log(JSON.stringify([
+  _sessionOrigin({{source:'webui', session_source:'webui'}}),
+  _sessionOrigin({{raw_source:'webui'}}),
+  _sessionOrigin({{source_tag:'webui'}}),
+]));
+"""
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=True)
+    assert json.loads(result.stdout) == ["webui", "webui", "webui"]
+
+
 def test_sidebar_payload_exposes_origin_metadata_and_dynamic_filtering_contract(monkeypatch):
     import api.routes as routes
     import api.profiles as profiles

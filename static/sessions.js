@@ -1489,7 +1489,14 @@ async function newSession(flash, options={}){
     }
     S.session=data.session;S.messages=data.session.messages||[];
     S._pendingSessionToolsets=null;
-    if(_sessionSourceFilters.some(source=>source!=='webui')) _setSessionSourceFilters(['webui']);
+    const hasNonWebuiSource=typeof _sessionSourceFilters!=='undefined'&&Array.isArray(_sessionSourceFilters)
+      ? _sessionSourceFilters.some(source=>source!=='webui')
+      : _sessionSourceFilter!=='webui';
+    if(hasNonWebuiSource){
+      if(typeof _sessionSourceFilters!=='undefined') _sessionSourceFilters=['webui'];
+      _sessionSourceFilter='webui';
+      try{localStorage.setItem('hermes-session-source-filters-v2',JSON.stringify(['webui']));}catch(_e){}
+    }
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
     S.lastUsage={...(data.session.last_usage||{})};
     if(!(options&&options.worktree)) _rememberNewChatDraftSession(S.session);
@@ -2557,6 +2564,7 @@ function _sessionOrigin(session){
     .map(value=>String(value||'').trim().toLowerCase().replace(/[- ]/g,'_'));
   const known=_SESSION_ORIGIN_ORDER.filter(origin=>origin!=='webui');
   for(const marker of raw){
+    if(marker==='webui') return 'webui';
     if(marker==='api_server') return 'api';
     if(known.includes(marker)) return marker;
   }
@@ -5703,13 +5711,19 @@ function _applySessionListPayload(sessData, projData, opts){
   // all-profiles flag). If a later /api/sessions fails right after a profile
   // switch, the catch path checks this so it won't re-render the PRIOR
   // profile's rows as if they were current (#4167 review item 3).
+  const requestedSidebarSources=typeof _requestedSessionSidebarSources==='function'
+    ? _requestedSessionSidebarSources()
+    : [typeof _requestedSessionSidebarSource==='function'?_requestedSessionSidebarSource():'webui'];
+  const requestedSidebarSourcesKey=typeof _sessionSourceSelectionKey==='function'
+    ? _sessionSourceSelectionKey(requestedSidebarSources)
+    : requestedSidebarSources.slice().sort().join(',');
   _allSessionsScope = {
     profile: (typeof sessData.active_profile === 'string' && sessData.active_profile)
       ? sessData.active_profile
       : (S.activeProfile || 'default'),
     allProfiles: !!_showAllProfiles,
-    sidebarSource: _requestedSessionSidebarSources()[0],
-    sidebarSourcesKey: _sessionSourceSelectionKey(_requestedSessionSidebarSources()),
+    sidebarSource: requestedSidebarSources[0],
+    sidebarSourcesKey: requestedSidebarSourcesKey,
     excludeHidden: _sessionListExcludeHiddenEnabled(),
   };
   // Record this profile's session count so the NEXT switch into it can pick an
@@ -5932,11 +5946,17 @@ async function _runRenderSessionListRefresh(opts, _gen){
     // PRIOR profile's sessions; re-rendering them would falsely show another
     // profile's conversations, so render the error state with no rows instead
     // (#4167 review item 3).
+    const _currentRequestedSources=typeof _requestedSessionSidebarSources==='function'
+      ? _requestedSessionSidebarSources()
+      : [typeof _requestedSessionSidebarSource==='function'?_requestedSessionSidebarSource():'webui'];
+    const _currentRequestedSourcesKey=typeof _sessionSourceSelectionKey==='function'
+      ? _sessionSourceSelectionKey(_currentRequestedSources)
+      : _currentRequestedSources.slice().sort().join(',');
     const _curScope = {
       profile: S.activeProfile || 'default',
       allProfiles: !!_showAllProfiles,
-      sidebarSource: _requestedSessionSidebarSources()[0],
-      sidebarSourcesKey: _sessionSourceSelectionKey(_requestedSessionSidebarSources()),
+      sidebarSource: _currentRequestedSources[0],
+      sidebarSourcesKey: _currentRequestedSourcesKey,
       excludeHidden: _sessionListExcludeHiddenEnabled(),
     };
     const _scopeMatches = _allSessionsScope
@@ -7764,13 +7784,23 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
     if(!_showArchived&&s.archived) continue;
     sessionsRaw.push(s);
   }
-  if(_sessionSourceFilters.some(source=>source!=='webui') && !window._showCliSessions && cliSessionCount===0){
-    _sessionSourceFilters=['webui'];_sessionSourceFilter='webui';
+  let activeSourceFilters=typeof _sessionSourceFilters!=='undefined'&&Array.isArray(_sessionSourceFilters)
+    ? _sessionSourceFilters.slice()
+    : [typeof _sessionSourceFilter==='string'?_sessionSourceFilter:'webui'];
+  if(activeSourceFilters.some(source=>source!=='webui') && !window._showCliSessions && cliSessionCount===0){
+    activeSourceFilters=['webui'];
+    if(typeof _sessionSourceFilters!=='undefined') _sessionSourceFilters=activeSourceFilters.slice();
+    _sessionSourceFilter='webui';
   }
-  const selectedOrigins=new Set(_sessionSourceFilters);
-  const selectedProfileFiltered=webuiProfileFiltered.concat(cliProfileFiltered).filter(s=>selectedOrigins.has(_sessionOrigin(s)));
-  const selectedSessionsRaw=webuiSessionsRaw.concat(cliSessionsRaw).filter(s=>selectedOrigins.has(_sessionOrigin(s)));
-  const selectedReferenceRaw=webuiReferenceRaw.concat(cliReferenceRaw).filter(s=>selectedOrigins.has(_sessionOrigin(s)));
+  const selectedOrigins=new Set(activeSourceFilters);
+  const sourceRowsById=new Map(allMatched.filter(Boolean).map(s=>[s.session_id,s]));
+  const effectiveOrigin=s=>{
+    const parent=s&&s.parent_session_id?sourceRowsById.get(s.parent_session_id):null;
+    return parent&&_isChildSession(s)?_sessionOrigin(parent):_sessionOrigin(s);
+  };
+  const selectedProfileFiltered=webuiProfileFiltered.concat(cliProfileFiltered).filter(s=>selectedOrigins.has(effectiveOrigin(s)));
+  const selectedSessionsRaw=webuiSessionsRaw.concat(cliSessionsRaw).filter(s=>selectedOrigins.has(effectiveOrigin(s)));
+  const selectedReferenceRaw=webuiReferenceRaw.concat(cliReferenceRaw).filter(s=>selectedOrigins.has(effectiveOrigin(s)));
   const showCliOnly=selectedOrigins.size===1&&selectedOrigins.has('cli');
   const serverArchivedCount=(selectedOrigins.has('webui')?_archivedWebuiCount:0)+([...selectedOrigins].some(origin=>origin!=='webui')?_archivedCliCount:0);
   const selectedArchivedCount=selectedSessionsRaw.filter(s=>s.archived).length;
@@ -7798,7 +7828,10 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
 // project + source bucket as the render they feed before using them.
 function _scopedSidebarReferenceRows(isCli=null){
   if(typeof _sidebarReferenceSessions==='undefined'||!Array.isArray(_sidebarReferenceSessions)||!_sidebarReferenceSessions.length) return [];
-  const selectedOrigins=new Set(_normalizeSessionSourceFilters(_sessionSourceFilters));
+  const activeSourceFilters=typeof _sessionSourceFilters!=='undefined'&&Array.isArray(_sessionSourceFilters)
+    ? _sessionSourceFilters
+    : [typeof _sessionSourceFilter==='string'?_sessionSourceFilter:'webui'];
+  const selectedOrigins=new Set(activeSourceFilters.map(source=>String(source||'').trim().toLowerCase().replace(/[- ]/g,'_')).filter(Boolean));
   return _sidebarReferenceSessions.filter(s=>{
     if(!s) return false;
     if(!selectedOrigins.has(_sessionOrigin(s))) return false;

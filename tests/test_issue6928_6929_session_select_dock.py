@@ -19,12 +19,12 @@ def test_batch_dock_is_a_sibling_of_the_scrolling_session_list():
     assert 'class="session-batch-dock"' in html
 
 
-def test_batch_toolbar_is_rendered_only_after_selection():
+def test_batch_toolbar_is_rendered_only_in_selection_mode():
     js = _read("static/sessions.js")
 
     assert "function _renderSessionBatchDock()" in js
     assert "const dock=$('sessionBatchDock')" in js
-    assert "if(!_sessionSelectMode||!_selectedSessions.size){" in js
+    assert "if(!_sessionSelectMode){" in js
     assert "dock.style.display='none';" in js
     assert "dock.appendChild(batchBar)" in js
     assert "bar.style.display='flex'" in js
@@ -60,10 +60,10 @@ def test_dock_has_responsive_safe_area_styles():
     assert ".session-batch-dock .batch-action-bar" in css
 
 
-def test_date_group_checkbox_is_the_selection_mode_entry_point():
+def test_date_group_select_trigger_is_the_selection_mode_entry_point():
     js = _read("static/sessions.js")
 
-    assert "session-group-select-toggle" in js
-    assert "Enable session selection" in js
+    assert "session-group-select-trigger" in js
+    assert "Select conversations" in js
     assert "_enableSessionSelectMode()" in js
     assert "if(!g.isPinned)" in js

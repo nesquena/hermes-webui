@@ -248,7 +248,8 @@ def test_omit_exclude_hidden_still_returns_default_hidden_rows(monkeypatch):
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_default_and_unassigned_queries_send_exclude_hidden(monkeypatch):
     src = SESSIONS_JS.read_text(encoding="utf-8")
-    requested_source_fn = _extract_function(src, "_requestedSessionSidebarSource")
+    normalize_sources_fn = _extract_function(src, "_normalizeSessionSourceFilters")
+    requested_sources_fn = _extract_function(src, "_requestedSessionSidebarSources")
     exclude_hidden_fn = _extract_function(src, "_sessionListExcludeHiddenEnabled")
     project_filter_fn = _extract_function(src, "_setActiveProjectFilter")
     query_fn = _extract_function(src, "_sessionListQueryString")
@@ -258,10 +259,12 @@ global._showCliSessions = false;
 global._showAllProfiles = false;
 global._showArchived = false;
 global._activeProject = null;
+global._sessionSourceFilters = ['webui'];
 global.NO_PROJECT_FILTER = '__none__';
 global.renderSessionListFromCache = () => {{}};
 global.renderSessionList = () => Promise.resolve();
-{requested_source_fn}
+{normalize_sources_fn}
+{requested_sources_fn}
 {exclude_hidden_fn}
 {project_filter_fn}
 {query_fn}

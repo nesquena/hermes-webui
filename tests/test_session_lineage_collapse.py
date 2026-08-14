@@ -660,7 +660,8 @@ function extractFunc(name) {{
 }}
 var _showArchived = false;
 var NO_PROJECT_FILTER = '__none__';
-var _activeProject;
+    var _activeProject;
+    const _SESSION_ORIGIN_ORDER = ['webui','cli','other'];
 var _sidebarReferenceSessions = [{{session_id:'parent', title:'Archived parent', archived:true, updated_at:10, last_message_at:10, source:'webui'}}];
 function _isMessagingSession(s) {{ return false; }}
 function _isCliSession(s) {{ return !!(s && (s.source === 'cli' || s.raw_source === 'cli')); }}
@@ -670,8 +671,9 @@ eval(extractFunc('_isForkWithResolvableParent'));
 eval(extractFunc('_sessionLineageKey'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
 eval(extractFunc('_collapseSessionLineageForSidebar'));
-eval(extractFunc('_attachChildSessionsToSidebarRows'));
-eval(extractFunc('_scopedSidebarReferenceRows'));
+    eval(extractFunc('_attachChildSessionsToSidebarRows'));
+    eval(extractFunc('_sessionOrigin'));
+    eval(extractFunc('_scopedSidebarReferenceRows'));
 eval(extractFunc('_renderSidebarRowsFromRawSessions'));
 const child = {{session_id:'child', title:'Subagent', parent_session_id:'parent', relationship_type:'child_session', updated_at:20, last_message_at:20, source:'webui'}};
 const refs = _scopedSidebarReferenceRows(false);
@@ -708,7 +710,8 @@ function extractFunc(name) {{
 }}
 var _showArchived = false;
 var NO_PROJECT_FILTER = '__none__';
-var _activeProject = 'projA';
+    var _activeProject = 'projA';
+    const _SESSION_ORIGIN_ORDER = ['webui','cli','other'];
 var _sidebarReferenceSessions = [{{session_id:'parent', title:'Archived parent (projB)', archived:true, project_id:'projB', updated_at:10, last_message_at:10, source:'webui'}}];
 function _isMessagingSession(s) {{ return false; }}
 function _isCliSession(s) {{ return !!(s && (s.source === 'cli' || s.raw_source === 'cli')); }}
@@ -718,8 +721,9 @@ eval(extractFunc('_isForkWithResolvableParent'));
 eval(extractFunc('_sessionLineageKey'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
 eval(extractFunc('_collapseSessionLineageForSidebar'));
-eval(extractFunc('_attachChildSessionsToSidebarRows'));
-eval(extractFunc('_scopedSidebarReferenceRows'));
+    eval(extractFunc('_attachChildSessionsToSidebarRows'));
+    eval(extractFunc('_sessionOrigin'));
+    eval(extractFunc('_scopedSidebarReferenceRows'));
 eval(extractFunc('_renderSidebarRowsFromRawSessions'));
 const child = {{session_id:'child', title:'Fork in projA', parent_session_id:'parent', relationship_type:'child_session', project_id:'projA', message_count:3, updated_at:20, last_message_at:20, source:'webui'}};
 const refs = _scopedSidebarReferenceRows(false);
