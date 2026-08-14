@@ -397,7 +397,11 @@ def inspect_session_recovery_status(session_path: Path) -> dict:
     }
 
 
-def recover_session(session_path: Path) -> dict:
+def recover_session(
+    session_path: Path,
+    *,
+    state_db_path: Path | None = None,
+) -> dict:
     """Restore from .bak without superseding a newer sidecar generation."""
     from api.models import _session_sidecar_authority
 
@@ -405,13 +409,21 @@ def recover_session(session_path: Path) -> dict:
         session_path.stem,
         session_dir=session_path.parent,
     ):
-        return _recover_session_owned(session_path)
+        return _recover_session_owned(
+            session_path,
+            state_db_path=state_db_path,
+        )
 
 
-def _recover_session_owned(session_path: Path) -> dict:
+def _recover_session_owned(
+    session_path: Path,
+    *,
+    state_db_path: Path | None = None,
+) -> dict:
     """Run one recovery while holding the cross-process SID authority."""
     from api.models import (
         _invalidate_cached_session_generation,
+        _publish_sidecar_no_replace,
         _read_sidecar_revision,
     )
 
@@ -427,6 +439,19 @@ def _recover_session_owned(session_path: Path) -> dict:
     status = inspect_session_recovery_status(session_path)
     if status["recommend"] != "restore":
         return {**status, "restored": False}
+    if expected_live_revision.state == "ABSENT":
+        if _durable_tombstone_marks_deleted_webui_session(
+            session_path.parent,
+            session_path.stem,
+        ):
+            return {**status, "restored": False, "deleted": True}
+        if not _state_db_has_session(session_path.stem, state_db_path):
+            return {
+                **status,
+                "restored": False,
+                "deleted": True,
+                "missing_state_row": True,
+            }
     if expected_backup_revision.state != "PRESENT":
         return {**status, "restored": False, "stale_generation": True}
     tmp_path = session_path.with_suffix(
@@ -436,6 +461,8 @@ def _recover_session_owned(session_path: Path) -> dict:
         backup = json.loads(bak_path.read_text(encoding='utf-8'))
         if not isinstance(backup, dict):
             raise ValueError("backup payload is not a session object")
+        if backup.get('session_id') != session_path.stem:
+            raise ValueError("backup session id does not match sidecar path")
         base_generation = (
             expected_live_revision.generation
             if expected_live_revision.state == "PRESENT"
@@ -456,7 +483,7 @@ def _recover_session_owned(session_path: Path) -> dict:
             return {**status, "restored": False, "stale_generation": True}
         if expected_live_revision.state == "ABSENT":
             try:
-                os.link(str(tmp_path), str(session_path))
+                _publish_sidecar_no_replace(tmp_path, session_path)
             except FileExistsError:
                 tmp_path.unlink(missing_ok=True)
                 return {**status, "restored": False, "stale_generation": True}
@@ -699,7 +726,7 @@ def _state_db_row_to_sidecar(row: dict) -> dict:
 
 def recover_missing_sidecars_from_state_db(session_dir: Path, state_db_path: Path | None) -> dict:
     """Materialize missing WebUI JSON sidecars from canonical state.db rows."""
-    from api.models import _session_sidecar_authority
+    from api.models import _publish_sidecar_no_replace, _session_sidecar_authority
 
     rows = _read_state_db_missing_sidecar_rows(session_dir, state_db_path)
     materialized = 0
@@ -734,10 +761,17 @@ def recover_missing_sidecars_from_state_db(session_dir: Path, state_db_path: Pat
         # above and the rename — a concurrent Session.save() for the same SID
         # will win and we silently skip rather than overwrite a live sidecar.
         materialized_now = False
+        skipped_deleted = False
         try:
             with _session_sidecar_authority(sid, session_dir=session_dir):
-                os.link(str(tmp), str(target))
-                materialized_now = True
+                if (
+                    _durable_tombstone_marks_deleted_webui_session(session_dir, sid)
+                    or not _state_db_has_session(sid, state_db_path)
+                ):
+                    skipped_deleted = True
+                else:
+                    _publish_sidecar_no_replace(tmp, target)
+                    materialized_now = True
         except FileExistsError:
             # Live sidecar appeared between the check and the link — keep it.
             pass
@@ -752,6 +786,8 @@ def recover_missing_sidecars_from_state_db(session_dir: Path, state_db_path: Pat
         if materialized_now:
             materialized += 1
             details.append({'session_id': sid, 'materialized': True, 'messages': len(payload.get('messages') or [])})
+        elif skipped_deleted:
+            details.append({'session_id': sid, 'materialized': False, 'skipped': 'deleted_during_reconcile'})
         elif not detail_recorded:
             details.append({'session_id': sid, 'materialized': False, 'skipped': 'sidecar_appeared_during_reconcile'})
     return {'scanned': len(rows), 'materialized': materialized, 'details': details}
@@ -1110,7 +1146,7 @@ def recover_all_sessions_on_startup(
     scanned = len(live_paths) + len(orphan_paths)
     for path in [*recovery_paths, *orphan_paths]:
         try:
-            result = recover_session(path)
+            result = recover_session(path, state_db_path=state_db_path)
         except Exception as exc:
             # Defensive: a malformed session file shouldn't break recovery
             # for the rest. Log and continue.

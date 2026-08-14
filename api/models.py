@@ -2,6 +2,7 @@
 import collections
 import copy
 import datetime
+import errno
 import hashlib
 import inspect
 import json
@@ -288,19 +289,97 @@ def _read_sidecar_revision(path: Path, sid: str | None = None) -> SidecarRevisio
     return _sidecar_revision_from_bytes(resolved_sid, raw)
 
 
+def _publish_sidecar_no_replace(source: Path, destination: Path) -> None:
+    """Publish *source* only when *destination* is still absent.
+
+    Hard links provide the strongest atomic create-only primitive and remain the
+    fast path. Some Windows, removable, and network filesystems reject hard
+    links, so fall back to an exclusive destination create while the SID
+    authority is held. The fallback removes a partial destination on failure
+    and never replaces an existing sidecar.
+    """
+    try:
+        os.link(str(source), str(destination))
+        return
+    except FileExistsError:
+        raise
+    except OSError as exc:
+        fallback_errnos = {
+            errno.EACCES,
+            errno.EPERM,
+            errno.EXDEV,
+            getattr(errno, "ENOTSUP", errno.EOPNOTSUPP),
+            errno.EOPNOTSUPP,
+        }
+        if exc.errno not in fallback_errnos:
+            raise
+
+    fd = None
+    destination_created = False
+    try:
+        fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        destination_created = True
+        with os.fdopen(fd, "wb") as destination_handle:
+            fd = None
+            with open(source, "rb") as source_handle:
+                while True:
+                    chunk = source_handle.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    destination_handle.write(chunk)
+            destination_handle.flush()
+            os.fsync(destination_handle.fileno())
+    except Exception:
+        if fd is not None:
+            os.close(fd)
+        if destination_created:
+            destination.unlink(missing_ok=True)
+        raise
+
+
+def _message_rows_cover(candidate, baseline) -> bool:
+    """Return whether baseline is an ordered exact-row subsequence of candidate."""
+    if not isinstance(candidate, list) or not isinstance(baseline, list):
+        return False
+    try:
+        candidate_rows = iter(
+            json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            for row in candidate
+        )
+        baseline_rows = (
+            json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            for row in baseline
+        )
+    except (TypeError, ValueError):
+        return False
+    try:
+        return all(
+            any(candidate_row == baseline_row for candidate_row in candidate_rows)
+            for baseline_row in baseline_rows
+        )
+    except (TypeError, ValueError):
+        return False
+
+
 def _retire_backup_if_owned(
     session_id: str,
     backup_path: Path,
-    receipt,
+    backup_receipt,
+    live_receipt,
 ) -> bool:
-    """Delete a backup only while its exact save receipt still owns it."""
-    if not isinstance(receipt, SidecarRevision):
+    """Delete a backup only while both save receipts still own the generation."""
+    if not isinstance(backup_receipt, SidecarRevision):
+        return False
+    if not isinstance(live_receipt, SidecarRevision):
         return False
     with _session_sidecar_authority(
         session_id,
         session_dir=backup_path.parent,
     ):
-        if _read_sidecar_revision(backup_path, session_id) != receipt:
+        live_path = backup_path.with_suffix("")
+        if _read_sidecar_revision(live_path, session_id) != live_receipt:
+            return False
+        if _read_sidecar_revision(backup_path, session_id) != backup_receipt:
             return False
         backup_path.unlink(missing_ok=True)
         return not backup_path.exists()
@@ -1582,6 +1661,16 @@ class Session:
     ):
         if not is_safe_session_id(self.session_id):
             raise ValueError(f"Unsafe session_id {self.session_id!r}; refusing to write outside session store")
+        # Reject intrinsically unsafe partial objects before checking ownership.
+        # A stale metadata-only alias must still report the stronger data-loss
+        # contract instead of looking like an ordinary retryable CAS conflict.
+        if getattr(self, '_loaded_metadata_only', False):
+            raise RuntimeError(
+                f"Refusing to save metadata-only session {self.session_id!r}: "
+                f"would atomically overwrite on-disk messages with []. "
+                f"Reload with metadata_only=False before mutating state. "
+                f"See #1558."
+            )
         expected_record = self._sidecar_revisions.get(self.session_id)
         expected_revision = (
             SidecarRevision.absent(self.session_id)
@@ -1594,27 +1683,22 @@ class Session:
             )
         current_revision = _read_sidecar_revision(self.path, self.session_id)
         if current_revision != expected_revision:
+            with LOCK:
+                if SESSIONS.get(self.session_id) is self:
+                    SESSIONS.pop(self.session_id, None)
+                    self._sidecar_revisions[self.session_id] = _sidecar_revision_record(
+                        SidecarRevision(
+                            sid=self.session_id,
+                            state="INVALIDATED",
+                            generation=-1,
+                            digest_sha256=None,
+                        )
+                    )
             raise StaleSessionGenerationError(
                 f"Stale session generation for {self.session_id!r}; reload before saving"
             )
         next_sidecar_generation = current_revision.generation + 1
         # ── #1558 P0 guard ──────────────────────────────────────────────
-        # Refuse to save a session that was loaded with metadata_only=True.
-        # Such sessions have messages=[] (it's the whole point of the partial
-        # load), and save() unconditionally writes self.messages to disk via
-        # an atomic os.replace(). Saving a metadata-only stub thus wipes the
-        # full conversation history — which is exactly the v0.50.279
-        # _clear_stale_stream_state() regression that lost users 1000+
-        # message conversations. Any caller that needs to mutate persisted
-        # fields on a metadata-only session must reload with
-        # metadata_only=False first.
-        if getattr(self, '_loaded_metadata_only', False):
-            raise RuntimeError(
-                f"Refusing to save metadata-only session {self.session_id!r}: "
-                f"would atomically overwrite on-disk messages with []. "
-                f"Reload with metadata_only=False before mutating state. "
-                f"See #1558."
-            )
         if touch_updated_at:
             self.updated_at = time.time()
         # Write metadata fields first so load_metadata_only() can read them
@@ -1712,15 +1796,42 @@ class Session:
                     return None
                 if existing_msg_count > incoming_msg_count:
                     bak_path = self.path.with_suffix('.json.bak')
-                    backup_msg_count = -1
-                    try:
-                        backup = json.loads(bak_path.read_text(encoding='utf-8'))
-                        backup_msg_count = len(backup.get('messages') or [])
-                    except (OSError, json.JSONDecodeError, ValueError):
-                        pass
+                    replace_backup = not bak_path.exists()
+                    if bak_path.exists():
+                        try:
+                            backup = json.loads(bak_path.read_text(encoding='utf-8'))
+                            backup_messages = backup.get('messages')
+                            existing_messages = existing.get('messages')
+                            if not isinstance(backup, dict) or not isinstance(backup_messages, list):
+                                raise ValueError("backup payload is not a session snapshot")
+                            if not isinstance(existing_messages, list):
+                                raise ValueError("live payload is not a session snapshot")
+                        except (OSError, json.JSONDecodeError, ValueError) as exc:
+                            raise RuntimeError(
+                                f"Refusing to replace unreadable recoverable backup for {self.session_id!r}"
+                            ) from exc
+                        existing_covers_backup = _message_rows_cover(
+                            existing_messages,
+                            backup_messages,
+                        )
+                        backup_covers_existing = _message_rows_cover(
+                            backup_messages,
+                            existing_messages,
+                        )
+                        if backup_covers_existing:
+                            backup_receipt = _read_sidecar_revision(
+                                bak_path,
+                                self.session_id,
+                            )
+                        elif existing_covers_backup:
+                            replace_backup = True
+                        else:
+                            raise RuntimeError(
+                                f"Refusing to discard incomparable recoverable backup for {self.session_id!r}"
+                            )
                     bak_tmp = None
                     try:
-                        if backup_msg_count < existing_msg_count:
+                        if replace_backup:
                             bak_tmp = bak_path.with_suffix(
                                 f'.bak.tmp.{os.getpid()}.{threading.current_thread().ident}'
                             )
@@ -1755,7 +1866,7 @@ class Session:
                 os.fsync(f.fileno())
             if expected_revision.state == "ABSENT":
                 try:
-                    os.link(str(tmp), str(self.path))
+                    _publish_sidecar_no_replace(tmp, self.path)
                 except FileExistsError as exc:
                     raise StaleSessionGenerationError(
                         f"Stale session generation for {self.session_id!r}; "
@@ -4554,6 +4665,38 @@ def _cached_session_lags_disk(cached) -> bool:
     sid = getattr(cached, 'session_id', None)
     if not sid:
         return False
+    expected_revision = _coerce_sidecar_revision(
+        getattr(cached, '_sidecar_revisions', {}).get(sid),
+        sid,
+    )
+    if expected_revision is not None:
+        path = SESSION_DIR / f'{sid}.json'
+        if expected_revision.state == "ABSENT":
+            return path.exists()
+        if expected_revision.state != "PRESENT":
+            return True
+        disk_prefix = _persisted_session_meta_prefix(sid)
+        if disk_prefix is None:
+            if not path.exists():
+                return True
+        else:
+            raw_generation = disk_prefix.get('_sidecar_generation_v1')
+            disk_generation = (
+                raw_generation
+                if type(raw_generation) is int and raw_generation >= 0
+                else 0
+            )
+            if disk_generation != expected_revision.generation:
+                return True
+            if expected_revision.generation > 0:
+                # Modern compliant writers advance the prefix generation for
+                # metadata and transcript changes alike. Parity therefore
+                # avoids hashing/parsing the potentially huge sidecar on every
+                # cache hit and preserves any newer unsaved in-memory tail.
+                return False
+        # Generation-zero legacy files can still be changed by older writers
+        # without a revision bump. Fall through to the directional count/scene
+        # checks below for compatibility.
     cached_count = len(getattr(cached, 'messages', None) or [])
     # Fast path: prefix read of just the metadata header.
     disk_count = _persisted_message_count(sid)
@@ -5923,6 +6066,7 @@ def persist_recovered_workspace_binding(
                 raise WorkspaceBindingPersistenceError(
                     "Failed to persist recovered workspace: session sidecar is missing"
                 )
+            revision_before = revision
 
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
@@ -5970,26 +6114,67 @@ def persist_recovered_workspace_binding(
                         "Failed to persist recovered workspace"
                     ) from exc
 
-        session.workspace = resolved
-        if hasattr(session, "_sidecar_revisions"):
+        session_expected = _coerce_sidecar_revision(
+            getattr(session, "_sidecar_revisions", {}).get(sid),
+            sid,
+        )
+        session_owned = session_expected == revision_before
+        if session_owned:
+            session.workspace = resolved
             session._sidecar_revisions[sid] = _sidecar_revision_record(revision)
+        elif hasattr(session, "_sidecar_revisions"):
+            session._sidecar_revisions[sid] = _sidecar_revision_record(
+                SidecarRevision(
+                    sid=sid,
+                    state="INVALIDATED",
+                    generation=-1,
+                    digest_sha256=None,
+                )
+            )
+        cached_owned = False
         with LOCK:
             cached = SESSIONS.get(sid)
             if cached is not None:
-                cached.workspace = resolved
-                if hasattr(cached, "_sidecar_revisions"):
+                cached_expected = _coerce_sidecar_revision(
+                    getattr(cached, "_sidecar_revisions", {}).get(sid),
+                    sid,
+                )
+                cached_owned = cached_expected == revision_before
+                if cached_owned:
+                    cached.workspace = resolved
                     cached._sidecar_revisions[sid] = _sidecar_revision_record(
                         revision
                     )
+                else:
+                    SESSIONS.pop(sid, None)
+                    if hasattr(cached, "_sidecar_revisions"):
+                        cached._sidecar_revisions[sid] = _sidecar_revision_record(
+                            SidecarRevision(
+                                sid=sid,
+                                state="INVALIDATED",
+                                generation=-1,
+                                digest_sha256=None,
+                            )
+                        )
+        result = cached if cached_owned else (session if session_owned else None)
+        if result is None:
+            result = Session.load(sid)
+            if result is None:
+                raise WorkspaceBindingPersistenceError(
+                    "Failed to reload session after workspace recovery"
+                )
+            with LOCK:
+                SESSIONS[sid] = result
+                SESSIONS.move_to_end(sid)
         try:
-            _write_session_index(updates=[cached or session])
+            _write_session_index(updates=[result])
         except Exception:
             logger.debug(
                 "Failed to refresh session index after workspace recovery for %s",
                 sid,
                 exc_info=True,
             )
-        return cached or session
+        return result
 
 
 def get_session_for_file_ops(sid: str):

@@ -15315,7 +15315,9 @@ def handle_post(handler, parsed) -> bool:
             # again (#3542 lifecycle gap).
             from api.session_ops import apply_session_title_rename
             apply_session_title_rename(s, "Untitled")
-            s.save()
+            backup_receipt = s.save()
+            from api.models import _read_sidecar_revision, _retire_backup_if_owned
+            committed_receipt = _read_sidecar_revision(s.path, sid)
             persisted_clear = False
             try:
                 persisted = json.loads(s.path.read_text(encoding="utf-8"))
@@ -15335,7 +15337,12 @@ def handle_post(handler, parsed) -> bool:
                 logger.warning("session clear could not verify persisted empty state for %s", sid, exc_info=True)
             if had_sidecar_messages and persisted_clear:
                 try:
-                    s.path.with_suffix('.json.bak').unlink(missing_ok=True)
+                    _retire_backup_if_owned(
+                        sid,
+                        s.path.with_suffix('.json.bak'),
+                        backup_receipt,
+                        committed_receipt,
+                    )
                 except OSError:
                     logger.warning("session clear could not remove stale backup for %s", sid, exc_info=True)
         # Evict cached agent outside the per-session lock.  Eviction may run a
@@ -26070,10 +26077,16 @@ def _handle_session_compress(handler, body):
             s.truncation_boundary = compress_watermark
             s.compression_anchor_mode = "manual"
             s.last_prompt_tokens = new_tokens
-            s.save()
+            backup_receipt = s.save()
             # Drop stale backups that would undo an intentional manual compress.
             try:
-                s.path.with_suffix(".json.bak").unlink(missing_ok=True)
+                from api.models import _read_sidecar_revision, _retire_backup_if_owned
+                _retire_backup_if_owned(
+                    s.session_id,
+                    s.path.with_suffix(".json.bak"),
+                    backup_receipt,
+                    _read_sidecar_revision(s.path, s.session_id),
+                )
             except OSError:
                 pass
 

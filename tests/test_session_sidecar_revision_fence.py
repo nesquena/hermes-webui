@@ -1,6 +1,9 @@
+import errno
 import json
 import multiprocessing
 import os
+import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -189,7 +192,10 @@ def test_recovery_expected_absent_uses_create_or_fail(tmp_path, monkeypatch):
     backup_path = session_path.with_suffix(".json.bak")
     backup_path.write_text(
         json.dumps(
-            {"messages": [{"role": "user", "content": "backup"}]}
+            {
+                "session_id": "absent",
+                "messages": [{"role": "user", "content": "backup"}],
+            }
         ),
         encoding="utf-8",
     )
@@ -286,21 +292,30 @@ def test_backup_retirement_requires_matching_receipt(tmp_path, monkeypatch):
     _patch_store(monkeypatch, models, session_dir)
     sid = "cleanup"
     backup_path = session_dir / f"{sid}.json.bak"
+    live_path = session_dir / f"{sid}.json"
+    live_path.write_text("committed live", encoding="utf-8")
+    live_receipt = models._read_sidecar_revision(live_path, sid)
     backup_path.write_text("first backup", encoding="utf-8")
 
     first_receipt = models._read_sidecar_revision(backup_path, sid)
     backup_path.write_text("newer foreign backup", encoding="utf-8")
 
-    assert models._retire_backup_if_owned(sid, backup_path, None) is False
+    assert models._retire_backup_if_owned(
+        sid, backup_path, None, live_receipt
+    ) is False
     assert (
-        models._retire_backup_if_owned(sid, backup_path, first_receipt)
+        models._retire_backup_if_owned(
+            sid, backup_path, first_receipt, live_receipt
+        )
         is False
     )
     assert backup_path.read_text(encoding="utf-8") == "newer foreign backup"
 
     current_receipt = models._read_sidecar_revision(backup_path, sid)
     assert (
-        models._retire_backup_if_owned(sid, backup_path, current_receipt)
+        models._retire_backup_if_owned(
+            sid, backup_path, current_receipt, live_receipt
+        )
         is True
     )
     assert not backup_path.exists()
@@ -342,3 +357,306 @@ def test_shrinking_save_fails_closed_when_backup_publish_fails(
         persisted["_sidecar_generation_v1"]
         == original["_sidecar_generation_v1"]
     )
+
+
+def test_workspace_patch_does_not_grant_stale_alias_new_revision(
+    tmp_path, monkeypatch
+):
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    sid = "workspace-stale-alias"
+    original_workspace = tmp_path / "before"
+    recovered_workspace = tmp_path / "after"
+    seed = models.Session(
+        session_id=sid,
+        workspace=str(original_workspace),
+        messages=[{"role": "user", "content": "seed"}],
+    )
+    seed.save(skip_index=True)
+    stale = models.Session.load(sid)
+    newer = models.Session.load(sid)
+    assert stale is not None and newer is not None
+    newer.messages.append({"role": "assistant", "content": "newer"})
+    newer.save(skip_index=True)
+    with models.LOCK:
+        models.SESSIONS[sid] = stale
+
+    current = models.persist_recovered_workspace_binding(
+        stale,
+        recovered_workspace,
+        expected_workspace=str(original_workspace.resolve()),
+    )
+
+    assert current is not stale
+    assert current.messages[-1]["content"] == "newer"
+    assert current.workspace == str(recovered_workspace.resolve())
+    stale.title = "must not own current revision"
+    with pytest.raises(models.StaleSessionGenerationError):
+        stale.save(skip_index=True)
+    persisted = json.loads(seed.path.read_text(encoding="utf-8"))
+    assert persisted["messages"][-1]["content"] == "newer"
+
+
+def test_incomparable_backup_fails_closed_without_losing_either_snapshot(
+    tmp_path, monkeypatch
+):
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    sid = "incomparable-backup"
+    a = {"role": "user", "content": "A"}
+    unique = {"role": "assistant", "content": "UNIQUE-U"}
+    session = models.Session(
+        session_id=sid,
+        workspace=str(tmp_path),
+        messages=[a, unique],
+    )
+    session.save(skip_index=True)
+    session.messages = [a]
+    session.save(skip_index=True)
+    session.messages = [
+        a,
+        {"role": "assistant", "content": "D1"},
+        {"role": "user", "content": "D2"},
+    ]
+    session.save(skip_index=True)
+
+    session.messages = [a]
+    with pytest.raises(RuntimeError, match="incomparable"):
+        session.save(skip_index=True)
+
+    live = json.loads(session.path.read_text(encoding="utf-8"))
+    backup = json.loads(
+        session.path.with_suffix(".json.bak").read_text(encoding="utf-8")
+    )
+    assert [row["content"] for row in live["messages"]] == ["A", "D1", "D2"]
+    assert [row["content"] for row in backup["messages"]] == ["A", "UNIQUE-U"]
+
+
+def test_backup_dominance_preserves_message_order():
+    from api.models import _message_rows_cover
+
+    first = {"role": "user", "content": "first"}
+    second = {"role": "assistant", "content": "second"}
+
+    assert _message_rows_cover([first, second], [first]) is True
+    assert _message_rows_cover([second, first], [first, second]) is False
+
+
+def test_backup_retirement_requires_live_revision_to_still_match(
+    tmp_path, monkeypatch
+):
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    sid = "cleanup-live-race"
+    session = models.Session(
+        session_id=sid,
+        workspace=str(tmp_path),
+        messages=[
+            {"role": "user", "content": "one"},
+            {"role": "assistant", "content": "two"},
+        ],
+    )
+    session.save(skip_index=True)
+    session.messages = session.messages[:1]
+    backup_receipt = session.save(skip_index=True)
+    committed_receipt = models._read_sidecar_revision(session.path, sid)
+    session.messages.append({"role": "assistant", "content": "new generation"})
+    session.save(skip_index=True)
+
+    assert models._retire_backup_if_owned(
+        sid,
+        session.path.with_suffix(".json.bak"),
+        backup_receipt,
+        committed_receipt,
+    ) is False
+    assert session.path.with_suffix(".json.bak").exists()
+
+
+def test_same_count_external_metadata_update_reloads_cached_owner(
+    tmp_path, monkeypatch
+):
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    sid = "same-count-metadata"
+    seed = models.Session(
+        session_id=sid,
+        title="before",
+        workspace=str(tmp_path),
+        messages=[{"role": "user", "content": "same transcript"}],
+    )
+    seed.save(skip_index=True)
+    cached = models.Session.load(sid)
+    external = models.Session.load(sid)
+    assert cached is not None and external is not None
+    with models.LOCK:
+        models.SESSIONS[sid] = cached
+    external.title = "after"
+    external.save(skip_index=True)
+
+    loaded = models.get_session(sid)
+
+    assert loaded is not cached
+    assert loaded.title == "after"
+    assert loaded.messages == cached.messages
+
+
+def test_modern_cache_freshness_uses_prefix_generation_not_full_digest(
+    tmp_path, monkeypatch
+):
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    session = models.Session(
+        session_id="prefix-generation",
+        workspace=str(tmp_path),
+        messages=[{"role": "user", "content": "large sidecar proxy"}],
+    )
+    session.save(skip_index=True)
+    cached = models.Session.load(session.session_id)
+    assert cached is not None
+
+    monkeypatch.setattr(
+        models,
+        "_read_sidecar_revision",
+        lambda *_args, **_kwargs: pytest.fail("cache hit hashed the full sidecar"),
+    )
+
+    assert models._cached_session_lags_disk(cached) is False
+
+
+def test_recovery_rejects_backup_with_foreign_embedded_sid(tmp_path, monkeypatch):
+    from api import models, session_recovery
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    sid = "expected-sid"
+    session_path = session_dir / f"{sid}.json"
+    live = {
+        "session_id": sid,
+        "messages": [{"role": "user", "content": "live"}],
+    }
+    foreign = {
+        "session_id": "foreign-sid",
+        "messages": [
+            {"role": "user", "content": "foreign one"},
+            {"role": "assistant", "content": "foreign two"},
+        ],
+    }
+    session_path.write_text(json.dumps(live), encoding="utf-8")
+    session_path.with_suffix(".json.bak").write_text(
+        json.dumps(foreign), encoding="utf-8"
+    )
+
+    result = session_recovery.recover_session(session_path)
+
+    assert result["restored"] is False
+    assert "session id" in result["error"].lower()
+    assert json.loads(session_path.read_text(encoding="utf-8")) == live
+
+
+def test_expected_absent_save_falls_back_when_hardlinks_are_unsupported(
+    tmp_path, monkeypatch
+):
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+
+    def unsupported_link(_source, _destination):
+        raise OSError(errno.EOPNOTSUPP, "hard links unsupported")
+
+    monkeypatch.setattr(models.os, "link", unsupported_link)
+    session = models.Session(
+        session_id="no-hardlinks",
+        workspace=str(tmp_path),
+        messages=[{"role": "user", "content": "safe first save"}],
+    )
+
+    session.save(skip_index=True)
+
+    assert json.loads(session.path.read_text(encoding="utf-8"))["messages"] == session.messages
+
+
+def test_orphan_recovery_rechecks_delete_tombstone_under_authority(
+    tmp_path, monkeypatch
+):
+    from api import models, session_recovery
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    sid = "deleted-before-recovery"
+    session_path = session_dir / f"{sid}.json"
+    session_path.with_suffix(".json.bak").write_text(
+        json.dumps(
+            {
+                "session_id": sid,
+                "messages": [{"role": "user", "content": "deleted"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    models._record_webui_deleted_session_tombstone(sid)
+
+    result = session_recovery.recover_session(session_path)
+
+    assert result["restored"] is False
+    assert result.get("deleted") is True
+    assert not session_path.exists()
+
+
+def test_state_db_materialization_rechecks_delete_inside_authority(
+    tmp_path, monkeypatch
+):
+    from api import models, session_recovery
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    sid = "deleted-during-reconcile"
+    db_path = tmp_path / "state.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, title TEXT, "
+            "model TEXT, started_at REAL, message_count INTEGER)"
+        )
+        conn.execute(
+            "CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, "
+            "role TEXT, content TEXT, timestamp REAL)"
+        )
+        conn.execute(
+            "INSERT INTO sessions VALUES (?, 'webui', 'deleted', 'model', 1, 1)",
+            (sid,),
+        )
+        conn.execute(
+            "INSERT INTO messages VALUES (1, ?, 'user', 'deleted', 1)",
+            (sid,),
+        )
+
+    real_authority = models._session_sidecar_authority
+
+    @contextmanager
+    def delete_before_authority_yields(session_id, *, session_dir=None):
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+        models._record_webui_deleted_session_tombstone(session_id)
+        with real_authority(session_id, session_dir=session_dir):
+            yield
+
+    monkeypatch.setattr(
+        models, "_session_sidecar_authority", delete_before_authority_yields
+    )
+
+    result = session_recovery.recover_missing_sidecars_from_state_db(
+        session_dir, db_path
+    )
+
+    assert result["materialized"] == 0
+    assert not (session_dir / f"{sid}.json").exists()
