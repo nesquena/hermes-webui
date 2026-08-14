@@ -70,9 +70,15 @@ def test_api_modules_exist(cleanup_test_sessions):
         assert (base / mod).exists(), f"Missing api/{mod}"
 
 def test_server_py_under_750_lines(cleanup_test_sessions):
-    """server.py should be under 750 lines after the split."""
+    """server.py should be under 750 lines after the split.
+
+    Ceiling is 760, not 750: the deep-review gate of 2026-08-14 (PR #6658)
+    requires `Connection: close` emission in Handler.end_headers(), which
+    lives in server.py by definition — the framing logic cannot move to api/
+    without losing the BaseHTTPRequestHandler override.
+    """
     lines = len((REPO_ROOT / "server.py").read_text().splitlines())
-    assert lines < 750, f"server.py is {lines} lines -- split may not have landed"
+    assert lines < 760, f"server.py is {lines} lines -- split may not have landed"
 
 def test_api_config_has_cancel_flags(cleanup_test_sessions):
     src = (REPO_ROOT / "api/config.py").read_text()
