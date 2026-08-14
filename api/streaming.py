@@ -65,6 +65,7 @@ from api.todo_state import attach_todo_state, emit_todo_state
 from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
 from api.models import (
+    _canonical_message_digest,
     _collapse_duplicate_incomplete_message_ids,
     _durable_empty_assistant_replay_key,
     _incomplete_reasoning_message_id,
@@ -5826,15 +5827,20 @@ def _comparison_keys_equal(left, right):
 
 
 def _messages_have_prefix(messages, prefix, *, key_fn=None):
+    strict_keys_only = key_fn is not None
     key_fn = key_fn or _message_identity
     if len(messages or []) < len(prefix or []):
         return False
     for idx, expected in enumerate(prefix or []):
-        if not _comparison_keys_equal(
-            key_fn((messages or [])[idx]),
-            key_fn(expected),
+        actual = (messages or [])[idx]
+        if _comparison_keys_equal(key_fn(actual), key_fn(expected)):
+            continue
+        if not strict_keys_only and _comparison_keys_equal(
+            _canonical_message_digest(actual),
+            _canonical_message_digest(expected),
         ):
-            return False
+            continue
+        return False
     return True
 
 

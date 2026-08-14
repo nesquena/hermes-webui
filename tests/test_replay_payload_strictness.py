@@ -159,6 +159,17 @@ def test_messages_prefix_rejects_noncomparable_structured_assistants():
     assert not _messages_have_prefix([first], [second], key_fn=_message_replay_key)
 
 
+def test_default_prefix_accepts_only_exact_structured_payload():
+    from api.streaming import _messages_have_prefix
+
+    first = _structured_assistant("file:///A.png")
+    identical = copy.deepcopy(first)
+    different = _structured_assistant("file:///B.png")
+
+    assert _messages_have_prefix([identical], [first]) is True
+    assert _messages_have_prefix([different], [first]) is False
+
+
 def test_partial_reducer_only_removes_identical_rows():
     from api.models import _collapse_adjacent_duplicate_partials
 
