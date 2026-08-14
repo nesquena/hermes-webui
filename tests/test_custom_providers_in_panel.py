@@ -305,7 +305,7 @@ class TestDeepSeekV4Models:
         zai = _SUPPORTED_PROVIDER_SETUPS["zai"]
         assert zai["label"] == "Z.AI / GLM (智谱)"
         assert zai["env_var"] == "GLM_API_KEY"
-        assert zai["default_model"] == "glm-5.1"
+        assert zai["default_model"] == "glm-5.3"
         assert zai["default_base_url"] == "https://open.bigmodel.cn/api/paas/v4"
 
     def test_deepseek_onboarding_default_is_v4(self):
