@@ -135,3 +135,143 @@ def test_extension_settings_runtime_normalizes_persists_resets_and_clears():
         """
     )
     _run_node(script)
+
+
+def test_hermes_ext_register_runtime_identity_and_reload_lifecycle():
+    script = textwrap.dedent(
+        f"""
+        const fs = require('fs');
+        const assert = require('assert');
+        const store = new Map();
+        let reads = 0;
+        let writes = 0;
+        let removes = 0;
+        global.window = {{
+          __HERMES_EXTENSION_CONFIG__: {{
+            extensions: [{{
+              id: 'alpha.ext',
+              name: 'Alpha',
+              storage_owned: true,
+              settings_schema: [
+                {{key: 'enabled', type: 'boolean', default: false}},
+                {{key: 'mode', type: 'string', default: 'alpha'}}
+              ]
+            }}, {{
+              id: 'beta.ext',
+              name: 'Beta',
+              storage_owned: true,
+              settings_schema: [
+                {{key: 'enabled', type: 'boolean', default: true}},
+                {{key: 'mode', type: 'string', default: 'beta'}}
+              ]
+            }}, {{
+              id: 'deferred.ext',
+              name: 'Deferred',
+              storage_owned: true,
+              settings_schema: [
+                {{key: 'enabled', type: 'boolean', default: false}},
+                {{key: 'mode', type: 'string', default: 'deferred'}}
+              ]
+            }}]
+          }},
+          localStorage: {{
+            getItem(key) {{ reads += 1; return store.has(key) ? store.get(key) : null; }},
+            setItem(key, value) {{ writes += 1; store.set(key, String(value)); }},
+            removeItem(key) {{ removes += 1; store.delete(key); }}
+          }}
+        }};
+        eval(fs.readFileSync({str(EXTENSION_SETTINGS_JS)!r}, 'utf8'));
+
+        const forgedMetadata = {{
+          id: 'forged.ext',
+          name: 'Forged',
+          storage_owned: true,
+          settings_schema: [{{key: 'owned', type: 'boolean', default: false}}]
+        }};
+        const forgedSettings = window.HermesExtensionSettings.settingsForExtension(
+          'forged.ext', forgedMetadata
+        );
+        const forgedStorage = window.HermesExtensionSettings.storageForExtension(
+          'forged.ext', forgedMetadata
+        );
+        assert.strictEqual(forgedSettings.trusted, false);
+        assert.strictEqual(forgedSettings.set('owned', true).ok, false);
+        assert.strictEqual(forgedStorage.set('owned', true), false);
+        assert.strictEqual(store.has('hermes.ext.settings.forged.ext'), false);
+        assert.strictEqual(store.has('hermes.ext.storage.forged.ext'), false);
+
+        const beforeUnknown = {{reads, writes, removes}};
+        assert.strictEqual(window.hermesExt.register(''), null);
+        assert.strictEqual(window.hermesExt.register('   unknown.ext   '), null);
+        assert.strictEqual(window.hermesExt.register(null), null);
+        assert.strictEqual(window.hermesExt.register(42), null);
+        assert.strictEqual(window.hermesExt.register({{toString() {{ return 'alpha.ext'; }}}}), null);
+        assert.strictEqual(window.hermesExt.register(Symbol('alpha.ext')), null);
+        assert.deepStrictEqual({{reads, writes, removes}}, beforeUnknown);
+        assert.deepStrictEqual([...store.keys()], []);
+
+        const alpha = window.hermesExt.register('  alpha.ext  ');
+        assert.ok(alpha);
+        assert.strictEqual(alpha.id, 'alpha.ext');
+        assert.strictEqual(Object.isFrozen(alpha), true);
+        assert.deepStrictEqual(Object.keys(alpha).sort(), ['events', 'id', 'settings', 'storage']);
+        assert.deepStrictEqual(alpha.settings.values, {{enabled: false, mode: 'alpha'}});
+        assert.strictEqual(alpha.settings.set('enabled', true).ok, true);
+        assert.strictEqual(alpha.storage.set('note', 'alpha-note'), true);
+        assert.deepStrictEqual(JSON.parse(store.get('hermes.ext.settings.alpha.ext')), {{enabled: true}});
+        assert.deepStrictEqual(JSON.parse(store.get('hermes.ext.storage.alpha.ext')), {{note: 'alpha-note'}});
+
+        assert.strictEqual(window.hermesExt.register('alpha.ext'), alpha);
+        assert.strictEqual(window.hermesExt.register(' alpha.ext '), alpha);
+
+        const beta = window.hermesExt.register('beta.ext');
+        assert.ok(beta);
+        assert.strictEqual(beta.id, 'beta.ext');
+        assert.notStrictEqual(beta, alpha);
+        assert.notStrictEqual(beta.settings, alpha.settings);
+        assert.notStrictEqual(beta.storage, alpha.storage);
+        assert.strictEqual(beta.storage.set('note', 'beta-note'), true);
+        assert.strictEqual(beta.settings.set('enabled', false).ok, true);
+        assert.strictEqual(alpha.storage.get('note'), 'alpha-note');
+        assert.strictEqual(beta.storage.get('note'), 'beta-note');
+        assert.strictEqual(alpha.settings.get('enabled'), true);
+        assert.strictEqual(beta.settings.get('enabled'), false);
+
+        const legacySettings = window.HermesExtensionSettings.settingsForExtension('alpha.ext');
+        const legacyStorage = window.HermesExtensionSettings.storageForExtension('alpha.ext');
+        assert.strictEqual(legacySettings.get('enabled'), true);
+        assert.strictEqual(legacyStorage.get('note'), 'alpha-note');
+        assert.strictEqual(window.hermesExt.settings.forExtension('alpha.ext').get('mode'), 'alpha');
+        assert.strictEqual(window.hermesExt.storage.forExtension('beta.ext').get('note'), 'beta-note');
+
+        window.HermesExtensionSettings.primeFromStatus({{
+          extensions: [{{
+            id: 'beta.ext',
+            name: 'Beta after refresh',
+            storage_owned: true,
+            settings_schema: [{{key: 'different', type: 'string', default: 'late'}}]
+          }}, {{
+            id: 'late.ext',
+            name: 'Late',
+            storage_owned: true,
+            settings_schema: [{{key: 'enabled', type: 'boolean', default: false}}]
+          }}]
+        }});
+
+        const deferred = window.hermesExt.register('deferred.ext');
+        assert.ok(deferred);
+        assert.deepStrictEqual(deferred.settings.values, {{enabled: false, mode: 'deferred'}});
+        assert.strictEqual(deferred.settings.trusted, true);
+        assert.strictEqual(deferred.storage.set('note', 'deferred-note'), true);
+        assert.strictEqual(deferred.storage.get('note'), 'deferred-note');
+        assert.strictEqual(window.hermesExt.settings.forExtension('deferred.ext').trusted, false);
+
+        assert.strictEqual(window.hermesExt.register('alpha.ext'), alpha);
+        assert.strictEqual(alpha.settings.get('enabled'), true);
+        assert.strictEqual(alpha.storage.get('note'), 'alpha-note');
+        assert.strictEqual(window.hermesExt.register('late.ext'), null);
+        assert.strictEqual(store.has('hermes.ext.settings.late.ext'), false);
+        assert.strictEqual(store.has('hermes.ext.storage.late.ext'), false);
+        """
+    )
+    _run_node(script)

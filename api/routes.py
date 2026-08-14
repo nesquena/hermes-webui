@@ -1942,6 +1942,7 @@ def _session_list_cache_key(
     exclude_hidden: bool = False,
     visible_only: bool = False,
     show_webhook_sessions: bool = False,
+    show_kanban_sessions: bool = False,
     source_filter: str | None = None,
     sidebar_source: str | None = None,
     archived_limit: int | None = None,
@@ -1958,6 +1959,7 @@ def _session_list_cache_key(
         exclude_hidden=exclude_hidden,
         visible_only=visible_only,
         show_webhook_sessions=show_webhook_sessions,
+        show_kanban_sessions=show_kanban_sessions,
         source_filter=source_filter,
         sidebar_source=sidebar_source,
         archived_limit=archived_limit,
@@ -2203,6 +2205,7 @@ def _build_session_list_cache_payload(
     exclude_hidden: bool = False,
     visible_only: bool = False,
     show_webhook_sessions: bool = False,
+    show_kanban_sessions: bool = False,
     source_filter: str | None = None,
     sidebar_source: str | None = None,
     archived_limit: int | None = None,
@@ -2254,6 +2257,7 @@ def _build_session_list_cache_payload(
     show_previous_messaging_sessions = bool(show_previous_messaging_sessions)
     show_cron_sessions = bool(show_cron_sessions)
     show_webhook_sessions = bool(show_webhook_sessions)
+    show_kanban_sessions = bool(show_kanban_sessions)
     webui_sessions = [_normalize_sidebar_source_flags(s) for s in webui_sessions]
     if show_cli_sessions:
         diag_stage("get_cli_sessions")
@@ -2400,6 +2404,8 @@ def _build_session_list_cache_payload(
             represented_webui_ids,
             show_cron_sessions=show_cron_sessions,
             show_webhook_sessions=show_webhook_sessions,
+            show_kanban_sessions=show_kanban_sessions,
+            source_filter=source_filter,
         )
     else:
         diag_stage("filter_webui_sessions")
@@ -2573,6 +2579,7 @@ def _build_session_list_cache_payload(
             "show_cron_sessions": show_cron_sessions,
             "show_claude_code_sessions": show_claude_code_sessions if show_cli_sessions else False,
             "show_webhook_sessions": show_webhook_sessions,
+            "show_kanban_sessions": show_kanban_sessions,
         },
     }
 
@@ -2841,6 +2848,7 @@ from api.config import (
     ACTIVE_RUNS,
     ACTIVE_RUNS_LOCK,
     register_stream_owner,
+    register_session_writeback_owner,
     stream_owner_session_id,
     unregister_stream_owner,
     CHAT_LOCK,
@@ -2869,6 +2877,7 @@ from api.config import (
     get_config_for_profile_home,
     _cfg_lock,
     PENDING_BG_TASK_COMPLETIONS,
+    _parse_provider_qualified_model_id,
 )
 from api import config as api_config
 from api.helpers import (
@@ -2882,6 +2891,8 @@ from api.helpers import (
     _security_headers,
     _sanitize_error,
     redact_session_data,
+    public_session_projection,
+    strip_public_internal_fields,
     _redact_text,
     _CLIENT_DISCONNECT_ERRORS,
 )
@@ -2902,6 +2913,37 @@ def _kanban_unknown_endpoint(handler, parsed, method: str) -> bool:
         ),
         status=404,
     ) or True
+
+
+# A cancelled worker that stays in ACTIVE_RUNS longer than this is treated as
+# stuck (e.g. blocked in C-level provider I/O and never reaching its finally).
+# Once the cancel has been outstanding past this grace window, the run row can
+# no longer protect the session's active_stream_id/pending_* from stale
+# cleanup: _clear_stale_stream_state() clears them, and every delayed cancel
+# finalizer (api/streaming.py _finalize_cancelled_turn) is generation-guarded
+# under the session lock — it no-ops unless the session still points at the
+# cancelled stream — so clearing early cannot clobber a newer turn (#6623).
+_STALE_CANCELLED_RUN_GRACE_SECONDS = 60.0
+
+
+def _cancelled_run_is_stale(run_entry) -> bool:
+    """Return True when an ACTIVE_RUNS row belongs to a cancel that has been
+    outstanding longer than the stale grace window.
+
+    ``cancelled_at`` is stamped by cancel_stream() when it flips the run to
+    phase="cancelling". ``started_at`` is accepted as a fallback anchor so runs
+    cancelled before the stamp was introduced are still reclaimed eventually.
+    """
+    if not isinstance(run_entry, dict) or run_entry.get("phase") != "cancelling":
+        return False
+    anchor = run_entry.get("cancelled_at") or run_entry.get("started_at")
+    if not anchor:
+        return False
+    try:
+        age = time.time() - float(anchor)
+    except (TypeError, ValueError):
+        return False
+    return age >= _STALE_CANCELLED_RUN_GRACE_SECONDS
 
 
 def _clear_stale_stream_state(session) -> bool:
@@ -2931,13 +2973,33 @@ def _clear_stale_stream_state(session) -> bool:
     except Exception:
         worker_alive = False
     if worker_alive:
-        logger.debug(
-            "_clear_stale_stream_state: stream %s for session %s missing SSE channel "
-            "but worker bookkeeping is still active; deferring stale cleanup",
+        # #6623: a worker stuck in C-level I/O may never reach its finally to
+        # unregister the run, so ACTIVE_RUNS could hold the row forever and
+        # block stale cleanup indefinitely. A *cancelled* run (cancel_stream()
+        # stamped phase="cancelling" + cancelled_at) that has not unwound past
+        # the grace window is treated as stale — clear the session anyway. The
+        # _stream_writeback_is_current() guard rejects any eventual writeback
+        # from the stuck worker, so this cannot clobber a newer turn.
+        try:
+            with _live_config.ACTIVE_RUNS_LOCK:
+                run_entry = dict((_live_config.ACTIVE_RUNS or {}).get(stream_id) or {})
+        except Exception:
+            run_entry = {}
+        if not _cancelled_run_is_stale(run_entry):
+            logger.debug(
+                "_clear_stale_stream_state: stream %s for session %s missing SSE channel "
+                "but worker bookkeeping is still active; deferring stale cleanup",
+                stream_id,
+                getattr(session, "session_id", "?"),
+            )
+            return False
+        logger.info(
+            "_clear_stale_stream_state: stream %s for session %s missing SSE channel and "
+            "cancelled run is stale (cancelled_at=%s); clearing stale stream state (#6623)",
             stream_id,
             getattr(session, "session_id", "?"),
+            run_entry.get("cancelled_at"),
         )
-        return False
     grace_seconds = 30.0
     try:
         from api.models import _REPAIR_STALE_PENDING_GRACE_SECONDS
@@ -3755,6 +3817,85 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "activity_rows": anchor_activity_rows,
         },
     }
+
+
+def _runtime_journal_snapshot_for_session_payload(snapshot: dict | None) -> dict | None:
+    """Return the non-mutating, display-equivalent transport form of a live snapshot.
+
+    The canonical recovery snapshot intentionally keeps fallback representations.
+    Sending all of them duplicates each tool result in top-level ``tool_calls``
+    and row ``text``, ``tool``, and ``payload`` fields. Keep one authoritative
+    display source for each value at the HTTP boundary; the durable journal and
+    the canonical in-process snapshot remain unchanged.
+    """
+    if not isinstance(snapshot, dict):
+        return snapshot
+
+    projected = dict(snapshot)
+    # The frontend reconstructs this single live assistant row from the
+    # authoritative last_* strings when messages is empty. Preserve the row's
+    # timestamp separately so the synthesized message keeps stable identity.
+    live_messages = [
+        message
+        for message in (projected.get("messages") or [])
+        if isinstance(message, dict) and message.get("role") == "assistant"
+    ]
+    if live_messages:
+        last_message_ts = live_messages[-1].get("_ts")
+        if last_message_ts is not None:
+            projected["last_message_ts"] = last_message_ts
+    if projected.get("last_assistant_text") or projected.get("last_reasoning_text"):
+        projected["messages"] = []
+
+    scene = projected.get("anchor_activity_scene")
+    compact_calls = []
+    for raw_call in projected.get("tool_calls") or []:
+        if not isinstance(raw_call, dict):
+            continue
+        call = dict(raw_call)
+        if call.get("preview") == call.get("snippet"):
+            call.pop("preview", None)
+        compact_calls.append(call)
+    # Retain the compact top-level list as the degraded-render fallback. The
+    # Anchor scene is normally authoritative, but session reattach deliberately
+    # falls back to INFLIGHT.toolCalls when scene rendering is unavailable.
+    projected["tool_calls"] = compact_calls
+
+    if not isinstance(scene, dict):
+        return projected
+    compact_scene = dict(scene)
+    compact_rows = []
+    row_keys = (
+        "row_id", "local_id", "kind", "role", "source_event_type", "status",
+        "created_at", "group", "text", "thinking", "tool_call_id", "tool",
+    )
+    for raw_row in scene.get("activity_rows") or []:
+        if not isinstance(raw_row, dict):
+            continue
+        row = {
+            key: raw_row[key]
+            for key in row_keys
+            if key in raw_row and raw_row[key] not in (None, "")
+        }
+        if str(raw_row.get("role") or "") == "tool":
+            tool = raw_row.get("tool") if isinstance(raw_row.get("tool"), dict) else {}
+            compact_tool = dict(tool)
+            if compact_tool.get("preview") == compact_tool.get("snippet"):
+                compact_tool.pop("preview", None)
+            if compact_tool.get("tid") == compact_tool.get("id"):
+                compact_tool.pop("tid", None)
+            row["tool"] = compact_tool
+            # Tool cards consume args/snippet from row.tool. row.payload and
+            # row.text are byte-for-byte fallbacks of those same values.
+            row.pop("text", None)
+        else:
+            thinking = row.get("thinking")
+            if isinstance(thinking, dict) and thinking.get("text") == row.get("text"):
+                row.pop("thinking", None)
+        compact_rows.append(row)
+    compact_scene["activity_rows"] = compact_rows
+    projected["anchor_activity_scene"] = compact_scene
+    return projected
 
 
 def _ensure_full_session_before_mutation(sid: str, session):
@@ -6394,20 +6535,42 @@ def _repair_foreign_session_model_provider(
 
 
 def _clean_session_model_provider(value: str | None) -> str | None:
+    """Normalize a stored/requested provider value to a bare provider ID.
+
+    An ``@``-prefixed value is a provider-qualified *model* hint, so the
+    provider is resolved with the shared
+    ``config._parse_provider_qualified_model_id()`` grammar rather than a
+    positional colon split — that keeps multi-segment custom provider IDs
+    (``custom:<slug>``, ``custom:<host>:<port>``) whole while still dropping a
+    trailing model segment (#6722). Values without the ``@`` marker are already
+    plain provider IDs, whose colons belong to the ID itself, so they are
+    preserved verbatim.
+    """
     provider = str(value or "").strip().lower()
     if not provider or provider == "default":
         return None
     if provider.startswith("@"):
-        provider = provider[1:]
+        parsed = _parse_provider_qualified_model_id(provider)
+        provider = parsed[1].strip() if parsed else provider[1:]
     return provider or None
 
 
 def _split_provider_qualified_model(model: str) -> tuple[str, str | None]:
+    """Split an ``@provider:model`` hint into ``(bare_model, provider)``.
+
+    Delegates the grammar to ``config._parse_provider_qualified_model_id()``,
+    the shared parser that already knows how to keep a multi-segment custom
+    provider ID (``custom:<slug>``, ``custom:<host>:<port>``) intact while
+    still letting the model segment carry its own colons for tags such as
+    ``:free``. Keeping one parser here means every caller in this module and
+    the gateway request path resolve the same provider/model pair (#6722).
+    """
     model = str(model or "").strip()
-    if model.startswith("@") and ":" in model:
-        provider_hint, bare_model = model[1:].rsplit(":", 1)
+    parsed = _parse_provider_qualified_model_id(model)
+    if parsed:
+        bare_model, provider_hint = parsed
         provider = _clean_session_model_provider(provider_hint)
-        bare = bare_model.strip()
+        bare = str(bare_model or "").strip()
         if provider and bare:
             return bare, provider
     return model, None
@@ -9251,6 +9414,8 @@ def _dedupe_cli_sidebar_sessions_for_api(
     *,
     show_cron_sessions: bool = False,
     show_webhook_sessions: bool = False,
+    show_kanban_sessions: bool = False,
+    source_filter: str | None = None,
 ) -> list[dict]:
     """Return state sidebar rows while preserving project-hidden background rows.
 
@@ -9258,11 +9423,25 @@ def _dedupe_cli_sidebar_sessions_for_api(
     session store. They should stay hidden from the default sidebar, but
     project-assigned messageful rows must remain in the `/api/sessions` payload
     with `default_hidden` so the matching project chip can reveal them (#3134).
+
+    An explicit ``source_filter`` for a background source (cron/webhook/kanban)
+    is a deliberate request to view those rows, so it overrides the default
+    hide for that source only — the user asked for them.
     """
     from api.models import (
         _hide_from_default_sidebar as _hide_background,
         _include_project_hidden_background_sidebar_sessions,
     )
+
+    # An explicit background source filter reveals that source (override the hide).
+    # Normalize to match how the loader canonicalizes source_filter (strip+lower).
+    _sf = str(source_filter or '').strip().lower()
+    if _sf == 'cron':
+        show_cron_sessions = True
+    elif _sf == 'webhook':
+        show_webhook_sessions = True
+    elif _sf == 'kanban':
+        show_kanban_sessions = True
 
     candidates = [
         s for s in cli
@@ -9276,6 +9455,7 @@ def _dedupe_cli_sidebar_sessions_for_api(
             s,
             show_cron=show_cron_sessions,
             show_webhook=show_webhook_sessions,
+            show_kanban=show_kanban_sessions,
         )
     ]
     return _include_project_hidden_background_sidebar_sessions(candidates, visible)
@@ -9445,6 +9625,7 @@ from api.models import (
     get_state_db_session_message_keys_before_timestamp,
     get_state_db_session_summary,
     merge_session_messages_append_only,
+    _reconcile_api_content_sidecars,
     _enrich_sidebar_lineage_metadata,
     _active_stream_ids,
     _evict_sessions_over_cap,
@@ -9660,6 +9841,7 @@ from api.workspace import (
     EscapeAuthorizationExpiredError,
     list_dir,
     list_authorized_escape_dir,
+    serialize_workspace_entries_for_browser,
     dir_signature,
     list_workspace_suggestions,
     read_file_content,
@@ -9848,6 +10030,7 @@ _SIDEBAR_SESSION_RESPONSE_FIELDS = {
     "is_cli_session",
     "is_messaging_session",
     "is_streaming",
+    "cron_running",
     "active_stream_id",
     "has_pending_user_message",
     "pending_started_at",
@@ -12911,7 +13094,7 @@ def handle_get(handler, parsed) -> bool:
                         journal,
                         active=journal_active,
                     )
-                    if journal_active:
+                    if journal_active and (not load_messages or msg_limit is None):
                         try:
                             snapshot = _run_journal_live_snapshot(original_stream_id, handler=handler)
                         except Exception:
@@ -12922,7 +13105,7 @@ def handle_get(handler, parsed) -> bool:
                             )
                             snapshot = None
                         if snapshot:
-                            raw["runtime_journal_snapshot"] = snapshot
+                            raw["runtime_journal_snapshot"] = _runtime_journal_snapshot_for_session_payload(snapshot)
                             raw["pending_attachments"] = getattr(s, "pending_attachments", []) or []
             # Cold-load: derive the latest settled todo snapshot from the full
             # merged transcript, not the truncated display window. This keeps
@@ -13103,7 +13286,7 @@ def handle_get(handler, parsed) -> bool:
             }
             attach_todo_state(sess, msgs)
             sess = _merge_cli_sidebar_metadata(sess, cli_meta)
-            return j(handler, {"session": redact_session_data(sess)})
+            return j(handler, {"session": public_session_projection(sess)})
 
     if parsed.path == "/api/session/lineage/report":
         sid = parse_qs(parsed.query).get("session_id", [""])[0]
@@ -13166,6 +13349,7 @@ def handle_get(handler, parsed) -> bool:
             )
             show_cron_sessions = bool(settings.get("show_cron_sessions"))
             show_webhook_sessions = bool(settings.get("show_webhook_sessions"))
+            show_kanban_sessions = bool(settings.get("show_kanban_sessions"))
             agent_session_source_filter = settings.get("agent_session_source_filter")
             active_profile = profiles_api.get_active_profile_name()
             all_profiles = _all_profiles_enabled(parsed)
@@ -13189,6 +13373,7 @@ def handle_get(handler, parsed) -> bool:
                 exclude_hidden=exclude_hidden,
                 visible_only=True,
                 show_webhook_sessions=show_webhook_sessions,
+                show_kanban_sessions=show_kanban_sessions,
                 source_filter=agent_session_source_filter,
                 sidebar_source=sidebar_source,
                 archived_limit=archived_limit,
@@ -13211,6 +13396,7 @@ def handle_get(handler, parsed) -> bool:
                     exclude_hidden=exclude_hidden,
                     visible_only=True,
                     show_webhook_sessions=show_webhook_sessions,
+                    show_kanban_sessions=show_kanban_sessions,
                     source_filter=agent_session_source_filter,
                     sidebar_source=sidebar_source,
                     archived_limit=archived_limit,
@@ -14228,7 +14414,9 @@ def handle_post(handler, parsed) -> bool:
                     "created_at": share_meta["share_created_at"],
                     "updated_at": share_meta["share_updated_at"],
                 },
-                "session": response_session.compact() | {"messages": response_session.messages},
+                "session": public_session_projection(
+                    response_session.compact() | {"messages": response_session.messages}
+                ),
             },
         )
 
@@ -14267,7 +14455,9 @@ def handle_post(handler, parsed) -> bool:
             handler,
             {
                 "ok": True,
-                "session": response_session.compact() | {"messages": response_session.messages},
+                "session": public_session_projection(
+                    response_session.compact() | {"messages": response_session.messages}
+                ),
             },
         )
 
@@ -14397,7 +14587,9 @@ def handle_post(handler, parsed) -> bool:
                 profile=getattr(s, "profile", None),
                 session_id=getattr(s, "session_id", None),
             )
-        payload = {"session": s.compact() | {"messages": s.messages}}
+        payload = {
+            "session": public_session_projection(s.compact() | {"messages": s.messages})
+        }
         if worktree_skipped:
             # Config-default worktree was skipped (non-git workspace); tell the
             # client the session is plain so the UI doesn't assume isolation.
@@ -14494,7 +14686,14 @@ def handle_post(handler, parsed) -> bool:
                 session_id=getattr(copied_session, "session_id", None),
             )
 
-            return j(handler, {"session": copied_session.compact() | {"messages": copied_session.messages}})
+            return j(
+                handler,
+                {
+                    "session": public_session_projection(
+                        copied_session.compact() | {"messages": copied_session.messages}
+                    )
+                },
+            )
         except Exception as e:
             return bad(handler, str(e))
 
@@ -14893,7 +15092,10 @@ def handle_post(handler, parsed) -> bool:
             except Exception:
                 logger.debug("Failed to close workspace terminal after workspace update")
         set_last_workspace(new_ws)
-        return j(handler, {"session": s.compact() | {"messages": s.messages}})
+        return j(
+            handler,
+            {"session": public_session_projection(s.compact() | {"messages": s.messages})},
+        )
     if parsed.path == "/api/session/worktree/remove":
         sid = body.get("session_id", "")
         if not sid or not isinstance(sid, str) or not sid.strip():
@@ -15170,7 +15372,13 @@ def handle_post(handler, parsed) -> bool:
         from api.config import _evict_session_agent
         _evict_session_agent(body["session_id"])
         return j(
-            handler, {"ok": True, "session": s.compact() | {"messages": s.messages}}
+            handler,
+            {
+                "ok": True,
+                "session": public_session_projection(
+                    s.compact() | {"messages": s.messages}
+                ),
+            },
         )
 
     if parsed.path == "/api/session/branch":
@@ -15218,11 +15426,44 @@ def handle_post(handler, parsed) -> bool:
         cli_meta = _lookup_cli_session_metadata(source.session_id) if _session_requires_cli_metadata_lookup(source) else {}
         is_messaging_session = _is_messaging_session_record(source) or _is_messaging_session_record(cli_meta)
         cli_messages = get_cli_session_messages(source.session_id) if is_messaging_session else []
-        source_messages = (
-            _merged_session_messages_for_display(source, cli_messages)
-            if is_messaging_session and cli_messages
-            else list(source.messages or [])
-        )
+        if is_messaging_session:
+            if cli_messages:
+                source_messages = _merged_session_messages_for_display(source, cli_messages)
+            else:
+                # Match GET /api/session: a messaging session with no CLI
+                # transcript does not fall back to state.db rows.
+                source_messages = merge_session_messages_append_only(
+                    _webui_sidecar_lineage_messages_for_display(source),
+                    [],
+                    truncation_watermark=getattr(source, "truncation_watermark", None),
+                    truncation_boundary=getattr(source, "truncation_boundary", None),
+                )
+                source_messages = _merged_webui_lineage_messages_for_display(source, source_messages)
+        else:
+            # Match GET /api/session's full-transcript display path exactly:
+            # sidecar lineage stitched across compression snapshots, merged
+            # append-only with state.db rows, then parent-row backfill for
+            # partial continuations. The frontend's keep_count is an index
+            # into THAT merged list; slicing the raw sidecar instead landed
+            # the cut too early whenever the merged view deduplicates rows
+            # (replayed sidecar/state.db doubles, filtered prefixes), so the
+            # fork stopped mid tool-run and dropped the final conclusion.
+            _state_db_reader_kwargs = {
+                "profile": getattr(source, "profile", None) or None,
+            }
+            _backstop = _state_db_backstop_limit_for_display(source, None)
+            if _backstop is not None:
+                _state_db_reader_kwargs["limit"] = _backstop
+            source_messages = merge_session_messages_append_only(
+                _webui_sidecar_lineage_messages_for_display(source),
+                get_state_db_session_messages(
+                    source.session_id,
+                    **_state_db_reader_kwargs,
+                ),
+                truncation_watermark=getattr(source, "truncation_watermark", None),
+                truncation_boundary=getattr(source, "truncation_boundary", None),
+            )
+            source_messages = _merged_webui_lineage_messages_for_display(source, source_messages)
         if keep_count is not None:
             forked_messages = source_messages[:keep_count]
         else:
@@ -15239,11 +15480,21 @@ def handle_post(handler, parsed) -> bool:
         from api.session_ops import truncate_context_for_display_keep
 
         fork_keep = keep_count if keep_count is not None else len(source_messages)
-        forked_context = truncate_context_for_display_keep(
-            getattr(source, "context_messages", None),
-            source_messages,
-            fork_keep,
+        forked_context = copy.deepcopy(
+            truncate_context_for_display_keep(
+                getattr(source, "context_messages", None),
+                source_messages,
+                fork_keep,
+            )
         )
+        # `truncate_context_for_display_keep` aligns rows by visible display
+        # identity but intentionally does not carry provider replay sidecars.
+        # Reconcile only the retained prefix before constructing the branch so
+        # its persisted model context receives the same conservative
+        # api_content bytes as the forked display messages.  The helper mutates
+        # the freshly aligned context copy; the source session and
+        # forked_messages ownership remain untouched.
+        _reconcile_api_content_sidecars(forked_context, forked_messages)
         branch = Session(
             workspace=source.workspace,
             model=source.model,
@@ -15814,6 +16065,7 @@ def handle_post(handler, parsed) -> bool:
                 "show_claude_code_sessions",
                 "show_cron_sessions",
                 "show_webhook_sessions",
+                "show_kanban_sessions",
                 "show_previous_messaging_sessions",
             )
         ):
@@ -16811,7 +17063,10 @@ def _handle_session_export(handler, parsed):
     active_profile = get_active_profile_name()
     if not _profiles_match(getattr(s, "profile", None), active_profile):
         return bad(handler, "Session not found", 404)
-    safe = redact_session_data(s.__dict__)
+    # ``public_session_projection`` supersedes the narrower
+    # ``redact_session_data`` path so export context_messages uses the same
+    # alias-stripping boundary as the visible transcript.
+    safe = public_session_projection(s.__dict__)
     qs = parse_qs(parsed.query)
     fmt = qs.get("format", ["json"])[0].lower()
     if fmt == "html":
@@ -17024,7 +17279,7 @@ def _handle_list_dir(handler, parsed):
         return j(
             handler,
             {
-                "entries": entries,
+                "entries": serialize_workspace_entries_for_browser(entries),
                 "signature": dir_signature(Path(workspace), rel_path, entries),
                 "path": rel_path,
                 "workspace": str(workspace),
@@ -17098,6 +17353,7 @@ def _handle_escape_list_dir(handler, parsed):
     rel_path = qs.get("path", ["."])[0]
     try:
         payload = list_authorized_escape_dir(Path(s.workspace), sid, token, rel_path)
+        payload["entries"] = serialize_workspace_entries_for_browser(payload.get("entries"))
         return j(handler, payload)
     except FileNotFoundError as exc:
         return bad(handler, _sanitize_error(exc), 404)
@@ -17476,6 +17732,29 @@ def _runner_event_payload(entry: dict):
     return entry
 
 
+def _project_runner_event_payload(payload):
+    """Strip internal replay fields (api_content, row-id aliases) from a runner
+    SSE payload before it is relayed to the browser.
+
+    Runner-backed SSE relays adapter payloads verbatim; a terminal event can
+    carry a full ``session`` object (with per-message ``api_content`` sidecars)
+    or be session/message-shaped itself. Neither must reach a client, so route
+    the transcript-bearing shapes through the same public projection every other
+    session emitter uses. Non-session payloads pass through unchanged.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    # Terminal events wrap the session under a "session" key.
+    if isinstance(payload.get("session"), dict):
+        projected = dict(payload)
+        projected["session"] = public_session_projection(payload["session"])
+        return projected
+    # Payload is itself session/message-shaped (has a messages transcript).
+    if "messages" in payload or "context_messages" in payload:
+        return public_session_projection(payload)
+    return payload
+
+
 def _runner_event_id(run_id: str, entry: dict) -> str | None:
     event_id = entry.get("event_id") or entry.get("id")
     if event_id:
@@ -17522,7 +17801,7 @@ def _stream_runner_run_events(handler, run_id: str, cursor: str | None = None) -
                 if not isinstance(entry, dict):
                     continue
                 event = _runner_event_name(entry)
-                _sse_with_id(handler, event, _runner_event_payload(entry), _runner_event_id(run_id, entry))
+                _sse_with_id(handler, event, _project_runner_event_payload(_runner_event_payload(entry)), _runner_event_id(run_id, entry))
                 emitted = True
                 if event in SSE_RELAY_CLOSE_EVENTS:
                     terminal = True
@@ -18145,7 +18424,12 @@ def _parse_range_header(range_header: str, file_size: int) -> tuple[int, int] | 
 
 def _open_file_read_fd(target: Path, anchor_root: Path | None = None) -> int:
     if anchor_root is None:
-        return os.open(str(target), os.O_RDONLY)
+        flags = os.O_RDONLY
+        # On Windows, files are opened in text mode by default; O_BINARY
+        # prevents CRLF translation that would corrupt binary media files.
+        if hasattr(os, "O_BINARY"):
+            flags |= os.O_BINARY
+        return os.open(str(target), flags)
     return open_anchored_fd(anchor_root, target.resolve(), want_dir=False)
 
 
@@ -18158,12 +18442,78 @@ def _close_fd_quietly(fd: int | None) -> None:
         pass
 
 
-def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_control: str, *, csp: str | None = None, anchor_root: Path | None = None):
-    """Serve a file with correct MIME/disposition and optional byte-range support."""
+# Maximum size for which a content-derived ETag is computed.  Files above
+# this cap (and all HTML with no-store) are served without ETag to avoid
+# hashing every byte of large media / Range requests.
+_ETAG_SIZE_CAP = 10 * 1024 * 1024  # 10 MB
+
+
+def _bytes_etag(data: bytes) -> str:
+    """Weak ETag from a content digest of the bytes that will be served.
+
+    The bytes must be an immutable snapshot (e.g. pread or an in-memory copy)
+    so the validator cannot diverge from the body under TOCTOU.
+    """
+    return 'W/"%s"' % hashlib.sha256(data).hexdigest()
+
+
+def _etag_and_snapshot(fd, *, file_size: int) -> tuple[str | None, bytes | None, int]:
+    """Return (weak ETag, snapshot bytes, actual size) for files under the size cap.
+
+    Uses os.lseek + looped os.read to grab an immutable snapshot in a cross-platform
+    and short-read-safe manner. The snapshot bytes can be sent directly so the ETag
+    and the body can never diverge under TOCTOU (the file may change on disk after read).
+
+    Returns (None, None, file_size) for files above the cap or on unexpected I/O failure.
+    Returns (None, None, actual_size) if the file was truncated mid-read (short snapshot).
+    The caller must use actual_size (not the original file_size) for Content-Length/Range
+    calculations to avoid header/body mismatch.
+    """
+    if file_size > _ETAG_SIZE_CAP:
+        return None, None, file_size
+
+    # Cross-platform: os.lseek + looped os.read instead of POSIX-only os.pread
+    # Short reads are possible (interrupted, EOF from truncation), so we loop.
+    os.lseek(fd, 0, os.SEEK_SET)
+    data = b""
+    remaining = file_size
+    while remaining > 0:
+        chunk = os.read(fd, min(1024 * 1024, remaining))
+        if not chunk:  # EOF reached (file was truncated)
+            break
+        data += chunk
+        remaining -= len(chunk)
+
+    actual_size = len(data)
+    if actual_size == 0:
+        return None, None, 0
+
+    # If the file was truncated after fstat (short snapshot), return the actual
+    # size but no ETag — caller will fall back to streaming without ETag.
+    # Round-6 fix: keep the captured `data` so the body path serves the immutable
+    # snapshot instead of re-reading the fd after headers are committed.
+    # Content-Length derives from actual_size == len(data), so header/body match.
+    if actual_size != file_size:
+        return None, data, actual_size
+
+    return _bytes_etag(data), data, actual_size
+
+
+def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_control: str, *, csp: str | None = None, anchor_root: Path | None = None, download_name: str | None = None):
+    """Serve a file with correct MIME/disposition and optional byte-range support.
+
+    Supports conditional GET via If-None-Match (ETag) — when the ETag matches,
+    the request is short-circuited with 304 so revalidating clients (e.g.
+    `no-cache` responses) do not re-download unchanged files.
+
+    ``download_name`` overrides the Content-Disposition filename (used when
+    serving an immutable media snapshot whose on-disk name is a content digest).
+    """
     fd = None
     try:
         fd = _open_file_read_fd(target, anchor_root)
-        file_size = os.fstat(fd).st_size
+        st = os.fstat(fd)
+        file_size = st.st_size
     except PermissionError:
         _close_fd_quietly(fd)
         return bad(handler, "Permission denied", 403)
@@ -18178,6 +18528,50 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
         return bad(handler, "Could not stat file", 500)
 
     try:
+        # Pre-commit phase: ETag/snapshot computation and response selection.
+        # OSError here is still convertible into a clean 500 because no
+        # status line has been written yet. After end_headers() the response
+        # is committed, so body-transmission errors must never call bad()
+        # again (that would attempt a second send_response on a stream the
+        # client may have already closed — see the body phase below).
+        try:
+            no_store = "no-store" in cache_control
+            if no_store or file_size > _ETAG_SIZE_CAP:
+                etag = None
+                snapshot = None
+                # actual_size stays as file_size for over-cap/no-store cases
+            else:
+                etag, snapshot, actual_size = _etag_and_snapshot(fd, file_size=file_size)
+                # If the file was truncated mid-read (short snapshot), use the
+                # actual read size for all subsequent calculations so
+                # Content-Length/Range match the body we can actually send.
+                # Round-6 fix: the captured bytes are kept, so the body path
+                # serves the immutable snapshot instead of re-reading the fd.
+                if actual_size != file_size:
+                    file_size = actual_size  # reconcile to avoid header/body mismatch
+        except OSError:
+            return bad(handler, "Could not serve file", 500)
+
+        # RFC 7232 §3.2: If-None-Match uses weak comparison (W/ prefixes ignored)
+        # and "*" matches any existing resource. On match, GET/HEAD is
+        # short-circuited with 304 — processed before Range since a matched
+        # conditional request skips the entity entirely.
+        if_none_match = handler.headers.get("If-None-Match", "")
+        if if_none_match and etag is not None:
+            current = etag[2:] if etag.startswith("W/") else etag
+            matched = if_none_match.strip() == "*" or any(
+                (c.strip()[2:] if c.strip().startswith("W/") else c.strip()) == current
+                for c in if_none_match.split(",")
+                if c.strip()
+            )
+            if matched:
+                handler.send_response(304)
+                handler.send_header("ETag", etag)
+                handler.send_header("Cache-Control", cache_control)
+                _security_headers(handler)
+                handler.end_headers()
+                return True
+
         byte_range = _parse_range_header(handler.headers.get("Range", ""), file_size)
         if handler.headers.get("Range") and byte_range is None:
             handler.send_response(416)
@@ -18194,10 +18588,12 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
         handler.send_header("Content-Type", mime)
         handler.send_header("Content-Length", str(content_length))
         handler.send_header("Accept-Ranges", "bytes")
+        if etag is not None:
+            handler.send_header("ETag", etag)
         if byte_range:
             handler.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
         handler.send_header("Cache-Control", cache_control)
-        handler.send_header("Content-Disposition", _content_disposition_value(disposition, target.name))
+        handler.send_header("Content-Disposition", _content_disposition_value(disposition, download_name or target.name))
         if csp:
             # Sandboxed inline HTML must remain frameable for workspace previews;
             # X-Frame-Options: DENY would block the iframe before CSP sandbox applies.
@@ -18212,20 +18608,46 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
             _security_headers(handler)
         handler.end_headers()
 
+        # Body transmission: the response is committed once end_headers()
+        # returns, so attempting bad()/send_response again here would corrupt
+        # the stream with a second status line. Client disconnects are normal
+        # (tab close, network switch) — log at debug and stop, same contract
+        # as _safe_write(). Never emit a 500 after headers are out.
         if content_length:
             try:
-                with os.fdopen(fd, "rb", closefd=True) as f:
-                    fd = None
-                    f.seek(start)
-                    remaining = content_length
-                    while remaining:
-                        chunk = f.read(min(1024 * 1024, remaining))
-                        if not chunk:
-                            break
-                        handler.wfile.write(chunk)
-                        remaining -= len(chunk)
-            except PermissionError:
-                return True
+                if snapshot is not None:
+                    handler.wfile.write(snapshot[start:start + content_length])
+                else:
+                    with os.fdopen(fd, "rb", closefd=True) as f:
+                        fd = None
+                        f.seek(start)
+                        remaining = content_length
+                        while remaining:
+                            chunk = f.read(min(1024 * 1024, remaining))
+                            if not chunk:
+                                break
+                            handler.wfile.write(chunk)
+                            remaining -= len(chunk)
+            except _CLIENT_DISCONNECT_ERRORS as exc:
+                logging.getLogger("hermes.webui").debug(
+                    "Client disconnected mid-response (%s): %s",
+                    type(exc).__name__,
+                    getattr(handler, "path", "?"),
+                )
+            except Exception as exc:
+                # Post-commit fail-closed: the status line is already on the
+                # wire, so ANY body-transmission error that is not a client
+                # disconnect (EIO from a truncated read, a generic OSError,
+                # PermissionError, ...) must still be contained here. Letting
+                # it escape would reach Handler.do_GET's 500 path and emit a
+                # SECOND status line after the committed 200/206, corrupting
+                # the HTTP stream. Log at debug and stop — the client already
+                # received its headers (and possibly a partial body).
+                logging.getLogger("hermes.webui").debug(
+                    "Body transmission error after commit (%s): %s",
+                    type(exc).__name__,
+                    getattr(handler, "path", "?"),
+                )
         return True
     finally:
         _close_fd_quietly(fd)
@@ -18917,6 +19339,201 @@ def _path_is_within_root(child: Path, root: Path) -> bool:
         return False
 
 
+def _media_deny_reason(target: Path) -> str | None:
+    """Return a reason string when ``target`` must be hard-denied, else None.
+
+    The ``/api/media`` #3234 state/profile deny model, extracted so the
+    snapshot CAPTURE side (api/media_snapshots.media_capture_allowed) shares
+    the EXACT same predicate — anything the serve path refuses is never
+    captured in the first place (#6979 Round 2 MUST-FIX 1 deny parity).
+
+    Model: the ACTIVE WORKSPACE is a legitimate-media carve-out — the user is
+    entitled to their own workspace files (that is also how the workspace file
+    browser reaches them), even when a workspace happens to live under a
+    Hermes root. The deny rules target Hermes's OWN internal state, which lives
+    OUTSIDE any workspace. So: if the target is inside the active workspace, it
+    is never denied here; otherwise we deny known secret/config basenames and
+    the internal state subdirectories across every Hermes root the allowlist
+    accepts (active-profile HERMES_HOME, base ~/.hermes, the api.profiles
+    default home, and STATE_DIR — which also defends sibling profiles).
+    """
+    import os as _os
+
+    _HOME = Path(_os.path.expanduser("~"))
+    _HERMES_HOME = Path(_os.getenv("HERMES_HOME", str(_HOME / ".hermes"))).expanduser()
+
+    _DENY_FILENAMES = {
+        "settings.json", "state.db", "state.db-wal", "state.db-shm",
+        "auth.json", "auth.lock", "config.yaml", "config.yml", ".env",
+        ".signing_key", ".pbkdf2_key", ".sessions.json",
+        "google_token.json", "google_client_secret.json",
+        "gateway_state.json", "channel_directory.json", "jobs.json",
+        "passkeys.json", ".passkey_challenges.json", ".login_attempts.json",
+    }
+    # Internal state subdirs that are sensitive in their entirety. NOTE:
+    # `profiles` is intentionally NOT here — it is a container of profile roots,
+    # each of which has its own legitimate workspace/. We instead enumerate each
+    # named-profile root below and deny ITS state subdirs, so a sibling profile's
+    # secrets are blocked without 403-ing a named-profile workspace. (#3234.)
+    _DENY_SUBDIRS = (
+        "sessions", "memories", "cron", "logs",
+        "checkpoints", "backups",
+        # Content-addressed media snapshots (api/media_snapshots.py) are an
+        # internal store: digest bytes are only reachable through the validated
+        # `snap=` parameter, never as a bare `path=` request. (#media-snapshots)
+        "media_snapshots",
+    )
+    _state_dir = None
+    try:
+        from api.config import STATE_DIR as _STATE_DIR
+        _state_dir = Path(_STATE_DIR).resolve()
+    except Exception:
+        _state_dir = None
+    _base_hermes_home = None
+    try:
+        from api.profiles import _DEFAULT_HERMES_HOME as _BASE_HH
+        _base_hermes_home = Path(_BASE_HH).resolve()
+    except Exception:
+        _base_hermes_home = None
+    _hermes_roots = []
+    for _r in (
+        _HERMES_HOME.resolve(),
+        (_HOME / ".hermes").resolve(),
+        _base_hermes_home,
+        _state_dir,
+    ):
+        if _r is not None and _r not in _hermes_roots:
+            _hermes_roots.append(_r)
+    # Enumerate named-profile roots (<root>/profiles/<name>) and treat each as a
+    # Hermes root in its own right, so a sibling/other profile's sensitive subdirs
+    # + secret files are denied — WITHOUT denying the whole `profiles` container
+    # (which would block a legit named-profile workspace at
+    # <root>/profiles/<name>/workspace/). (Codex review #3234.)
+    _profile_roots = []
+    for _root in list(_hermes_roots):
+        _profiles_dir = (_root / "profiles")
+        try:
+            if _profiles_dir.is_dir():
+                for _pchild in _profiles_dir.iterdir():
+                    if _pchild.is_dir():
+                        _pr = _pchild.resolve()
+                        if _pr not in _hermes_roots and _pr not in _profile_roots:
+                            _profile_roots.append(_pr)
+        except OSError:
+            pass
+    _hermes_roots.extend(_profile_roots)
+
+    # Case-insensitive path helpers so STATE.DB / Sessions/ casing variants
+    # cannot bypass the deny on macOS/Windows filesystems (Codex review #3234).
+    def _norm(p):
+        return os.path.normcase(str(Path(p).resolve())).casefold()
+    def _within_ci(child, root):
+        try:
+            c, r = _norm(child), _norm(root)
+            return os.path.commonpath([c, r]) == r
+        except (ValueError, OSError):
+            return False
+    def _equal_ci(a, b):
+        try:
+            return _norm(a) == _norm(b)
+        except (ValueError, OSError):
+            return False
+
+    # State-subdir deny set: each DENY_SUBDIR directly under any Hermes root
+    # (which includes STATE_DIR — so STATE_DIR/sessions, STATE_DIR/memories,
+    # etc. are covered). These ALWAYS apply — even to a file under the active
+    # workspace — so a workspace pointed at (or overlapping) a state dir cannot
+    # expose sessions/memories/profiles/etc. We do NOT deny STATE_DIR itself
+    # wholesale: the default workspace lives at STATE_DIR/workspace, and that is
+    # legitimate user media — direct sensitive files there are still caught by
+    # the filename denies below. (Codex review #3234.)
+    _deny_dirs = []
+    for _root in _hermes_roots:
+        for _sub in _DENY_SUBDIRS:
+            _deny_dirs.append((_root / _sub).resolve())
+        # Per-profile WebUI state lives at <root>/webui_state (api/workspace.py),
+        # so its state subdirs (<root>/webui_state/sessions, etc.) must be denied
+        # too — they are NOT direct children of <root>. (Codex review #3234.)
+        _ws_state = (_root / "webui_state")
+        for _sub in _DENY_SUBDIRS:
+            _deny_dirs.append((_ws_state / _sub).resolve())
+    # The configured media-snapshot store root itself: blobs are internal and
+    # only reachable through the validated `snap=` parameter on an authorized
+    # path, so a bare `path=` request at or below the store is rejected
+    # REGARDLESS of the store's configured name/location
+    # (HERMES_WEBUI_MEDIA_SNAPSHOT_DIR may point anywhere, e.g. /tmp/custom-name;
+    # the literal "media_snapshots" entry above only covers the default layout).
+    # (#6979 Round 2 MUST-FIX 2.)
+    try:
+        from api.media_snapshots import get_snapshot_dir
+        _snap_store = get_snapshot_dir().resolve()
+    except Exception:
+        _snap_store = None
+    if _snap_store is not None and _within_ci(target, _snap_store):
+        return "media snapshot store is internal"
+    _deny_names_ci = {n.casefold() for n in _DENY_FILENAMES}
+
+    # Active-workspace carve-out: a file inside a genuine PROJECT workspace is
+    # the user's own content, so the secret/config FILENAME denies are relaxed
+    # for it. The carve-out is DISABLED when the workspace is a broad/internal
+    # location ($HOME, a Hermes root itself, an ANCESTOR of a Hermes root, a
+    # */profiles dir, a named-profile root, or a state subdir) — honoring those
+    # would re-open the disclosure. A workspace that is a proper DESCENDANT of a
+    # Hermes root (e.g. STATE_DIR/workspace) is still a legit project workspace
+    # and keeps the carve-out. The dir-based denies above are NOT relaxed.
+    _active_workspace = None
+    try:
+        from api.workspace import get_last_workspace
+        _aw = Path(get_last_workspace()).resolve()
+        if _aw.is_dir():
+            _active_workspace = _aw
+    except Exception:
+        _active_workspace = None
+
+    def _workspace_is_safe_carveout(ws):
+        if ws is None:
+            return False
+        if _equal_ci(ws, _HOME):
+            return False
+        for _root in _hermes_roots:
+            # ws IS a root, or ws is an ANCESTOR of a root → unsafe. (A proper
+            # descendant of a root is fine — that's a normal project workspace.)
+            if _equal_ci(ws, _root) or _within_ci(_root, ws):
+                return False
+        if ws.name == "profiles" or ws.parent.name == "profiles":
+            return False
+        if ws.name in _DENY_SUBDIRS:
+            return False
+        return True
+
+    _in_active_workspace = (
+        _active_workspace is not None
+        and _workspace_is_safe_carveout(_active_workspace)
+        and _within_ci(target, _active_workspace)
+    )
+
+    # Dir-based denies always fire (even inside the active workspace).
+    if any(_within_ci(target, d) for d in _deny_dirs):
+        return "denied state subdir"
+    # Filename-based denies fire for files under a Hermes root, UNLESS the file
+    # is inside a genuine project workspace (carve-out).
+    if not _in_active_workspace:
+        _under_hermes_root = any(_within_ci(target, _root) for _root in _hermes_roots)
+        _name_cf = target.name.casefold()
+        # Exact secret/state basenames, plus atomic-write temp files for those
+        # (api/auth.py and api/passkeys.py write via a `tmp*.<name>.tmp` / `tmp*.tmp`
+        # sidecar then rename) — deny those suffixes too so a momentary temp file
+        # cannot be fetched. (Codex review #3234.)
+        _deny_tmp_suffixes = (".sessions.tmp", ".login_attempts.tmp",
+                              ".passkeys.tmp", ".passkey_challenges.tmp")
+        if _under_hermes_root and (
+            _name_cf in _deny_names_ci
+            or _name_cf.endswith(_deny_tmp_suffixes)
+        ):
+            return "denied state filename"
+    return None
+
+
 def _handle_media(handler, parsed):
     """Serve a local file by absolute path for inline display in the chat.
 
@@ -19018,175 +19635,21 @@ def _handle_media(handler, parsed):
     # covers every entry path (bare file:// URLs, markdown anchors, MEDIA:
     # tokens, and session-token grants).
     #
-    # Model: the ACTIVE WORKSPACE is a legitimate-media carve-out — the user is
-    # entitled to their own workspace files (that is also how the workspace file
-    # browser reaches them), even when a workspace happens to live under a
-    # Hermes root. The deny rules target Hermes's OWN internal state, which lives
-    # OUTSIDE any workspace. So: if the target is inside the active workspace, it
-    # is never denied here; otherwise we deny known secret/config basenames and
-    # the internal state subdirectories across every Hermes root the allowlist
-    # accepts (active-profile HERMES_HOME, base ~/.hermes, the api.profiles
-    # default home, and STATE_DIR — which also defends sibling profiles).
-    _DENY_FILENAMES = {
-        "settings.json", "state.db", "state.db-wal", "state.db-shm",
-        "auth.json", "auth.lock", "config.yaml", "config.yml", ".env",
-        ".signing_key", ".pbkdf2_key", ".sessions.json",
-        "google_token.json", "google_client_secret.json",
-        "gateway_state.json", "channel_directory.json", "jobs.json",
-        "passkeys.json", ".passkey_challenges.json", ".login_attempts.json",
-    }
-    # Internal state subdirs that are sensitive in their entirety. NOTE:
-    # `profiles` is intentionally NOT here — it is a container of profile roots,
-    # each of which has its own legitimate workspace/. We instead enumerate each
-    # named-profile root below and deny ITS state subdirs, so a sibling profile's
-    # secrets are blocked without 403-ing a named-profile workspace. (#3234.)
-    _DENY_SUBDIRS = (
-        "sessions", "memories", "cron", "logs",
-        "checkpoints", "backups",
-    )
-    _state_dir = None
-    try:
-        from api.config import STATE_DIR as _STATE_DIR
-        _state_dir = Path(_STATE_DIR).resolve()
-    except Exception:
-        _state_dir = None
-    _base_hermes_home = None
-    try:
-        from api.profiles import _DEFAULT_HERMES_HOME as _BASE_HH
-        _base_hermes_home = Path(_BASE_HH).resolve()
-    except Exception:
-        _base_hermes_home = None
-    _hermes_roots = []
-    for _r in (
-        _HERMES_HOME.resolve(),
-        (_HOME / ".hermes").resolve(),
-        _base_hermes_home,
-        _state_dir,
-    ):
-        if _r is not None and _r not in _hermes_roots:
-            _hermes_roots.append(_r)
-    # Enumerate named-profile roots (<root>/profiles/<name>) and treat each as a
-    # Hermes root in its own right, so a sibling/other profile's sensitive subdirs
-    # + secret files are denied — WITHOUT denying the whole `profiles` container
-    # (which would block a legit named-profile workspace at
-    # <root>/profiles/<name>/workspace/). (Codex review #3234.)
-    _profile_roots = []
-    for _root in list(_hermes_roots):
-        _profiles_dir = (_root / "profiles")
-        try:
-            if _profiles_dir.is_dir():
-                for _pchild in _profiles_dir.iterdir():
-                    if _pchild.is_dir():
-                        _pr = _pchild.resolve()
-                        if _pr not in _hermes_roots and _pr not in _profile_roots:
-                            _profile_roots.append(_pr)
-        except OSError:
-            pass
-    _hermes_roots.extend(_profile_roots)
-
-    # Case-insensitive path helpers so STATE.DB / Sessions/ casing variants
-    # cannot bypass the deny on macOS/Windows filesystems (Codex review #3234).
-    def _norm(p):
-        return os.path.normcase(str(Path(p).resolve())).casefold()
-    def _within_ci(child, root):
-        try:
-            c, r = _norm(child), _norm(root)
-            return os.path.commonpath([c, r]) == r
-        except (ValueError, OSError):
-            return False
-    def _equal_ci(a, b):
-        try:
-            return _norm(a) == _norm(b)
-        except (ValueError, OSError):
-            return False
-
-    # State-subdir deny set: each DENY_SUBDIR directly under any Hermes root
-    # (which includes STATE_DIR — so STATE_DIR/sessions, STATE_DIR/memories,
-    # etc. are covered). These ALWAYS apply — even to a file under the active
-    # workspace — so a workspace pointed at (or overlapping) a state dir cannot
-    # expose sessions/memories/profiles/etc. We do NOT deny STATE_DIR itself
-    # wholesale: the default workspace lives at STATE_DIR/workspace, and that is
-    # legitimate user media — direct sensitive files there are still caught by
-    # the filename denies below. (Codex review #3234.)
-    _deny_dirs = []
-    for _root in _hermes_roots:
-        for _sub in _DENY_SUBDIRS:
-            _deny_dirs.append((_root / _sub).resolve())
-        # Per-profile WebUI state lives at <root>/webui_state (api/workspace.py),
-        # so its state subdirs (<root>/webui_state/sessions, etc.) must be denied
-        # too — they are NOT direct children of <root>. (Codex review #3234.)
-        _ws_state = (_root / "webui_state")
-        for _sub in _DENY_SUBDIRS:
-            _deny_dirs.append((_ws_state / _sub).resolve())
-    _deny_names_ci = {n.casefold() for n in _DENY_FILENAMES}
-
-    # Active-workspace carve-out: a file inside a genuine PROJECT workspace is
-    # the user's own content, so the secret/config FILENAME denies are relaxed
-    # for it. The carve-out is DISABLED when the workspace is a broad/internal
-    # location ($HOME, a Hermes root itself, an ANCESTOR of a Hermes root, a
-    # */profiles dir, a named-profile root, or a state subdir) — honoring those
-    # would re-open the disclosure. A workspace that is a proper DESCENDANT of a
-    # Hermes root (e.g. STATE_DIR/workspace) is still a legit project workspace
-    # and keeps the carve-out. The dir-based denies above are NOT relaxed.
-    _active_workspace = None
-    try:
-        from api.workspace import get_last_workspace
-        _aw = Path(get_last_workspace()).resolve()
-        if _aw.is_dir():
-            _active_workspace = _aw
-    except Exception:
-        _active_workspace = None
-
-    def _workspace_is_safe_carveout(ws):
-        if ws is None:
-            return False
-        if _equal_ci(ws, _HOME):
-            return False
-        for _root in _hermes_roots:
-            # ws IS a root, or ws is an ANCESTOR of a root → unsafe. (A proper
-            # descendant of a root is fine — that's a normal project workspace.)
-            if _equal_ci(ws, _root) or _within_ci(_root, ws):
-                return False
-        if ws.name == "profiles" or ws.parent.name == "profiles":
-            return False
-        if ws.name in _DENY_SUBDIRS:
-            return False
-        return True
-
-    _in_active_workspace = (
-        _active_workspace is not None
-        and _workspace_is_safe_carveout(_active_workspace)
-        and _within_ci(target, _active_workspace)
-    )
-
-    # Dir-based denies always fire (even inside the active workspace).
-    if any(_within_ci(target, d) for d in _deny_dirs):
+    # The predicate is SHARED with snapshot capture
+    # (api/media_snapshots.media_capture_allowed) so capture and serve can
+    # never diverge on what is denied — anything denied here is never
+    # snapshotted in the first place. (#6979 Round 2 MUST-FIX 1.)
+    deny_reason = _media_deny_reason(target)
+    if deny_reason:
         return bad(handler, "Path not in allowed location", 403)
-    # Filename-based denies fire for files under a Hermes root, UNLESS the file
-    # is inside a genuine project workspace (carve-out).
-    if not _in_active_workspace:
-        _under_hermes_root = any(_within_ci(target, _root) for _root in _hermes_roots)
-        _name_cf = target.name.casefold()
-        # Exact secret/state basenames, plus atomic-write temp files for those
-        # (api/auth.py and api/passkeys.py write via a `tmp*.<name>.tmp` / `tmp*.tmp`
-        # sidecar then rename) — deny those suffixes too so a momentary temp file
-        # cannot be fetched. (Codex review #3234.)
-        _deny_tmp_suffixes = (".sessions.tmp", ".login_attempts.tmp",
-                              ".passkeys.tmp", ".passkey_challenges.tmp")
-        if _under_hermes_root and (
-            _name_cf in _deny_names_ci
-            or _name_cf.endswith(_deny_tmp_suffixes)
-        ):
-            return bad(handler, "Path not in allowed location", 403)
     # ── end #3234 deny ───────────────────────────────────────────────────────
 
     if not within_allowed and not session_media_allowed:
         return bad(handler, "Path not in allowed location", 403)
 
-    if not target.exists() or not target.is_file():
-        return j(handler, {"error": "not found"}, status=404)
-
-    # Determine MIME type
+    # Determine MIME type from the requested path's extension. Computed BEFORE
+    # the existence check because the requested file may have been overwritten
+    # or deleted while its message-level snapshot still exists below.
     ext = target.suffix.lower()
     mime = MIME_MAP.get(ext, "application/octet-stream")
 
@@ -19205,10 +19668,71 @@ def _handle_media(handler, parsed):
     ) else "attachment"
     # _serve_file_bytes sends Content-Security-Policy when csp is set.
     csp = "sandbox allow-scripts" if html_inline_ok else None
+
+    # ── Message-level snapshot serving (?snap=<sha256>) ─────────────────────
+    # Historical chat previews carry a content-addressed snapshot digest of the
+    # file as it existed when the message settled (see api/media_snapshots.py).
+    # Serving the frozen bytes instead of the live file means an in-place
+    # overwrite (same filename) no longer rewrites old previews — the user can
+    # still compare old vs new. The allow/deny checks above still gate the
+    # request: `snap` only selects WHICH bytes to serve for an already-
+    # authorized path; it never grants access to a path that would be denied
+    # without it. A missing/evicted snapshot falls back to the live file.
+    snap_digest = qs.get("snap", [""])[0].strip().lower()
+    snapshot_file = None
+    snap_dir = None
+    if snap_digest:
+        from api.media_snapshots import (
+            get_snapshot_dir,
+            is_valid_digest,
+            snapshot_path_for_digest,
+            snapshot_servable_for_path,
+        )
+
+        snap_dir = get_snapshot_dir().resolve()
+        if is_valid_digest(snap_digest):
+            snapshot_file = snapshot_path_for_digest(snap_digest)
+            # Server-owned source-path binding (#6979 Round 2 MUST-FIX 1): a
+            # digest may only be served back for the EXACT canonical path it
+            # was captured from. Replaying a digest through a different
+            # (allowed) path must not leak the stored bytes — treat it as an
+            # invalid snapshot and fall back to the live file (or 404 when the
+            # live file is absent).
+            if snapshot_file is not None and not snapshot_servable_for_path(snap_digest, target):
+                snapshot_file = None
+    if snapshot_file is not None:
+        # Content-addressed and immutable: the digest IS the SHA-256 of the
+        # exact bytes, so the browser may cache forever and never revalidate.
+        # The blob is opened ANCHORED inside the store root (no-follow), and
+        # the store root itself is deny-listed from bare path= fetches above
+        # (#6979 Round 2 MUST-FIX 2).
+        return _serve_file_bytes(
+            handler,
+            snapshot_file,
+            mime,
+            disposition,
+            "private, max-age=31536000, immutable",
+            csp=csp,
+            download_name=target.name,
+            anchor_root=snap_dir,
+        )
+
+    if not target.exists() or not target.is_file():
+        return j(handler, {"error": "not found"}, status=404)
+
     # HTML inline previews change frequently (agent edits + re-renders).
     # Use no-store so the browser always fetches fresh content, avoiding stale
     # previews that require a manual full-page refresh to update.
-    cache_control = "no-store" if mime == "text/html" else "private, max-age=3600"
+    # All other media (images, audio, video, PDF) use private, no-cache + ETag
+    # revalidation (see _serve_file_bytes): the browser may cache, but must
+    # revalidate on every use, so a file replaced in place (same name) is
+    # picked up immediately while unchanged files still short-circuit with 304.
+    # The `private` directive keeps per-user/per-session media out of shared
+    # intermediary caches.
+    if mime == "text/html":
+        cache_control = "no-store"
+    else:
+        cache_control = "private, no-cache"
     return _serve_file_bytes(handler, target, mime, disposition, cache_control, csp=csp)
 
 
@@ -20856,6 +21380,7 @@ def _handle_btw(handler, body):
     ephemeral.save()
     stream_id = uuid.uuid4().hex
     ephemeral.active_stream_id = stream_id
+    register_session_writeback_owner(ephemeral.session_id, stream_id)
     ephemeral.save()
     stream = create_stream_channel()
     register_stream_owner(stream_id, ephemeral.session_id)
@@ -20906,6 +21431,7 @@ def _handle_background(handler, body):
     bg.save()
     stream_id = uuid.uuid4().hex
     bg.active_stream_id = stream_id
+    register_session_writeback_owner(bg.session_id, stream_id)
     bg.save()
     stream = create_stream_channel()
     register_stream_owner(stream_id, bg.session_id)
@@ -21045,6 +21571,7 @@ def _prepare_chat_start_session_for_stream(
     s.model = model
     s.model_provider = model_provider
     s.active_stream_id = stream_id
+    register_session_writeback_owner(s.session_id, stream_id)
     s.post_compression_context_tokens_estimate = None
     s.pending_user_message = msg
     s.pending_attachments = attachments
@@ -21126,9 +21653,14 @@ def _active_run_stream_for_session(session_id: str | None) -> str | None:
     wedged worker that never reaches its finally (e.g. stuck in a provider call,
     or leaked by SIGKILL without restart) must NOT 409 the session forever — so an
     entry older than the unwind ceiling (180s) is treated as stale and ignored
-    here. A legitimately long-running turn keeps ``active_stream_id`` SET
-    and is handled by ``_active_stream_blocks_chat_start`` above; this guard only
-    covers the cleared-stream-id unwind window. (Codex brick-gate hardening, #3822.)
+    here. For a phase="cancelling" row the ceiling is anchored on the cancel time
+    (``cancelled_at``), never on the original run start: cancel_stream() removes
+    STREAMS itself, so absence from STREAMS is not worker-death proof, and a
+    long-running turn that was just cancelled must not be reaped (and a successor
+    admitted) while the old worker is still alive (#6623). A legitimately
+    long-running turn keeps ``active_stream_id`` SET and is handled by
+    ``_active_stream_blocks_chat_start`` above; this guard only covers the
+    cleared-stream-id unwind window. (Codex brick-gate hardening, #3822.)
     """
     sid = str(session_id or "").strip()
     if not sid:
@@ -21156,13 +21688,35 @@ def _active_run_stream_for_session(session_id: str | None) -> str | None:
                     started_at = float((raw or {}).get("started_at") or 0)
                 except (TypeError, ValueError):
                     started_at = 0.0
+                # #6623 re-gate: cancel_stream() removes STREAMS itself, so a
+                # missing SSE channel is NOT proof that a cancelled worker is
+                # dead. For a phase="cancelling" row the unwind ceiling must be
+                # anchored on the CANCEL time (cancelled_at, started_at as a
+                # legacy fallback), never on the original run start: a turn that
+                # ran for minutes and was just cancelled would otherwise be
+                # reaped the instant its started_at crosses the ceiling and a
+                # successor admitted while the old worker is still alive. A
+                # recently cancelled run therefore keeps blocking a successor
+                # (this function returns its stream id) until the worker either
+                # unwinds (its finally unregisters the row within seconds) or
+                # the cancel itself has been outstanding past the ceiling.
+                _run_phase = str((raw or {}).get("phase") or "").strip()
+                if _run_phase == "cancelling":
+                    try:
+                        _age_anchor = float(
+                            (raw or {}).get("cancelled_at") or started_at or 0
+                        )
+                    except (TypeError, ValueError):
+                        _age_anchor = started_at
+                else:
+                    _age_anchor = started_at
                 # Past the unwind ceiling: never block a successor on it (the
                 # anti-permanent-409 guarantee, #3822). Additionally reconcile the
                 # zombie out of ACTIVE_RUNS so health/recovery polling stops seeing a
                 # half-alive run — but ONLY when the worker is truly gone from
                 # STREAMS, so a still-live / still-tearing-down worker keeps its
                 # lifecycle row. Pop by the real dict key. (Codex gate, #4492)
-                if started_at and (now - started_at) > ceiling:
+                if _age_anchor and (now - _age_anchor) > ceiling:
                     if run_stream_id not in live_stream_ids and stream_id not in live_stream_ids:
                         stale_stream_ids.append(run_stream_id)
                     continue
@@ -21624,6 +22178,12 @@ def start_session_turn(
     PR #2279 next-turn drain delivers the wakeup when the active turn ends.
     """
     msg = str(message or "").strip()
+    if _is_silent_control_message(msg):
+        return {
+            "status": "suppressed",
+            "reason": "silent_control_message",
+            "_status": 200,
+        }
     if not msg:
         return {"error": "message is required", "_status": 400}
     stale_response = _agent_runtime_barrier_response(runner_local_owned=True)
@@ -22120,6 +22680,18 @@ def _handle_goal_command(handler, body):
     return j(handler, payload)
 
 
+def _is_silent_control_message(message) -> bool:
+    """Return True only for the scheduler's exact suppression sentinel.
+
+    ``[SILENT]`` is control-plane output, never conversation content. If a wake
+    relay POSTs it and 8701 restarts while the turn is pending, recovery
+    materializes it as a visible ``_recovered`` user message. Suppress it before
+    session lookup or pending-state mutation. Matching stays exact and
+    case-sensitive so ordinary user text is unaffected.
+    """
+    return str(message or "").strip() == "[SILENT]"
+
+
 def _handle_chat_start(handler, body, diag=None):
     try:
         diag.stage("validate_session_id") if diag else None
@@ -22127,6 +22699,12 @@ def _handle_chat_start(handler, body, diag=None):
             require(body, "session_id")
         except ValueError as e:
             return bad(handler, str(e))
+        if _is_silent_control_message(body.get("message")):
+            return j(
+                handler,
+                {"status": "suppressed", "reason": "silent_control_message"},
+                status=200,
+            )
         # Reject a stale local Agent runtime before materialising, claiming, or
         # mutating any session state. Gateway-backed turns run in the gateway's
         # process and do not depend on this WebUI process's imported checkout.
@@ -22545,7 +23123,7 @@ def _handle_chat_sync(handler, body):
                 _merge_display_messages_after_agent_result,
                 _restore_display_reasoning_metadata,
                 _restore_reasoning_metadata,
-                _sanitize_messages_for_api,
+                _sanitize_messages_for_agent,
                 _compact_session_image_parts_for_persistence,
                 _context_messages_for_new_turn,
                 _workspace_context_prefix,
@@ -22576,7 +23154,7 @@ def _handle_chat_sync(handler, body):
             result = agent.run_conversation(
                 user_message=workspace_ctx + msg,
                 system_message=workspace_system_msg,
-                conversation_history=_sanitize_messages_for_api(
+                conversation_history=_sanitize_messages_for_agent(
                     _previous_context_messages,
                     cfg=get_config(),
                     effective_model=_model,
@@ -22658,7 +23236,7 @@ def _handle_chat_sync(handler, body):
         {
             "answer": result.get("final_response") or "",
             "status": "done" if result.get("completed", True) else "partial",
-            "session": s.compact() | {"messages": s.messages},
+            "session": public_session_projection(s.compact() | {"messages": s.messages}),
             "result": {k: v for k, v in result.items() if k != "messages"},
         },
     )
@@ -25832,6 +26410,11 @@ def _normalize_message_for_import_refresh(message: object) -> object:
     normalized = dict(message)
     normalized.pop("timestamp", None)
     normalized.pop("_ts", None)
+    # These are WebUI/Agent replay bookkeeping aliases at the message's top
+    # level.  Strip only those exact keys; nested business payloads are opaque
+    # and must remain part of the semantic import comparison.
+    for key in ("api_content", "_state_db_row_id", "_db_row_id", "state_db_row_id"):
+        normalized.pop(key, None)
     return normalized
 
 
@@ -25990,19 +26573,21 @@ def _handle_session_import_cli(handler, body):
         return j(
             handler,
             {
-                "session": existing.compact()
-                | {
-                    "messages": existing.messages,
-                    "is_cli_session": (False if _existing_is_sa else True),
-                    # Greptile #4911 follow-up: read read_only from
-                    # the persisted Session, NOT from cli_meta.  This
-                    # refresh path is for an already-WebUI-owned
-                    # session; the WebUI's persisted view is the
-                    # source of truth for the response, not the
-                    # foreign store's current value.  (Mirrors the
-                    # GET /api/session fix.)
-                    "read_only": bool(getattr(existing, "read_only", False)),
-                },
+                "session": public_session_projection(
+                    existing.compact()
+                    | {
+                        "messages": existing.messages,
+                        "is_cli_session": (False if _existing_is_sa else True),
+                        # Greptile #4911 follow-up: read read_only from
+                        # the persisted Session, NOT from cli_meta.  This
+                        # refresh path is for an already-WebUI-owned
+                        # session; the WebUI's persisted view is the
+                        # source of truth for the response, not the
+                        # foreign store's current value.  (Mirrors the
+                        # GET /api/session fix.)
+                        "read_only": bool(getattr(existing, "read_only", False)),
+                    }
+                ),
                 "imported": False,
             },
         )
@@ -26086,7 +26671,13 @@ def _handle_session_import_cli(handler, body):
             "messages": msgs,
             "tool_calls": [],
         }
-        return j(handler, {"session": session_payload, "imported": False})
+        return j(
+            handler,
+            {
+                "session": public_session_projection(session_payload),
+                "imported": False,
+            },
+        )
 
     s = import_cli_session(
         sid,
@@ -26131,11 +26722,13 @@ def _handle_session_import_cli(handler, body):
     return j(
         handler,
         {
-            "session": s.compact()
-            | {
-                "messages": msgs,
-                "is_cli_session": True,
-            },
+            "session": public_session_projection(
+                s.compact()
+                | {
+                    "messages": msgs,
+                    "is_cli_session": True,
+                }
+            ),
             "imported": True,
         },
     )
@@ -26145,9 +26738,15 @@ def _handle_session_import(handler, body):
     """Import a session from a JSON export. Creates a new session with a new ID."""
     if not body or not isinstance(body, dict):
         return bad(handler, "Request body must be a JSON object")
-    messages = body.get("messages")
+    messages = strip_public_internal_fields(
+        body.get("messages"),
+        message_records=True,
+    )
     if not isinstance(messages, list):
         return bad(handler, 'JSON must contain a "messages" array')
+    raw_tool_calls = body.get("tool_calls", [])
+    if not isinstance(raw_tool_calls, list):
+        return bad(handler, 'JSON "tool_calls" must be an array')
     title = body.get("title", "Imported session")
     try:
         workspace = str(resolve_trusted_workspace(body.get("workspace", str(DEFAULT_WORKSPACE))))
@@ -26159,7 +26758,7 @@ def _handle_session_import(handler, body):
         workspace=workspace,
         model=model,
         messages=messages,
-        tool_calls=body.get("tool_calls", []),
+        tool_calls=strip_public_internal_fields(raw_tool_calls),
         profile=get_active_profile_name(),
     )
     s.pinned = body.get("pinned", False)
@@ -26169,7 +26768,13 @@ def _handle_session_import(handler, body):
         _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
     s.save()
     publish_session_list_changed("session_import")
-    return j(handler, {"ok": True, "session": s.compact() | {"messages": s.messages}})
+    return j(
+        handler,
+        {
+            "ok": True,
+            "session": public_session_projection(s.compact() | {"messages": s.messages}),
+        },
+    )
 
 
 def _mask_secrets(obj):

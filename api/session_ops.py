@@ -8,6 +8,7 @@ the hermes-agent repo.
 from __future__ import annotations
 import json
 import logging
+import uuid
 from bisect import bisect_left
 from typing import Any
 
@@ -97,6 +98,14 @@ def _truncation_watermark_for(messages):
         return float(history[-1].get('timestamp') or 0)
     except (AttributeError, TypeError, ValueError):
         return 0.0
+
+
+def _stamp_intentional_shrink_generation(session, old_message_count: int, new_message_count: int) -> bool:
+    """Stamp a new generation only when the visible message list shrinks."""
+    if new_message_count >= old_message_count:
+        return False
+    session.intentional_shrink_generation = uuid.uuid4().hex
+    return True
 
 
 def truncate_context_for_display_keep(
@@ -403,6 +412,7 @@ def truncate_session_at_keep(session, keep: int) -> tuple[int, int]:
     old_msg_count = len(full_messages)
     old_ctx_count = len(getattr(session, 'context_messages', None) or [])
     session.messages = full_messages[:keep]
+    _stamp_intentional_shrink_generation(session, old_msg_count, len(session.messages))
     if isinstance(getattr(session, 'context_messages', None), list):
         session.context_messages = truncate_context_for_display_keep(
             session.context_messages,
@@ -462,6 +472,7 @@ def retry_last(session_id: str) -> dict[str, Any]:
             last_user_text = _extract_text(history[last_user_idx].get('content', ''))
             removed_count = len(history) - last_user_idx
             s.messages = history[:last_user_idx]
+            _stamp_intentional_shrink_generation(s, len(history), len(s.messages))
             s.truncation_watermark = _truncation_watermark_for(s.messages)
             # Persist the original truncate cutoff so empty-sidecar recovery
             # can distinguish legitimate prefix from deleted suffix.
@@ -505,6 +516,7 @@ def undo_last(session_id: str) -> dict[str, Any]:
             removed_text = _extract_text(history[last_user_idx].get('content', ''))
             removed_count = len(history) - last_user_idx
             s.messages = history[:last_user_idx]
+            _stamp_intentional_shrink_generation(s, len(history), len(s.messages))
             s.truncation_watermark = _truncation_watermark_for(s.messages)
             # Persist the original truncate cutoff.
             s.truncation_boundary = s.truncation_watermark

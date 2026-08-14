@@ -1085,7 +1085,7 @@ def test_scroll_listener_guards_programmatic_scroll_before_marking_active():
     listener_end = js.index("});", listener_start)
     listener_body = js[listener_start:listener_end]
 
-    guard_pos = listener_body.index("if(_programmaticScroll) return;")
+    guard_pos = listener_body.index("if(_freshProgrammaticScrollActive()) return;")
     mark_pos = listener_body.index("_markMessageVirtualScrollActive();")
     assert guard_pos < mark_pos, (
         "Scroll listener must check _programmaticScroll before calling "

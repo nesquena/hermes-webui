@@ -1176,7 +1176,7 @@ function _remountMessageViewportAnchor(anchor){
   if(visIdx<0) return false;
   // A virtualized anchor may be outside the current DOM. Scroll to its virtual
   // row and render once so the semantic restore below has a real target.
-  _programmaticScroll=true;
+  _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
   container.scrollTop=_messageVirtualScrollTopForVisibleIdx(visWithIdx,visIdx,container);
   _messageVirtualWindowKey='';
   _messageViewportAnchorRemounting=true;
@@ -1514,6 +1514,53 @@ function _getCachedRender(text, isUser){
   _renderCache.set(key, rendered);
   return rendered;
 }
+// ── Message-level media snapshot stamping ─────────────────────────────────
+// /api/media serves a file's CURRENT bytes. Since ETag revalidation (#6922),
+// an in-place overwrite (same filename) also rewrites every historical chat
+// preview that referenced it — the old/new comparison is lost. At settle time
+// the backend freezes the bytes of each local-file MEDIA: reference into a
+// content-addressed store and stamps the message with
+// `_media_snapshots: {path: digest}`. This helper rewrites the rendered HTML
+// of ONE message to append `&snap=<digest>` to the matching /api/media URLs
+// (and `data-snap` on lazy-preview placeholders), so old previews keep
+// showing the file as it was when the message was emitted.
+// Runs AFTER the text-keyed render cache: the cache stays pure-text, and each
+// message stamps its own digests — two messages with identical text but
+// different snapshots (exactly the old/new case) resolve independently.
+function _stampMediaSnapshots(html, snaps){
+  if(!html || !snaps || typeof snaps !== 'object') return html;
+  let out = String(html);
+  // Direct media URLs: rewrite each COMPLETE `path=` query value atomically.
+  // Value-level parsing (decode the whole value, exact map lookup) instead of
+  // substring split/join: when one path is a PREFIX of another
+  // (/tmp/a.png vs /tmp/a.png.backup) the naive rewrite corrupts the longer
+  // URL and drops its own digest. Matching is boundary-aware — the value runs
+  // to the next `&` separator or an attribute quote/whitespace — so nothing
+  // outside the value ever moves.
+  out = out.replace(/api\/media[?&]path=([^&"'\s<>]+)/g, (match, encodedPath)=>{
+    let decoded;
+    try{ decoded = decodeURIComponent(encodedPath); }
+    catch(e){ return match; }
+    const digest = snaps[decoded];
+    if(typeof digest === 'string' && /^[0-9a-f]{64}$/.test(digest)){
+      return match + '&snap=' + digest;
+    }
+    return match;
+  });
+  // Lazy-preview placeholders: data-path="<html-escaped raw path>" — match the
+  // complete attribute value, unescape HTML entities, then exact lookup (same
+  // prefix-safety: a longer path's attribute can never be partially matched).
+  const _unescapeHtml=(s)=>String(s||'').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&amp;/g,'&');
+  out = out.replace(/data-path="([^"]*)"/g, (match, rawValue)=>{
+    const decoded = _unescapeHtml(rawValue);
+    const digest = snaps[decoded];
+    if(typeof digest === 'string' && /^[0-9a-f]{64}$/.test(digest)){
+      return match + ' data-snap="' + digest + '"';
+    }
+    return match;
+  });
+  return out;
+}
 function _currentMessageRenderWindowSize(){
   return Math.max(
     MESSAGE_RENDER_WINDOW_DEFAULT,
@@ -1613,6 +1660,11 @@ function _highlightQuestionRow(row){
 async function jumpToTurnQuestion(questionRawIdx, assistantRawIdx){
   const container=$('messages');
   if(!container||typeof questionRawIdx!=='number'||questionRawIdx<0) return;
+  const clampTargetScrollTop=(scrollTop)=>{
+    const maxTop=Math.max(0,container.scrollHeight-container.clientHeight);
+    const n=Number(scrollTop);
+    return Math.max(0,Math.min(Number.isFinite(n)?n:container.scrollTop,maxTop));
+  };
   const scrollToTarget=()=>{
     const hasAssistant=typeof assistantRawIdx==='number'&&assistantRawIdx>=0;
     if(hasAssistant){
@@ -1635,14 +1687,18 @@ async function jumpToTurnQuestion(questionRawIdx, assistantRawIdx){
     _highlightQuestionRow(row);
     return true;
   };
+  // Cancel load-time bottom settling before any visible or virtualized target
+  // path can return. The jump owner keeps every native smooth-scroll frame out
+  // of the manual-reader listener, then reconciles against the final geometry.
+  _cancelBottomSettle();
+  _beginMessageJumpScroll(container);
   if(scrollToTarget()) return;
   const visWithIdx=_getVisibleMessagesWithIdx();
   const visibleIdx=_messageVisibleIndexForRawIdx(questionRawIdx, visWithIdx);
   if(visibleIdx>=0){
-    _scrollPinned=false;
-    _messageUserUnpinned=true;
     _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
-    container.scrollTop=_messageVirtualScrollTopForVisibleIdx(visWithIdx, visibleIdx, container);
+    const virtualTarget=clampTargetScrollTop(_messageVirtualScrollTopForVisibleIdx(visWithIdx, visibleIdx, container));
+    container.scrollTop=virtualTarget;
     _messageVirtualWindowKey='';
     renderMessages({ preserveScroll:true });
     requestAnimationFrame(()=>{
@@ -3195,7 +3251,34 @@ function _findModelInDropdown(modelId, sel, preferredProviderId){
   }
   const preferred=String(preferredProviderId||explicitProvider||'').toLowerCase();
   if(preferred){
-    const providerMatch=options.find(o=>norm(o.value)===target && _getOptionProviderId(o).toLowerCase()===preferred);
+    if(preferred==='custom'||preferred.startsWith('custom:')){
+      // A slash is part of a custom endpoint's upstream model ID, not a
+      // provider namespace. Match the exact routed ID (allowing only the
+      // WebUI's @provider: wrapper and dash/dot spelling compatibility).
+      const routeNorm=value=>{
+        let routed=String(value||'');
+        const prefix=`@${preferred}:`;
+        if(routed.toLowerCase().startsWith(prefix)) routed=routed.slice(prefix.length);
+        return routed.toLowerCase().replace(/-/g,'.');
+      };
+      const providerOptions=options.filter(o=>_getOptionProviderId(o).toLowerCase()===preferred);
+      const providerMatch=providerOptions.find(o=>routeNorm(o.value)===routeNorm(rawModel));
+      if(providerMatch) return providerMatch.value;
+      // Legacy sessions may store only the bare suffix of a routed custom
+      // option. Preserve #6195's provider-hinted repair, but only for an
+      // explicit @provider: row; an unwrapped slash ID belongs to the active
+      // endpoint and must not substitute for a distinct bare model.
+      if(!rawModel.includes('/')&&!rawModel.startsWith('@')){
+        const prefix=`@${preferred}:`;
+        const suffixMatches=providerOptions.filter(o=>
+          String(o.value||'').toLowerCase().startsWith(prefix)
+          &&norm(o.value)===target
+        );
+        if(suffixMatches.length===1) return suffixMatches[0].value;
+      }
+      return null;
+    }
+    const providerMatch=options.find(o=>norm(o.value)===target&&_getOptionProviderId(o).toLowerCase()===preferred);
     if(providerMatch) return providerMatch.value;
   }
   // 2. Normalized match — but ONLY when unambiguous. If the bare id
@@ -5676,7 +5759,107 @@ let _scrollPinned=true;
 let _programmaticScroll=false;
 let _programmaticScrollSetAt=0;
 let _programmaticScrollResetTimer=0;
+const PROGRAMMATIC_SCROLL_VALID_MS=150;
+function _freshProgrammaticScrollActive(){
+  if(!_programmaticScroll) return false;
+  const age=performance.now()-_programmaticScrollSetAt;
+  if(!Number.isFinite(age)||age<0||age>PROGRAMMATIC_SCROLL_VALID_MS){
+    _programmaticScroll=false;
+    return false;
+  }
+  return true;
+}
 function _deferClearProgrammaticScroll(ms){clearTimeout(_programmaticScrollResetTimer);_programmaticScrollResetTimer=setTimeout(()=>{_programmaticScroll=false;},ms||80);}
+let _messageJumpScrollGeneration=0;
+let _messageJumpScrollOwner=null;
+let _messageJumpScrollSettleTimer=0;
+function _messageJumpSessionId(){
+  if(typeof S!=='undefined'&&S.session&&S.session.session_id) return String(S.session.session_id);
+  return '';
+}
+function _scheduleMessageJumpScrollReconcile(generation,ms){
+  if(!_messageJumpScrollOwner||_messageJumpScrollOwner.generation!==generation) return;
+  clearTimeout(_messageJumpScrollSettleTimer);
+  _messageJumpScrollSettleTimer=setTimeout(()=>_finishMessageJumpScroll(generation),ms||220);
+}
+function _beginMessageJumpScroll(container){
+  const previous=_messageJumpScrollOwner;
+  const preserved=previous?previous.preserved:{
+    scrollPinned:_scrollPinned,
+    messageUserUnpinned:_messageUserUnpinned,
+    nearBottomCount:_nearBottomCount,
+  };
+  clearTimeout(_messageJumpScrollSettleTimer);
+  const generation=++_messageJumpScrollGeneration;
+  _messageJumpScrollOwner={generation,container,sessionId:_messageJumpSessionId(),preserved};
+  // While the jump owner is active, temporarily release the reader pin so a
+  // live token arriving between smooth-scroll frames cannot let scrollIfPinned()
+  // reclaim the bottom and snap the reader off the jump target (#6621). The
+  // preserved snapshot above is what _finishMessageJumpScroll() reconciles
+  // against once the jump settles.
+  _scrollPinned=false;
+  _messageUserUnpinned=true;
+  _nearBottomCount=0;
+  _programmaticScroll=true;
+  _programmaticScrollSetAt=performance.now();
+  _scheduleMessageJumpScrollReconcile(generation,300);
+  return generation;
+}
+function _finishMessageJumpScroll(generation){
+  const owner=_messageJumpScrollOwner;
+  if(!owner||owner.generation!==generation) return;
+  if(owner.sessionId!==_messageJumpSessionId()){
+    _cancelMessageJumpScroll();
+    return;
+  }
+  clearTimeout(_messageJumpScrollSettleTimer);
+  _messageJumpScrollSettleTimer=0;
+  const container=owner.container;
+  const maxTop=Math.max(0,container.scrollHeight-container.clientHeight);
+  const top=Math.max(0,Math.min(Number(container.scrollTop)||0,maxTop));
+  const bottomDistance=maxTop-top;
+  if(bottomDistance>80){
+    _scrollPinned=false;
+    _messageUserUnpinned=true;
+    _nearBottomCount=0;
+  }else{
+    _scrollPinned=owner.preserved.scrollPinned;
+    _messageUserUnpinned=owner.preserved.messageUserUnpinned;
+    _nearBottomCount=owner.preserved.nearBottomCount;
+  }
+  _lastScrollTop=container.scrollTop;
+  _lastMessageClientHeight=container.clientHeight;
+  _messageJumpScrollOwner=null;
+  _programmaticScroll=false;
+  if(typeof _syncScrollToBottomCue==='function'){
+    _syncScrollToBottomCue(!_scrollPinned&&bottomDistance>80,{newMessage:_newMessageCueVisible});
+  }
+  if(typeof _updateSessionStartJumpButton==='function') _updateSessionStartJumpButton();
+  // An external-session refresh deferred while the reader was temporarily
+  // unpinned for the jump window (#6621) would otherwise stay stranded once the
+  // near-tail reconciliation restores follow mode. Flush it when the terminal
+  // state is genuinely pinned to the tail.
+  if(_scrollPinned&&!_messageUserUnpinned&&typeof _flushDeferredActiveSessionExternalRefresh==='function'){
+    _flushDeferredActiveSessionExternalRefresh();
+  }
+}
+function _cancelMessageJumpScroll(){
+  ++_messageJumpScrollGeneration;
+  clearTimeout(_messageJumpScrollSettleTimer);
+  _messageJumpScrollSettleTimer=0;
+  // _beginMessageJumpScroll temporarily unpins the reader for the ownership
+  // window (#6621); a cancel that isn't a reconcile must put the pre-jump pin
+  // state back, or the transient unpinned state would leak. Callers that want a
+  // different terminal pin state (e.g. scrollToBottom) set it right after this.
+  const owner=_messageJumpScrollOwner;
+  if(owner&&owner.preserved){
+    _scrollPinned=owner.preserved.scrollPinned;
+    _messageUserUnpinned=owner.preserved.messageUserUnpinned;
+    _nearBottomCount=owner.preserved.nearBottomCount;
+  }
+  _messageJumpScrollOwner=null;
+  _programmaticScroll=false;
+}
 let _nearBottomCount=0;
 let _lastScrollTop=null;
 let _lastMessageClientHeight=null;   // #4702: track scroller height to ignore iOS portrait toolbar-settle reflows (a clientHeight increase fires a scroll event with decreased scrollTop that is NOT a user scroll)
@@ -5722,7 +5905,7 @@ let _lastMessageRenderAt=-Infinity;
 function _recentMessageRenderArtifactWindow(ms){
   return performance.now()-_lastMessageRenderAt<(ms||1400);
 }
-function _cancelBottomSettle(){ _bottomSettleToken++; if(_settleRO){ _settleRO.disconnect(); _settleRO=null; } clearTimeout(_settleTimer); clearTimeout(_settleFinalTimer); cancelAnimationFrame(_settleRAF); }
+function _cancelBottomSettle(){ _cancelMessageJumpScroll(); _bottomSettleToken++; if(_settleRO){ _settleRO.disconnect(); _settleRO=null; } clearTimeout(_settleTimer); clearTimeout(_settleFinalTimer); cancelAnimationFrame(_settleRAF); }
 function _markMessageTouchScrollIntent(active=true){
   _messageTouchScrollActive=!!active;
   _lastMessageTouchScrollIntentMs=performance.now();
@@ -5775,24 +5958,35 @@ function _recordNonMessageScrollIntent(e){
   const target=e&&e.target;
   if(!el||!target) return;
   if(!el.contains(target)){ _lastNonMessageScrollIntentMs=performance.now(); return; }
+  // Capture the guards before cancelling the active owner: cancellation clears
+  // the programmatic flag and jump owner, but a low-delta upward wheel must still
+  // count as reader takeover when it interrupted an owned scroll.
+  const wheelUp=typeof e.deltaY==='number'&&e.deltaY<0;
+  const guardedWheelUp=wheelUp&&_freshProgrammaticScrollActive();
+  const jumpScrollOwned=typeof _messageJumpScrollOwner!=='undefined'&&!!_messageJumpScrollOwner;
   if(e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY!==0)){
     if(typeof _messageScrollInputGeneration==='number') _messageScrollInputGeneration++;
+    if(jumpScrollOwned||e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY< -30)||guardedWheelUp){
+      if(typeof _cancelBottomSettle==='function') _cancelBottomSettle();
+    }
   }
-  // #4970: record ANY upward message-pane wheel motion as recent wheel intent,
-  // including gentle low-delta trackpad wheels (e.g. deltaY:-5) that never reach
-  // the decisive -30 sticky-unpin threshold below. The post-render artifact
-  // suppression consults _recentMessageWheelIntent() so it cannot swallow a real
-  // gentle scroll-up. This does NOT unpin on its own — only the <-30 branch and
-  // the scroll listener's movedUp branch flip _messageUserUnpinned.
-  if(e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY!==0)){
-    const bottomDistance=el.scrollHeight-el.scrollTop-el.clientHeight;
-    if(bottomDistance>120) _lastMessageScrollIntentMs=performance.now();
+  // Any message-pane scroll input that interrupts an active jump owner is a
+  // reader takeover, regardless of direction or the programmatic-latch age
+  // (#6621): _cancelBottomSettle above restores the pre-jump snapshot, so
+  // without this a gentle wheel-up OR wheel-down (or a touch scroll) after the
+  // latch expires would leave the reader pinned and let the next token snap to
+  // the bottom. Establish the unpinned reader-owned state explicitly; a reader
+  // who wants the bottom re-pins by reaching it (<=80px) or pressing End.
+  if(jumpScrollOwned&&(wheelUp||e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY!==0))){
+    _messageUserUnpinned=true;
+    _scrollPinned=false;
+    _nearBottomCount=0;
   }
   if(typeof e.deltaY==='number'&&e.deltaY<0) _lastMessageWheelIntentMs=performance.now();
-  if(e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY< -30)){
-    _cancelBottomSettle();
+  // Keep e.deltaY< -30 as the ordinary direct sticky-unpin threshold.
+  if(e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY< -30)||guardedWheelUp){
     if(e.type==='touchmove') _markMessageTouchScrollIntent(true);
-    if(typeof e.deltaY==='number'&&e.deltaY< -30){
+    if((typeof e.deltaY==='number'&&e.deltaY< -30)||guardedWheelUp){
       _messageUserUnpinned=true;
       _nearBottomCount=0;
       _scrollPinned=false;
@@ -5809,6 +6003,19 @@ function _recordNonMessageScrollIntent(e){
         _scrollPinned=false;
       }
     }
+  }
+  // #4970: record ANY upward message-pane wheel motion as recent wheel intent,
+  // including gentle low-delta trackpad wheels (e.g. deltaY:-5) that never reach
+  // the decisive -30 sticky-unpin threshold below. The post-render artifact
+  // suppression consults _recentMessageWheelIntent() so it cannot swallow a real
+  // gentle scroll-up. Ordinarily this does NOT unpin on its own: the <-30 branch
+  // and the scroll listener's movedUp branch remain the stable threshold. The
+  // exception is an active programmatic-scroll guard. That guard returns before
+  // its listener can see the native scroll event, so even a small capture-phase
+  // upward wheel input must immediately stop live-tail follow (#6414).
+  if(e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY!==0)){
+    const bottomDistance=el.scrollHeight-el.scrollTop-el.clientHeight;
+    if(bottomDistance>120) _lastMessageScrollIntentMs=performance.now();
   }
 }
 function _recentNonMessageScrollIntent(){
@@ -5869,6 +6076,7 @@ if(typeof document!=='undefined'){
 // prevent the new chat's first scroll comparing against the previous chat's
 // scrollTop (Opus stage-302 SHOULD-FIX, #1731 follow-up).
 function _resetScrollDirectionTracker(){
+  _cancelMessageJumpScroll();
   _clearNewMessageScrollCue();
   _lastScrollTop=null;
   _lastMessageClientHeight=null;
@@ -5890,6 +6098,11 @@ function _resetScrollDirectionTracker(){
   _deferredOlderMessagesTimer=0;
 }
 function _resetStreamScrollFollow(){
+  // Cancel any in-flight jump owner FIRST: a new stream is a definitive
+  // pin-to-follow, and _cancelMessageJumpScroll() restores the pre-jump snapshot
+  // (#6621), so it must run BEFORE the pinned-state assignments below or it would
+  // undo them and silently disable auto-follow for the new stream.
+  _cancelBottomSettle();
   _clearNewMessageScrollCue();
   _messageUserUnpinned=false;
   _scrollPinned=true;
@@ -5902,7 +6115,6 @@ function _resetStreamScrollFollow(){
   _lastMessageScrollIntentMs=-Infinity;
   // #4970 review (greptile P1): same hygiene for keyboard scroll intent.
   _lastMessageKeyScrollIntentMs=-Infinity;
-  _cancelBottomSettle();
 }
 if(typeof window!=='undefined'){
   window._resetScrollDirectionTracker=_resetScrollDirectionTracker;
@@ -5982,6 +6194,7 @@ if(typeof window!=='undefined'){
   if(!el) return;
   el.addEventListener('pointerdown',(e)=>{
     if(e.target===el&&e.offsetX>=el.clientWidth){
+      if(typeof _cancelBottomSettle==='function') _cancelBottomSettle();
       _scrollbarDragActive=true;
       if(typeof _messageScrollInputGeneration==='number') _messageScrollInputGeneration++;
     }
@@ -6029,6 +6242,7 @@ if(typeof window!=='undefined'){
     // Count only when the message pane itself is the scroll target: it is focused,
     // contains the focus, or the pointer is over it (keyboard scroll w/o focus).
     if(a===el||el.contains(a)||el.matches(':hover')){
+      if(typeof _cancelBottomSettle==='function') _cancelBottomSettle();
       const now=performance.now();
       if(typeof _messageScrollInputGeneration==='number') _messageScrollInputGeneration++;
       _lastMessageKeyScrollIntentMs=now;
@@ -6039,8 +6253,11 @@ if(typeof window!=='undefined'){
   let _scrollRaf=0;
   el.addEventListener('scroll',()=>{
     _scheduleMessageVirtualizedRender();
-    if(_programmaticScroll&&(performance.now()-_programmaticScrollSetAt)>150) _programmaticScroll=false;
-    if(_programmaticScroll) return;
+    if(_messageJumpScrollOwner){
+      _scheduleMessageJumpScrollReconcile(_messageJumpScrollOwner.generation);
+      return;
+    }
+    if(_freshProgrammaticScrollActive()) return;
     _markMessageVirtualScrollActive();
     cancelAnimationFrame(_scrollRaf);
     _scrollRaf=requestAnimationFrame(()=>{
@@ -6898,6 +7115,11 @@ function _settleFinalScroll(token){
 }
 function scrollIfPinned(){
   if(!window._autoScrollFollow) return;
+  // A jump-to-question owner is mid-flight: it deliberately holds the reader at
+  // the jump target across smooth-scroll frames, so never let a live token
+  // reclaim the bottom while it is active (#6621). _finishMessageJumpScroll()
+  // reconciles the pin state once the jump settles.
+  if(typeof _messageJumpScrollOwner!=='undefined'&&_messageJumpScrollOwner) return;
   if(_messageUserUnpinned){
     // Only scrollToBottom() cleared this flag, so one scroll-up permanently
     // killed auto-follow. Re-pin ONLY when the reader has genuinely returned to
@@ -6922,6 +7144,13 @@ function scrollIfPinned(){
   _settleMessageScrollToBottom(false);
 }
 function scrollToBottom(){
+  // An explicit scroll-to-bottom (End button, or any definitive pin-to-bottom)
+  // supersedes a pending jump-to-question reconciliation: cancel the active jump
+  // owner first so its deferred _finishMessageJumpScroll() can't restore the
+  // pre-jump unpinned snapshot and silently undo this pin (#6621). The jump path
+  // itself never calls scrollToBottom(), and while a jump owner is active the
+  // reader is unpinned so the internal auto-follow callers don't reach here.
+  if(typeof _messageJumpScrollOwner!=='undefined'&&_messageJumpScrollOwner&&typeof _cancelMessageJumpScroll==='function') _cancelMessageJumpScroll();
   _clearNewMessageScrollCue();
   _scrollPinned=true;
   _messageUserUnpinned=false;
@@ -7366,7 +7595,7 @@ function renderMd(raw){
     // Stash [label](url) links before autolink so the URL in href= is not re-linked
     const _link_stash=[];
     t=t.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^\s\)]+)\)/g,(_,lb,u)=>{_link_stash.push(_markdownAnchor(lb,u));return `\x00L${_link_stash.length-1}\x00`;});
-    t=t.replace(/(https?:\/\/[^\s<>"')\]]+)/g,(url)=>{const trail=url.match(/[.,;:!?)]$/)?url.slice(-1):'';const clean=trail?url.slice(0,-1):url;return `<a href="${clean}" target="_blank" rel="noopener">${esc(clean)}</a>${trail}`;});
+    t=t.replace(/(https?:\/\/[^\s<>"')\]\uFF09]+)/g,(url)=>{const trail=url.match(/[.,;:!?)\uFF09\uFF0C\uFF1B\uFF1A\uFF01\uFF1F\u3001\u3002]$/)?url.slice(-1):'';const clean=trail?url.slice(0,-1):url;return `<a href="${clean}" target="_blank" rel="noopener">${esc(clean)}</a>${trail}`;});
     t=t.replace(/\x00L(\d+)\x00/g,(_,i)=>_link_stash[+i]);
     t=t.replace(/\x00G(\d+)\x00/g,(_,i)=>_img_stash[+i]);
     // Escape any plain text that isn't already wrapped in a tag we produced
@@ -7668,9 +7897,11 @@ function renderMd(raw){
   // Stash <a>, <img> and <pre> blocks so autolink never runs inside them.
   const _al_stash=[];
   s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>|<img\b[^>]*>|<pre\b[^>]*>[\s\S]*?<\/pre>)/g,m=>{_al_stash.push(m);return `\x00B${_al_stash.length-1}\x00`;});
-  s=s.replace(/(https?:\/\/[^\s<>"'\)\]]+)/g,(url)=>{
-    // Strip trailing punctuation that was likely not part of the URL
-    const trail=url.match(/[.,;:!?)]$/)?url.slice(-1):'';
+  s=s.replace(/(https?:\/\/[^\s<>"')\]\uFF09]+)/g,(url)=>{
+    // Strip trailing punctuation that was likely not part of the URL.
+    // CJK full-width punctuation (）。，；：！？、) is included because LLMs
+    // frequently use full-width delimiters in Chinese/Japanese text.
+    const trail=url.match(/[.,;:!?)]$/)||url.match(/[\uFF09\uFF0C\uFF1B\uFF1A\uFF01\uFF1F\u3001\u3002]$/)?url.slice(-1):'';
     const clean=trail?url.slice(0,-1):url;
     return `<a href="${clean}" target="_blank" rel="noopener">${esc(clean)}</a>${trail}`;
   });
@@ -9291,7 +9522,33 @@ function snapshotLiveTurnHtmlForSession(sid){
   const turn=$('liveAssistantTurn');
   if(!turn) return;
   if(turn.dataset&&turn.dataset.sessionId&&turn.dataset.sessionId!==sid) return;
-  INFLIGHT[sid].liveTurnHtml=turn.outerHTML;
+  let snapshotTurn=turn;
+  const sourceControls=turn.querySelectorAll
+    ? Array.from(turn.querySelectorAll('.transparent-event-copy,.thinking-copy-btn'))
+    : [];
+  if(sourceControls.some(control=>!!control._transparentCopiedFeedbackNormal)){
+    // Copy-success feedback is transient, while its normal presentation lives
+    // only on element properties. Sanitize an independent clone so switching
+    // sessions cannot persist the check/Copied/accent presentation, without
+    // mutating the visible control or disturbing its active feedback timer.
+    snapshotTurn=turn.cloneNode(true);
+    const clonedControls=Array.from(snapshotTurn.querySelectorAll('.transparent-event-copy,.thinking-copy-btn'));
+    sourceControls.forEach((source,index)=>{
+      const normal=source._transparentCopiedFeedbackNormal;
+      const clone=clonedControls[index];
+      if(!normal||!clone) return;
+      clone.innerHTML=normal.innerHTML;
+      if(clone.style){
+        if(normal.styleCssText!==null) clone.style.cssText=normal.styleCssText;
+        else clone.style.color=normal.color||'';
+      }
+      if(normal.titleAttr===null) clone.removeAttribute('title');
+      else clone.setAttribute('title',normal.titleAttr);
+      if(normal.ariaLabel===null) clone.removeAttribute('aria-label');
+      else clone.setAttribute('aria-label',normal.ariaLabel);
+    });
+  }
+  INFLIGHT[sid].liveTurnHtml=snapshotTurn.outerHTML;
 }
 
 function _liveAssistantSegmentTextLength(seg){
@@ -10125,7 +10382,7 @@ function _renderLockManualInstruction(target, res){
   code.style.background='rgba(0,0,0,0.05)';
   code.style.padding='6px';
   code.style.margin='4px 0';
-  code.style.fontFamily='ui-monospace,monospace';
+  code.style.fontFamily='var(--font-mono)';
   code.style.borderRadius='4px';
   code.style.whiteSpace='pre-wrap';
   code.style.wordBreak='break-all';
@@ -11201,7 +11458,124 @@ function _transparentToolSummary(tc){
   if(target) return target;
   return '';
 }
-function _copyEventToClipboard(row){
+function _showTransparentCopiedFeedback(control,row,opts){
+  if(!control&&!row) return;
+  opts=opts||{};
+  // A live-row refresh may replace a header's copy control with new markup.
+  // Keep the lifetime on the persistent row, then resolve the currently visible
+  // control for every render/expiry rather than retaining a detached button.
+  const feedbackRow=row||(control&&control.closest?control.closest('.transparent-event-row'):null);
+  const owner=feedbackRow||control;
+  if(!owner) return;
+  const currentControl=()=>{
+    if(feedbackRow&&feedbackRow.querySelector){
+      return feedbackRow.querySelector('.transparent-event-copy,.thinking-copy-btn');
+    }
+    return control||null;
+  };
+  const connectedControl=()=>{
+    const target=currentControl();
+    if(!target||target.isConnected!==true) return null;
+    if(feedbackRow&&feedbackRow.isConnected!==true) return null;
+    return target;
+  };
+  const clearFeedbackState=(state)=>{
+    if(state&&state.timer){
+      clearTimeout(state.timer);
+      state.timer=null;
+    }
+    if(owner._transparentCopiedFeedback===state) delete owner._transparentCopiedFeedback;
+  };
+  const restoreControl=(target)=>{
+    if(!target) return;
+    const normal=target._transparentCopiedFeedbackNormal;
+    if(!normal) return;
+    target.innerHTML=normal.innerHTML;
+    if(target.style){
+      if(normal.styleCssText!==null) target.style.cssText=normal.styleCssText;
+      else target.style.color=normal.color||'';
+    }
+    if(normal.titleAttr===null){
+      if(target.removeAttribute) target.removeAttribute('title');
+    }else if(target.setAttribute){
+      target.setAttribute('title',normal.titleAttr);
+    }
+    if(normal.ariaLabel===null){
+      if(target.removeAttribute) target.removeAttribute('aria-label');
+    }else if(target.setAttribute){
+      target.setAttribute('aria-label',normal.ariaLabel);
+    }
+    delete target._transparentCopiedFeedbackNormal;
+  };
+  const renderCopiedControl=(target)=>{
+    if(!target) return;
+    if(!target._transparentCopiedFeedbackNormal){
+      target._transparentCopiedFeedbackNormal={
+        innerHTML:target.innerHTML,
+        color:target.style?target.style.color:undefined,
+        styleCssText:target.style&&typeof target.style.cssText==='string'?target.style.cssText:null,
+        titleAttr:target.getAttribute?target.getAttribute('title'):null,
+        ariaLabel:target.getAttribute?target.getAttribute('aria-label'):null,
+      };
+    }
+    const copiedLabel=t('copied')||'Copied';
+    target.innerHTML=typeof li==='function'?li('check',11):'✓';
+    if(target.style){
+      target.style.color='var(--accent)';
+      target.style.opacity='1';
+    }
+    if(target.setAttribute) target.setAttribute('title',copiedLabel);
+    else target.title=copiedLabel;
+    if(target.setAttribute) target.setAttribute('aria-label',copiedLabel);
+  };
+  const now=Date.now();
+  let state=owner._transparentCopiedFeedback;
+  if(opts.rehydrate){
+    if(!state) return;
+    const target=connectedControl();
+    if(!target){
+      clearFeedbackState(state);
+      return;
+    }
+    if(!state.expiresAt||state.expiresAt<=now){
+      if(state.timer) clearTimeout(state.timer);
+      state.timer=null;
+      restoreControl(target);
+      if(owner._transparentCopiedFeedback===state) delete owner._transparentCopiedFeedback;
+      return;
+    }
+    renderCopiedControl(target);
+    return;
+  }
+  const target=connectedControl();
+  if(!target){
+    if(state) clearFeedbackState(state);
+    return;
+  }
+  if(!state){
+    state={timer:null,generation:0,expiresAt:0};
+    owner._transparentCopiedFeedback=state;
+  }else if(state.timer){
+    clearTimeout(state.timer);
+  }
+  state.generation+=1;
+  const generation=state.generation;
+  state.expiresAt=now+1500;
+  renderCopiedControl(target);
+  state.timer=setTimeout(()=>{
+    if(owner._transparentCopiedFeedback!==state||state.generation!==generation) return;
+    const expiryTarget=connectedControl();
+    if(!expiryTarget){
+      state.timer=null;
+      delete owner._transparentCopiedFeedback;
+      return;
+    }
+    state.timer=null;
+    restoreControl(expiryTarget);
+    delete owner._transparentCopiedFeedback;
+  },1500);
+}
+function _copyEventToClipboard(row,control){
   if(!row) return;
   const type=row.getAttribute('data-event-type');
   let text='';
@@ -11244,9 +11618,12 @@ function _copyEventToClipboard(row){
   }else{
     text=row.textContent||'';
   }
+  if(!text) return;
+  const copied=()=>_showTransparentCopiedFeedback(control,row);
   const fallback=()=>{
+    let ta=null;
     try{
-      const ta=document.createElement('textarea');
+      ta=document.createElement('textarea');
       ta.value=text;
       ta.setAttribute('readonly','');
       ta.style.position='absolute';
@@ -11254,14 +11631,17 @@ function _copyEventToClipboard(row){
       document.body.appendChild(ta);
       ta.select();
       const ok=document.execCommand('copy');
-      document.body.removeChild(ta);
+      if(ok) copied();
       if(typeof showToast==='function') showToast(ok?(t('copied')||'Copied'):(t('copy_failed')||'Copy failed'),1600);
     }catch(_){
       if(typeof showToast==='function') showToast(t('copy_failed')||'Copy failed',2000,'error');
+    }finally{
+      if(ta&&ta.parentNode) ta.parentNode.removeChild(ta);
     }
   };
   if(navigator&&navigator.clipboard&&navigator.clipboard.writeText){
     navigator.clipboard.writeText(text).then(()=>{
+      copied();
       if(typeof showToast==='function') showToast(`${t('copied')||'Copied'} ${label}`,1600);
     }).catch(fallback);
   }else{
@@ -11272,21 +11652,29 @@ function _attachCopyButton(header){
   if(!header) return null;
   const bindCopyButton=(btn)=>{
     if(!btn) return null;
+    const row=header.closest?header.closest('.transparent-event-row'):null;
+    const feedbackState=row&&row._transparentCopiedFeedback;
+    const feedbackActive=!!(feedbackState&&Number(feedbackState.expiresAt)>Date.now());
     btn.classList.add('transparent-event-copy');
     btn.setAttribute('role','button');
     btn.setAttribute('tabindex','0');
-    btn.setAttribute('aria-label',t('copy')||'Copy');
     btn.setAttribute('data-transparent-copy','1');
-    btn.title=t('copy')||'Copy';
+    if(!btn._transparentCopiedFeedback&&!feedbackActive){
+      btn.setAttribute('aria-label',t('copy')||'Copy');
+      btn.title=t('copy')||'Copy';
+    }
     const handler=function(ev){
       ev.stopPropagation();
       ev.preventDefault();
-      _copyEventToClipboard(header.closest('.transparent-event-row'));
+      _copyEventToClipboard(header.closest('.transparent-event-row'),btn);
     };
     btn.onclick=handler;
     btn.onkeydown=function(ev){
       if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();handler(ev);}
     };
+    if(btn.parentNode&&typeof _showTransparentCopiedFeedback==='function'){
+      _showTransparentCopiedFeedback(btn,row,{rehydrate:true});
+    }
     return btn;
   };
   // Reuse ANY existing copy button (handles both .transparent-event-copy
@@ -11309,6 +11697,8 @@ function _attachCopyButton(header){
   const toggle=header.querySelector('.tool-card-toggle,.thinking-card-toggle');
   if(toggle&&toggle.parentNode===header) header.insertBefore(btn,toggle);
   else header.appendChild(btn);
+  const row=header.closest?header.closest('.transparent-event-row'):null;
+  if(typeof _showTransparentCopiedFeedback==='function') _showTransparentCopiedFeedback(btn,row,{rehydrate:true});
   return btn;
 }
 function _transparentEventCountLabel(toolCount){
@@ -13224,7 +13614,13 @@ function _bindTransparentFadeCleanup(body){
   body.addEventListener('animationend', e=>{
     const span = e.target;
     if(!span || !span.classList || !span.classList.contains('stream-fade-word')) return;
-    span.replaceWith(document.createTextNode(span.textContent || ''));
+    // Keep the animated inline node stable for the lifetime of the live turn,
+    // exactly like _streamFadeBindCleanup() in messages.js. Replacing each word
+    // with a fresh text node makes native scroll anchoring choose a new anchor
+    // while the transparent prose row is still growing, producing a visible
+    // vertical bounce. Final settlement rebuilds plain persisted DOM.
+    span.classList.remove('is-new');
+    if(span.style) span.style.removeProperty('--stream-fade-ms');
   });
 }
 
@@ -13649,6 +14045,67 @@ function _armKeepSettledWorklogOpen(streamId){
 }
 function _disarmKeepSettledWorklogOpen(){
   _keepSettledWorklogOpenForStreamId=null;
+}
+function _assistantTurnHasVisibleRenderedSegment(turn){
+  if(!turn||typeof turn.querySelectorAll!=='function') return null;
+  for(const seg of turn.querySelectorAll('.assistant-segment')){
+    if(seg.classList.contains('assistant-segment-worklog-source')) continue;
+    if(seg.classList.contains('assistant-segment-anchor')) continue;
+    if((seg.textContent||'').trim()) return true;
+  }
+  return false;
+}
+function _collapseJustSettledWorklogInPlace(streamId){
+  // #6414: STREAM_DONE used to render the settled turn once with its Worklog
+  // forced open, then immediately run a second full render only to collapse it.
+  // That second `innerHTML=''` rebuild removes the Worklog the user just saw and
+  // can expose a reset frame. Keep the canonical first render, then collapse its
+  // one settled group in place. The rows are released after the group is hidden;
+  // an expand still rebuilds them from the settled transcript via the normal
+  // #5839 deferred-row path.
+  const inner=$('msgInner');
+  if(!inner||!streamId) return false;
+  const group=Array.from(inner.querySelectorAll('[data-anchor-settled-scene-owner="1"]'))
+    .filter(candidate=>candidate.getAttribute('data-anchor-stream-id')===String(streamId))
+    .pop();
+  if(!group) return false;
+  const ownerTurn=typeof group.closest==='function'?group.closest('.assistant-turn'):null;
+  const ownerHasVisibleSegment=_assistantTurnHasVisibleRenderedSegment(ownerTurn);
+  if(ownerHasVisibleSegment===null) return false;
+  const disclosureKey=group.getAttribute('data-activity-disclosure-key')||'';
+  const savedDisclosure=_readActivityDisclosureState(disclosureKey);
+  const rows=_deferredWorklogRowsFromGroup(group);
+  if(!rows||!rows.length) return false;
+  const match=/^anchor-scene:(\d+)$/.exec(disclosureKey);
+  const message=match&&S.messages&&S.messages[Number(match[1])];
+  const errored=!!(message&&message._anchor_activity_scene&&
+    _anchorSceneHasErroredTerminalState(message._anchor_activity_scene));
+  const keepOpen=!ownerHasVisibleSegment
+    || savedDisclosure==='open'
+    || (errored&&savedDisclosure!=='closed')
+    || (_worklogDetailsExpandedDefault()&&savedDisclosure!=='closed');
+  if(!keepOpen){
+    const detailDisclosure=typeof _captureWorklogDetailDisclosureState==='function'
+      ? _captureWorklogDetailDisclosureState(group)
+      : null;
+    group._deferredWorklogRows=rows;
+    group._deferredWorklogDisclosure=detailDisclosure&&detailDisclosure.size
+      ? detailDisclosure
+      : null;
+    group.setAttribute('data-worklog-rows-deferred','1');
+    group.classList.add('tool-call-group-collapsed');
+    group.classList.remove('open');
+    const summary=group.querySelector('.tool-worklog-summary,.tool-call-group-summary');
+    if(summary) summary.setAttribute('aria-expanded','false');
+    _syncToolCallGroupSummary(group);
+    requestAnimationFrame(()=>{
+      if(!group.isConnected||!group.classList.contains('tool-call-group-collapsed')) return;
+      if(group.getAttribute('data-worklog-rows-deferred')!=='1') return;
+      const list=_toolWorklogListEl(group);
+      if(list) list.replaceChildren();
+    });
+  }
+  return true;
 }
 // True while a just-settled worklog is being force-rendered open (between
 // _armKeepSettledWorklogOpen and _disarmKeepSettledWorklogOpen). renderMessages()
@@ -16302,6 +16759,13 @@ function renderMessages(options){
       }).join('')}</div>`;
     }
     let bodyHtml = _getCachedRender(displayContent, isUser);
+    // Message-level media snapshots: settled assistant messages carry a
+    // path→digest map (written at settle time) freezing the file bytes the
+    // turn emitted. Stamp it AFTER the text-keyed render cache so identical
+    // text with different snapshots (old/new comparison) never collides.
+    if(!isUser && m && m._media_snapshots && typeof m._media_snapshots==='object'){
+      bodyHtml = _stampMediaSnapshots(bodyHtml, m._media_snapshots);
+    }
     if(!isUser&&m.provider_details){
       const summary=m.provider_details_label||'Provider details';
       bodyHtml += `<details class="provider-error-details"><summary>${esc(String(summary))}</summary><pre><code>${esc(String(m.provider_details))}</code></pre></details>`;
@@ -16522,10 +16986,15 @@ function renderMessages(options){
         if(!firstSeg&&thinkingText&&window._showThinking!==false&&!((isCompactWorklogMode()||isTransparentStream())&&_assistantThinkingBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs))) orderedSeg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
         const isLastTextPart=partIdx===lastTextPartIdx;
         const partBodyHtml=_getCachedRender(partDisplayText,false);
+        // Message-level media snapshots: transparent ordered segments carry the
+        // same per-message path→digest map as the main transcript; stamp it so
+        // historical previews freeze (&snap=) instead of following overwrites.
+        // Inlined in the template (no intermediate variable) so test-harness
+        // block extraction of the ordered-segment slice stays self-contained.
         if(isLastTextPart&&statusHtml){
           orderedSeg.insertAdjacentHTML('beforeend', statusHtml);
         }
-        orderedSeg.insertAdjacentHTML('beforeend', `${isLastTextPart?filesHtml:''}<div class="msg-body">${partBodyHtml}</div>${isLastTextPart?footHtml:''}`);
+        orderedSeg.insertAdjacentHTML('beforeend', `${isLastTextPart?filesHtml:''}<div class="msg-body">${(typeof m!=='undefined'&&m&&m._media_snapshots&&typeof m._media_snapshots==='object')?_stampMediaSnapshots(partBodyHtml,m._media_snapshots):partBodyHtml}</div>${isLastTextPart?footHtml:''}`);
         blocks.appendChild(orderedSeg);
         if(!firstSeg) firstSeg=orderedSeg;
       });
@@ -17287,11 +17756,12 @@ function renderMessages(options){
   // (Opus advisor, stage-342).
   {
     const _turnHasVisibleContent=(turn)=>{
-      const segs=turn.querySelectorAll('.assistant-segment');
-      for(const seg of segs){
-        // A segment shows real content only when it is NOT worklog-folded AND its
-        // body/files/status actually painted (the anchor-only placeholder class
-        // carries no visible body).
+      if(typeof _assistantTurnHasVisibleRenderedSegment==='function'){
+        return _assistantTurnHasVisibleRenderedSegment(turn)===true;
+      }
+      // Keep the extracted renderMessages test harness self-contained.
+      if(!turn||typeof turn.querySelectorAll!=='function') return false;
+      for(const seg of turn.querySelectorAll('.assistant-segment')){
         if(seg.classList.contains('assistant-segment-worklog-source')) continue;
         if(seg.classList.contains('assistant-segment-anchor')) continue;
         if((seg.textContent||'').trim()) return true;
@@ -18902,7 +19372,8 @@ function loadDiffInline(container){
   root.querySelectorAll('.diff-inline-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
-    fetch('api/media?path='+encodeURIComponent(path))
+    const snapQuery=_mediaSnapQuery(el);
+    fetch('api/media?path='+encodeURIComponent(path)+snapQuery)
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
         if(text.length>DIFF_MAX_SIZE){
@@ -18931,8 +19402,18 @@ function _mediaSessionQuery(){
   return mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'';
 }
 
+// Message-level media snapshots: lazy preview loaders (pdf/html/csv/diff/
+// excalidraw) build their fetch URL from data-path at load time. The stamping
+// pass in _stampMediaSnapshots carries the content digest in data-snap;
+// append it here so the preview shows the file as the message emitted it.
+function _mediaSnapQuery(el){
+  const snap=el&&el.dataset?el.dataset.snap:'';
+  return (snap&&/^[0-9a-f]{64}$/.test(snap))?('&snap='+snap):'';
+}
+
 function _csvMediaUrl(path, opts={}){
   let url='api/media?path='+encodeURIComponent(path)+_mediaSessionQuery();
+  if(opts.snap) url+='&snap='+encodeURIComponent(opts.snap);
   if(opts.download) url+='&download=1';
   return url;
 }
@@ -18972,8 +19453,9 @@ function loadCsvInline(container){
   root.querySelectorAll('.csv-inline-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
-    const mediaUrl=_csvMediaUrl(path);
-    const downloadUrl=_csvMediaUrl(path,{download:true});
+    const snap=_mediaSnapQuery(el).replace(/^&snap=/,'');
+    const mediaUrl=_csvMediaUrl(path,{snap:snap||undefined});
+    const downloadUrl=_csvMediaUrl(path,{download:true,snap:snap||undefined});
     fetch(mediaUrl)
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
@@ -18992,7 +19474,8 @@ function loadExcalidrawInline(container){
   root.querySelectorAll('.excalidraw-inline-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
-    fetch('api/media?path='+encodeURIComponent(path))
+    const snapQuery=_mediaSnapQuery(el);
+    fetch('api/media?path='+encodeURIComponent(path)+snapQuery)
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
         if(text.length>EXCALIDRAW_MAX_SIZE){
@@ -19121,14 +19604,15 @@ function loadPdfInline(container){
     const path=el.dataset.path;
     const fname=path.split('/').pop()||path;
     const mediaSessionId=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)?String(S.session.session_id):'';
+    const snapQuery=_mediaSnapQuery(el);
     const publicMediaUrl='api/media?path='+encodeURIComponent(path);
-    const mediaUrl=publicMediaUrl+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'');
+    const mediaUrl=publicMediaUrl+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'')+snapQuery;
     const loadPdf=(pdfjsLib)=>{
       fetch(mediaUrl)
         .then(r=>{if(!r.ok) throw new Error(r.status); return r.arrayBuffer();})
         .then(buf=>{
           if(buf.byteLength>PDF_MAX_SIZE){
-            const dlUrl=publicMediaUrl+'&download=1';
+            const dlUrl=publicMediaUrl+'&download=1'+snapQuery;
             el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_too_large')}</span></div>`;
             return;
           }
@@ -19136,7 +19620,7 @@ function loadPdfInline(container){
         })
         .then(pdf=>{
           if(!pdf) return;
-          const dlUrl=publicMediaUrl+'&download=1';
+          const dlUrl=publicMediaUrl+'&download=1'+snapQuery;
           const total=pdf.numPages;
           const pagesLabel=total>1?` · ${total} pages`:'';
           const wrap=document.createElement('div');
@@ -19175,7 +19659,7 @@ function loadPdfInline(container){
           renderPage(1);
         })
         .catch(()=>{
-          const dlUrl=publicMediaUrl+'&download=1';
+          const dlUrl=publicMediaUrl+'&download=1'+snapQuery;
           el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_error')}</span></div>`;
         });
     };
@@ -19195,7 +19679,7 @@ function loadPdfInline(container){
       window.addEventListener('pdfjs-ready',()=>{ _pdfjsReady=true; loadPdf(window._pdfjsLib); },{once:true});
       setTimeout(()=>{
         if(!_pdfjsReady){
-          const dlUrl=publicMediaUrl+'&download=1';
+          const dlUrl=publicMediaUrl+'&download=1'+snapQuery;
           if(el.parentNode){
             el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_error')}</span></div>`;
           }
@@ -19216,22 +19700,23 @@ function loadHtmlInline(container){
     const path=el.dataset.path;
     const fname=path.split('/').pop()||path;
     const mediaSessionId=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)?String(S.session.session_id):'';
+    const snapQuery=_mediaSnapQuery(el);
     const publicMediaUrl='api/media?path='+encodeURIComponent(path);
-    const mediaUrl=publicMediaUrl+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'');
+    const mediaUrl=publicMediaUrl+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'')+snapQuery;
     fetch(mediaUrl, {cache:'no-store'})
       .then(r=>{if(!r.ok) throw new Error(r.status); return r.text();})
       .then(html=>{
         if(html.length>HTML_MAX_SIZE){
-          const openUrl=publicMediaUrl+'&inline=1';
+          const openUrl=publicMediaUrl+'&inline=1'+snapQuery;
           el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${openUrl}" target="_blank" rel="noopener">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_too_large')}</span></div>`;
           return;
         }
-        const openUrl=publicMediaUrl+'&inline=1';
+        const openUrl=publicMediaUrl+'&inline=1'+snapQuery;
         const safeHtml=html.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
         el.outerHTML=`<div class="html-preview-wrap"><div class="html-preview-header"><span>${t('html_sandbox_label')}</span><a href="${openUrl}" target="_blank" rel="noopener" class="html-open-link">${t('html_open_full')} ↗</a></div><iframe srcdoc="${safeHtml}" sandbox="allow-scripts" class="html-preview-iframe" loading="lazy"></iframe></div>`;
       })
       .catch(()=>{
-        const dlUrl=publicMediaUrl+'&download=1';
+        const dlUrl=publicMediaUrl+'&download=1'+snapQuery;
         el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_error')}</span></div>`;
       });
   });
@@ -19663,22 +20148,123 @@ function _visibleWorkspaceEntries(entries){
   const list=Array.isArray(entries)?entries:[];
   return S.showHiddenWorkspaceFiles?list:list.filter(item=>!_workspaceShouldHideEntry(item));
 }
+const WORKSPACE_SORT_KEYS=['name-asc','name-desc','created-desc','modified-desc'];
+const WORKSPACE_SORT_DEFAULT='name-asc';
+function _normalizeWorkspaceSortKey(value){
+  return WORKSPACE_SORT_KEYS.includes(value)?value:WORKSPACE_SORT_DEFAULT;
+}
+function _workspaceEntryRank(item){
+  const rank=item&&item.workspace_sort_rank;
+  return rank===0||rank===1||rank===2?rank:1;
+}
+function _workspaceEntryTimestampKey(item,field){
+  const raw=item&&item[field];
+  if(typeof raw==='string'){
+    const value=raw.trim();
+    if(!/^[+-]?\d+$/.test(value))return null;
+    const negative=value[0]==='-';
+    const digits=value.replace(/^[+-]/,'').replace(/^0+(?=\d)/,'');
+    if(digits==='0')return '0';
+    return negative?'-'+digits:digits;
+  }
+  if(typeof raw==='number') return Number.isInteger(raw)?String(raw):null;
+  if(typeof raw==='bigint') return String(raw);
+  return null;
+}
+function _compareWorkspaceTimestampDesc(a,b,field){
+  const av=_workspaceEntryTimestampKey(a,field),bv=_workspaceEntryTimestampKey(b,field);
+  if(av==null&&bv==null)return 0;
+  if(av==null)return 1;
+  if(bv==null)return -1;
+  const an=av[0]==='-',bn=bv[0]==='-';
+  if(an!==bn)return an?1:-1;
+  const aa=an?av.slice(1):av,bb=bn?bv.slice(1):bv;
+  if(aa.length!==bb.length)return an?aa.length-bb.length:bb.length-aa.length;
+  return aa===bb?0:(an?(aa<bb?-1:1):(aa<bb?1:-1));
+}
+function _workspaceSortComparator(key){
+  if(key==='name-desc') return (a,b)=>String(b.name||'').toLowerCase().localeCompare(String(a.name||'').toLowerCase());
+  const field=key==='created-desc'?'birthtime_ns':'mtime_ns';
+  return (a,b)=>_compareWorkspaceTimestampDesc(a,b,field);
+}
+function _workspaceCreatedSortAvailable(){return !!(S.session&&S.session.workspace&&S._workspaceBirthtimeSeen);}
+function _effectiveWorkspaceSortKey(){
+  const key=_normalizeWorkspaceSortKey(S.workspaceSortKey);
+  return key==='created-desc'&&!_workspaceCreatedSortAvailable()?WORKSPACE_SORT_DEFAULT:key;
+}
+function _workspaceEntriesForRender(entries){
+  const list=_visibleWorkspaceEntries(entries);
+  const key=_effectiveWorkspaceSortKey();
+  if(key===WORKSPACE_SORT_DEFAULT)return list;
+  const cmp=_workspaceSortComparator(key);
+  return list.slice().sort((a,b)=>{
+    const rank=_workspaceEntryRank(a)-_workspaceEntryRank(b);
+    return rank!==0?rank:cmp(a,b);
+  });
+}
+function _resetWorkspaceBirthtimeSupport(scope=''){
+  S._workspaceBirthtimeSeen=false;
+  S._workspaceBirthtimeWorkspace=String(scope||'');
+  _syncWorkspacePrefsIndicators();
+  _syncWorkspaceSortMenuState();
+}
+function _syncWorkspaceBirthtimeSupportScope(scope=''){
+  const next=String(scope||'');
+  if(S._workspaceBirthtimeWorkspace!==next) _resetWorkspaceBirthtimeSupport(next);
+}
+function _noteWorkspaceBirthtimeSupport(entries){
+  if(S._workspaceBirthtimeSeen)return;
+  if((Array.isArray(entries)?entries:[]).some(e=>_workspaceEntryTimestampKey(e,'birthtime_ns')!==null)){
+    S._workspaceBirthtimeSeen=true;
+    S._workspaceBirthtimeWorkspace=String((S.session&&S.session.workspace)||S._workspaceBirthtimeWorkspace||'');
+    _syncWorkspacePrefsIndicators();
+    _syncWorkspaceSortMenuState();
+  }
+}
+function _syncWorkspacePrefsIndicators(ind=$('workspaceHiddenIndicator'),dot=$('workspacePrefsDot')){
+  if(ind){
+    if(S.showHiddenWorkspaceFiles){ind.hidden=false;ind.removeAttribute('hidden');}
+    else{ind.hidden=true;ind.setAttribute('hidden','');}
+  }
+  if(dot){
+    const active=S.showHiddenWorkspaceFiles||_effectiveWorkspaceSortKey()!==WORKSPACE_SORT_DEFAULT;
+    if(active){dot.hidden=false;dot.removeAttribute('hidden');}
+    else{dot.hidden=true;dot.setAttribute('hidden','');}
+  }
+}
+function _syncWorkspaceSortMenuState(menu=_workspacePrefsMenu){
+  if(!menu||!menu.querySelectorAll)return;
+  const active=_effectiveWorkspaceSortKey();
+  const createdOk=_workspaceCreatedSortAvailable();
+  menu.querySelectorAll('.workspace-prefs-item--radio').forEach(row=>{
+    const input=row&&row.querySelector?row.querySelector('input[name="workspaceSortKey"]'):null;
+    if(!input)return;
+    const checked=input.value===active;
+    const disabled=input.value==='created-desc'&&!createdOk;
+    input.checked=checked;
+    input.disabled=disabled;
+    row.setAttribute('aria-checked',checked?'true':'false');
+    row.setAttribute('aria-disabled',disabled?'true':'false');
+    if(row.classList&&row.classList.toggle) row.classList.toggle('is-disabled',disabled);
+    if(input.value==='created-desc'){
+      const copy=row.querySelector('.workspace-prefs-copy');
+      let meta=row.querySelector('.workspace-prefs-meta');
+      if(disabled){
+        if(!meta&&copy&&typeof document!=='undefined'){
+          meta=document.createElement('span');
+          meta.className='workspace-prefs-meta';
+          copy.appendChild(meta);
+        }
+        if(meta)meta.textContent=typeof t==='function'?t('workspace_sort_created_unavailable'):'Creation time is not reported by this server or platform.';
+      }else if(meta)meta.remove();
+    }
+  });
+  if(menu===_workspacePrefsMenu&&typeof _workspacePrefsAnchor!=='undefined'&&_workspacePrefsAnchor&&typeof _positionWorkspacePrefsMenu==='function') _positionWorkspacePrefsMenu(_workspacePrefsAnchor);
+}
 function _syncWorkspaceHiddenToggle(){
   const el=$('workspaceShowHiddenFiles');
   if(el)el.checked=!!S.showHiddenWorkspaceFiles;
-  // Reflect "hidden files are visible" state on the panel heading + kebab dot,
-  // so users can see they've flipped a non-default workspace pref without
-  // having to open the menu. The menu itself stays out of the way otherwise.
-  const ind=$('workspaceHiddenIndicator');
-  if(ind){
-    if(S.showHiddenWorkspaceFiles){ ind.hidden=false; ind.removeAttribute('hidden'); }
-    else { ind.hidden=true; ind.setAttribute('hidden',''); }
-  }
-  const dot=$('workspacePrefsDot');
-  if(dot){
-    if(S.showHiddenWorkspaceFiles){ dot.hidden=false; dot.removeAttribute('hidden'); }
-    else { dot.hidden=true; dot.setAttribute('hidden',''); }
-  }
+  _syncWorkspacePrefsIndicators($('workspaceHiddenIndicator'),$('workspacePrefsDot'));
 }
 function toggleWorkspaceHiddenFiles(value){
   S.showHiddenWorkspaceFiles=!!value;
@@ -19687,6 +20273,14 @@ function toggleWorkspaceHiddenFiles(value){
   renderFileTree();
 }
 try{S.showHiddenWorkspaceFiles=localStorage.getItem('hermes-workspace-show-hidden-files')==='1';}catch(_){}
+try{S.workspaceSortKey=_normalizeWorkspaceSortKey(localStorage.getItem('hermes-workspace-sort-key'));}catch(_){S.workspaceSortKey=WORKSPACE_SORT_DEFAULT;}
+function setWorkspaceSortKey(value){
+  S.workspaceSortKey=_normalizeWorkspaceSortKey(value);
+  try{localStorage.setItem('hermes-workspace-sort-key',S.workspaceSortKey);}catch(_){ }
+  _syncWorkspacePrefsIndicators();
+  _syncWorkspaceSortMenuState();
+  renderFileTree();
+}
 
 // ── Workspace preferences kebab menu (#1793 UX refinement) ───────────────
 // The "Show hidden files" toggle used to live as a permanent inline row
@@ -19724,6 +20318,35 @@ function _buildWorkspacePrefsMenu(){
   const menu=document.createElement('div');
   menu.className='workspace-prefs-menu open';
   menu.setAttribute('role','menu');
+  const group=document.createElement('div');
+  group.className='workspace-prefs-group';
+  group.setAttribute('role','group');
+  const groupLabel=(typeof t==='function'?t('workspace_sort_by'):'Sort by');
+  group.setAttribute('aria-label',groupLabel);
+  const head=document.createElement('div');
+  head.className='workspace-prefs-grouplabel';
+  head.textContent=groupLabel;
+  group.appendChild(head);
+  const createdOk=_workspaceCreatedSortAvailable();
+  const active=_effectiveWorkspaceSortKey();
+  [['name-asc','workspace_sort_name_asc'],['name-desc','workspace_sort_name_desc'],['created-desc','workspace_sort_created_desc'],['modified-desc','workspace_sort_modified_desc']].forEach(([key,i18nKey])=>{
+    const disabled=key==='created-desc'&&!createdOk;
+    const row=document.createElement('label');
+    row.className='workspace-prefs-item workspace-prefs-item--radio'+(disabled?' is-disabled':'');
+    row.setAttribute('role','menuitemradio');
+    row.setAttribute('aria-checked',active===key?'true':'false');
+    row.setAttribute('aria-disabled',disabled?'true':'false');
+    row.innerHTML='<input type="radio" name="workspaceSortKey" value="'+esc(key)+'" id="workspaceSort_'+esc(key)+'"'+(disabled?' disabled':'')+' onchange="setWorkspaceSortKey(this.value)">'+
+      '<span class="workspace-prefs-copy"><span class="workspace-prefs-name">'+esc(typeof t==='function'?t(i18nKey):key)+'</span>'+
+      (disabled?'<span class="workspace-prefs-meta">'+esc(typeof t==='function'?t('workspace_sort_created_unavailable'):'Creation time is not reported by this server or platform.')+'</span>':'')+'</span>';
+    const input=row.querySelector('input');
+    if(input)input.checked=active===key;
+    group.appendChild(row);
+  });
+  menu.appendChild(group);
+  const sep=document.createElement('div');
+  sep.className='workspace-prefs-sep';
+  menu.appendChild(sep);
   // The checkbox keeps id="workspaceShowHiddenFiles" so existing call
   // sites (and the existing test_issue1793_file_tree_cruft_filter test)
   // can find it the same way as before. Only the parent container moves.
@@ -19943,13 +20566,15 @@ function renderFileTree(){
   const emptyEl=$('wsEmptyState');
   const hasWorkspace=!!(S.session&&S.session.workspace);
   if(!hasWorkspace){
+    _syncWorkspaceBirthtimeSupportScope('');
     if(emptyEl){emptyEl.textContent=t('workspace_empty_no_path');emptyEl.style.display='flex';}
     box.style.display='none';
     return;
   }
+  _noteWorkspaceBirthtimeSupport(S.entries);
   if(emptyEl) emptyEl.style.display='none';
   box.style.display='';
-  const visibleEntries=_visibleWorkspaceEntries(S.entries);
+  const visibleEntries=_workspaceEntriesForRender(S.entries);
   if(!visibleEntries.length){
     if(emptyEl){emptyEl.textContent=t('workspace_empty_dir');emptyEl.style.display='flex';}
     return;
@@ -20337,7 +20962,7 @@ function _renderTreeItems(container, entries, depth){
 
     // Render children if directory is expanded
     if(isDirLike&&S._expandedDirs.has(item.path)){
-      const children=_visibleWorkspaceEntries(S._dirCache[item.path]||[]);
+      const children=_workspaceEntriesForRender(S._dirCache[item.path]||[]);
       if(children.length){
         _renderTreeItems(container, children, depth+1);
       }else{
