@@ -738,3 +738,46 @@ def test_kanban_second_pass_still_projects_rows(fake_hermes_home, tmp_path):
     assert "kanban-old" in by_id
     # Upstream semantics: kanban rows get no chip from this helper.
     assert by_id["kanban-old"]["project_id"] is None
+
+
+# ── The all-profiles sidebar view runs the same recovery passes ───────────────
+
+
+def test_all_profiles_view_recovers_project_assigned_sessions(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """``?all_profiles=1`` truncates by recency too, so it needs both passes.
+
+    That path passes ``visible_session_limit=None``, which reads like
+    "unbounded" but is mapped to ``CLI_VISIBLE_SESSION_LIMIT`` for the
+    interactive pass — only the cron/webhook/kanban limits reach the reader as
+    ``limit=`` directly, where None really does mean unbounded. Skipping the
+    assigned recovery pass here therefore lost exactly the sessions this
+    regression is about, in the one view that shows every profile at once.
+    """
+    monkeypatch.setattr(models, "CLI_VISIBLE_SESSION_LIMIT", 5)
+    _register_projects(tmp_path, "project-123")
+
+    db_path = fake_hermes_home / "state.db"
+    rows = [
+        _session(f"recent-{index:02d}", BASE_TS + 100 + index)
+        for index in range(25)
+    ]
+    rows.append(_session("older-assigned", BASE_TS, project_id="project-123"))
+    _write_state_db(db_path, rows)
+
+    # Enumerating real profiles shells out to the agent CLI; pin the one context.
+    monkeypatch.setattr(
+        models,
+        "_all_profiles_cli_contexts",
+        lambda: ([(fake_hermes_home, db_path, "default")], (("home", "default", 1),)),
+    )
+
+    sessions = models.get_cli_sessions(all_profiles=True)
+    by_id = {session["session_id"]: session for session in sessions}
+
+    assert "older-assigned" in by_id
+    assert by_id["older-assigned"]["project_id"] == "project-123"
+    assert [s["session_id"] for s in sessions].count("older-assigned") == 1
+    # The unassigned window is still bounded — the recovery pass is additive.
+    assert sum(1 for s in sessions if s["project_id"] is None) == 5

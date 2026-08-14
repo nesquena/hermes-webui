@@ -8234,12 +8234,17 @@ def get_cli_sessions(
             merged: list[dict] = []
             for idx, (ctx_home, ctx_db_path, ctx_profile) in enumerate(contexts):
                 load_kwargs = {
+                    # NOTE: visible_session_limit=None is NOT "unbounded" for the
+                    # interactive pass — it resolves to CLI_VISIBLE_SESSION_LIMIT
+                    # above, so this view truncates assigned conversations by
+                    # recency exactly like the single-profile one and needs the
+                    # same recovery passes. project_assigned_limit therefore keeps
+                    # its default per-project bound here. Only the three limits
+                    # below are handed straight to the reader as ``limit=``, where
+                    # None really does mean unbounded.
                     'source_filter': source_filter,
                     'visible_session_limit': None,
-                    # An unbounded first pass already returns every assigned and
-                    # unassigned conversation, so the bounded recovery passes
-                    # have nothing to recover — skip their queries.
-                    'project_assigned_limit': False,
+                    'project_assigned_limit': PROJECT_ASSIGNED_CLI_LIMIT,
                     'cron_project_limit': None,
                     'webhook_project_limit': None,
                     'kanban_project_limit': None,
