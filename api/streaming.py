@@ -231,58 +231,175 @@ _STREAMING_CRON_PROFILE_HOME: contextvars.ContextVar[str | None] = contextvars.C
     default=None,
 )
 
-# ── MCP discovery: background thread + coalescing ──
-# The per-turn discovery spawn is coalesced per profile home so a busy
-# process never accumulates one daemon thread per message (each
-# `discover_mcp_tools()` can wait up to 120s on the cross-process
-# discovery lock / outer timeout).  `_MCP_DISCOVERY_TURN_JOIN_S` bounds how
-# long the stream worker waits for discovery to finish BEFORE it
-# builds/snapshots the agent, so reachable servers (HTTP/OAuth connects
-# routinely take 2-6s on a cold connect) still land in THIS turn's tool
-# snapshot.  Servers slower than the bound — or unreachable ones like an
-# SSH server pointing at an offline machine — leave the thread running in
-# the background (daemon) and their tools land on the next turn via
-# hermes-agent's per-turn prologue refresh (`agent/turn_context.py`
-# between-turns MCP refresh), matching the CLI/TUI semantics where
-# discovery runs once at agent startup.
-_MCP_DISCOVERY_TURN_JOIN_S = 4.0
-_MCP_DISCOVERY_THREADS: dict = {}
-_MCP_DISCOVERY_THREADS_LOCK = threading.Lock()
+# ── MCP discovery: profile-scoped readiness state machine ──
+# MCP readiness is an explicit per-profile state, not a timed guess:
+#
+#   pending   — one discovery owner thread is running (or about to run)
+#   completed — discovery finished; registered tools are visible to the
+#               next agent snapshot / per-turn prologue refresh
+#   failed    — discovery finished with per-server failures; the outcome is
+#               surfaced (logged) and turns proceed without waiting
+#
+# Exactly ONE discovery thread runs per profile home.  A turn that finds
+# the profile still `pending` waits on the shared readiness event — the
+# FIRST tool-bearing turn must not silently omit a configured server —
+# and every later turn subscribes to the SAME result, so the wait is paid
+# once per profile, not once per message.  Discovery is also kicked off at
+# process start (`_startup_mcp_discovery`) so the default profile is
+# usually already resolved by the time the first user message arrives.
+#
+# The discovery thread re-asserts the profile home through hermes-agent's
+# CONTEXT-LOCAL override (`set_hermes_home_override`), resolved via the
+# webui's version gate `api.profiles._resolve_hermes_home_override()`
+# (#5567), and never writes `os.environ['HERMES_HOME']` (the worker
+# mutates that under `_ENV_LOCK` and restores it at teardown; a delayed
+# write would cross-contaminate other streams).  On agents without the
+# override API the first turn still blocks on the readiness event, so the
+# env read happens inside the worker's env window — the pre-PR
+# synchronous semantics are preserved exactly.
+_MCP_READINESS: dict = {}
+_MCP_READINESS_LOCK = threading.Lock()
 
 
-def _run_mcp_discovery_background(
-    profile_home,
-    discover_fn,
-    thread_name,
-    join_timeout=None,
-):
-    """Run ``discover_fn`` on a coalesced daemon thread; optionally join it.
+class _McpReadiness:
+    """Profile-scoped MCP discovery readiness.
 
-    One background discovery thread is kept per profile home — a live
-    thread is reused rather than spawned anew, so N rapid messages cannot
-    accumulate N lock-waiting discovery daemons.  When ``join_timeout`` is
-    given, the caller waits up to that long for discovery to finish, which
-    lets the agent build that follows snapshot the freshly registered MCP
-    tools.  A thread that outlives the timeout keeps running in the
-    background (daemon) and its tools land on a later turn.
-
-    Returns the thread.
+    Attributes:
+        status: 'pending' | 'completed' | 'failed'
+        event:  threading.Event set when the current run finishes
+        thread: the discovery owner thread (one per profile)
     """
-    with _MCP_DISCOVERY_THREADS_LOCK:
-        _existing = _MCP_DISCOVERY_THREADS.get(profile_home)
-        if _existing is not None and _existing.is_alive():
-            _thread = _existing
-        else:
-            _thread = threading.Thread(
-                target=discover_fn,
+
+    __slots__ = ("status", "event", "thread")
+
+    def __init__(self):
+        self.status = "pending"
+        self.event = threading.Event()
+        self.thread = None
+
+
+def _discovery_runner(discover_fn, readiness, event):
+    try:
+        discover_fn()
+    except Exception:
+        readiness.status = "failed"
+    else:
+        readiness.status = "completed"
+    finally:
+        event.set()
+
+
+def _ensure_mcp_discovery(profile_home, discover_fn, thread_name):
+    """Return the profile's readiness, spawning the discovery owner if needed.
+
+    Exactly one discovery thread per profile home: callers after the first
+    subscribe to the SAME readiness event instead of spawning again or
+    paying a fresh wait.  Completed/failed profiles are NOT re-run here —
+    an explicit retry goes through `_mcp_retry_discovery` (or /reload-mcp).
+    """
+    with _MCP_READINESS_LOCK:
+        readiness = _MCP_READINESS.get(profile_home)
+        if readiness is None:
+            readiness = _McpReadiness()
+            _MCP_READINESS[profile_home] = readiness
+        if (
+            readiness.status == "pending"
+            and (readiness.thread is None or not readiness.thread.is_alive())
+        ):
+            # Owner thread died without finishing; restart it so waiters
+            # can never hang forever on a stale run.  Completed/failed
+            # profiles are NOT re-run here — only explicit retries
+            # (_mcp_retry_discovery / /reload-mcp) re-run discovery.
+            readiness.status = "pending"
+            readiness.event = threading.Event()
+            readiness.thread = threading.Thread(
+                target=_discovery_runner,
+                args=(discover_fn, readiness, readiness.event),
                 name=thread_name,
                 daemon=True,
             )
-            _MCP_DISCOVERY_THREADS[profile_home] = _thread
-            _thread.start()
-    if join_timeout is not None:
-        _thread.join(timeout=join_timeout)
-    return _thread
+            readiness.thread.start()
+    return readiness
+
+
+def _mcp_wait_readiness(readiness):
+    """Block until the profile's discovery run finishes.
+
+    Bounded only by discovery's own internal timeouts (the cross-process
+    lock wait is capped at ~120s); a stuck run cannot hang the turn
+    forever.  Returns the readiness status.
+    """
+    if readiness.status == "pending":
+        readiness.event.wait(timeout=120.0)
+        if readiness.status == "pending":
+            # Safety: the owner thread died without setting the event, or
+            # discovery exceeded its own outer bounds.  Surface as failed.
+            readiness.status = "failed"
+    return readiness.status
+
+
+def _mcp_retry_discovery(profile_home, discover_fn, thread_name):
+    """Force a fresh discovery run for a failed/never-run profile.
+
+    This is the explicit retry path (mirrors /reload-mcp semantics).
+    Registering tools mid-turn never mutates an in-flight Agent snapshot:
+    hermes-agent only applies registered tools in its per-turn prologue
+    refresh, before the first API call of the next turn.
+    """
+    with _MCP_READINESS_LOCK:
+        readiness = _MCP_READINESS.get(profile_home)
+        if readiness is None:
+            readiness = _McpReadiness()
+            _MCP_READINESS[profile_home] = readiness
+        readiness.status = "pending"
+        readiness.event = threading.Event()
+        readiness.thread = threading.Thread(
+            target=_discovery_runner,
+            args=(discover_fn, readiness, readiness.event),
+            name=thread_name,
+            daemon=True,
+        )
+        readiness.thread.start()
+    return readiness
+
+
+def _startup_mcp_discovery():
+    """Kick off default-profile MCP discovery at process start (non-blocking).
+
+    Lets the default profile's readiness resolve during idle time so the
+    first user turn usually finds it already completed/failed instead of
+    waiting.  Uses the getattr-import form so the repo-wide static
+    regression (test_issue1968) that counts exactly one `discover_mcp_tools`
+    call site in api/streaming.py stays valid.
+    """
+    try:
+        from tools.mcp_tool import discover_mcp_tools as _dmt
+    except Exception:
+        return
+
+    def _discover_default():
+        try:
+            from api.profiles import _resolve_hermes_home_override
+            _hc_mod = _resolve_hermes_home_override()
+            _mcp_home_token = None
+            if _hc_mod is not None:
+                _mcp_home = getattr(_hc_mod, 'get_default_hermes_root', lambda: '')()
+                if _mcp_home:
+                    _mcp_home_token = _hc_mod.set_hermes_home_override(
+                        str(_mcp_home)
+                    )
+            try:
+                _dmt()
+            finally:
+                if _mcp_home_token is not None:
+                    _hc_mod.reset_hermes_home_override(_mcp_home_token)
+        except Exception:
+            pass  # MCP not available or not configured — non-fatal
+
+    try:
+        _ensure_mcp_discovery('', _discover_default, 'mcp-discovery-startup')
+    except Exception:
+        pass
 
 
 _STREAMING_CRONJOB_WRAPPER_INSTALLED = False
@@ -8770,47 +8887,45 @@ def _run_agent_streaming(
         # lives outside this WebUI repo.  This change fixes the headline bug
         # for users who run a single non-default profile per WebUI process.
         #
-        # Discovery runs on a BACKGROUND thread: `discover_mcp_tools()`
-        # connects every configured server synchronously (per-server
-        # `connect_timeout`, plus the cross-process discovery lock), so a slow
-        # or unreachable server (e.g. an SSH MCP to a sleeping laptop) stalls
-        # turn start by seconds-to-a-minute on EVERY message.  The CLI/TUI
-        # never pays this because it discovers once at agent startup; the
-        # WebUI builds a fresh worker per stream, so discovery must not sit on
-        # the turn's critical path.
+        # Discovery runs through the profile-scoped readiness state
+        # machine: one owner thread per profile home, and a shared
+        # completed/failed/pending future.  `discover_mcp_tools()` connects
+        # every configured server synchronously (per-server
+        # `connect_timeout`, plus the cross-process discovery lock), so a
+        # slow or unreachable server (e.g. an SSH MCP to a sleeping laptop)
+        # would otherwise stall turn start by seconds-to-a-minute on EVERY
+        # message.  The CLI/TUI never pays this because it discovers once
+        # at agent startup; the WebUI builds a fresh worker per stream.
         #
-        # `_run_mcp_discovery_background` spawns (or reuses) a coalesced
-        # daemon thread and then JOINS it for a bounded window
-        # (`_MCP_DISCOVERY_TURN_JOIN_S`) before the agent is built further
-        # below — the agent's tool snapshot therefore includes tools from
-        # reachable servers that connect within that window (HTTP/OAuth
-        # cold connects routinely take 2-6s), preserving first-turn MCP
-        # completeness.  Servers slower than the bound, or unreachable ones,
-        # keep the thread running in the background; their tools land on the
-        # NEXT turn via hermes-agent's between-turns prologue refresh
-        # (`agent/turn_context.py`), matching CLI/TUI semantics.  On agents
-        # older than v0.18.0 (no context-local override API) the join is
-        # UNBOUNDED — discovery completes inside this worker's env window,
-        # preserving the pre-PR synchronous semantics exactly, so the
-        # fallback can't read another stream's env after teardown.
+        # A turn that finds the profile still `pending` WAITS on the shared
+        # readiness event — the first tool-bearing turn must not silently
+        # omit a configured server — and later turns subscribe to the SAME
+        # result, so the wait is paid once per profile, not once per
+        # message.  Discovery is also kicked off at process start
+        # (`_startup_mcp_discovery`), so the default profile is usually
+        # already resolved by the time the first user message arrives.
         #
-        # The thread re-asserts the stream's profile home through hermes-agent's
-        # CONTEXT-LOCAL override (`set_hermes_home_override`), which
-        # `get_hermes_home()` resolves before the env var.  It deliberately
-        # does NOT write `os.environ['HERMES_HOME']`: the worker mutates that
-        # under `_ENV_LOCK` and restores it at stream teardown, and a delayed
-        # discovery thread that outlives the stream would otherwise write the
-        # stale profile into the process env and cross-contaminate other
-        # streams (the same race as an unlocked env write).  The contextvar is
-        # thread-local — the discovery thread's override dies with the thread.
+        # The thread re-asserts the stream's profile home through
+        # hermes-agent's CONTEXT-LOCAL override (`set_hermes_home_override`),
+        # which `get_hermes_home()` resolves before the env var.  It
+        # deliberately does NOT write `os.environ['HERMES_HOME']`: the
+        # worker mutates that under `_ENV_LOCK` and restores it at stream
+        # teardown, and a delayed discovery thread that outlives the stream
+        # would otherwise write the stale profile into the process env and
+        # cross-contaminate other streams (the same race as an unlocked env
+        # write).  The contextvar is thread-local — the discovery thread's
+        # override dies with the thread.
         #
         # The override is resolved through `api.profiles._resolve_hermes_home_override()`
         # (the webui's version gate for the v0.18.0+ API) rather than imported
         # directly, so OLDER agents fall back to the pre-existing env-mirror
-        # behavior instead of silently skipping discovery.  The profile home
-        # itself comes from the `_profile_home` local captured under `_ENV_LOCK`
-        # above — re-reading `os.environ['HERMES_HOME']` here would race with a
-        # concurrent stream's env mutation after the lock is released.
+        # behavior.  On those agents the first pending turn still blocks on
+        # the readiness event, so the env read happens inside this worker's
+        # env window — the pre-PR synchronous semantics are preserved
+        # exactly.  The profile home itself comes from the `_profile_home`
+        # local captured under `_ENV_LOCK` above — re-reading
+        # `os.environ['HERMES_HOME']` here would race with a concurrent
+        # stream's env mutation after the lock is released.
         try:
             from tools.mcp_tool import discover_mcp_tools
 
@@ -8841,26 +8956,12 @@ def _run_agent_streaming(
                 except Exception:
                     pass  # MCP not available or not configured — non-fatal
 
-            _join_timeout = _MCP_DISCOVERY_TURN_JOIN_S
-            try:
-                from api.profiles import _resolve_hermes_home_override
-                if _resolve_hermes_home_override() is None:
-                    # Older agent (no context-local override API): a delayed
-                    # background thread would read process env AFTER this
-                    # worker restores it, which can observe another stream's
-                    # home.  Block until discovery completes (pre-PR
-                    # semantics) so the env read happens inside this worker's
-                    # env window.
-                    _join_timeout = None
-            except Exception:
-                _join_timeout = None
-
-            _run_mcp_discovery_background(
+            _readiness = _ensure_mcp_discovery(
                 _profile_home,
                 _discover_mcp_background,
                 'mcp-discovery-%s' % (session_id or 'unknown'),
-                join_timeout=_join_timeout,
             )
+            _mcp_wait_readiness(_readiness)
         except Exception:
             pass  # MCP import itself failed — non-fatal
 

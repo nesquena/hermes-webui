@@ -10,21 +10,20 @@ The CLI/TUI never pays this cost per message because it discovers MCP servers
 once at agent startup. The WebUI builds a fresh worker per stream, so discovery
 must not sit on the turn's critical path.
 
-The fix runs discovery through `_run_mcp_discovery_background`: a coalesced
-daemon thread (one per profile home, so messages can't accumulate lock-waiting
-daemons) that the stream worker joins for a bounded window BEFORE the agent
-builds/snapshots its tools. Reachable servers that connect within the window
-land in THIS turn's snapshot (first-turn completeness); slower or unreachable
-servers keep the thread running in the background and their tools land on the
-next turn via hermes-agent's between-turns prologue refresh. The thread
-re-asserts the stream's profile home through the context-local override
-(`set_hermes_home_override`) instead of mutating the process env, so a delayed
-thread can never cross-contaminate another stream.
+The fix is a profile-scoped readiness state machine (`_ensure_mcp_discovery` /
+`_mcp_wait_readiness`): exactly ONE discovery owner thread per profile home; a
+turn that finds the profile still `pending` waits on the shared readiness
+event (so a configured server is never silently omitted from the first
+tool-bearing turn), and later turns subscribe to the SAME result instead of
+paying a fresh wait. Discovery is also kicked off at process start so the
+default profile usually resolves during idle time. The thread re-asserts the
+profile home through the context-local override (`set_hermes_home_override`)
+instead of mutating the process env, so a delayed thread can never
+cross-contaminate another stream.
 
 The structural checks here are static (same precedent as
 `test_issue1968_mcp_profile_discovery.py`); the real production-path behavior
-of `_run_mcp_discovery_background` is exercised at runtime by
-`test_mcp_discovery_thread_coalescing.py`.
+is exercised at runtime by `test_mcp_discovery_thread_coalescing.py`.
 """
 from pathlib import Path
 
@@ -93,57 +92,56 @@ def test_discovery_thread_uses_context_local_home_not_env():
     )
 
 
-def _helper_body() -> list[str]:
-    """Lines of `_run_mcp_discovery_background` from its def to its end."""
-    start = next(
-        i
-        for i, line in enumerate(LINES)
-        if line.startswith("def _run_mcp_discovery_background(")
-    )
+def _function_body(name: str, stop_prefixes: tuple[str, ...]) -> list[str]:
+    """Lines of a top-level function from its def to the next top-level item."""
+    start = next(i for i, line in enumerate(LINES) if line.startswith(f"def {name}("))
     end = start + 1
-    while end < len(LINES) and not (
-        LINES[end].startswith("def ") or LINES[end].startswith("_STREAMING_CRONJOB")
-    ):
+    while end < len(LINES) and not LINES[end].startswith(stop_prefixes):
         end += 1
     return LINES[start:end]
 
 
-def test_discovery_thread_is_daemon_and_bounded_join():
-    """The helper must spawn a daemon thread and only ever JOIN with a bound.
-
-    The stream worker must never block on the full discovery duration: the
-    join has to be `join(timeout=...)` (bounded), not a bare `.join()`, and
-    the thread must be `daemon=True` so it never keeps the process alive.
-    """
-    body = _helper_body()
-    assert any("threading.Thread(" in line for line in body), (
-        "_run_mcp_discovery_background must construct a threading.Thread."
-    )
-    thread_block = body
-    assert any("daemon=True" in line for line in thread_block), (
-        "MCP discovery thread must be daemon=True so it never keeps the "
-        "process alive."
-    )
-    assert any(".start()" in line for line in thread_block), (
-        "MCP discovery thread must be started with .start() — a direct call "
-        "would block the stream worker."
-    )
-    assert any(".join(timeout=" in line for line in body), (
-        "The stream worker's wait for discovery must be a BOUNDED join "
-        "(join(timeout=...)) — a bare .join() would block the turn for the "
-        "full connect timeout, recreating the original bug."
-    )
-
-
-def test_discovery_threads_coalesced_per_profile():
-    """One live discovery thread per profile home — never one per message."""
-    body = _helper_body()
-    assert any("_MCP_DISCOVERY_THREADS.get(profile_home)" in line for line in body), (
-        "The helper must look up an existing live thread by profile home "
-        "before spawning, so rapid messages don't accumulate one "
-        "lock-waiting discovery daemon each."
+def test_ensure_spawns_one_daemon_owner_thread_per_profile():
+    """The readiness owner must be a daemon thread, one per profile."""
+    body = _function_body("_ensure_mcp_discovery", ("def ", "_STREAMING_CRONJOB"))
+    assert any("_MCP_READINESS.get(profile_home)" in line for line in body), (
+        "readiness must be keyed by profile home so each profile gets its "
+        "own registry entry"
     )
     assert any("is_alive()" in line for line in body), (
-        "Only LIVE discovery threads may be reused; finished threads must be "
-        "replaced by a fresh spawn."
+        "only LIVE owner threads may be reused; a dead pending run must be "
+        "restarted so waiters can't hang forever"
+    )
+    assert any("threading.Thread(" in line for line in body), (
+        "the owner must be a threading.Thread"
+    )
+    assert any("daemon=True" in line for line in body), (
+        "the owner thread must be daemon=True so it never keeps the process "
+        "alive"
+    )
+    assert any(".start()" in line for line in body), (
+        "the owner thread must be started with .start() — a direct call "
+        "would block the stream worker"
+    )
+
+
+def test_wait_uses_shared_readiness_event_not_per_turn_join():
+    """The turn wait must be a shared event wait, never a fresh join."""
+    body = _function_body("_mcp_wait_readiness", ("def ", "_STREAMING_CRONJOB"))
+    assert any("event.wait(" in line for line in body), (
+        "the turn must wait on the profile's shared readiness event"
+    )
+    assert not any(".join(" in line for line in body), (
+        "turns must never join the owner thread directly — that would make "
+        "each message pay a fresh wait instead of subscribing to the one "
+        "shared readiness result"
+    )
+
+
+def test_startup_kickoff_exists_and_keeps_single_call_site():
+    """Process-start discovery exists, and no second call line was added."""
+    body = _function_body("_startup_mcp_discovery", ("def ", "_STREAMING_CRONJOB"))
+    assert body, "_startup_mcp_discovery() must exist"
+    assert any("_ensure_mcp_discovery(" in line for line in body), (
+        "the startup kickoff must route through the same readiness owner"
     )

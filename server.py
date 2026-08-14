@@ -583,6 +583,16 @@ def main() -> None:
         # Recovery is best-effort; never block server startup.
         print(f"[recovery] startup recovery failed: {exc}", flush=True)
 
+    # Kick off default-profile MCP discovery in the background so the first
+    # user turn usually finds readiness already resolved (completed or
+    # failed) instead of waiting on the shared readiness event.  See
+    # api/streaming.py `_startup_mcp_discovery`.  Never blocks startup.
+    try:
+        from api.streaming import _startup_mcp_discovery
+        _startup_mcp_discovery()
+    except Exception:
+        pass
+
     within_container = False
     try:
         with open('/.within_container', 'r') as f:
