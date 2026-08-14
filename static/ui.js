@@ -617,7 +617,7 @@ function _cancelMessageVirtualizedRender(){
 }
 function _messageIsRenderable(m){
   if(!m||!m.role||m.role==='tool') return false;
-  if(_isProviderErrorCardMessage(m)&&m._dismissed===true) return false;
+  if(typeof _isProviderErrorCardMessage==='function'&&_isProviderErrorCardMessage(m)&&m._dismissed===true) return false;
   if(m._source === 'process_wakeup') return !!(msgContent(m)||m.attachments?.length);
   if(_isContextCompactionMessage(m)||_isPreservedCompressionTaskListMessage(m)) return false;
   if(_isRecoveryControlMessage(m)) return false;
@@ -16871,7 +16871,7 @@ function renderMessages(options){
       : false;
     const forkBtn  = (readOnlySession&&!branchableReadOnlySession) ? '' : `<button class="msg-action-btn" title="${t('fork_from_here')}" onclick="forkFromMessage(${rawIdx+1})">${li('git-branch',13)}</button>`;
     const ttsBtn   = !isUser ? `<button class="msg-action-btn msg-tts-btn" title="${t('tts_listen')||'Listen'}" onclick="speakMessage(this)">${li('volume-2',13)}</button>` : '';
-    const dismissErrorBtn = !isUser ? _providerErrorDismissalButtonHtml(m, rawIdx, readOnlySession) : '';
+    const dismissErrorBtn = !isUser&&typeof _providerErrorDismissalButtonHtml==='function' ? _providerErrorDismissalButtonHtml(m, rawIdx, readOnlySession) : '';
     const tsVal=m._ts||m.timestamp;
     // _formatInServerTz handles fractional-hour offsets (India +0530 etc.)
     // correctly via offset arithmetic; bare toLocaleString is the browser-tz fallback.

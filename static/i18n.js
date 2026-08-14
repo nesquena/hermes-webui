@@ -13104,6 +13104,10 @@ const LOCALES = {
     clear: '清除',
     create: '建立',
     remove: '移除',
+    dismiss_error_card: '隱藏錯誤卡片',
+    dismiss_error_confirm: '要從對話記錄中隱藏此提供商錯誤卡片嗎？',
+    dismiss_error_stale: '對話記錄已變更，正在重新整理。',
+    dismiss_error_failed: '無法隱藏提供商錯誤卡片，請重試。',
     project_name_prompt: '專案名稱：',
     // Sidebar & Tabs
     tab_chat: '聊天',
