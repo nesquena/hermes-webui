@@ -319,6 +319,47 @@ def test_insights_absolute_range_explicit_today_end_admits_no_future_same_day(mo
     assert data["total_input_tokens"] == 200
 
 
+def test_insights_absolute_range_precise_numeric_end_today_stays_precise(monkeypatch, tmp_path):
+    """A PRECISE numeric `end` earlier on the current local date (e.g. today
+    10:00 while now is 14:00) is an explicit exact boundary and must NOT be
+    widened to the server clock.  `end_clamped_to_now = end_day == today`
+    previously crammed the cutoff up to `now`, leaking sessions between the
+    requested endpoint and `now` into the window.  Only a whole-day "today"
+    selection (end == today's local midnight, e.g. a date string) clamps to
+    now; a strict sub-day end keeps its exact value as the exclusive stop.
+    Regression for Greptile P1 'Today widens precise end timestamps'."""
+    now = time.mktime((2026, 5, 4, 14, 0, 0, 0, 0, -1))        # server clock 2026-05-04 14:00
+    today_midnight = time.mktime((2026, 5, 4, 0, 0, 0, 0, 0, -1))
+    precise_end_ts = time.mktime((2026, 5, 4, 10, 0, 0, 0, 0, -1))  # requested end = today 10:00
+    start_ts = time.mktime((2026, 5, 1, 0, 0, 0, 0, 0, -1))         # selected start day
+    after_end_before_now = precise_end_ts + 1800                    # 10:30 - between endpoint and now (must stay OUT)
+    after_now = now + 3600                                          # 15:00 same day (future vs server, must stay OUT)
+    entries = [
+        {
+            "session_id": "in_range", "updated_at": today_midnight + 60, "created_at": start_ts,
+            "message_count": 2, "input_tokens": 200, "output_tokens": 80,
+            "estimated_cost": "0.0200", "model": "gpt-x",
+        },
+        {
+            "session_id": "between_end_and_now", "updated_at": after_end_before_now,
+            "created_at": after_end_before_now,
+            "message_count": 1, "input_tokens": 999, "output_tokens": 999,
+            "estimated_cost": "0.9999", "model": "gpt-x",
+        },
+        {
+            "session_id": "future_same_day", "updated_at": after_now, "created_at": after_now,
+            "message_count": 1, "input_tokens": 888, "output_tokens": 888,
+            "estimated_cost": "0.8888", "model": "gpt-x",
+        },
+    ]
+    # Precise numeric end at today 10:00: the 10:30 (between end and now)
+    # session must NOT leak in (<-- the bug), matching the 15:00 future one.
+    data = _call_insights(monkeypatch, tmp_path, entries,
+                          query=f"start={int(start_ts)}&end={int(precise_end_ts)}", now=now)
+    assert data["total_sessions"] == 1
+    assert data["total_input_tokens"] == 200
+
+
 def test_insights_absolute_range_invalid_falls_back_to_days(monkeypatch, tmp_path):
     now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
     entries = [
