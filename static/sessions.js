@@ -1505,8 +1505,8 @@ async function newSession(flash, options={}){
     }
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
     if(!_newSessionOwnsPane()) return null;
-    _loadSessionGeneration++;
-    _loadingSessionId=null;
+    if(typeof _loadSessionGeneration!=='undefined') _loadSessionGeneration++;
+    if(typeof _loadingSessionId!=='undefined') _loadingSessionId=null;
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
       _clearEmptyComposerModelOverride();
     }

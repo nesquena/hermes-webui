@@ -180,7 +180,9 @@ def _run_send_js(*, command, status, adapter_status=None, hook_result=None, hook
           updateSendBtn(){{}},
           clearOptimisticSessionStreaming(){{}},
           newSession: async () => {{
-            ctx.S.session = {{ session_id: 'sid-1', title: 'New Chat' }};
+            const created = {{ session_id: 'sid-1', title: 'New Chat' }};
+            ctx.S.session = created;
+            return created;
           }},
           $: id => {{
             if (id === 'msg') return msgInput;

@@ -5,6 +5,7 @@ fresh session. The provider must follow only when that dropdown/persisted state
 describes the same model being sent.
 """
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -17,6 +18,105 @@ MESSAGES_JS_PATH = REPO_ROOT / "static" / "messages.js"
 NODE = shutil.which("node")
 
 
+def _function_source(source: str, marker: str) -> str:
+    start = source.find(marker)
+    assert start >= 0, f"{marker!r} not found"
+    body_start = source.find("{", source.find(")", start))
+    assert body_start >= 0, f"{marker!r} has no body"
+    depth = 0
+    quote = None
+    escaped = False
+    line_comment = False
+    block_comment = False
+    i = body_start
+    while i < len(source):
+        ch = source[i]
+        nxt = source[i + 1] if i + 1 < len(source) else ""
+        if line_comment:
+            if ch == "\n":
+                line_comment = False
+        elif block_comment:
+            if ch == "*" and nxt == "/":
+                block_comment = False
+                i += 1
+        elif quote:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = None
+        elif ch == "/" and nxt == "/":
+            line_comment = True
+            i += 1
+        elif ch == "/" and nxt == "*":
+            block_comment = True
+            i += 1
+        elif ch in "'\"`":
+            quote = ch
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start : i + 1]
+        i += 1
+    raise AssertionError(f"{marker!r} body is not balanced")
+
+
+def _balanced_call(source: str, marker: str, start: int = 0) -> tuple[str, int]:
+    call_start = source.find(marker, start)
+    assert call_start >= 0, f"{marker!r} not found"
+    open_at = source.find("(", call_start)
+    assert open_at >= 0, f"{marker!r} has no opening parenthesis"
+    depth = 0
+    quote = None
+    escaped = False
+    line_comment = False
+    block_comment = False
+    for i in range(open_at, len(source)):
+        ch = source[i]
+        nxt = source[i + 1] if i + 1 < len(source) else ""
+        if line_comment:
+            if ch == "\n":
+                line_comment = False
+        elif block_comment:
+            if ch == "*" and nxt == "/":
+                block_comment = False
+        elif quote:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = None
+        elif ch == "/" and nxt == "/":
+            line_comment = True
+        elif ch == "/" and nxt == "*":
+            block_comment = True
+        elif ch in "'\"`":
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return source[call_start : i + 1], i + 1
+    raise AssertionError(f"{marker!r} call is not balanced")
+
+
+def _calls(source: str, marker: str) -> list[str]:
+    calls = []
+    start = 0
+    while True:
+        marker_pos = source.find(marker, start)
+        if marker_pos < 0:
+            return calls
+        call, start = _balanced_call(source, marker, marker_pos)
+        calls.append(call)
+    return calls
+
+
 def test_messages_payloads_use_model_tied_provider_helper():
     ui_src = UI_JS_PATH.read_text(encoding="utf-8")
     messages_src = MESSAGES_JS_PATH.read_text(encoding="utf-8")
@@ -25,17 +125,29 @@ def test_messages_payloads_use_model_tied_provider_helper():
     assert "function _chatPayloadModelState" in messages_src
     assert "_modelProviderForSend(model)" in messages_src
 
-    chat_start_idx = messages_src.find("api('/api/chat/start'")
-    assert chat_start_idx >= 0, "could not find /api/chat/start POST in messages.js"
-    payload_block = messages_src[chat_start_idx:chat_start_idx + 500]
-    assert "model:_modelState.model" in payload_block
-    assert "model_provider:_modelState.model_provider" in payload_block
-    assert "model_provider:S.session.model_provider||null" not in payload_block
+    send_src = _function_source(messages_src, "async function send(")
+    snapshot = "const _submittedModelState={..._chatPayloadModelState()};"
+    snapshot_pos = send_src.index(snapshot)
+    upload_pos = send_src.index("await uploadPendingFiles")
+    forced_skill_pos = send_src.index("await _pending.promise")
+    chat_start_call, _ = _balanced_call(send_src, "await api('/api/chat/start'")
+    chat_start_pos = send_src.index(chat_start_call)
+    assert snapshot_pos < upload_pos < forced_skill_pos < chat_start_pos
+    assert not re.search(r"_submittedModelState\.(?:model|model_provider)\s*=", send_src[snapshot_pos:])
 
-    for idx in [m.start() for m in __import__("re").finditer("queueSessionMessage\\(", messages_src)]:
-        block = messages_src[idx:idx + 260]
-        if "model_provider:" in block:
-            assert "S.session.model_provider||null" not in block
+    assert "model:_submittedModelState.model" in chat_start_call
+    assert "model_provider:_submittedModelState.model_provider" in chat_start_call
+    assert "_chatPayloadModelState()" not in chat_start_call
+    assert "_modelState.model" not in chat_start_call
+    assert "_modelState.model_provider" not in chat_start_call
+
+    queue_calls = _calls(messages_src, "queueSessionMessage(")
+    assert queue_calls, "messages.js must retain synchronous queue-path coverage"
+    for queue_call in queue_calls:
+        model = re.search(r"\bmodel:\s*([A-Za-z_$][\w$]*)\.model\b", queue_call)
+        provider = re.search(r"\bmodel_provider:\s*([A-Za-z_$][\w$]*)\.model_provider\b", queue_call)
+        assert model and provider, queue_call
+        assert model.group(1) == provider.group(1), queue_call
 
 
 _DRIVER_SRC = r"""
