@@ -651,6 +651,115 @@ class TestMediaEndpointUnit(unittest.TestCase):
                     h5.status, 403,
                     "active profile's webui/workspace/shot.png must NOT be blocked")
 
+    def test_media_serve_binds_authorization_to_opened_object_swap_toctou(self):
+        """#6988 review: authorization must be bound to the object actually
+        opened. /api/media resolves + allow/deny-checks `target` first, then
+        serves it; if an ancestor is swapped for a symlink to a denied webui
+        state dir between the check and the final open, the SAME
+        already-authorized pathname must NOT open the denied object.
+
+        (a) A plain file under an allowed tree serves normally (200 + body).
+        (b) After swapping an ancestor (`alias`) for a symlink to the denied
+        active-profile <root>/webui/sessions dir, the same pathname must be
+        refused at open time (component-anchored openat + O_NOFOLLOW) — the
+        denied state content must never reach the response, even though the
+        path was authorized before the swap.
+        """
+        import shutil
+        from api import routes
+
+        class _CaptureHandler:
+            def __init__(self):
+                self.status = None
+                self.headers = {}
+                self.body = bytearray()
+                self.wfile = self
+            def send_response(self, code):
+                self.status = code
+            def send_header(self, *a, **k):
+                pass
+            def end_headers(self):
+                pass
+            def write(self, b):
+                self.body.extend(b)
+            def flush(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as home:
+            base = pathlib.Path(home) / ".hermes"
+            # Active named profile (HERMES_HOME) with its WebUI state dir and
+            # the default workspace under it (STATE_DIR/workspace).
+            active = base / "profiles" / "webui"
+            active_webui = active / "webui"
+            denied_sessions = active_webui / "sessions"
+            ws = active_webui / "workspace"
+            denied_sessions.mkdir(parents=True)
+            ws.mkdir(parents=True)
+            # Denied state object with the SAME relative name the request uses.
+            denied_state = denied_sessions / "payload.json"
+            denied_state.write_text(
+                '{"top-secret-session":"do-not-leak","messages":[]}',
+                encoding="utf-8")
+            # Allowed, attacker-mutable tree inside the active workspace.
+            alias_dir = ws / "media_swap" / "alias"
+            alias_dir.mkdir(parents=True)
+            innocent = alias_dir / "payload.json"
+            innocent.write_text('{"ok":true,"payload":"innocent"}', encoding="utf-8")
+
+            env = {
+                "HERMES_HOME": str(active),
+                "HERMES_WEBUI_STATE_DIR": str(active_webui),
+            }
+            with mock.patch.dict(os.environ, env), \
+                 mock.patch.object(routes, "get_last_workspace", lambda: str(ws)), \
+                 mock.patch("api.auth.is_auth_enabled", lambda: False), \
+                 mock.patch("api.config.STATE_DIR", active_webui), \
+                 mock.patch("api.profiles._DEFAULT_HERMES_HOME", base):
+                request_path = (
+                    "path="
+                    + urllib.parse.quote(str((alias_dir / "payload.json").resolve()))
+                )
+
+                # (a) Pre-swap: the same pathname serves the innocent file.
+                h1 = _CaptureHandler()
+                routes._handle_media(h1, SimpleNamespace(
+                    query=request_path, path="/api/media"))
+                self.assertEqual(
+                    h1.status, 200,
+                    "innocent file under the allowed workspace must serve (200)")
+                self.assertIn(
+                    b"innocent", h1.body,
+                    "pre-swap body must be the innocent file content")
+
+                # (b) Swap the ancestor for a symlink to the denied webui
+                # state dir between check and open (simulated inside the first
+                # os.open call, i.e. after allow/deny evaluation). With the
+                # anchor_root binding the open is component-anchored and the
+                # swapped component is refused; without it, the same pathname
+                # re-traversed by name would open the denied state object.
+                real_open = os.open
+                swapped = {"done": False}
+
+                def _swap_on_first_open(path, *args, **kwargs):
+                    if not swapped["done"]:
+                        swapped["done"] = True
+                        shutil.rmtree(str(alias_dir))
+                        os.symlink(str(denied_sessions), str(alias_dir))
+                    return real_open(path, *args, **kwargs)
+
+                h2 = _CaptureHandler()
+                with mock.patch.object(os, "open", autospec=True,
+                                       side_effect=_swap_on_first_open):
+                    routes._handle_media(h2, SimpleNamespace(
+                        query=request_path, path="/api/media"))
+                self.assertNotEqual(
+                    h2.status, 200,
+                    "swapped-ancestor open must not serve the denied state object")
+                self.assertNotIn(
+                    b"top-secret-session", h2.body,
+                    "denied webui state content must never reach the response "
+                    "(authorization must be bound to the opened object)")
+
     def test_media_allowed_roots_env_var_serves_outside_hermes_root(self):
         """MEDIA_ALLOWED_ROOTS must still allow legitimate outside-root media."""
         from api import routes

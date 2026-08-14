@@ -20005,6 +20005,30 @@ def _handle_media(handler, parsed):
     if not target.exists() or not target.is_file():
         return j(handler, {"error": "not found"}, status=404)
 
+    # ── #6988: bind authorization to the object actually opened ──────────────
+    # All allow/deny checks above authorize the RESOLVED pathname, but
+    # _serve_file_bytes() would otherwise re-traverse it by NAME at open time:
+    # an attacker able to mutate an allowed tree (/tmp or the workspace) could
+    # swap an ancestor (e.g. an `alias` dir) for a symlink to a denied
+    # base/sibling webui state dir BETWEEN the checks and os.open — the same
+    # already-authorized pathname would then open the denied object (TOCTOU).
+    # Retain the root that authorized `target` and pass it as anchor_root so
+    # the final open is component-anchored (openat + O_NOFOLLOW): any
+    # component swapped to a symlink after the checks is refused. (#6988.)
+    serve_anchor = None
+    if session_media_allowed:
+        # Session MEDIA: tokens are exact-path grants; anchor at the parent so
+        # a swapped parent component cannot redirect the open either.
+        serve_anchor = target.parent
+    elif within_allowed:
+        # Narrowest matching allowed root -> smallest open scope (the active
+        # workspace root when the file lives there, HERMES_HOME otherwise).
+        matching_roots = [
+            r for r in allowed_roots
+            if r.exists() and _path_is_within_root(target, r)
+        ]
+        if matching_roots:
+            serve_anchor = max(matching_roots, key=lambda r: len(r.parts))
     # HTML inline previews change frequently (agent edits + re-renders).
     # Use no-store so the browser always fetches fresh content, avoiding stale
     # previews that require a manual full-page refresh to update.
@@ -20018,7 +20042,10 @@ def _handle_media(handler, parsed):
         cache_control = "no-store"
     else:
         cache_control = "private, no-cache"
-    return _serve_file_bytes(handler, target, mime, disposition, cache_control, csp=csp)
+    return _serve_file_bytes(
+        handler, target, mime, disposition, cache_control, csp=csp,
+        anchor_root=serve_anchor,
+    )
 
 
 def _file_raw_target(session, sid: str, rel: str) -> tuple[Path, Path] | None:
