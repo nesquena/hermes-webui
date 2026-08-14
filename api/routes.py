@@ -11080,7 +11080,16 @@ def _handle_insights(handler, parsed) -> bool:
         if re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
             try:
                 y, mo, d = map(int, v.split("-"))
-                return _time.mktime((y, mo, d, 0, 0, 0, 0, 0, -1))
+                ts = _time.mktime((y, mo, d, 0, 0, 0, 0, 0, -1))
+                # Reject impossible calendar dates (e.g. 2026-02-31):
+                # mktime silently normalizes them to another day, which
+                # would return analytics for the wrong interval.  A
+                # round-trip must land back on the requested local
+                # midnight, otherwise the value is invalid -> fall back.
+                lt = _time.localtime(ts)
+                if (lt.tm_year, lt.tm_mon, lt.tm_mday) != (y, mo, d):
+                    return None
+                return ts
             except (OverflowError, ValueError, OSError):
                 return None
         # Numeric epoch seconds.
