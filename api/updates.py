@@ -2085,96 +2085,104 @@ def apply_force_update(target: str, channel=None) -> dict:
         if path is None or not (path / '.git').exists():
             return {'ok': False, 'message': 'Not a git repository'}
 
-        # NOTE: v2 of PR #5688 removed the prior stale-lock cleanup loop from
-        # this entry point. The mtime-based heuristic was empirically proven
-        # unsafe (a live `git add` was shown to hold .git/index.lock past 31 s
-        # with unchanged mtime) and unconditional pre-cleanup clobbered locks
-        # for force-update retries that had nothing to do with a lock error.
-        # Lock cleanup is now ONLY performed by the explicit
-        # /api/updates/clear_lock endpoint, where the user has opted in to
-        # a non-destructive retry.
-
-        # --force so a remote re-tag (e.g. squash-merge that re-points an
-        # existing release tag) doesn't jam the apply path with "would clobber
-        # existing tag". See #2756.
-        fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=15)
-        if not fetch_ok:
-            return {
-                'ok': False,
-                'message': _apply_fetch_failure_message(
-                    fetch_out,
-                    'Could not reach the remote repository. Check your connection.',
-                ),
-            }
-
-        compare_ref = _select_apply_compare_ref(path, channel, target)
-        # Stable channel, already up to date on the promoted subset: nothing to
-        # force to. Do NOT fall back to origin/master (firehose). See
-        # _select_apply_compare_ref channel semantics.
-        if compare_ref is None:
-            dirty_state = None
-            if target == 'webui' and channel == 'stable':
-                dirty_state = _probe_dirty(path, timeout=_FORCE_DIRTY_PROBE_TIMEOUT)
-            if dirty_state is True:
-                compare_ref = 'HEAD'
-            else:
-                return {
-                    'ok': True,
-                    'message': f'{target} is already up to date on the {channel} channel.',
-                    'target': target,
-                    'up_to_date': True,
-                    'channel': channel,
-                }
-
-        # Rewind guard (Codex CORE #3): refuse to reset --hard onto a ref that
-        # is an ANCESTOR of HEAD — that would downgrade the checkout. This is the
-        # switch-back-to-stable-while-ahead case. A ref that is a descendant of
-        # HEAD (normal update / opt-in to experimental) fast-forwards fine and is
-        # allowed. Refs on a divergent line (neither ancestor nor descendant) are
-        # the legitimate force-update case (conflict/diverged recovery) and are
-        # also allowed — the guard fires ONLY on a pure-ancestor rewind.
-        if _head_contains_ref(path, compare_ref) and not _can_fast_forward_to(path, compare_ref):
-            return {
-                'ok': False,
-                'message': (
-                    f'{target} is already ahead of the {channel} channel '
-                    f'({compare_ref}); refusing to rewind the checkout. '
-                    'Switching to a slower channel keeps your current version '
-                    'until that channel catches up.'
-                ),
-                'target': target,
-                'channel': channel,
-                'refused_rewind': True,
-            }
-        if not _discard_local_changes(path, compare_ref):
-            return {'ok': False, 'message': f'Force reset to {compare_ref} failed'}
-
-        with _cache_lock:
-            _update_cache['checked_at'] = 0
-
-        if target == 'agent':
-            gateway_ok, gateway_result = _ensure_gateway_restart_for_agent_update()
-            if not gateway_ok:
-                return {
-                    'ok': False,
-                    'message': _agent_gateway_restart_failure_message(target, gateway_result),
-                    'target': target,
-                    'gateway_restart': gateway_result.get('status'),
-                }
-
-        _schedule_restart()
-
-        response = {
-            'ok': True,
-            'message': f'{target} force-updated to {compare_ref}',
-            'target': target,
-            'restart_scheduled': True,
-        }
-        if target == 'agent':
-            response['gateway_restart'] = gateway_result.get('status')
-        return response
+        # Serialize git operations against check stragglers on this repo.
+        # (PR #6830, Greptile: apply bypasses repository lock)
+        with _repo_check_lock(path):
+            return _apply_force_update_locked(target, channel, path)
     finally:
         _apply_lock.release()
+
+
+def _apply_force_update_locked(target, channel, path):
+    """Force-apply body, called under _apply_lock and the per-repo check lock."""
+    # NOTE: v2 of PR #5688 removed the prior stale-lock cleanup loop from
+    # this entry point. The mtime-based heuristic was empirically proven
+    # unsafe (a live `git add` was shown to hold .git/index.lock past 31 s
+    # with unchanged mtime) and unconditional pre-cleanup clobbered locks
+    # for force-update retries that had nothing to do with a lock error.
+    # Lock cleanup is now ONLY performed by the explicit
+    # /api/updates/clear_lock endpoint, where the user has opted in to
+    # a non-destructive retry.
+
+    # --force so a remote re-tag (e.g. squash-merge that re-points an
+    # existing release tag) doesn't jam the apply path with "would clobber
+    # existing tag". See #2756.
+    fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=15)
+    if not fetch_ok:
+        return {
+            'ok': False,
+            'message': _apply_fetch_failure_message(
+                fetch_out,
+                'Could not reach the remote repository. Check your connection.',
+            ),
+        }
+
+    compare_ref = _select_apply_compare_ref(path, channel, target)
+    # Stable channel, already up to date on the promoted subset: nothing to
+    # force to. Do NOT fall back to origin/master (firehose). See
+    # _select_apply_compare_ref channel semantics.
+    if compare_ref is None:
+        dirty_state = None
+        if target == 'webui' and channel == 'stable':
+            dirty_state = _probe_dirty(path, timeout=_FORCE_DIRTY_PROBE_TIMEOUT)
+        if dirty_state is True:
+            compare_ref = 'HEAD'
+        else:
+            return {
+                'ok': True,
+                'message': f'{target} is already up to date on the {channel} channel.',
+                'target': target,
+                'up_to_date': True,
+                'channel': channel,
+            }
+
+    # Rewind guard (Codex CORE #3): refuse to reset --hard onto a ref that
+    # is an ANCESTOR of HEAD — that would downgrade the checkout. This is the
+    # switch-back-to-stable-while-ahead case. A ref that is a descendant of
+    # HEAD (normal update / opt-in to experimental) fast-forwards fine and is
+    # allowed. Refs on a divergent line (neither ancestor nor descendant) are
+    # the legitimate force-update case (conflict/diverged recovery) and are
+    # also allowed — the guard fires ONLY on a pure-ancestor rewind.
+    if _head_contains_ref(path, compare_ref) and not _can_fast_forward_to(path, compare_ref):
+        return {
+            'ok': False,
+            'message': (
+                f'{target} is already ahead of the {channel} channel '
+                f'({compare_ref}); refusing to rewind the checkout. '
+                'Switching to a slower channel keeps your current version '
+                'until that channel catches up.'
+            ),
+            'target': target,
+            'channel': channel,
+            'refused_rewind': True,
+        }
+    if not _discard_local_changes(path, compare_ref):
+        return {'ok': False, 'message': f'Force reset to {compare_ref} failed'}
+
+    with _cache_lock:
+        _update_cache['checked_at'] = 0
+
+    if target == 'agent':
+        gateway_ok, gateway_result = _ensure_gateway_restart_for_agent_update()
+        if not gateway_ok:
+            return {
+                'ok': False,
+                'message': _agent_gateway_restart_failure_message(target, gateway_result),
+                'target': target,
+                'gateway_restart': gateway_result.get('status'),
+            }
+
+    _schedule_restart()
+
+    response = {
+        'ok': True,
+        'message': f'{target} force-updated to {compare_ref}',
+        'target': target,
+        'restart_scheduled': True,
+    }
+    if target == 'agent':
+        response['gateway_restart'] = gateway_result.get('status')
+    return response
 
 
 def apply_update(target, channel=None):
@@ -2245,6 +2253,16 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
     if path is None or not (path / '.git').exists():
         return {'ok': False, 'message': 'Not a git repository'}
 
+    # Serialize git operations against check stragglers on this repo. A
+    # detached check thread from a timed-out check may still be fetching;
+    # the apply must not run git concurrently on the same checkout.
+    # (PR #6830, Greptile: apply bypasses repository lock)
+    with _repo_check_lock(path):
+        return _apply_update_locked(target, channel, path)
+
+
+def _apply_update_locked(target, channel, path):
+    """Apply body, called under _apply_lock and the per-repo check lock."""
     # Fetch before attempting pull, so the remote ref is current.
     # --force so a remote re-tag doesn't block the update path (see #2756).
     fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=15)

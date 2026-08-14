@@ -2083,6 +2083,80 @@ def test_check_for_updates_serializes_detached_checks_per_repo(tmp_path, monkeyp
     )
 
 
+def test_apply_waits_for_detached_check_straggler(tmp_path, monkeypatch):
+    """An apply must not run git concurrently with a detached check straggler
+    on the same checkout — the apply path shares the per-repo lock.
+    (PR #6830, Greptile: apply bypasses repository lock)"""
+    import threading
+    import time
+
+    webui_path = tmp_path / 'webui'
+    agent_path = tmp_path / 'agent'
+    webui_path.mkdir()
+    agent_path.mkdir()
+    (webui_path / '.git').mkdir()
+    (agent_path / '.git').mkdir()
+
+    # WebUI fetch hangs until released — the straggler thread holds the repo
+    # lock while blocked in git fetch.
+    straggler_started = threading.Event()
+    release = threading.Event()
+
+    active = {}
+    active_lock = threading.Lock()
+    max_concurrent = {}
+
+    def fake_run_git(args, path, timeout=30):
+        key = str(path)
+        with active_lock:
+            active[key] = active.get(key, 0) + 1
+            max_concurrent[key] = max(max_concurrent.get(key, 0), active[key])
+        try:
+            if args[0] == 'fetch' and key == str(webui_path):
+                straggler_started.set()
+                release.wait(timeout=5.0)
+                return '', False  # fetch failed after release
+            return '', True
+        finally:
+            with active_lock:
+                active[key] -= 1
+
+    monkeypatch.setattr(updates, '_run_git', fake_run_git)
+    monkeypatch.setattr(updates, 'REPO_ROOT', webui_path)
+    monkeypatch.setattr(updates, '_AGENT_DIR', agent_path)
+    monkeypatch.setattr(updates, '_UPDATE_CHECK_BUDGET_S', 1, raising=False)
+    monkeypatch.setattr(updates, '_update_cache', {
+        'webui': None, 'agent': None, 'checked_at': 0,
+        'include_agent': True, 'channel': 'stable'
+    })
+
+    # First check: webui fetch hangs → times out; straggler keeps running and
+    # holds the webui repo lock.
+    result1 = updates.check_for_updates(force=True, include_agent=True, channel='stable')
+    assert 'timed out' in result1['webui']['error']
+    assert straggler_started.wait(1.0)
+
+    # Release the straggler after a short delay — mirroring its real bounded
+    # 30s fetch timeout finishing on its own.
+    threading.Timer(0.3, release.set).start()
+
+    # Apply on the same repo while the straggler still holds the lock. The
+    # apply must block on the repo lock, not run git concurrently.
+    start = time.time()
+    apply_result = updates.apply_update('webui', channel='stable')
+    elapsed = time.time() - start
+    release.set()
+
+    # Apply returns (its own fetch runs after the straggler releases)...
+    assert apply_result is not None
+    # ...and git operations on the webui checkout never overlapped.
+    assert max_concurrent.get(str(webui_path), 0) == 1, (
+        f'{max_concurrent.get(str(webui_path), 0)} concurrent git ops on the webui repo'
+    )
+    # The apply's own fetch is bounded by the lock wait; it must not hang.
+    assert elapsed < 5.0, f'apply took {elapsed:.1f}s — likely ran git concurrently'
+
+
 def test_check_for_updates_aggregate_timeout_never_exceeds_budget(tmp_path, monkeypatch):
     """When the first check consumes the full budget, the second future must
     get only the remaining time, not a fresh timeout — and an exhausted
