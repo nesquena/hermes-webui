@@ -36,7 +36,15 @@ _SEQ_CACHE_LOCK = threading.Lock()
 _SUMMARY_CACHE_MAX_ENTRIES = 128
 _SUMMARY_CACHE: OrderedDict[str, tuple[tuple[int, int, int, int, int], dict]] = OrderedDict()
 _SUMMARY_CACHE_LOCK = threading.Lock()
-_TERMINAL_SSE_EVENTS = {"done", "cancel", "apperror", "error", "stream_end"}
+# Events that mark a run terminal in the journal / summary sense.
+TERMINAL_SSE_EVENTS = frozenset({"done", "cancel", "apperror", "error", "stream_end"})
+# Events that should close an SSE relay drain loop. `done` is intentionally
+# excluded: background title generation and `stream_end` are emitted after
+# `done`, and breaking early would drop them. `apperror` is included because
+# it terminates with no trailing `stream_end`.
+SSE_RELAY_CLOSE_EVENTS = frozenset({"stream_end", "cancel", "apperror", "error"})
+# Back-compat alias used by older call sites / tests.
+_TERMINAL_SSE_EVENTS = TERMINAL_SSE_EVENTS
 _FSYNC_MODE_ENV = "HERMES_WEBUI_RUN_JOURNAL_FSYNC"
 _FSYNC_MODE_EAGER = "eager"
 _FSYNC_MODE_TERMINAL_ONLY = "terminal-only"
@@ -476,14 +484,32 @@ def read_run_events(
     }
 
 
+def select_authoritative_terminal_event(events: Iterable[dict]) -> dict | None:
+    """Return the terminal event that owns the run's settled outcome.
+
+    ``stream_end`` is transport closure, so a preceding semantic terminal event
+    (done, cancel, or error) remains authoritative. Among semantic terminal
+    events, the latest journal row wins.
+    """
+    terminal_events = [
+        event
+        for event in events
+        if isinstance(event, dict) and event.get("terminal")
+    ]
+    return next(
+        (
+            event
+            for event in reversed(terminal_events)
+            if event.get("event") != "stream_end"
+        ),
+        terminal_events[-1] if terminal_events else None,
+    )
+
+
 def _summary_from_events(session_id: str, run_id: str, events: Iterable[dict]) -> dict:
     ordered = [event for event in events if isinstance(event, dict)]
     last = ordered[-1] if ordered else None
-    terminal_events = [event for event in ordered if event.get("terminal")]
-    terminal = next(
-        (event for event in reversed(terminal_events) if event.get("event") != "stream_end"),
-        terminal_events[-1] if terminal_events else None,
-    )
+    terminal = select_authoritative_terminal_event(ordered)
     status = terminal.get("terminal_state") if terminal else ("running" if ordered else "unknown")
     return {
         "session_id": str(session_id),
