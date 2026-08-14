@@ -24,8 +24,9 @@ def _isolate_models_cache():
     (e.g. test_model_resolver) which see stale data and never hit their
     mocks.  Clearing the cache around each test breaks that linkage.
 
-    Also snapshots/restores ``c.cfg``, ``c._cfg_mtime``, and ``c._cfg_path``
-    to prevent tests from leaking global config state to neighboring test files.
+    Also snapshots/restores ``c.cfg``, ``c._cfg_mtime``, ``c._cfg_path``,
+    and ``c._cfg_fingerprint`` to prevent tests from leaking global config
+    state to neighboring test files.
     """
     import api.config as c
     import api.providers as p
@@ -33,6 +34,7 @@ def _isolate_models_cache():
     old_cfg = dict(c.cfg)
     old_mtime = c._cfg_mtime
     old_path = c._cfg_path
+    old_fingerprint = c._cfg_fingerprint
     try:
         c.invalidate_models_cache()
         p.invalidate_providers_cache()
@@ -46,6 +48,7 @@ def _isolate_models_cache():
     c.cfg.update(old_cfg)
     c._cfg_mtime = old_mtime
     c._cfg_path = old_path
+    c._cfg_fingerprint = old_fingerprint
     try:
         c.invalidate_models_cache()
         p.invalidate_providers_cache()
