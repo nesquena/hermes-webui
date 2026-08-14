@@ -254,6 +254,40 @@ def test_insights_absolute_range_start_only_defaults_end_to_now(monkeypatch, tmp
     assert data["total_input_tokens"] == 300
 
 
+def test_insights_absolute_range_omitted_or_future_end_admits_no_future_same_day(monkeypatch, tmp_path):
+    """An omitted or future-supplied `end` collapses to the server clock, so an
+    absolute range must NOT admit same-day sessions stamped after `now` - the
+    local-midnight roll-up to the NEXT midnight previously leaked them in.
+    Regression for Greptile P1 'Current-day cutoff admits future sessions'."""
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))                # server clock 2026-05-04 12:00
+    start_ts = time.mktime((2026, 5, 1, 0, 0, 0, 0, 0, -1))            # selected start day
+    after_now = now + 3600                                              # 13:00 same day (future vs server)
+    entries = [
+        {
+            "session_id": "at_now", "updated_at": now, "created_at": start_ts,
+            "message_count": 2, "input_tokens": 200, "output_tokens": 80,
+            "estimated_cost": "0.0200", "model": "gpt-x",
+        },
+        {
+            "session_id": "future_same_day", "updated_at": after_now, "created_at": after_now,
+            "message_count": 1, "input_tokens": 999, "output_tokens": 999,
+            "estimated_cost": "0.9999", "model": "gpt-x",
+        },
+    ]
+    # start only; `end` omitted -> effective end clamps to `now`.
+    data = _call_insights(monkeypatch, tmp_path, entries,
+                          query=f"start={int(start_ts)}", now=now)
+    # Future-same-day session excluded; the session exactly at `now` stays.
+    assert data["total_sessions"] == 1
+    assert data["total_input_tokens"] == 200
+    assert data["total_output_tokens"] == 80
+    # Explicit but FUTURE `end` is clamped to `now` the same way.
+    data2 = _call_insights(monkeypatch, tmp_path, entries,
+                           query=f"start={int(start_ts)}&end={int(after_now)}", now=now)
+    assert data2["total_sessions"] == 1
+    assert data2["total_input_tokens"] == 200
+
+
 def test_insights_absolute_range_invalid_falls_back_to_days(monkeypatch, tmp_path):
     now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
     entries = [
