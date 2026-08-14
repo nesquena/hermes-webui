@@ -8788,7 +8788,11 @@ def _run_agent_streaming(
         # completeness.  Servers slower than the bound, or unreachable ones,
         # keep the thread running in the background; their tools land on the
         # NEXT turn via hermes-agent's between-turns prologue refresh
-        # (`agent/turn_context.py`), matching CLI/TUI semantics.
+        # (`agent/turn_context.py`), matching CLI/TUI semantics.  On agents
+        # older than v0.18.0 (no context-local override API) the join is
+        # UNBOUNDED — discovery completes inside this worker's env window,
+        # preserving the pre-PR synchronous semantics exactly, so the
+        # fallback can't read another stream's env after teardown.
         #
         # The thread re-asserts the stream's profile home through hermes-agent's
         # CONTEXT-LOCAL override (`set_hermes_home_override`), which
@@ -8815,10 +8819,20 @@ def _run_agent_streaming(
                     from api.profiles import _resolve_hermes_home_override
                     _hc_mod = _resolve_hermes_home_override()
                     _mcp_home_token = None
-                    if _hc_mod is not None and _profile_home:
-                        _mcp_home_token = _hc_mod.set_hermes_home_override(
-                            _profile_home
-                        )
+                    if _hc_mod is not None:
+                        _mcp_home = _profile_home
+                        if not _mcp_home:
+                            # Default-profile session: the worker never set
+                            # HERMES_HOME, so an override to the platform
+                            # default keeps the thread independent of the
+                            # process env (which other streams mutate).
+                            _mcp_home = getattr(
+                                _hc_mod, 'get_default_hermes_root', lambda: ''
+                            )()
+                        if _mcp_home:
+                            _mcp_home_token = _hc_mod.set_hermes_home_override(
+                                str(_mcp_home)
+                            )
                     try:
                         discover_mcp_tools()
                     finally:
@@ -8827,11 +8841,25 @@ def _run_agent_streaming(
                 except Exception:
                     pass  # MCP not available or not configured — non-fatal
 
+            _join_timeout = _MCP_DISCOVERY_TURN_JOIN_S
+            try:
+                from api.profiles import _resolve_hermes_home_override
+                if _resolve_hermes_home_override() is None:
+                    # Older agent (no context-local override API): a delayed
+                    # background thread would read process env AFTER this
+                    # worker restores it, which can observe another stream's
+                    # home.  Block until discovery completes (pre-PR
+                    # semantics) so the env read happens inside this worker's
+                    # env window.
+                    _join_timeout = None
+            except Exception:
+                _join_timeout = None
+
             _run_mcp_discovery_background(
                 _profile_home,
                 _discover_mcp_background,
                 'mcp-discovery-%s' % (session_id or 'unknown'),
-                join_timeout=_MCP_DISCOVERY_TURN_JOIN_S,
+                join_timeout=_join_timeout,
             )
         except Exception:
             pass  # MCP import itself failed — non-fatal
