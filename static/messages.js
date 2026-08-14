@@ -7266,13 +7266,12 @@ function _updateYoloPill() {
 async function toggleYoloFromApproval() {
   const sid = S.session && S.session.session_id;
   if (!sid) return false;
-  const enabled = await respondApproval('once', {yolo: true});
-  if (enabled) {
-    _yoloEnabled = true;
-    _updateYoloPill();
-    showToast(t('yolo_enabled'));
-  }
-  return enabled;
+  const result = await respondApproval('once', {yolo: true});
+  if (!result) return false;
+  _yoloEnabled = !!result.yolo_enabled;
+  _updateYoloPill();
+  showToast(t(_yoloEnabled ? 'yolo_enabled' : 'yolo_disabled'));
+  return true;
 }
 
 // ── Approval polling ──
@@ -7641,7 +7640,7 @@ async function respondApproval(choice) {
           })
           .catch(() => {});
       }
-      return true;
+      return options.yolo ? result : true;
     }
     const errMsg = (result && result.error) || "Approval response not accepted.";
     _restoreFailedApprovalResponse(sid, errMsg);

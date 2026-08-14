@@ -24883,6 +24883,7 @@ def _handle_approval_respond(handler, body):
                     return j(handler, {"ok": False, "choice": choice, "relayed": True, "error": str(exc)}, status=502)
                 finally:
                     finish_session_yolo_transition(sid, yolo_transition, succeeded=relay_succeeded)
+                settled_yolo_enabled = bool(is_session_yolo_enabled(sid)) if enable_yolo else False
                 # The outbound relay only resumes the remote run; the local mirror
                 # still needs the same cleanup path so the parked entry, mirrored
                 # card, and agent signal all settle here too.
@@ -24893,7 +24894,7 @@ def _handle_approval_respond(handler, body):
                     "ok": True,
                     "choice": choice,
                     "relayed": True,
-                    **({"yolo_enabled": True} if enable_yolo else {}),
+                    **({"yolo_enabled": settled_yolo_enabled} if enable_yolo else {}),
                 })
             finally:
                 release_gateway_approval_relay_owner(sid, _run_id, claimed_approval_id)
