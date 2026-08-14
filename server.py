@@ -103,6 +103,7 @@ from api.auth import check_auth, check_auth_or_close, reset_trusted_auth_request
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
 from api.helpers import (
     j,
+    advertise_connection_close,
     get_profile_cookie,
     _build_csp_report_only_policy,
     _CLIENT_DISCONNECT_ERRORS,
@@ -331,12 +332,7 @@ class Handler(BaseHTTPRequestHandler):
         extra_frame_src = getattr(self, "_csp_extra_frame_src", None)
         self.send_header("Content-Security-Policy-Report-Only", self.csp_report_only_policy(extra_connect_src, extra_frame_src))
         self.send_header("Report-To", self._CSP_REPORT_TO)
-        if self.close_connection and not getattr(self, "_close_advertised", False):
-            # A reject-before-read leaves the body unread; the client must be
-            # TOLD the connection dies or a pooled client reuses it and breaks.
-            # BaseHTTPRequestHandler does not serialize the flag itself.
-            self.send_header("Connection", "close")
-            self._close_advertised = True
+        advertise_connection_close(self)  # tell the client when the socket dies
         super().end_headers()
 
     def log_message(self, fmt, *args): pass  # suppress default Apache-style log
@@ -409,9 +405,7 @@ class Handler(BaseHTTPRequestHandler):
             set_request_profile(cookie_profile)
         try:
             parsed = urlparse(self.path)
-            _is_csp_report_post = (
-                parsed.path == "/api/csp-report" and self.command == "POST"
-            )
+            _is_csp_report_post = parsed.path == "/api/csp-report" and self.command == "POST"
             if not _is_csp_report_post and not check_auth_or_close(self, parsed): return
             result = route_func(self, parsed)
             if result is False:
