@@ -5139,7 +5139,7 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False)
         _apply_source_meta(s)
         s.save(touch_updated_at=False)
     else:
-        # Regular CLI/agent sessions: import full message history
+        # Regular CLI/agent sessions: import full message history.
         msgs = get_cli_session_messages(sid)
         if not msgs:
             raise KeyError(sid)
@@ -5152,6 +5152,18 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False)
             created_at=cli_meta.get("created_at"),
             updated_at=cli_meta.get("updated_at"),
         )
+        # Stamp the capped-source truncation flag so the real viewer path (GET
+        # /api/session, which serves the sidecar) can surface an "earlier turns
+        # omitted" notice. Reflects the CURRENT rollout read (a Codex session
+        # that later grows past the cap self-heals to True on re-open); a cheap
+        # cache-hit for Codex and False for every other CLI source.
+        _trunc_now = get_cli_session_truncation(sid, profile=cli_meta.get("profile"))
+        if _trunc_now != bool(getattr(s, "cli_transcript_truncated", False)):
+            s.cli_transcript_truncated = _trunc_now
+            try:
+                s.save(touch_updated_at=False)
+            except Exception:
+                logger.debug("Failed to persist cli_transcript_truncated for %s", sid, exc_info=True)
         _apply_source_meta(s)
 
     return s
@@ -9448,6 +9460,8 @@ from api.models import (
     CLAUDE_CODE_SOURCE,
     get_cli_sessions,
     get_cli_session_messages,
+    get_cli_session_truncation,
+    is_codex_session_id,
     get_state_db_session_messages,
     get_state_db_session_message_prefix_summary,
     get_state_db_session_message_keys_before_timestamp,
@@ -25969,6 +25983,13 @@ def _handle_session_import_cli(handler, body):
             sid,
             profile=(cli_meta or {}).get("profile") or refresh_profile,
         )
+        # Re-stamp truncation from the current CLI read so a capped source that
+        # grew past the cap self-heals to True on re-open (cheap cache-hit for
+        # Codex, False for other sources).
+        _cli_truncated = get_cli_session_truncation(
+            sid,
+            profile=(cli_meta or {}).get("profile") or refresh_profile,
+        )
         changed = False
         if fresh_msgs and len(fresh_msgs) > len(existing.messages):
             # Prefix-equality guard: only extend if existing messages are a prefix of
@@ -26006,6 +26027,15 @@ def _handle_session_import_cli(handler, body):
             for attr, value in updates.items():
                 if getattr(existing, attr, None) != value:
                     setattr(existing, attr, value)
+                    changed = True
+            # Re-stamp truncation from the current CLI read so a capped source
+            # (Codex) that later grew past the cap self-heals to True on
+            # re-open. Only touched for capped sources to avoid spurious saves
+            # (and attribute writes) on every other CLI/messaging session.
+            if is_codex_session_id(sid):
+                _trunc_now = bool(_cli_truncated)
+                if getattr(existing, "cli_transcript_truncated", False) != _trunc_now:
+                    existing.cli_transcript_truncated = _trunc_now
                     changed = True
         else:
             _existing_is_sa = (
@@ -26048,6 +26078,11 @@ def _handle_session_import_cli(handler, body):
     msgs = get_cli_session_messages(sid, profile=profile)
     if not msgs:
         return bad(handler, "Session not found in CLI store", 404)
+    # Capped-source transcripts (Codex) drop the oldest turns; surface that so
+    # the real viewer path can show an "earlier turns omitted" notice. A cheap
+    # cache-hit for Codex (shares the rollout parse cache) and False for every
+    # other CLI source, so non-Codex imports are unaffected.
+    _cli_truncated = get_cli_session_truncation(sid, profile=profile)
 
     # Get profile, model, timestamps, and title from CLI session metadata
     created_at = cli_meta.get("created_at") if cli_meta else None
@@ -26116,6 +26151,9 @@ def _handle_session_import_cli(handler, body):
             "read_only": True,
             "messages": msgs,
             "tool_calls": [],
+            # Surface capped-source truncation on the read-only stub path too
+            # (Codex sessions are read-only, so this is the branch they take).
+            "cli_transcript_truncated": bool(_cli_truncated),
         }
         return j(handler, {"session": session_payload, "imported": False})
 
@@ -26136,6 +26174,9 @@ def _handle_session_import_cli(handler, body):
     s.raw_source = cli_raw_source or cli_source_tag
     s.session_source = cli_session_source
     s.source_label = cli_source_label
+    # Stamp capped-source truncation so the real viewer path (GET /api/session)
+    # can surface an "earlier turns omitted" notice for long CLI transcripts.
+    s.cli_transcript_truncated = bool(_cli_truncated)
     s.user_id = cli_user_id
     s.chat_id = cli_chat_id
     s.chat_type = cli_chat_type

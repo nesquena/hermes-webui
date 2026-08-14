@@ -75,10 +75,29 @@ Codex transcripts grow **newest-last** (each turn is appended). To keep a
 recently-finished conversation's latest turns — the ones a reader actually
 wants — the bridge renders only the **newest** 1000 messages per transcript.
 
-Whether this cap was hit is surfaced on `GET /api/codex/session/<id>` as a
-`truncated` boolean (true when older turns were dropped), so a consumer can show
-a "…earlier turns omitted" notice rather than letting the reader believe the
-conversation starts where the window does.
+A transcript is **never dropped for being large**. When a rollout exceeds the
+tail-read threshold the parser reads only its tail (the newest records) instead
+of the whole file, so a long-lived conversation stays visible in the sidebar
+and the viewer however large it grows. The dropped prefix is always the oldest
+turns.
+
+Whether older turns were omitted is surfaced as a `truncated` boolean:
+
+- on `GET /api/codex/session/<id>`, and
+- on the **real viewer path** the WebUI actually uses to open a Codex session
+  (`POST /api/session/import_cli` → `GET /api/session`) as a
+  `cli_transcript_truncated` flag on the session payload.
+
+The latter lets the transcript show an "earlier turns omitted" notice rather
+than letting the reader believe the conversation starts where the window does.
+There is no back-fill path for the omitted oldest turns — they are not stored
+in the WebUI sidecar — so the notice is informational only.
+
+The sidebar's per-row message count is derived from a small **bounded tail
+read** (a few KiB per file), not a full parse, so a cold sidebar scan stays
+bounded regardless of how large individual transcripts have grown. The count is
+therefore a lower bound for very long sessions; opening the session still loads
+the full newest-1000 window.
 
 This intentionally mirrors the existing Claude Code bridge's
 `CLAUDE_CODE_MAX_MESSAGES_PER_FILE` cap; the differing behaviour here is that
@@ -96,5 +115,5 @@ Codex keeps the **tail** (newest) rather than the head.
 ## Troubleshooting
 
 - **No Codex rows in the sidebar** — confirm Codex is installed, `~/.codex/state_5.sqlite` exists, and **Settings → Show Codex sessions** is enabled. If running in Docker, verify the `CODEX_HOME` mount is present (`docker compose config` shows it) and `HERMES_WEBUI_CODEX_HOME` matches the mounted path.
-- **Session shows an old or incomplete conversation** — the bridge renders the newest 1000 turns; check whether `GET /api/codex/session/<id>` returns `"truncated": true` (the conversation simply has more than 1000 turns). If it looks genuinely stale, touch the transcript and re-open the session — the parse cache invalidates on file mtime/size change.
+- **Session shows an old or incomplete conversation** — the bridge renders the newest 1000 turns (and tail-reads very large files rather than dropping them); check whether `GET /api/codex/session/<id>` returns `"truncated": true`, or whether the open session shows an "earlier turns omitted" notice (both mean the conversation has more turns than the retained window). If it looks genuinely stale, touch the transcript and re-open the session — the parse cache invalidates on file mtime/size change.
 - **"Session not found"** — the id is not a Codex thread the WebUI can see (wrong home, missing DB, or the rollout path is outside `<codex_home>/sessions`). Confirm `HERMES_WEBUI_CODEX_HOME` if you moved Codex state.

@@ -38,6 +38,7 @@ from api.codex_sessions import (
     CODEX_SOURCE,
     codex_state_db_stat_key,
     get_codex_session_messages,
+    get_codex_session_messages_and_truncated,
     get_codex_sessions,
     is_codex_session_id,
 )
@@ -1241,6 +1242,7 @@ class Session:
                  process_wakeup_pause=None,
                  share_token=None,
                  share_created_at=None,
+                 cli_transcript_truncated=None,
                  **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.title = title
@@ -1329,6 +1331,10 @@ class Session:
         self.process_wakeup_pause = process_wakeup_pause if isinstance(process_wakeup_pause, dict) else {}
         self.share_token = str(share_token).strip() if share_token else None
         self.share_created_at = share_created_at
+        # Codex (and other capped-source) rollouts keep only the newest N turns,
+        # dropping the oldest. Surfaced on the real viewer path so a reader can
+        # be told older turns were omitted. Defaults falsy; set at import time.
+        self.cli_transcript_truncated = bool(cli_transcript_truncated)
         # #5854: a compact fingerprint of anchor_activity_scenes ({scene_key:
         # updated_at}) persisted BEFORE the messages array so the sidebar-poll
         # freshness check can compare scene freshness without parsing the full
@@ -1399,7 +1405,7 @@ class Session:
             'is_cli_session', 'source_tag', 'raw_source', 'session_source', 'source_label', 'read_only',
             'enabled_toolsets', 'composer_draft',
             'process_wakeup_pause',
-            'share_token', 'share_created_at',
+            'share_token', 'share_created_at', 'cli_transcript_truncated',
         ]
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
         # #5854: message_count and a compact anchor-scene fingerprint go in the
@@ -1783,6 +1789,7 @@ class Session:
             'process_wakeup_pause': self.process_wakeup_pause if isinstance(self.process_wakeup_pause, dict) else {},
             'share_token': self.share_token,
             'share_created_at': self.share_created_at,
+            'cli_transcript_truncated': self.cli_transcript_truncated,
             'is_streaming': _is_streaming_session(
                 self.active_stream_id, active_stream_ids
             ) if include_runtime else False,
@@ -9368,6 +9375,41 @@ def get_cli_session_messages(sid, *, profile=None) -> list:
     if is_codex_session_id(sid):
         return get_codex_session_messages(sid)
     return get_state_db_session_messages(sid, stitch_continuations=True, profile=profile)
+
+
+def get_cli_session_messages_and_truncated(sid, *, profile=None):
+    """Read ``(messages, truncated)`` for a CLI/external-agent session.
+
+    ``truncated`` is True only for sources that can drop older turns at read
+    time (currently Codex, whose rollout is capped to the newest 1000 turns and
+    tail-read when very large). Other CLI sources return ``(messages, False)``.
+    Used by the import path so the real WebUI viewer can surface an
+    "earlier turns omitted" notice without going through the Codex detail API.
+    """
+    if str(sid or '').startswith(f'{CLAUDE_CODE_SOURCE}_'):
+        return get_claude_code_session_messages(sid), False
+    if is_codex_session_id(sid):
+        return get_codex_session_messages_and_truncated(sid)
+    return (
+        get_state_db_session_messages(sid, stitch_continuations=True, profile=profile),
+        False,
+    )
+
+
+def get_cli_session_truncation(sid, *, profile=None) -> bool:
+    """Return whether a CLI/external-agent session dropped its oldest turns.
+
+    True only for capped sources (currently Codex, whose rollout is read as the
+    newest ``CODEX_MAX_MESSAGES_PER_FILE`` turns and tail-read when very large).
+    For Codex this is a cache-hit on the shared rollout parse cache; for every
+    other CLI source it is a constant ``False``. Lets the import path stamp the
+    truncation flag WITHOUT changing the existing ``get_cli_session_messages``
+    call sites, so non-Codex imports are untouched.
+    """
+    if is_codex_session_id(sid):
+        _messages, truncated = get_codex_session_messages_and_truncated(sid)
+        return bool(truncated)
+    return False
 
 
 def count_conversation_rounds(sid: str, since: float | None = None) -> int:

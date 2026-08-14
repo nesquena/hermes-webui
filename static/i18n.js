@@ -181,6 +181,7 @@ const LOCALES = {
     untitled: 'Untitled',
     n_messages: (n) => `${n} messages`,
     load_older_messages: '↑ Scroll up or click to load older messages',
+    earlier_turns_omitted: 'Earlier turns from this session were omitted (only the recent part of a long CLI transcript is kept).',
     session_jump_start: 'Start',
     session_jump_start_label: 'Jump to beginning of session',
     session_jump_end: 'End',
