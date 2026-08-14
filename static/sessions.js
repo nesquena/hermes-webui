@@ -1703,6 +1703,12 @@ async function loadSession(sid){
   // #2971: idempotent re-arm before the no-op guard revives a stream a prior
   // failed loadSession killed; no-ops on real switches.
   _rearmActiveSessionStream();
+  // #6999: same-session force-reload coordination lives in the refresh paths
+  // (refreshActiveSessionIfExternallyUpdated guard + session-updated SSE
+  // handler in messages.js), NOT here: a second loadSession(sid,{force:true})
+  // for the same sid is a legitimate supersede (generation bump below) that
+  // cross-session ordering tests rely on. Coalescing at the entry point would
+  // drop the superseding fetch and leave a stale first load in charge.
   if(currentSid===sid && !forceReload && (!_loadingSessionId || _loadingSessionId===sid)){
     // Re-selecting the already-open session is a no-op for transcript/scroll, but
     // it is still a *visit*: clear a stale sidebar unread dot (e.g. one a
@@ -3187,7 +3193,20 @@ async function _ensureMessagesLoaded(sid, opts) {
   // Expand render window to cover all loaded messages so the next
   // renderMessages() doesn't hide most of them behind a tiny window.
   if(typeof _messageRenderableMessageCount==='function'&&typeof _currentMessageRenderWindowSize==='function'){
-    _messageRenderWindowSize=Math.max(_currentMessageRenderWindowSize(), _messageRenderableMessageCount());
+    // #6999: bound the auto-expansion. This number gates
+    // _messageHiddenBeforeCount() (load-older / jump-to-start affordances)
+    // and the non-virtualized fallback render width; the virtualized DOM tail
+    // is independently capped at MESSAGE_RENDER_WINDOW_DEFAULT via
+    // _messageVirtualKeepTailCount(). Growing the window to the FULL loaded
+    // transcript on every force reload (tab focus, SSE catch-up) zeroes the
+    // hidden-before count for long sessions and widens the effective render
+    // window for non-virtualized paths. Keep the #3686 intent (don't collapse
+    // back to the 50-row default after a load) but cap the growth to a small
+    // multiple of the default window.
+    _messageRenderWindowSize=Math.max(
+      _currentMessageRenderWindowSize(),
+      Math.min(_messageRenderableMessageCount(), (typeof MESSAGE_RENDER_WINDOW_DEFAULT==='number'?MESSAGE_RENDER_WINDOW_DEFAULT:50)*4)
+    );
   }
   if(S.session&&S.session.session_id===sid){
     S.session.message_count=Number(data.session.message_count || msgs.length);
@@ -5846,6 +5865,10 @@ async function refreshActiveSessionIfExternallyUpdated(reason){
   if(_activeSessionExternalRefreshInFlight) return 'skipped';
   if(!S.session || !S.session.session_id) return 'skipped';
   if(S.busy || S.activeStreamId) return 'skipped';
+  // #6999: if a load for this exact session is already in flight, it owns the
+  // refresh — probing now would duplicate the fetch and the O(N) render work
+  // that exhausts the tab's JS heap when the tab comes back into focus.
+  if(_loadingSessionId === S.session.session_id) return 'skipped';
   if(typeof _isMessageReaderUnpinned==='function'&&_isMessageReaderUnpinned()){
     _deferActiveSessionExternalRefresh(reason||'poll');
     return 'skipped';

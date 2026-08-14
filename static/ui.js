@@ -15150,6 +15150,30 @@ function clearMessageRenderCache(){
   _clearMessageVirtualHeightCache();
 }
 
+// #6999: hash a structured payload field's string form WITHOUT feeding the
+// whole payload through the FNV loop. Tool-call function/args payloads and
+// attachments on a long session can be tens of KB each; hashing every char
+// of every one on every renderMessages() cache-signature pass is a
+// per-render O(transcript bytes) cost (and JSON.stringify() of the args
+// allocates a full copy first). Hash length + head + tail — the same
+// length+edges pattern _renderCacheKey uses for long content — so the
+// signature still changes on any length change or head/tail content change
+// at a constant per-field cost. Full-content hashing is retained for the
+// message text itself (msgContent), whose every character can affect the
+// rendered DOM.
+function _addBoundedHash(add, value, maxLen){
+  const limit=Math.max(64, Number(maxLen)||512);
+  let s='';
+  try{ s=(value==null)?'':String(value); }catch(e){ s=''; }
+  add(s.length);
+  if(s.length>limit){
+    add(s.slice(0,limit));
+    add(s.slice(-limit));
+  }else{
+    add(s);
+  }
+}
+
 function _messageRenderCacheSignature(){
   let hash=2166136261;
   function add(value){
@@ -15176,24 +15200,31 @@ function _messageRenderCacheSignature(){
     }
     if(Array.isArray(m.tool_calls)){
       add('message-tool-calls');add(m.tool_calls.length);
-      m.tool_calls.forEach(tc=>{add(tc&&tc.id);add(tc&&tc.name);add(tc&&tc.type);add(JSON.stringify(tc&&tc.function||{}));});
+      m.tool_calls.forEach(tc=>{
+        add(tc&&tc.id);add(tc&&tc.name);add(tc&&tc.type);
+        add(tc&&tc.function&&tc.function.name);
+        // function.arguments is already a string — no JSON.stringify copy.
+        _addBoundedHash(add, tc&&tc.function&&tc.function.arguments, 2048);
+      });
     }
     if(Array.isArray(m._partial_tool_calls)){
       add('partial-tool-calls');add(m._partial_tool_calls.length);
       m._partial_tool_calls.forEach(tc=>{add(tc&&tc.id);add(tc&&tc.name);add(tc&&tc.snippet);});
     }
     if(_messageHasReasoningPayload(m)) add(m.reasoning||m.thinking||m._reasoning||'reasoning');
-    if(Array.isArray(m.attachments)) m.attachments.forEach(a=>add(a&&typeof a==='object'?JSON.stringify(a):a));
+    if(Array.isArray(m.attachments)) m.attachments.forEach(a=>_addBoundedHash(add, (a&&typeof a==='object')?JSON.stringify(a):a, 2048));
   }
   const toolCalls=Array.isArray(S.toolCalls)?S.toolCalls:[];
   add('settled-tool-calls');add(toolCalls.length);
   toolCalls.forEach(tc=>{
     if(!tc||typeof tc!=='object'){ add(tc); return; }
-    add(tc.tid);add(tc.id);add(tc.name);add(tc.done);add(tc.is_diff);add(tc.assistant_msg_idx);add(tc.snippet);add(JSON.stringify(tc.args||{}));
+    add(tc.tid);add(tc.id);add(tc.name);add(tc.done);add(tc.is_diff);add(tc.assistant_msg_idx);
+    _addBoundedHash(add, tc.snippet, 4096);
+    _addBoundedHash(add, JSON.stringify(tc.args||{}), 2048);
   });
   if(S.session){
     add(S.session.message_count);add(S.session.updated_at);add(S.session.compression_anchor_visible_idx);
-    add(JSON.stringify(S.session.compression_anchor_message_key||null));
+    _addBoundedHash(add, JSON.stringify(S.session.compression_anchor_message_key||null), 1024);
     add(S.session.compression_anchor_summary||'');
   }
   return `${messages.length}:${toolCalls.length}:${hash.toString(16)}`;
@@ -16514,8 +16545,16 @@ function renderMessages(options){
     rawIdx++;
   }
   const firstRenderedRawIdx=renderVisWithIdx.length?renderVisWithIdx[0].rawIdx:Infinity;
-  const assistantTurnFinalVisibleContentByRawIdx=_assistantTurnFinalVisibleContentMap(visWithIdx);
-  const assistantTurnVisibleContentByRawIdx=_assistantTurnVisibleContentMap(visWithIdx);
+  // #6999: build the turn-content maps over the RENDER window, not the full
+  // visWithIdx. These maps only feed the echo-strip of RENDERED rows (see
+  // _worklogReasoningTextFromMessage below); entries for windowed-out
+  // messages are never read. The full-array version extracted + concatenated
+  // visible content for EVERY assistant message on EVERY renderMessages()
+  // pass — a per-render O(transcript) allocation that compounds when a
+  // focused tab force-reloads a long session (issue #6999). Mirrors the
+  // renderVisWithIdx windowing of _turnVisibleTextByRawIdx below.
+  const assistantTurnFinalVisibleContentByRawIdx=_assistantTurnFinalVisibleContentMap(renderVisWithIdx);
+  const assistantTurnVisibleContentByRawIdx=_assistantTurnVisibleContentMap(renderVisWithIdx);
   const hasServerOlder=!!(typeof _messagesTruncated!=='undefined' && _messagesTruncated && S.messages.length>0);
   const serverOlderCount=hasServerOlder&&Number.isFinite(Number(_oldestIdx))?Math.max(0,Number(_oldestIdx)):0;
   if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();

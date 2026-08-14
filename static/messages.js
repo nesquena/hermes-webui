@@ -8022,6 +8022,15 @@ function startSessionStream(sid) {
     // the hidden-tab return (loadSession force + keepStaleUntilLoaded): the new
     // transcript replaces the old in a single render frame — NO clear+refetch,
     // so the #5177/#5189 blank-gap "jump" is not reintroduced.
+    // #6999: focusing a backgrounded tab also fires the visibility-recovery
+    // probe in sessions.js (refreshActiveSessionIfExternallyUpdated), which
+    // holds the shared _activeSessionExternalRefreshInFlight guard while it
+    // probes + force-reloads this same session. This handler honors that guard
+    // so the two paths never start two concurrent loadSession(force) calls
+    // (double full-transcript fetch + double renderMessages pass = the OOM
+    // pattern on long sessions). The probe side carries its own
+    // _loadingSessionId guard; loadSession() keeps its legitimate
+    // newest-wins supersede semantics untouched.
     es.addEventListener('session-updated', e => {
       try {
         const d = JSON.parse(e.data || '{}');
@@ -8034,6 +8043,7 @@ function startSessionStream(sid) {
           : (S.session && S.session.session_id === sid);
         if (!isCurrent) return;
         if (S.activeStreamId) return;
+        if (typeof _activeSessionExternalRefreshInFlight !== 'undefined' && _activeSessionExternalRefreshInFlight) return;
         // Re-check against our CURRENT known count — a concurrent load may have
         // already caught us up between the server's emit and now.
         const localCount = (S.session && S.session.session_id === sid && Number.isFinite(Number(S.session.message_count)))
