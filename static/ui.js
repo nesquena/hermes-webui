@@ -7327,6 +7327,20 @@ function _stripDottedModelPrefix(bare){
   return segs.slice(i).join('.').replace(/:\d+$/, '');
 }
 
+// Python's whitespace set, spelled out once. JS is NOT a drop-in replacement
+// here: JS's \s and String.trim() both include U+FEFF and both omit the C0
+// separators \x1C-\x1F and \x85, so delegating to each language's own idea of
+// "whitespace" is itself a source of grammar drift — Python called the host
+// "a<U+FEFF>b" an authority and JS did not. One class covers the edge trim AND the
+// interior reject because Python's re \s and str.strip() sets are identical over
+// every code point (verified 0..0x10FFFF). #6657.
+const _PY_WS_CLASS='\\t\\n\\v\\f\\r\\x1c-\\x1f \\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000';
+// Mirror of str.strip() on the slug rest.
+const _CUSTOM_SLUG_TRIM_RE=new RegExp('^['+_PY_WS_CLASS+']+|['+_PY_WS_CLASS+']+$','g');
+// Mirror of api/config.py:_CUSTOM_ENDPOINT_HOST_REJECT_RE — characters a URL
+// authority host can never contain.
+const _CUSTOM_SLUG_HOST_REJECT_RE=new RegExp('['+_PY_WS_CLASS+':/?#@\\[\\]]');
+
 function _customSlugIsEndpointAuthority(rest){
   // Mirror of api/config.py:_custom_slug_rest_is_endpoint_authority — THE
   // grammar for the endpoint-derived half of a custom provider slug, not a
@@ -7335,14 +7349,20 @@ function _customSlugIsEndpointAuthority(rest){
   // "1234:qwen3".
   //   port -> 1-5 ASCII digits, 1..65535
   //   host -> any nonempty token with no character a URL authority host cannot
-  //           hold, not hyphen/dot-fenced. Covers single-label Docker/LAN names
+  //           hold, and not starting with '-' or '.' nor ending with '-'. A
+  //           TRAILING dot is accepted (a root-anchored FQDN is legal and the
+  //           producer can emit it). Covers single-label Docker/LAN names
   //           ("llm", from base_url http://llm:8080/v1), dotted DNS names,
   //           IPv4 literals and "localhost" alike. Requiring an IP/dot/localhost
   //           rejected the producer's own single-label output (#6657).
-  //   host -> OR a bracketed IPv6 literal ("[::1]", "[fe80::1%eth0]").
+  //   host -> OR a bracketed literal whose contents are a real IPv6 address
+  //           ("[::1]", "[fe80::1%eth0]"). Brackets alone are NOT enough:
+  //           "[dead:beef]" and "[not-ipv6]" are rejected on both sides, so the
+  //           label and the resolved route cannot disagree (#6657).
   // IPv6 (explicit contract): an UNBRACKETED IPv6 authority is rejected —
   // "::1:11434" is irreducibly ambiguous (valid address on its own, or address
   // + port). The backend emits the bracketed spelling for IPv6 hosts.
+  rest=String(rest||'').replace(_CUSTOM_SLUG_TRIM_RE,'');  // == str(rest or "").strip()
   if(!rest.includes(':')) return false;
   const idx=rest.lastIndexOf(':');
   const host=rest.slice(0,idx), portS=rest.slice(idx+1);
@@ -7351,11 +7371,43 @@ function _customSlugIsEndpointAuthority(rest){
   const portN=parseInt(portS,10);
   if(!(portN>=1 && portN<=65535)) return false;
   if(host.startsWith('[') && host.endsWith(']')){
-    const innerHost=host.slice(1,-1).split('%')[0];
-    // Hex groups separated by ':' (with '::' elision), optional IPv4 tail.
-    return innerHost.includes(':') && /^[0-9A-Fa-f:.]+$/.test(innerHost);
+    // Mirrors ipaddress.ip_address(inner).version == 6 on the backend: 8 hextets
+    // of 1-4 hex digits, at most one '::' elision standing for >=1 all-zero
+    // hextets, and an optional dotted-quad IPv4 tail worth 2 hextets.
+    const isIPv6=(text)=>{
+      if(!text.includes(':')) return false;
+      const elide=text.indexOf('::');
+      if(elide!==text.lastIndexOf('::')) return false;
+      const head=elide<0?text:text.slice(0,elide);
+      const tail=elide<0?'':text.slice(elide+2);
+      const headG=head?head.split(':'):[];
+      const tailG=tail?tail.split(':'):[];
+      const groups=headG.concat(tailG);
+      if(!groups.length) return elide===0;  // "::" is all zeros
+      // A dotted quad is legal only as the LAST textual piece of the address, so
+      // it lives in head only when there is no elision: "::ffff:1.2.3.4" and
+      // "1:2:3:4:5:6:1.2.3.4" are addresses, "1.2.3.4::" is not.
+      const quadSlot=(elide<0||tailG.length)?groups.length-1:-1;
+      let count=0;
+      for(let i=0;i<groups.length;i++){
+        if(i===quadSlot && groups[i].includes('.')){
+          // IPv4 tail: worth 2 hextets, so it only fits where 2 still remain.
+          const quad=groups[i].split('.');
+          if(quad.length!==4) return false;
+          if(!quad.every(o=>/^(0|[1-9][0-9]{0,2})$/.test(o) && Number(o)<=255)) return false;
+          count+=2;
+          continue;
+        }
+        if(!/^[0-9A-Fa-f]{1,4}$/.test(groups[i])) return false;
+        count+=1;
+      }
+      // Without an elision every hextet is spelled out; with one, it must stand
+      // for at least one hextet.
+      return elide<0?count===8:count<=7;
+    };
+    return isIPv6(host.slice(1,-1).split('%')[0]);
   }
-  if(/[\s:/?#@[\]]/.test(host)) return false;
+  if(_CUSTOM_SLUG_HOST_REJECT_RE.test(host)) return false;
   return !(host.startsWith('-') || host.endsWith('-') || host.startsWith('.'));
 }
 

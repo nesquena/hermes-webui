@@ -18,6 +18,7 @@ grammar alone cannot disambiguate.
 
 from __future__ import annotations
 
+import itertools
 import json
 import shutil
 import subprocess
@@ -83,29 +84,53 @@ def test_single_label_host_port_slug_parses_without_matching_config():
     assert model == "qwen3"
 
 
-@pytest.mark.parametrize(
-    "rest,expected",
-    [
-        ("llm:8080", True),               # single-label Docker/LAN name
-        ("localhost:11434", True),        # loopback alias
-        ("10.8.71.41:8080", True),        # IPv4 literal
-        ("proxy.internal:8443", True),    # dotted DNS name
-        ("a:80", True),                   # one-character host
-        ("[::1]:11434", True),            # bracketed IPv6 literal
-        ("[fe80::1%25eth0]:8080", True),  # bracketed IPv6 + zone id
-        ("::1:11434", False),             # UNBRACKETED IPv6: ambiguous, rejected
-        ("[not-ipv6]:8080", False),       # brackets around a non-IPv6 host
-        ("my-key:some-model", False),     # named slug + model, not an authority
-        ("gw:0", False),                  # port out of range
-        ("gw:65536", False),              # port out of range
-        ("gw:080808", False),             # more than 5 digits
-        ("-bad:80", False),               # hyphen-fenced host
-        ("bad-:80", False),
-        (".bad:80", False),
-        ("host name:80", False),          # whitespace is not a host character
-        ("llm", False),                   # no port at all
-    ],
-)
+# ── THE grammar table — asserted against BOTH implementations ────────────────
+#
+# Re-review 2026-08-14 (round 2): the two sides used to be independent
+# implementations that measurably disagreed on bracketed hosts — JS accepted any
+# `/^[0-9A-Fa-f:.]+$/` inner, so `[dead:beef]:80` was an authority in the picker
+# and not on the backend, which is exactly the label/route split this PR exists
+# to remove. This single table now drives the Python parametrize below AND the
+# node cross-check in `test_endpoint_authority_grammar_js_matches_python`, so the
+# two implementations cannot silently drift again on any covered row — and
+# `test_endpoint_authority_grammar_js_matches_python_over_corpus` extends that
+# agreement to a generated shape space, because a table only proves its rows.
+_AUTHORITY_GRAMMAR_CASES = [
+    ("llm:8080", True),                  # single-label Docker/LAN name
+    ("localhost:11434", True),           # loopback alias
+    ("10.8.71.41:8080", True),           # IPv4 literal
+    ("proxy.internal:8443", True),       # dotted DNS name
+    ("ollama.internal.:8443", True),     # trailing root dot: a legal FQDN
+    ("a:80", True),                      # one-character host
+    ("[::1]:11434", True),               # bracketed IPv6 literal
+    ("[fe80::1%25eth0]:8080", True),     # bracketed IPv6 + zone id
+    ("[1:2:3:4:5:6:7:8]:443", True),     # fully spelled-out IPv6
+    ("[::ffff:1.2.3.4]:443", True),      # IPv6 with IPv4-mapped tail
+    ("[::1.2.3.4]:443", True),           # elision + IPv4 tail, nothing between
+    ("::1:11434", False),                # UNBRACKETED IPv6: ambiguous, rejected
+    ("[not-ipv6]:8080", False),          # brackets around a non-IPv6 host
+    ("[dead:beef]:80", False),           # bracketed, colon-bearing, NOT an address
+    ("[:::::]:80", False),               # more than one '::' elision
+    ("[1:2:3:4:5:6:7:8:9]:443", False),  # nine hextets
+    ("[12345::1]:443", False),           # hextet longer than 4 digits
+    ("[::1.2.3.4.5]:443", False),        # five-octet IPv4 tail
+    ("[1.2.3.4::]:80", False),           # dotted quad must be LAST, not in the head
+    ("[]:80", False),                    # empty brackets
+    ("my-key:some-model", False),        # named slug + model, not an authority
+    ("gw:0", False),                     # port out of range
+    ("gw:65536", False),                 # port out of range
+    ("gw:080808", False),                # more than 5 digits
+    ("-bad:80", False),                  # hyphen-fenced host
+    ("bad-:80", False),
+    (".bad:80", False),
+    ("host name:80", False),             # whitespace is not a host character
+    ("llm", False),                      # no port at all
+    (" llm:8080", True),                 # surrounding whitespace is trimmed first
+    ("llm:8080\t", True),
+]
+
+
+@pytest.mark.parametrize("rest,expected", _AUTHORITY_GRAMMAR_CASES)
 def test_endpoint_authority_grammar(rest, expected):
     """One grammar, asserted directly: host shape is not a name heuristic."""
     assert config._custom_slug_rest_is_endpoint_authority(rest) is expected
@@ -249,7 +274,11 @@ def test_one_malformed_base_url_does_not_hide_its_valid_siblings():
 
 # ── Frontend: getModelLabel() fallback mirrors the same grammar ──────────────
 
-_DRIVER = r"""
+# Both node drivers below slice the real `static/ui.js` (a classic script, not a
+# module) and eval the pieces they need, so they exercise the shipped source
+# rather than a copy of it. One preamble, used by both — the predicate and its
+# module-level regexes are what both drivers have in common.
+_EXTRACT_PREAMBLE = r"""
 const fs = require('fs');
 const ui = fs.readFileSync(process.argv[2], 'utf8');
 function extractFunc(name) {
@@ -269,9 +298,26 @@ function extractFunc(name) {
   }
   return out.join('\n');
 }
+function extractConst(name) {
+  // A single-line top-level `const NAME=...;`, re-spelled as `var`: a direct
+  // eval() keeps LEXICAL declarations inside the eval's own scope, while
+  // sloppy-mode function declarations leak into the caller's — which is why
+  // extractFunc() above needs no such rewrite and this does.
+  const re = new RegExp('^const ' + name + '=.*$', 'm');
+  const m = ui.match(re);
+  if (!m) throw new Error(name + ' not found');
+  return m[0].replace(/^const /, 'var ');
+}
+// The predicate's module-level regexes, in dependency order.
+eval(extractConst('_PY_WS_CLASS'));
+eval(extractConst('_CUSTOM_SLUG_TRIM_RE'));
+eval(extractConst('_CUSTOM_SLUG_HOST_REJECT_RE'));
+eval(extractFunc('_customSlugIsEndpointAuthority'));
+"""
+
+_DRIVER = _EXTRACT_PREAMBLE + r"""
 let _dynamicModelLabels = JSON.parse(process.argv[3]);
 let _dynamicProviderIds = JSON.parse(process.argv[5]);
-eval(extractFunc('_customSlugIsEndpointAuthority'));
 eval(extractFunc('_customModelFromQualifiedId'));
 eval(extractFunc('getModelLabel'));
 const cases = JSON.parse(process.argv[4]);
@@ -302,6 +348,141 @@ def _labels(tmp_path, dynamic_labels, cases, provider_ids=None):
 
 
 requires_node = pytest.mark.skipif(NODE is None, reason="node not on PATH")
+
+
+_PREDICATE_DRIVER = _EXTRACT_PREAMBLE + r"""
+const rests = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
+process.stdout.write(JSON.stringify(rests.map(r => _customSlugIsEndpointAuthority(r))));
+"""
+
+
+def _js_authority(tmp_path, rests):
+    """Run static/ui.js's _customSlugIsEndpointAuthority over `rests` via node.
+
+    The inputs go through a file, not argv: the cross-check corpus below is
+    thousands of cases and would blow the command-line length limit.
+    """
+    driver = tmp_path / "predicate.js"
+    driver.write_text(_PREDICATE_DRIVER, encoding="utf-8")
+    payload = tmp_path / "rests.json"
+    payload.write_text(json.dumps(rests), encoding="utf-8")
+    assert NODE is not None
+    result = subprocess.run(
+        [NODE, str(driver), str(UI_JS_PATH), str(payload)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def _assert_js_matches_python(tmp_path, rests):
+    """Assert both implementations answer identically for every rest in `rests`."""
+    js_results = _js_authority(tmp_path, rests)
+    py_results = [config._custom_slug_rest_is_endpoint_authority(rest) for rest in rests]
+    drift = [(r, j, p) for r, j, p in zip(rests, js_results, py_results) if j is not p]
+    assert not drift, f"JS/Python grammar drift ({len(drift)} of {len(rests)}): {drift[:20]}"
+    return py_results
+
+
+@requires_node
+def test_endpoint_authority_grammar_js_matches_python(tmp_path):
+    """ONE grammar, two implementations, asserted to agree row for row.
+
+    The maintainer asked for a single unambiguous grammar rather than mirrored
+    heuristics. `static/ui.js` cannot import `api/config.py`, so the enforceable
+    form of "single" is this: every row of `_AUTHORITY_GRAMMAR_CASES` must get the
+    same answer from both. Round 1 shipped a JS bracketed-host check that was a
+    looser approximation (`/^[0-9A-Fa-f:.]+$/`) and disagreed on `[dead:beef]:80`
+    and `[:::::]:80`; this test is what makes that class of drift fail CI.
+    """
+    rests = [rest for rest, _ in _AUTHORITY_GRAMMAR_CASES]
+    py_results = _assert_js_matches_python(tmp_path, rests)
+    assert py_results == [want for _, want in _AUTHORITY_GRAMMAR_CASES]
+
+
+def _ipv6_cross_check_corpus():
+    """Every 1-3 piece bracketed literal over adversarial atoms and separators.
+
+    A table of hand-picked rows only proves the rows. The bracketed branch is
+    where the two implementations diverged twice (round 1: any `[0-9A-Fa-f:.]+`
+    inner passed in JS; round 2 of this review: JS read a dotted quad in the HEAD
+    of an elided address as an IPv4 tail, so it accepted `[1.2.3.4::]:80` which
+    `ipaddress` rejects). Both were shapes no hand-written table happened to
+    hold, so the cross-check enumerates the shape space instead.
+    """
+    atoms = ["", "0", "ffff", "fffff", "g", "1.2.3.4", "1.2.3", "%eth0"]
+    inners: set[str] = set()
+    for count in (1, 2, 3):
+        for parts in itertools.product(atoms, repeat=count):
+            for joins in itertools.product((":", "::"), repeat=count - 1):
+                inner = "".join(
+                    part + join for part, join in zip(parts, (*joins, ""))
+                )
+                inners.update((inner, f"::{inner}", f"{inner}::"))
+    return [f"[{inner}]:80" for inner in sorted(inners)]
+
+
+def _whitespace_cross_check_corpus():
+    """Hosts and ports fenced by, or holding, each disputed whitespace code point.
+
+    `str.strip()`/`re \\s` and `String.trim()`/JS `\\s` are NOT the same set:
+    U+001C-U+001F and U+0085 are whitespace only to Python, U+FEFF only to JS.
+    Leaving each language to its own definition made the two grammars disagree
+    (Python called `a\\ufeffb:1` an authority, JS did not), which is why
+    `static/ui.js` spells Python's set out in `_PY_WS_CLASS`.
+    """
+    disputed = (
+        "\t\n\v\f\r\x1c\x1d\x1e\x1f \x85\xa0"
+        "\u1680\u2000\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+    )
+    rests = []
+    for char in disputed:
+        rests += [
+            f"{char}llm:8080",
+            f"llm:8080{char}",
+            f"ll{char}m:8080",
+            f"llm:80{char}80",
+            f"[::1]:11434{char}",
+            f"[::{char}1]:11434",
+        ]
+    return rests
+
+
+@requires_node
+@pytest.mark.parametrize(
+    "corpus",
+    [
+        pytest.param(_ipv6_cross_check_corpus(), id="bracketed-ipv6-shape-space"),
+        pytest.param(_whitespace_cross_check_corpus(), id="disputed-whitespace"),
+    ],
+)
+def test_endpoint_authority_grammar_js_matches_python_over_corpus(tmp_path, corpus):
+    """The two implementations agree over a whole generated space, not just a table."""
+    py_results = _assert_js_matches_python(tmp_path, corpus)
+    # Guard against a degenerate corpus that would pass by answering False to
+    # everything on both sides.
+    assert any(py_results) and not all(py_results)
+
+
+@requires_node
+def test_bracketed_non_ipv6_host_labels_the_same_on_both_sides(tmp_path):
+    """End to end for the class that used to diverge: brackets are not enough.
+
+    `[dead:beef]` is colon-bearing and hex-only but is not an IPv6 address, so it
+    is NOT an endpoint authority — the #1776 peel applies and the model keeps the
+    numeric segment. Backend and picker must say the same thing, or the label
+    reads `qwen3` while the request routes to model `80:qwen3`.
+    """
+    cases = ["@custom:[dead:beef]:80:qwen3", "@custom:[not-ipv6]:8080:qwen3"]
+    assert _labels(tmp_path, {}, cases) == ["80:qwen3", "8080:qwen3"]
+    for model_id, want_model, want_provider in (
+        ("@custom:[dead:beef]:80:qwen3", "80:qwen3", "custom:[dead:beef]"),
+        ("@custom:[not-ipv6]:8080:qwen3", "8080:qwen3", "custom:[not-ipv6]"),
+    ):
+        model, provider, _ = _resolve_with_cfg(model_id, provider="openai")
+        assert (model, provider) == (want_model, want_provider)
 
 
 @requires_node

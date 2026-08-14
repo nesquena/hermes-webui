@@ -2612,10 +2612,17 @@ def _custom_slug_rest_is_endpoint_authority(rest: str) -> bool:
     * ``port``  — 1-5 ASCII digits, 1..65535.
     * ``host``  — any nonempty token containing no character that a URL
       authority host cannot contain (no whitespace, ``:``, ``/``, ``?``, ``#``,
-      ``@``, ``[``, ``]``) and not hyphen/dot-fenced. That covers a single-label
+      ``@``, ``[``, ``]``), not starting with ``-`` or ``.`` and not ending with
+      ``-``. A TRAILING dot IS accepted: ``ollama.internal.`` is a legal
+      root-anchored FQDN and ``urlparse`` hands it back verbatim, so the producer
+      can emit ``custom:ollama.internal.:8443``. That covers a single-label
       Docker/LAN name (``llm``), a dotted DNS name (``ollama.internal``), an
       IPv4 literal (``10.8.71.41``) and ``localhost`` alike.
-    * ``host`` — OR a bracketed IPv6 literal (``[::1]``, ``[fe80::1%eth0]``).
+    * ``host`` — OR a bracketed literal whose contents are a real IPv6 address
+      (``[::1]``, ``[fe80::1%eth0]``). Brackets alone do not qualify:
+      ``[dead:beef]`` and ``[not-ipv6]`` are rejected, and the ``static/ui.js``
+      mirror rejects them too, so a picker label can never disagree with the
+      route the backend resolves (#6657).
 
     The earlier form of this predicate required an IP literal, ``localhost`` or
     a dot, which rejected the producer's own single-label output: a config
@@ -2706,6 +2713,12 @@ def _parse_provider_qualified_model_id(
        segment back unless what remains after ``custom:`` is an endpoint
        authority.
 
+    The ``custom:`` prefix test is case-SENSITIVE in both steps, and in the
+    ``static/ui.js`` mirror (``rawId.startsWith('@custom:')``). Every ``@custom:``
+    id is server-generated in lowercase, and one half of this function matching
+    case-insensitively while the other did not would route ``@CUSTOM:`` ids down
+    two different grammars.
+
     ``config_obj`` defaults to the live ``cfg``; pass one to parse against a
     specific config snapshot.
     """
@@ -2715,7 +2728,7 @@ def _parse_provider_qualified_model_id(
     inner = candidate[1:]
     # Only a hint with an extra colon beyond ``custom:<slug>:<model>`` is
     # ambiguous, so the config lookup is skipped (and stays free) otherwise.
-    if inner.lower().startswith("custom:") and inner.count(":") >= 3:
+    if inner.startswith("custom:") and inner.count(":") >= 3:
         known_slugs = _known_custom_provider_slugs(config_obj)
         if known_slugs:
             segments = inner.split(":")
