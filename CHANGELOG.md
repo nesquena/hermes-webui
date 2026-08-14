@@ -11,6 +11,12 @@
 
 - **The composer no longer keeps a "Reconnected" status pill sitting next to the send button.** When a live response reconnected after a brief drop, the small "Reconnected" notice was written into the composer's status slot and stayed there indefinitely — on a narrow phone layout it crowded (and could slightly clip) the send button and the other composer controls. Transient stream notices now auto-dismiss on their own: "Reconnected" clears after one second and a provider-fallback notice after four, so the notice flashes briefly and then gets out of the way. The status setter uses a single owned timer that cancels any prior countdown before arming a new one, so a newer status can't be wiped early by an older one, and a status set without a timeout (a persistent one) is left in place exactly as before. Thanks @starship-s. (#7028)
 
+- **Replayed empty assistant rows no longer multiply across reloads.** Session
+  persistence, model context, display reconciliation, and backup recovery now
+  share one conservative replay identity: only byte-equivalent, strictly
+  JSON-shaped rows are reduced, while structured, non-text, or ambiguous
+  payloads are preserved.
+
 - **Self-hosted appearance defaults are reachable again on a fresh browser.** The inline theme bootstrap wrote the resolved theme/skin back to local storage on every load — including a brand-new browser with no saved preference. That made the settings sync treat the fallback (`dark`/`default`) as an explicit user choice and ignore the server-side appearance default, so operators who changed the default appearance for their instance never saw it take effect on first visit. The bootstrap now persists only when a saved preference already exists; a fresh browser keeps the exact same first paint but lets the server default win. Thanks @tomtong2015. (#6808)
 
 - **Japanese locale: consistent wording for "profile".** The Japanese UI used two different katakana spellings for "profile" — the cron profile selector said プロフィール (the personal/social-profile loanword) while the rest of the app (profiles tab, kanban, settings) said プロファイル (the technical/config term). The two cron strings are now unified to プロファイル, matching the rest of the Japanese locale and the Hermes docs. Thanks @0809android. (#6762)

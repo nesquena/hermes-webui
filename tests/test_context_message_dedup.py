@@ -63,7 +63,7 @@ def test_deduplicate_context_messages_empty_input():
     assert _deduplicate_context_messages(None) is None
 
 
-def test_deduplicate_context_messages_with_tool_calls():
+def test_deduplicate_context_messages_preserves_tool_call_rows():
     from api.streaming import _deduplicate_context_messages
 
     messages = [
@@ -73,7 +73,9 @@ def test_deduplicate_context_messages_with_tool_calls():
     ]
 
     result = _deduplicate_context_messages(messages)
-    assert len(result) == 2  # third message (dup) removed
+    # Structured provider payloads are fail-closed: even apparently identical
+    # rows stay durable unless the dedicated replay classifier proves them safe.
+    assert len(result) == 3
 
 
 def test_deduplicate_context_messages_different_timestamps_same_content():

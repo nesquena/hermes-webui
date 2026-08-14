@@ -65,7 +65,13 @@ from api.todo_state import attach_todo_state, emit_todo_state
 from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
 from api.models import (
+    _collapse_duplicate_incomplete_message_ids,
+    _durable_empty_assistant_replay_key,
+    _incomplete_reasoning_message_id,
+    _is_admissible_empty_text_content,
     _is_empty_partial_activity_message,
+    _message_has_structured_replay_fields,
+    _partial_message_signature as _durable_partial_message_signature,
     _evict_sessions_over_cap,
     clear_process_wakeup_pause,
     get_state_db_session_messages,
@@ -5770,13 +5776,40 @@ def _message_identity(msg):
         # Now, _partial messages with empty text get a stable identity
         # keyed on their role + _partial flag + reasoning/tool metadata,
         # so the merge can dedup identical empty partials.
+        # Codex can persist a reasoning-only assistant result with an empty
+        # visible body and finish_reason=incomplete without the legacy
+        # ``_partial`` flag. Those rows still carry the stable core message id.
+        # Returning None here made every reconcile treat the same result as a
+        # fresh context-only row, which amplified alternating replays such as
+        # FD05 message ids 1701/1702 on every subsequent turn.
+        # #6600: share the persistence boundary's strict typed scalar identity
+        # (api.models._strict_incomplete_message_id_key) so str/int/float ids
+        # never collapse across types and bools/containers/subclasses/non-finite
+        # floats are rejected in BOTH layers.
+        if (
+            role == 'assistant'
+            and str(msg.get('finish_reason') or '').lower() == 'incomplete'
+        ):
+            typed_id_key = _incomplete_reasoning_message_id(msg)
+            if typed_id_key is not None:
+                return (
+                    role,
+                    '',
+                    '',
+                    '__incomplete_message_id__' + repr(typed_id_key),
+                )
+            return None
+        # Canonical incomplete identity must win over the legacy partial arm:
+        # persistence keys `_partial + incomplete` rows by typed message id too.
         if msg.get('_partial'):
-            reasoning_key = " ".join(str(msg.get('reasoning') or '').split())[:200]
+            partial_digest = _durable_partial_message_signature(msg)
+            if partial_digest is None:
+                return None
             return (
                 role,
                 '',  # empty text
                 '',  # no tool_call_id
-                '__partial__' + reasoning_key,
+                '__partial__' + partial_digest.hex(),
             )
         return None
     return (
@@ -5799,6 +5832,11 @@ def _messages_have_prefix(messages, prefix, *, key_fn=None):
 
 def _message_replay_key(msg):
     """Return a stable comparison key for replay/overlap de-duplication."""
+    durable_empty_key = _durable_empty_assistant_replay_key(msg)
+    if durable_empty_key is not None:
+        return ('durable_empty', durable_empty_key)
+    if _message_has_structured_replay_fields(msg):
+        return None
     identity = _message_identity(msg)
     # ``api_content`` is a provider-facing replay sidecar.  It must participate
     # in context/replay overlap identity or two same-visible turns can collapse
@@ -5816,6 +5854,11 @@ def _message_replay_key(msg):
             return (*identity, sidecar)
         return identity
     if not isinstance(msg, dict):
+        return None
+    if (
+        str(msg.get('role') or '') == 'assistant'
+        and not _is_admissible_empty_text_content(msg.get('content'))
+    ):
         return None
     key = (
         str(msg.get('role') or ''),
@@ -6528,6 +6571,7 @@ def _merge_display_messages_after_agent_result(
     # three inputs consistently so prefix/delta detection below stays aligned.
     # (#5334; same internal-control-message class as #3320/#3821/#4373/#4875)
     previous_display = _drop_synthetic_control_messages(previous_display)
+    previous_display, _ = _collapse_duplicate_incomplete_message_ids(previous_display)
     # Deduplicate stale _partial messages that accumulated in previous_display.
     # A bug in cancel_stream() could insert multiple identical _partial messages
     # when _stripped was empty but _has_reasoning/_has_tools was True. The
@@ -6578,6 +6622,8 @@ def _merge_display_messages_after_agent_result(
     # would otherwise slip into the merged transcript as a real delta. (#5334)
     previous_context = _drop_synthetic_control_messages(previous_context)
     result_messages = _drop_synthetic_control_messages(result_messages)
+    previous_context, _ = _collapse_duplicate_incomplete_message_ids(previous_context)
+    result_messages, _ = _collapse_duplicate_incomplete_message_ids(result_messages)
     if not result_messages:
         return previous_display
     previous_user_tail = _stale_user_tail_candidate(_last_user_row(previous_context))
