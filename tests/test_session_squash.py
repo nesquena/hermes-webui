@@ -59,6 +59,7 @@ def _make_session(tmp_path, *, messages=None, **overrides):
         compression_anchor_message_key=None,
         compression_anchor_summary=None,
         compression_anchor_mode=None,
+        compaction_generation=None,
         truncation_watermark=None,
         truncation_boundary=None,
         read_only=False,
@@ -91,6 +92,7 @@ def _make_session(tmp_path, *, messages=None, **overrides):
             "compression_anchor_message_key": sess.compression_anchor_message_key,
             "compression_anchor_summary": sess.compression_anchor_summary,
             "compression_anchor_mode": sess.compression_anchor_mode,
+            "compaction_generation": sess.compaction_generation,
             "truncation_watermark": sess.truncation_watermark,
             "truncation_boundary": sess.truncation_boundary,
             "message_count": len(sess.messages or []),
@@ -154,6 +156,8 @@ def test_squash_job_collapses_session(tmp_path):
     assert len(persisted["context_messages"]) == 1
     assert persisted["context_messages"][0]["content"].startswith("[CONTEXT COMPACTION")
     assert persisted["compression_anchor_mode"] == "manual"
+    assert isinstance(persisted["compaction_generation"], str)
+    assert persisted["compaction_generation"]
     assert persisted["compression_anchor_visible_idx"] == 0
     assert persisted["compression_anchor_message_key"]["role"] == "assistant"
     assert persisted["truncation_watermark"] == persisted["truncation_boundary"]
@@ -198,6 +202,61 @@ def test_squash_refuses_read_only(tmp_path):
     with patch.object(api.models, "get_session", lambda sid, metadata_only=False: sess):
         with pytest.raises(session_squash.SquashError):
             session_squash.start_squash_job(SID, confirm_session_id=SID, summary=None)
+
+
+def test_manual_squash_refuses_automatic_tail_continuation(tmp_path, monkeypatch):
+    sess = _make_session(
+        tmp_path,
+        compression_anchor_mode="automatic_tail",
+        parent_session_id="archived-snapshot",
+    )
+    monkeypatch.setattr(session_squash, "_JOBS", {})
+
+    with patch.object(api.models, "get_session", lambda sid, metadata_only=False: sess), \
+         patch.object(session_squash, "_THREAD_FACTORY"):
+        with pytest.raises(session_squash.SquashError) as excinfo:
+            session_squash.start_squash_job(SID, confirm_session_id=SID, summary=None)
+
+    assert excinfo.value.status == 409
+    assert "automatic" in str(excinfo.value).lower()
+
+
+def test_manual_squash_refuses_session_with_running_auto_job(tmp_path, monkeypatch):
+    sess = _make_session(tmp_path)
+    monkeypatch.setattr(session_squash, "_AUTO_SNAPSHOT_SIDS", {SID})
+
+    with patch.object(api.models, "get_session", lambda sid, metadata_only=False: sess), \
+         patch.object(session_squash, "_THREAD_FACTORY"):
+        with pytest.raises(session_squash.SquashError) as excinfo:
+            session_squash.start_squash_job(SID, confirm_session_id=SID, summary=None)
+
+    assert excinfo.value.status == 409
+
+
+def test_manual_squash_removes_job_when_thread_start_fails(tmp_path, monkeypatch):
+    sess = _make_session(tmp_path)
+
+    class FailingThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(session_squash, "_JOBS", {})
+    monkeypatch.setattr(session_squash, "_AUTO_SNAPSHOT_SIDS", set())
+    monkeypatch.setattr(session_squash, "_THREAD_FACTORY", FailingThread)
+
+    with patch.object(api.models, "get_session", lambda sid, metadata_only=False: sess):
+        with pytest.raises(session_squash.SquashError) as excinfo:
+            session_squash.start_squash_job(
+                SID,
+                confirm_session_id=SID,
+                summary=None,
+            )
+
+    assert excinfo.value.status == 500
+    assert session_squash._JOBS == {}
 
 
 def test_squash_refuses_empty_session(tmp_path):

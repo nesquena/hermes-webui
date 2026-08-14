@@ -21,6 +21,7 @@ import threading
 import time
 import traceback
 import copy
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -5978,6 +5979,16 @@ def _is_context_compression_marker(msg):
     return is_context_compression_marker(msg)
 
 
+def _is_trusted_auto_compression_marker(message):
+    """Accept only WebUI-generated assistant summaries for destructive compaction."""
+    return bool(
+        isinstance(message, dict)
+        and message.get("role") == "assistant"
+        and message.get("_compressed_summary") is True
+        and _is_context_compression_marker(message)
+    )
+
+
 def _compression_tail_after_latest_compaction(
     messages,
     active_turn_identity=None,
@@ -5988,7 +5999,7 @@ def _compression_tail_after_latest_compaction(
     rows = list(messages or [])
     marker_idx = None
     for idx, message in enumerate(rows):
-        if _is_context_compression_marker(message):
+        if _is_trusted_auto_compression_marker(message):
             marker_idx = idx
     active_idx = None
     if isinstance(active_turn_identity, dict) and active_turn_identity.get("token"):
@@ -6004,22 +6015,11 @@ def _compression_tail_after_latest_compaction(
     boundary_idx = active_idx if active_idx is not None else marker_idx
     if boundary_idx is not None:
         return copy.deepcopy(rows[boundary_idx:])
-    try:
-        anchor_idx = int(anchor_visible_idx)
-    except (TypeError, ValueError):
-        return rows
-    visible = visible_messages_for_anchor(rows, auto_compression=True)
-    if anchor_idx < 0 or anchor_idx >= len(visible):
-        return rows
-    anchor_message = visible[anchor_idx]
-    raw_anchor_idx = next(
-        (idx for idx, message in enumerate(rows) if message is anchor_message),
-        None,
-    )
-    if raw_anchor_idx is None or raw_anchor_idx + 1 >= len(rows):
-        return rows
-    boundary_idx = raw_anchor_idx + 1
-    return copy.deepcopy(rows[boundary_idx:])
+    # ``anchor_visible_idx`` is display metadata and accepts legacy/user-shaped
+    # markers. It is intentionally never authoritative for destructive tail
+    # reduction. Without a server-owned active-turn identity or trusted marker,
+    # fail open and retain the complete transcript.
+    return copy.deepcopy(rows)
 
 
 def _tool_call_summaries_after_dropping_prefix(tool_calls, dropped_message_count):
@@ -6070,7 +6070,7 @@ def _maybe_start_auto_snapshot_squash(
             from api.config import load_settings
 
             settings = load_settings()
-        if not bool((settings or {}).get("auto_squash_after_compression")):
+        if (settings or {}).get("auto_squash_after_compression") is not True:
             return False
         from api.session_squash import start_auto_snapshot_squash_job
 
@@ -6088,6 +6088,27 @@ def _maybe_start_auto_snapshot_squash(
             continuation_sid,
         )
         return False
+
+
+def _cleanup_auto_tail_backup_after_writeback(
+    session,
+    *,
+    compacted_this_turn: bool,
+) -> None:
+    """Drop only the backup created by this turn's intentional tail reduction."""
+    if (
+        not compacted_this_turn
+        or getattr(session, "compression_anchor_mode", None) != "automatic_tail"
+    ):
+        return
+    try:
+        session.path.with_suffix(".json.bak").unlink(missing_ok=True)
+    except OSError:
+        logger.warning(
+            "auto tail compaction could not remove stale backup for %s",
+            session.session_id,
+            exc_info=True,
+        )
 
 
 def _compact_summary_text(raw_text: str | None) -> str | None:
@@ -6130,11 +6151,28 @@ def _compression_summary_from_messages(messages):
     return None
 
 
+def _latest_display_compression_marker_index(messages):
+    """Return the latest marker accepted by non-destructive display metadata."""
+    marker_idx = None
+    for idx, message in enumerate(messages or []):
+        if _is_context_compression_marker(message):
+            marker_idx = idx
+    return marker_idx
+
+
+def _display_compression_summary(display_messages, context_messages):
+    """Preserve legacy compression summaries for cards without authorizing squash."""
+    return (
+        _compression_summary_from_messages(context_messages)
+        or _compression_summary_from_messages(display_messages)
+    )
+
+
 def _auto_snapshot_summary_from_compression(display_messages, context_messages):
-    """Prefer the current model-context marker over stale rendered dividers."""
+    """Extract only a provenanced WebUI compression summary."""
     def raw_marker_text(messages):
         for message in reversed(messages or []):
-            if not isinstance(message, dict) or not _is_context_compression_marker(message):
+            if not _is_trusted_auto_compression_marker(message):
                 continue
             content = message.get("content")
             if isinstance(content, str):
@@ -10924,6 +10962,7 @@ def _run_agent_streaming(
                         return  # apperror already closes the stream on the client side
 
                 # ── Handle context compression side effects ──
+                _compacted_tail_this_turn = False
                 # Also detect compression via the result dict or compressor state
                 if not _compressed:
                     _compressor = getattr(agent, 'context_compressor', None)
@@ -10948,10 +10987,9 @@ def _run_agent_streaming(
                     # established. Using len(visible_before)-1 is fragile when
                     # _previous_messages doesn't include markers or when extra
                     # messages accumulate between compression and the done event.
-                    _last_marker_raw_idx = None
-                    for _mi, _m in enumerate(s.messages):
-                        if _is_context_compression_marker(_m):
-                            _last_marker_raw_idx = _mi
+                    _last_marker_raw_idx = _latest_display_compression_marker_index(
+                        s.messages
+                    )
                     if _last_marker_raw_idx is not None:
                         _visible_before_marker = visible_messages_for_anchor(
                             s.messages[:_last_marker_raw_idx], auto_compression=True,
@@ -11000,6 +11038,10 @@ def _run_agent_streaming(
                     )
                     s.compression_anchor_summary = _compact_summary_text(
                         _auto_snapshot_squash_summary
+                        or _display_compression_summary(
+                            s.messages,
+                            s.context_messages,
+                        )
                     )
                     if _compression_continuation_session_id is None:
                         _compression_continuation_session_id = s.session_id
@@ -11398,19 +11440,16 @@ def _run_agent_streaming(
                             _continuation_tail[0]
                         )
                         s.compression_anchor_mode = "automatic_tail"
+                        s.compaction_generation = uuid.uuid4().hex
                         s.truncation_watermark = _continuation_tail_boundary
                         s.truncation_boundary = _continuation_tail_boundary
+                        _compacted_tail_this_turn = True
                 with _stream_writeback_stage(_writeback_timings, "session_save"):
                     s.save()
-                if getattr(s, "compression_anchor_mode", None) == "automatic_tail":
-                    try:
-                        s.path.with_suffix(".json.bak").unlink(missing_ok=True)
-                    except OSError:
-                        logger.warning(
-                            "auto tail compaction could not remove stale backup for %s",
-                            s.session_id,
-                            exc_info=True,
-                        )
+                _cleanup_auto_tail_backup_after_writeback(
+                    s,
+                    compacted_this_turn=_compacted_tail_this_turn,
+                )
                 if cancel_event.is_set():
                     _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
                     try:

@@ -54,7 +54,8 @@ class SquashError(Exception):
 _JOBS: dict[str, dict] = {}
 _JOBS_LOCK = threading.Lock()
 _AUTO_SNAPSHOT_SIDS: set[str] = set()
-_AUTO_SNAPSHOT_LOCK = threading.Lock()
+_SQUASH_INTENT_LOCK = threading.Lock()
+_THREAD_FACTORY = threading.Thread
 MIN_AUTO_SUMMARY_CHARS = 80
 
 
@@ -147,6 +148,8 @@ def _rollback_failed_squash(
     restored = _restore_verified_archive(archive_path, session_path, original_sha256)
     for key, value in restored.items():
         setattr(session, key, value)
+    if "compaction_generation" not in restored:
+        session.compaction_generation = None
 
 
 def _archive_original(session_path: Path, archive_dir: Path, original_sha: str) -> tuple[Path, Path]:
@@ -427,6 +430,7 @@ def _apply_squash(
     session.compression_anchor_mode = (
         "automatic_snapshot" if preserve_snapshot_lineage else "manual"
     )
+    session.compaction_generation = uuid.uuid4().hex
     session.truncation_watermark = now
     session.truncation_boundary = now
     session.updated_at = now
@@ -451,6 +455,8 @@ def _apply_squash(
         == ("automatic_snapshot" if preserve_snapshot_lineage else "manual")
         and persisted.get("truncation_watermark") == now
         and persisted.get("truncation_boundary") == now
+        and persisted.get("compaction_generation")
+        == session.compaction_generation
         and persisted.get("parent_session_id")
         == (original_parent_session_id if preserve_snapshot_lineage else None)
         and (
@@ -496,17 +502,29 @@ def start_auto_snapshot_squash_job(
         or len(summary) < MIN_AUTO_SUMMARY_CHARS
     ):
         return False
-    with _AUTO_SNAPSHOT_LOCK:
-        if snapshot_sid in _AUTO_SNAPSHOT_SIDS:
+    with _SQUASH_INTENT_LOCK:
+        with _JOBS_LOCK:
+            manual_running = any(
+                job.get("session_id") == snapshot_sid
+                and job.get("status") == "running"
+                for job in _JOBS.values()
+            )
+        if manual_running or snapshot_sid in _AUTO_SNAPSHOT_SIDS:
             return False
         _AUTO_SNAPSHOT_SIDS.add(snapshot_sid)
-    thread = threading.Thread(
-        target=_run_auto_snapshot_squash_job,
-        args=(snapshot_sid, continuation_sid, summary),
-        daemon=True,
-        name=f"auto-snapshot-squash-{snapshot_sid[:12]}",
-    )
-    thread.start()
+    try:
+        thread = _THREAD_FACTORY(
+            target=_run_auto_snapshot_squash_job,
+            args=(snapshot_sid, continuation_sid, summary),
+            daemon=True,
+            name=f"auto-snapshot-squash-{snapshot_sid[:12]}",
+        )
+        thread.start()
+    except Exception:
+        with _SQUASH_INTENT_LOCK:
+            _AUTO_SNAPSHOT_SIDS.discard(snapshot_sid)
+        logger.exception("auto snapshot squash thread failed to start for %s", snapshot_sid)
+        return False
     return True
 
 
@@ -547,7 +565,7 @@ def _run_auto_snapshot_squash_job(
             if (
                 len(messages) == 1
                 and isinstance(messages[0], dict)
-                and messages[0].get("_auto_snapshot_squash") is True
+                and messages[0].get("_squash_summary") is True
             ):
                 return
             if not messages:
@@ -588,7 +606,7 @@ def _run_auto_snapshot_squash_job(
         # parent snapshot remains available for the continuation to stitch.
         logger.exception("auto snapshot squash failed for %s", snapshot_sid)
     finally:
-        with _AUTO_SNAPSHOT_LOCK:
+        with _SQUASH_INTENT_LOCK:
             _AUTO_SNAPSHOT_SIDS.discard(snapshot_sid)
 
 
@@ -600,11 +618,6 @@ def start_squash_job(sid: str, *, confirm_session_id: str | None, summary: str |
     _purge_jobs()
     if confirm_session_id != sid:
         raise SquashError("confirm_session_id does not match session_id")
-    with _JOBS_LOCK:
-        for job in _JOBS.values():
-            if job.get("session_id") == sid and job.get("status") == "running":
-                raise SquashError("a squash job is already running for this session", 409)
-
     try:
         meta = get_session(sid, metadata_only=True)
     except KeyError:
@@ -613,6 +626,15 @@ def start_squash_job(sid: str, *, confirm_session_id: str | None, summary: str |
         raise SquashError("read-only sessions cannot be squashed", 400)
     if _busy_fields(meta):
         raise SquashError("session is active (stream or pending turn) — stop it before squashing", 409)
+    if (
+        getattr(meta, "compression_anchor_mode", None) == "automatic_tail"
+        and getattr(meta, "parent_session_id", None)
+    ):
+        raise SquashError(
+            "automatic-tail continuations cannot be squashed manually; "
+            "their verified history remains in the parent lineage",
+            409,
+        )
 
     job_id = uuid.uuid4().hex[:16]
     job = {
@@ -625,13 +647,31 @@ def start_squash_job(sid: str, *, confirm_session_id: str | None, summary: str |
         "result": None,
         "error": None,
     }
-    with _JOBS_LOCK:
-        _JOBS[job_id] = job
+    with _SQUASH_INTENT_LOCK:
+        if sid in _AUTO_SNAPSHOT_SIDS:
+            raise SquashError("an automatic squash job is already running for this session", 409)
+        with _JOBS_LOCK:
+            for existing in _JOBS.values():
+                if (
+                    existing.get("session_id") == sid
+                    and existing.get("status") == "running"
+                ):
+                    raise SquashError(
+                        "a squash job is already running for this session",
+                        409,
+                    )
+            _JOBS[job_id] = job
 
-    thread = threading.Thread(target=_run_squash_job, args=(job, summary), daemon=True,
-                              name=f"session-squash-{sid[:12]}")
-    job["_thread"] = thread
-    thread.start()
+    try:
+        thread = _THREAD_FACTORY(target=_run_squash_job, args=(job, summary), daemon=True,
+                                 name=f"session-squash-{sid[:12]}")
+        job["_thread"] = thread
+        thread.start()
+    except Exception as exc:
+        with _SQUASH_INTENT_LOCK:
+            with _JOBS_LOCK:
+                _JOBS.pop(job_id, None)
+        raise SquashError("failed to start squash worker", 500) from exc
     return _job_snapshot(job)
 
 

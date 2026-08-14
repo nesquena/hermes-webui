@@ -168,6 +168,53 @@ def _session_records_intentional_compress_shrink(session_path: Path) -> bool:
     return False
 
 
+def _session_records_new_compaction_generation(
+    session_path: Path,
+    bak_path: Path,
+) -> bool:
+    """True when live state proves an intentional shrink newer than its backup."""
+    try:
+        live = json.loads(session_path.read_text(encoding='utf-8'))
+        bak = json.loads(bak_path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+    if not isinstance(live, dict) or not isinstance(bak, dict):
+        return False
+    generation = live.get('compaction_generation')
+    if not isinstance(generation, str) or not generation.strip():
+        return False
+    if bak.get('compaction_generation') == generation:
+        return False
+    mode = str(live.get('compression_anchor_mode') or '').strip().lower()
+    if mode not in {'manual', 'automatic_tail', 'automatic_snapshot'}:
+        return False
+    try:
+        boundary = float(live.get('truncation_boundary'))
+        watermark = float(live.get('truncation_watermark'))
+    except (TypeError, ValueError):
+        return False
+    if boundary <= 0 or watermark != boundary:
+        return False
+    messages = live.get('messages')
+    if not isinstance(messages, list) or not messages:
+        return False
+    if mode == 'automatic_tail':
+        return bool(
+            live.get('parent_session_id')
+            and not live.get('pre_compression_snapshot')
+        )
+    if len(messages) != 1 or not isinstance(messages[0], dict):
+        return False
+    if messages[0].get('_squash_summary') is not True:
+        return False
+    if mode == 'automatic_snapshot':
+        return bool(
+            live.get('pre_compression_snapshot') is True
+            and messages[0].get('_auto_snapshot_squash') is True
+        )
+    return live.get('parent_session_id') in (None, '')
+
+
 def _backup_predates_intentional_shrink(session_path: Path, bak_path: Path) -> bool:
     """True when the ``.bak`` captured the PRE-compression transcript.
 
@@ -318,6 +365,14 @@ def inspect_session_recovery_status(session_path: Path) -> dict:
         }
     bak_count = _msg_count(bak_path)
     if bak_count > live_count:
+        if _session_records_new_compaction_generation(session_path, bak_path):
+            return {
+                "session_id": session_path.stem,
+                "live_messages": live_count,
+                "bak_messages": bak_count,
+                "recommend": "no_action",
+                "intentional_compaction_generation": True,
+            }
         if (
             _session_records_clear_sentinel(session_path, bak_path)
             or _live_supersedes_backup_by_clear_generation(session_path, bak_path)

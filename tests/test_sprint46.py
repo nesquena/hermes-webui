@@ -368,6 +368,43 @@ def test_session_compress_roundtrip(monkeypatch, cleanup_test_sessions):
     assert _FakeAgent.last_instance.context_compressor.calls[0]["focus_topic"] == "database schema"
 
 
+def test_manual_context_compress_preserves_automatic_tail_lineage(
+    monkeypatch,
+    cleanup_test_sessions,
+):
+    sid = _make_session()
+    cleanup_test_sessions.append(sid)
+    continuation = get_session(sid)
+    continuation.parent_session_id = "compression-snapshot-parent"
+    continuation.pre_compression_snapshot = False
+    continuation.compression_anchor_mode = "automatic_tail"
+    continuation.compaction_generation = "tail-generation"
+    continuation.save(touch_updated_at=False)
+    backup_path = SESSION_DIR / f"{sid}.json.bak"
+    backup_path.write_text(
+        json.dumps({
+            "messages": [
+                {"role": "user", "content": "recoverable later turn"},
+                *continuation.messages,
+            ],
+            "compaction_generation": "tail-generation",
+        }),
+        encoding="utf-8",
+    )
+    _install_fake_compression_runtime(monkeypatch, _FakeAgent)
+
+    handler = _FakeHandler()
+    _handle_session_compress(handler, {"session_id": sid})
+
+    assert handler.status == 200
+    persisted = Session.load(sid)
+    assert persisted is not None
+    assert persisted.parent_session_id == "compression-snapshot-parent"
+    assert persisted.compression_anchor_mode == "automatic_tail"
+    assert persisted.compaction_generation == "tail-generation"
+    assert backup_path.exists()
+
+
 def test_session_compress_start_is_async_and_reuses_running_job(monkeypatch, cleanup_test_sessions):
     import api.routes as routes
 

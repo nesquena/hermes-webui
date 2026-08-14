@@ -1,3 +1,4 @@
+import sqlite3
 from types import SimpleNamespace
 
 
@@ -115,6 +116,36 @@ def test_automatic_tail_watermark_blocks_older_state_db_replay():
     ]
 
     assert _merged_session_messages_for_display(session, state_db_messages) == [tail]
+
+
+def test_state_db_floor_can_exclude_legacy_null_timestamps(tmp_path, monkeypatch):
+    from api import models
+
+    db_path = tmp_path / "state.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE messages ("
+            "id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, "
+            "content TEXT, timestamp REAL)"
+        )
+        conn.executemany(
+            "INSERT INTO messages (id, session_id, role, content, timestamp) "
+            "VALUES (?, 'continuation', ?, ?, ?)",
+            [
+                (1, "user", "legacy null row", None),
+                (2, "user", "older row", 100.0),
+                (3, "assistant", "current row", 250.0),
+            ],
+        )
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db_path)
+
+    messages = models.get_state_db_session_messages(
+        "continuation",
+        since_timestamp=200.0,
+        include_null_timestamps=False,
+    )
+
+    assert [message["content"] for message in messages] == ["current row"]
 
 
 def test_non_squash_short_sidecar_keeps_existing_merge_behavior():

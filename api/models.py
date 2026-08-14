@@ -1247,6 +1247,7 @@ class Session:
                  truncation_watermark=None,
                  truncation_boundary=None,
                  clear_generation=None,
+                 compaction_generation=None,
                  gateway_routing=None, gateway_routing_history=None,
                  llm_title_generated: bool=False,
                  manual_title: bool=False,
@@ -1345,6 +1346,9 @@ class Session:
         self.truncation_watermark = truncation_watermark
         self.truncation_boundary = truncation_boundary
         self.clear_generation = clear_generation
+        self.compaction_generation = (
+            str(compaction_generation).strip() if compaction_generation else None
+        )
         self.gateway_routing = gateway_routing if isinstance(gateway_routing, dict) else None
         self.gateway_routing_history = gateway_routing_history if isinstance(gateway_routing_history, list) else []
         self.llm_title_generated = bool(llm_title_generated)
@@ -1454,6 +1458,7 @@ class Session:
             'truncation_watermark',
             'truncation_boundary',
             'clear_generation',
+            'compaction_generation',
             'gateway_routing', 'gateway_routing_history', 'llm_title_generated', 'manual_title',
             'parent_session_id',
             'worktree_path', 'worktree_branch', 'worktree_repo_root', 'worktree_created_at',
@@ -8269,6 +8274,7 @@ def get_state_db_session_messages(
     stitch_continuations: bool = False,
     profile=None,
     since_timestamp=None,
+    include_null_timestamps: bool = True,
     include_inactive: bool = False,
     limit=None,
 ) -> list:
@@ -8286,6 +8292,10 @@ def get_state_db_session_messages(
     raw state.db scan to rows at or after a sidecar-derived timestamp floor while
     preserving the caller's normal merge/window logic.  Full-history callers must
     leave it unset.
+
+    ``include_null_timestamps`` keeps legacy undated rows by default. Compacted
+    display paths can set it false alongside a verified floor so undated archive
+    rows cannot bypass that floor and resurrect an intentionally removed prefix.
 
     ``limit`` is an optional defensive row cap (applied after ORDER BY as a SQL
     LIMIT). It is a BACKSTOP against a pathological/huge state.db materializing
@@ -8395,7 +8405,11 @@ def get_state_db_session_messages(
                 except (TypeError, ValueError):
                     since_ts = None
                 if since_ts is not None:
-                    since_clause = " AND (timestamp IS NULL OR timestamp >= ?)"
+                    since_clause = (
+                        " AND (timestamp IS NULL OR timestamp >= ?)"
+                        if include_null_timestamps
+                        else " AND timestamp >= ?"
+                    )
                     params.append(since_ts)
             active_clause = ""
             if 'active' in available and not include_inactive:

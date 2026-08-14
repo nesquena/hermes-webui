@@ -341,10 +341,21 @@ reload. A daemon worker waits for the session mutation lock, verifies the
 parent/continuation relationship, writes and verifies a gzip archive plus SHA-256
 manifest, and only then replaces the hidden parent transcript with the existing
 compression summary. The parent remains a compression snapshot so lineage and
-restore continue to work. Missing markers, summaries, timestamps, locks, or
-lineage proof fail open: the full transcript stays in place. The setting is off
-by default and affects future automatic compressions only; it does not sweep
-existing sessions or `_run_journal` files.
+restore continue to work. Destructive boundaries accept only WebUI-generated
+assistant summaries carrying `_compressed_summary`; matching text from a user is
+not authoritative, and legacy display anchors never authorize tail reduction.
+Without a server-owned active-turn identity or trusted marker, the full transcript
+is retained. Tail and parent reductions persist a `compaction_generation`
+so startup recovery ignores only backups from before that generation while still
+restoring later loss within the same generation. Manual squash is rejected for an
+`automatic_tail` continuation because its complete visible history still depends
+on the compact parent lineage, and one intent lock excludes concurrent manual and
+automatic squash jobs. Missing provenance, summaries, timestamps, locks, or
+lineage proof fail open: the full transcript stays in place. The setting accepts
+only a JSON boolean, is off by default, and affects future automatic compressions
+only; it does not sweep existing sessions or `_run_journal` files. Manual context
+compression preserves any existing recovery backup because it does not reduce the
+persisted display transcript.
 
 on_token callback:
     if text is None: return  # end-of-stream sentinel from AIAgent

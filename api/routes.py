@@ -12972,6 +12972,7 @@ def handle_get(handler, parsed) -> bool:
                 _state_db_reader_kwargs = {"profile": _session_profile}
                 if manual_squash_state_db_floor is not None:
                     _state_db_reader_kwargs["since_timestamp"] = manual_squash_state_db_floor
+                    _state_db_reader_kwargs["include_null_timestamps"] = False
                 elif state_db_since_timestamp is not None:
                     _state_db_reader_kwargs["since_timestamp"] = state_db_since_timestamp
                 # Apply the display-path row backstop ONLY on provably-safe
@@ -25612,14 +25613,15 @@ def _handle_session_compress(handler, body):
             compress_watermark = _truncation_watermark_for(compressed_copy)
             s.truncation_watermark = compress_watermark
             s.truncation_boundary = compress_watermark
-            s.compression_anchor_mode = "manual"
+            preserves_automatic_tail_lineage = (
+                getattr(s, "compression_anchor_mode", None) == "automatic_tail"
+                and getattr(s, "parent_session_id", None) not in (None, "")
+                and not getattr(s, "pre_compression_snapshot", False)
+            )
+            if not preserves_automatic_tail_lineage:
+                s.compression_anchor_mode = "manual"
             s.last_prompt_tokens = new_tokens
             s.save()
-            # Drop stale backups that would undo an intentional manual compress.
-            try:
-                s.path.with_suffix(".json.bak").unlink(missing_ok=True)
-            except OSError:
-                pass
 
         session_payload = redact_session_data(
             s.compact() | {

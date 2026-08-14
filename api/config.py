@@ -9570,6 +9570,8 @@ def load_settings() -> dict:
                 and k != _SETTINGS_PERSISTED_SPEECH_KEYS_FIELD
             }
         )
+        if not isinstance(stored.get("auto_squash_after_compression"), bool):
+            settings["auto_squash_after_compression"] = False
         if (
             "default_message_mode" not in stored
             and "busy_input_mode" in stored
@@ -9673,6 +9675,7 @@ _SETTINGS_FLOAT_RANGES = {
 }
 _SETTINGS_BOOL_KEYS = {
     "onboarding_completed",
+    "auto_squash_after_compression",
     "show_token_usage",
     "show_quota_chip",
     "show_conversation_outline",
@@ -9939,6 +9942,8 @@ def save_settings(settings: dict) -> dict:
                 continue
             # Coerce bool keys
             if k in _SETTINGS_BOOL_KEYS:
+                if k == "auto_squash_after_compression" and not isinstance(v, bool):
+                    v = False
                 v = bool(v)
             current[k] = v
             if key_is_speech:
