@@ -96,6 +96,145 @@ def test_insights_absolute_range_start_end_filters_by_window(monkeypatch, tmp_pa
     assert len(data["daily_tokens"]) <= 30
 
 
+def test_insights_absolute_range_accepts_date_strings_server_local(monkeypatch, tmp_path):
+    # The production frontend sends raw YYYY-MM-DD date strings, NOT
+    # browser-local epoch seconds.  The server must parse them in its OWN
+    # timezone (so a remote browser cannot shift the selected day) and
+    # report the effective server-local window it queried.
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    # Server-local calendar day for 2026-04-20
+    start_day = time.mktime((2026, 4, 20, 0, 0, 0, 0, 0, -1))
+    end_day = time.mktime((2026, 4, 25, 23, 59, 59, 0, 0, -1))
+    entries = [
+        {
+            "session_id": "in_range", "updated_at": start_day + 86400, "created_at": start_day,
+            "message_count": 2, "input_tokens": 200, "output_tokens": 50,
+            "estimated_cost": "0.0020", "model": "gpt-x",
+        },
+        {
+            "session_id": "before", "updated_at": start_day - 86400, "created_at": start_day - 86400,
+            "message_count": 1, "input_tokens": 500, "output_tokens": 100,
+            "estimated_cost": "0.0050", "model": "gpt-x",
+        },
+    ]
+    data = _call_insights(monkeypatch, tmp_path, entries,
+                          query="start=2026-04-20&end=2026-04-25", now=now)
+    # in_range is inside; before is excluded.
+    assert data["total_sessions"] == 1
+    assert data["total_input_tokens"] == 200
+    # Effective bounds reflect the server-local calendar window (not shifted).
+    assert data["effective_start"] == "2026-04-20"
+    assert data["effective_end"] == "2026-04-25"
+    # Daily series spans the inclusive date range.
+    assert data["daily_tokens"][0]["date"] == "2026-04-20"
+    assert data["daily_tokens"][-1]["date"] == "2026-04-25"
+    assert len(data["daily_tokens"]) == 6
+
+
+def test_insights_absolute_range_reports_clamped_effective_bounds(monkeypatch, tmp_path):
+    # A request spanning more than 5 years must be clamped server-side, and
+    # the response must report the EFFECTIVE window (not the raw input) so
+    # the footer can never disagree with the filtered totals/chart.
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    far_past = time.mktime((2010, 1, 1, 0, 0, 0, 0, 0, -1))
+    entries = [
+        {
+            "session_id": "recent", "updated_at": now - 86400, "created_at": now - 86400,
+            "message_count": 1, "input_tokens": 100, "output_tokens": 10,
+            "estimated_cost": "0.0010", "model": "gpt-x",
+        },
+    ]
+    data = _call_insights(monkeypatch, tmp_path, entries,
+                          query=f"start={int(far_past)}&end={int(now)}", now=now)
+    # The effective END is still the queried ~now; the effective START was
+    # clamped by the 5-year cap, and the reported bounds equal the series.
+    # 5 years before 2026-05-04 is 2021-05-05 (server-local).
+    assert data["effective_start"] == "2021-05-05"
+    assert data["effective_end"] == "2026-05-04"
+    assert data["daily_tokens"][0]["date"] == data["effective_start"]
+    assert data["daily_tokens"][-1]["date"] == data["effective_end"]
+    assert len(data["daily_tokens"]) == 5 * 365 + 1  # 5 years inclusive
+
+
+def test_insights_absolute_range_reports_swapped_effective_bounds(monkeypatch, tmp_path):
+    # Reversed input (end before start) is normalized server-side; the
+    # effective bounds must reflect the sorted window so the footer shows
+    # start -> end, never a reversed range.
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    start_day = time.mktime((2026, 4, 20, 0, 0, 0, 0, 0, -1))
+    end_day = time.mktime((2026, 4, 25, 0, 0, 0, 0, 0, -1))
+    entries = [
+        {
+            "session_id": "in_range", "updated_at": start_day + 86400, "created_at": start_day,
+            "message_count": 1, "input_tokens": 30, "output_tokens": 10,
+            "estimated_cost": "0.0003", "model": "gpt-x",
+        },
+    ]
+    # end is BEFORE start -> server swaps them.
+    data = _call_insights(monkeypatch, tmp_path, entries,
+                          query=f"start={int(end_day)}&end={int(start_day)}", now=now)
+    assert data["total_sessions"] == 1
+    assert data["effective_start"] == "2026-04-20"
+    assert data["effective_end"] == "2026-04-25"
+    assert data["daily_tokens"][0]["date"] == "2026-04-20"
+    assert data["daily_tokens"][-1]["date"] == "2026-04-25"
+
+
+def test_insights_absolute_range_valid_epoch_still_supported(monkeypatch, tmp_path):
+    # Numeric epoch seconds remain a supported input contract (backward
+    # compat for CLI/scripting callers); effective bounds are still reported.
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    start_ts = now - (3 * 86400)
+    end_ts = now - 86400
+    entries = [
+        {
+            "session_id": "s1", "updated_at": start_ts + 3600, "created_at": start_ts,
+            "message_count": 1, "input_tokens": 40, "output_tokens": 10,
+            "estimated_cost": "0.0004", "model": "gpt-x",
+        },
+    ]
+    data = _call_insights(monkeypatch, tmp_path, entries,
+                          query=f"start={int(start_ts)}&end={int(end_ts)}", now=now)
+    assert data["total_sessions"] == 1
+    assert data["effective_start"] is not None
+    assert data["effective_end"] is not None
+
+
+def _function_body(src, name):
+    start = src.index("function " + name + "(")
+    brace = src.index("{", start)
+    depth = 0
+    for i in range(brace, len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start:i+1]
+    raise AssertionError("function body not found: " + name)
+
+
+def test_insights_frontend_request_guard_and_raw_dates_present():
+    # Regression for "editing start then end lets the slower first request
+    # overwrite the newer range": loadInsights must carry a per-request token
+    # and drop any stale in-flight response.
+    load = _function_body(PANELS_JS, "loadInsights")
+    assert "_insightsReqToken" in load
+    assert "const reqToken = ++_insightsReqToken;" in load
+    assert "if (reqToken !== _insightsReqToken) return;" in load
+    assert "if (startVal) qs.set('start', startVal)" in load
+    assert "if (endVal) qs.set('end', endVal)" in load
+    assert "new Date(startVal" not in load
+
+
+def test_insights_footer_uses_effective_bounds():
+    # The footer must prefer the server-reported effective window so a
+    # clamped/swapped range is displayed truthfully.
+    render = _function_body(PANELS_JS, "_renderInsights")
+    assert "d.effective_start" in render
+    assert "d.effective_end" in render
+
+
 def test_insights_absolute_range_start_only_defaults_end_to_now(monkeypatch, tmp_path):
     now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
     start_ts = now - (5 * 86400)
@@ -600,7 +739,20 @@ def test_insights_frontend_has_daily_chart_styles_and_range_switching_hooks():
     assert "qs.set('end'" in PANELS_JS
     assert "insightsCustomRange" in INDEX_HTML
     assert 'type="date"' in INDEX_HTML
-    assert "new Date(startVal + 'T00:00:00')" in PANELS_JS
+    # Raw YYYY-MM-DD date strings are sent to the API (NOT browser-local
+    # epoch seconds): the server parses them in its OWN timezone so a remote
+    # browser/timezone can never shift the selected calendar day.
+    assert "if (startVal) qs.set('start', startVal)" in PANELS_JS
+    assert "if (endVal) qs.set('end', endVal)" in PANELS_JS
+    assert "new Date(startVal + 'T00:00:00')" not in PANELS_JS
+    # Latest-request guard: a stale in-flight response must not overwrite a
+    # newer range.
+    assert "_insightsReqToken" in PANELS_JS
+    assert "reqToken !== _insightsReqToken" in PANELS_JS
+    # Date inputs are accessible by name.
+    assert 'aria-label="Start date"' in INDEX_HTML
+    assert 'aria-label="End date"' in INDEX_HTML
+    assert 'aria-hidden="true"' in INDEX_HTML
     assert ".insights-daily-token-chart" in STYLE_CSS
     assert ".insights-daily-bar-output" in STYLE_CSS
     assert ".insights-model-cost" in STYLE_CSS

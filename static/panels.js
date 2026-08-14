@@ -4409,6 +4409,9 @@ async function copyLogsAll() {
 }
 
 // ── Insights panel ──
+// Latest-request generation counter: an older /api/insights response that
+// resolves after a newer request must not overwrite the newer render.
+let _insightsReqToken = 0;
 const STATIC_MODEL_HEALTH_ROWS = [
   {id:'openai/gpt-5.4-mini', provider:'OpenAI', inputCostPerM:0.25, outputCostPerM:2.00, replacement:'Default economical general-purpose model'},
   {id:'openai/gpt-5.4', provider:'OpenAI', inputCostPerM:2.00, outputCostPerM:10.00, replacement:'Use for complex synthesis; fall back to Mini for routine turns'},
@@ -4448,24 +4451,33 @@ async function loadInsights(animate) {
       const endEl = $('insightsEnd');
       const startVal = startEl && startEl.value;
       const endVal = endEl && endEl.value;
-      if (startVal) qs.set('start', String(Math.floor(new Date(startVal + 'T00:00:00').getTime() / 1000)));
-      if (endVal) qs.set('end', String(Math.floor(new Date(endVal + 'T00:00:00').getTime() / 1000)));
+      // Send RAW YYYY-MM-DD strings, not browser-local epoch seconds: the
+      // server interprets them in ITS OWN timezone, so a browser in another
+      // timezone can never shift the selected calendar day.
+      if (startVal) qs.set('start', startVal);
+      if (endVal) qs.set('end', endVal);
     } else {
       qs.set('days', period);
     }
+    // Latest-request guard: date inputs fire one load per change; a slower
+    // earlier response must never overwrite a newer range.  Each call takes
+    // its own token; only the newest token may render.
+    const reqToken = ++_insightsReqToken;
   try {
     const [data, wikiStatus, skillUsage] = await Promise.all([
       api(`/api/insights?${qs.toString()}`),
       api('/api/wiki/status').catch(err => ({status:'error', error: err.message || String(err)})),
       api('/api/skills/usage').catch(() => ({usage:{}, skill_names:[], total_invocations:0, unique_skills_used:0})),
     ]);
+    if (reqToken !== _insightsReqToken) return;
     _renderInsights(data, box, wikiStatus, skillUsage);
     if (typeof _syncSystemHealthMonitorVisibility === 'function') _syncSystemHealthMonitorVisibility();
     if (typeof pollSystemHealth === 'function') void pollSystemHealth();
   } catch(e) {
+    if (reqToken !== _insightsReqToken) return;
     box.innerHTML = `<div style="color:var(--accent);font-size:12px">${esc(t('error_prefix') + e.message)}</div>`;
   } finally {
-    if (animate && refreshBtn) {
+    if (animate && refreshBtn && reqToken === _insightsReqToken) {
       refreshBtn.style.opacity = '';
       refreshBtn.disabled = false;
     }
@@ -4494,6 +4506,9 @@ function insightsPeriodChange() {
 }
 
 function insightsRangeInputs() {
+  // Each date change is its own request generation; the guard in
+  // loadInsights() drops any stale in-flight response.
+  _insightsReqToken++;
   loadInsights();
 }
 
@@ -4864,8 +4879,14 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
 
   const periodSel = $('insightsPeriod');
     const isCustomRange = periodSel && periodSel.value === 'custom';
+    // The server reports the EFFECTIVE calendar window it actually queried
+    // (after swap, DST alignment, and the 5-year cap), so the footer can
+    // never disagree with the rendered totals/chart.  Fall back to the raw
+    // inputs only if the server omits the effective bounds.
+    const effStart = isCustomRange && d.effective_start;
+    const effEnd = isCustomRange && d.effective_end;
     const rangeLabel = isCustomRange
-      ? (($('insightsStart') || {}).value || '…') + ' → ' + (($('insightsEnd') || {}).value || '…')
+      ? (effStart && effEnd ? effStart + ' → ' + effEnd : (($('insightsStart') || {}).value || '…') + ' → ' + (($('insightsEnd') || {}).value || '…'))
       : t('insights_footer').replace('{days}', d.period_days);
     box.innerHTML = `
       ${_renderSystemHealthPanel()}
