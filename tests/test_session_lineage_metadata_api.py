@@ -1,5 +1,6 @@
 """Regression tests for /api/sessions lineage metadata used by sidebar collapse."""
 
+import json
 import sqlite3
 import time
 
@@ -51,7 +52,8 @@ def _ensure_state_db(path):
             message_count INTEGER DEFAULT 0,
             parent_session_id TEXT,
             ended_at REAL,
-            end_reason TEXT
+            end_reason TEXT,
+            model_config TEXT
         );
         """
     )
@@ -79,14 +81,14 @@ def _insert_state_message(conn, sid, *, role, content, timestamp):
     conn.commit()
 
 
-def _insert_state_row(conn, sid, *, title=None, parent=None, ended_at=None, end_reason=None, started_at=None, source='webui', session_source=None):
+def _insert_state_row(conn, sid, *, title=None, parent=None, ended_at=None, end_reason=None, started_at=None, source='webui', session_source=None, model_config=None):
     conn.execute(
         """
         INSERT INTO sessions
-        (id, source, session_source, title, model, started_at, message_count, parent_session_id, ended_at, end_reason)
-        VALUES (?, ?, ?, ?, 'openai/gpt-5', ?, 2, ?, ?, ?)
+        (id, source, session_source, title, model, started_at, message_count, parent_session_id, ended_at, end_reason, model_config)
+        VALUES (?, ?, ?, ?, 'openai/gpt-5', ?, 2, ?, ?, ?, ?)
         """,
-        (sid, source, session_source, title or sid, started_at or time.time(), parent, ended_at, end_reason),
+        (sid, source, session_source, title or sid, started_at or time.time(), parent, ended_at, end_reason, model_config),
     )
     conn.commit()
 
@@ -764,10 +766,11 @@ def test_materially_overlapping_compression_child_stays_child_session(_isolate):
         conn.close()
 
 
-def test_same_title_compression_child_recognized_beyond_timestamp_tolerance(_isolate):
-    """#6931: a direct same-source child with the parent's exact title is still
-    a continuation even when the boundary timestamps disagree beyond the
-    tolerance — timestamp is not the only gate."""
+def test_same_title_independent_child_outside_tolerance_stays_visible(_isolate):
+    """#7021 re-gate: a same-title independent child started well outside the
+    tolerance window must NOT collapse on the title match — titles are
+    user-controlled and non-unique, so the only continuation evidence is the
+    bounded early-side timestamp window."""
     conn = _ensure_state_db(_isolate)
     t0 = time.time() - 100
     try:
@@ -781,33 +784,110 @@ def test_same_title_compression_child_recognized_beyond_timestamp_tolerance(_iso
             ended_at=t0 + 60,
             end_reason="compression",
         )
-        # child started 30s before the parent ended but carries the exact title.
+        # Same title, but started 50s before the parent ended — far outside any
+        # handoff race window. Must remain a visible child session.
         _insert_state_row(
             conn,
             "lineage_title_tip",
             title="Shared conversation",
             parent="lineage_title_root",
-            started_at=t0 + 30,
+            started_at=t0 + 10,
         )
 
         rows = {row["session_id"]: row for row in all_sessions()}
 
         tip = rows["lineage_title_tip"]
-        assert tip.get("_lineage_root_id") == "lineage_title_root"
-        assert tip.get("_lineage_tip_id") == "lineage_title_tip"
-        assert tip.get("_compression_segment_count") == 2
-        assert tip.get("relationship_type") != "child_session"
+        assert tip.get("relationship_type") == "child_session"
+        assert tip.get("parent_session_id") == "lineage_title_root"
+        assert "_lineage_root_id" not in tip
+        assert "_compression_segment_count" not in tip
+    finally:
+        conn.close()
+
+
+def test_model_config_branched_from_child_stays_visible_within_tolerance(_isolate):
+    """#7021 re-gate: an explicit Agent branch is marked in
+    model_config._branched_from (not session_source). Even when it starts
+    inside the 2s tolerance window of the parent's compression, the real
+    marker must keep it visible instead of collapsing it into the lineage."""
+    conn = _ensure_state_db(_isolate)
+    t0 = time.time() - 100
+    try:
+        _save_webui_session("lineage_branch_root", title="Shared conversation", updated_at=t0)
+        _save_webui_session("lineage_branch_tip", title="Shared conversation", updated_at=t0 + 10)
+        _insert_state_row(
+            conn,
+            "lineage_branch_root",
+            started_at=t0,
+            ended_at=t0 + 5,
+            end_reason="compression",
+        )
+        # The reviewer's adversarial probe: an Agent branch starting 1.5s
+        # BEFORE the parent's compression ended_at. No session_source — the
+        # fork identity lives in model_config._branched_from.
+        _insert_state_row(
+            conn,
+            "lineage_branch_tip",
+            parent="lineage_branch_root",
+            started_at=t0 + 5 - 1.5,
+            model_config=json.dumps({"_branched_from": "lineage_branch_root"}),
+        )
+
+        rows = {row["session_id"]: row for row in all_sessions()}
+
+        tip = rows["lineage_branch_tip"]
+        assert tip.get("relationship_type") == "child_session"
+        assert tip.get("parent_session_id") == "lineage_branch_root"
+        assert "_lineage_root_id" not in tip
+        assert "_compression_segment_count" not in tip
+    finally:
+        conn.close()
+
+
+def test_model_config_delegate_from_child_stays_visible_within_tolerance(_isolate):
+    """#7021 re-gate: delegate/subagent runs are marked in
+    model_config._delegate_from. A delegate child starting inside the
+    tolerance window of the parent's compression must stay visible."""
+    conn = _ensure_state_db(_isolate)
+    t0 = time.time() - 100
+    try:
+        _save_webui_session("lineage_delegate_root", title="Shared conversation", updated_at=t0)
+        _save_webui_session("lineage_delegate_tip", title="Shared conversation", updated_at=t0 + 10)
+        _insert_state_row(
+            conn,
+            "lineage_delegate_root",
+            started_at=t0,
+            ended_at=t0 + 5,
+            end_reason="compression",
+        )
+        _insert_state_row(
+            conn,
+            "lineage_delegate_tip",
+            parent="lineage_delegate_root",
+            started_at=t0 + 5 - 1.0,
+            model_config=json.dumps({"_delegate_from": "lineage_delegate_root"}),
+        )
+
+        rows = {row["session_id"]: row for row in all_sessions()}
+
+        tip = rows["lineage_delegate_tip"]
+        assert tip.get("relationship_type") == "child_session"
+        assert tip.get("parent_session_id") == "lineage_delegate_root"
+        assert "_lineage_root_id" not in tip
+        assert "_compression_segment_count" not in tip
     finally:
         conn.close()
 
 
 def test_continuation_classification_timestamp_tolerance_and_guards():
-    """#6931 focused unit coverage of _is_continuation_session: tolerance,
-    title evidence fallback, and preserved fork/cross-source/end_reason guards."""
+    """#6931/#7021 focused unit coverage of _is_continuation_session: bounded
+    tolerance, model_config branch markers, and preserved fork/cross-source/
+    end_reason guards."""
     from api.agent_sessions import _is_continuation_session
 
     def make_parent(**over):
         row = {
+            'id': 'parent-1',
             'source': 'webui',
             'end_reason': 'compression',
             'ended_at': 1000.0,
@@ -818,6 +898,7 @@ def test_continuation_classification_timestamp_tolerance_and_guards():
 
     def make_child(**over):
         row = {
+            'id': 'child-1',
             'source': 'webui',
             'started_at': 1000.05,
             'title': 'Shared conversation',
@@ -831,11 +912,55 @@ def test_continuation_classification_timestamp_tolerance_and_guards():
     assert _is_continuation_session(make_parent(), make_child(started_at=999.95))
     # Overlap inside the 2s tolerance: continuation.
     assert _is_continuation_session(make_parent(), make_child(started_at=998.5))
-    # Overlap beyond tolerance but exact title evidence: continuation.
-    assert _is_continuation_session(make_parent(), make_child(started_at=950.0))
-    # Overlap beyond tolerance with a different title: separate child.
+    # Overlap beyond tolerance: separate child, even with an exact title match
+    # (titles are user-controlled and non-unique — no title fallback).
+    assert not _is_continuation_session(make_parent(), make_child(started_at=950.0))
     assert not _is_continuation_session(
         make_parent(), make_child(started_at=950.0, title='Another conversation')
+    )
+    # model_config._branched_from pointing at the parent: never a
+    # continuation, regardless of timing.
+    assert not _is_continuation_session(
+        make_parent(),
+        make_child(
+            started_at=999.95,
+            model_config=json.dumps({'_branched_from': 'parent-1'}),
+        ),
+    )
+    assert not _is_continuation_session(
+        make_parent(),
+        make_child(
+            started_at=998.5,
+            model_config={'_branched_from': 'parent-1'},
+        ),
+    )
+    # model_config._delegate_from pointing at the parent: never a
+    # continuation, regardless of timing.
+    assert not _is_continuation_session(
+        make_parent(),
+        make_child(
+            started_at=999.95,
+            model_config=json.dumps({'_delegate_from': 'parent-1'}),
+        ),
+    )
+    # A marker pointing at a DIFFERENT session does not disqualify: compression
+    # continuations inherit the rotated agent's model_config verbatim, so a
+    # delegate's continuation still carries the delegate's own marker.
+    assert _is_continuation_session(
+        make_parent(),
+        make_child(
+            started_at=999.95,
+            model_config=json.dumps({'_delegate_from': 'some-other-session'}),
+        ),
+    )
+    # Unparsable model_config degrades to no markers (no crash, no match).
+    assert _is_continuation_session(
+        make_parent(),
+        make_child(started_at=999.95, model_config='not-json'),
+    )
+    assert not _is_continuation_session(
+        make_parent(),
+        make_child(started_at=950.0, model_config='not-json'),
     )
     # Fork guard holds regardless of timing.
     assert not _is_continuation_session(
