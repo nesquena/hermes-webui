@@ -237,28 +237,42 @@ _STREAMING_CRON_PROFILE_HOME: contextvars.ContextVar[str | None] = contextvars.C
 #   pending   — one discovery owner thread is running (or about to run)
 #   completed — discovery finished; registered tools are visible to the
 #               next agent snapshot / per-turn prologue refresh
-#   failed    — discovery finished with per-server failures; the outcome is
-#               surfaced (logged) and turns proceed without waiting
+#   failed    — discovery finished with a failure; the outcome is
+#               surfaced (logged) at the stream boundary and turns
+#               proceed without waiting
 #
-# Exactly ONE discovery thread runs per profile home.  A turn that finds
-# the profile still `pending` waits on the shared readiness event — the
-# FIRST tool-bearing turn must not silently omit a configured server —
-# and every later turn subscribes to the SAME result, so the wait is paid
-# once per profile, not once per message.  Discovery is also kicked off at
-# process start (`_startup_mcp_discovery`) so the default profile is
-# usually already resolved by the time the first user message arrives.
+# Readiness is GENERATION-based and SINGLE-FLIGHT:
+#   * `_McpReadiness.gen` is bumped whenever a new owner run starts
+#     (restart, explicit retry) or a wait times out (retirement).  A run
+#     only publishes its terminal outcome if its generation is still
+#     current, so a late-finishing owner can never flip state over a
+#     timed-out wait or a newer run — and never registers tools into a
+#     turn that already proceeded.
+#   * Exactly ONE current owner thread exists per profile home.  A turn
+#     that finds the profile still `pending` waits on the shared
+#     readiness event — the FIRST tool-bearing turn must not silently
+#     omit a configured server — and every later turn subscribes to the
+#     SAME result, so the wait is paid once per profile, not once per
+#     message.  Discovery is also kicked off at process start
+#     (`_startup_mcp_discovery`) so the default profile is usually
+#     already resolved by the time the first user message arrives.
+#   * The discovery closure returns an EXPLICIT success/failure outcome
+#     (bool): production closures never swallow failures into a fake
+#     'completed', and a thrown run is recorded as 'failed' by the
+#     runner.
 #
 # The discovery thread re-asserts the profile home through hermes-agent's
 # CONTEXT-LOCAL override (`set_hermes_home_override`), resolved via the
 # webui's version gate `api.profiles._resolve_hermes_home_override()`
 # (#5567), and never writes `os.environ['HERMES_HOME']` (the worker
 # mutates that under `_ENV_LOCK` and restores it at teardown; a delayed
-# write would cross-contaminate other streams).  On agents without the
-# override API the first turn still blocks on the readiness event, so the
-# env read happens inside the worker's env window — the pre-PR
-# synchronous semantics are preserved exactly.
+# write would cross-contaminate other streams).  On agents WITHOUT the
+# override API discovery is never backgrounded: the worker runs it
+# INLINE inside its own env window (pre-PR synchronous semantics), so a
+# daemon can never read another stream's profile after env mutation.
 _MCP_READINESS: dict = {}
 _MCP_READINESS_LOCK = threading.Lock()
+_MCP_READINESS_WAIT_CAP_S = 120.0
 
 
 class _McpReadiness:
@@ -267,26 +281,38 @@ class _McpReadiness:
     Attributes:
         status: 'pending' | 'completed' | 'failed'
         event:  threading.Event set when the current run finishes
-        thread: the discovery owner thread (one per profile)
+        thread: the current owner thread (one per profile)
+        gen:    generation counter — bumped on restart/retry/timeout
+                retirement so a stale owner can never publish.
     """
 
-    __slots__ = ("status", "event", "thread")
+    __slots__ = ("status", "event", "thread", "gen")
 
     def __init__(self):
         self.status = "pending"
         self.event = threading.Event()
         self.thread = None
+        self.gen = 0
 
 
-def _discovery_runner(discover_fn, readiness, event):
+def _discovery_runner(discover_fn, readiness, event, gen):
+    """Run one discovery generation and publish its terminal outcome.
+
+    Only the generation captured at start may publish: a retry or a
+    timed-out wait bumps `readiness.gen`, retiring this run, so a
+    late-finishing owner can never flip the readiness over the caller's
+    terminal outcome (or register tools into a turn that already
+    proceeded).  The closure returns an explicit bool outcome — a thrown
+    run is recorded as failed.
+    """
     try:
-        discover_fn()
+        outcome = discover_fn()  # production closures return bool
     except Exception:
-        readiness.status = "failed"
-    else:
-        readiness.status = "completed"
-    finally:
-        event.set()
+        outcome = False
+    with _MCP_READINESS_LOCK:
+        if gen == readiness.gen:
+            readiness.status = "completed" if outcome is True else "failed"
+    event.set()
 
 
 def _ensure_mcp_discovery(profile_home, discover_fn, thread_name):
@@ -296,6 +322,8 @@ def _ensure_mcp_discovery(profile_home, discover_fn, thread_name):
     subscribe to the SAME readiness event instead of spawning again or
     paying a fresh wait.  Completed/failed profiles are NOT re-run here —
     an explicit retry goes through `_mcp_retry_discovery` (or /reload-mcp).
+    A pending run whose owner died is restarted as a NEW generation so
+    waiters can never hang forever on a stale run.
     """
     with _MCP_READINESS_LOCK:
         readiness = _MCP_READINESS.get(profile_home)
@@ -306,15 +334,16 @@ def _ensure_mcp_discovery(profile_home, discover_fn, thread_name):
             readiness.status == "pending"
             and (readiness.thread is None or not readiness.thread.is_alive())
         ):
-            # Owner thread died without finishing; restart it so waiters
-            # can never hang forever on a stale run.  Completed/failed
-            # profiles are NOT re-run here — only explicit retries
-            # (_mcp_retry_discovery / /reload-mcp) re-run discovery.
-            readiness.status = "pending"
+            # Owner thread died without finishing; restart it as a new
+            # generation so waiters can never hang forever on a stale
+            # run.  Completed/failed profiles are NOT re-run here — only
+            # explicit retries (_mcp_retry_discovery / /reload-mcp).
+            readiness.gen += 1
+            _gen = readiness.gen
             readiness.event = threading.Event()
             readiness.thread = threading.Thread(
                 target=_discovery_runner,
-                args=(discover_fn, readiness, readiness.event),
+                args=(discover_fn, readiness, readiness.event, _gen),
                 name=thread_name,
                 daemon=True,
             )
@@ -325,26 +354,65 @@ def _ensure_mcp_discovery(profile_home, discover_fn, thread_name):
 def _mcp_wait_readiness(readiness):
     """Block until the profile's discovery run finishes.
 
-    Bounded only by discovery's own internal timeouts (the cross-process
-    lock wait is capped at ~120s); a stuck run cannot hang the turn
-    forever.  Returns the readiness status.
+    Bounded by `_MCP_READINESS_WAIT_CAP_S` (discovery's own internal
+    timeouts plus a hang-safety cap); a stuck run cannot hang the turn
+    forever.  If the cap is hit while the run is still pending, the
+    CURRENT generation is RETIRED (gen bumped, status 'failed', owner
+    released) so a late-finishing thread can never publish terminal
+    state over the caller's outcome.  If a retry started a newer
+    generation mid-wait, the wait rides the newer run.
     """
     if readiness.status == "pending":
-        readiness.event.wait(timeout=120.0)
-        if readiness.status == "pending":
-            # Safety: the owner thread died without setting the event, or
-            # discovery exceeded its own outer bounds.  Surface as failed.
-            readiness.status = "failed"
+        _deadline = time.monotonic() + _MCP_READINESS_WAIT_CAP_S
+        while readiness.status == "pending":
+            _gen = readiness.gen
+            _event = readiness.event
+            _remaining = _deadline - time.monotonic()
+            if _remaining <= 0:
+                break
+            _event.wait(timeout=_remaining)
+            if readiness.gen == _gen and readiness.status == "pending":
+                # Event fired but nothing published for this generation:
+                # the owner died mid-run or discovery outlived its bounds.
+                break
+        if readiness.status == "pending" and readiness.gen == _gen:
+            with _MCP_READINESS_LOCK:
+                if readiness.gen == _gen and readiness.status == "pending":
+                    readiness.gen += 1
+                    readiness.status = "failed"
+                    readiness.thread = None
     return readiness.status
 
 
-def _mcp_retry_discovery(profile_home, discover_fn, thread_name):
-    """Force a fresh discovery run for a failed/never-run profile.
+def _wait_and_surface_mcp_readiness(readiness, profile_home, session_id):
+    """Wait for the profile's discovery run and surface its outcome.
 
-    This is the explicit retry path (mirrors /reload-mcp semantics).
-    Registering tools mid-turn never mutates an in-flight Agent snapshot:
-    hermes-agent only applies registered tools in its per-turn prologue
-    refresh, before the first API call of the next turn.
+    Returns the readiness status ('completed' | 'failed').  A failed run
+    is surfaced at the stream boundary (logged with the profile home)
+    BEFORE the agent snapshot is constructed, so the turn proceeds
+    without MCP tools rather than hanging or pretending discovery
+    succeeded.
+    """
+    _status = _mcp_wait_readiness(readiness)
+    if _status == "failed":
+        logger.warning(
+            "MCP discovery failed for profile %r (session %s) - "
+            "continuing without MCP tools for this turn",
+            profile_home or "default",
+            session_id,
+        )
+    return _status
+
+
+def _mcp_retry_discovery(profile_home, discover_fn, thread_name):
+    """Force a fresh discovery run, retiring the current generation.
+
+    This is the explicit retry path (mirrors /reload-mcp semantics) and
+    is SINGLE-FLIGHT: the previous owner — even if still running — is
+    retired by bumping the generation so it can never publish, and
+    exactly one current owner exists afterwards.  Registering tools
+    mid-turn never mutates an in-flight Agent snapshot: hermes-agent
+    only applies registered tools in its per-turn prologue refresh.
     """
     with _MCP_READINESS_LOCK:
         readiness = _MCP_READINESS.get(profile_home)
@@ -352,10 +420,12 @@ def _mcp_retry_discovery(profile_home, discover_fn, thread_name):
             readiness = _McpReadiness()
             _MCP_READINESS[profile_home] = readiness
         readiness.status = "pending"
+        readiness.gen += 1
+        _gen = readiness.gen
         readiness.event = threading.Event()
         readiness.thread = threading.Thread(
             target=_discovery_runner,
-            args=(discover_fn, readiness, readiness.event),
+            args=(discover_fn, readiness, readiness.event, _gen),
             name=thread_name,
             daemon=True,
         )
@@ -368,20 +438,30 @@ def _startup_mcp_discovery():
 
     Lets the default profile's readiness resolve during idle time so the
     first user turn usually finds it already completed/failed instead of
-    waiting.  Uses the getattr-import form so the repo-wide static
-    regression (test_issue1968) that counts exactly one `discover_mcp_tools`
-    call site in api/streaming.py stays valid.
+    waiting.  Only runs when the context-local override API is available:
+    on older agents discovery may only run inside a stream worker's env
+    window (the worker runs it inline there), never on a background
+    thread that could read another stream's profile after env mutation.
+    Uses the getattr-import form so the repo-wide static regression
+    (test_issue1968) that counts exactly one `discover_mcp_tools` call
+    site in api/streaming.py stays valid.
     """
+    try:
+        from api.profiles import _resolve_hermes_home_override
+        if _resolve_hermes_home_override() is None:
+            return
+    except Exception:
+        return
     try:
         from tools.mcp_tool import discover_mcp_tools as _dmt
     except Exception:
         return
 
     def _discover_default():
+        _mcp_home_token = None
         try:
             from api.profiles import _resolve_hermes_home_override
             _hc_mod = _resolve_hermes_home_override()
-            _mcp_home_token = None
             if _hc_mod is not None:
                 _mcp_home = getattr(_hc_mod, 'get_default_hermes_root', lambda: '')()
                 if _mcp_home:
@@ -390,11 +470,12 @@ def _startup_mcp_discovery():
                     )
             try:
                 _dmt()
+                return True
             finally:
                 if _mcp_home_token is not None:
                     _hc_mod.reset_hermes_home_override(_mcp_home_token)
         except Exception:
-            pass  # MCP not available or not configured — non-fatal
+            return False
 
     try:
         _ensure_mcp_discovery('', _discover_default, 'mcp-discovery-startup')
@@ -8918,22 +8999,28 @@ def _run_agent_streaming(
         #
         # The override is resolved through `api.profiles._resolve_hermes_home_override()`
         # (the webui's version gate for the v0.18.0+ API) rather than imported
-        # directly, so OLDER agents fall back to the pre-existing env-mirror
-        # behavior.  On those agents the first pending turn still blocks on
-        # the readiness event, so the env read happens inside this worker's
-        # env window — the pre-PR synchronous semantics are preserved
-        # exactly.  The profile home itself comes from the `_profile_home`
-        # local captured under `_ENV_LOCK` above — re-reading
+        # directly.  On agents WITHOUT the override API the readiness
+        # background owner is NOT used at all: the worker runs discovery
+        # INLINE below (pre-PR synchronous semantics) so the env read
+        # happens inside this worker's env window — a daemon could never
+        # be kept safe from another stream's env mutation on those agents.
+        # The profile home itself comes from the `_profile_home` local
+        # captured under `_ENV_LOCK` above — re-reading
         # `os.environ['HERMES_HOME']` here would race with a concurrent
         # stream's env mutation after the lock is released.
         try:
             from tools.mcp_tool import discover_mcp_tools
 
             def _discover_mcp_background():
+                """Discover MCP tools for this stream's profile; returns bool.
+
+                True = ran to completion; False = the run raised.  The
+                runner needs an explicit outcome (maintainer review).
+                """
+                _mcp_home_token = None
                 try:
                     from api.profiles import _resolve_hermes_home_override
                     _hc_mod = _resolve_hermes_home_override()
-                    _mcp_home_token = None
                     if _hc_mod is not None:
                         _mcp_home = _profile_home
                         if not _mcp_home:
@@ -8950,18 +9037,38 @@ def _run_agent_streaming(
                             )
                     try:
                         discover_mcp_tools()
+                        return True
+                    except Exception:
+                        return False
                     finally:
                         if _mcp_home_token is not None:
                             _hc_mod.reset_hermes_home_override(_mcp_home_token)
                 except Exception:
-                    pass  # MCP not available or not configured — non-fatal
+                    return False
 
-            _readiness = _ensure_mcp_discovery(
-                _profile_home,
-                _discover_mcp_background,
-                'mcp-discovery-%s' % (session_id or 'unknown'),
-            )
-            _mcp_wait_readiness(_readiness)
+            try:
+                from api.profiles import _resolve_hermes_home_override
+                _mcp_override_available = _resolve_hermes_home_override() is not None
+            except Exception:
+                _mcp_override_available = False
+
+            if _mcp_override_available:
+                _readiness = _ensure_mcp_discovery(
+                    _profile_home,
+                    _discover_mcp_background,
+                    'mcp-discovery-%s' % (session_id or 'unknown'),
+                )
+                _wait_and_surface_mcp_readiness(
+                    _readiness, _profile_home, session_id
+                )
+            else:
+                # Older agent: no context-local override — a background
+                # owner would read the process env, which other streams
+                # mutate (cross-profile contamination).  Run discovery
+                # INLINE (pre-PR synchronous semantics) so the env read
+                # happens inside this worker's env window; a daemon can
+                # never read another stream's profile after env mutation.
+                _discover_mcp_background()
         except Exception:
             pass  # MCP import itself failed — non-fatal
 

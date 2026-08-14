@@ -7,6 +7,7 @@ so the frontend can still load with WEBUI_ONLY commands.
 from __future__ import annotations
 from contextlib import nullcontext
 import logging
+import os
 import threading
 from typing import Any
 
@@ -270,7 +271,31 @@ def _run_reload_mcp_command() -> str:
                 old_servers = set(_servers.keys())
 
             shutdown_mcp_servers()
-            new_tools = discover_mcp_tools()
+
+            # Route the re-discovery through the SAME readiness authority
+            # the stream worker uses (api.streaming), so a subsequent turn
+            # observes the fresh outcome instead of a stale 'completed' /
+            # 'failed' readiness recorded before this reload.  The command
+            # waits on the shared readiness event so its synchronous
+            # report below is still accurate.  The profile home is taken
+            # from the exec-time env: inside a session that is the
+            # worker's env window; otherwise it resolves to the default
+            # profile (''), which is the authority the startup kickoff
+            # and default-profile turns consult.
+            from api.streaming import _mcp_retry_discovery, _mcp_wait_readiness
+
+            def _reload_discover():
+                try:
+                    discover_mcp_tools()
+                    return True
+                except Exception:
+                    return False
+
+            _profile_home = str(os.environ.get("HERMES_HOME", "") or "")
+            _readiness = _mcp_retry_discovery(
+                _profile_home, _reload_discover, "mcp-reload"
+            )
+            _reload_status = _mcp_wait_readiness(_readiness)
 
             with _lock:
                 connected_servers = set(_servers.keys())
@@ -291,9 +316,23 @@ def _run_reload_mcp_command() -> str:
         lines.append(f"Removed: {', '.join(sorted(removed))}")
 
     if connected_servers:
-        lines.append(f"{len(new_tools or [])} tool(s) available across {len(connected_servers)} server(s)")
+        _tool_count = 0
+        for _server_name in connected_servers:
+            try:
+                _tool_count += len(
+                    getattr(_servers[_server_name], "_registered_tool_names", [])
+                    or []
+                )
+            except Exception:
+                pass
+        lines.append(
+            f"{_tool_count} tool(s) available across {len(connected_servers)} server(s)"
+        )
     else:
         lines.append("No MCP servers connected")
+
+    if _reload_status == "failed":
+        lines.append("MCP discovery failed during reload — check the server logs")
 
     if not reconnected and not added and not removed:
         lines.append("Tooling state was already current")

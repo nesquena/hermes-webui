@@ -45,7 +45,7 @@ def test_discovery_call_is_inside_a_nested_function():
     call_idx = _call_line_index()
     # Look upward from the call for the enclosing `def` and a `try:` guard
     # (test_issue1968 already pins the try/except window; this pins the def).
-    preceding = LINES[max(0, call_idx - 24):call_idx]
+    preceding = LINES[max(0, call_idx - 32):call_idx]
     assert any(line.lstrip().startswith("def ") for line in preceding), (
         "discover_mcp_tools() must be called from inside a nested function so "
         "it runs off the stream worker's critical path."
@@ -69,7 +69,7 @@ def test_discovery_thread_uses_context_local_home_not_env():
     thread.
     """
     call_idx = _call_line_index()
-    preceding = LINES[max(0, call_idx - 24):call_idx]
+    preceding = LINES[max(0, call_idx - 32):call_idx]
     assert any("set_hermes_home_override" in line for line in preceding), (
         "The discovery thread must assert the profile home through the "
         "context-local override (set_hermes_home_override), never by writing "

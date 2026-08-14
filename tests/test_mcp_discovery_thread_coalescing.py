@@ -1,8 +1,9 @@
 """Runtime regression tests for the WebUI's profile-scoped MCP readiness.
 
 Exercises the REAL production path — `api.streaming._ensure_mcp_discovery` /
-`_mcp_wait_readiness` / `_mcp_retry_discovery` — with fake discovery payloads.
-These map 1:1 onto the readiness contract the maintainer review demanded:
+`_mcp_wait_readiness` / `_mcp_retry_discovery` / `_wait_and_surface_mcp_readiness`
+— with fake discovery payloads.  These map 1:1 onto the readiness contract the
+maintainer review demanded:
 
 1. A discovery that finishes AFTER any fixed-timeout guess (e.g. 4s) must
    still be present for the first tool-bearing turn — the turn waits on the
@@ -10,9 +11,14 @@ These map 1:1 onto the readiness contract the maintainer review demanded:
 2. Several same-profile turns while one discovery is pending must share ONE
    owner thread and resolve on the SAME event, not each pay a fresh wait.
 3. Different profiles keep independent readiness/tool registries.
-4. Failure has an explicit surfaced outcome (status == 'failed'), and a
-   later explicit retry completes without touching an in-flight Agent
-   snapshot (hermes-agent only applies tools at the next turn's prologue).
+4. Failure has an explicit surfaced outcome: a thrown run becomes 'failed',
+   a PRODUCTION-style closure returning False becomes 'failed' (closures no
+   longer swallow failures into a fake 'completed'), and the outcome is
+   surfaced at the stream boundary before the agent snapshot is built.
+5. Readiness is generation-based and single-flight: a timed-out wait RETIRES
+   the run so a late-finishing owner can never flip state (or register tools
+   into an in-flight turn), and a retry while the prior owner is still
+   pending never leaves two live owners for one profile.
 """
 import sys
 import threading
@@ -26,7 +32,7 @@ from api import streaming  # noqa: E402
 
 
 def _make_discover(duration: float, fail: bool = False):
-    """Return (discover_fn, started_flag)."""
+    """Return (discover_fn, started_flag).  Raises on failure."""
     started = threading.Event()
 
     def _discover():
@@ -36,6 +42,32 @@ def _make_discover(duration: float, fail: bool = False):
             raise RuntimeError("simulated connect failure")
         if duration:
             time.sleep(duration)
+        return True
+
+    return _discover, started
+
+
+def _make_production_discover(duration: float, fail: bool = False):
+    """Return (discover_fn, started_flag) shaped like the PRODUCTION closures.
+
+    `_discover_mcp_background` / `_discover_default` catch their own
+    exceptions and return an explicit bool — they never raise.  The
+    readiness runner must record a False return as 'failed'; this is the
+    exact path the maintainer review found broken when closures swallowed
+    failures into a fake 'completed'.
+    """
+    started = threading.Event()
+
+    def _discover():
+        try:
+            started.set()
+            if duration:
+                time.sleep(duration)
+            if fail:
+                return False
+            return True
+        except Exception:
+            return False
 
     return _discover, started
 
@@ -97,6 +129,7 @@ class TestSharedReadiness:
 
         def _discover():
             runs.append(1)
+            return True
 
         r = streaming._ensure_mcp_discovery("profile-b2", _discover, "t")
         assert streaming._mcp_wait_readiness(r) == "completed"
@@ -118,11 +151,33 @@ class TestProfileIsolation:
 
 
 class TestFailureAndRetry:
-    def test_failure_surfaces_explicit_status(self):
-        """A failed discovery must surface status='failed', never hang."""
+    def test_thrown_discovery_becomes_failed(self):
+        """A discovery that RAISES must surface status='failed'."""
         discover, started = _make_discover(0.1, fail=True)
         readiness = streaming._ensure_mcp_discovery("profile-z", discover, "tz")
         assert streaming._mcp_wait_readiness(readiness) == "failed"
+
+    def test_closure_returning_false_becomes_failed(self):
+        """A PRODUCTION-style closure returning False must surface 'failed'.
+
+        Regression (maintainer review): the production closures used to
+        swallow exceptions and return None, so the runner recorded every
+        failed run as 'completed'.  The closures now return an explicit
+        bool and the runner must honor a False outcome.
+        """
+        discover, started = _make_production_discover(0.05, fail=True)
+        readiness = streaming._ensure_mcp_discovery(
+            "profile-z2", discover, "tz2"
+        )
+        assert streaming._mcp_wait_readiness(readiness) == "failed"
+
+    def test_closure_returning_true_completes(self):
+        """A production-style closure returning True completes."""
+        discover, started = _make_production_discover(0.05)
+        readiness = streaming._ensure_mcp_discovery(
+            "profile-z3", discover, "tz3"
+        )
+        assert streaming._mcp_wait_readiness(readiness) == "completed"
 
     def test_explicit_retry_after_failure_completes(self):
         """An explicit retry re-runs discovery and completes."""
@@ -135,3 +190,84 @@ class TestFailureAndRetry:
         assert r2.thread is not old_thread, "retry must run a fresh owner thread"
         assert streaming._mcp_wait_readiness(r2) == "completed"
         assert ok_started.is_set()
+
+
+class TestGenerations:
+    def test_timeout_retires_generation_and_cannot_flip_later(self):
+        """A timed-out wait retires the run; a late finish cannot flip state.
+
+        Regression (maintainer review): `_mcp_wait_readiness` used to set
+        'failed' after the cap without retiring the owner, so the thread
+        could later finish and overwrite the terminal outcome to
+        'completed' after the caller had already proceeded.
+        """
+        _old_cap = streaming._MCP_READINESS_WAIT_CAP_S
+        streaming._MCP_READINESS_WAIT_CAP_S = 0.15
+        try:
+            discover, started = _make_discover(0.6)  # finishes AFTER the cap
+            readiness = streaming._ensure_mcp_discovery(
+                "profile-g", discover, "tg"
+            )
+            assert streaming._mcp_wait_readiness(readiness) == "failed"
+            assert readiness.thread is None, "timed-out owner must be retired"
+            time.sleep(0.7)  # let the retired thread actually finish
+            assert readiness.status == "failed", (
+                "a late-finishing retired generation must never publish "
+                "terminal state over a timed-out wait"
+            )
+        finally:
+            streaming._MCP_READINESS_WAIT_CAP_S = _old_cap
+
+    def test_retry_while_pending_never_creates_two_owners(self):
+        """A retry while the prior owner is still running must be single-flight.
+
+        Regression (maintainer review): `_mcp_retry_discovery` used to
+        spawn a new daemon unconditionally, so a retry while the previous
+        owner was still pending left TWO live discovery threads for one
+        profile.  Retry now retires the old generation first.
+        """
+        slow_disc, slow_started = _make_discover(0.4)
+        r = streaming._ensure_mcp_discovery("profile-r", slow_disc, "tr1")
+        assert r.status == "pending"
+        old_thread = r.thread
+        assert old_thread is not None and old_thread.is_alive()
+        ok_disc, ok_started = _make_discover(0.05)
+        r2 = streaming._mcp_retry_discovery("profile-r", ok_disc, "tr2")
+        assert r2.thread is not old_thread, "retry must run a fresh owner"
+        assert r2.thread is not None and r2.thread.is_alive()
+        assert streaming._mcp_wait_readiness(r2) == "completed"
+        # The retired slow owner must finish WITHOUT flipping the outcome.
+        time.sleep(0.5)
+        assert r2.status == "completed", "retired generation must not publish"
+        # The registry still holds exactly ONE current owner for the profile.
+        assert streaming._MCP_READINESS["profile-r"].thread is r2.thread
+
+
+class TestStreamBoundarySurfacing:
+    def test_failed_status_surfaced_at_stream_boundary(self, caplog):
+        """A failed readiness must be surfaced before the agent snapshot."""
+        discover, started = _make_discover(0.05, fail=True)
+        readiness = streaming._ensure_mcp_discovery("profile-s", discover, "ts")
+        with caplog.at_level("WARNING", logger="api.streaming"):
+            status = streaming._wait_and_surface_mcp_readiness(
+                readiness, "profile-s", "sess-1"
+            )
+        assert status == "failed"
+        assert any(
+            "MCP discovery failed" in rec.getMessage() for rec in caplog.records
+        )
+
+    def test_completed_status_not_surfaced_as_failure(self, caplog):
+        """A completed readiness proceeds without a failure log."""
+        discover, started = _make_discover(0.05)
+        readiness = streaming._ensure_mcp_discovery(
+            "profile-s2", discover, "ts2"
+        )
+        with caplog.at_level("WARNING", logger="api.streaming"):
+            status = streaming._wait_and_surface_mcp_readiness(
+                readiness, "profile-s2", "sess-2"
+            )
+        assert status == "completed"
+        assert not any(
+            "MCP discovery failed" in rec.getMessage() for rec in caplog.records
+        )
