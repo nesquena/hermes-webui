@@ -1030,6 +1030,10 @@ def safe_resolve_ws(root: Path, requested: str) -> Path:
 _DIR_FD_OK = os.open in getattr(os, "supports_dir_fd", set())
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+# Windows opens files in TEXT mode by default (CRLF translation); every leaf
+# fd that reaches os.read / response serving must be opened in BINARY mode so
+# media bytes, ETag digests and Content-Lengths are never corrupted. No-op
+# (0) on POSIX. (#6988 round 3.)
 _O_BINARY = getattr(os, "O_BINARY", 0)
 
 
@@ -1051,12 +1055,9 @@ def open_anchored_fd(workspace: Path, target: Path, *, want_dir: bool) -> int:
     if not _DIR_FD_OK:
         # Windows / no openat: fall back to a plain pathname open. No new race
         # protection, but no regression vs the prior path-based behaviour, and
-        # symlink creation needs admin on Windows anyway.
-        flags = (
-            os.O_RDONLY
-            | (_O_DIRECTORY if want_dir else _O_BINARY)
-            | _O_NOFOLLOW
-        )
+        # symlink creation needs admin on Windows anyway. O_BINARY is required
+        # so the returned leaf fd reads raw bytes (no CRLF translation).
+        flags = os.O_RDONLY | (_O_DIRECTORY if want_dir else 0) | _O_NOFOLLOW | _O_BINARY
         try:
             return os.open(str(target), flags)
         except OSError:
@@ -1071,17 +1072,22 @@ def open_anchored_fd(workspace: Path, target: Path, *, want_dir: bool) -> int:
         for i, part in enumerate(rel_parts):
             is_last = i == len(rel_parts) - 1
             want_directory = (not is_last) or want_dir
-            flags = (
-                os.O_RDONLY
-                | _O_NOFOLLOW
-                | (_O_DIRECTORY if want_directory else _O_BINARY)
-            )
+            flags = os.O_RDONLY | _O_NOFOLLOW | (_O_DIRECTORY if want_directory else 0) | _O_BINARY
             try:
                 nfd = os.open(part, flags, dir_fd=fd)
             except OSError:
                 # ELOOP (component is a symlink — swapped in) or missing/wrong type.
                 raise FileNotFoundError(f"Not found: {target}") from None
-            os.close(fd)
+            try:
+                os.close(fd)
+            except BaseException:
+                # Never orphan the freshly-opened descriptor: close nfd before
+                # propagating the close failure. (#6988 round 3.)
+                try:
+                    os.close(nfd)
+                except OSError:
+                    pass
+                raise
             fd = nfd
         return fd
     except BaseException:
@@ -1119,13 +1125,22 @@ def open_anchored_fd_from_root(root_fd: int, rel_parts, *, want_dir: bool) -> in
         for i, part in enumerate(rel_parts):
             is_last = i == len(rel_parts) - 1
             want_directory = (not is_last) or want_dir
-            flags = os.O_RDONLY | _O_NOFOLLOW | (_O_DIRECTORY if want_directory else 0)
+            flags = os.O_RDONLY | _O_NOFOLLOW | (_O_DIRECTORY if want_directory else 0) | _O_BINARY
             try:
                 nfd = os.open(part, flags, dir_fd=fd)
             except OSError:
                 # ELOOP (component is a symlink — swapped in) or missing/wrong type.
                 raise FileNotFoundError(f"Not found: {part}") from None
-            os.close(fd)
+            try:
+                os.close(fd)
+            except BaseException:
+                # Never orphan the freshly-opened descriptor: close nfd before
+                # propagating the close failure. (#6988 round 3.)
+                try:
+                    os.close(nfd)
+                except OSError:
+                    pass
+                raise
             fd = nfd
         return fd
     except BaseException:
@@ -1160,7 +1175,7 @@ def open_anchored_create_fd(root: Path, dest: Path) -> int:
     if not _DIR_FD_OK:
         # Windows / no openat: create parent dirs then exclusively create the leaf.
         dest.parent.mkdir(parents=True, exist_ok=True)
-        return os.open(str(dest), os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW, 0o644)
+        return os.open(str(dest), os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_BINARY, 0o644)
 
     fd = os.open(str(root_resolved), os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW)
     try:
@@ -1173,11 +1188,20 @@ def open_anchored_create_fd(root: Path, dest: Path) -> int:
             except OSError:
                 # ELOOP — component swapped to a symlink (escape attempt).
                 raise FileNotFoundError(f"Not found: {dest}") from None
-            os.close(fd)
+            try:
+                os.close(fd)
+            except BaseException:
+                # Never orphan the freshly-opened descriptor: close nfd before
+                # propagating the close failure. (#6988 round 3.)
+                try:
+                    os.close(nfd)
+                except OSError:
+                    pass
+                raise
             fd = nfd
         return os.open(
             rel_parts[-1],
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_BINARY,
             0o644,
             dir_fd=fd,
         )

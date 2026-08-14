@@ -18737,16 +18737,18 @@ def _open_verified_leaf_fd(target: Path) -> int | None:
     ancestor — including the immediate parent — between the grant decision and
     the serve open is refused (ELOOP). The returned leaf fd is retained and the
     response is served from it, so later pathname changes cannot redirect the
-    serve. Returns None on any failure (fail closed). On platforms without
-    dir_fd support (Windows, where creating symlinks requires admin) falls back
-    to a plain O_NOFOLLOW open of the resolved leaf — no new race protection
-    but no regression vs the prior path-based behaviour.
+    serve. Returns None on any failure (fail closed).
+
+    Round 3: on platforms without dir_fd support (Windows — Python's os
+    module has no openat/dir_fd there), there is no stable-handle equivalent
+    to anchor the walk, and a plain pathname open of the resolved leaf would
+    silently re-expose the authorization-to-open race this route exists to
+    close (Windows reparse points are not an acceptable trust primitive).
+    The route therefore FAILS CLOSED (403 via the caller) instead of falling
+    back to a pathname open.
     """
     if not _DIR_FD_OK:
-        try:
-            return os.open(str(target), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-        except OSError:
-            return None
+        return None
     try:
         anchor = Path(target.anchor)
         rel = target.relative_to(anchor)
@@ -20098,9 +20100,14 @@ def _handle_media(handler, parsed):
     #   - exact-token grant: retain an already-verified LEAF fd (walked with
     #     O_NOFOLLOW from the filesystem anchor) instead of the mutable
     #     target.parent pathname.
+    # Round 3: the route REQUIRES a genuinely secure handle capability
+    # (dir_fd + per-component no-follow). Platforms without dir_fd (Windows —
+    # Python's os module has no openat equivalent there) have no stable-handle
+    # equivalent for this walk, so the request FAILS CLOSED (403) rather than
+    # re-resolving/opening the authorizing root, target, or target.parent by
+    # pathname after the decision — the known-vulnerable path is never used.
     # Fail closed (403) when the authority fd cannot be retained — the serve
     # path must never fall through to an unanchored pathname open. (#6988.)
-    serve_anchor = None
     media_anchor_fd = None      # retained authority fd (opened at authorization)
     media_rel_parts = None      # pre-computed relative components under the fd
     if session_media_allowed:
@@ -20116,23 +20123,22 @@ def _handle_media(handler, parsed):
         ]
         if matching_roots:
             root = max(matching_roots, key=lambda r: len(r.parts))
-            if _DIR_FD_OK:
-                try:
-                    media_rel_parts = target.relative_to(root).parts
-                except ValueError:
-                    media_rel_parts = None
-                media_anchor_fd = _open_allowed_root_fd(root)
-                if media_anchor_fd is None or not media_rel_parts:
-                    # Authority fd could not be retained, or the relative
-                    # components could not be computed: fail closed — never
-                    # fall through to a pathname open or serve a directory fd.
-                    return bad(handler, "Path not in allowed location", 403)
-            else:
-                # Windows / no openat: keep the round-1 pathname anchor (no
-                # new race protection, but symlink creation needs admin there).
-                serve_anchor = root
-        if media_anchor_fd is None and serve_anchor is None:
-            return bad(handler, "Path not in allowed location", 403)
+            if not _DIR_FD_OK:
+                # No secure anchored-open capability on this platform: fail
+                # closed instead of re-resolving root/target by pathname.
+                return bad(handler, "Path not in allowed location", 403)
+            try:
+                media_rel_parts = target.relative_to(root).parts
+            except ValueError:
+                media_rel_parts = None
+            media_anchor_fd = _open_allowed_root_fd(root)
+            if media_anchor_fd is None or not media_rel_parts:
+                # Authority fd could not be retained, or the relative
+                # components could not be computed: fail closed — never
+                # fall through to a pathname open or serve a directory fd.
+                return bad(handler, "Path not in allowed location", 403)
+    if media_anchor_fd is None:
+        return bad(handler, "Path not in allowed location", 403)
     # HTML inline previews change frequently (agent edits + re-renders).
     # Use no-store so the browser always fetches fresh content, avoiding stale
     # previews that require a manual full-page refresh to update.
@@ -20148,8 +20154,7 @@ def _handle_media(handler, parsed):
         cache_control = "private, no-cache"
     return _serve_file_bytes(
         handler, target, mime, disposition, cache_control, csp=csp,
-        anchor_root=serve_anchor, anchor_fd=media_anchor_fd,
-        rel_parts=media_rel_parts,
+        anchor_fd=media_anchor_fd, rel_parts=media_rel_parts,
     )
 
 
