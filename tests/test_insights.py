@@ -406,6 +406,41 @@ def test_insights_absolute_range_future_start_never_produces_future_window(monke
     assert data["daily_tokens"][-1]["date"] == _day(now)
 
 
+def test_insights_absolute_range_swapped_future_start_past_end_admits_no_future_same_day(monkeypatch, tmp_path):
+    """A future `start` paired with a past `end` is swapped, and the resulting
+    `end` is clamped to the server clock.  That post-swap collapse must be
+    treated like an omitted/future end - NOT admit same-day sessions stamped
+    after `now`.  The pre-swap 'clamped to now' flag wrongly stayed False and
+    left the cutoff at the next local midnight (exclusive), leaking them in.
+    Regression for Greptile P1 'Swapped range leaks future sessions'."""
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))                # server clock 2026-05-04 12:00
+    future = now + (10 * 86400)                                        # 2026-05-14 (future start)
+    past = now - (2 * 86400)                                           # 2026-05-02 (past end)
+    after_now = now + 3600                                             # 13:00 today (future vs server)
+    entries = [
+        {
+            "session_id": "at_now", "updated_at": now, "created_at": past,
+            "message_count": 2, "input_tokens": 200, "output_tokens": 80,
+            "estimated_cost": "0.0200", "model": "gpt-x",
+        },
+        {
+            "session_id": "future_same_day", "updated_at": after_now, "created_at": after_now,
+            "message_count": 1, "input_tokens": 999, "output_tokens": 999,
+            "estimated_cost": "0.9999", "model": "gpt-x",
+        },
+    ]
+    # Future start + past end -> server swaps them, clamps end to now.  The
+    # past..now window is preserved; a session stamped after the server clock
+    # on the same day must still be excluded (old pre-swap flag admitted it).
+    data = _call_insights(monkeypatch, tmp_path, entries,
+                          query=f"start={int(future)}&end={int(past)}", now=now)
+    assert data["total_sessions"] == 1
+    assert data["total_input_tokens"] == 200
+    assert data["total_output_tokens"] == 80
+    assert data["daily_tokens"][0]["date"] == _day(past)
+    assert data["daily_tokens"][-1]["date"] == _day(now)
+
+
 def test_insights_absolute_range_dst_transition_daily_buckets(monkeypatch, tmp_path):
     """Custom range straddling a DST transition must produce the correct
     number of calendar-day buckets.  The old fixed-86400-step logic would
