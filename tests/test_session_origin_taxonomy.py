@@ -169,7 +169,7 @@ def test_sidebar_payload_exposes_origin_metadata_fields():
     source = routes.read_text(encoding="utf-8")
     assert '"session_origin_counts"' in source
     assert '"session_origin_labels"' in source
-    assert "_sidebar_session_origin(s) == sidebar_source" in source
+    assert "_sidebar_session_origin(s) in selected_sidebar_source_set" in source
     assert '"session_origin",' in source
 
 

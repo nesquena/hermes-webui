@@ -196,6 +196,7 @@ def _session_list_cache_key(
     show_kanban_sessions: bool = False,
     source_filter: str | None = None,
     sidebar_source: str | None = None,
+    sidebar_sources: tuple[str, ...] | list[str] | None = None,
     archived_limit: int | None = None,
     archived_offset: int = 0,
 ) -> tuple:
@@ -209,6 +210,14 @@ def _session_list_cache_key(
         normalized_archived_offset = max(0, int(archived_offset or 0))
     except (TypeError, ValueError):
         normalized_archived_offset = 0
+    selected_sidebar_sources = sidebar_sources
+    if selected_sidebar_sources is None and sidebar_source:
+        selected_sidebar_sources = (sidebar_source,)
+    canonical_sidebar_sources = (
+        tuple(sorted({str(source) for source in selected_sidebar_sources if str(source)}))
+        if selected_sidebar_sources is not None
+        else None
+    )
     return (
         _session_list_cache_profile_scope(active_profile),
         bool(all_profiles),
@@ -222,7 +231,7 @@ def _session_list_cache_key(
         bool(show_webhook_sessions),
         bool(show_kanban_sessions),
         source_filter,
-        sidebar_source,
+        canonical_sidebar_sources,
         normalized_archived_limit,
         normalized_archived_offset,
     )

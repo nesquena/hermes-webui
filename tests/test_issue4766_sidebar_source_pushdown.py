@@ -226,6 +226,68 @@ def test_sidebar_source_omitted_returns_all_rows(monkeypatch):
     assert len([r for r in body["sessions"] if r["session_id"].startswith("cli-")]) == 20
 
 
+def test_repeated_sidebar_sources_return_one_deduplicated_union(monkeypatch):
+    rows = _session_rows(webui_count=1, cli_count=1)
+    rows.extend(
+        [
+            {
+                "session_id": "matrix-1",
+                "title": "Matrix room",
+                "profile": "default",
+                "archived": False,
+                "message_count": 2,
+                "updated_at": 3001,
+                "last_message_at": 3001,
+                "source": "matrix",
+                "raw_source": "matrix",
+                "session_source": "messaging",
+                "source_tag": "matrix",
+            },
+            {
+                "session_id": "telegram-1",
+                "title": "Telegram room",
+                "profile": "default",
+                "archived": False,
+                "message_count": 2,
+                "updated_at": 3002,
+                "last_message_at": 3002,
+                "source": "telegram",
+                "raw_source": "telegram",
+                "session_source": "messaging",
+                "source_tag": "telegram",
+            },
+        ]
+    )
+    _install_common_monkeypatches(monkeypatch, rows)
+
+    handler = _handle_sessions(
+        "http://example.com/api/sessions?sidebar_source=webui"
+        "&sidebar_source=matrix&sidebar_source=matrix"
+    )
+
+    body = handler.json_body()
+    assert handler.status == 200
+    assert {row["session_id"] for row in body["sessions"]} == {"webui-0", "matrix-1"}
+    assert body["session_origin_counts"] == {
+        "webui": 1,
+        "cli": 1,
+        "matrix": 1,
+        "telegram": 1,
+    }
+
+
+def test_any_malformed_repeated_sidebar_source_fails_closed(monkeypatch):
+    rows = _session_rows(webui_count=1, cli_count=1)
+    _install_common_monkeypatches(monkeypatch, rows)
+
+    handler = _handle_sessions(
+        "http://example.com/api/sessions?sidebar_source=webui&sidebar_source=../matrix"
+    )
+
+    assert handler.status == 400
+    assert handler.json_body()["error"] == "Invalid sidebar_source"
+
+
 def test_sidebar_source_returns_cross_bucket_counts(monkeypatch):
     rows = _session_rows(webui_count=30, cli_count=20, archived_webui_count=2, archived_cli_count=3)
     _install_common_monkeypatches(monkeypatch, rows)
@@ -286,6 +348,33 @@ def test_sidebar_source_varies_cache_key():
     assert key_webui != key_cli
     assert key_webui != key_omitted
     assert key_cli != key_omitted
+
+
+def test_sidebar_source_cache_key_canonicalizes_complete_source_set():
+    common = {
+        "active_profile": "default",
+        "all_profiles": False,
+        "show_cli_sessions": True,
+        "show_previous_messaging_sessions": False,
+        "show_cron_sessions": False,
+        "include_archived": False,
+    }
+
+    first = routes._session_list_cache_key(
+        **common,
+        sidebar_sources=("matrix", "webui", "matrix"),
+    )
+    reordered = routes._session_list_cache_key(
+        **common,
+        sidebar_sources=("webui", "matrix"),
+    )
+    matrix_only = routes._session_list_cache_key(
+        **common,
+        sidebar_sources=("matrix",),
+    )
+
+    assert first == reordered
+    assert first != matrix_only
 
 
 def test_frontend_sends_sidebar_source_param():
