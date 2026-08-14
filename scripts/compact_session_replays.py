@@ -16,8 +16,10 @@ import io
 import json
 import math
 import os
+import pickle
 import resource
 import shutil
+import sqlite3
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -339,11 +341,42 @@ class ArrayStats:
     changed: bool = False
 
 
+class SeenKeyIndex:
+    """Exact disk-backed membership with a bounded SQLite page cache."""
+
+    def __init__(self):
+        self.connection = sqlite3.connect('')
+        self.connection.execute('PRAGMA journal_mode=OFF')
+        self.connection.execute('PRAGMA synchronous=OFF')
+        self.connection.execute('PRAGMA temp_store=FILE')
+        self.connection.execute('PRAGMA cache_size=-4096')
+        self.connection.execute(
+            'CREATE TABLE seen ('
+            'namespace INTEGER NOT NULL, '
+            'replay_key BLOB NOT NULL, '
+            'PRIMARY KEY (namespace, replay_key)'
+            ') WITHOUT ROWID'
+        )
+
+    def add(self, namespace: int, key: tuple) -> bool:
+        encoded = sqlite3.Binary(pickle.dumps(key, protocol=5))
+        cursor = self.connection.execute(
+            'INSERT OR IGNORE INTO seen(namespace, replay_key) VALUES (?, ?)',
+            (namespace, encoded),
+        )
+        return cursor.rowcount == 1
+
+    def close(self) -> None:
+        self.connection.close()
+
+
 class ReplayReducer:
     def __init__(self):
         self.previous_partial = None
-        self.seen_incomplete: set[tuple] = set()
-        self.seen_durable: set[tuple] = set()
+        self.seen = SeenKeyIndex()
+
+    def close(self) -> None:
+        self.seen.close()
 
     def keep(self, message) -> bool:
         if isinstance(message, dict) and message.get('_partial'):
@@ -356,21 +389,18 @@ class ReplayReducer:
 
         incomplete_key = _incomplete_reasoning_message_id(message)
         if incomplete_key is not None:
-            if incomplete_key in self.seen_incomplete:
+            if not self.seen.add(1, incomplete_key):
                 return False
-            self.seen_incomplete.add(incomplete_key)
 
         durable_key = _durable_empty_assistant_replay_key(message)
         if durable_key is not None:
-            if durable_key in self.seen_durable:
+            if not self.seen.add(2, durable_key):
                 return False
-            self.seen_durable.add(durable_key)
         return True
 
 
 def _transform_array(reader: StreamReader, output: TextIO | None) -> ArrayStats:
     stats = ArrayStats()
-    reducer = ReplayReducer()
     reader.expect('[')
     if output is not None:
         output.write('[')
@@ -381,31 +411,35 @@ def _transform_array(reader: StreamReader, output: TextIO | None) -> ArrayStats:
         if output is not None:
             output.write(']')
         return stats
-    while True:
-        message = reader.decode_value()
-        stats.input_count += 1
-        if reducer.keep(message):
-            stats.output_count += 1
-            if output is not None:
-                if not first_output:
-                    output.write(',')
-                output.write(
-                    json.dumps(
-                        message,
-                        ensure_ascii=False,
-                        separators=(',', ':'),
-                        allow_nan=False,
+    reducer = ReplayReducer()
+    try:
+        while True:
+            message = reader.decode_value()
+            stats.input_count += 1
+            if reducer.keep(message):
+                stats.output_count += 1
+                if output is not None:
+                    if not first_output:
+                        output.write(',')
+                    output.write(
+                        json.dumps(
+                            message,
+                            ensure_ascii=False,
+                            separators=(',', ':'),
+                            allow_nan=False,
+                        )
                     )
-                )
-                first_output = False
-        else:
-            stats.changed = True
-        reader.skip_ws()
-        delimiter = reader.take()
-        if delimiter == ']':
-            break
-        if delimiter != ',':
-            raise StreamJSONError(f'expected array delimiter, got {delimiter!r}')
+                    first_output = False
+            else:
+                stats.changed = True
+            reader.skip_ws()
+            delimiter = reader.take()
+            if delimiter == ']':
+                break
+            if delimiter != ',':
+                raise StreamJSONError(f'expected array delimiter, got {delimiter!r}')
+    finally:
+        reducer.close()
     if output is not None:
         output.write(']')
     return stats

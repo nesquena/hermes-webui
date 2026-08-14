@@ -154,6 +154,43 @@ def test_offline_compactor_memory_is_bounded_for_many_replays(tmp_path):
     assert repaired["messages"] == [_row()]
 
 
+def test_offline_compactor_memory_is_bounded_for_many_unique_ids(tmp_path):
+    sidecar = tmp_path / "many-unique-replays.json"
+    copies = 500_000
+    with sidecar.open("w", encoding="utf-8") as handle:
+        handle.write('{"session_id":"many-unique","messages":[')
+        for index in range(copies):
+            if index:
+                handle.write(',')
+            handle.write(
+                json.dumps(
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "id": f"assistant-{index}",
+                        "finish_reason": "stop",
+                    },
+                    separators=(",", ":"),
+                )
+            )
+        handle.write('],"context_messages":[]}')
+
+    script = Path(__file__).resolve().parents[1] / "scripts" / "compact_session_replays.py"
+    completed = subprocess.run(
+        [sys.executable, str(script), "--dry-run", str(sidecar)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    result = json.loads(completed.stdout)
+    assert result["status"] == "no_change"
+    assert result["arrays"]["messages"]["output"] == copies
+    assert result["max_rss_kib"] < 192 * 1024
+
+
 def test_offline_compactor_refuses_publish_after_source_drift(tmp_path, monkeypatch):
     from scripts import compact_session_replays as compactor
 

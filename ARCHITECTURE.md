@@ -251,11 +251,14 @@ python scripts/compact_session_replays.py ~/.hermes/webui/sessions/<session-id>.
 
 The tool performs separate analysis and write passes, limits one decoded JSON
 item to 64 MiB, and transforms only top-level `messages` and
-`context_messages`. It publishes only while the source inode/stat signature,
-SHA-256, and generation still match. Ambiguous or non-JSON-stable rows are
-retained. A content-addressed byte-exact backup and checksum manifest are
-fsynced before the compacted sidecar is atomically installed; both compact and
-restore advance `_sidecar_generation_v1`.
+`context_messages`. Exact replay membership is tracked in a temporary SQLite
+index with a bounded page cache, so RAM does not grow with the number of unique
+message identities; operators must provide temporary-disk headroom proportional
+to that unique-key count. It publishes only while the source inode/stat
+signature, SHA-256, and generation still match. Ambiguous or non-JSON-stable
+rows are retained. A content-addressed byte-exact backup and checksum manifest
+are fsynced before the compacted sidecar is atomically installed; both compact
+and restore advance `_sidecar_generation_v1`.
 
 Rollback is explicit and also fail-closed:
 
