@@ -8268,6 +8268,8 @@ function renderSessionListFromCache(){
           list.scrollTop=Math.max(0,list.scrollTop+rowRect.bottom-listRect.bottom);
         }
       }
+    }else{
+      _resyncSessionVirtualWindowAfterRender(list,listScrollTopBeforeRender,virtualWindow);
     }
   }else if(virtualAnchorScrollTop!==null){
     list.scrollTop=virtualAnchorScrollTop;
