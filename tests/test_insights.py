@@ -288,6 +288,37 @@ def test_insights_absolute_range_omitted_or_future_end_admits_no_future_same_day
     assert data2["total_input_tokens"] == 200
 
 
+def test_insights_absolute_range_explicit_today_end_admits_no_future_same_day(monkeypatch, tmp_path):
+    """An explicit `end` whose calendar day is TODAY (e.g. today's midnight,
+    which is `< now` so it does not collapse via min(end, now)) must still not
+    admit same-day sessions stamped after the server clock.  The end_exclusive
+    next-local-midnight cutoff previously leaked them in because
+    `end_clamped_to_now == (end_ts == now)` was False for a genuine today
+    timestamp.  Regression for Greptile P1 'Today's end leaks future sessions'."""
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))                # server clock 2026-05-04 12:00
+    today_midnight = time.mktime((2026, 5, 4, 0, 0, 0, 0, 0, -1))     # explicit end = today 00:00 (< now)
+    start_ts = time.mktime((2026, 5, 1, 0, 0, 0, 0, 0, -1))            # selected start day
+    after_now = now + 3600                                              # 13:00 same day (future vs server)
+    entries = [
+        {
+            "session_id": "before_end", "updated_at": today_midnight + 60, "created_at": start_ts,
+            "message_count": 2, "input_tokens": 200, "output_tokens": 80,
+            "estimated_cost": "0.0200", "model": "gpt-x",
+        },
+        {
+            "session_id": "future_same_day", "updated_at": after_now, "created_at": after_now,
+            "message_count": 1, "input_tokens": 999, "output_tokens": 999,
+            "estimated_cost": "0.9999", "model": "gpt-x",
+        },
+    ]
+    # Explicit end = today midnight.  A session BEFORE the server clock but
+    # after that boundary still belongs; the future-stamped one must not leak.
+    data = _call_insights(monkeypatch, tmp_path, entries,
+                          query=f"start={int(start_ts)}&end={int(today_midnight)}", now=now)
+    assert data["total_sessions"] == 1
+    assert data["total_input_tokens"] == 200
+
+
 def test_insights_absolute_range_invalid_falls_back_to_days(monkeypatch, tmp_path):
     now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
     entries = [
