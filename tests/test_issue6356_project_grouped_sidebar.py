@@ -401,7 +401,7 @@ const NO_PROJECT_FILTER = '__none__';
 const SESSION_SWIPE_DURATION_MS = 0;
 const SESSION_SWIPE_REFLOW_LEAD_MS = 0;
 const SESSION_VIRTUAL_ROW_HEIGHT = 52;
-const SESSION_VIRTUAL_BUFFER_ROWS = 0;
+const SESSION_VIRTUAL_BUFFER_ROWS = 12;
 const SESSION_VIRTUAL_THRESHOLD_ROWS = 80;
 const SESSION_GROUP_HEADER_HEIGHT = 30;
 const SESSION_ARCHIVED_PAGE_SIZE = 25;
@@ -480,7 +480,8 @@ function _sessionVirtualSpacer(height, where) {
   spacer.style.height = Math.max(0, Math.round(height || 0)) + 'px';
   return spacer;
 }
-function _resyncSessionVirtualWindowAfterRender() {}
+let groupedResyncCalls = 0;
+function _resyncSessionVirtualWindowAfterRender() { groupedResyncCalls += 1; }
 function _renderOneSession(session) {
   const row = document.createElement('div');
   row.className = 'session-item' + (session.session_id === activeSid ? ' active' : '');
@@ -532,15 +533,19 @@ try {
         const rowRect = row.getBoundingClientRect();
         return rowRect.bottom > listRect.top && rowRect.top < listRect.bottom;
       };
-  renderSessionListFromCache();
-  _sessionVirtualScrollList = list;
-  _scheduleSessionVirtualizedRender();
-  const projectBar = list.querySelector('.project-bar');
-  const sourceTabs = list.querySelector('.session-source-tabs');
+      renderSessionListFromCache();
+      _sessionVirtualScrollList = list;
+      _scheduleSessionVirtualizedRender();
+      list.scrollTop = Math.floor(list.scrollHeight / 2);
+      activeSid = null;
+      renderSessionListFromCache();
+      const projectBar = list.querySelector('.project-bar');
+      const sourceTabs = list.querySelector('.session-source-tabs');
   window.groupedGeometry.projectBarHeight = projectBar ? projectBar.getBoundingClientRect().height : 0;
   window.groupedGeometry.sourceTabsHeight = sourceTabs ? sourceTabs.getBoundingClientRect().height : 0;
-  window.groupedGeometry.virtualTotal = Number(list.dataset.sessionVirtualTotal);
-  window.groupedGeometry.headers = list.querySelectorAll('.project-session-header').length;
+      window.groupedGeometry.virtualTotal = Number(list.dataset.sessionVirtualTotal);
+      window.groupedGeometry.headers = list.querySelectorAll('.project-session-header').length;
+      window.groupedGeometry.passiveResyncCalls = groupedResyncCalls;
   const belowSid = `session-${ROW_TOTAL - 1}`;
   activeSid = belowSid;
   list.scrollTop = 0;
@@ -609,6 +614,7 @@ try {
             assert observed["error"] is None, (total, case, observed["error"])
             assert observed["virtualTotal"] == total, (total, case, observed)
             assert observed["headers"] > 0
+            assert observed["passiveResyncCalls"] >= 1, (total, case, observed)
             assert observed["belowVisible"], (total, case, observed)
             assert abs(observed["belowGeometry"]["bottom"] - observed["belowGeometry"]["listBottom"]) <= 0.5, (total, case, observed["belowGeometry"])
             assert observed["aboveIntersects"], (total, case, observed["aboveGeometry"])
@@ -1242,14 +1248,35 @@ def _extract_js_function(source, name):
     raise AssertionError(f"unterminated JavaScript function: {name}")
 
 
+def test_grouped_active_row_lookup_resolves_lineage_parent():
+    helper = _active_row_helper()
+    script = """
+const parent = {session_id: 'parent', _child_sessions: [{session_id: 'child'}]};
+const _allSessions = [parent];
+function _sessionLineageContainsSession(session, sid) {
+  return !!(session && sid && (session.session_id === sid || (session._child_sessions || []).some(child => child && child.session_id === sid)));
+}
+__HELPER__
+const list = {querySelectorAll: () => [{dataset: {sid: 'parent'}}]};
+const row = _findGroupedActiveRow(list, 'child');
+process.stdout.write(JSON.stringify({resolved: row && row.dataset.sid}));
+""".replace("__HELPER__", helper)
+    assert _run_node_json(script) == {"resolved": "parent"}
+
+
 def _active_row_helper():
     try:
         return _extract_js_function(SESSIONS_JS, "_findGroupedActiveRow")
     except ValueError:
         return """function _findGroupedActiveRow(list, activeSidForSidebar) {
   if (!list || !activeSidForSidebar || typeof list.querySelectorAll !== 'function') return null;
-  const rows = [...list.querySelectorAll('.session-item[data-sid]')];
-  return rows.find(row => row.dataset.sid === activeSidForSidebar) || null;
+const rows = [...list.querySelectorAll('.session-item[data-sid]')];
+  const exact = rows.find(row => row.dataset.sid === activeSidForSidebar);
+  if (exact) return exact;
+  return rows.find(row => {
+    const rowSession = Array.isArray(_allSessions) ? _allSessions.find(item => item && item.session_id === row.dataset.sid) : null;
+    return !!(rowSession && _sessionLineageContainsSession(rowSession, activeSidForSidebar));
+  }) || null;
 }"""
 
 
