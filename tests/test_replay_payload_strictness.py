@@ -170,6 +170,63 @@ def test_default_prefix_accepts_only_exact_structured_payload():
     assert _messages_have_prefix([different], [first]) is False
 
 
+def test_display_merge_collapses_only_exact_durable_empty_replay():
+    from api.streaming import _merge_display_messages_after_agent_result
+
+    prompt = "Continue the active turn."
+    token = "stream:active-turn"
+    active_user = {
+        "role": "user",
+        "content": prompt,
+        "_active_turn_token": token,
+    }
+    replay = _empty_assistant("durable-empty")
+    previous = [active_user, replay]
+    provenance = {
+        "active_turn_identity": {
+            "token": token,
+            "text": prompt,
+            "current_turn_user_idx": 0,
+            "turn_id": "turn-active",
+        }
+    }
+
+    merged = _merge_display_messages_after_agent_result(
+        previous,
+        previous,
+        previous + [copy.deepcopy(replay)],
+        prompt,
+        verification_nudge_provenance=provenance,
+    )
+    assert merged == previous
+
+    distinct = copy.deepcopy(replay)
+    distinct["reasoning"] = "different"
+    merged_distinct = _merge_display_messages_after_agent_result(
+        previous,
+        previous,
+        previous + [distinct],
+        prompt,
+        verification_nudge_provenance=provenance,
+    )
+    assert merged_distinct == previous + [distinct]
+
+    synthetic_only = _merge_display_messages_after_agent_result(
+        previous + [copy.deepcopy(replay)],
+        previous + [copy.deepcopy(replay)],
+        [
+            {
+                "role": "user",
+                "content": "[System: verify the workspace]",
+                "_verification_stop_synthetic": True,
+            }
+        ],
+        prompt,
+        verification_nudge_provenance=provenance,
+    )
+    assert synthetic_only == previous
+
+
 def test_partial_reducer_only_removes_identical_rows():
     from api.models import _collapse_adjacent_duplicate_partials
 

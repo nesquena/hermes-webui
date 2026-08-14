@@ -66,6 +66,7 @@ from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
 from api.models import (
     _canonical_message_digest,
+    _collapse_duplicate_durable_empty_assistant_replays,
     _collapse_duplicate_incomplete_message_ids,
     _durable_empty_assistant_replay_key,
     _incomplete_reasoning_message_id,
@@ -6592,6 +6593,9 @@ def _merge_display_messages_after_agent_result(
     # (#5334; same internal-control-message class as #3320/#3821/#4373/#4875)
     previous_display = _drop_synthetic_control_messages(previous_display)
     previous_display, _ = _collapse_duplicate_incomplete_message_ids(previous_display)
+    previous_display, _ = _collapse_duplicate_durable_empty_assistant_replays(
+        previous_display
+    )
     # Deduplicate stale _partial messages that accumulated in previous_display.
     # A bug in cancel_stream() could insert multiple identical _partial messages
     # when _stripped was empty but _has_reasoning/_has_tools was True. The
@@ -6922,6 +6926,7 @@ def _merge_display_messages_after_agent_result(
         merged.append(copy.deepcopy(display_msg))
         if key is not None:
             seen.add(key)
+    merged, _ = _collapse_duplicate_durable_empty_assistant_replays(merged)
     return merged
 
 
