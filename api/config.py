@@ -4868,6 +4868,7 @@ _available_models_cache_lock = threading.RLock()
 # on the next expiry, and the caller still re-checks ``get_auth_status``
 # per authenticated provider below.
 _PROVIDER_ENUM_CACHE: dict[str, tuple[float, list]] = {}
+_PROVIDER_ENUM_CACHE_INFLIGHT: dict[str, threading.Event] = {}
 _PROVIDER_ENUM_CACHE_TTL_SECONDS = 120.0
 _PROVIDER_ENUM_CACHE_LOCK = threading.Lock()
 
@@ -4877,19 +4878,41 @@ def _list_available_providers_cached(profile_key: str) -> list:
 
     The uncached core call can take seconds (serial per-provider probes).
     Keep the cache small and TTL-bounded so credential edits are picked up
-    within two minutes and memory stays flat.
+    within two minutes and memory stays flat.  Concurrent misses for the same
+    profile are coalesced so only one caller performs the expensive probe.
     """
-    now = time.monotonic()
-    with _PROVIDER_ENUM_CACHE_LOCK:
-        hit = _PROVIDER_ENUM_CACHE.get(profile_key)
-        if hit is not None and now - hit[0] < _PROVIDER_ENUM_CACHE_TTL_SECONDS:
-            return hit[1]
-    from hermes_cli.models import list_available_providers as _lap
+    while True:
+        with _PROVIDER_ENUM_CACHE_LOCK:
+            now = time.monotonic()
+            hit = _PROVIDER_ENUM_CACHE.get(profile_key)
+            if hit is not None and now - hit[0] < _PROVIDER_ENUM_CACHE_TTL_SECONDS:
+                return hit[1]
+            wait_for = _PROVIDER_ENUM_CACHE_INFLIGHT.get(profile_key)
+            if wait_for is None:
+                wait_for = threading.Event()
+                _PROVIDER_ENUM_CACHE_INFLIGHT[profile_key] = wait_for
+                break
+        # A different caller owns this profile's cold refresh.  Do not hold
+        # the cache lock while waiting; unrelated profiles remain independent.
+        wait_for.wait()
 
-    result = _lap()
-    with _PROVIDER_ENUM_CACHE_LOCK:
-        _PROVIDER_ENUM_CACHE[profile_key] = (now, result)
-    return result  # must be RLock: cold path refactoring moved slow work inside this lock, requiring re-entry
+    try:
+        from hermes_cli.models import list_available_providers as _lap
+
+        result = _lap()
+        completed_at = time.monotonic()
+        with _PROVIDER_ENUM_CACHE_LOCK:
+            _PROVIDER_ENUM_CACHE[profile_key] = (completed_at, result)
+            _PROVIDER_ENUM_CACHE_INFLIGHT.pop(profile_key).set()
+        return result
+    except BaseException:
+        # Never leave waiters blocked, and allow the next caller to retry after
+        # a failed probe rather than caching a partial/failed result.
+        with _PROVIDER_ENUM_CACHE_LOCK:
+            owner = _PROVIDER_ENUM_CACHE_INFLIGHT.pop(profile_key, None)
+            if owner is not None:
+                owner.set()
+        raise
 _cache_build_cv = threading.Condition(_available_models_cache_lock)  # shares underlying RLock so notify_all() is safe inside with _available_models_cache_lock
 _cache_build_in_progress = False  # True while a cold path is actively building
 
@@ -6811,7 +6834,6 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
 
         _hermes_auth_used = False
         try:
-            from hermes_cli.models import list_available_providers as _lap
             from hermes_cli.auth import get_auth_status as _gas
 
             for _p in _list_available_providers_cached(_active_profile_name or "default"):
