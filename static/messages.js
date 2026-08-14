@@ -9119,8 +9119,20 @@ function _notificationOptions(body,options={}){
 const _NOTIFICATION_IDENTITY_MAX_LENGTH=512;
 const _NOTIFICATION_CLAIM_DB='hermes-webui-notification-claims-v1';
 const _NOTIFICATION_CLAIM_STORE='event-identities';
+function _notificationEventFallbackId(event){
+  const source=`${String(event&&event.type||'event')}\n${String(event&&event.data||'')}`;
+  let first=2166136261;
+  let second=16777619;
+  for(let i=0;i<source.length;i++){
+    const code=source.charCodeAt(i);
+    first=Math.imul(first^code,16777619);
+    second=Math.imul(second^code,2246822519);
+  }
+  return `legacy:${(first>>>0).toString(16)}${(second>>>0).toString(16)}`;
+}
 function _captureNotificationEventIdentity(streamId,event){
-  return {streamId,lastEventId:event&&event.lastEventId};
+  const lastEventId=String(event&&event.lastEventId||'').trim()||_notificationEventFallbackId(event);
+  return {streamId,lastEventId};
 }
 function _sendStreamNotification(title,body,eventIdentity,options={}){
   return sendBrowserNotification(title,body,{...options,eventIdentity});

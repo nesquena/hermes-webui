@@ -322,6 +322,7 @@ def _keyed_edge_driver(
     worker_response: str = "shown",
     permission: str = "granted",
     backgrounded: bool = True,
+    missing_event_id: bool = False,
 ) -> dict:
     notification_options = _notification_helper_source()
     show_notification = extract_function(MESSAGES_JS, "_showPwaNotification")
@@ -332,6 +333,7 @@ def _keyed_edge_driver(
         const vm = require('vm');
         const workerResponse = {json.dumps(worker_response)};
         const permission = {json.dumps(permission)};
+        const missingEventId = {json.dumps(missing_event_id)};
         const permissionResult = permission === 'default' ? 'granted' : permission;
         const trace = [];
         let claimAttempts = 0;
@@ -403,15 +405,19 @@ def _keyed_edge_driver(
         );
 
         (async () => {{
+          const identity = missingEventId
+            ? context._captureNotificationEventIdentity('stream-6673', {{type: 'approval', data: '{{"description":"Approve"}}'}})
+            : {{streamId: 'stream-6673', lastEventId: 'stream-6673:edge'}};
           const result = await context.sendBrowserNotification(
             'Response complete',
             'The task finished.',
-            {{sid: '{FIXTURE['sid']}', forceHidden: {json.dumps(backgrounded)}, eventIdentity: {{streamId: 'stream-6673', lastEventId: 'stream-6673:edge'}}}},
+            {{sid: '{FIXTURE['sid']}', forceHidden: {json.dumps(backgrounded)}, eventIdentity: identity}},
           );
           console.log(JSON.stringify({{
             result: result === undefined ? 'undefined' : result,
             claimAttempts,
             directFallbacks,
+            identity: missingEventId ? identity : undefined,
             trace,
           }}));
         }})().catch(error => {{
@@ -773,6 +779,16 @@ def test_keyed_permission_is_resolved_before_claim_and_denial_blocks_claim():
     assert denied["trace"] == []
     assert denied["result"] == "undefined"
     assert denied["claimAttempts"] == 0
+
+
+def test_missing_sse_id_gets_a_stable_claim_identity_instead_of_dropping_delivery():
+    result = _keyed_edge_driver(missing_event_id=True)
+
+    assert result["result"] == "shown"
+    assert result["claimAttempts"] == 1
+    assert result["directFallbacks"] == 0
+    assert result["identity"]["streamId"] == "stream-6673"
+    assert result["identity"]["lastEventId"].startswith("legacy:")
 
 
 def test_public_sender_repeats_same_session_toast_with_stable_tag():
