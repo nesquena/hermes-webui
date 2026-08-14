@@ -3340,8 +3340,10 @@ function _currentTailUserMessage(messages,candidateStart,candidateTimestamp,cand
     }
     if((typeof _isCanonicalAssistantToolCallEnvelope==='function'&&_isCanonicalAssistantToolCallEnvelope(msg))
       ||String(msg.role||'')==='tool'){
-      if(msg._active_turn_token!==undefined
-        &&msg._active_turn_token!==authoritativeToken) return null;
+      if(Object.prototype.hasOwnProperty.call(msg,'_active_turn_token')){
+        if(!authoritativeToken||msg._active_turn_token!==authoritativeToken) return null;
+      }else if(typeof _isTailActivityOwnedByCandidateTurn!=='function'
+        ||!_isTailActivityOwnedByCandidateTurn(msg,candidateStart,candidateTimestamp)) return null;
       crossedActivity=true;
       continue;
     }

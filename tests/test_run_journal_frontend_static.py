@@ -432,6 +432,7 @@ const canonicalTopNameCall = {{call_id:'call-2', name:'inspect'}};
 const sameTurnEnvelope = {{role:'assistant', content:'', _ts:10, tool_calls:[canonicalCall]}};
 const topNameEnvelope = {{role:'assistant', content:'', _ts:10, tool_calls:[canonicalTopNameCall]}};
 const sameTurnTool = {{role:'tool', content:'result', tool_call_id:'call-1', _ts:11}};
+const taggedEnvelope = {{...sameTurnEnvelope, _ts:undefined, timestamp:undefined, _active_turn_token:'turn-1:10'}};
 const ordinaryAssistant = {{role:'assistant', content:'done', _ts:12}};
 const liveAssistant = {{role:'assistant', content:'working', _live:true, _ts:12, _active_turn_token:'turn-1:10'}};
 const compaction = {{role:'user', content:'[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted.', _ts:10.5}};
@@ -451,12 +452,13 @@ const cases = [
   {{name:'canonical envelope plus tool result', messages:[priorUser,currentUser,sameTurnEnvelope,sameTurnTool], expect:prompt}},
   {{name:'tool result only', messages:[priorUser,currentUser,sameTurnTool], expect:prompt}},
   {{name:'ordinary assistant boundary', messages:[priorUser,currentUser,ordinaryAssistant], expect:null}},
-  {{name:'older envelope activity', messages:[priorUser,currentUser,{{...sameTurnEnvelope,_ts:9}}], currentExpect:prompt, pendingExpect:null}},
-  {{name:'older tool activity', messages:[priorUser,currentUser,sameTurnEnvelope,{{...sameTurnTool,_ts:9}}], currentExpect:prompt, pendingExpect:null}},
-  {{name:'missing envelope timestamp', messages:[priorUser,currentUser,{{...sameTurnEnvelope,_ts:undefined}}], currentExpect:prompt, pendingExpect:null}},
-  {{name:'missing tool timestamp', messages:[priorUser,currentUser,sameTurnEnvelope,{{...sameTurnTool,_ts:undefined}}], currentExpect:prompt, pendingExpect:null}},
-  {{name:'missing candidate timestamp', messages:[priorUser,currentUser,sameTurnEnvelope], candidateStart:null, currentExpect:prompt, pendingExpect:null}},
+  {{name:'older envelope activity', messages:[priorUser,currentUser,{{...sameTurnEnvelope,_ts:9}}], currentExpect:null, pendingExpect:null}},
+  {{name:'older tool activity', messages:[priorUser,currentUser,sameTurnEnvelope,{{...sameTurnTool,_ts:9}}], currentExpect:null, pendingExpect:null}},
+  {{name:'missing envelope timestamp', messages:[priorUser,currentUser,{{...sameTurnEnvelope,_ts:undefined}}], currentExpect:null, pendingExpect:null}},
+  {{name:'missing tool timestamp', messages:[priorUser,currentUser,sameTurnEnvelope,{{...sameTurnTool,_ts:undefined}}], currentExpect:null, pendingExpect:null}},
+  {{name:'missing candidate timestamp', messages:[priorUser,currentUser,sameTurnEnvelope], candidateStart:null, currentExpect:null, pendingExpect:null}},
   {{name:'same-turn activity', messages:[priorUser,currentUser,{{...sameTurnEnvelope,timestamp:10,_ts:undefined}},{{...sameTurnTool,timestamp:10.1,_ts:undefined}}], expect:prompt}},
+  {{name:'same-token tagged activity', messages:[priorUser,currentUser,taggedEnvelope], candidateStart:null, expect:prompt, pendingExpect:null}},
   {{name:'compaction marker', messages:[priorUser,currentUser,compaction,sameTurnEnvelope], expect:prompt}},
   {{name:'live tail', messages:[priorUser,currentUser,liveAssistant], expect:prompt}},
   {{name:'live tail missing token', messages:[priorUser,currentUser,{{role:'assistant', content:'working', _live:true, _ts:12}}], currentExpect:null, pendingExpect:prompt}},
