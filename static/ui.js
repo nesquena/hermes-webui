@@ -10652,12 +10652,24 @@ async function _waitForServerThenReload(opts){
 
 function _pendingCurrentTailUserMessage(messages,candidateStart,candidateTimestamp,activeTurnToken){
   const list=Array.isArray(messages)?messages:[];
+  let crossedActivity=false;
   for(let i=list.length-1;i>=0;i--){
     const msg=list[i];
     if(!msg) continue;
     if(String(msg.role||'')==='user'){
       // Compaction rows are synthetic user-role markers, not submitted turns.
       if(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(msg)) continue;
+      if(crossedActivity){
+        if(Object.prototype.hasOwnProperty.call(msg,'_active_turn_token')){
+          if(typeof activeTurnToken!=='string'||!activeTurnToken.trim().length
+            ||msg._active_turn_token!==activeTurnToken) return null;
+        }else{
+          const rowTimestamp=_messageTimestampSeconds(msg);
+          const candidateTimestampValue=_firstValidTimestampSeconds(candidateStart,candidateTimestamp);
+          if(rowTimestamp===null||candidateTimestampValue===null
+            ||Math.abs(rowTimestamp-candidateTimestampValue)>_PENDING_ACTIVE_TURN_TS_EPSILON) return null;
+        }
+      }
       return msg;
     }
     if((typeof _isCanonicalAssistantToolCallEnvelope==='function'&&_isCanonicalAssistantToolCallEnvelope(msg))
@@ -10665,10 +10677,12 @@ function _pendingCurrentTailUserMessage(messages,candidateStart,candidateTimesta
       if(msg._active_turn_token!==undefined){
         if(typeof activeTurnToken!=='string'||!activeTurnToken.trim().length
           ||msg._active_turn_token!==activeTurnToken) return null;
+        crossedActivity=true;
         continue;
       }
       if(typeof _isTailActivityOwnedByCandidateTurn!=='function'
         ||!_isTailActivityOwnedByCandidateTurn(msg,candidateStart,candidateTimestamp)) return null;
+      crossedActivity=true;
       continue;
     }
     if(msg._live) continue;

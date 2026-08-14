@@ -219,10 +219,14 @@ def _run_pending_session_message_probe() -> dict:
             _function_body(SESSIONS_SRC, "function _normalizeUserTranscriptText"),
             _function_body(SESSIONS_SRC, "function _sameTranscriptMessage"),
             _function_body(SESSIONS_SRC, "function _opaqueActiveTurnToken"),
+            _function_body(UI_SRC, "function _timestampSeconds"),
+            _function_body(UI_SRC, "function _firstValidTimestampSeconds"),
+            _function_body(UI_SRC, "function _isTailActivityOwnedByCandidateTurn"),
+            _function_body(UI_SRC, "function _isCanonicalAssistantToolCallEnvelope"),
+            _function_body(UI_SRC, "function _messageTimestampSeconds"),
             _function_body(UI_SRC, "function _pendingCurrentTailUserMessage"),
-            _optional_function_body(UI_SRC, "function _messageTimestampSeconds"),
-            _optional_function_body(UI_SRC, "function _activeTurnTokenMatches"),
-            _optional_function_body(UI_SRC, "function _pendingActiveTurnUserMessage"),
+            _function_body(UI_SRC, "function _activeTurnTokenMatches"),
+            _function_body(UI_SRC, "function _pendingActiveTurnUserMessage"),
             _function_body(UI_SRC, "function _isContextCompactionText"),
             _function_body(UI_SRC, "function _isContextCompactionMessage"),
             _function_body(UI_SRC, "function getPendingSessionMessage"),
@@ -341,17 +345,16 @@ const noStartedAtResult = getPendingSessionMessage(
   midRunTranscript
 );
 
-// Regression (review round 2): two completed identical-text turns whose
-// started_at differ by ~1s. The old 1.5s tolerance adopted the EARLIER row as
-// the "active turn", hiding the second (still-pending) turn and copying its
-// attachments onto the old row. With the precision-only epsilon the second turn
-// is materialized and the first row stays untouched.
+// Regression (review round 2): an older same-text user row at 100 is followed
+// by an untagged tool row at 102 while the pending turn starts at 101. The old
+// tail scan adopted the earlier row, hiding the pending turn and copying its
+// attachments onto the old row. The second turn must materialize instead.
 const rapidRepeatTurnOne = {{role:'user', content:prompt, timestamp:100}};
-const rapidRepeatAnswerOne = {{role:'assistant', content:'done', timestamp:101}};
+const rapidRepeatOldTool = {{role:'tool', content:'old result', timestamp:102, tool_call_id:'old-call'}};
 const rapidRepeatSecondAttachments = [{{name:'second.txt', path:'second.txt', mime:'text/plain'}}];
 const rapidRepeatResult = getPendingSessionMessage(
   {{pending_user_message:prompt, pending_started_at:101, pending_attachments:rapidRepeatSecondAttachments}},
-  [rapidRepeatTurnOne, rapidRepeatAnswerOne]
+  [rapidRepeatTurnOne, rapidRepeatOldTool]
 );
 // Exact token identity: the eager-checkpoint row carries _active_turn_token
 // built from the same stream_id + started_at as the session — adopted even
@@ -408,6 +411,7 @@ def _run_tail_scanner_boundary_probe() -> list[dict]:
             _function_body(UI_SRC, "function _firstValidTimestampSeconds"),
             ownership_helper,
             canonical_helper,
+            _function_body(UI_SRC, "function _messageTimestampSeconds"),
             _function_body(UI_SRC, "function _pendingCurrentTailUserMessage"),
             _function_body(UI_SRC, "function msgContent"),
             _function_body(UI_SRC, "function _isContextCompactionText"),
@@ -420,6 +424,7 @@ def _run_tail_scanner_boundary_probe() -> list[dict]:
     )
     script = f"""
 {helpers}
+const _PENDING_ACTIVE_TURN_TS_EPSILON=1e-6;
 function _sameTranscriptMessage(a,b){{
   return !!(a&&b&&a.role===b.role&&String(a.content||'').trim()===String(b.content||'').trim());
 }}
@@ -458,7 +463,7 @@ const cases = [
   {{name:'missing tool timestamp', messages:[priorUser,currentUser,sameTurnEnvelope,{{...sameTurnTool,_ts:undefined}}], currentExpect:null, pendingExpect:null}},
   {{name:'missing candidate timestamp', messages:[priorUser,currentUser,sameTurnEnvelope], candidateStart:null, currentExpect:null, pendingExpect:null}},
   {{name:'same-turn activity', messages:[priorUser,currentUser,{{...sameTurnEnvelope,timestamp:10,_ts:undefined}},{{...sameTurnTool,timestamp:10.1,_ts:undefined}}], expect:prompt}},
-  {{name:'same-token tagged activity', messages:[priorUser,currentUser,taggedEnvelope], candidateStart:null, expect:prompt, pendingExpect:null}},
+  {{name:'same-token tagged activity', messages:[priorUser,currentUser,taggedEnvelope], candidateStart:null, expect:prompt, pendingExpect:prompt}},
   {{name:'compaction marker', messages:[priorUser,currentUser,compaction,sameTurnEnvelope], expect:prompt}},
   {{name:'live tail', messages:[priorUser,currentUser,liveAssistant], expect:prompt}},
   {{name:'live tail missing token', messages:[priorUser,currentUser,{{role:'assistant', content:'working', _live:true, _ts:12}}], currentExpect:null, pendingExpect:prompt}},
@@ -475,7 +480,12 @@ const results = cases.map(tc=>({{
     tc.candidate===undefined?currentCandidate:tc.candidate,
     tc.activeTurnToken===undefined?'turn-1:10':tc.activeTurnToken,
   )),
-  pending:tailPrompt(_pendingCurrentTailUserMessage(tc.messages,tc.candidateStart===undefined?10:tc.candidateStart)),
+  pending:tailPrompt(_pendingCurrentTailUserMessage(
+    tc.messages,
+    tc.candidateStart===undefined?10:tc.candidateStart,
+    tc.candidateTimestamp,
+    tc.activeTurnToken===undefined?'turn-1:10':tc.activeTurnToken,
+  )),
   currentExpect:tc.currentExpect===undefined?tc.expect:tc.currentExpect,
   pendingExpect:tc.pendingExpect===undefined?tc.expect:tc.pendingExpect,
 }}));
@@ -608,6 +618,7 @@ def _run_turn_ownership_adversarial_probe() -> dict:
     )
     script = f"""
 {helpers}
+const _PENDING_ACTIVE_TURN_TS_EPSILON=1e-6;
 const prompt = 'same prompt';
 const newToken = 'opaque:new-turn';
 const oldToken = 'opaque:old-turn';
