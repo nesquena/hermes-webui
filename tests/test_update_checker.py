@@ -307,21 +307,17 @@ class TestApplyUpdateDiagnostics:
     # ------------------------------------------------------------------
 
     def test_fetch_failure_for_agent_target(self, tmp_path):
-        """Fetch failure path also works when target='agent'."""
+        """Agent updates use the official transaction adapter."""
         (tmp_path / '.git').mkdir()
 
         from api import updates
-        with patch(f'{_MODULE}._AGENT_DIR', tmp_path), \
-             patch(f'{_MODULE}._run_git') as mock_run_git:
-            mock_run_git.side_effect = [
-                ('', False),   # fetch fails
-            ]
+        with patch('api.agent_update.apply_agent_update') as update:
+            update.return_value = {'ok': False, 'target': 'agent', 'outcome': 'failed', 'message': 'official transaction failed'}
             result = updates._apply_update_inner('agent')
 
         assert result['ok'] is False
-        assert 'could not reach' in result['message'].lower() or \
-               'internet' in result['message'].lower() or \
-               'remote' in result['message'].lower()
+        assert result['message'] == 'official transaction failed'
+        update.assert_called_once_with(force=False)
 
 
 # Issue #4085 regression: a dirty install at-or-past the latest release tag

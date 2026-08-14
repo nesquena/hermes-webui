@@ -10274,6 +10274,8 @@ async function applyUpdates(){
     return;
   }
   try{
+    let restartScheduled=false;
+    let noOp=false;
     const stashConflictMessages=[];
     const baselineServerIdentity = await _readHealthServerIdentity();
     for(const target of targets){
@@ -10285,7 +10287,7 @@ async function applyUpdates(){
       const _applyBody={target};
       const _ch=window._updateData?.[target]?.channel;
       if(_ch==='stable'||_ch==='experimental') _applyBody.channel=_ch;
-      const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify(_applyBody),timeoutMs:120000});
+      const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify(_applyBody),timeoutMs:target==='agent'?2100000:120000});
       if(!res.ok){
         _showUpdateError(target,res);
         resetApplyButton(0);
@@ -10295,12 +10297,19 @@ async function applyUpdates(){
         stashConflictMessages.push('Update applied ('+target+'): '+(res.message||'Local changes were preserved in git stash.'));
         if(errEl){errEl.textContent=stashConflictMessages.join('\n\n');errEl.style.display='block';}
       }
+      restartScheduled=restartScheduled||res.restart_scheduled===true;
+      noOp=noOp||res.outcome==='noop'||res.no_op===true||res.up_to_date===true;
     }
     const stashConflictMessage=stashConflictMessages.join('\n\n');
-    showToast(stashConflictMessage||'Update applied — restarting…',stashConflictMessages.length?10000:undefined,stashConflictMessages.length?'warning':undefined);
+    showToast(stashConflictMessage||(restartScheduled?'Update applied — restarting…':(noOp?'Update already applied.':'Update completed.')),stashConflictMessages.length?10000:undefined,stashConflictMessages.length?'warning':undefined);
     sessionStorage.removeItem('hermes-update-checked');
     sessionStorage.removeItem('hermes-update-dismissed');
-    _waitForServerThenReload({baselineServerIdentity});
+    if(restartScheduled){
+      _waitForServerThenReload({baselineServerIdentity});
+    } else {
+      window._updateApplyInFlight=false;
+      if(btn){btn.disabled=false;btn.textContent=updateText('update_now','Update Now');}
+    }
   }catch(e){
     const msg=_formatUpdateApplyExceptionMessage(e);
     if(errEl){errEl.textContent=msg;errEl.style.display='block';}
@@ -10345,12 +10354,21 @@ async function applyClearUpdateLock(btn){
   const originalLabel=btn.textContent;
   btn.textContent='Checking lock…';
   try{
-    const res=await api('/api/updates/clear_lock',{method:'POST',body:JSON.stringify({target}),timeoutMs:60000});
+    const baselineServerIdentity = await _readHealthServerIdentity();
+    const res=await api('/api/updates/clear_lock',{method:'POST',body:JSON.stringify({target}),timeoutMs:target==='agent'?2100000:120000});
     if(res.ok){
+      const errEl=$('updateError');
+      if(errEl){errEl.style.display='none';errEl.textContent='';}
+      btn.style.display='none';
+      btn.dataset.target='';
       sessionStorage.removeItem('hermes-update-checked');
       sessionStorage.removeItem('hermes-update-dismissed');
-      showToast('Update applied — restarting…');
-      _waitForServerThenReload({});
+      if(res.restart_scheduled){
+        showToast('Update applied — restarting…');
+        _waitForServerThenReload({baselineServerIdentity});
+      } else {
+        showToast(res.outcome==='noop'?'Update already applied.':'Update completed.');
+      }
     } else if(res.lock_held){
       // v2.2: server returns manual-instruction. Show the exact `rm`
       // command + a one-click "I've removed it, retry update" affordance
@@ -10476,7 +10494,7 @@ async function forceUpdate(btn){
   if(!target) return;
   const confirmed=await showConfirmDialog({
     title:'Force update '+target+'?',
-    message:'This will discard all local changes and delete untracked files in the '+target+' repo, then reset to the latest remote version. This cannot be undone.',
+    message:target==='agent'?'This runs the official Agent repair/update transaction for the selected installation.':'This will discard all local changes and delete untracked files in the '+target+' repo, then reset to the latest remote version. This cannot be undone.',
     confirmLabel:'Force update',
     danger:true,
     focusCancel:true,
@@ -10487,10 +10505,15 @@ async function forceUpdate(btn){
   if(errEl){errEl.style.display='none';}
   try{
     const baselineServerIdentity = await _readHealthServerIdentity();
-    const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify((()=>{const b={target};const _ch=window._updateData?.[target]?.channel;if(_ch==='stable'||_ch==='experimental')b.channel=_ch;return b;})()),timeoutMs:120000});
+    const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify((()=>{const b={target};const _ch=window._updateData?.[target]?.channel;if(_ch==='stable'||_ch==='experimental')b.channel=_ch;return b;})()),timeoutMs:target==='agent'?2100000:120000});
     if(!res.ok){
       if(errEl){errEl.textContent='Force update failed: '+(res.message||'unknown error');errEl.style.display='block';}
       btn.disabled=false;btn.textContent='Force update';
+      return;
+    }
+    if(!res.restart_scheduled){
+      btn.disabled=false;btn.textContent='Force update';
+      if(res.outcome==='noop'||res.no_op||res.up_to_date) showToast('Force update found no changes.');
       return;
     }
     showToast('Force update applied — restarting…');
