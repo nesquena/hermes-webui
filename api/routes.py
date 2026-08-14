@@ -8895,7 +8895,7 @@ def _limited_webui_messages_for_display(session, state_db_messages) -> list:
     the sidecar yet.
     """
     stitch = _webui_sidecar_lineage_stitch(session)
-    sidecar_messages = stitch["messages"] if stitch["complete"] else list(getattr(session, "messages", []) or [])
+    sidecar_messages = stitch["messages"]
     return _limited_webui_messages_for_display_with_sidecar(
         session,
         sidecar_messages,
@@ -9058,7 +9058,7 @@ def _webui_sidecar_lineage_stitch(session, *, max_hops: int = 20, load_session=N
                 continue
             seen_keys.add(key)
             merged.append(message)
-        return sorted(merged, key=lambda message: float(message.get("timestamp") or 0) if isinstance(message, dict) else 0)
+        return merged
 
     for _ in range(max(0, int(max_hops))):
         parent_id = str(getattr(current, "parent_session_id", "") or "").strip()
@@ -9173,6 +9173,7 @@ def _project_sidebar_lineage_user_counts(rows: list[dict]) -> None:
         )
         if any(
             isinstance(message, dict)
+            and message.get("role") == "user"
             and isinstance(message.get("content"), str)
             and _is_structured_serialized_content(message["content"])
             for message in display_messages
@@ -13043,11 +13044,7 @@ def handle_get(handler, parsed) -> bool:
                     )
                 else:
                     _detail_stitch = _webui_sidecar_lineage_stitch(s)
-                    _detail_sidecar_messages = (
-                        _detail_stitch["messages"]
-                        if _detail_stitch["complete"]
-                        else list(getattr(s, "messages", []) or [])
-                    )
+                    _detail_sidecar_messages = _detail_stitch["messages"]
                     _all_msgs = merge_session_messages_append_only(
                         _detail_sidecar_messages,
                         state_db_messages,

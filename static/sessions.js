@@ -7163,10 +7163,8 @@ function _syncSidebarExpansionForActiveSession(rows, activeSid){
 function _sidebarUserTurnCount(row){
   if(!row) return null;
   const usable=(value)=>(typeof value==='number'&&Number.isFinite(value)&&value>=0)?value:null;
-  if(Array.isArray(row._lineage_segments)&&row._lineage_segments.length>1){
-    return usable(row._lineage_user_message_count);
-  }
-  return usable(row.user_message_count);
+  const lineage=usable(row._lineage_user_message_count);
+  return lineage!==null?lineage:usable(row.user_message_count);
 }
 
 function _collapseSessionLineageForSidebar(sessions){
@@ -7251,6 +7249,7 @@ function resolveLocalTurnCountOwner(){
     lineageCount:logical===null?null:logical+1,
     baseline:Object.freeze({
       directCount:direct,
+      sessionDirectCount:valid(S.session.user_message_count),
       rowDirectCount:valid(row&&row.user_message_count),
       lineageCount:logical,
       rowLineageCount:logical,
@@ -7267,7 +7266,7 @@ function restoreLocalTurnCountOwner(sid){
   if(!owner) return;
   const target=sid||S.session&&S.session.session_id;
   if(S.session&&S.session.session_id===target){
-    if(owner.baseline.directCount!==null) S.session.user_message_count=owner.baseline.directCount;
+    if(owner.baseline.sessionDirectCount!==null) S.session.user_message_count=owner.baseline.sessionDirectCount;
     else delete S.session.user_message_count;
   }
   const row=(Array.isArray(_allSessions)?_allSessions:[]).find(s=>s&&s.session_id===target);
