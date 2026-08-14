@@ -80,7 +80,15 @@ def isolated_session_env():
 
 
 class _BrowserSession:
-    """Minimal Session stand-in carrying the attrs the browser start path reads."""
+    """Minimal Session stand-in carrying the attrs the browser start path reads.
+
+    PRODUCTION-SHAPED (review 17, blocker): a real ``Session`` always
+    initializes ``process_wakeup_pause={}`` (``api/models.py``).  Omitting the
+    attribute made ``getattr(..., None)`` match the token's previously
+    hard-coded ``pause_state=None`` and false-green the route; with the
+    production shape the immediate pre-POST mismatch check compares the live
+    ``{}`` against the token snapshot exactly.
+    """
 
     def __init__(self, session_id):
         self.session_id = session_id
@@ -105,6 +113,7 @@ class _BrowserSession:
         self.pending_started_at = None
         self.llm_title_generated = True
         self.composer_draft = None
+        self.process_wakeup_pause = {}  # production shape: Session() default
         self._loaded_metadata_only = False
         self.created_at = time.time()
 
@@ -455,3 +464,114 @@ def test_browser_explicit_lane_change_root_default_profile_is_accepted(
     assert captured["body"]["model"] == "new-model", captured["body"]
     assert captured["body"]["provider"] == "new-provider", captured["body"]
     assert captured["body"]["workspace"] == "/root-ws", captured["body"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Review 17, blocker: browser owner tokens encode the wrong pause-state shape
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_browser_pause_state_mutation_after_token_capture_refused_before_post(
+    isolated_session_env, monkeypatch
+):
+    """NEGATIVE regression (review 17, blocker): the browser owner token must
+    snapshot the canonical owner's pause state (same representation as the
+    immutable owner-token/mismatch path: copy a dict, otherwise None) under
+    the AGENT lock, and the claim must be refused BEFORE the runner POST when
+    the live pause state mutates after token capture.
+
+    A real ``Session`` initializes ``process_wakeup_pause={}``, so a
+    hard-coded ``None`` token made the pre-POST mismatch check see live {}
+    != token None -> ``pause_state_changed`` -> retryable 409 before
+    ``adapter.start_run()`` for EVERY ordinary browser start (the previous
+    ``_BrowserSession`` omitted the attribute and false-greened the route via
+    ``getattr(..., None)``).  Here the token captures ``{}`` correctly and a
+    LATER mutation is detected by the claim fence: 409 retryable, zero POSTs.
+    """
+    import api.routes as routes
+    from api import models as _models
+
+    sid = "sess-browser-pause-mutation"
+    session = _BrowserSession(sid)
+    with _models.LOCK:
+        _models.SESSIONS[sid] = session
+
+    monkeypatch.setenv("HERMES_WEBUI_RUNTIME_ADAPTER", "runner-local")
+    monkeypatch.setenv("HERMES_WEBUI_RUNNER_BASE_URL", "http://127.0.0.1:1")
+
+    monkeypatch.setattr(routes, "_get_or_materialize_session", lambda s_id, **kw: session)
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *a, **kw: True)
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(routes, "_normalize_chat_attachments", lambda raw: [])
+    monkeypatch.setattr(routes, "compression_recovery_payload_for_session", lambda s: None)
+    monkeypatch.setattr(
+        routes, "_resolve_chat_workspace_with_recovery", lambda s, w: (w or "/workspace")
+    )
+    monkeypatch.setattr(routes, "_read_profile_model_config", lambda s, p: (None, None, None))
+    monkeypatch.setattr(routes, "get_config_snapshot", lambda: {})
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda cfg: False)
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda model, provider, **kw: (model, provider, False),
+    )
+    monkeypatch.setattr(
+        routes, "_repair_foreign_session_model_provider", lambda s, **kw: kw.get("resolved_provider")
+    )
+    monkeypatch.setattr(routes, "process_wakeup_credential_state_fingerprint", lambda s: "fp-pause-mut")
+    monkeypatch.setattr(routes, "_process_wakeup_profile_home", lambda s: "/home/test/.hermes")
+
+    responses = {}
+
+    def _fake_j(handler, payload, status=200, **kw):
+        responses["payload"] = payload
+        responses["status"] = status
+        return payload
+
+    monkeypatch.setattr(routes, "j", _fake_j)
+    monkeypatch.setattr(
+        routes, "bad", lambda handler, msg, status=400: _fake_j(handler, {"error": msg}, status=status)
+    )
+
+    # The REAL token builder captures the pause snapshot under the AGENT lock;
+    # we then MUTATE the live pause state AFTER capture and before the claim
+    # fence runs — the immutable token must refuse the claim pre-POST.
+    real_build = routes._build_browser_start_owner_token
+
+    def _build_then_mutate_pause(s, **kwargs):
+        token, err = real_build(s, **kwargs)
+        assert token is not None, err
+        assert token["pause_state"] == {}, token  # production {} shape captured
+        s.process_wakeup_pause = {
+            "model": "gpt-5.5",
+            "provider": "openai-codex",
+            "classification": "manual_pause",
+            "reason": "paused after token capture",
+        }
+        return token, err
+
+    monkeypatch.setattr(routes, "_build_browser_start_owner_token", _build_then_mutate_pause)
+
+    post_count = {"n": 0}
+
+    def fake_urlopen(req, timeout=0):
+        post_count["n"] += 1
+        return _FakeResponse({})
+
+    monkeypatch.setattr(
+        HttpRunnerClient, "_opener", lambda self: _FakeOpener(fake_urlopen)
+    )
+
+    result = routes._handle_chat_start(
+        None, {"session_id": sid, "message": "pause mutated after token capture"}
+    )
+
+    # The claim is REFUSED before POST: retryable 409, pause_state_changed,
+    # and the runner transport was never contacted.
+    assert responses.get("status") == 409, responses
+    payload = responses.get("payload") or {}
+    assert payload.get("retryable") is True, payload
+    assert payload.get("owner_fence") == "pause_state_changed", payload
+    assert "error" in payload, payload
+    assert result == payload
+    assert post_count["n"] == 0, post_count

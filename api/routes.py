@@ -22164,6 +22164,21 @@ def _build_browser_start_owner_token(s, *, model, provider, normalized_model, wo
             # Fail closed: a fence without the credential-state generation
             # cannot be compared-and-accepted by the runner.
             return None, "credential_fingerprint_unreadable"
+        # #6327 (review 17, blocker): snapshot the canonical owner's pause
+        # state with the SAME representation the immutable owner-token /
+        # mismatch path uses (_build_immutable_session_owner_token and
+        # _process_wakeup_owner_token_mismatch both normalize a dict pause
+        # via ``dict(pause) if isinstance(pause, dict) else None``).  A real
+        # Session always initializes ``process_wakeup_pause={}``
+        # (api/models.py), so the previous hard-coded ``None`` made the
+        # immediate pre-POST mismatch check see live {} != token None →
+        # ``pause_state_changed`` → a retryable 409 BEFORE
+        # ``adapter.start_run()`` for every ordinary browser runner-local
+        # start.  Snapshotting under this AGENT lock keeps the token
+        # immutable: a pause mutation after capture is refused by the claim
+        # fence before the runner is ever contacted.
+        _pause = getattr(s, "process_wakeup_pause", None)
+        _pause_state = dict(_pause) if isinstance(_pause, dict) else None
         token = {
             "requested_sid": live_sid,
             "session_id": live_sid,
@@ -22183,7 +22198,7 @@ def _build_browser_start_owner_token(s, *, model, provider, normalized_model, wo
             "provider": provider,
             "normalized_model": bool(normalized_model),
             "workspace": str(workspace or ""),
-            "pause_state": None,
+            "pause_state": _pause_state,
             "pause_matches": False,
             "credential_state_fingerprint": credential_fingerprint,
         }
