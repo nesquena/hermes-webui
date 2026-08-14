@@ -5820,12 +5820,20 @@ def _message_identity(msg):
     )
 
 
+def _comparison_keys_equal(left, right):
+    """Return True only when both comparison keys are conclusive and equal."""
+    return left is not None and right is not None and left == right
+
+
 def _messages_have_prefix(messages, prefix, *, key_fn=None):
     key_fn = key_fn or _message_identity
     if len(messages or []) < len(prefix or []):
         return False
     for idx, expected in enumerate(prefix or []):
-        if key_fn((messages or [])[idx]) != key_fn(expected):
+        if not _comparison_keys_equal(
+            key_fn((messages or [])[idx]),
+            key_fn(expected),
+        ):
             return False
     return True
 
@@ -5883,7 +5891,10 @@ def _strip_replayed_prefix(existing_messages, candidates):
     for overlap in range(max_overlap, 0, -1):
         left = [_message_replay_key(m) for m in existing_messages[-overlap:]]
         right = [_message_replay_key(m) for m in candidates[:overlap]]
-        if left == right:
+        if all(
+            _comparison_keys_equal(left_key, right_key)
+            for left_key, right_key in zip(left, right, strict=True)
+        ):
             return candidates[overlap:]
     return candidates
 
@@ -5948,7 +5959,10 @@ def _strip_replayed_context_items(existing_messages, candidates):
             while (
                 idx + length < len(candidate_keys)
                 and start + length < len(existing_keys)
-                and candidate_keys[idx + length] == existing_keys[start + length]
+                and _comparison_keys_equal(
+                    candidate_keys[idx + length],
+                    existing_keys[start + length],
+                )
             ):
                 length += 1
             if length > best:

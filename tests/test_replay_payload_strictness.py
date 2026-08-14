@@ -17,6 +17,14 @@ def _empty_assistant(
     }
 
 
+def _structured_assistant(image_url):
+    return {
+        "role": "assistant",
+        "content": [{"type": "image_url", "image_url": image_url}],
+        "finish_reason": "incomplete",
+    }
+
+
 def _session_payload(tmp_path, sid, *, messages, context_messages=None, **extra):
     payload = {
         "session_id": sid,
@@ -105,6 +113,50 @@ def test_replay_fallback_preserves_distinct_nontext_assistants():
     assert _message_replay_key(first) is None
     assert _message_replay_key(second) is None
     assert _deduplicate_context_messages([first, second]) == [first, second]
+
+
+def test_replay_prefix_does_not_strip_noncomparable_structured_assistants():
+    from api.streaming import _message_replay_key, _strip_replayed_prefix
+
+    first = _structured_assistant("file:///A.png")
+    second = _structured_assistant("file:///B.png")
+    candidate_tail = {"role": "assistant", "content": "keep the tail"}
+
+    assert _message_replay_key(first) is None
+    assert _message_replay_key(second) is None
+    assert _strip_replayed_prefix([first], [second, candidate_tail]) == [
+        second,
+        candidate_tail,
+    ]
+
+
+def test_replayed_context_block_requires_all_comparison_keys_to_be_conclusive():
+    from api.streaming import _message_replay_key, _strip_replayed_context_items
+
+    first = _structured_assistant("file:///A.png")
+    second = _structured_assistant("file:///B.png")
+    shared_tail = [
+        {"role": "user", "content": "shared user row"},
+        {"role": "assistant", "content": "shared assistant row"},
+    ]
+    existing = [first, *shared_tail]
+    candidates = [second, *copy.deepcopy(shared_tail)]
+
+    assert len(existing) == len(candidates) == 3
+    assert _message_replay_key(first) is None
+    assert _message_replay_key(second) is None
+    assert _strip_replayed_context_items(existing, candidates) == candidates
+
+
+def test_messages_prefix_rejects_noncomparable_structured_assistants():
+    from api.streaming import _message_replay_key, _messages_have_prefix
+
+    first = _structured_assistant("file:///A.png")
+    second = _structured_assistant("file:///B.png")
+
+    assert _message_replay_key(first) is None
+    assert _message_replay_key(second) is None
+    assert not _messages_have_prefix([first], [second], key_fn=_message_replay_key)
 
 
 def test_partial_reducer_only_removes_identical_rows():
