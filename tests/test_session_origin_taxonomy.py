@@ -203,7 +203,7 @@ def test_sidebar_payload_exposes_origin_metadata_and_dynamic_filtering_contract(
     assert payload["session_origin_labels"]["matrix"] == "Matrix sessions"
 
 
-def test_sidebar_origin_counts_include_hidden_state_db_origins(monkeypatch, tmp_path):
+def test_webui_filtered_payload_counts_available_state_db_origins(monkeypatch, tmp_path):
     import sqlite3
     import api.routes as routes
 
@@ -218,20 +218,36 @@ def test_sidebar_origin_counts_include_hidden_state_db_origins(monkeypatch, tmp_
     con.close()
 
     monkeypatch.setattr(routes, "_active_state_db_path", lambda: db_path)
-    monkeypatch.setattr(routes, "all_sessions", lambda diag=None: [])
+    webui_row = {
+        "session_id": "webui-1",
+        "title": "WebUI session",
+        "profile": "default",
+        "source": "webui",
+        "message_count": 2,
+        "updated_at": 20,
+        "last_message_at": 20,
+        "archived": False,
+    }
+    monkeypatch.setattr(routes, "all_sessions", lambda diag=None: [dict(webui_row)])
     monkeypatch.setattr(routes, "_reconcile_stale_stream_state_for_session_rows", lambda _rows: False)
     monkeypatch.setattr(routes, "get_cli_sessions", lambda **_kwargs: [])
 
     payload = routes._build_session_list_cache_payload(
         active_profile="default",
         all_profiles=False,
-        show_cli_sessions=True,
+        show_cli_sessions=False,
         show_previous_messaging_sessions=False,
         show_cron_sessions=False,
         show_matrix_sessions=False,
+        sidebar_source="webui",
     )
 
-    assert payload["session_origin_counts"] == {"matrix": 1, "telegram": 1}
+    assert [row["session_id"] for row in payload["sessions"]] == ["webui-1"]
+    assert payload["session_origin_counts"] == {
+        "webui": 1,
+        "matrix": 1,
+        "telegram": 1,
+    }
 
 
 def test_sidebar_payload_exposes_origin_metadata_fields():

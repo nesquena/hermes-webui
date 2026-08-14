@@ -2546,10 +2546,9 @@ def _build_session_list_cache_payload(
         origin = _sidebar_session_origin(session)
         session_origin_counts[origin] += 1
         session_origin_labels.setdefault(origin, _sidebar_session_origin_label(origin))
-    if show_cli_sessions:
-        for origin, count in _sidebar_state_origin_counts().items():
-            session_origin_counts[origin] = max(session_origin_counts[origin], count)
-            session_origin_labels.setdefault(origin, _sidebar_session_origin_label(origin))
+    for origin, count in _sidebar_state_origin_counts().items():
+        session_origin_counts[origin] = max(session_origin_counts[origin], count)
+        session_origin_labels.setdefault(origin, _sidebar_session_origin_label(origin))
     visible_scoped_filtered = _filter_sidebar_source(visible_scoped)
     archived_scoped_filtered = _filter_sidebar_source(archived_scoped)
     scoped = _filter_sidebar_source(full_scoped_all_sources)
