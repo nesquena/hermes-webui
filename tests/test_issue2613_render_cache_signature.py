@@ -199,3 +199,99 @@ def test_old_clip_scheme_collides_on_the_same_middle_edits():
     assert out["oldCollidesAttach"]
     assert out["oldCollidesAnchor"]
     assert out["oldCollidesSnippet"]
+
+
+# ── #6999 re-gate: insertion order + recursion depth ────────────────────────
+# _hashObjectInto() used to Object.keys(value).sort() while BOTH tool-detail
+# render paths (buildToolCard and _transparentToolDetailHtml) render
+# Object.entries(tc.args) — insertion order. Two argument objects with
+# opposite insertion order therefore rendered DIFFERENT HTML while receiving
+# the SAME cache signature (sandbox repro: alpha=A|beta=B vs beta=B|alpha=A
+# with sameSignature=true). The fix walks keys in insertion order with an
+# explicit per-key index discriminator, and threads recursion depth (child
+# calls used to restart depth at 0, so the depth>64 guard never fired for
+# nested/cyclic payloads).
+
+
+def test_hash_object_preserves_insertion_order_not_sorted():
+    fn = _function_source("_hashObjectInto")
+    assert "Object.keys(value).sort()" not in fn, (
+        "sorting keys aliases opposite-insertion-order args onto one signature"
+    )
+    assert "const keys=Object.keys(value);" in fn
+    assert "add(i)" in fn, "the per-key index must discriminate insertion order"
+
+
+def test_hash_add_bounded_threads_recursion_depth():
+    fn = _function_source("_addBoundedHash")
+    assert "function _addBoundedHash(add, value, depth)" in fn
+    assert "_hashObjectInto(add, value, (depth||0)+1)" in fn, (
+        "child objects must increment depth, not restart at 0"
+    )
+
+
+_INSERTION_ORDER_NODE_BODY = r"""
+function stateWithArgs(args) {
+  return {
+    messages: [
+      {role: 'user', content: 'u1'},
+      {role: 'assistant', content: 'a1'},
+    ],
+    toolCalls: [{tid: 'tc1', id: 'tc-m1', name: 'shell', done: true, is_diff: false, assistant_msg_idx: 1, snippet: 'out', args}],
+    session: {session_id: 'sid', message_count: 2, updated_at: 111, compression_anchor_visible_idx: 0, compression_anchor_message_key: null, compression_anchor_summary: ''},
+  };
+}
+globalThis.S = stateWithArgs({alpha: 'A', beta: 'B'});
+const sigAlphaBeta = _messageRenderCacheSignature();
+globalThis.S = stateWithArgs({beta: 'B', alpha: 'A'});
+const sigBetaAlpha = _messageRenderCacheSignature();
+globalThis.S = stateWithArgs({alpha: 'A', beta: 'B'});
+const sigAlphaBetaAgain = _messageRenderCacheSignature();
+// Deeply nested payload: 100 levels of objects (far past the depth>64 guard).
+let deep = {leaf: 'x'};
+for (let i = 0; i < 100; i++) deep = {child: deep};
+globalThis.S = stateWithArgs(deep);
+const sigDeep = _messageRenderCacheSignature();
+globalThis.S = stateWithArgs(deep);
+const sigDeepAgain = _messageRenderCacheSignature();
+// Cyclic payload: JSON.stringify would reject it; the depth guard must
+// serialize it via the [unserializable] path instead of recursing forever.
+const cyc = {}; cyc.self = cyc;
+globalThis.S = stateWithArgs(cyc);
+const sigCyclic = _messageRenderCacheSignature();
+console.log(JSON.stringify({
+  differInsertionOrder: sigAlphaBeta !== sigBetaAlpha,
+  sameOrderDeterministic: sigAlphaBeta === sigAlphaBetaAgain,
+  deepDeterministic: sigDeep === sigDeepAgain,
+  cyclicComputes: typeof sigCyclic === 'string' && sigCyclic.length > 0,
+}));
+"""
+
+
+def _run_insertion_order_node() -> dict:
+    assert NODE, "node is required for the render-cache signature harness"
+    script = (
+        f"const window = {{}};\n"
+        f"{_collect_functions(['_messageRenderCacheSignature', '_addBoundedHash', '_hashObjectInto', 'msgContent', '_messageHasReasoningPayload'])}\n"
+        f"{_INSERTION_ORDER_NODE_BODY}"
+    )
+    result = subprocess.run([NODE, "-e", script], text=True, capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def test_opposite_insertion_order_arguments_get_different_signatures():
+    """alpha=A|beta=B and beta=B|alpha=A must NOT share a cache signature."""
+    out = _run_insertion_order_node()
+    assert out["differInsertionOrder"], (
+        "opposite insertion order renders different HTML but the signature aliased it"
+    )
+    assert out["sameOrderDeterministic"], "identical order must stay deterministic"
+
+
+def test_depth_guard_survives_deep_and_cyclic_payloads():
+    """Recursion depth must increment (not restart), so the depth>64 guard
+    actually fires for nested/cyclic tool args instead of overflowing."""
+    out = _run_insertion_order_node()
+    assert out["deepDeterministic"], "100-level-deep args must hash deterministically"
+    assert out["cyclicComputes"], "cyclic args must fall back to [unserializable], not hang"

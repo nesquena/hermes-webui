@@ -5749,6 +5749,12 @@ let _sessionTimeRefreshVisibilityHandler = null;
 let _activeSessionExternalRefreshTimer = null;
 let _activeSessionExternalRefreshInFlight = false;
 let _deferredActiveSessionExternalRefreshReason = '';
+// #6999 re-gate: per-SID latch of the maximum message_count announced by a
+// `session-updated` frame while the external-refresh guard was held. The
+// refresh owner runs ONE guarded follow-up in its finally instead of letting
+// the event die — production does not guarantee a second event, so discarding
+// would leave the transcript stale until the next focus/poll.
+let _pendingSessionUpdatedCounts = null;
 let _sessionEventsSSE = null;
 let _sessionEventsRefreshTimer = 0;
 let _sessionEventsRefreshPendingRequest = null;
@@ -5839,6 +5845,51 @@ function _flushDeferredActiveSessionExternalRefresh(){
   if(!reason) return;
   _deferredActiveSessionExternalRefreshReason = '';
   void refreshActiveSessionIfExternallyUpdated(reason);
+}
+
+// #6999 re-gate: coalesce, never discard. Called by the messages.js
+// `session-updated` handler when it finds the external-refresh guard held:
+// instead of dropping the update (production does not guarantee a second
+// event), latch the MAXIMUM announced count per SID. The refresh owner's
+// finally drains it with ONE guarded follow-up.
+function _latchSessionUpdatedPendingCount(sid, count){
+  const n = Number(count);
+  if(!sid || !Number.isFinite(n)) return;
+  if(!_pendingSessionUpdatedCounts) _pendingSessionUpdatedCounts = {};
+  const prev = _pendingSessionUpdatedCounts[sid];
+  if(prev === undefined || n > prev) _pendingSessionUpdatedCounts[sid] = n;
+}
+
+// Single-line entry used by the messages.js `session-updated` handler:
+// returns true when the external-refresh probe owns the guard (the frame was
+// latched for the owner's finally to drain); returns false when the handler
+// should take its normal direct-load path.
+function _coalesceSessionUpdatedWhileRefreshHeld(sid, count){
+  if(typeof _activeSessionExternalRefreshInFlight === 'undefined' || !_activeSessionExternalRefreshInFlight) return false;
+  _latchSessionUpdatedPendingCount(sid, count);
+  return true;
+}
+
+// Drain the per-SID latch after the external-refresh owner releases its
+// guard. Runs ONE guarded follow-up only when local state is still behind
+// the latched count — a same-SID load during the refresh window already
+// caught us up, a switch-away moved the active session elsewhere, and
+// duplicate events coalesce into this single follow-up.
+function _drainSessionUpdatedPendingCount(){
+  const pending = _pendingSessionUpdatedCounts;
+  _pendingSessionUpdatedCounts = null;
+  if(!pending || !S.session || !S.session.session_id) return;
+  const sid = S.session.session_id;
+  const latched = pending[sid];
+  if(latched === undefined) return;
+  const localCount = Number(S.session.message_count || (Array.isArray(S.messages)?S.messages.length:0) || 0);
+  if(Number.isFinite(localCount) && localCount >= latched) return;
+  // The follow-up re-enters refreshActiveSessionIfExternallyUpdated, which
+  // re-probes server metadata and only force-reloads when the count actually
+  // changed — so the OOM guards (busy/stream/loading/document.hidden) all
+  // apply, and a metadata-read-only probe that already ran during the refresh
+  // window gets a second chance to observe the latched growth.
+  void refreshActiveSessionIfExternallyUpdated('session-updated');
 }
 
 // Reconcile the active session against server-side metadata. Returns a status
@@ -5953,6 +6004,10 @@ async function refreshActiveSessionIfExternallyUpdated(reason){
     return 'failed';
   }finally{
     _activeSessionExternalRefreshInFlight = false;
+    // #6999 re-gate: any `session-updated` frames that arrived while we owned
+    // the guard were latched (coalesced), not dropped — run ONE guarded
+    // follow-up when local state is still behind the latched count.
+    _drainSessionUpdatedPendingCount();
   }
 }
 

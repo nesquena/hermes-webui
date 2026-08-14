@@ -15163,12 +15163,12 @@ function clearMessageRenderCache(){
 // head/tail slice copies. _renderCacheKey's length+edges shortcut is only
 // safe for the render-window geometry key, where equal span+edges means
 // equal window; here equal signature must mean equal CONTENT.
-function _addBoundedHash(add, value){
+function _addBoundedHash(add, value, depth){
   if(value==null){ add('null'); return; }
   const t=typeof value;
   if(t==='string'){ add(value.length); add(value); return; }
   if(t==='number'||t==='boolean'){ add(t); add(value); return; }
-  if(t==='object'){ _hashObjectInto(add, value, 0); return; }
+  if(t==='object'){ _hashObjectInto(add, value, (depth||0)+1); return; }
   add(t); add(String(value));
 }
 function _hashObjectInto(add, value, depth){
@@ -15182,13 +15182,20 @@ function _hashObjectInto(add, value, depth){
   }
   if(Array.isArray(value)){
     add('array'); add(value.length);
-    for(let i=0;i<value.length;i++){ add(i); _addBoundedHash(add, value[i]); }
+    for(let i=0;i<value.length;i++){ add(i); _addBoundedHash(add, value[i], depth); }
     return;
   }
   add('object');
-  const keys=Object.keys(value).sort();
+  // #6999 re-gate: walk keys in INSERTION ORDER (never sorted) so the cache
+  // signature equals the rendered projection — the tool-detail render paths
+  // use Object.entries(tc.args), which preserves insertion order. Sorting here
+  // gave opposite-insertion-order argument objects the same signature while
+  // they render DIFFERENT HTML. The explicit per-key index is the
+  // insertion-order discriminator: {alpha:A, beta:B} and {beta:B, alpha:A}
+  // now hash differently.
+  const keys=Object.keys(value);
   add(keys.length);
-  for(const k of keys){ add(k); _addBoundedHash(add, value[k]); }
+  for(let i=0;i<keys.length;i++){ add(keys[i]); add(i); _addBoundedHash(add, value[keys[i]], depth); }
 }
 
 function _messageRenderCacheSignature(){

@@ -8031,6 +8031,11 @@ function startSessionStream(sid) {
     // pattern on long sessions). The probe side carries its own
     // _loadingSessionId guard; loadSession() keeps its legitimate
     // newest-wins supersede semantics untouched.
+    // #6999 re-gate: while the probe owns the guard, frames are COALESCED via
+    // _coalesceSessionUpdatedWhileRefreshHeld — the max announced count is
+    // latched per SID and the owner's finally runs ONE guarded follow-up when
+    // local state is still behind (a bare return dropped the update; production
+    // does not guarantee a second event).
     es.addEventListener('session-updated', e => {
       try {
         const d = JSON.parse(e.data || '{}');
@@ -8043,13 +8048,13 @@ function startSessionStream(sid) {
           : (S.session && S.session.session_id === sid);
         if (!isCurrent) return;
         if (S.activeStreamId) return;
-        if (typeof _activeSessionExternalRefreshInFlight !== 'undefined' && _activeSessionExternalRefreshInFlight) return;
+        const serverCount = Number(d.message_count);
+        if (typeof _coalesceSessionUpdatedWhileRefreshHeld === 'function' && _coalesceSessionUpdatedWhileRefreshHeld(sid, serverCount)) return;
         // Re-check against our CURRENT known count — a concurrent load may have
         // already caught us up between the server's emit and now.
         const localCount = (S.session && S.session.session_id === sid && Number.isFinite(Number(S.session.message_count)))
           ? Number(S.session.message_count)
           : (Array.isArray(S.messages) ? S.messages.length : 0);
-        const serverCount = Number(d.message_count);
         if (!Number.isFinite(serverCount) || serverCount <= localCount) return;
         if (typeof loadSession === 'function') {
           void loadSession(sid, {force: true, externalRefreshReason: 'session-updated', keepStaleUntilLoaded: true});
