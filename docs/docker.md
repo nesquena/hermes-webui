@@ -193,6 +193,22 @@ cp .env.docker.example .env
 docker compose -f docker-compose.two-container.yml up -d
 ```
 
+The compose files forward `API_SERVER_KEY` from `.env` into the `hermes-agent`
+container. The agent only starts the gateway API listener (port 8642) when
+`API_SERVER_KEY` is a usable value (>=16 chars) — `API_SERVER_ENABLED` alone
+does nothing. Without a key, the gateway daemon still runs but port 8642 stays
+unbound and the WebUI keeps showing **"Gateway endpoint not reachable"**. To
+enable scheduled ticking and the green gateway pill, set a long random string
+in `.env`:
+
+```bash
+echo "API_SERVER_KEY=$(openssl rand -hex 24)" >> .env
+docker compose -f docker-compose.two-container.yml up -d --force-recreate
+```
+
+The compose file forwards the same value to the WebUI as
+`HERMES_WEBUI_GATEWAY_API_KEY`, so the health probe authenticates automatically.
+
 The three-container layout adds the dashboard but is otherwise the same shape. If you must stay single-container, you can run `hermes gateway` inside the container as a long-lived background process, but the compose split is sturdier.
 
 If you maintain a custom compose file, make sure the **WebUI service** points at

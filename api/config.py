@@ -6960,7 +6960,30 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     and _provider_cfg["models"]
                     and _canonical == _canonicalise_provider_id(active_provider)
                 )
-                if not (_is_known_provider or _has_provider_route or _has_models_only_active_route):
+                # A known provider listed in config.yaml without route
+                # configuration should only appear in the picker when it was
+                # already detected from credential sources (env vars, hermes
+                # auth, credential pool).  Otherwise a provider with
+                # metadata-only entries in config.yaml (e.g.
+                # ``openai-api: {name: "OpenAI API"}``) would still render
+                # in the model selector after the API key is removed (#6335).
+                # Resolve provider aliases on both sides so an alias-named
+                # config key (e.g. ``x-ai`` in providers, ``google`` in
+                # config.yaml) matches credential evidence reported under the
+                # agent's canonical alias (``xai``, ``gemini``) (#6338).
+                # Normalise detected_providers entries into the same
+                # alias-resolved namespace as _canonical so that a WebUI
+                # canonical form in detected_providers (e.g. ``x-ai`` added
+                # by a prior loop iteration) also matches (#6338).
+                _resolved_detected = {
+                    _resolve_provider_alias(_pid) for _pid in detected_providers
+                }
+                _already_credentialed = (
+                    _resolve_provider_alias(_canonical) in _resolved_detected
+                    or _canonical in _resolved_detected
+                )
+                _admit_as_known = _is_known_provider and _already_credentialed
+                if not (_admit_as_known or _has_provider_route or _has_models_only_active_route):
                     continue
 
                 _canonical_to_raw_provider_key.setdefault(_canonical, _pid_key)
@@ -8582,6 +8605,10 @@ def get_sessions_cache_max(config_data: dict | None = None) -> int:
     ``HERMES_WEBUI_SESSIONS_MAX`` env override, then to
     ``DEFAULT_SESSIONS_CACHE_MAX`` — a typo can never disable the bound and
     reintroduce unbounded memory growth.
+
+    This is the sole resolution authority and it is side-effect free. The cap
+    diagnostics report is published by the code that enforces it; see
+    ``_LAST_APPLIED_SESSIONS_CACHE_MAX`` below.
     """
     active_cfg = config_data if isinstance(config_data, dict) else get_config()
     webui_cfg = active_cfg.get("webui", {}) if isinstance(active_cfg, dict) else {}
@@ -8590,7 +8617,10 @@ def get_sessions_cache_max(config_data: dict | None = None) -> int:
         if raw is not None:
             try:
                 value = int(raw)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
+                # OverflowError covers YAML's float infinities (`.inf`, `1e400`),
+                # which safe_load resolves to a real float. Without it a typo
+                # would escape the fallback and raise out of every caller.
                 value = None
             if value is not None and value >= 1:
                 return value
@@ -8599,6 +8629,16 @@ def get_sessions_cache_max(config_data: dict | None = None) -> int:
     if isinstance(SESSIONS_MAX, int) and SESSIONS_MAX >= 1:
         return SESSIONS_MAX
     return DEFAULT_SESSIONS_CACHE_MAX
+
+
+# The cap api/models.py::_evict_sessions_over_cap() last enforced. That function
+# publishes it after its own fallback and range normalization, so a nonblocking
+# diagnostics read reports what eviction applied without re-entering config or
+# profile I/O, and nothing else writes this field. Seeded from the config
+# reload_config() already loaded at import (see `cfg` above) through the getter's
+# dict mode, which reads no file and takes no lock, so the value is right before
+# the first eviction pass instead of after it.
+_LAST_APPLIED_SESSIONS_CACHE_MAX: int = get_sessions_cache_max(cfg)
 CHAT_LOCK = threading.Lock()
 
 
@@ -8814,19 +8854,39 @@ class StreamChannel:
                 self._SUBSCRIBER_QUEUE_MAXSIZE,
             )
 
+    def _diagnostic_counters_locked(self) -> dict[str, object]:
+        """Return the counter dict. CALLER CONTRACT: ``self._lock`` is held."""
+        return {
+            "subscriber_count": len(self._subscribers),
+            "offline_buffered_events": len(self._offline_buffer),
+            # Cumulative over the channel lifetime (ops visibility), vs. the
+            # per-cycle count subscribe_with_snapshot() reports for truncation.
+            "offline_dropped_events": self._offline_dropped_total,
+            # Cumulative per-subscriber queue drops (replay + broadcast) over
+            # the channel lifetime — surfaces slow/backpressured tabs.
+            "subscriber_dropped_events": self._subscriber_dropped_total,
+        }
+
     def diagnostic_snapshot(self) -> dict[str, object]:
         """Return non-sensitive stream observation counters for health checks."""
         with self._lock:
-            return {
-                "subscriber_count": len(self._subscribers),
-                "offline_buffered_events": len(self._offline_buffer),
-                # Cumulative over the channel lifetime (ops visibility), vs. the
-                # per-cycle count subscribe_with_snapshot() reports for truncation.
-                "offline_dropped_events": self._offline_dropped_total,
-                # Cumulative per-subscriber queue drops (replay + broadcast) over
-                # the channel lifetime — surfaces slow/backpressured tabs.
-                "subscriber_dropped_events": self._subscriber_dropped_total,
-            }
+            return self._diagnostic_counters_locked()
+
+    def try_diagnostic_snapshot(self) -> dict[str, object] | None:
+        """Return the same counters without waiting, or ``None`` when busy.
+
+        An aggregate health poll must never stall behind one channel's producer
+        or subscriber work, so a contended channel is reported as unavailable
+        instead of waited on. ``diagnostic_snapshot()`` keeps its blocking
+        contract for the per-stream ``/health?deep=1`` view, which needs the
+        counters of every stream rather than a best-effort aggregate.
+        """
+        if not self._lock.acquire(blocking=False):
+            return None
+        try:
+            return self._diagnostic_counters_locked()
+        finally:
+            self._lock.release()
 
 
 def create_stream_channel() -> StreamChannel:
@@ -9948,6 +10008,70 @@ if _settings_file_exists:
 
 # ── SESSIONS in-memory cache (LRU OrderedDict) ───────────────────────────────
 SESSIONS: collections.OrderedDict = collections.OrderedDict()
+
+
+def get_runtime_diagnostics_snapshot() -> dict[str, dict[str, object]]:
+    """Return nonblocking scalar observations owned by the config module."""
+    result = {
+        "sessions": {"available": False, "resident": 0, "cap": 0},
+        "models_cache": {
+            "available": False,
+            "groups": 0,
+            "models": 0,
+            "age_seconds": None,
+        },
+    }
+    try:
+        if LOCK.acquire(blocking=False):
+            try:
+                # Held-section discipline: len(), arithmetic, and owner-held
+                # scalars only. Never call anything here that can resolve config
+                # or a profile, touch the filesystem, import a module, or wait on
+                # another lock — the cap is the scalar _evict_sessions_over_cap()
+                # published, precisely so this section stays leaf-nonblocking.
+                result["sessions"] = {
+                    "available": True,
+                    "resident": max(0, int(len(SESSIONS))),
+                    "cap": max(0, int(_LAST_APPLIED_SESSIONS_CACHE_MAX)),
+                }
+            finally:
+                LOCK.release()
+    except Exception:
+        pass
+    try:
+        if _available_models_cache_lock.acquire(blocking=False):
+            try:
+                # Same held-section discipline: len(), isinstance, float(), and
+                # time.monotonic() only. _available_models_cache_lock is an RLock
+                # (see its definition), so a nonblocking acquire from a thread
+                # that already holds it would report available mid-build; safe
+                # here because health collection is never nested inside a
+                # catalog build, and nothing may be added that changes that.
+                snapshot = _available_models_cache
+                groups = snapshot.get("groups") if isinstance(snapshot, dict) else None
+                group_count = len(groups) if isinstance(groups, list) else 0
+                model_count = 0
+                if isinstance(groups, list):
+                    for group in groups:
+                        if isinstance(group, dict):
+                            for bucket in ("models", "extra_models"):
+                                models = group.get(bucket)
+                                if isinstance(models, list):
+                                    model_count += len(models)
+                age = None
+                if snapshot is not None and _available_models_cache_ts:
+                    age = max(0.0, time.monotonic() - float(_available_models_cache_ts))
+                result["models_cache"] = {
+                    "available": True,
+                    "groups": max(0, int(group_count)),
+                    "models": max(0, int(model_count)),
+                    "age_seconds": age,
+                }
+            finally:
+                _available_models_cache_lock.release()
+    except Exception:
+        pass
+    return result
 
 # ── Profile state initialisation ────────────────────────────────────────────
 # Must run after all imports are resolved to correctly patch module-level caches

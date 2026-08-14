@@ -187,6 +187,7 @@ function getMatchingCommands(prefix){
   const matches=COMMANDS.filter(c=>c.name.startsWith(q)).map(c=>({...c,source:'builtin'}));
   const seen=new Set(matches.map(c=>c.name));
   const reserved=_getReservedSlashCommandSlugs();
+  const bundleSlugs=new Set(_bundleCommandCache.map(bundle=>bundle.name));
   for(const [name, spec] of Object.entries(SLASH_SUBARG_SOURCES)){
     if(!name.startsWith(q)||seen.has(name))continue;
     matches.push({
@@ -227,10 +228,16 @@ function getMatchingCommands(prefix){
       seen.add(bundle.name);
     }
   }
+  // A same-slug bundle owns dispatch. Hold plain skills until the independent
+  // bundle metadata request settles so a slow bundle response cannot briefly
+  // expose a selectable, shadowed skill.
+  if(!_bundleCommandCacheReady)return matches;
   for(const skill of _skillCommandCache){
-    if(!skill.name.startsWith(q)||seen.has(skill.name)||reserved.has(skill.name))continue;
+    const name=String(skill&&skill.name||'').toLowerCase();
+    const description=String(skill&&skill.desc||'').toLowerCase();
+    if((!name.includes(q)&&!description.includes(q))||seen.has(name)||reserved.has(name)||bundleSlugs.has(name))continue;
     matches.push(skill);
-    seen.add(skill.name);
+    seen.add(name);
   }
   return matches;
 }
@@ -2086,8 +2093,9 @@ function refreshSlashCommandDropdown(){
   });
 }
 function ensureSkillCommandsLoadedForAutocomplete(){
-  if(_skillCommandCacheReady||_skillCommandLoadPromise)return;
-  loadSkillCommands().then(()=>{refreshSlashCommandDropdown();});
+  if(!_skillCommandCacheReady&&!_skillCommandLoadPromise){
+    loadSkillCommands().then(()=>{refreshSlashCommandDropdown();});
+  }
   if(!_bundleCommandCacheReady&&!_bundleCommandLoadPromise){
     loadBundleCommands().then(()=>{refreshSlashCommandDropdown();});
   }
