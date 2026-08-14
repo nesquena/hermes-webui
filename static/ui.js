@@ -7315,6 +7315,53 @@ function _stripDottedModelPrefix(bare){
   if (i === 0) return value;
   return segs.slice(i).join('.').replace(/:\d+$/, '');
 }
+
+function _customSlugLooksLikeHostPort(rest){
+  // Mirror of api/config.py:_custom_slug_rest_looks_like_host_port. An
+  // endpoint-style custom slug (host:port) must never be split as a model tag:
+  // @custom:localhost:1234:qwen3 has model "qwen3", not "1234:qwen3".
+  if(!rest.includes(':')) return false;
+  const idx=rest.lastIndexOf(':');
+  const host=rest.slice(0,idx), portS=rest.slice(idx+1);
+  if(!host || host.includes(':')) return false;
+  if(!/^\d+$/.test(portS)) return false;
+  const portN=parseInt(portS,10);
+  if(!(portN>=1 && portN<=65535)) return false;
+  if(/^[\d.]+$/.test(host)) return true;              // IPv4 literal
+  if(host.toLowerCase()==='localhost') return true;   // localhost alias
+  if(host.includes('.')) return true;                 // DNS hostname slug
+  return false;
+}
+
+function _customModelFromQualifiedId(rawId){
+  // Shared qualified-ID grammar — mirror of api/config.py:
+  // _parse_provider_qualified_model_id. The provider segment may itself
+  // contain colons (host:port endpoints) and the model segment may too
+  // (":free" tags), so a blind first/last-colon split misparses both.
+  const rest=rawId.slice('@custom:'.length);
+  if(!rest.includes(':')){
+    // Legacy "<slug>/<model>" form (no provider colon).
+    if(rest.includes('/')) return rest.slice(rest.indexOf('/')+1)||rawId;
+    return rest||rawId;
+  }
+  const inner='custom:'+rest;
+  const lastColon=inner.lastIndexOf(':');
+  let providerHint=inner.slice(0,lastColon);
+  let bare=inner.slice(lastColon+1);
+  if(providerHint.startsWith('custom:') && providerHint.split(':').length-1>=2){
+    const slugRest=providerHint.slice('custom:'.length);
+    if(!_customSlugLooksLikeHostPort(slugRest)){
+      // Not an endpoint slug: the extra segment belongs to the model
+      // (e.g. @custom:my-key:some-model:free -> model "some-model:free").
+      const extraColon=providerHint.lastIndexOf(':');
+      const extra=providerHint.slice(extraColon+1);
+      providerHint=providerHint.slice(0,extraColon);
+      bare=extra+':'+bare;
+    }
+  }
+  return bare||rawId;
+}
+
 function getModelLabel(modelId){
   if(!modelId) return 'Unknown';
   const rawId=String(modelId||'');
@@ -7326,14 +7373,9 @@ function getModelLabel(modelId){
     // Prefer the operator-supplied label from the API catalog (populated into
     // _dynamicModelLabels from /api/models). Deriving from the id breaks for
     // namespaced ids like @custom:claude-code:us.anthropic.claude-opus-4-5-...-v1:0
-    // where lastIndexOf(':') lands on the ":0" tail and yields "0".
+    // where a colon split lands on the ":0" tail and yields "0".
     if(_dynamicModelLabels[modelId]) return _dynamicModelLabels[modelId];
-    const rest=rawId.slice('@custom:'.length);
-    // Strip the "<provider-slug>:" prefix (first segment only), keep the full
-    // model id — including any ":" inside it (e.g. version "...-v1:0").
-    if(rest.includes(':')) return rest.slice(rest.indexOf(':')+1)||rawId;
-    if(rest.includes('/')) return rest.slice(rest.indexOf('/')+1)||rawId;
-    return rest||rawId;
+    return _customModelFromQualifiedId(rawId);
   }
   // Check dynamic labels first, then fall back to splitting the ID
   if(_dynamicModelLabels[modelId]) return _dynamicModelLabels[modelId];

@@ -7531,6 +7531,25 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 if _slug and _slug not in _named_custom_groups:
                     _named_custom_groups[_slug] = (_cp_name, [])
 
+                # Config label map: honor operator-supplied labels
+                # (custom_providers[].models[].label) instead of title-casing
+                # the raw id, which mangles namespaced Bedrock ids like
+                # "us.anthropic.claude-opus-4-8" -> "Us.anthropic.claude Opus 4 8"
+                # (and ".../-v1:0" -> "0"). Built per entry BEFORE the live-row
+                # loop so a prewarmed/probed duplicate of a configured model gets
+                # the operator label, not the endpoint's (deep-review 2026-08-13).
+                _cp_label_map: dict = {}
+                for _opt in _configured_model_options(_cp.get("models")):
+                    _oid = str(_opt.get("id") or "").strip()
+                    _olabel = str(_opt.get("label") or "").strip()
+                    # _configured_model_options synthesizes the id AS the label
+                    # when the operator supplied none, so an entry like
+                    # `models: [gpt-4o-mini]` arrives with label == id. Only an
+                    # operator-supplied label — one that differs from the id —
+                    # belongs in the map.
+                    if _oid and _olabel and _olabel != _oid:
+                        _cp_label_map[_oid] = _olabel
+
                 _cp_base_url = str(_cp.get("base_url") or "").strip()
                 _cp_api_key = str(_cp.get("api_key") or "").strip()
                 if not _cp_api_key:
@@ -7601,22 +7620,13 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         if active_provider != _slug and not _cp_option_id.startswith("@"):
                             _cp_option_id = f"@{_slug}:{_cp_option_id}"
                         _named_custom_groups[_slug][1].append(
-                            {"id": _cp_option_id, "label": _live_model.get("label") or _get_label_for_model(_live_id, [])}
+                            {
+                                "id": _cp_option_id,
+                                "label": _cp_label_map.get(_live_id)
+                                or _live_model.get("label")
+                                or _get_label_for_model(_live_id, []),
+                            }
                         )
-
-                # Config label map: honor operator-supplied labels
-                # (custom_providers[].models[].label) instead of title-casing
-                # the raw id, which mangles namespaced Bedrock ids like
-                # "us.anthropic.claude-opus-4-8" -> "Us.anthropic.claude Opus 4 8"
-                # (and ".../-v1:0" -> "0"). Mirrors the cold-path fix at ~5304.
-                _cp_label_map: dict = {}
-                for _opt in _configured_model_options(_cp.get("models")):
-                    _oid = str(_opt.get("id") or "").strip()
-                    _olabel = str(_opt.get("label") or "").strip()
-                    # Same guard as the hot path above: a synthesized label equals
-                    # the id and must not displace the derived one.
-                    if _oid and _olabel and _olabel != _oid:
-                        _cp_label_map[_oid] = _olabel
 
                 # Collect configured model IDs as a fallback/sticky entry after live discovery.
                 _cp_model_ids: list[str] = []
