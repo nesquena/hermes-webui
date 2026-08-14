@@ -9119,7 +9119,8 @@ function _notificationOptions(body,options={}){
 const _NOTIFICATION_IDENTITY_MAX_LENGTH=512;
 const _NOTIFICATION_CLAIM_DB='hermes-webui-notification-claims-v1';
 const _NOTIFICATION_CLAIM_STORE='event-identities';
-function _notificationEventFallbackId(event){
+const _NOTIFICATION_FALLBACK_ORDINALS=Object.create(null);
+function _notificationEventFallbackId(streamId,event){
   const source=`${String(event&&event.type||'event')}\n${String(event&&event.data||'')}`;
   let first=2166136261;
   let second=16777619;
@@ -9128,10 +9129,14 @@ function _notificationEventFallbackId(event){
     first=Math.imul(first^code,16777619);
     second=Math.imul(second^code,2246822519);
   }
-  return `legacy:${(first>>>0).toString(16)}${(second>>>0).toString(16)}`;
+  const fingerprint=`${(first>>>0).toString(16)}${(second>>>0).toString(16)}`;
+  const counterKey=`${String(streamId||'')}\u0000${fingerprint}`;
+  const ordinal=(_NOTIFICATION_FALLBACK_ORDINALS[counterKey]||0)+1;
+  _NOTIFICATION_FALLBACK_ORDINALS[counterKey]=ordinal;
+  return `legacy:${fingerprint}:${ordinal}`;
 }
 function _captureNotificationEventIdentity(streamId,event){
-  const lastEventId=String(event&&event.lastEventId||'').trim()||_notificationEventFallbackId(event);
+  const lastEventId=String(event&&event.lastEventId||'').trim()||_notificationEventFallbackId(streamId,event);
   return {streamId,lastEventId};
 }
 function _sendStreamNotification(title,body,eventIdentity,options={}){

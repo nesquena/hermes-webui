@@ -791,6 +791,26 @@ def test_missing_sse_id_gets_a_stable_claim_identity_instead_of_dropping_deliver
     assert result["identity"]["lastEventId"].startswith("legacy:")
 
 
+def test_missing_sse_id_keeps_identical_distinct_events_distinct():
+    capture = extract_function(MESSAGES_JS, "_captureNotificationEventIdentity")
+    fallback = extract_function(MESSAGES_JS, "_notificationEventFallbackId")
+    result = _run_node(
+        f"""
+        const _NOTIFICATION_FALLBACK_ORDINALS = Object.create(null);
+        {fallback}
+        {capture}
+        const event = {{type: 'approval', data: '{{"description":"Approve"}}'}};
+        console.log(JSON.stringify([
+          _captureNotificationEventIdentity('stream-6673', event),
+          _captureNotificationEventIdentity('stream-6673', event),
+        ]));
+        """,
+    )
+
+    assert result[0]["streamId"] == result[1]["streamId"] == "stream-6673"
+    assert result[0]["lastEventId"] != result[1]["lastEventId"]
+
+
 def test_public_sender_repeats_same_session_toast_with_stable_tag():
     result = _driver(
         delivery="service-worker",
