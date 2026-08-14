@@ -183,6 +183,7 @@ def _safe_replace(src: Path, dst: Path) -> None:
 # Serializes index writers so concurrent Session.save() calls cannot race on
 # stale baselines while still allowing LOCK to be released before disk I/O.
 _INDEX_WRITE_LOCK = threading.RLock()
+_INLINE_REPLAY_REPAIR_MAX_BYTES = 128 * 1024 * 1024
 _SESSION_INDEX_REBUILD_LOCK = threading.Lock()
 _SESSION_INDEX_REBUILD_THREAD = None
 _SESSION_INDEX_REBUILD_THREAD_TARGET: tuple[Path, Path] | None = None
@@ -1360,6 +1361,7 @@ class Session:
             except (TypeError, ValueError):
                 parsed_message_count = None
         self._metadata_message_count = parsed_message_count if parsed_message_count is not None and parsed_message_count >= 0 else None
+        self._replay_repair_deferred = False
 
     @property
     def path(self):
@@ -1384,6 +1386,10 @@ class Session:
                 f"would atomically overwrite on-disk messages with []. "
                 f"Reload with metadata_only=False before mutating state. "
                 f"See #1558."
+            )
+        if getattr(self, '_replay_repair_deferred', False):
+            raise RuntimeError(
+                f"Session {self.session_id!r} requires offline replay repair before saving"
             )
         if touch_updated_at:
             self.updated_at = time.time()
@@ -1556,13 +1562,20 @@ class Session:
         p = SESSION_DIR / f'{sid}.json'
         if not p.exists():
             return None
+        inline_repair = p.stat().st_size <= _INLINE_REPLAY_REPAIR_MAX_BYTES
         # #5854: snapshot the stat signature BEFORE reading so a legacy-facts
         # cache write is only committed if the file didn't change under us
         # during the parse (TOCTOU guard against an atomic replace mid-read).
         _pre_read_sig = _sidecar_stat_signature(p)
         data = json.loads(p.read_text(encoding='utf-8'))
-        data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
+        if inline_repair:
+            data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(
+                data.get('messages')
+            )
+        else:
+            _collapsed_partials = False
         session = cls(**data)
+        session._replay_repair_deferred = not inline_repair
         if _collapsed_partials:
             try:
                 # Self-heal bloated sessions on first full load without touching

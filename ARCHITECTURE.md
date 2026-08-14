@@ -232,6 +232,41 @@ Session is a plain Python class (not a dataclass, not SQLAlchemy):
     With 10 sessions: negligible. With 1000+: will be slow.
     See Architecture Phase C for the index file fix.
 
+#### Offline replay repair for very large sidecars
+
+Loading a session normally repairs known replay duplicates before returning the
+mutable `Session`. For a sidecar larger than 128 MiB, that inline path would
+create several full-size copies inside an HTTP request. `Session.load()` instead
+marks the projection as `_replay_repair_deferred`, preserves every row, and
+`Session.save()` refuses to publish it until an operator runs the bounded-memory
+repair tool.
+
+Drain and stop every WebUI process that can write the session before using the
+tool, especially on releases that predate the shared per-session sidecar lock:
+
+```bash
+python scripts/compact_session_replays.py --dry-run ~/.hermes/webui/sessions/<session-id>.json
+python scripts/compact_session_replays.py ~/.hermes/webui/sessions/<session-id>.json
+```
+
+The tool performs separate analysis and write passes, limits one decoded JSON
+item to 64 MiB, and transforms only top-level `messages` and
+`context_messages`. It publishes only while the source inode/stat signature,
+SHA-256, and generation still match. Ambiguous or non-JSON-stable rows are
+retained. A content-addressed byte-exact backup and checksum manifest are
+fsynced before the compacted sidecar is atomically installed; both compact and
+restore advance `_sidecar_generation_v1`.
+
+Rollback is explicit and also fail-closed:
+
+```bash
+python scripts/compact_session_replays.py --restore <backup>.manifest.json
+```
+
+Restore refuses if either the current compacted sidecar or immutable backup no
+longer matches the manifest. The archive remains byte-exact; only the restored
+sidecar receives the newer generation required to fence stale writers.
+
 title_from(): takes messages list, finds first user message, returns first 64 chars.
 Called after run_conversation() completes to set the session title retroactively.
 
