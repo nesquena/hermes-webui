@@ -14,14 +14,14 @@ def test_sidebar_has_dynamic_webui_and_cli_session_source_menu():
     assert "session-source-menu" in src
     assert "WebUI sessions" in src
     assert "CLI sessions" in src
-    assert "_sessionSourceFilter==='cli'" in src
+    assert "_sessionSourceFilters" in src
 
 
 def test_cli_filter_keeps_cli_rows_out_of_default_webui_list():
     src = SESSIONS_JS.read_text(encoding="utf-8")
     assert "function _partitionSidebarSessionRows(allMatched, activeSidForSidebar)" in src
     assert "cliSessionCount" in src
-    assert "const showCliOnly=_sessionSourceFilter==='cli';" in src
+    assert "const showCliOnly=selectedOrigins.size===1&&selectedOrigins.has('cli');" in src
     assert "const webuiProfileFiltered=[];" in src
     assert "const cliProfileFiltered=[];" in src
     assert "const webuiSessionsRaw=[];" in src

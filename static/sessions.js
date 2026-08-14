@@ -918,11 +918,9 @@ function _purgeStaleInflightEntries() {
     && typeof _sessionListSourceById.get === 'function'
     ? _sessionListSourceById
     : null;
-  const currentSidebarSource = typeof _allSessionsScope !== 'undefined'
-    && _allSessionsScope
-    && typeof _allSessionsScope.sidebarSource === 'string'
-    ? _allSessionsScope.sidebarSource
-    : null;
+  const currentSidebarSources = typeof _allSessionsScope !== 'undefined'&&_allSessionsScope
+    ? new Set(String(_allSessionsScope.sidebarSourcesKey||_allSessionsScope.sidebarSource||'').split(',').filter(Boolean))
+    : new Set();
   for (const sid of Object.keys(INFLIGHT)) {
     // #4354: purge stale INFLIGHT even for a hung/idle session, BUT skip the one
     // session actively mid-send (#2689 start-race) — during /api/chat/start the
@@ -933,7 +931,7 @@ function _purgeStaleInflightEntries() {
     }
     if (!sessionsById.has(sid)) {
       const knownSource = sourceById ? sourceById.get(sid) : null;
-      if (currentSidebarSource && (!knownSource || knownSource !== currentSidebarSource)) {
+      if (currentSidebarSources.size && (!knownSource || !currentSidebarSources.has(knownSource))) {
         continue;
       }
       // Session is absent from _allSessions — it was deleted / archived /
@@ -1197,11 +1195,9 @@ function _markPollingCompletionUnreadTransitions(sessions) {
     && typeof _sessionListSourceById.delete === 'function'
     ? _sessionListSourceById
     : new Map();
-  const currentSidebarSource = typeof _allSessionsScope !== 'undefined'
-    && _allSessionsScope
-    && typeof _allSessionsScope.sidebarSource === 'string'
-    ? _allSessionsScope.sidebarSource
-    : null;
+  const currentSidebarSources = typeof _allSessionsScope !== 'undefined'&&_allSessionsScope
+    ? new Set(String(_allSessionsScope.sidebarSourcesKey||_allSessionsScope.sidebarSource||'').split(',').filter(Boolean))
+    : new Set();
   for (const s of sessions) {
     if (!s || !s.session_id) continue;
     const sid = s.session_id;
@@ -1275,7 +1271,7 @@ function _markPollingCompletionUnreadTransitions(sessions) {
   for (const sid of staleRuntimeStateSids) {
     if (seen.has(sid)) continue;
     const knownSource = sourceById.get(sid);
-    if (currentSidebarSource && (!knownSource || knownSource !== currentSidebarSource)) continue;
+    if (currentSidebarSources.size && (!knownSource || !currentSidebarSources.has(knownSource))) continue;
     _sessionStreamingById.delete(sid);
     _sessionListSnapshotById.delete(sid);
     sourceById.delete(sid);
@@ -2590,18 +2586,33 @@ function _sessionOriginLabel(filter) {
 }
 
 function _sessionSourceFilterModel(renderedWebuiSessionCount, renderedCliSessionCount){
-  const activeOrigin=_sessionSourceFilter||'webui';
+  const selectedOrigins=_normalizeSessionSourceFilters(_sessionSourceFilters);
+  const selectedSet=new Set(selectedOrigins);
   const items=_sessionOriginKeys().map(origin=>{
     const count=_sessionSourceTabCount(origin,renderedWebuiSessionCount,renderedCliSessionCount);
-    return {origin,label:_sessionOriginLabel(origin),count:Number(count)||0,active:origin===activeOrigin};
+    return {origin,label:_sessionOriginLabel(origin),count:Number(count)||0,selected:selectedSet.has(origin)};
   });
-  const active=items.find(item=>item.active);
   return {
-    activeOrigin,
-    activeLabel:active?active.label:_sessionOriginLabel(activeOrigin),
+    selectedOrigins,
+    visibleChips:selectedOrigins.slice(0,2).map(origin=>({origin,label:_sessionOriginLabel(origin)})),
+    overflowCount:Math.max(0,selectedOrigins.length-2),
     originCount:items.length,
     items,
   };
+}
+
+function _renderSessionSourceMenuItem(item,onToggle){
+  const row=document.createElement('label');
+  row.className='session-source-menu-item'+(item.selected?' active':'');
+  row.setAttribute('role','menuitemcheckbox');row.setAttribute('aria-checked',item.selected?'true':'false');
+  const checkbox=document.createElement('input');
+  checkbox.type='checkbox';checkbox.className='session-source-menu-checkbox';checkbox.checked=item.selected;
+  checkbox.setAttribute('aria-label',item.label);
+  checkbox.onchange=(event)=>{event.stopPropagation();onToggle(item.origin,checkbox.checked);};
+  const label=document.createElement('span');label.className='session-source-menu-label';label.textContent=item.label;
+  const count=document.createElement('span');count.className='session-source-menu-count';count.textContent=String(item.count);
+  row.appendChild(checkbox);row.appendChild(label);row.appendChild(count);
+  return row;
 }
 
 function _renderSessionSourceFilterControl(renderedWebuiSessionCount, renderedCliSessionCount){
@@ -2609,18 +2620,8 @@ function _renderSessionSourceFilterControl(renderedWebuiSessionCount, renderedCl
   if(model.originCount<2) return null;
   const control=document.createElement('div');
   control.className='session-source-filter';
-  const active=document.createElement('div');
-  active.className='session-source-active';
-  active.textContent=model.activeLabel;
-  active.title=model.activeLabel;
-  control.appendChild(active);
-  if(model.activeOrigin!=='webui'){
-    const clear=document.createElement('button');
-    clear.type='button';clear.className='session-source-clear';clear.textContent='\u00d7';
-    clear.title='Show WebUI sessions';clear.setAttribute('aria-label','Clear source filter');
-    clear.onclick=(event)=>{event.stopPropagation();_setSessionSourceFilter('webui');};
-    active.appendChild(clear);
-  }
+  const selectedBar=document.createElement('div');selectedBar.className='session-source-selected-bar';
+  control.appendChild(selectedBar);
   const trigger=document.createElement('button');
   trigger.type='button';trigger.className='session-source-menu-trigger';
   trigger.setAttribute('aria-haspopup','menu');trigger.setAttribute('aria-expanded','false');
@@ -2641,31 +2642,55 @@ function _renderSessionSourceFilterControl(renderedWebuiSessionCount, renderedCl
     menu.hidden=true;trigger.setAttribute('aria-expanded','false');
     if(restoreFocus)trigger.focus();
   };
-  for(const item of model.items){
-    const button=document.createElement('button');
-    button.type='button';button.className='session-source-menu-item'+(item.active?' active':'');
-    button.setAttribute('role','menuitemradio');button.setAttribute('aria-checked',item.active?'true':'false');
-    const label=document.createElement('span');label.className='session-source-menu-label';label.textContent=item.label;
-    const count=document.createElement('span');count.className='session-source-menu-count';count.textContent=String(item.count);
-    button.appendChild(label);button.appendChild(count);
-    button.onclick=(event)=>{event.stopPropagation();close(false);_setSessionSourceFilter(item.origin);};
-    menu.appendChild(button);
-  }
-  trigger.onclick=(event)=>{
+  const openMenu=(event)=>{
     event.stopPropagation();
-    const opening=menu.hidden;
-    menu.hidden=!opening;trigger.setAttribute('aria-expanded',opening?'true':'false');
-    if(opening){
+    if(menu.hidden){
+      menu.hidden=false;trigger.setAttribute('aria-expanded','true');
       if(_sessionSourceMenuCleanup)_sessionSourceMenuCleanup();
       _sessionSourceMenuCleanup=releaseOutsideHandler;
       outsideHandler=(outsideEvent)=>{if(!control.contains(outsideEvent.target))close(false);};
       outsideTimer=setTimeout(()=>{outsideTimer=0;if(!menu.hidden)document.addEventListener('pointerdown',outsideHandler);},0);
-      const selected=menu.querySelector('.session-source-menu-item.active');
+      const selected=menu.querySelector('.session-source-menu-checkbox:checked');
       if(selected)selected.focus();
-    }else releaseOutsideHandler();
+    }else close(false);
   };
+  const refreshSelectedState=()=>{
+    const nextModel=_sessionSourceFilterModel(renderedWebuiSessionCount,renderedCliSessionCount);
+    selectedBar.innerHTML='';
+    for(const chip of nextModel.visibleChips){
+      const node=document.createElement('div');node.className='session-source-filter-chip';node.title=chip.label;
+      const text=document.createElement('span');text.textContent=chip.label;node.appendChild(text);
+      const remove=document.createElement('button');remove.type='button';remove.className='session-source-chip-remove';
+      remove.textContent='\u00d7';remove.setAttribute('aria-label',`Remove ${chip.label}`);
+      remove.onclick=(event)=>{event.stopPropagation();_toggleSessionSourceFilter(chip.origin,false,{renderCache:false});refreshSelectedState();};
+      node.appendChild(remove);selectedBar.appendChild(node);
+    }
+    if(nextModel.overflowCount){
+      const overflow=document.createElement('button');overflow.type='button';overflow.className='session-source-overflow';
+      overflow.textContent=`+${nextModel.overflowCount}`;overflow.setAttribute('aria-label',`${nextModel.overflowCount} more selected sources`);
+      overflow.onclick=openMenu;selectedBar.appendChild(overflow);
+    }
+    const selectedSet=new Set(nextModel.selectedOrigins);
+    menu.querySelectorAll('.session-source-menu-item').forEach(row=>{
+      const checkbox=row.querySelector('.session-source-menu-checkbox');
+      const selected=checkbox&&selectedSet.has(checkbox.dataset.origin);
+      if(checkbox)checkbox.checked=selected;
+      row.classList.toggle('active',selected);row.setAttribute('aria-checked',selected?'true':'false');
+    });
+  };
+  for(const item of model.items){
+    const row=_renderSessionSourceMenuItem(item,(origin,selected)=>{
+      _toggleSessionSourceFilter(origin,selected,{renderCache:false});
+      refreshSelectedState();
+    });
+    const checkbox=row.querySelector('.session-source-menu-checkbox');
+    if(checkbox)checkbox.dataset.origin=item.origin;
+    menu.appendChild(row);
+  }
+  trigger.onclick=openMenu;
   control.onkeydown=(event)=>{if(event.key==='Escape'&&!menu.hidden){event.preventDefault();event.stopPropagation();close(true);}};
   control.appendChild(menu);
+  refreshSelectedState();
   return control;
 }
 
@@ -2743,7 +2768,8 @@ function _setActiveProjectFilter(projectId) {
   void renderSessionList({deferWhileInteracting:false});
 }
 
-function _setSessionSourceFilters(filters) {
+function _setSessionSourceFilters(filters,options) {
+  options=options&&typeof options==='object'?options:{};
   const next=_normalizeSessionSourceFilters(filters);
   if(next.length===_sessionSourceFilters.length&&next.every((source,index)=>source===_sessionSourceFilters[index]))return;
   _sessionSourceFilters=next;
@@ -2752,16 +2778,17 @@ function _setSessionSourceFilters(filters) {
   _selectedSessions.clear();
   _sessionSelectMode = false;
   try { localStorage.setItem('hermes-session-source-filters-v2', JSON.stringify(next)); } catch (_e) {}
-  renderSessionListFromCache();
+  if(options.renderCache!==false)renderSessionListFromCache();
   void renderSessionList({deferWhileInteracting:false});
 }
 
-function _toggleSessionSourceFilter(origin, selected){
+function _toggleSessionSourceFilter(origin, selected, options){
+  options=options&&typeof options==='object'?options:{};
   const source=_normalizeSessionSourceFilters([origin])[0];
   const next=selected
     ? _sessionSourceFilters.concat(source)
     : _sessionSourceFilters.filter(item=>item!==source);
-  _setSessionSourceFilters(next);
+  _setSessionSourceFilters(next,options);
 }
 
 function _setSessionSourceFilter(filter) {

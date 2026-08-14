@@ -5740,20 +5740,26 @@ main.main > #mainPlugin{display:none;}
 
 /* ── Session projects ── */
 .session-source-filter{position:relative;display:flex;align-items:center;gap:6px;padding:4px 10px 8px;flex-shrink:0;}
-.session-source-active{min-width:0;max-width:60%;height:28px;display:flex;align-items:center;gap:4px;padding:0 8px;border-radius:7px;background:var(--accent-bg);color:var(--accent-text);font-size:10px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.session-source-clear{border:0;background:transparent;color:inherit;font:inherit;font-size:14px;line-height:1;padding:1px 0 1px 3px;cursor:pointer;opacity:.7;}
-.session-source-clear:hover{opacity:1;}
+.session-source-selected-bar{min-width:0;flex:1;display:flex;align-items:center;gap:4px;overflow:hidden;}
+.session-source-filter-chip{min-width:0;max-width:42%;height:28px;display:flex;align-items:center;gap:3px;padding:0 5px 0 8px;border-radius:7px;background:var(--accent-bg);color:var(--accent-text);font-size:10px;font-weight:700;}
+.session-source-filter-chip>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.session-source-chip-remove{flex:0 0 auto;border:0;background:transparent;color:inherit;font:inherit;font-size:14px;line-height:1;padding:2px;cursor:pointer;opacity:.7;}
+.session-source-chip-remove:hover{opacity:1;}
+.session-source-overflow{flex:0 0 auto;height:24px;border:0;border-radius:6px;background:var(--hover-bg);color:var(--muted);font-size:10px;font-weight:700;padding:0 6px;cursor:pointer;}
+.session-source-overflow:hover{color:var(--text);}
 .session-source-menu-trigger{height:28px;margin-left:auto;border:1px solid var(--border2);border-radius:7px;background:transparent;color:var(--muted);font-size:10px;font-weight:700;padding:0 8px;cursor:pointer;white-space:nowrap;}
 .session-source-menu-trigger:hover,.session-source-menu-trigger[aria-expanded="true"]{background:var(--hover-bg);color:var(--text);}
-.session-source-menu-trigger:focus-visible,.session-source-clear:focus-visible,.session-source-menu-item:focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px;}
+.session-source-menu-trigger:focus-visible,.session-source-chip-remove:focus-visible,.session-source-overflow:focus-visible,.session-source-menu-checkbox:focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px;}
 .session-source-menu{position:absolute;z-index:35;top:36px;left:10px;right:10px;padding:5px;border:1px solid var(--border);border-radius:9px;background:var(--surface);box-shadow:0 10px 28px rgba(0,0,0,.28);}
 .session-source-menu[hidden]{display:none;}
 .session-source-menu-item{width:100%;min-height:32px;display:flex;align-items:center;gap:10px;border:0;border-radius:6px;background:transparent;color:var(--text);font-size:11px;text-align:left;padding:6px 8px;cursor:pointer;}
-.session-source-menu-item:hover,.session-source-menu-item:focus-visible{background:var(--hover-bg);}
+.session-source-menu-item:hover,.session-source-menu-item:focus-within{background:var(--hover-bg);}
 .session-source-menu-item.active{background:var(--accent-bg);color:var(--accent-text);}
+.session-source-menu-checkbox{width:14px;height:14px;flex:0 0 auto;margin:0;accent-color:var(--accent);cursor:pointer;}
 .session-source-menu-label{min-width:0;flex:1;white-space:normal;overflow-wrap:anywhere;}
 .session-source-menu-count{flex:0 0 auto;color:var(--muted);font-variant-numeric:tabular-nums;}
 .session-source-menu-item.active .session-source-menu-count{color:inherit;opacity:.8;}
+@media(max-width:700px){.session-source-filter-chip{max-width:38%;}.session-source-menu-trigger{padding:0 6px;}}
 .session-empty-note{padding:20px 14px;color:var(--muted);font-size:12px;text-align:center;opacity:.7;}
 .session-list-error{margin:4px 10px 8px;padding:10px 12px;border:1px solid var(--border2);border-radius:8px;background:var(--surface);color:var(--text);display:flex;flex-direction:column;align-items:flex-start;gap:4px;text-align:left;opacity:1;}
 .session-list-error>div:first-child{font-size:12px;font-weight:600;line-height:1.35;word-break:break-word;}

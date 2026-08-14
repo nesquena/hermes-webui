@@ -745,6 +745,26 @@ console.log(JSON.stringify({{ oldPayload, newPayload }}));
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_inflight_cleanup_uses_the_complete_selected_source_union():
+    src = SESSIONS_JS.read_text(encoding="utf-8")
+    purge_fn = _extract_function(src, "_purgeStaleInflightEntries")
+    script = f"""
+global._allSessions = [];
+global._allSessionsScope = {{sidebarSource:'webui', sidebarSourcesKey:'matrix,webui'}};
+global._sessionListSourceById = new Map([['matrix-missing','matrix'],['slack-hidden','slack']]);
+global.INFLIGHT = {{'matrix-missing':{{}},'slack-hidden':{{}}}};
+global._sendInProgress = false;
+global.clearInflightState = () => {{}};
+{purge_fn}
+_purgeStaleInflightEntries();
+console.log(JSON.stringify(Object.keys(INFLIGHT).sort()));
+"""
+    body = _run_node(script)
+
+    assert body == ["slack-hidden"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_source_filtered_cache_preserves_hidden_bucket_runtime_state():
     src = SESSIONS_JS.read_text(encoding="utf-8")
     is_cli_fn = _extract_function(src, "_isCliSession")

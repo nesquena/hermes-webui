@@ -32,20 +32,24 @@ def _extract_function(source_text, function_name):
 def test_source_filter_model_keeps_every_origin_readable_without_a_tab_strip():
     """Dropping or truncating dynamic adapters must break the source-control contract."""
     source = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    normalize_fn = _extract_function(source, "_normalizeSessionSourceFilters")
     model_fn = _extract_function(source, "_sessionSourceFilterModel")
     script = f"""
-global._sessionSourceFilter = 'matrix';
-global._serverSessionOriginCounts = {{webui: 17, cli: 2, matrix: 220, telegram: 14}};
+global._sessionSourceFilters = ['matrix', 'telegram', 'slack', 'discord'];
+global._serverSessionOriginCounts = {{webui: 17, cli: 2, matrix: 220, telegram: 14, slack: 8, discord: 5}};
 global._serverSessionOriginLabels = {{
   webui: 'WebUI sessions',
   cli: 'CLI sessions',
   matrix: 'Matrix sessions',
   telegram: 'Telegram sessions',
+  slack: 'Slack sessions',
+  discord: 'Discord sessions',
 }};
-global._sessionOriginKeys = () => ['webui', 'cli', 'matrix', 'telegram'];
+global._sessionOriginKeys = () => ['webui', 'cli', 'matrix', 'telegram', 'slack', 'discord'];
 global._sessionSourceTabCount = (origin) => global._serverSessionOriginCounts[origin];
 global._sessionSourceLabel = (origin, count) => `${{global._serverSessionOriginLabels[origin]}} (${{count}})`;
 global._sessionOriginLabel = (origin) => global._serverSessionOriginLabels[origin];
+{normalize_fn}
 {model_fn}
 console.log(JSON.stringify(_sessionSourceFilterModel(null, null)));
 """
@@ -53,15 +57,63 @@ console.log(JSON.stringify(_sessionSourceFilterModel(null, null)));
     model = json.loads(result.stdout)
 
     assert model == {
-        "activeOrigin": "matrix",
-        "activeLabel": "Matrix sessions",
-        "originCount": 4,
-        "items": [
-            {"origin": "webui", "label": "WebUI sessions", "count": 17, "active": False},
-            {"origin": "cli", "label": "CLI sessions", "count": 2, "active": False},
-            {"origin": "matrix", "label": "Matrix sessions", "count": 220, "active": True},
-            {"origin": "telegram", "label": "Telegram sessions", "count": 14, "active": False},
+        "selectedOrigins": ["matrix", "telegram", "slack", "discord"],
+        "visibleChips": [
+            {"origin": "matrix", "label": "Matrix sessions"},
+            {"origin": "telegram", "label": "Telegram sessions"},
         ],
+        "overflowCount": 2,
+        "originCount": 6,
+        "items": [
+            {"origin": "webui", "label": "WebUI sessions", "count": 17, "selected": False},
+            {"origin": "cli", "label": "CLI sessions", "count": 2, "selected": False},
+            {"origin": "matrix", "label": "Matrix sessions", "count": 220, "selected": True},
+            {"origin": "telegram", "label": "Telegram sessions", "count": 14, "selected": True},
+            {"origin": "slack", "label": "Slack sessions", "count": 8, "selected": True},
+            {"origin": "discord", "label": "Discord sessions", "count": 5, "selected": True},
+        ],
+    }
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_source_menu_item_uses_checkbox_and_reports_immediate_checked_state():
+    source = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    render_fn = _extract_function(source, "_renderSessionSourceMenuItem")
+    script = f"""
+global.document = {{
+  createElement(tag) {{
+    return {{
+      tagName: tag.toUpperCase(), type: '', className: '', textContent: '', checked: false,
+      children: [], attrs: {{}},
+      appendChild(child) {{ this.children.push(child); }},
+      setAttribute(key, value) {{ this.attrs[key] = value; }},
+    }};
+  }},
+}};
+{render_fn}
+const changes = [];
+const row = _renderSessionSourceMenuItem(
+  {{origin:'slack', label:'Slack sessions', count:8, selected:false}},
+  (origin, selected) => changes.push([origin, selected])
+);
+const checkbox = row.children[0];
+checkbox.checked = true;
+checkbox.onchange({{stopPropagation(){{}}}});
+console.log(JSON.stringify({{
+  rowTag: row.tagName,
+  checkboxTag: checkbox.tagName,
+  checkboxType: checkbox.type,
+  initialSelected: row.attrs['aria-checked'],
+  changes,
+}}));
+"""
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=True)
+    assert json.loads(result.stdout) == {
+        "rowTag": "LABEL",
+        "checkboxTag": "INPUT",
+        "checkboxType": "checkbox",
+        "initialSelected": "false",
+        "changes": [["slack", True]],
     }
 
 
