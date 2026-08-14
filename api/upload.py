@@ -3,6 +3,7 @@ Hermes Web UI -- File upload: multipart parser and upload handler.
 """
 import mimetypes
 import os
+import posixpath
 import re as _re
 import tempfile
 from pathlib import Path
@@ -115,11 +116,128 @@ def _attachment_root() -> Path:
     Plain chat attachments are transient context for the agent, not project
     source files.  Keep them out of the active workspace by default while still
     allowing operators to move the inbox with HERMES_WEBUI_ATTACHMENT_DIR.
+
+    When a remote terminal backend (``terminal.backend: docker``/modal/ssh/...)
+    is active, the default root moves under the active profile's Hermes cache
+    subtree (``cache/documents/webui-attachments``). hermes-agent auto-mounts
+    those cache directories into remote sandboxes, so a file staged there can
+    be translated to its sandbox-visible path (see _agent_visible_attachment_path)
+    instead of dangling as an unreachable host path inside the container.
     """
     override = os.getenv('HERMES_WEBUI_ATTACHMENT_DIR', '').strip()
     if override:
         return Path(override).expanduser().resolve()
+    if _remote_terminal_backend_active():
+        return _sandbox_attachment_root()
     return (STATE_DIR / 'attachments').resolve()
+
+
+def _remote_terminal_backend_active() -> bool:
+    """Return True when tool execution runs inside a remote/container sandbox.
+
+    Mirrors api.workspace._is_remote_terminal_backend: any ``terminal.backend``
+    other than ''/local means the agent's tool calls (read_file, ...) execute
+    inside a sandbox (docker, modal, ssh, daytona, vercel_sandbox, ...) that
+    does not share the WebUI host's filesystem.
+    """
+    try:
+        from api.config import get_config
+        from api.workspace import _is_remote_terminal_backend
+
+        return _is_remote_terminal_backend(get_config().get('terminal', {}))
+    except Exception:
+        return False
+
+
+def _terminal_backend_name() -> str:
+    """Return the active ``terminal.backend`` value, lowercased ('' = local)."""
+    try:
+        from api.config import get_config
+
+        terminal_cfg = get_config().get('terminal', {})
+        if not isinstance(terminal_cfg, dict):
+            return ''
+        return str(terminal_cfg.get('backend') or '').strip().lower()
+    except Exception:
+        return ''
+
+
+def _sandbox_attachment_root() -> Path:
+    """Return the profile-scoped staging root that remote sandboxes see.
+
+    hermes-agent's remote backends bind-mount (or file-sync) its cache
+    directories — ``cache/documents`` among them — into every sandbox it
+    creates. Staging chat uploads under the active profile's
+    ``cache/documents/webui-attachments`` subtree keeps them out of the
+    workspace, keeps them per-profile and per-session, and makes the staged
+    host path translatable to its sandbox-visible form. ``get_hermes_dir`` is
+    used (with an explicit home) so a legacy ``document_cache`` layout is
+    honored exactly the way hermes-agent resolves it when building mounts.
+    """
+    try:
+        from api.profiles import get_active_hermes_home
+
+        home = get_active_hermes_home()
+    except Exception:
+        _env_home = os.getenv('HERMES_HOME', '').strip()
+        home = Path(_env_home).expanduser() if _env_home else STATE_DIR.parent
+    try:
+        from hermes_constants import get_hermes_dir
+
+        root = get_hermes_dir('cache/documents', 'document_cache', home=home)
+    except Exception:
+        root = Path(home) / 'cache' / 'documents'
+    return (Path(root).resolve() / 'webui-attachments').resolve()
+
+
+def _agent_visible_attachment_path(host_path) -> str:
+    """Return the form of *host_path* that tool calls inside the sandbox see.
+
+    For remote terminal backends, hermes-agent mounts its cache directories
+    into the sandbox; chat attachments are staged under
+    ``cache/documents/webui-attachments`` (see _attachment_root), so the host
+    path maps to the container path (``/root/.hermes/cache/documents/...`` for
+    docker/modal, ``~/.hermes/cache/documents/...`` for ssh-style backends).
+    Returns the host path unchanged for local backends, paths outside the
+    staged subtree, or when translation is unavailable (older agent builds).
+    """
+    backend = _terminal_backend_name()
+    if backend in ('', 'local', 'singularity'):
+        return str(host_path)
+    if backend in ('ssh', 'daytona', 'vercel_sandbox'):
+        container_base = '~/.hermes'
+    else:  # docker, modal, and any other container/remote backend
+        container_base = '/root/.hermes'
+    try:
+        from api.profiles import get_active_hermes_home
+        from hermes_constants import get_hermes_dir
+
+        host_root = Path(
+            get_hermes_dir('cache/documents', 'document_cache', home=get_active_hermes_home())
+        ).resolve()
+        candidate = Path(host_path).resolve()
+        try:
+            rel = candidate.relative_to(host_root)
+        except ValueError:
+            rel = None
+        if rel is not None:
+            return posixpath.join(f'{container_base.rstrip("/")}/cache/documents', rel.as_posix())
+    except Exception:
+        pass
+    # Fall back to the agent's own cache-path translator for roots that live
+    # under any other auto-mounted cache directory (e.g. an operator-configured
+    # HERMES_WEBUI_ATTACHMENT_DIR pointing into ~/.hermes/attachments). Best
+    # effort only — older agent builds without the helper degrade to the host
+    # path, which is exactly today's behavior.
+    try:
+        from tools.credential_files import map_cache_path_to_container
+
+        mapped = map_cache_path_to_container(str(host_path), container_base=container_base)
+        if mapped is not None:
+            return mapped
+    except Exception:
+        pass
+    return str(host_path)
 
 
 def _upload_destination(session_id: str, safe_name: str) -> Path:
@@ -230,6 +348,11 @@ def handle_upload(handler):
         return j(handler, {
             'filename': dest.name,
             'path': str(dest),
+            # Sandbox-visible path for remote terminal backends (docker/...);
+            # equals 'path' on local backends. The frontend embeds this in the
+            # agent-facing [Attached files: ...] marker so tool calls inside
+            # the sandbox can actually open the file (#6939).
+            'agent_path': _agent_visible_attachment_path(dest),
             'size': dest.stat().st_size,
             'mime': mime,
             'is_image': mime.startswith('image/'),
@@ -404,7 +527,12 @@ def handle_upload_extract(handler):
         session_dir = _session_attachment_dir(session_id)
         session_dir.mkdir(parents=True, exist_ok=True)
         result = extract_archive(file_bytes, filename, session_dir)
-        return j(handler, {'ok': True, **result})
+        return j(handler, {
+            'ok': True,
+            **result,
+            # Sandbox-visible destination for remote terminal backends (#6939).
+            'agent_path': _agent_visible_attachment_path(result.get('dest') or session_dir),
+        })
     except ValueError as e:
         return j(handler, {'error': str(e)}, status=400)
     except Exception:
