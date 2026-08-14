@@ -104,7 +104,6 @@ def test_insights_absolute_range_accepts_date_strings_server_local(monkeypatch, 
     now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
     # Server-local calendar day for 2026-04-20
     start_day = time.mktime((2026, 4, 20, 0, 0, 0, 0, 0, -1))
-    end_day = time.mktime((2026, 4, 25, 23, 59, 59, 0, 0, -1))
     entries = [
         {
             "session_id": "in_range", "updated_at": start_day + 86400, "created_at": start_day,
@@ -268,6 +267,26 @@ def test_insights_absolute_range_invalid_falls_back_to_days(monkeypatch, tmp_pat
     data = _call_insights(monkeypatch, tmp_path, entries, query="start=notanum&end=abc", now=now)
     assert data["total_sessions"] == 1
     assert len(data["daily_tokens"]) == 30  # falls back to default trailing 30 days
+
+
+def test_insights_absolute_range_impossible_calendar_date_falls_back(monkeypatch, tmp_path):
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    entries = [
+        {
+            "session_id": "today", "updated_at": now, "created_at": now,
+            "message_count": 1, "input_tokens": 10, "output_tokens": 5,
+            "estimated_cost": "0.0001", "model": "gpt-x",
+        },
+    ]
+    # 2026-02-31 and 2026-13-01 do not exist; time.mktime silently
+    # normalizes them to other calendar days.  The parse must reject them
+    # so analytics never cover the wrong interval - fall back to the
+    # trailing 30-day window instead.
+    data = _call_insights(monkeypatch, tmp_path, entries,
+                          query="start=2026-02-31&end=2026-13-01", now=now)
+    assert data["total_sessions"] == 1
+    assert len(data["daily_tokens"]) == 30
+    assert data["period_days"] == len(data["daily_tokens"])
 
 
 def test_insights_absolute_range_nonfinite_timestamps_do_not_500(monkeypatch, tmp_path):
