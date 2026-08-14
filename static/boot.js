@@ -2184,9 +2184,13 @@ function clearPreview(opts={}){
   // would leave #wsEmptyState hidden (it was suppressed for the preview
   // state) — closing the preview would reveal a blank panel. The renderer
   // owns the tree/empty-state contract, so defer to it rather than
-  // duplicating placeholder rules here. Skip when the panel was closed: the
-  // next explicit open renders fresh state.
-  if(!closePanelAfter&&typeof renderFileTree==='function'){
+  // duplicating placeholder rules here. Always call even when the panel is
+  // being closed: the tree visibility computed by renderFileTree (preview
+  // path is already cleared) is correct for browse mode and persists when
+  // the user reopens the panel later — openWorkspacePanel('browse') does
+  // not otherwise render the tree, so skipping the call here leaves both
+  // the tree and empty-state placeholder hidden on reopen.
+  if(typeof renderFileTree==='function'){
     try{renderFileTree();}catch(_){}
   }
 }
