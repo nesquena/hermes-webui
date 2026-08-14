@@ -11178,7 +11178,24 @@ def _handle_insights(handler, parsed) -> bool:
             # collapsed to now (omitted/future/after-swap clamp) AND an explicit
             # end whose calendar day is today (e.g. the user picks today) share
             # the same condition - today is not over, so clamp the cutoff.
-            end_clamped_to_now = end_day == _datetime.fromtimestamp(now).date()
+            # Precise effective end BEFORE the midnight realignment below:
+            # it distinguishes a whole-day selection (== today's local
+            # midnight, from a date string) from a PRECISE numeric end
+            # earlier today (e.g. today 10:00 while now is 14:00).  The
+            # latter is an exact caller-supplied boundary and must never be
+            # widened to the server clock (Greptile P1 'Today widens precise
+            # end timestamps').
+            precise_end_ts = end_ts
+            now_day = _datetime.fromtimestamp(now).date()
+            today_midnight = _time.mktime((now_day.year, now_day.month, now_day.day, 0, 0, 0, 0, 0, -1))
+            # Whether the effective `end` resolves to "today, bounded by the
+            # server clock".  True when the end collapsed to now (omitted /
+            # future / after-swap clamp, so end_ts == now) or when it is a
+            # whole-day "today" selection (end == today's local midnight,
+            # i.e. a date string for today).  A PRECISE numeric end strictly
+            # between today's midnight and now is an explicit exact boundary
+            # and must NOT be clamped to now.
+            end_clamped_to_now = end_day == now_day and (end_ts == now or end_ts <= today_midnight)
             days = max((end_day - start_day).days + 1, 1)
             # Align start/end to local midnight so daily buckets are whole days.
             start_ts = _time.mktime((start_day.year, start_day.month, start_day.day, 0, 0, 0, 0, 0, -1))
@@ -11201,6 +11218,16 @@ def _handle_insights(handler, parsed) -> bool:
                 # at/behind `now`, exclude any stamped after.
                 end_cutoff = min(end_cutoff, now)
                 end_exclusive = False
+            elif end_day == now_day:
+                # A PRECISE numeric `end` strictly between today's local
+                # midnight and now (e.g. today 10:00 while now is 14:00) is
+                # an explicit exact boundary: it was NOT clamped to now
+                # above, so honor its precise value as the exclusive stop
+                # instead of the next local midnight (which would otherwise
+                # admit the rest of today).  Sessions between the requested
+                # endpoint and now must stay OUT (Greptile P1 'Today widens
+                # precise end timestamps').
+                end_cutoff = precise_end_ts
             first_day_ts = start_ts
             # Effective bounds (server-local calendar days actually queried),
             # so the client footer always agrees with what was filtered even
