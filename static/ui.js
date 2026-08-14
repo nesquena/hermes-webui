@@ -7960,7 +7960,13 @@ function setStatus(t){
   showToast(t, 4000);
 }
 
-function setComposerStatus(t){
+let _composerStatusTimer=null;
+
+function setComposerStatus(t,timeoutMs){
+  if(_composerStatusTimer!==null){
+    clearTimeout(_composerStatusTimer);
+    _composerStatusTimer=null;
+  }
   const el=$('composerStatus');
   if(!el)return;
   const statusHidden=!!(window._composerControlVisibility&&window._composerControlVisibility.hide_composer_status);
@@ -7979,6 +7985,14 @@ function setComposerStatus(t){
   el.removeAttribute('aria-hidden');
   el.textContent=t;
   el.style.display='';
+  if(timeoutMs>0){
+    const timer=setTimeout(()=>{
+      if(_composerStatusTimer!==timer)return;
+      _composerStatusTimer=null;
+      setComposerStatus('');
+    },timeoutMs);
+    _composerStatusTimer=timer;
+  }
 }
 
 let _composerLockState=null;
