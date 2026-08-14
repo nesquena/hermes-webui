@@ -2961,6 +2961,13 @@ window.addEventListener('visibilitychange',()=>{
 
 // Dynamic model labels -- populated by populateModelDropdown(), fallback to static map
 let _dynamicModelLabels={};
+// Authoritative provider ids the server reported in /api/models group metadata,
+// lowercased and used as a lookup set. _customModelFromQualifiedId prefers the
+// longest match here over the shape grammar so a `custom:<host>:<port>` endpoint
+// slug and a named `custom:<slug>` provider are never confused (#6657). Only
+// populateModelDropdown() writes it: the live per-provider fetch adds models to
+// an optgroup this pass already registered, so it needs no second writer.
+let _dynamicProviderIds={};
 window._configuredModelBadges=window._configuredModelBadges||{};
 const MODEL_STATE_KEY='hermes-webui-model-state';
 const PENDING_SESSION_MODEL_PREFIX='hermes-webui-pending-session-model:';
@@ -3638,10 +3645,14 @@ async function populateModelDropdown(opts={}){
     // Clear existing options
     sel.innerHTML='';
     _dynamicModelLabels={};
+    _dynamicProviderIds={};
     for(const g of groups){
       const og=document.createElement('optgroup');
       og.label=g.provider;
-      if(g.provider_id) og.dataset.provider=g.provider_id;
+      if(g.provider_id){
+        og.dataset.provider=g.provider_id;
+        _dynamicProviderIds[String(g.provider_id).toLowerCase()]=true;
+      }
       if(g.models_endpoint_error){
         const errorKey=g.provider_id||g.provider||'';
         og.dataset.modelsEndpointError=JSON.stringify(g.models_endpoint_error);
@@ -7316,28 +7327,44 @@ function _stripDottedModelPrefix(bare){
   return segs.slice(i).join('.').replace(/:\d+$/, '');
 }
 
-function _customSlugLooksLikeHostPort(rest){
-  // Mirror of api/config.py:_custom_slug_rest_looks_like_host_port. An
-  // endpoint-style custom slug (host:port) must never be split as a model tag:
-  // @custom:localhost:1234:qwen3 has model "qwen3", not "1234:qwen3".
+function _customSlugIsEndpointAuthority(rest){
+  // Mirror of api/config.py:_custom_slug_rest_is_endpoint_authority — THE
+  // grammar for the endpoint-derived half of a custom provider slug, not a
+  // name-shape heuristic. An endpoint authority slug (host:port) must never be
+  // split as a model tag: @custom:localhost:1234:qwen3 has model "qwen3", not
+  // "1234:qwen3".
+  //   port -> 1-5 ASCII digits, 1..65535
+  //   host -> any nonempty token with no character a URL authority host cannot
+  //           hold, not hyphen/dot-fenced. Covers single-label Docker/LAN names
+  //           ("llm", from base_url http://llm:8080/v1), dotted DNS names,
+  //           IPv4 literals and "localhost" alike. Requiring an IP/dot/localhost
+  //           rejected the producer's own single-label output (#6657).
+  //   host -> OR a bracketed IPv6 literal ("[::1]", "[fe80::1%eth0]").
+  // IPv6 (explicit contract): an UNBRACKETED IPv6 authority is rejected —
+  // "::1:11434" is irreducibly ambiguous (valid address on its own, or address
+  // + port). The backend emits the bracketed spelling for IPv6 hosts.
   if(!rest.includes(':')) return false;
   const idx=rest.lastIndexOf(':');
   const host=rest.slice(0,idx), portS=rest.slice(idx+1);
-  if(!host || host.includes(':')) return false;
-  if(!/^\d+$/.test(portS)) return false;
+  if(!host) return false;
+  if(!/^[0-9]{1,5}$/.test(portS)) return false;
   const portN=parseInt(portS,10);
   if(!(portN>=1 && portN<=65535)) return false;
-  if(/^[\d.]+$/.test(host)) return true;              // IPv4 literal
-  if(host.toLowerCase()==='localhost') return true;   // localhost alias
-  if(host.includes('.')) return true;                 // DNS hostname slug
-  return false;
+  if(host.startsWith('[') && host.endsWith(']')){
+    const innerHost=host.slice(1,-1).split('%')[0];
+    // Hex groups separated by ':' (with '::' elision), optional IPv4 tail.
+    return innerHost.includes(':') && /^[0-9A-Fa-f:.]+$/.test(innerHost);
+  }
+  if(/[\s:/?#@[\]]/.test(host)) return false;
+  return !(host.startsWith('-') || host.endsWith('-') || host.startsWith('.'));
 }
 
 function _customModelFromQualifiedId(rawId){
   // Shared qualified-ID grammar — mirror of api/config.py:
-  // _parse_provider_qualified_model_id. The provider segment may itself
-  // contain colons (host:port endpoints) and the model segment may too
-  // (":free" tags), so a blind first/last-colon split misparses both.
+  // _parse_provider_qualified_model_id (see its docstring for the grammar).
+  // The provider segment may itself contain colons (host:port endpoints) and
+  // the model segment may too (":free" tags), so a blind first/last-colon split
+  // misparses both.
   const rest=rawId.slice('@custom:'.length);
   if(!rest.includes(':')){
     // Legacy "<slug>/<model>" form (no provider colon).
@@ -7345,13 +7372,27 @@ function _customModelFromQualifiedId(rawId){
     return rest||rawId;
   }
   const inner='custom:'+rest;
+  // 1. Authoritative: longest provider_id prefix the server actually told us
+  // about via /api/models group metadata. Config beats shape, so a purely
+  // numeric model id under a named provider (@custom:gw:8080:free) still
+  // resolves to "8080:free" when the server reports provider_id "custom:gw".
+  // cut>=2 skips the bare `custom` root: it prefixes EVERY id here, so matching
+  // it would hand the whole slug back as the label. Only a slug that names
+  // something (custom:gw, custom:llm:8080) disambiguates.
+  const segs=inner.split(':');
+  for(let cut=segs.length-1;cut>=2;cut--){
+    const prefix=segs.slice(0,cut).join(':');
+    const tail=segs.slice(cut).join(':');
+    if(tail && _dynamicProviderIds[prefix.toLowerCase()]) return tail;
+  }
+  // 2. Otherwise the shape grammar.
   const lastColon=inner.lastIndexOf(':');
   let providerHint=inner.slice(0,lastColon);
   let bare=inner.slice(lastColon+1);
   if(providerHint.startsWith('custom:') && providerHint.split(':').length-1>=2){
     const slugRest=providerHint.slice('custom:'.length);
-    if(!_customSlugLooksLikeHostPort(slugRest)){
-      // Not an endpoint slug: the extra segment belongs to the model
+    if(!_customSlugIsEndpointAuthority(slugRest)){
+      // Not an endpoint authority: the extra segment belongs to the model
       // (e.g. @custom:my-key:some-model:free -> model "some-model:free").
       const extraColon=providerHint.lastIndexOf(':');
       const extra=providerHint.slice(extraColon+1);

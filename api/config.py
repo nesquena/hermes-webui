@@ -1558,6 +1558,19 @@ def _custom_endpoint_slugs_for_base_url(value: object) -> set[str]:
     same base URL, those endpoint slugs are just UI routing hints and should
     resolve back to the configured provider rather than requiring a CUSTOM_* API
     key.
+
+    ``host`` is whatever ``urlparse().hostname`` yields, so every reg-name shape
+    is producible — a single-label Docker/LAN name (``llm``), a dotted DNS name
+    (``ollama.internal``) and an IPv4 literal alike. The
+    ``custom:<host>:<port>`` spelling is the authority form recognised by
+    ``_parse_provider_qualified_model_id``; keep the two in step (#6657).
+
+    IPv6 (explicit contract): ``urlparse`` strips the URL's brackets, so a raw
+    ``custom:::1:11434`` spelling is genuinely ambiguous — ``::1:11434`` is
+    itself a valid IPv6 address. The bracketed ``custom:[::1]:11434`` form is
+    therefore the one the qualified-ID grammar parses, and it is emitted first
+    here. The unbracketed spellings stay in the set for backwards-compatible
+    *matching* only (this set feeds membership checks, never new IDs).
     """
     url = str(value or "").strip().rstrip("/")
     if not url:
@@ -1570,7 +1583,10 @@ def _custom_endpoint_slugs_for_base_url(value: object) -> set[str]:
     if port is None:
         scheme = (parsed_url.scheme or "http").lower()
         port = 443 if scheme == "https" else 80
-    return {f"custom:{host}:{port}", f"custom:{host}-{port}"}
+    slugs = {f"custom:{host}:{port}", f"custom:{host}-{port}"}
+    if ":" in host:
+        slugs.add(f"custom:[{host}]:{port}")
+    return slugs
 
 
 _LEGACY_CUSTOM_API_KEY_ENV_WARNED: set[str] = set()
@@ -2516,60 +2532,144 @@ def _base_url_points_at_local_server(base_url: str) -> bool:
         return False
 
 
-def _custom_slug_rest_looks_like_host_port(rest: str) -> bool:
-    """True when ``custom:<rest>`` is an endpoint-style slug ``host:port``.
+_CUSTOM_ENDPOINT_PORT_RE = re.compile(r"^[0-9]{1,5}$")
+# Characters a URL authority's host can never contain, so a slug segment holding
+# any of them is not a host token. Everything else (single-label Docker names,
+# dotted DNS names, IPv4 literals, IDN/punycode) is accepted — see
+# _custom_slug_rest_is_endpoint_authority.
+_CUSTOM_ENDPOINT_HOST_REJECT_RE = re.compile(r"[\s:/?#@\[\]]")
 
-    WebUI sometimes derives ``custom:10.8.71.41:8080`` from ``base_url`` authority.
-    The #1776 peel must not treat that middle colon as part of an eaten model
-    segment — otherwise ``@custom:10.8.71.41:8080:Qwen3`` wrongly becomes model
-    ``8080:Qwen3``.
+
+def _custom_slug_rest_is_endpoint_authority(rest: str) -> bool:
+    """True when ``custom:<rest>`` is an endpoint authority slug ``host:port``.
+
+    This is the ONE grammar for the endpoint-derived half of a custom provider
+    slug — not a name-shape heuristic. It accepts exactly what the producer
+    ``_custom_endpoint_slugs_for_base_url`` can emit:
+
+    * ``port``  — 1-5 ASCII digits, 1..65535.
+    * ``host``  — any nonempty token containing no character that a URL
+      authority host cannot contain (no whitespace, ``:``, ``/``, ``?``, ``#``,
+      ``@``, ``[``, ``]``) and not hyphen/dot-fenced. That covers a single-label
+      Docker/LAN name (``llm``), a dotted DNS name (``ollama.internal``), an
+      IPv4 literal (``10.8.71.41``) and ``localhost`` alike.
+    * ``host`` — OR a bracketed IPv6 literal (``[::1]``, ``[fe80::1%eth0]``).
+
+    The earlier form of this predicate required an IP literal, ``localhost`` or
+    a dot, which rejected the producer's own single-label output: a config
+    ``base_url`` of ``http://llm:8080/v1`` yields slug ``custom:llm:8080``, and
+    ``@custom:llm:8080:qwen3`` then mis-peeled into provider ``custom:llm`` with
+    model ``8080:qwen3`` (#6657).
+
+    IPv6 (explicit contract): an UNBRACKETED IPv6 authority is rejected. It is
+    irreducibly ambiguous — in ``::1:11434`` the tail is either a port or the
+    last IPv6 hextet, and ``::1:11434`` is a valid address on its own. Bracket
+    it (``custom:[::1]:11434``), which is the spelling
+    ``_custom_endpoint_slugs_for_base_url`` emits for IPv6 hosts.
+
+    The #1776 peel in ``_parse_provider_qualified_model_id`` must not treat the
+    authority's middle colon as part of an eaten model segment.
     """
     rest = str(rest or "").strip()
     if ":" not in rest:
         return False
     host, port_s = rest.rsplit(":", 1)
-    if not host or ":" in host:
+    if not host:
         return False
-    if not port_s.isdigit():
+    if not _CUSTOM_ENDPOINT_PORT_RE.match(port_s):
         return False
-    try:
-        port_n = int(port_s)
-    except ValueError:
+    if not (1 <= int(port_s) <= 65535):
         return False
-    if not (1 <= port_n <= 65535):
-        return False
-    try:
-        import ipaddress
+    if host.startswith("[") and host.endswith("]"):
+        inner = host[1:-1].split("%", 1)[0]
+        if not inner:
+            return False
+        try:
+            import ipaddress
 
-        ipaddress.ip_address(host)
-        return True
-    except ValueError:
-        pass
-    hl = host.lower()
-    if hl == "localhost":
-        return True
-    # Typical DNS hostname used as proxy slug (contains at least one label dot).
-    if "." in host:
-        return True
-    return False
+            return ipaddress.ip_address(inner).version == 6
+        except ValueError:
+            return False
+    if _CUSTOM_ENDPOINT_HOST_REJECT_RE.search(host):
+        return False
+    return not (host.startswith("-") or host.endswith("-") or host.startswith("."))
 
 
-def _parse_provider_qualified_model_id(model_id: str) -> tuple[str, str] | None:
+def _known_custom_provider_slugs(config_obj: dict | None = None) -> set[str]:
+    """Authoritative custom-provider slugs, lowercased, for prefix matching.
+
+    Union of the name-derived slugs (``custom_providers[].name``) and the
+    endpoint-derived authority slugs for every configured ``base_url`` plus the
+    active ``model.base_url``. ``_parse_provider_qualified_model_id`` prefers a
+    longest match from this set over the shape grammar, so config resolves the
+    one residual ambiguity the grammar cannot: for ``@custom:gw:8080:free`` a
+    configured ``custom:gw`` wins (model ``8080:free``) while a configured
+    ``http://gw:8080`` endpoint wins instead (model ``free``). #6657.
+    """
+    source = config_obj if isinstance(config_obj, dict) else cfg
+    slugs: set[str] = set(_named_custom_provider_slugs(source))
+    for entry in _custom_provider_entries(source):
+        slugs |= _custom_endpoint_slugs_for_base_url(entry.get("base_url"))
+    model_cfg = source.get("model") if isinstance(source, dict) else None
+    if isinstance(model_cfg, dict):
+        slugs |= _custom_endpoint_slugs_for_base_url(model_cfg.get("base_url"))
+    return {slug.lower() for slug in slugs if slug}
+
+
+def _parse_provider_qualified_model_id(
+    model_id: str,
+    config_obj: dict | None = None,
+) -> tuple[str, str] | None:
     """Parse WebUI's ``@provider:model`` route hint into ``(model, provider)``.
 
-    The provider segment can contain colons for named custom providers, while
-    the model segment can also contain colons for tags such as ``:free``.
-    Keep this parser shared with ``resolve_model_provider`` so any caller that
-    compares route-hinted model lanes uses the same grammar.
+    THE qualified-ID grammar. Keep this parser shared with
+    ``resolve_model_provider`` — and with its ``static/ui.js`` mirror
+    ``_customModelFromQualifiedId`` — so every caller that compares route-hinted
+    model lanes agrees on where the provider ends and the model begins::
+
+        @<provider>:<model>
+        <provider> := <plain-id>                  # "openrouter", "ollama"
+                    | custom:<name-slug>          # colon-free, per
+                                                  #   _custom_provider_slug_from_name
+                    | custom:<host>:<port>        # endpoint authority, per
+                                                  #   _custom_slug_rest_is_endpoint_authority
+        <model>    := any nonempty string, colons allowed (":free", ":0", ":32b")
+
+    Resolution order for a ``custom:`` hint:
+
+    1. Longest prefix that is an authoritative configured provider slug
+       (``_known_custom_provider_slugs``). Config beats shape, so a purely
+       numeric model id under a named provider still parses correctly.
+    2. Otherwise the shape grammar above: rsplit at the last colon, then peel one
+       segment back unless what remains after ``custom:`` is an endpoint
+       authority.
+
+    ``config_obj`` defaults to the live ``cfg``; pass one to parse against a
+    specific config snapshot.
     """
     candidate = str(model_id or "").strip()
     if not candidate.startswith("@") or ":" not in candidate:
         return None
     inner = candidate[1:]
+    # Only a hint with an extra colon beyond ``custom:<slug>:<model>`` is
+    # ambiguous, so the config lookup is skipped (and stays free) otherwise.
+    if inner.lower().startswith("custom:") and inner.count(":") >= 3:
+        known_slugs = _known_custom_provider_slugs(config_obj)
+        if known_slugs:
+            segments = inner.split(":")
+            # Longest provider prefix first; a provider must leave a model
+            # behind. ``cut >= 2`` skips the bare ``custom`` root, which prefixes
+            # every id here and so disambiguates nothing (it is never a member of
+            # the slug set either — every entry starts with ``custom:``).
+            for cut in range(len(segments) - 1, 1, -1):
+                prefix = ":".join(segments[:cut])
+                bare = ":".join(segments[cut:])
+                if bare and prefix.lower() in known_slugs:
+                    return bare, prefix
     provider_hint, bare_model = inner.rsplit(":", 1)
     if provider_hint.startswith("custom:") and provider_hint.count(":") >= 2:
         _slug_rest = provider_hint[len("custom:"):]
-        if not _custom_slug_rest_looks_like_host_port(_slug_rest):
+        if not _custom_slug_rest_is_endpoint_authority(_slug_rest):
             provider_hint, extra = provider_hint.rsplit(":", 1)
             bare_model = f"{extra}:{bare_model}"
     elif (provider_hint not in _PROVIDER_MODELS
