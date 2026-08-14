@@ -16980,6 +16980,18 @@ _STATIC_CACHE_LOCK = threading.Lock()
 
 def _serve_static(handler, parsed):
     static_root = api_config.get_static_root().resolve()
+    # Issue #6992: an in-place self-update mutates the working tree this
+    # process serves /static/* from. During that window a request could receive
+    # bytes from two different revisions under one versioned URL, and the old
+    # code marked every non-empty ?v= response immutable for a year — caching a
+    # mixed bundle (e.g. new JS + old CSS) indefinitely. While an update is
+    # being applied we refuse to serve static bytes (503 + no-store); the
+    # client's post-update reload lands after the restart, on the new coherent
+    # revision.
+    from api.updates import update_in_progress
+
+    if update_in_progress():
+        return j(handler, {"error": "server is updating; retry shortly"}, status=503)
     # Strip the leading '/static/' prefix, then resolve and sandbox
     rel = parsed.path[len("/static/") :]
     static_file = (static_root / rel).resolve()
@@ -17016,9 +17028,18 @@ def _serve_static(handler, parsed):
     # The page template substitutes __WEBUI_VERSION__ at request time (see the
     # `/`/`/index.html`/`/session/` branch above), and static/sw.js's
     # SHELL_ASSETS list relies on the same convention. So a fingerprinted URL
-    # is safe to cache aggressively: any redeploy changes the URL.
+    # is safe to cache aggressively — but ONLY when this process can prove the
+    # token→bytes binding: the token must equal WEBUI_VERSION, the revision
+    # this server was started on (resolved once at import). Any other non-empty
+    # token — e.g. HTML stamped by a different revision mid-update, a stale
+    # service worker, or a hand-crafted URL — cannot be verified against the
+    # bytes being served, so keep it short-lived instead of immutable for a
+    # year (issue #6992).
     version_values = parse_qs(parsed.query, keep_blank_values=True).get("v", [""])
-    has_fingerprint = bool(version_values[0])
+    from api.updates import WEBUI_VERSION
+
+    version_token = version_values[0]
+    has_fingerprint = bool(version_token) and version_token == WEBUI_VERSION
     cache_control = (
         "public, max-age=31536000, immutable" if has_fingerprint
         else "public, max-age=300"

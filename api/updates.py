@@ -43,6 +43,13 @@ _summary_cache: OrderedDict = OrderedDict()
 _cache_lock = threading.Lock()
 _check_in_progress = False
 _apply_lock = threading.Lock()   # prevents concurrent stash/pull/pop on same repo
+# Issue #6992: set while an in-place WebUI update is mutating the checkout this
+# process serves from. `_serve_static()` in api/routes.py refuses to serve
+# /static/* bytes while it is set, so a request can never receive a
+# mixed-revision bundle (new JS + old CSS) under one versioned URL and have it
+# cached immutable for a year. Plain bool: reads/writes are GIL-atomic, and
+# this is checked on the hot static-serving path.
+_UPDATE_IN_PROGRESS = False
 CACHE_TTL = 1800  # 30 minutes
 _AGENT_GATEWAY_RESTART_RETRY_DELAY_S = 1.0
 _FORCE_DIRTY_PROBE_TIMEOUT = 5
@@ -1936,6 +1943,33 @@ def _discard_local_changes(path: Path, reset_ref: str) -> bool:
     return ok
 
 
+def set_update_in_progress() -> None:
+    """Freeze versioned static serving while an in-place update mutates the WebUI checkout.
+
+    Called (for ``target == 'webui'``) under ``_apply_lock`` before any git
+    command that can change the working tree this process serves /static/*
+    from. Cleared by :func:`clear_update_in_progress` once the working tree is
+    coherent again — the scheduled ``os.execv`` restart then serves the new
+    revision (issue #6992).
+    """
+    global _UPDATE_IN_PROGRESS
+    _UPDATE_IN_PROGRESS = True
+
+
+def clear_update_in_progress() -> None:
+    """Resume normal static serving after an update attempt finishes.
+
+    Safe to call even when the flag was never set (agent-target updates).
+    """
+    global _UPDATE_IN_PROGRESS
+    _UPDATE_IN_PROGRESS = False
+
+
+def update_in_progress() -> bool:
+    """True while an in-place WebUI update may be mutating the served checkout."""
+    return _UPDATE_IN_PROGRESS
+
+
 def apply_force_update(target: str, channel=None) -> dict:
     """Discard local changes for the requested update target.
 
@@ -1964,6 +1998,11 @@ def apply_force_update(target: str, channel=None) -> dict:
     if not _apply_lock.acquire(blocking=False):
         return {'ok': False, 'message': 'Update already in progress'}
     try:
+        # Freeze /static/* serving while this checkout is being mutated in
+        # place (issue #6992) — cleared in the finally below once the working
+        # tree is coherent again.
+        if target == 'webui':
+            set_update_in_progress()
         if target == 'webui':
             path = REPO_ROOT
         elif target == 'agent':
@@ -2066,6 +2105,8 @@ def apply_force_update(target: str, channel=None) -> dict:
         return response
     finally:
         _apply_lock.release()
+        if target == 'webui':
+            clear_update_in_progress()
 
 
 def apply_update(target, channel=None):
@@ -2080,9 +2121,17 @@ def apply_update(target, channel=None):
     if not _apply_lock.acquire(blocking=False):
         return {'ok': False, 'message': 'Update already in progress'}
     try:
+        # Freeze /static/* serving while this checkout is being mutated in
+        # place (issue #6992) — cleared in the finally below once the working
+        # tree is coherent again (the scheduled restart then serves the new
+        # revision).
+        if target == 'webui':
+            set_update_in_progress()
         return _apply_update_inner(target, channel)
     finally:
         _apply_lock.release()
+        if target == 'webui':
+            clear_update_in_progress()
 
 
 def _restore_stash_after_pull_failure(
