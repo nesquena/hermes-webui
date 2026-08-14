@@ -42,6 +42,13 @@ _SUMMARY_CACHE_MAX = 16
 _summary_cache: OrderedDict = OrderedDict()
 _cache_lock = threading.Lock()
 _check_in_progress = False
+# Per-repo serialization: a straggler thread from a timed-out check must not
+# overlap a newer check on the same checkout. Guarded by
+# _repo_check_locks_guard (never _cache_lock) so acquiring a repo lock can
+# never deadlock against cache-lock holders. (PR #6830, Greptile: detached
+# checks overlap later fetches)
+_repo_check_locks: dict[str, threading.Lock] = {}
+_repo_check_locks_guard = threading.Lock()
 _apply_lock = threading.Lock()   # prevents concurrent stash/pull/pop on same repo
 CACHE_TTL = 1800  # 30 minutes
 _AGENT_GATEWAY_RESTART_RETRY_DELAY_S = 1.0
@@ -1204,6 +1211,25 @@ def _check_repo_branch(path, name, *, fetch=True):
     }
 
 
+def _repo_check_lock(path: Path) -> threading.Lock:
+    """Return the per-repo lock serializing git operations on ``path``.
+
+    After a timed-out check, ``executor.shutdown(wait=False)`` leaves the
+    straggler worker running (bounded by the 30s fetch timeout). Without
+    this lock a new forced check could run git concurrently on the same
+    checkout — index.lock failures, or update results computed from refs
+    that changed mid-read. (PR #6830, Greptile: detached checks overlap
+    later fetches)
+    """
+    key = str(path)
+    with _repo_check_locks_guard:
+        lock = _repo_check_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _repo_check_locks[key] = lock
+        return lock
+
+
 def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     """Check if a git repo is behind its latest release. Returns dict or None.
 
@@ -1231,48 +1257,55 @@ def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
             'no_git': True,
         }
 
-    # Fetch tags first so update prompts track published releases, not every
-    # development commit that lands on master/main after the latest release.
-    #
-    # --force is required because the WebUI is a release-tracking consumer:
-    # it never pushes tags, so it should always defer to whatever the remote
-    # says a release tag points to. Without --force, a remote re-tag (e.g.
-    # after a squash-merge that re-points a release tag at a new SHA) jams
-    # the update path indefinitely with "would clobber existing tag" errors.
-    # See #2756.
-    fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--tags', '--force'], path, timeout=30)
-    if not fetch_ok:
+    # Serialize git operations on this checkout. A straggler from a
+    # timed-out check may still be fetching (bounded by the 30s fetch
+    # timeout); a new forced check must not run git concurrently on the
+    # same repo — index.lock failures, or results computed from refs that
+    # changed mid-read. (PR #6830, Greptile: detached checks overlap later
+    # fetches)
+    with _repo_check_lock(path):
+        # Fetch tags first so update prompts track published releases, not every
+        # development commit that lands on master/main after the latest release.
+        #
+        # --force is required because the WebUI is a release-tracking consumer:
+        # it never pushes tags, so it should always defer to whatever the remote
+        # says a release tag points to. Without --force, a remote re-tag (e.g.
+        # after a squash-merge that re-points a release tag at a new SHA) jams
+        # the update path indefinitely with "would clobber existing tag" errors.
+        # See #2756.
+        fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--tags', '--force'], path, timeout=30)
+        if not fetch_ok:
+            release_info = _check_repo_release(path, name, channel)
+            message = 'fetch failed'
+            if fetch_out:
+                message = f'{message}: {_sanitize_git_diagnostic(fetch_out)}'
+            if release_info is not None:
+                release_info = dict(release_info)
+                release_info['error'] = message
+                release_info['stale_check'] = True
+                release_info['dirty'] = _is_dirty(path)
+                return release_info
+            return {
+                'name': name,
+                'behind': None,
+                'error': message,
+                'stale_check': True,
+                'dirty': _is_dirty(path),
+            }
+
         release_info = _check_repo_release(path, name, channel)
-        message = 'fetch failed'
-        if fetch_out:
-            message = f'{message}: {_sanitize_git_diagnostic(fetch_out)}'
         if release_info is not None:
             release_info = dict(release_info)
-            release_info['error'] = message
-            release_info['stale_check'] = True
             release_info['dirty'] = _is_dirty(path)
             return release_info
-        return {
-            'name': name,
-            'behind': None,
-            'error': message,
-            'stale_check': True,
-            'dirty': _is_dirty(path),
-        }
 
-    release_info = _check_repo_release(path, name, channel)
-    if release_info is not None:
-        release_info = dict(release_info)
-        release_info['dirty'] = _is_dirty(path)
-        return release_info
-
-    branch_info = _check_repo_branch(path, name, fetch=False)
-    if branch_info is not None:
-        branch_info = dict(branch_info)
-        branch_info['dirty'] = _is_dirty(path)
-        branch_info['channel'] = channel
-        return branch_info
-    return None
+        branch_info = _check_repo_branch(path, name, fetch=False)
+        if branch_info is not None:
+            branch_info = dict(branch_info)
+            branch_info['dirty'] = _is_dirty(path)
+            branch_info['channel'] = channel
+            return branch_info
+        return None
 
 
 def _probe_dirty(
