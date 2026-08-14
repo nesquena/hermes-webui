@@ -693,3 +693,162 @@ def test_sessions_route_preserves_visible_child_lineage_when_archived_parent_fil
         ]
     finally:
         conn.close()
+
+
+def test_compression_continuation_tolerates_sub_second_timestamp_overlap(_isolate):
+    """#6931: a compression continuation recorded a few ms BEFORE the parent's
+    ended_at (write-order race) is still one lineage in /api/sessions."""
+    conn = _ensure_state_db(_isolate)
+    t0 = time.time() - 100
+    try:
+        _save_webui_session("lineage_race_root", title="Shared conversation", updated_at=t0)
+        _save_webui_session("lineage_race_tip", title="Shared conversation", updated_at=t0 + 10)
+        _insert_state_row(
+            conn,
+            "lineage_race_root",
+            started_at=t0,
+            ended_at=t0 + 5,
+            end_reason="compression",
+        )
+        # child.started_at lands 0.1s BEFORE parent.ended_at — the #6931 race.
+        _insert_state_row(
+            conn,
+            "lineage_race_tip",
+            parent="lineage_race_root",
+            started_at=t0 + 5 - 0.1,
+        )
+
+        rows = {row["session_id"]: row for row in all_sessions()}
+
+        tip = rows["lineage_race_tip"]
+        assert tip.get("parent_session_id") == "lineage_race_root"
+        assert tip.get("_lineage_root_id") == "lineage_race_root"
+        assert tip.get("_lineage_tip_id") == "lineage_race_tip"
+        assert tip.get("_compression_segment_count") == 2
+        assert tip.get("relationship_type") != "child_session"
+    finally:
+        conn.close()
+
+
+def test_materially_overlapping_compression_child_stays_child_session(_isolate):
+    """#6931: a child that started long before the compression parent ended
+    (beyond tolerance, no matching title) must remain a separate child."""
+    conn = _ensure_state_db(_isolate)
+    t0 = time.time() - 100
+    try:
+        _save_webui_session("lineage_overlap_root", title="Root title", updated_at=t0)
+        _save_webui_session("lineage_overlap_child", title="Child title", updated_at=t0 + 10)
+        _insert_state_row(
+            conn,
+            "lineage_overlap_root",
+            started_at=t0,
+            ended_at=t0 + 60,
+            end_reason="compression",
+        )
+        # child started 30s before the parent ended — a genuine concurrent child.
+        _insert_state_row(
+            conn,
+            "lineage_overlap_child",
+            parent="lineage_overlap_root",
+            started_at=t0 + 30,
+        )
+
+        rows = {row["session_id"]: row for row in all_sessions()}
+
+        child = rows["lineage_overlap_child"]
+        assert child.get("relationship_type") == "child_session"
+        assert child.get("parent_session_id") == "lineage_overlap_root"
+        assert "_lineage_root_id" not in child
+        assert "_compression_segment_count" not in child
+    finally:
+        conn.close()
+
+
+def test_same_title_compression_child_recognized_beyond_timestamp_tolerance(_isolate):
+    """#6931: a direct same-source child with the parent's exact title is still
+    a continuation even when the boundary timestamps disagree beyond the
+    tolerance — timestamp is not the only gate."""
+    conn = _ensure_state_db(_isolate)
+    t0 = time.time() - 100
+    try:
+        _save_webui_session("lineage_title_root", title="Shared conversation", updated_at=t0)
+        _save_webui_session("lineage_title_tip", title="Shared conversation", updated_at=t0 + 10)
+        _insert_state_row(
+            conn,
+            "lineage_title_root",
+            title="Shared conversation",
+            started_at=t0,
+            ended_at=t0 + 60,
+            end_reason="compression",
+        )
+        # child started 30s before the parent ended but carries the exact title.
+        _insert_state_row(
+            conn,
+            "lineage_title_tip",
+            title="Shared conversation",
+            parent="lineage_title_root",
+            started_at=t0 + 30,
+        )
+
+        rows = {row["session_id"]: row for row in all_sessions()}
+
+        tip = rows["lineage_title_tip"]
+        assert tip.get("_lineage_root_id") == "lineage_title_root"
+        assert tip.get("_lineage_tip_id") == "lineage_title_tip"
+        assert tip.get("_compression_segment_count") == 2
+        assert tip.get("relationship_type") != "child_session"
+    finally:
+        conn.close()
+
+
+def test_continuation_classification_timestamp_tolerance_and_guards():
+    """#6931 focused unit coverage of _is_continuation_session: tolerance,
+    title evidence fallback, and preserved fork/cross-source/end_reason guards."""
+    from api.agent_sessions import _is_continuation_session
+
+    def make_parent(**over):
+        row = {
+            'source': 'webui',
+            'end_reason': 'compression',
+            'ended_at': 1000.0,
+            'title': 'Shared conversation',
+        }
+        row.update(over)
+        return row
+
+    def make_child(**over):
+        row = {
+            'source': 'webui',
+            'started_at': 1000.05,
+            'title': 'Shared conversation',
+        }
+        row.update(over)
+        return row
+
+    # Normal non-overlapping ordering: continuation.
+    assert _is_continuation_session(make_parent(), make_child())
+    # Sub-second overlap (observed -0.06..-0.07s in #6931): continuation.
+    assert _is_continuation_session(make_parent(), make_child(started_at=999.95))
+    # Overlap inside the 2s tolerance: continuation.
+    assert _is_continuation_session(make_parent(), make_child(started_at=998.5))
+    # Overlap beyond tolerance but exact title evidence: continuation.
+    assert _is_continuation_session(make_parent(), make_child(started_at=950.0))
+    # Overlap beyond tolerance with a different title: separate child.
+    assert not _is_continuation_session(
+        make_parent(), make_child(started_at=950.0, title='Another conversation')
+    )
+    # Fork guard holds regardless of timing.
+    assert not _is_continuation_session(
+        make_parent(), make_child(started_at=999.95, session_source='fork')
+    )
+    # Cross-source guard holds regardless of timing.
+    assert not _is_continuation_session(
+        make_parent(), make_child(started_at=999.95, source='telegram')
+    )
+    # Non-compression/cli_close parents never continue.
+    assert not _is_continuation_session(
+        make_parent(end_reason='user_stop'), make_child(started_at=999.95)
+    )
+    # Missing/unparsable boundary timestamps degrade to False (no crash).
+    assert not _is_continuation_session(make_parent(ended_at='not-a-number'), make_child())
+    assert not _is_continuation_session(make_parent(), make_child(started_at='not-a-number'))

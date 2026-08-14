@@ -52,6 +52,15 @@ MESSAGING_SOURCES = {
 CLI_MIN_UNTITLED_MESSAGE_COUNT = 6
 CLI_MIN_UNTITLED_USER_MESSAGE_COUNT = 2
 
+# Sub-second scheduling/write-order races during a compression/cli_close
+# handoff can persist the continuation row with ``started_at`` a few
+# milliseconds BEFORE the parent's ``ended_at`` lands (#6931). The tolerance
+# below lets those rows still classify as the next segment; the fork /
+# cross-source / end_reason guards in ``_is_continuation_session`` already
+# rule out unrelated rows, so a small window cannot collapse genuinely
+# concurrently started children.
+CONTINUATION_STARTED_AT_TOLERANCE_SECONDS = 2.0
+
 SOURCE_LABELS = {
     'acp': 'ACP',
     'api_server': 'API',
@@ -307,7 +316,8 @@ def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
     by ``hermes -c`` also records a new child session; for sidebar projection it
     should continue the same visible conversation rather than becoming a
     separate child-session row. Plain parent/child links that started before the
-    parent's ended boundary remain child sessions.
+    parent's ended boundary remain child sessions. A small scheduling/write-order
+    overlap between the handoff boundary timestamps is tolerated (#6931).
 
     Do not collapse lineage across raw sources. A WebUI session that continues
     from a Telegram/CLI/etc. parent must remain visible as its own surface-owned
@@ -331,9 +341,21 @@ def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
         # continuations when no boundary timestamp is available.
         return True
     try:
-        return float(child.get('started_at') or 0) >= float(ended_at)
+        child_started = float(child.get('started_at') or 0)
+        parent_ended = float(ended_at)
     except (TypeError, ValueError):
         return False
+    if child_started >= parent_ended - CONTINUATION_STARTED_AT_TOLERANCE_SECONDS:
+        return True
+    # Timestamps disagree beyond the tolerance. Independent evidence can still
+    # identify the same handoff: a compression/cli_close continuation carries
+    # the parent's conversation title verbatim (the #6931 rows had identical
+    # titles), while a genuinely new or forked session gets its own
+    # auto-numbered/user title. Requiring an exact title match keeps unrelated
+    # same-source children separate even when they overlap the parent.
+    parent_title = str(parent.get('title') or '').strip()
+    child_title = str(child.get('title') or '').strip()
+    return bool(parent_title and child_title and parent_title == child_title)
 
 
 def _continuation_root_id(rows_by_id: dict[str, dict], session_id: str | None) -> str | None:
