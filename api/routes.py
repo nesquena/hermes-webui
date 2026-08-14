@@ -11110,15 +11110,6 @@ def _handle_insights(handler, parsed) -> bool:
     start_ts = None
     end_ts = None
 
-    # Whether the effective `end` collapses to the server clock ("now") rather
-    # than an explicit calendar day: true when `end` was omitted (start-only)
-    # or supplied but in the future (> now).  For those, the local-midnight
-    # alignment below must not roll end_cutoff up to the NEXT midnight, or
-    # same-day sessions stamped after the server clock (future from the
-    # server's point of view) would be admitted.  An explicit end date at or
-    # before today still keeps its full calendar day.
-    end_clamped_to_now = end_ts_v is None or (end_ts_v is not None and end_ts_v > now)
-
     if start_ts_v is not None or end_ts_v is not None:
         if end_ts_v is not None:
             end_ts = min(end_ts_v, now)
@@ -11141,6 +11132,13 @@ def _handle_insights(handler, parsed) -> bool:
         if start_ts >= now:
             start_ts = None
             end_ts = None
+        # Whether the effective `end` collapsed to the server clock ("now")
+        # rather than an explicit calendar day.  MUST be computed AFTER the
+        # swap+clamp above: a future `start` paired with a past `end` is
+        # swapped and then clamped to `now`, so a pre-swap flag would wrongly
+        # stay False and leave end_cutoff at the NEXT local midnight, admitting
+        # same-day sessions stamped after the server clock.
+        end_clamped_to_now = end_ts == now
         # Clamp both endpoints into the platform-safe localtime range so an
         # absurd-but-finite timestamp (e.g. 1e20, -1e20) cannot reach
         # localtime()/mktime() and return HTTP 500. Windows msvcrt localtime
