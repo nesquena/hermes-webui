@@ -205,7 +205,8 @@ def test_static_sessions_js_switches_profile_before_opening_all_profiles_row():
     assert "_profileSwitchOpeningExistingSession=true;" in ensure_body
     assert open_body.index("await _ensureSidebarSessionProfile(session);") < open_body.index("await loadSession(session.session_id,")
     assert "await _openSidebarSession(s);" in src
-    assert "await _openSidebarSession(seg, {skipLineageResolve:true});" in src
+    assert "await _openSidebarLineageSegment(seg);" in src
+    assert "return _openSidebarSession(segment, {skipLineageResolve:true});" in src
     assert "await _openSidebarSession(childSession, {skipLineageResolve:true});" in src
 
 
