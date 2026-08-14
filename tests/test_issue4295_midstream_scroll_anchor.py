@@ -457,7 +457,7 @@ def test_restore_message_scroll_snapshot_keeps_user_unpinned_state_authoritative
     compact = _compact(body)
 
     assert "constbottomDistance=el.scrollHeight-el.scrollTop-el.clientHeight;" in compact
-    assert "if(snapshot.userUnpinned===true){_messageUserUnpinned=true;_scrollPinned=false;_nearBottomCount=0;}elseif(snapshot.pinned===true){_messageUserUnpinned=false;_scrollPinned=true;_nearBottomCount=2;}else{" in compact
+    assert "if(snapshot.userUnpinned===true){_messageUserUnpinned=true;_scrollPinned=false;_nearBottomCount=0;}elseif(snapshot.pinned===true){_messageUserUnpinned=false;_scrollPinned=true;_messageFollowIntentCache=true;_nearBottomCount=2;}else{" in compact
     assert "_messageUserUnpinned=false;_scrollPinned=false;_nearBottomCount=0;" not in compact
 
 
