@@ -67,6 +67,35 @@ def test_is_root_profile_caches_results(monkeypatch):
     assert calls['n'] == 1, "Cache should be hit after first lookup"
 
 
+def test_is_root_profile_single_flights_cold_cache(monkeypatch):
+    """Concurrent sidebar filters must not rebuild the profile list per row."""
+    import threading
+    import api.profiles as p
+
+    calls = {'n': 0}
+    entered = threading.Event()
+    release = threading.Event()
+
+    def fake_list():
+        calls['n'] += 1
+        entered.set()
+        release.wait(timeout=2)
+        return [{'name': 'kinni', 'is_default': True, 'path': '/tmp/.hermes'}]
+
+    monkeypatch.setattr(p, 'list_profiles_api', fake_list)
+    p._invalidate_root_profile_cache()
+    first = threading.Thread(target=p._is_root_profile, args=('kinni',))
+    second = threading.Thread(target=p._is_root_profile, args=('haku',))
+    first.start()
+    assert entered.wait(timeout=1)
+    second.start()
+    release.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert calls['n'] == 1
+
+
 def test_is_root_profile_invalidation_drops_stale(monkeypatch):
     """Explicit invalidation forces re-query on next call."""
     import api.profiles as p
