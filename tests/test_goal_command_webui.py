@@ -627,6 +627,7 @@ async function cmdGoal(args) {{{cmd_goal_body}}}
   assert.strictEqual(savedA.messages.at(-1).content, 'A goal status');
 
   if ({json.dumps(pane_state)} === 'same') {{
+    assert.strictEqual(INFLIGHT.A.reattach, undefined);
     assert.strictEqual(S.activeStreamId, 'A-stream');
     assert.strictEqual(S.busy, true);
     assert.strictEqual(S.session.active_stream_id, 'A-stream');
@@ -650,6 +651,7 @@ async function cmdGoal(args) {{{cmd_goal_body}}}
       sid:'A', streamId:'A-stream', ts:123,
     }});
   }} else {{
+    assert.strictEqual(INFLIGHT.A.reattach, true);
     assert.deepStrictEqual(S.session, visibleSessionBefore);
     assert.deepStrictEqual(S.messages, visibleMessagesBefore);
     assert.deepStrictEqual(S.toolCalls, visibleToolCallsBefore);

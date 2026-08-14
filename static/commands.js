@@ -1259,7 +1259,7 @@ async function cmdGoal(args){
       if(!r||!r.stream_id)return;
       const messages=activeMessages.slice();
       if(statusMessage)messages.push(statusMessage);
-      INFLIGHT[activeSid]={streamId:r.stream_id,messages,uploaded:[],toolCalls:[],activeTurnToken};
+      INFLIGHT[activeSid]={streamId:r.stream_id,messages,uploaded:[],toolCalls:[],activeTurnToken,reattach:true};
       if(typeof saveInflightState==='function')saveInflightState(activeSid,{streamId:r.stream_id,messages,uploaded:[],toolCalls:[],activeTurnToken});
       return;
     }
