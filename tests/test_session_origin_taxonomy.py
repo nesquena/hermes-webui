@@ -178,5 +178,5 @@ def test_sidebar_frontend_renders_origin_tabs_and_accepts_non_cli_origins():
     assert "_serverSessionOriginCounts" in source
     assert "session_origin_counts" in source
     assert "_sessionOriginKeys" in source
-    assert "sourceFilter!=='webui'&&sourceFilter!=='cli'" in source
+    assert "selectedOrigins.has(_sessionOrigin(s))" in source
     assert "session_origin" in source

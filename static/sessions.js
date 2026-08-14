@@ -1493,7 +1493,7 @@ async function newSession(flash, options={}){
     }
     S.session=data.session;S.messages=data.session.messages||[];
     S._pendingSessionToolsets=null;
-    if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
+    if(_sessionSourceFilters.some(source=>source!=='webui')) _setSessionSourceFilters(['webui']);
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
     S.lastUsage={...(data.session.last_usage||{})};
     if(!(options&&options.worktree)) _rememberNewChatDraftSession(S.session);
@@ -2573,7 +2573,7 @@ function _sessionOriginKeys(){
   const keys=new Set(['webui']);
   if(window._showCliSessions) keys.add('cli');
   Object.keys(counts).forEach(key=>{if(Number(counts[key])>0)keys.add(key);});
-  if(_sessionSourceFilter) keys.add(_sessionSourceFilter);
+  for(const source of _sessionSourceFilters)keys.add(source);
   return [...keys].sort((a,b)=>{
     const ai=_SESSION_ORIGIN_ORDER.indexOf(a),bi=_SESSION_ORIGIN_ORDER.indexOf(b);
     return (ai<0?999:ai)-(bi<0?999:bi)||a.localeCompare(b);
@@ -2676,8 +2676,23 @@ function _clearSessionSourceTabCounts() {
   _serverSessionOriginLabels = null;
 }
 
-function _requestedSessionSidebarSource() {
-  return window._showCliSessions ? _sessionSourceFilter : 'webui';
+function _normalizeSessionSourceFilters(values){
+  const normalized=[];
+  const seen=new Set();
+  for(const value of (Array.isArray(values)?values:[])){
+    const source=String(value||'').trim().toLowerCase().replace(/[- ]/g,'_');
+    if(!source||!/^[a-z0-9_]+$/.test(source)||seen.has(source))continue;
+    seen.add(source);normalized.push(source);
+  }
+  return normalized.length?normalized:['webui'];
+}
+
+function _requestedSessionSidebarSources() {
+  return window._showCliSessions ? _normalizeSessionSourceFilters(_sessionSourceFilters) : ['webui'];
+}
+
+function _sessionSourceSelectionKey(values){
+  return _normalizeSessionSourceFilters(values).slice().sort().join(',');
 }
 
 function _sessionListExcludeHiddenEnabled() {
@@ -2695,7 +2710,7 @@ function _sessionArchivePagingFilterActive() {
 
 function _sessionListQueryString() {
   const qs = new URLSearchParams();
-  qs.set('sidebar_source', _requestedSessionSidebarSource());
+  for(const source of _requestedSessionSidebarSources())qs.append('sidebar_source',source);
   if(_sessionListExcludeHiddenEnabled()) qs.set('exclude_hidden','1');
   if(_showAllProfiles) qs.set('all_profiles','1');
   if(_showArchived){
@@ -2728,25 +2743,49 @@ function _setActiveProjectFilter(projectId) {
   void renderSessionList({deferWhileInteracting:false});
 }
 
-function _setSessionSourceFilter(filter) {
-  const candidate=String(filter||'').trim().toLowerCase().replace(/[- ]/g,'_');
-  const next = /^[a-z0-9_]+$/.test(candidate)&&candidate ? candidate : 'webui';
-  if (_sessionSourceFilter === next) return;
-  _sessionSourceFilter = next;
+function _setSessionSourceFilters(filters) {
+  const next=_normalizeSessionSourceFilters(filters);
+  if(next.length===_sessionSourceFilters.length&&next.every((source,index)=>source===_sessionSourceFilters[index]))return;
+  _sessionSourceFilters=next;
+  _sessionSourceFilter=next[0];
   _activeProject = null;
   _selectedSessions.clear();
   _sessionSelectMode = false;
-  try { localStorage.setItem('hermes-session-source-filter', next); } catch (_e) {}
+  try { localStorage.setItem('hermes-session-source-filters-v2', JSON.stringify(next)); } catch (_e) {}
   renderSessionListFromCache();
   void renderSessionList({deferWhileInteracting:false});
 }
 
-function _restoreSessionSourceFilter() {
+function _toggleSessionSourceFilter(origin, selected){
+  const source=_normalizeSessionSourceFilters([origin])[0];
+  const next=selected
+    ? _sessionSourceFilters.concat(source)
+    : _sessionSourceFilters.filter(item=>item!==source);
+  _setSessionSourceFilters(next);
+}
+
+function _setSessionSourceFilter(filter) {
+  _setSessionSourceFilters([filter]);
+}
+
+function _restoreSessionSourceFilters() {
   try {
-    const raw = localStorage.getItem('hermes-session-source-filter');
-    if (/^[a-z0-9_]+$/.test(raw||'')) _sessionSourceFilter = raw;
+    const stored=localStorage.getItem('hermes-session-source-filters-v2');
+    let restored=null;
+    if(stored){
+      try{const parsed=JSON.parse(stored);if(Array.isArray(parsed))restored=_normalizeSessionSourceFilters(parsed);}catch(_e){}
+    }
+    if(!restored){
+      const legacy=localStorage.getItem('hermes-session-source-filter');
+      restored=_normalizeSessionSourceFilters(legacy?[legacy]:[]);
+      localStorage.setItem('hermes-session-source-filters-v2',JSON.stringify(restored));
+    }
+    _sessionSourceFilters=restored;
+    _sessionSourceFilter=restored[0];
   } catch (_e) {}
 }
+
+function _restoreSessionSourceFilter(){_restoreSessionSourceFilters();}
 
 function _normalizeMessageForCliImportComparison(message) {
   if (!message || typeof message !== 'object') return message;
@@ -4062,7 +4101,8 @@ let _serverCliSessionCount = null;    // explicit server count for CLI sessions
 let _serverSessionOriginCounts = null;
 let _serverSessionOriginLabels = null;
 let _sessionSourceMenuCleanup = null;
-let _sessionSourceFilter = 'webui';  // one high-level origin: webui, tui, matrix, telegram, ...
+let _sessionSourceFilters = ['webui'];  // ordered, non-empty high-level origins
+let _sessionSourceFilter = 'webui';  // first-origin compatibility alias
 
 function _restoreShowAllProfiles(){
   try{
@@ -5371,7 +5411,7 @@ function showSessionListSkeleton(targetProfile){
       && typeof _knownSessionProfileCount === 'function')
     ? _knownSessionProfileCount(targetProfile) : null;
   const filterActive = (typeof _activeProject !== 'undefined' && _activeProject)
-    || (typeof _sessionSourceFilter !== 'undefined' && _sessionSourceFilter === 'cli');
+    || (typeof _sessionSourceFilters !== 'undefined' && _sessionSourceFilters.some(source=>source!=='webui'));
   const wrap = document.createElement('div');
   wrap.setAttribute('aria-hidden', 'true');
   if(knownCount === 0 && !filterActive){
@@ -5585,7 +5625,7 @@ function _sessionListRenderSignature(){
       _allProjects,
       _activeSessionIdForSidebar(),
       search,
-      _sessionSourceFilter,
+      _sessionSourceFilters,
       !!_sessionSelectMode,
       (window._sidebarDensity==='detailed'?'d':'c'),
       !!_showAllProfiles,
@@ -5641,7 +5681,8 @@ function _applySessionListPayload(sessData, projData, opts){
       ? sessData.active_profile
       : (S.activeProfile || 'default'),
     allProfiles: !!_showAllProfiles,
-    sidebarSource: _requestedSessionSidebarSource(),
+    sidebarSource: _requestedSessionSidebarSources()[0],
+    sidebarSourcesKey: _sessionSourceSelectionKey(_requestedSessionSidebarSources()),
     excludeHidden: _sessionListExcludeHiddenEnabled(),
   };
   // Record this profile's session count so the NEXT switch into it can pick an
@@ -5652,7 +5693,7 @@ function _applySessionListPayload(sessData, projData, opts){
   // a different filter). This mirrors the read-side `filterActive` gate in
   // showSessionListSkeleton so the write and read agree on what the count means.
   const _recordFilterActive = (typeof _activeProject !== 'undefined' && _activeProject)
-    || (typeof _sessionSourceFilter !== 'undefined' && _sessionSourceFilter === 'cli');
+    || (typeof _sessionSourceFilters !== 'undefined' && _sessionSourceFilters.some(source=>source!=='webui'));
   if (!_showAllProfiles && !_recordFilterActive) {
     _recordSessionProfileCount(_allSessionsScope.profile, _allSessions.length);
   }
@@ -5867,13 +5908,14 @@ async function _runRenderSessionListRefresh(opts, _gen){
     const _curScope = {
       profile: S.activeProfile || 'default',
       allProfiles: !!_showAllProfiles,
-      sidebarSource: _requestedSessionSidebarSource(),
+      sidebarSource: _requestedSessionSidebarSources()[0],
+      sidebarSourcesKey: _sessionSourceSelectionKey(_requestedSessionSidebarSources()),
       excludeHidden: _sessionListExcludeHiddenEnabled(),
     };
     const _scopeMatches = _allSessionsScope
       && _allSessionsScope.profile === _curScope.profile
       && _allSessionsScope.allProfiles === _curScope.allProfiles
-      && _allSessionsScope.sidebarSource === _curScope.sidebarSource
+      && _allSessionsScope.sidebarSourcesKey === _curScope.sidebarSourcesKey
       && _allSessionsScope.excludeHidden === _curScope.excludeHidden;
     // #4671: the /api/sessions fetch failed — clear the skeleton flag so this error
     // render (matched cache, or empty rows for a mismatched scope) replaces the
@@ -7695,36 +7737,23 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
     if(!_showArchived&&s.archived) continue;
     sessionsRaw.push(s);
   }
-  if(_sessionSourceFilter==='cli' && !window._showCliSessions && cliSessionCount===0){
-    _sessionSourceFilter='webui';
+  if(_sessionSourceFilters.some(source=>source!=='webui') && !window._showCliSessions && cliSessionCount===0){
+    _sessionSourceFilters=['webui'];_sessionSourceFilter='webui';
   }
-  const showCliOnly=_sessionSourceFilter==='cli';
-  const selectedOrigin=_sessionSourceFilter;
-  const selectedProfileFiltered=selectedOrigin==='webui'
-    ? webuiProfileFiltered
-    : selectedOrigin==='cli'
-      ? cliProfileFiltered
-      : webuiProfileFiltered.concat(cliProfileFiltered).filter(s=>_sessionOrigin(s)===selectedOrigin);
-  const selectedSessionsRaw=selectedOrigin==='webui'
-    ? webuiSessionsRaw
-    : selectedOrigin==='cli'
-      ? cliSessionsRaw
-      : webuiSessionsRaw.concat(cliSessionsRaw).filter(s=>_sessionOrigin(s)===selectedOrigin);
-  const selectedReferenceRaw=selectedOrigin==='webui'
-    ? webuiReferenceRaw
-    : selectedOrigin==='cli'
-      ? cliReferenceRaw
-      : webuiReferenceRaw.concat(cliReferenceRaw).filter(s=>_sessionOrigin(s)===selectedOrigin);
-  const serverArchivedCount=showCliOnly?_archivedCliCount:_archivedWebuiCount;
+  const selectedOrigins=new Set(_sessionSourceFilters);
+  const selectedProfileFiltered=webuiProfileFiltered.concat(cliProfileFiltered).filter(s=>selectedOrigins.has(_sessionOrigin(s)));
+  const selectedSessionsRaw=webuiSessionsRaw.concat(cliSessionsRaw).filter(s=>selectedOrigins.has(_sessionOrigin(s)));
+  const selectedReferenceRaw=webuiReferenceRaw.concat(cliReferenceRaw).filter(s=>selectedOrigins.has(_sessionOrigin(s)));
+  const showCliOnly=selectedOrigins.size===1&&selectedOrigins.has('cli');
+  const serverArchivedCount=(selectedOrigins.has('webui')?_archivedWebuiCount:0)+([...selectedOrigins].some(origin=>origin!=='webui')?_archivedCliCount:0);
   const selectedArchivedCount=selectedSessionsRaw.filter(s=>s.archived).length;
-  const originServerArchivedCount=selectedOrigin==='cli'?_archivedCliCount:_archivedWebuiCount;
   return {
     cliSessionCount,
     profileFiltered: selectedProfileFiltered,
     sessionsRaw: selectedSessionsRaw,
     referenceRaw: selectedReferenceRaw,
     archivedCount: Math.max(showCliOnly ? cliArchivedCount : webuiArchivedCount, Number(serverArchivedCount||0)),
-    originArchivedCount: Math.max(selectedArchivedCount, Number(originServerArchivedCount||serverArchivedCount||0)),
+    originArchivedCount: Math.max(selectedArchivedCount, Number(serverArchivedCount||0)),
     webuiReferenceRaw,
     cliReferenceRaw,
     webuiSessionsRaw,
@@ -7740,14 +7769,14 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
 // suppression context — silently hiding a visible child/fork whose archived
 // ancestor lives outside the current view. Scope the references to the same
 // project + source bucket as the render they feed before using them.
-function _scopedSidebarReferenceRows(isCli){
+function _scopedSidebarReferenceRows(isCli=null){
   if(typeof _sidebarReferenceSessions==='undefined'||!Array.isArray(_sidebarReferenceSessions)||!_sidebarReferenceSessions.length) return [];
-  const sourceFilter=typeof _sessionSourceFilter==='string'?_sessionSourceFilter:'webui';
+  const selectedOrigins=new Set(_normalizeSessionSourceFilters(_sessionSourceFilters));
   return _sidebarReferenceSessions.filter(s=>{
     if(!s) return false;
-    if(sourceFilter!=='webui'&&sourceFilter!=='cli'&&_sessionOrigin(s)!==sourceFilter) return false;
+    if(!selectedOrigins.has(_sessionOrigin(s))) return false;
     // Source scope: only references in the same webui/cli bucket as this render.
-    if(_isCliSession(s)!==!!isCli) return false;
+    if(typeof isCli==='boolean'&&_isCliSession(s)!==isCli) return false;
     // Project scope: mirror _partitionSidebarSessionRows exactly.
     if(_activeProject===NO_PROJECT_FILTER){ if(s.project_id) return false; }
     else if(_activeProject){ if(s.project_id!==_activeProject) return false; }
@@ -7862,8 +7891,7 @@ function renderSessionListFromCache(){
     cliSessionsRaw,
   }=sidebarPartition;
   const referenceRaw=sidebarPartition.referenceRaw;
-  const isCliView=_sessionSourceFilter==='cli';
-  const sessions=_renderSidebarRowsFromRawSessions(sessionsRaw, [...referenceRaw, ..._scopedSidebarReferenceRows(isCliView)]);
+  const sessions=_renderSidebarRowsFromRawSessions(sessionsRaw, [...referenceRaw, ..._scopedSidebarReferenceRows()]);
   // Server-provided source bucket counts are authoritative for the current
   // payload. When present, skip the expensive cross-bucket render/count pass;
   // null is a deliberate "not computed" sentinel consumed only by
@@ -8036,11 +8064,12 @@ function renderSessionListFromCache(){
     list.appendChild(toggle);
   }
   // Empty state for active project filter
-  if(sessions.length===0&&_sessionSourceFilter!=='webui'){
+  if(sessions.length===0&&!(_sessionSourceFilters.length===1&&_sessionSourceFilters[0]==='webui')){
     const empty=document.createElement('div');
     empty.className='session-empty-note';
-    empty.textContent=window._showCliSessions||_sessionSourceFilter!=='cli'
-      ? `No ${_sessionOriginLabel(_sessionSourceFilter).toLowerCase()} found.`
+    const selectedLabels=_sessionSourceFilters.map(source=>_sessionOriginLabel(source));
+    empty.textContent=window._showCliSessions||!_sessionSourceFilters.includes('cli')
+      ? `No sessions found for ${selectedLabels.join(', ')}.`
       : 'Enable Show agent sessions in Settings to list CLI sessions here.';
     list.appendChild(empty);
   } else if(_activeProject&&sessions.length===0){
@@ -8190,8 +8219,9 @@ function renderSessionListFromCache(){
   }
   const archivePagingFilterActive=_sessionArchivePagingFilterActive();
   if(_showArchived&&!archivePagingFilterActive){
-    const activeArchivedTotal=_sessionSourceFilter==='cli'?_archivedCliCount:_archivedWebuiCount;
-    const loadedArchivedCount=sidebarRows.filter(s=>s&&s.archived&&(_sessionSourceFilter==='cli'?_isCliSession(s):!_isCliSession(s))).length;
+    const selectedOrigins=new Set(_sessionSourceFilters);
+    const activeArchivedTotal=(selectedOrigins.has('webui')?_archivedWebuiCount:0)+([...selectedOrigins].some(origin=>origin!=='webui')?_archivedCliCount:0);
+    const loadedArchivedCount=sidebarRows.filter(s=>s&&s.archived&&selectedOrigins.has(_sessionOrigin(s))).length;
     const archiveLoadCapReached=Number(_archivedRowsLoadedLimit||0)>=SESSION_ARCHIVED_MAX_LOADED_LIMIT;
     const remainingArchived=archiveLoadCapReached?0:Math.max(0, Number(activeArchivedTotal||0)-loadedArchivedCount);
     if(remainingArchived>0){
