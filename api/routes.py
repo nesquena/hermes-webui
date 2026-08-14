@@ -13702,9 +13702,11 @@ def handle_get(handler, parsed) -> bool:
         query = parse_qs(parsed.query)
         sid = query.get("session_id", [""])[0]
         try:
-            get_session(sid)
-        except KeyError:
-            return bad(handler, "Session not found", 404)
+            _resolve_session_queue_owner(sid)
+        except (KeyError, OSError, sqlite3.Error):
+            # Queue reads fail closed without turning an unavailable lineage into
+            # a browser-level sync error during startup or historical replay.
+            return j(handler, {"session_id": sid, "items": [], "available": False})
         from api.session_queue import QueueStorageError, list_queue
         try:
             items = list_queue(sid)
@@ -22243,6 +22245,61 @@ def start_session_turn(
             "server_turn_started fan-out failed for session %s", session_id, exc_info=True
         )
     return resp
+
+
+def _resolve_session_queue_owner(session_id: str):
+    """Authorize queue reads for the canonical writable conversation tip."""
+    sid = str(session_id or "").strip()
+    report = read_session_lineage_report(_active_state_db_path(), sid)
+    if (
+        not report.get("found")
+        or report.get("manual_review")
+        or str(report.get("tip_session_id") or "") != sid
+    ):
+        raise KeyError(sid)
+
+    db_path = _active_state_db_path()
+    uri = f"{db_path.resolve().as_uri()}?mode=ro"
+    with sqlite3.connect(uri, uri=True) as conn:
+        columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(sessions)")
+        }
+        selected = [
+            column if column in columns else f"NULL AS {column}"
+            for column in ("source", "session_source", "model_config")
+        ]
+        row = conn.execute(
+            f"SELECT {', '.join(selected)} FROM sessions WHERE id = ?",
+            (sid,),
+        ).fetchone()
+    if row is None:
+        raise KeyError(sid)
+    source, session_source, raw_config = row
+    allowed_sources = {"", "webui", "local", "cli", "tui", "desktop", "agent"}
+    if str(source or "").strip().lower() not in allowed_sources:
+        raise KeyError(sid)
+    if str(session_source or "").strip().lower() not in allowed_sources:
+        raise KeyError(sid)
+    try:
+        config = json.loads(raw_config) if isinstance(raw_config, str) else raw_config
+    except (TypeError, ValueError) as exc:
+        raise KeyError(sid) from exc
+    if config not in (None, {}) and not isinstance(config, dict):
+        raise KeyError(sid)
+    if isinstance(config, dict) and (
+        config.get("_branched_from") is not None
+        or config.get("_delegate_from") is not None
+    ):
+        raise KeyError(sid)
+    try:
+        session = get_session(sid)
+    except KeyError:
+        if int(report.get("total_segments") or 0) < 2:
+            raise
+        return sid
+    if getattr(session, "read_only", False):
+        raise KeyError(sid)
+    return session
 
 
 def _handle_session_queue_enqueue(handler, body):

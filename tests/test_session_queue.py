@@ -1,6 +1,7 @@
 import io
 import json
 import pathlib
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -95,6 +96,194 @@ vm.runInContext({json.dumps(queue_src)}, ctx, {{filename: 'ui-queue.js'}});
 }});
 """
     subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+
+def _queue_owner_state_db(path, *, model_config="{}", source="webui", session_source=None):
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            """CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                source TEXT,
+                session_source TEXT,
+                model_config TEXT
+            )"""
+        )
+        conn.execute(
+            "INSERT INTO sessions VALUES (?, ?, ?, ?)",
+            ("tip", source, session_source, model_config),
+        )
+
+
+def test_queue_owner_allows_state_db_only_canonical_tip(monkeypatch, tmp_path):
+    db_path = tmp_path / "state.db"
+    _queue_owner_state_db(db_path)
+    monkeypatch.setattr(routes, "_active_state_db_path", lambda: db_path)
+    monkeypatch.setattr(
+        routes,
+        "read_session_lineage_report",
+        lambda _path, _sid: {
+            "found": True,
+            "manual_review": False,
+            "tip_session_id": "tip",
+            "total_segments": 3,
+        },
+    )
+    monkeypatch.setattr(routes, "get_session", lambda _sid: (_ for _ in ()).throw(KeyError()))
+
+    assert routes._resolve_session_queue_owner("tip") == "tip"
+
+
+@pytest.mark.parametrize(
+    ("model_config", "source", "session_source"),
+    [
+        ('{"_delegate_from": "parent"}', "webui", None),
+        ('{"_branched_from": "parent"}', "webui", None),
+        ("{malformed", "webui", None),
+        ("{}", "subagent", None),
+        ("{}", "unknown-plugin", None),
+        ("{}", "webui", "fork"),
+    ],
+)
+def test_queue_owner_rejects_branch_delegate_and_malformed_identity(
+    monkeypatch, tmp_path, model_config, source, session_source
+):
+    db_path = tmp_path / "state.db"
+    _queue_owner_state_db(
+        db_path,
+        model_config=model_config,
+        source=source,
+        session_source=session_source,
+    )
+    monkeypatch.setattr(routes, "_active_state_db_path", lambda: db_path)
+    monkeypatch.setattr(
+        routes,
+        "read_session_lineage_report",
+        lambda _path, _sid: {
+            "found": True,
+            "manual_review": False,
+            "tip_session_id": "tip",
+            "total_segments": 3,
+        },
+    )
+
+    with pytest.raises(KeyError):
+        routes._resolve_session_queue_owner("tip")
+
+
+def test_queue_owner_rejects_stale_or_ambiguous_lineage(monkeypatch, tmp_path):
+    db_path = tmp_path / "state.db"
+    _queue_owner_state_db(db_path)
+    monkeypatch.setattr(routes, "_active_state_db_path", lambda: db_path)
+    monkeypatch.setattr(
+        routes,
+        "read_session_lineage_report",
+        lambda _path, _sid: {
+            "found": True,
+            "manual_review": True,
+            "tip_session_id": "new-tip",
+            "total_segments": 3,
+        },
+    )
+
+    with pytest.raises(KeyError):
+        routes._resolve_session_queue_owner("tip")
+
+
+def test_queue_owner_rejects_unavailable_lineage_state(monkeypatch):
+    monkeypatch.setattr(
+        routes,
+        "read_session_lineage_report",
+        lambda _path, _sid: {"found": False},
+    )
+    monkeypatch.setattr(routes, "get_session", lambda _sid: types.SimpleNamespace())
+
+    with pytest.raises(KeyError):
+        routes._resolve_session_queue_owner("tip")
+
+
+def test_queue_owner_rejects_read_only_sidecar(monkeypatch, tmp_path):
+    db_path = tmp_path / "state.db"
+    _queue_owner_state_db(db_path)
+    monkeypatch.setattr(routes, "_active_state_db_path", lambda: db_path)
+    monkeypatch.setattr(
+        routes,
+        "read_session_lineage_report",
+        lambda _path, _sid: {
+            "found": True,
+            "manual_review": False,
+            "tip_session_id": "tip",
+            "total_segments": 1,
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "get_session",
+        lambda _sid: types.SimpleNamespace(read_only=True),
+    )
+
+    with pytest.raises(KeyError):
+        routes._resolve_session_queue_owner("tip")
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [KeyError(), sqlite3.OperationalError("unable to open database file")],
+)
+def test_queue_get_returns_empty_unavailable_payload_when_lineage_is_not_authorized(
+    monkeypatch,
+    failure,
+):
+    monkeypatch.setattr(
+        routes,
+        "_resolve_session_queue_owner",
+        lambda _sid: (_ for _ in ()).throw(failure),
+    )
+    handler = _FakeHandler()
+
+    routes.handle_get(
+        handler,
+        types.SimpleNamespace(path="/api/session/queue", query="session_id=tip"),
+    )
+    assert handler.status == 200
+    assert handler.json_body() == {
+        "session_id": "tip",
+        "items": [],
+        "available": False,
+    }
+
+
+def test_queue_get_fails_closed_when_state_db_disappears_after_lineage_report(
+    monkeypatch,
+    tmp_path,
+):
+    db_path = tmp_path / "state.db"
+    missing_path = tmp_path / "missing-state.db"
+    _queue_owner_state_db(db_path)
+    paths = iter((db_path, missing_path))
+    monkeypatch.setattr(routes, "_active_state_db_path", lambda: next(paths))
+    monkeypatch.setattr(
+        routes,
+        "read_session_lineage_report",
+        lambda _path, _sid: {
+            "found": True,
+            "manual_review": False,
+            "tip_session_id": "tip",
+            "total_segments": 3,
+        },
+    )
+    handler = _FakeHandler()
+
+    routes.handle_get(
+        handler,
+        types.SimpleNamespace(path="/api/session/queue", query="session_id=tip"),
+    )
+
+    assert handler.status == 200
+    assert handler.json_body() == {
+        "session_id": "tip",
+        "items": [],
+        "available": False,
+    }
 
 
 def test_enqueue_persists_and_lists_session_queue(monkeypatch, tmp_path):
