@@ -11132,13 +11132,18 @@ def _handle_insights(handler, parsed) -> bool:
         if start_ts >= now:
             start_ts = None
             end_ts = None
-        # Whether the effective `end` collapsed to the server clock ("now")
-        # rather than an explicit calendar day.  MUST be computed AFTER the
-        # swap+clamp above: a future `start` paired with a past `end` is
-        # swapped and then clamped to `now`, so a pre-swap flag would wrongly
-        # stay False and leave end_cutoff at the NEXT local midnight, admitting
-        # same-day sessions stamped after the server clock.
-        end_clamped_to_now = end_ts == now
+        # Whether the effective `end` falls on the server-local calendar day
+        # "today".  When it does, that day has not finished yet from the
+        # server's perspective, so the exclusive end_cutoff must be pulled
+        # back from the NEXT local midnight (which would otherwise admit
+        # same-day sessions stamped after the server clock).
+        # Computed AFTER the swap+clamp AND after end_day is derived: both an
+        # end that collapsed to `now` (omitted/future/after-swap clamp) AND an
+        # explicit end whose calendar day is today (e.g. the user picks today)
+        # share the same condition - today is not over, so clamp the cutoff.
+        # (The actual flag is derived from end_day below, once the day is known;
+        # this comment block lives here as the anchor of where the clamp intent
+        # is documented, adjacent to the swap/clamp that sets the inputs.)
         # Clamp both endpoints into the platform-safe localtime range so an
         # absurd-but-finite timestamp (e.g. 1e20, -1e20) cannot reach
         # localtime()/mktime() and return HTTP 500. Windows msvcrt localtime
@@ -11164,6 +11169,16 @@ def _handle_insights(handler, parsed) -> bool:
             # daily series stays aligned with the filtered totals.
             start_day = _datetime.fromtimestamp(start_ts).date()
             end_day = _datetime.fromtimestamp(end_ts).date()
+            # Whether the effective end falls on the server-local calendar day
+            # today. When it does, today has not finished yet from the server's
+            # perspective, so the exclusive end_cutoff must be pulled back from
+            # the NEXT local midnight (which would otherwise admit same-day
+            # sessions stamped after the server clock). Computed AFTER the
+            # swap+clamp AND after end_day is derived: both an end that
+            # collapsed to now (omitted/future/after-swap clamp) AND an explicit
+            # end whose calendar day is today (e.g. the user picks today) share
+            # the same condition - today is not over, so clamp the cutoff.
+            end_clamped_to_now = end_day == _datetime.fromtimestamp(now).date()
             days = max((end_day - start_day).days + 1, 1)
             # Align start/end to local midnight so daily buckets are whole days.
             start_ts = _time.mktime((start_day.year, start_day.month, start_day.day, 0, 0, 0, 0, 0, -1))
@@ -11177,11 +11192,13 @@ def _handle_insights(handler, parsed) -> bool:
             # stamped exactly at the next local midnight belongs to the next day.
             end_exclusive = True
             if end_clamped_to_now:
-                # An omitted/future `end` collapsed to `now` above, so the
-                # exclusive bound must not extend into the rest of today (which
-                # has not happened yet from the server's view).  Drop it back to
-                # the server clock and treat it as INCLUSIVE, matching trailing
-                # mode: keep sessions at/behind `now`, exclude any stamped after.
+                # The effective end falls on today (either an omitted/future
+                # `end` collapsed to `now`, or an explicit end whose calendar
+                # day is today), so the exclusive bound must not extend into
+                # the rest of today (which has not happened yet from the
+                # server's view).  Drop it back to the server clock and treat
+                # it as INCLUSIVE, matching trailing mode: keep sessions
+                # at/behind `now`, exclude any stamped after.
                 end_cutoff = min(end_cutoff, now)
                 end_exclusive = False
             first_day_ts = start_ts
