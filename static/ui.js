@@ -15150,28 +15150,45 @@ function clearMessageRenderCache(){
   _clearMessageVirtualHeightCache();
 }
 
-// #6999: hash a structured payload field's string form WITHOUT feeding the
-// whole payload through the FNV loop. Tool-call function/args payloads and
-// attachments on a long session can be tens of KB each; hashing every char
-// of every one on every renderMessages() cache-signature pass is a
-// per-render O(transcript bytes) cost (and JSON.stringify() of the args
-// allocates a full copy first). Hash length + head + tail — the same
-// length+edges pattern _renderCacheKey uses for long content — so the
-// signature still changes on any length change or head/tail content change
-// at a constant per-field cost. Full-content hashing is retained for the
-// message text itself (msgContent), whose every character can affect the
-// rendered DOM.
-function _addBoundedHash(add, value, maxLen){
-  const limit=Math.max(64, Number(maxLen)||512);
-  let s='';
-  try{ s=(value==null)?'':String(value); }catch(e){ s=''; }
-  add(s.length);
-  if(s.length>limit){
-    add(s.slice(0,limit));
-    add(s.slice(-limit));
-  }else{
-    add(s);
+// #6999: feed a structured payload field's string form through the FNV-1a
+// loop IN FULL, without materializing clipped copies or skipping the middle.
+// The previous length+head+tail clip made same-length middle-only edits
+// (tool arguments, attachment metadata, tool snippets, compression-anchor
+// keys) produce identical signatures — a deterministic stale-cache collision
+// in _sessionHtmlCache (cross-session navigation served old HTML). Hashing
+// every character keeps the signature sensitive to ANY content change at a
+// constant-allocation cost: strings are streamed char-by-char (no copy) and
+// object fields are walked key-by-key so only scalar string forms are ever
+// allocated — no integral JSON.stringify() of a whole payload, and no
+// head/tail slice copies. _renderCacheKey's length+edges shortcut is only
+// safe for the render-window geometry key, where equal span+edges means
+// equal window; here equal signature must mean equal CONTENT.
+function _addBoundedHash(add, value){
+  if(value==null){ add('null'); return; }
+  const t=typeof value;
+  if(t==='string'){ add(value.length); add(value); return; }
+  if(t==='number'||t==='boolean'){ add(t); add(value); return; }
+  if(t==='object'){ _hashObjectInto(add, value, 0); return; }
+  add(t); add(String(value));
+}
+function _hashObjectInto(add, value, depth){
+  if(value==null){ add('null'); return; }
+  if(depth>64){
+    // Pathological depth (e.g. a cyclic structure JSON.stringify would also
+    // reject): serialize integrally so no field is silently dropped — the
+    // exact same data still yields the exact same signature.
+    try{ add(JSON.stringify(value)); }catch(e){ add('[unserializable]'); }
+    return;
   }
+  if(Array.isArray(value)){
+    add('array'); add(value.length);
+    for(let i=0;i<value.length;i++){ add(i); _addBoundedHash(add, value[i]); }
+    return;
+  }
+  add('object');
+  const keys=Object.keys(value).sort();
+  add(keys.length);
+  for(const k of keys){ add(k); _addBoundedHash(add, value[k]); }
 }
 
 function _messageRenderCacheSignature(){
@@ -15203,8 +15220,8 @@ function _messageRenderCacheSignature(){
       m.tool_calls.forEach(tc=>{
         add(tc&&tc.id);add(tc&&tc.name);add(tc&&tc.type);
         add(tc&&tc.function&&tc.function.name);
-        // function.arguments is already a string — no JSON.stringify copy.
-        _addBoundedHash(add, tc&&tc.function&&tc.function.arguments, 2048);
+        // function.arguments is already a string — streamed in full, no copy.
+        _addBoundedHash(add, tc&&tc.function&&tc.function.arguments);
       });
     }
     if(Array.isArray(m._partial_tool_calls)){
@@ -15212,19 +15229,19 @@ function _messageRenderCacheSignature(){
       m._partial_tool_calls.forEach(tc=>{add(tc&&tc.id);add(tc&&tc.name);add(tc&&tc.snippet);});
     }
     if(_messageHasReasoningPayload(m)) add(m.reasoning||m.thinking||m._reasoning||'reasoning');
-    if(Array.isArray(m.attachments)) m.attachments.forEach(a=>_addBoundedHash(add, (a&&typeof a==='object')?JSON.stringify(a):a, 2048));
+    if(Array.isArray(m.attachments)) m.attachments.forEach(a=>_addBoundedHash(add, a));
   }
   const toolCalls=Array.isArray(S.toolCalls)?S.toolCalls:[];
   add('settled-tool-calls');add(toolCalls.length);
   toolCalls.forEach(tc=>{
     if(!tc||typeof tc!=='object'){ add(tc); return; }
     add(tc.tid);add(tc.id);add(tc.name);add(tc.done);add(tc.is_diff);add(tc.assistant_msg_idx);
-    _addBoundedHash(add, tc.snippet, 4096);
-    _addBoundedHash(add, JSON.stringify(tc.args||{}), 2048);
+    _addBoundedHash(add, tc.snippet);
+    _addBoundedHash(add, tc.args||{});
   });
   if(S.session){
     add(S.session.message_count);add(S.session.updated_at);add(S.session.compression_anchor_visible_idx);
-    _addBoundedHash(add, JSON.stringify(S.session.compression_anchor_message_key||null), 1024);
+    _addBoundedHash(add, S.session.compression_anchor_message_key||null);
     add(S.session.compression_anchor_summary||'');
   }
   return `${messages.length}:${toolCalls.length}:${hash.toString(16)}`;
@@ -16545,16 +16562,19 @@ function renderMessages(options){
     rawIdx++;
   }
   const firstRenderedRawIdx=renderVisWithIdx.length?renderVisWithIdx[0].rawIdx:Infinity;
-  // #6999: build the turn-content maps over the RENDER window, not the full
-  // visWithIdx. These maps only feed the echo-strip of RENDERED rows (see
-  // _worklogReasoningTextFromMessage below); entries for windowed-out
-  // messages are never read. The full-array version extracted + concatenated
-  // visible content for EVERY assistant message on EVERY renderMessages()
-  // pass — a per-render O(transcript) allocation that compounds when a
-  // focused tab force-reloads a long session (issue #6999). Mirrors the
-  // renderVisWithIdx windowing of _turnVisibleTextByRawIdx below.
-  const assistantTurnFinalVisibleContentByRawIdx=_assistantTurnFinalVisibleContentMap(renderVisWithIdx);
-  const assistantTurnVisibleContentByRawIdx=_assistantTurnVisibleContentMap(renderVisWithIdx);
+  // #6999: the turn-content maps MUST see the FULL visWithIdx, not the
+  // virtual render window. _assistantTurnFinalVisibleContentMap /
+  // _assistantTurnVisibleContentMap derive the echo-strip context for a
+  // rendered assistant row from ALL assistant siblings of its turn
+  // (ui.js:10783-10830). Windowed-out siblings are still input context even
+  // though their own rows are not read: cutting through an assistant run
+  // loses the final/visible answer used to strip reasoning echoes, and
+  // concatenating head+tail across an omitted user boundary would merge
+  // distinct turns into one run (duplicate final-answer in Worklog/Thinking,
+  // or later-turn prose used as an echo-strip input). Turn context must
+  // always be complete — never cut mid-run, never head+tail with a gap.
+  const assistantTurnFinalVisibleContentByRawIdx=_assistantTurnFinalVisibleContentMap(visWithIdx);
+  const assistantTurnVisibleContentByRawIdx=_assistantTurnVisibleContentMap(visWithIdx);
   const hasServerOlder=!!(typeof _messagesTruncated!=='undefined' && _messagesTruncated && S.messages.length>0);
   const serverOlderCount=hasServerOlder&&Number.isFinite(Number(_oldestIdx))?Math.max(0,Number(_oldestIdx)):0;
   if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
