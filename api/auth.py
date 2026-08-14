@@ -1194,7 +1194,14 @@ def check_auth_or_close(handler, parsed) -> bool:
     The flag is armed BEFORE check_auth() writes its 401/302, so end_headers()
     can advertise ``Connection: close``; success restores the prior flag so an
     authenticated request keeps its keep-alive.
+
+    ``close_connection`` only exists once BaseHTTPRequestHandler has parsed a
+    request line, so partially-built handler stubs may not have it at all. Read
+    it defensively and only arm/restore when it was really there: inventing the
+    attribute on a stub would leave a bogus keep-alive verdict behind.
     """
+    if not hasattr(handler, 'close_connection'):
+        return check_auth(handler, parsed)
     prior_close = handler.close_connection
     handler.close_connection = True
     if check_auth(handler, parsed):
