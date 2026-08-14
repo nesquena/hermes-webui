@@ -61,8 +61,9 @@ sidebar_source=webui&sidebar_source=matrix
   limit.
 - If any supplied value is malformed, the request fails closed rather than
   silently widening the result set.
-- If no source parameter is supplied, the existing WebUI default remains in
-  effect for backward compatibility.
+- If no source parameter is supplied, the existing API behavior remains in
+  effect: return all permitted origins. The WebUI default is a browser-state
+  invariant, and the browser always sends at least one source.
 - Session filtering uses membership in the selected-origin set and returns the
   union in the existing authoritative ordering.
 - `session_origin_counts` and labels continue to describe all known origins,
@@ -128,4 +129,3 @@ After automated verification, deploy to the existing local host and verify the
 signed-in UI at desktop and narrow widths. Confirm immediate menu updates,
 stable chip ordering, `+N`, removal, persistence after refresh, combined source
 results, and no regression to the batch-selection interaction.
-
