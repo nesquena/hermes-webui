@@ -8895,7 +8895,7 @@ def _limited_webui_messages_for_display(session, state_db_messages) -> list:
     the sidecar yet.
     """
     stitch = _webui_sidecar_lineage_stitch(session)
-    sidecar_messages = stitch["messages"] if stitch["complete"] else list(getattr(session, "messages", []) or [])
+    sidecar_messages = stitch["messages"] if stitch["complete"] else []
     return _limited_webui_messages_for_display_with_sidecar(
         session,
         sidecar_messages,
@@ -9095,7 +9095,7 @@ def _webui_sidecar_lineage_stitch(session, *, max_hops: int = 20, load_session=N
 
 def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) -> list:
     result = _webui_sidecar_lineage_stitch(session, max_hops=max_hops)
-    return result["messages"] if result["complete"] else list(getattr(session, "messages", []) or [])
+    return result["messages"] if result["complete"] else []
 
 
 def _project_sidebar_lineage_user_counts(rows: list[dict]) -> None:
@@ -9119,10 +9119,28 @@ def _project_sidebar_lineage_user_counts(rows: list[dict]) -> None:
         result = _webui_sidecar_lineage_stitch(
             tip, load_session=Session.load, cache=operation_cache,
         )
-        if result.get("complete"):
-            row["_lineage_user_message_count"] = sum(
-                1 for message in result["messages"] if is_human_user_turn(message)
-            )
+        if not result.get("complete"):
+            continue
+        state_db_messages = get_state_db_session_messages(
+            tip.session_id,
+            stitch_continuations=True,
+            profile=getattr(tip, "profile", None) or None,
+        )
+        if state_db_messages and not all(
+            isinstance(message, dict)
+            and {"display_kind", "source", "_source", "_compressed_summary"}.issubset(message)
+            for message in state_db_messages
+        ):
+            continue
+        display_messages = merge_session_messages_append_only(
+            result["messages"],
+            state_db_messages,
+            truncation_watermark=getattr(tip, "truncation_watermark", None),
+            truncation_boundary=getattr(tip, "truncation_boundary", None),
+        )
+        row["_lineage_user_message_count"] = sum(
+            1 for message in display_messages if is_human_user_turn(message)
+        )
 
 
 def _merged_session_messages_for_display(session, cli_messages=None) -> list:
@@ -9135,7 +9153,10 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
     the same list rather than the sidecar-only ``session.messages`` array.
     """
     cli_messages = list(cli_messages or [])
-    sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)
+    lineage = _webui_sidecar_lineage_stitch(session)
+    if not lineage["complete"]:
+        return []
+    sidecar_messages = lineage["messages"]
     if cli_messages:
         if sidecar_messages and sidecar_messages != cli_messages:
             if len(sidecar_messages) >= len(cli_messages):
@@ -9174,6 +9195,15 @@ def _merged_webui_lineage_messages_for_display(session, messages=None) -> list:
     subset of their parent.
     """
     primary_messages = list(messages if messages is not None else (getattr(session, "messages", []) or []))
+    source = str(getattr(session, "session_source", "") or "").strip().lower()
+    relationship = str(getattr(session, "relationship_type", "") or "").strip().lower()
+    if source == "fork" or relationship == "child_session":
+        return primary_messages
+    lineage = _webui_sidecar_lineage_stitch(session)
+    if not lineage["complete"]:
+        return []
+    if messages is None:
+        primary_messages = list(lineage["messages"])
     parent_id = str(getattr(session, "parent_session_id", "") or "").strip()
     if not parent_id:
         return primary_messages
@@ -12979,9 +13009,7 @@ def handle_get(handler, parsed) -> bool:
                 else:
                     _detail_stitch = _webui_sidecar_lineage_stitch(s)
                     _detail_sidecar_messages = (
-                        _detail_stitch["messages"]
-                        if _detail_stitch["complete"]
-                        else list(getattr(s, "messages", []) or [])
+                        _detail_stitch["messages"] if _detail_stitch["complete"] else []
                     )
                     _all_msgs = merge_session_messages_append_only(
                         _detail_sidecar_messages,

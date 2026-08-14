@@ -80,7 +80,8 @@ _CLI_SESSIONS_CACHE_INVALIDATION_VERSION = 0
 # _CLAUDE_CODE_PARSE_CACHE / _SIDECAR_METADATA_CACHE LRU pattern.
 _CLI_SESSIONS_CACHE: "collections.OrderedDict[tuple, tuple]" = collections.OrderedDict()
 _CLI_SESSIONS_CACHE_MAX_ENTRIES = 8
-_SQLITE_FINGERPRINT_CONNECTIONS = {}
+_SQLITE_FINGERPRINT_CONNECTIONS = collections.OrderedDict()
+_SQLITE_FINGERPRINT_CONNECTIONS_MAX_ENTRIES = 8
 _SQLITE_FINGERPRINT_LOCK = threading.RLock()
 
 
@@ -110,6 +111,14 @@ def _sqlite_data_version(db_path: Path):
                 )
                 conn.execute("PRAGMA busy_timeout=50")
                 _SQLITE_FINGERPRINT_CONNECTIONS[key] = conn
+                while len(_SQLITE_FINGERPRINT_CONNECTIONS) > _SQLITE_FINGERPRINT_CONNECTIONS_MAX_ENTRIES:
+                    _evicted_key, _evicted = _SQLITE_FINGERPRINT_CONNECTIONS.popitem(last=False)
+                    try:
+                        _evicted.close()
+                    except Exception:
+                        pass
+            else:
+                _SQLITE_FINGERPRINT_CONNECTIONS.move_to_end(key)
             return conn.execute("PRAGMA data_version").fetchone()[0]
         except Exception:
             if conn is not None:
@@ -6994,6 +7003,7 @@ def clear_cli_sessions_cache() -> None:
         global _CLI_SESSIONS_CACHE_INVALIDATION_VERSION
         _CLI_SESSIONS_CACHE_INVALIDATION_VERSION += 1
         _CLI_SESSIONS_CACHE.clear()
+    _close_sqlite_fingerprint_connections()
     # The sidecar-metadata projection cache is stat-keyed (self-invalidating on
     # any file change), but clear it alongside the CLI cache so an explicit
     # reset — a mutating sidebar action or test isolation — starts fully cold.
@@ -7263,7 +7273,7 @@ def _sqlite_content_fingerprint(db_path: Path):
                     parts.append(row[0] if row else None)
                 except Exception:
                     parts.append(None)
-            return (_sqlite_data_version(db_path), *parts)
+            return tuple(parts)
         finally:
             try:
                 conn.close()
@@ -7282,7 +7292,7 @@ def _sqlite_file_stat_cache_key(db_path: Path):
     the case where the fingerprint can't be read.
     """
     return (
-        _sqlite_content_fingerprint(db_path),
+        (_sqlite_data_version(db_path), _sqlite_content_fingerprint(db_path)),
         _path_stat_cache_key(db_path),
         _path_stat_cache_key(Path(f"{db_path}-wal")),
         _path_stat_cache_key(Path(f"{db_path}-shm")),
@@ -8110,6 +8120,10 @@ def get_state_db_session_messages(
             if not required.issubset(available):
                 return []
             optional = [
+                'display_kind',
+                'source',
+                '_source',
+                '_compressed_summary',
                 'tool_call_id',
                 'tool_calls',
                 'tool_name',

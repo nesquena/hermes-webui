@@ -14,6 +14,14 @@ _LEGACY_CONTINUATION_HANDOFFS = {
     "Continue from the compressed conversation context above. This marker exists because no human user turn was available.",
     "Continue from the compressed conversation context above. This marker exists because the compacted transcript contained no preserved user turn.",
 }
+_STRUCTURED_TEXT_TYPES = {"text", "input_text", "output_text"}
+_COMPRESSION_SUMMARY_PREFIXES = (
+    "[context compaction",
+    "context compaction",
+    "[context summary]:",
+    "[session arc summary",
+    "[end of prior context — compaction summary below]",
+)
 
 
 def _human_turn_content_text(content: object) -> str:
@@ -25,12 +33,24 @@ def _human_turn_content_text(content: object) -> str:
             if isinstance(part, str):
                 parts.append(part)
             elif isinstance(part, dict):
-                for key in ("text", "content"):
+                part_type = str(part.get("type") or "").strip().lower()
+                if part_type and part_type not in _STRUCTURED_TEXT_TYPES:
+                    continue
+                for key in ("text", "content", "input_text", "output_text"):
                     value = part.get(key)
                     if isinstance(value, str):
                         parts.append(value)
                         break
         return "\n".join(parts)
+    if isinstance(content, dict):
+        part_type = str(content.get("type") or "").strip().lower()
+        if part_type not in _STRUCTURED_TEXT_TYPES:
+            return ""
+        for key in ("text", "content", "input_text", "output_text"):
+            value = content.get(key)
+            if isinstance(value, str):
+                return value
+        return ""
     if content is None:
         return ""
     return str(content)
@@ -58,37 +78,48 @@ def is_human_user_turn(message: object) -> bool:
         return False
     content = message.get("content")
     text = _human_turn_content_text(content)
+    if not text.strip():
+        return False
     if isinstance(content, str) and _is_structured_serialized_content(content):
         return False
     if is_context_compression_marker(message) or text.lstrip().startswith(_TODO_INJECTION_HEADER):
         return False
-    return text.strip() not in _LEGACY_CONTINUATION_HANDOFFS
+    normalized = text.strip().lower()
+    if normalized in {value.lower() for value in _LEGACY_CONTINUATION_HANDOFFS}:
+        return False
+    return not normalized.startswith(_COMPRESSION_SUMMARY_PREFIXES)
 
 
 def _human_user_turn_sql_predicate(message_cols: set[str], alias: str = "m") -> str:
     """Build the native-SQL equivalent of :func:`is_human_user_turn`."""
-    required = {"role", "content", "display_kind"}
+    required = {
+        "role",
+        "content",
+        "display_kind",
+        "source",
+        "_source",
+        "_compressed_summary",
+    }
     if not required.issubset(message_cols):
         return "NULL"
     clauses = [
         f"{alias}.role = 'user'",
         f"({alias}.display_kind IS NULL OR TRIM({alias}.display_kind) = '')",
     ]
-    if "source" in message_cols:
-        clauses.append(f"COALESCE({alias}.source, '') <> 'process_wakeup'")
-    if "_source" in message_cols:
-        clauses.append(f"COALESCE({alias}._source, '') <> 'process_wakeup'")
-    if "_compressed_summary" in message_cols:
-        clauses.append(f"COALESCE({alias}._compressed_summary, 0) = 0")
+    clauses.extend([
+        f"COALESCE({alias}.source, '') <> 'process_wakeup'",
+        f"COALESCE({alias}._source, '') <> 'process_wakeup'",
+        f"COALESCE({alias}._compressed_summary, 0) = 0",
+    ])
     content = f"{alias}.content"
     content_text = f"LOWER(LTRIM(CAST({content} AS TEXT)))"
     clauses.extend([
         f"typeof({content}) = 'text'",
+        f"TRIM(CAST({content} AS TEXT)) <> ''",
         f"NOT (typeof({content}) = 'text' AND json_valid({content}) AND json_type({content}) IN ('array', 'object'))",
-        f"{content_text} NOT LIKE '[context compaction%'",
+        *[f"{content_text} NOT LIKE {prefix!r} || '%'" for prefix in _COMPRESSION_SUMMARY_PREFIXES],
         f"{content_text} NOT LIKE '[your active task list was preserved across context compression]%'",
-        f"{content_text} NOT LIKE '[session arc summary%'",
-        f"{content} NOT IN ({', '.join(repr(value) for value in sorted(_LEGACY_CONTINUATION_HANDOFFS))})",
+        f"LOWER(CAST({content} AS TEXT)) NOT IN ({', '.join(repr(value.lower()) for value in sorted(_LEGACY_CONTINUATION_HANDOFFS))})",
     ])
     return "(" + " AND ".join(clauses) + ")"
 
@@ -292,7 +323,7 @@ def _count_user_turns(row: dict) -> int:
             return sum(
                 1
                 for msg in messages
-                if _safe_lower(msg.get("role") if isinstance(msg, dict) else msg) == "user"
+                if is_human_user_turn(msg)
             )
         return 0
     return _as_positive_int(user_turns)

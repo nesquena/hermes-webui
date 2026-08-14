@@ -5218,6 +5218,7 @@ function _shouldKeepLocalOnlyOptimisticSessionRow(local){
 
 function _dropStaleOptimisticSessionRow(sid){
   if(!sid) return;
+  if(typeof clearLocalTurnCountOwner==='function') clearLocalTurnCountOwner(sid);
   if(typeof _rememberSessionListSource==='function') _rememberSessionListSource(null, sid, false);
   if(INFLIGHT&&INFLIGHT[sid]){
     delete INFLIGHT[sid];
@@ -5233,6 +5234,29 @@ function _mergeOptimisticFirstTurnSessions(fetchedSessions){
   const merged=Array.isArray(fetchedSessions)?[...fetchedSessions]:[];
   const bySid=new Map();
   merged.forEach((s,idx)=>{if(s&&s.session_id) bySid.set(s.session_id,idx);});
+  const sendInProgress=typeof _sendInProgress!=='undefined'&&_sendInProgress;
+  for(const [sid,owner] of _localTurnOwners){
+    if(sendInProgress&&sid===_sendInProgressSid) continue;
+    const idx=bySid.has(sid)?bySid.get(sid):-1;
+    if(idx<0){
+      const local=(Array.isArray(_allSessions)?_allSessions:[]).find(s=>s&&s.session_id===sid);
+      if(!local||!_shouldKeepLocalOnlyOptimisticSessionRow(local)) clearLocalTurnCountOwner(sid);
+      continue;
+    }
+    const fetched=merged[idx]||{};
+    const fetchedDirect=Number(fetched.user_message_count);
+    const fetchedLineage=Number(fetched._lineage_user_message_count);
+    const directSatisfied=owner.directCount===null
+      ||(Number.isFinite(fetchedDirect)&&fetchedDirect>=owner.directCount);
+    const lineageSatisfied=owner.lineageCount===null
+      ||(Number.isFinite(fetchedLineage)&&fetchedLineage>=owner.lineageCount);
+    const ownerConfirmed=(owner.directCount!==null||owner.lineageCount!==null)
+      &&directSatisfied&&lineageSatisfied;
+    const locallyActive=S&&S.session&&S.session.session_id===sid&&S.busy;
+    if(ownerConfirmed||(_isServerIdleSessionRow(fetched)&&!locallyActive)){
+      clearLocalTurnCountOwner(sid);
+    }
+  }
   for(const local of Array.isArray(_allSessions)?_allSessions:[]){
     if(!_isOptimisticFirstTurnSessionRow(local)) continue;
     const sid=local.session_id;
@@ -5245,8 +5269,13 @@ function _mergeOptimisticFirstTurnSessions(fetchedSessions){
       const owner=_localTurnOwners.get(sid);
       const fetchedDirect=Number(fetched.user_message_count);
       const fetchedLineage=Number(fetched._lineage_user_message_count);
-      const ownerConfirmed=!!owner&&Number.isFinite(fetchedDirect)&&fetchedDirect>=owner.directCount
-        &&(owner.lineageCount===null||(Number.isFinite(fetchedLineage)&&fetchedLineage>=owner.lineageCount));
+      const directSatisfied=!!owner&&(owner.directCount===null
+        ||(Number.isFinite(fetchedDirect)&&fetchedDirect>=owner.directCount));
+      const lineageSatisfied=!!owner&&(owner.lineageCount===null
+        ||(Number.isFinite(fetchedLineage)&&fetchedLineage>=owner.lineageCount));
+      const ownerConfirmed=!!owner
+        &&(owner.directCount!==null||owner.lineageCount!==null)
+        &&directSatisfied&&lineageSatisfied;
       const keepOwned=!!owner&&!ownerConfirmed;
       const keepLocalOptimistic=keepOwned||(!fetchedIsServerIdle&&_shouldKeepLocalOnlyOptimisticSessionRow(local));
       const localTs=Number(local.last_message_at||local.updated_at||0);
@@ -5258,7 +5287,7 @@ function _mergeOptimisticFirstTurnSessions(fetchedSessions){
         ...fetched,
         title:keepLocalOptimistic?(local.title||fetched.title):fetched.title,
         message_count:keepLocalOptimistic?Math.max(localCount,fetchedCount):fetchedCount,
-        user_message_count:keepOwned?owner.directCount:fetched.user_message_count,
+        user_message_count:keepOwned&&owner.directCount!==null?owner.directCount:fetched.user_message_count,
         _lineage_user_message_count:keepOwned&&owner.lineageCount!==null?owner.lineageCount:fetched._lineage_user_message_count,
         last_message_at:keepLocalOptimistic?Math.max(localTs,fetchedTs):fetchedTs,
         updated_at:keepLocalOptimistic?Math.max(Number(local.updated_at||0),Number(fetched.updated_at||0),localTs,fetchedTs):Number(fetched.updated_at||fetchedTs||0),
@@ -7212,11 +7241,13 @@ function resolveLocalTurnCountOwner(){
   if(existing) return existing;
   const row=(Array.isArray(_allSessions)?_allSessions:[]).find(s=>s&&s.session_id===sid)||S.session;
   const valid=v=>typeof v==='number'&&Number.isFinite(v)&&v>=0?v:null;
-  const direct=valid(Math.max(Number(S.session.user_message_count)||0,Number(row&&row.user_message_count)||0));
+  const direct=valid(S.session.user_message_count)!==null
+    ?valid(S.session.user_message_count)
+    :valid(row&&row.user_message_count);
   const logical=valid(row&&row._lineage_user_message_count);
   const owner=Object.freeze({
     token: `${sid}:${Date.now()}:${Math.random().toString(36).slice(2)}`,
-    directCount:(direct===null?0:direct)+1,
+    directCount:direct===null?null:direct+1,
     lineageCount:logical===null?null:logical+1,
     baseline:Object.freeze({directCount:direct,lineageCount:logical}),
   });

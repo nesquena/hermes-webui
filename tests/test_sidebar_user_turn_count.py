@@ -529,13 +529,113 @@ console.log(JSON.stringify({direct:S.session.user_message_count, logical:_allSes
     assert result["token"]
 
 
+@requires_node
+def test_local_turn_owner_unknown_baseline_rolls_back_without_inventing_zero():
+    result = json.loads(_run_node(_harness("""
+const _localTurnOwners = new Map();
+var _allSessions = [{session_id:'unknown', message_count:3, _lineage_segments:[{}]}];
+S = {session:{session_id:'unknown', message_count:3}, messages:[{}]};
+eval(extractFunc('resolveLocalTurnCountOwner'));
+eval(extractFunc('clearLocalTurnCountOwner'));
+eval(extractFunc('restoreLocalTurnCountOwner'));
+const owner = resolveLocalTurnCountOwner();
+restoreLocalTurnCountOwner('unknown');
+console.log(JSON.stringify({
+  direct: S.session.user_message_count ?? null,
+  rowHasDirect: Object.prototype.hasOwnProperty.call(_allSessions[0], 'user_message_count'),
+  baseline: owner.baseline.directCount,
+}));
+""")))
+    assert result["direct"] is None
+    assert result["rowHasDirect"] is False
+    assert result["baseline"] is None
+
+
+@requires_node
+def test_local_turn_owner_is_cleared_when_idle_refresh_confirms_the_turn():
+    result = json.loads(_run_node(_harness("""
+const _localTurnOwners = new Map();
+var _allSessions = [{session_id:'idle', message_count:8, user_message_count:2, is_streaming:true}];
+var _sendInProgress = false;
+var _sendInProgressSid = null;
+var INFLIGHT = {};
+S = {session:{session_id:'idle', message_count:8, user_message_count:2}, messages:[{}], busy:false};
+function _isOptimisticFirstTurnSessionRow(){ return true; }
+function _shouldKeepLocalOnlyOptimisticSessionRow(){ return false; }
+function _isServerIdleSessionRow(s){ return !!s && !s.is_streaming && !s.active_stream_id && !s.pending_user_message && !s.has_pending_user_message && !s.pending_started_at; }
+function _dropStaleOptimisticSessionRow(){}
+eval(extractFunc('resolveLocalTurnCountOwner'));
+eval(extractFunc('clearLocalTurnCountOwner'));
+eval(extractFunc('_mergeOptimisticFirstTurnSessions'));
+const first = resolveLocalTurnCountOwner();
+const merged = _mergeOptimisticFirstTurnSessions([{session_id:'idle', message_count:9, user_message_count:3}]);
+_allSessions = merged;
+S.session.user_message_count = 3;
+const second = resolveLocalTurnCountOwner();
+console.log(JSON.stringify({first:first.directCount, second:second.directCount, different:first.token!==second.token}));
+""")))
+    assert result == {"first": 3, "second": 4, "different": True}
+
+
+def test_incomplete_sidecar_lineage_fails_closed_for_display(monkeypatch):
+    child = SimpleNamespace(
+        session_id="missing-parent-child",
+        parent_session_id="missing-parent",
+        session_source="webui",
+        messages=[{"role": "user", "content": "child only"}],
+    )
+    monkeypatch.setattr(routes.Session, "load", lambda _sid: None)
+    assert routes._webui_sidecar_lineage_messages_for_display(child) == []
+
+
+def test_sidebar_lineage_count_matches_detail_merge_and_fails_closed_for_unknown_state_rows(monkeypatch):
+    tip = SimpleNamespace(
+        session_id="lineage-tip",
+        parent_session_id="lineage-parent",
+        profile="default",
+        session_source="webui",
+        messages=[{"role": "user", "content": "sidecar turn", "timestamp": 1.0}],
+        truncation_watermark=None,
+        truncation_boundary=None,
+    )
+    parent = SimpleNamespace(
+        session_id="lineage-parent",
+        parent_session_id=None,
+        pre_compression_snapshot=True,
+        session_source="webui",
+        messages=[],
+    )
+    monkeypatch.setattr(routes.Session, "load", lambda sid: {"lineage-tip": tip, "lineage-parent": parent}.get(sid))
+    row = {"session_id": "lineage-tip", "_lineage_tip_id": "lineage-tip", "parent_session_id": "lineage-parent"}
+    monkeypatch.setattr(routes, "get_state_db_session_messages", lambda *args, **kwargs: [
+        {"role": "user", "content": "state turn", "timestamp": 2.0},
+    ])
+    routes._project_sidebar_lineage_user_counts([row])
+    assert "_lineage_user_message_count" not in row
+
+    row = {"session_id": "lineage-tip", "_lineage_tip_id": "lineage-tip", "parent_session_id": "lineage-parent"}
+    monkeypatch.setattr(routes, "get_state_db_session_messages", lambda *args, **kwargs: [
+        {
+            "role": "user",
+            "content": "state turn",
+            "timestamp": 2.0,
+            "display_kind": None,
+            "source": None,
+            "_source": None,
+            "_compressed_summary": 0,
+        },
+    ])
+    routes._project_sidebar_lineage_user_counts([row])
+    assert row["_lineage_user_message_count"] == 2
+
+
 def test_process_wakeup_restamp_preserves_count_and_advances_data_version(tmp_path):
     db = tmp_path / "state.db"
     conn = sqlite3.connect(db)
     conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, model TEXT, message_count INTEGER, started_at REAL, source TEXT)")
-    conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, display_kind TEXT, source TEXT, timestamp REAL)")
+    conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, display_kind TEXT, source TEXT, _source TEXT, _compressed_summary INTEGER, timestamp REAL)")
     conn.execute("INSERT INTO sessions VALUES ('w', 'Wakeup', 'm', 1, 1, 'cli')")
-    conn.execute("INSERT INTO messages VALUES (1, 'w', 'user', 'wake', '', 'process_wakeup', 1)")
+    conn.execute("INSERT INTO messages VALUES (1, 'w', 'user', 'wake', '', 'process_wakeup', NULL, 0, 1)")
     conn.commit()
     before = agent_sessions.read_importable_agent_session_rows(db, exclude_sources=None)[0]
     version_before = models._sqlite_data_version(db)
@@ -576,6 +676,9 @@ def _make_state_db(path, *, with_messages_table=True, with_role=True,
         cols.append("timestamp REAL")
         cols.append("content TEXT")
         cols.append("display_kind TEXT")
+        cols.append("source TEXT")
+        cols.append("_source TEXT")
+        cols.append("_compressed_summary INTEGER")
         conn.execute(f"CREATE TABLE messages ({', '.join(cols)})")
         for sid, role, ts in messages:
             names, values = [], []
@@ -586,6 +689,9 @@ def _make_state_db(path, *, with_messages_table=True, with_role=True,
             names.append("timestamp"); values.append(ts)
             names.append("content"); values.append(f"message {ts}")
             names.append("display_kind"); values.append(None)
+            names.append("source"); values.append(None)
+            names.append("_source"); values.append(None)
+            names.append("_compressed_summary"); values.append(0)
             conn.execute(
                 f"INSERT INTO messages ({', '.join(names)}) "
                 f"VALUES ({', '.join('?' * len(values))})", values
@@ -611,6 +717,30 @@ def test_role_column_present_reports_real_user_turn_count(tmp_path):
     assert row["actual_user_message_count"] == 2
 
 
+def test_state_db_missing_provenance_columns_reports_unknown_user_turns(tmp_path):
+    db = tmp_path / "state.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, model TEXT, "
+        "message_count INTEGER, started_at REAL, source TEXT, session_source TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO sessions VALUES ('s1', 'CLI Session', 'gpt', 1, 1, 'cli', 'cli')"
+    )
+    conn.execute(
+        "CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, "
+        "content TEXT, display_kind TEXT, timestamp REAL)"
+    )
+    conn.execute(
+        "INSERT INTO messages VALUES (1, 's1', 'user', 'wake', NULL, 1)"
+    )
+    conn.commit()
+    conn.close()
+
+    row = agent_sessions.read_importable_agent_session_rows(db, exclude_sources=None)[0]
+    assert row["actual_user_message_count"] is None
+
+
 def test_compact_uses_the_canonical_human_turn_truth_table():
     session = models.Session(session_id="truth-table")
     session.messages = [
@@ -622,9 +752,14 @@ def test_compact_uses_the_canonical_human_turn_truth_table():
         {"role": "user", "content": "[Your active task list was preserved across context compression]\n- [ ] task"},
         {"role": "user", "content": "Continue from the compressed conversation context above. This marker exists because no human user turn was available."},
         {"role": "user", "content": "Continue from the compressed conversation context above. This marker exists because the compacted transcript contained no preserved user turn."},
-        {"role": "user", "content": {"type": "text", "value": "structured"}},
+        {"role": "user", "content": {"type": "text", "text": "structured"}},
     ]
     assert session.compact()["user_message_count"] == 2
+
+
+@pytest.mark.parametrize("content", [None, [], [{"type": "image_url"}], {"type": "tool_use", "id": "x"}, {"type": "text", "value": "missing text key"}])
+def test_human_turn_classifier_fails_closed_for_empty_or_unsupported_content(content):
+    assert not agent_sessions.is_human_user_turn({"role": "user", "content": content})
 
 
 @pytest.mark.parametrize("shape", ["no_role_column", "no_messages_table", "no_session_id"])
@@ -673,7 +808,7 @@ def test_count_user_turns_fallback_does_not_reach_sidecar_or_index_rows():
     index_row = {"id": "s1", "title": "CLI Session", "message_count": 7,
                  "messages": [{"role": "user"}, {"role": "assistant"}]}
     assert "actual_user_message_count" not in index_row
-    assert agent_sessions._count_user_turns(index_row) == 1
+    assert agent_sessions._count_user_turns(index_row) == 0
 
     # A row that reached the projection and got NULL still uses the coarse total.
     projected = {"id": "s1", "title": "CLI Session",
