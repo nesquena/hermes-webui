@@ -139,6 +139,76 @@ console.log('LIFECYCLE ' + JSON.stringify(result));
     return preamble + render_ft + "\n" + clear_pv + "\n" + lifecycle
 
 
+def _close_panel_reopen_harness(entries_json: str) -> str:
+    """Build a Node script that drives clearPreview({keepPanelOpen:false})
+    (closes the panel entirely) and then reopens it in browse mode, verifying
+    the tree or empty-state placeholder is visible after reopen.
+
+    The Greptile bot identified this gap: when closing the panel (not just
+    the preview), the original code skipped renderFileTree() because it
+    assumed the next explicit open would render fresh state — but
+    openWorkspacePanel('browse') does not call renderFileTree(), leaving both
+    the tree and empty-state placeholder hidden on reopen.
+    """
+    render_ft = _extract_render_file_tree()
+    clear_pv = _extract_clear_preview()
+    preamble = r"""
+const store = {};
+function $id(id){
+  if(store[id]) return store[id];
+  const el = {
+    id, style: {}, classList: {add(){}, remove(){}, toggle(){}, contains(){return false;}},
+    innerHTML:'', textContent:'', scrollTop:0, appendChild(){}, remove(){},
+    setAttribute(){}, getAttribute(){return null;}, querySelector(){return null;},
+  };
+  store[id] = el;
+  return el;
+}
+const $ = $id;
+const S = {session:{workspace:'/ws'}, entries: null, currentDir:'.', _dirCache:{}};
+let _previewCurrentPath='', _previewCurrentMode='', _previewDirty=false;
+let _workspacePanelMode='preview';
+function t(k){ return k; }
+function _visibleWorkspaceEntries(entries){ return Array.isArray(entries)?entries:[]; }
+function _renderTreeItems(box, items){ box.innerHTML='items:'+items.length; }
+function closeWorkspacePanel(){ _workspacePanelMode='closed'; }
+function openWorkspacePanel(mode){ _workspacePanelMode=mode; }
+function syncWorkspacePanelUI(){}
+function _hasWorkspacePreviewVisible(){ return !!_previewCurrentPath; }
+
+"""
+    lifecycle = r"""
+// ── Lifecycle: preview → close panel → reopen
+S.entries = __ENTRIES__;
+_previewCurrentPath = '/ws/file.txt';
+_previewCurrentMode = 'code';
+// background refresh while preview open
+renderFileTree();
+const duringPreview = {
+  treeDisplay: store.fileTree.style.display,
+  emptyDisplay: store.wsEmptyState.style.display,
+};
+// close panel (not just preview — keepPanelOpen=false)
+clearPreview({keepPanelOpen:false});
+const afterClosePanel = {
+  treeDisplay: store.fileTree.style.display,
+  emptyDisplay: store.wsEmptyState.style.display,
+  panelMode: _workspacePanelMode,
+};
+// reopen panel in browse mode
+openWorkspacePanel('browse');
+const afterReopen = {
+  treeDisplay: store.fileTree.style.display,
+  emptyDisplay: store.wsEmptyState.style.display,
+  panelMode: _workspacePanelMode,
+};
+const result = {duringPreview, afterClosePanel, afterReopen};
+console.log('LIFECYCLE ' + JSON.stringify(result));
+"""
+    lifecycle = lifecycle.replace("__ENTRIES__", entries_json)
+    return preamble + render_ft + "\n" + clear_pv + "\n" + lifecycle
+
+
 # ── Behavioral lifecycle tests (real function bodies, Node VM) ──────────────
 
 
@@ -184,6 +254,57 @@ def test_nonempty_refresh_tree_hidden_during_preview_visible_after_close():
     assert during["treeDisplay"] == "none", during
     assert after["treeDisplay"] == "", after  # restored (renderer default)
     assert after["panelMode"] == "browse", after
+
+
+def test_close_panel_reopen_shows_tree_or_empty_state_nonempty():
+    """Greptile finding: closing the panel entirely (keepPanelOpen=false)
+    must not leave the tree hidden for a later reopen. After close + reopen
+    in browse mode, the non-empty tree must be visible."""
+    js = _close_panel_reopen_harness(
+        '[{"name":"a.txt","type":"file","path":"/ws/a.txt"}]'
+    )
+    proc = _run_node(js)
+    assert proc.returncode == 0, proc.stderr
+    assert "LIFECYCLE" in proc.stdout, proc.stdout
+    payload = proc.stdout.split("LIFECYCLE ", 1)[1].strip()
+    import json
+
+    data = json.loads(payload)
+    during = data["duringPreview"]
+    after_close = data["afterClosePanel"]
+    after_reopen = data["afterReopen"]
+    # during preview: tree hidden
+    assert during["treeDisplay"] == "none", during
+    # after closing the panel: panel is closed; the renderer may have already
+    # revealed the tree (always-call fix) or kept it hidden behind the panel —
+    # the invariant that matters is the REOPEN state
+    assert after_close["panelMode"] == "closed", after_close
+    # after reopen: tree must be visible — the Greptile regression
+    assert after_reopen["treeDisplay"] == "", after_reopen
+    assert after_reopen["panelMode"] == "browse", after_reopen
+
+
+def test_close_panel_reopen_shows_empty_state():
+    """Greptile finding, empty-directory variant: after closing the panel
+    over a preview of an emptied directory and reopening, the empty-state
+    placeholder must be visible (not a blank panel)."""
+    js = _close_panel_reopen_harness("[]")
+    proc = _run_node(js)
+    assert proc.returncode == 0, proc.stderr
+    assert "LIFECYCLE" in proc.stdout, proc.stdout
+    payload = proc.stdout.split("LIFECYCLE ", 1)[1].strip()
+    import json
+
+    data = json.loads(payload)
+    during = data["duringPreview"]
+    after_close = data["afterClosePanel"]
+    after_reopen = data["afterReopen"]
+    # during preview: empty-state hidden
+    assert during["emptyDisplay"] == "none", during
+    assert after_close["panelMode"] == "closed", after_close
+    # after reopen: empty-state placeholder visible
+    assert after_reopen["emptyDisplay"] == "flex", after_reopen
+    assert after_reopen["panelMode"] == "browse", after_reopen
 
 
 # ── Source-shape lock ────────────────────────────────────────────────────────
