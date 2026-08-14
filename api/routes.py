@@ -2952,6 +2952,7 @@ from api.helpers import (
     require,
     bad,
     safe_resolve,
+    arm_connection_close,
     j,
     t,
     read_body,
@@ -5715,7 +5716,7 @@ def _check_csrf(handler) -> bool:
     if not _check_same_origin_browser_request(handler):
         # CSRF checks run before read_body().  Close rather than reusing an
         # HTTP/1.1 connection whose unread body would corrupt the next request.
-        handler.close_connection = True
+        arm_connection_close(handler)
         return False
     if not _is_browser_unsafe_request(handler):
         return True  # non-browser clients (curl, MCP, agent) have no Origin/Referer
@@ -5728,7 +5729,7 @@ def _check_csrf(handler) -> bool:
     submitted = handler.headers.get(CSRF_HEADER_NAME) or handler.headers.get("X-CSRF-Token")
     if verify_csrf_token(cookie_val or "", submitted or ""):
         return True
-    handler.close_connection = True
+    arm_connection_close(handler)
     return _set_csrf_failure_reason(handler, "token_mismatch")
 
 
@@ -5913,7 +5914,7 @@ def _handle_extension_sidecar_proxy(
         # unread body would corrupt the next request (same class as _check_csrf).
         # GET (read_request_body=False) has nothing unread — keep-alive survives.
         if read_request_body:
-            handler.close_connection = True
+            arm_connection_close(handler)
         return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
     try:
         request_body = _read_body_bytes(handler) if read_request_body else None
@@ -6358,7 +6359,7 @@ def _handle_csp_report(handler) -> bool:
         )
         # Rate-limit rejection runs before the body is read; close-and-advertise
         # so the unread report can't corrupt the next pooled request.
-        handler.close_connection = True
+        arm_connection_close(handler)
         return _send_no_content(handler)
 
     payload = _read_csp_report_payload(handler)
@@ -12745,7 +12746,7 @@ def _handle_health_restart(handler) -> bool:
     """Restart the Hermes messaging gateway service."""
     # This endpoint never consumes its request body on any outcome; close so a
     # supplied body can't corrupt the next pooled request.
-    handler.close_connection = True
+    arm_connection_close(handler)
     outcome = restart_active_profile_gateway()
 
     if outcome.get("status") == "completed":
@@ -14915,7 +14916,7 @@ def handle_post(handler, parsed) -> bool:
             # The 410 runs before the stale tab's JSON body is read;
             # close-and-advertise so those unread bytes can't corrupt the next
             # pooled request.
-            handler.close_connection = True
+            arm_connection_close(handler)
             j(
                 handler,
                 {
