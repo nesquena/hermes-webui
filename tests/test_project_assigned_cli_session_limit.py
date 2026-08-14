@@ -1,77 +1,177 @@
-"""Regression: project-assigned CLI sessions must survive the recent-session cap."""
+"""Regression: project-assigned CLI sessions must survive the recent-session cap.
 
+Two independent 20-session caps used to hide older project-assigned CLI/TUI
+sessions while their project chip still claimed them. Recovering them must not
+swing to the opposite failure, so these tests pin BOTH edges of the contract:
+
+* an assigned conversation older than the recent window is still reachable
+  (the original bug), including past the 200-conversation mark when the
+  assignments are spread over several projects;
+* the recovered set is BOUNDED — per project, counting logical conversations —
+  including assigned rows that arrive as imported WebUI sidecars and therefore
+  never pass through any state.db cap;
+* assigned rows do not spend the unassigned sidebar quota: 20 unique unassigned
+  logical conversations survive after lineage/sidecar dedup;
+* a deleted or cross-profile ``project_id`` cannot hide a session — it resolves
+  to "unassigned" before either cap runs, instead of becoming a ``default_hidden``
+  row with no chip left to reveal it;
+* a project assignment recorded on a newer EMPTY compression continuation is
+  applied to the lineage even when the root is the freshest importable segment.
+"""
+
+import json
 import sqlite3
 
 import pytest
 
-from api import models, routes
+from api import agent_sessions, models, routes
+
+BASE_TS = 1700000000.0
 
 
-def _make_state_db(db_path, sessions):
+def _session(
+    sid,
+    started_at,
+    *,
+    project_id=None,
+    parent=None,
+    ended_at=None,
+    end_reason=None,
+    source="cli",
+    messages=1,
+    title=None,
+):
+    """One state.db ``sessions`` row. Titled by default so the row is visible."""
+    return {
+        "id": sid,
+        "title": sid if title is None else title,
+        "model": "gpt-x",
+        "message_count": messages,
+        "started_at": started_at,
+        "source": source,
+        "project_id": project_id,
+        "parent_session_id": parent,
+        "ended_at": ended_at,
+        "end_reason": end_reason,
+        "messages": messages,
+    }
+
+
+def _write_state_db(db_path, rows, *, lineage_columns=True):
+    """Create a minimal agent state.db from ``_session()`` rows."""
+    columns = [
+        "id", "title", "model", "message_count", "started_at", "source", "project_id",
+    ]
+    lineage_ddl = ""
+    if lineage_columns:
+        columns += ["parent_session_id", "ended_at", "end_reason"]
+        lineage_ddl = ", parent_session_id TEXT, ended_at REAL, end_reason TEXT"
     conn = sqlite3.connect(str(db_path))
     conn.execute(
-        """
-        CREATE TABLE sessions (
-            id TEXT PRIMARY KEY,
-            title TEXT,
-            model TEXT,
-            message_count INTEGER,
-            started_at REAL,
-            source TEXT,
-            project_id TEXT
-        )
-        """
+        "CREATE TABLE sessions ("
+        "id TEXT PRIMARY KEY, title TEXT, model TEXT, message_count INTEGER, "
+        f"started_at REAL, source TEXT, project_id TEXT{lineage_ddl})"
     )
     conn.execute(
-        """
-        CREATE TABLE messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT,
-            timestamp REAL,
-            role TEXT
-        )
-        """
+        "CREATE TABLE messages ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, timestamp REAL, role TEXT)"
     )
-    for sid, started_at, project_id in sessions:
+    placeholders = ", ".join("?" for _ in columns)
+    for row in rows:
         conn.execute(
-            "INSERT INTO sessions "
-            "(id, title, model, message_count, started_at, source, project_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (sid, sid, "gpt-x", 1, started_at, "cli", project_id),
+            f"INSERT INTO sessions ({', '.join(columns)}) VALUES ({placeholders})",
+            [row.get(column) for column in columns],
         )
-        conn.execute(
-            "INSERT INTO messages (session_id, timestamp, role) VALUES (?, ?, ?)",
-            (sid, started_at + 0.5, "user"),
-        )
+        for index in range(int(row.get("messages") or 0)):
+            conn.execute(
+                "INSERT INTO messages (session_id, timestamp, role) VALUES (?, ?, ?)",
+                (row["id"], float(row["started_at"]) + 0.5 + index, "user"),
+            )
     conn.commit()
     conn.close()
 
 
+def _lineage(prefix, start_ts, segments, *, project_id=None, tip_project_id=None,
+             step=10.0, messages=1):
+    """A compression chain: ``segments`` rows, only the last one still open."""
+    rows = []
+    for index in range(segments):
+        last = index == segments - 1
+        started_at = start_ts + index * step
+        rows.append(_session(
+            f"{prefix}-seg{index}",
+            started_at,
+            project_id=(
+                tip_project_id if last and tip_project_id is not None
+                else project_id if index == 0
+                else None
+            ),
+            parent=None if index == 0 else f"{prefix}-seg{index - 1}",
+            ended_at=None if last else started_at + step / 2,
+            end_reason=None if last else "compression",
+            messages=messages,
+        ))
+    return rows
+
+
 @pytest.fixture
 def fake_hermes_home(tmp_path, monkeypatch):
+    """Point get_cli_sessions() at a temporary HERMES_HOME + projects.json."""
     home = tmp_path / "hermes"
     home.mkdir()
 
+    import api.config as cfg
     import api.profiles as profiles
 
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: home)
     monkeypatch.setattr(profiles, "get_active_profile_name", lambda: None)
+    # Keep root-profile aliasing hermetic: the real _is_root_profile falls back
+    # to list_profiles_api(), which shells out to the agent CLI.
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda name: name == "default")
+
+    projects_file = tmp_path / "projects.json"
+    monkeypatch.setattr(cfg, "PROJECTS_FILE", projects_file)
+    monkeypatch.setattr(models, "PROJECTS_FILE", projects_file)
+    monkeypatch.setattr(models, "_projects_migrated", True)
+    projects_file.write_text("[]", encoding="utf-8")
+
     models.clear_cli_sessions_cache()
     yield home
     models.clear_cli_sessions_cache()
 
 
+def _register_projects(tmp_path, *project_ids, profile="default"):
+    """Write ``project_ids`` into the projects.json the loader resolves against."""
+    existing = json.loads((tmp_path / "projects.json").read_text(encoding="utf-8"))
+    existing.extend(
+        {
+            "project_id": project_id,
+            "name": f"Project {project_id}",
+            "color": "#6366f1",
+            "profile": profile,
+            "created_at": 1.0,
+        }
+        for project_id in project_ids
+    )
+    (tmp_path / "projects.json").write_text(json.dumps(existing), encoding="utf-8")
+    models.clear_cli_sessions_cache()
+
+
+# ── The original bug: an assigned session older than the recent window ────────
+
+
 def test_project_assigned_cli_session_survives_recent_session_limit(
-    fake_hermes_home, monkeypatch
+    fake_hermes_home, tmp_path, monkeypatch
 ):
     monkeypatch.setattr(models, "CLI_VISIBLE_SESSION_LIMIT", 5)
+    _register_projects(tmp_path, "project-123")
 
-    newer_unassigned = [
-        (f"recent-{index:02d}", 1700000100.0 + index, None)
+    rows = [
+        _session(f"recent-{index:02d}", BASE_TS + 100 + index)
         for index in range(25)
     ]
-    older_assigned = [("older-assigned", 1700000000.0, "project-123")]
-    _make_state_db(fake_hermes_home / "state.db", newer_unassigned + older_assigned)
+    rows.append(_session("older-assigned", BASE_TS, project_id="project-123"))
+    _write_state_db(fake_hermes_home / "state.db", rows)
 
     sessions = models.get_cli_sessions()
     by_id = {session["session_id"]: session for session in sessions}
@@ -90,108 +190,31 @@ def test_project_assigned_cli_session_survives_recent_session_limit(
 )
 def test_project_assigned_compression_lineage_is_returned_once(
     fake_hermes_home,
+    tmp_path,
     monkeypatch,
     root_project_id,
     tip_project_id,
 ):
     monkeypatch.setattr(models, "CLI_VISIBLE_SESSION_LIMIT", 5)
-    db_path = fake_hermes_home / "state.db"
-    conn = sqlite3.connect(str(db_path))
-    conn.execute(
-        """
-        CREATE TABLE sessions (
-            id TEXT PRIMARY KEY,
-            title TEXT,
-            model TEXT,
-            message_count INTEGER,
-            started_at REAL,
-            source TEXT,
-            project_id TEXT,
-            parent_session_id TEXT,
-            ended_at REAL,
-            end_reason TEXT
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT,
-            timestamp REAL,
-            role TEXT
-        )
-        """
-    )
+    _register_projects(tmp_path, "project-123")
+
     rows = [
-        (
+        _session(
             "lineage-root",
-            1700000000.0,
-            root_project_id,
-            None,
-            1700000001.0,
-            "compression",
+            BASE_TS,
+            project_id=root_project_id,
+            ended_at=BASE_TS + 1,
+            end_reason="compression",
         ),
-        (
-            "lineage-tip",
-            1700000200.0,
-            tip_project_id,
-            "lineage-root",
-            None,
-            None,
-        ),
+        _session("lineage-tip", BASE_TS + 200, project_id=tip_project_id, parent="lineage-root"),
     ]
     # Keep the tip inside the normal five-row window while pushing the root
     # outside its 8x SQL candidate window. This reproduces the real two-pass
     # boundary: the normal pass sees only the tip and the project pass must
     # bring enough lineage context to avoid appending the root separately.
-    rows.extend(
-        (
-            f"newer-{index}",
-            1700000300.0 + index,
-            None,
-            None,
-            None,
-            None,
-        )
-        for index in range(4)
-    )
-    rows.extend(
-        (
-            f"middle-{index}",
-            1700000100.0 + index,
-            None,
-            None,
-            None,
-            None,
-        )
-        for index in range(56)
-    )
-    for sid, started_at, project_id, parent_id, ended_at, end_reason in rows:
-        conn.execute(
-            "INSERT INTO sessions "
-            "(id, title, model, message_count, started_at, source, project_id, "
-            "parent_session_id, ended_at, end_reason) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                sid,
-                sid,
-                "gpt-x",
-                1,
-                started_at,
-                "cli",
-                project_id,
-                parent_id,
-                ended_at,
-                end_reason,
-            ),
-        )
-        conn.execute(
-            "INSERT INTO messages (session_id, timestamp, role) VALUES (?, ?, ?)",
-            (sid, started_at + 0.5, "user"),
-        )
-    conn.commit()
-    conn.close()
+    rows.extend(_session(f"newer-{index}", BASE_TS + 300 + index) for index in range(4))
+    rows.extend(_session(f"middle-{index}", BASE_TS + 100 + index) for index in range(56))
+    _write_state_db(fake_hermes_home / "state.db", rows)
 
     sessions = models.get_cli_sessions()
     lineage_rows = [
@@ -205,13 +228,156 @@ def test_project_assigned_compression_lineage_is_returned_once(
     assert lineage_rows[0]["project_id"] == "project-123"
 
 
-def test_route_cap_preserves_project_assigned_overflow_as_hidden():
-    recent = [
+# ── Finding 1: the recovered assigned set must stay bounded ───────────────────
+
+
+def test_assigned_conversations_are_bounded_per_project(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """250 assigned conversations in one project yield the newest 200, not 250."""
+    monkeypatch.setattr(models, "PROJECT_ASSIGNED_CLI_LIMIT", 200)
+    _register_projects(tmp_path, "project-a")
+
+    rows = [
+        _session(f"assigned-{index:04d}", BASE_TS + index, project_id="project-a")
+        for index in range(250)
+    ]
+    rows.extend(
+        _session(f"recent-{index:02d}", BASE_TS + 1000 + index) for index in range(25)
+    )
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    sessions = models.get_cli_sessions()
+    assigned = [s for s in sessions if s["project_id"] == "project-a"]
+    assigned_ids = {s["session_id"] for s in assigned}
+
+    assert len(assigned) == 200
+    # The bound drops the OLDEST assigned conversations, never a newer one.
+    assert "assigned-0249" in assigned_ids
+    assert "assigned-0050" in assigned_ids
+    assert "assigned-0049" not in assigned_ids
+    assert "assigned-0000" not in assigned_ids
+
+
+def test_route_cap_bounds_imported_sidecar_assigned_rows(fake_hermes_home):
+    """Imported CLI sidecars bypass every state.db cap (review finding 1).
+
+    ``all_sessions()`` rows never pass through read_importable_agent_session_rows,
+    so the merged payload is the only place that can bound them. 1,000 assigned
+    rows used to yield 1,000 returned rows.
+    """
+    sidecars = [
         {
-            "session_id": f"recent-{index}",
+            "session_id": f"imported-{index:04d}",
             "is_cli_session": True,
-            "project_id": None,
+            "project_id": "project-prime",
         }
+        for index in range(1000)
+    ]
+
+    kept = routes._cap_recent_cli_sessions(sidecars)
+
+    assert len(kept) == routes.CLI_PROJECT_ASSIGNED_CAP
+    assert kept[0]["session_id"] == "imported-0000"
+    # The recent window still renders normally; only the overflow is chip-only.
+    visible = [row for row in kept if not row.get("default_hidden")]
+    assert len(visible) == routes.CLI_VISIBLE_SESSION_CAP
+    # Capping never mutates the caller's rows.
+    assert not any("default_hidden" in row for row in sidecars)
+
+
+def test_route_cap_bounds_each_project_independently(fake_hermes_home):
+    """A busy project must not evict another project's history (greptile P1).
+
+    The bound is per project, so a profile with more than
+    ``CLI_PROJECT_ASSIGNED_CAP`` assigned conversations in TOTAL keeps them all.
+    """
+    rows = []
+    for project in ("project-a", "project-b"):
+        rows.extend(
+            {
+                "session_id": f"{project}-{index:04d}",
+                "is_cli_session": True,
+                "project_id": project,
+            }
+            for index in range(250)
+        )
+
+    kept = routes._cap_recent_cli_sessions(rows)
+
+    counts: dict[str, int] = {}
+    for row in kept:
+        counts[row["project_id"]] = counts.get(row["project_id"], 0) + 1
+    assert counts == {
+        "project-a": routes.CLI_PROJECT_ASSIGNED_CAP,
+        "project-b": routes.CLI_PROJECT_ASSIGNED_CAP,
+    }
+    assert len(kept) > routes.CLI_PROJECT_ASSIGNED_CAP
+
+
+def test_more_than_two_hundred_assigned_conversations_survive_across_projects(
+    fake_hermes_home, tmp_path
+):
+    """The model pass budgets per project too, not a single global 200."""
+    _register_projects(tmp_path, "project-a", "project-b")
+
+    rows = [
+        _session(f"a-{index:04d}", BASE_TS + index, project_id="project-a")
+        for index in range(150)
+    ]
+    rows.extend(
+        _session(f"b-{index:04d}", BASE_TS + 500 + index, project_id="project-b")
+        for index in range(150)
+    )
+    rows.extend(
+        _session(f"recent-{index:02d}", BASE_TS + 2000 + index) for index in range(25)
+    )
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    sessions = models.get_cli_sessions()
+    counts: dict[str, int] = {}
+    for session in sessions:
+        if session["project_id"]:
+            counts[session["project_id"]] = counts.get(session["project_id"], 0) + 1
+
+    # 300 assigned conversations total — a global 200 bound would silently drop
+    # the 100 oldest, all of them project-a's.
+    assert counts == {"project-a": 150, "project-b": 150}
+
+
+# ── Finding 2: assigned rows must not spend the unassigned quota ──────────────
+
+
+def test_route_cap_keeps_full_unassigned_window_when_assigned_rows_lead(
+    fake_hermes_home,
+):
+    """3 assigned + 20 unassigned used to yield only 17 unassigned."""
+    rows = [
+        {
+            "session_id": f"assigned-{index}",
+            "is_cli_session": True,
+            "project_id": "project-prime",
+        }
+        for index in range(3)
+    ]
+    rows.extend(
+        {"session_id": f"unassigned-{index:02d}", "is_cli_session": True, "project_id": None}
+        for index in range(20)
+    )
+
+    kept = routes._cap_recent_cli_sessions(rows)
+    unassigned_kept = [row for row in kept if not row.get("project_id")]
+
+    assert len(unassigned_kept) == 20
+    assert len(kept) == 23
+    # All three assigned rows are inside the recent window here, so none of them
+    # is demoted to a chip-only row.
+    assert not any(row.get("default_hidden") for row in kept)
+
+
+def test_route_cap_preserves_project_assigned_overflow_as_hidden(fake_hermes_home):
+    recent = [
+        {"session_id": f"recent-{index}", "is_cli_session": True, "project_id": None}
         for index in range(20)
     ]
     assigned_overflow = {
@@ -235,3 +401,264 @@ def test_route_cap_preserves_project_assigned_overflow_as_hidden():
     assert "unassigned-overflow" not in by_id
     assert by_id["assigned-overflow"]["default_hidden"] is True
     assert "default_hidden" not in assigned_overflow
+
+
+def test_model_refills_the_unassigned_window_consumed_by_assigned_rows(
+    fake_hermes_home, tmp_path
+):
+    """The first state.db pass fetches 20 rows TOTAL, so it must be refilled."""
+    _register_projects(tmp_path, "project-a")
+
+    rows = [
+        _session(f"assigned-{index}", BASE_TS + 1000 + index, project_id="project-a")
+        for index in range(3)
+    ]
+    rows.extend(_session(f"plain-{index:02d}", BASE_TS + index) for index in range(25))
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    sessions = models.get_cli_sessions()
+    unassigned = [s for s in sessions if not s["project_id"]]
+
+    assert len(unassigned) == models.CLI_VISIBLE_SESSION_LIMIT == 20
+    assert len([s for s in sessions if s["project_id"] == "project-a"]) == 3
+
+
+def test_unassigned_window_counts_logical_conversations_not_segments(
+    fake_hermes_home, tmp_path
+):
+    """The 20 unassigned rows must be 20 distinct conversations after dedup."""
+    _register_projects(tmp_path, "project-a")
+
+    rows = [
+        _session(f"assigned-{index}", BASE_TS + 9000 + index, project_id="project-a")
+        for index in range(3)
+    ]
+    for index in range(25):
+        rows.extend(_lineage(f"chain{index:02d}", BASE_TS + index * 100, 3))
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    sessions = models.get_cli_sessions()
+    unassigned = [s for s in sessions if not s["project_id"]]
+    lineage_keys = {
+        s.get("_lineage_root_id") or s["session_id"] for s in unassigned
+    }
+
+    assert len(unassigned) == 20
+    assert len(lineage_keys) == 20
+
+
+# ── Finding 3: a stale assignment must not hide a session ─────────────────────
+
+
+@pytest.mark.parametrize("project_profile", ["default", "other-profile"])
+def test_unresolvable_project_id_leaves_the_session_unassigned(
+    fake_hermes_home, tmp_path, monkeypatch, project_profile
+):
+    """A deleted or cross-profile id resolves to None BEFORE either cap runs.
+
+    ``project-live`` is registered for the active profile; ``project-ghost`` is
+    either absent from projects.json entirely (deleted) or tagged to another
+    profile (foreign). Both must read as "unassigned" rather than exiling the row
+    to a ``default_hidden`` chip that cannot exist.
+    """
+    monkeypatch.setattr(models, "CLI_VISIBLE_SESSION_LIMIT", 5)
+    _register_projects(tmp_path, "project-live")
+    if project_profile != "default":
+        _register_projects(tmp_path, "project-ghost", profile=project_profile)
+
+    rows = [
+        _session("newest-ghost", BASE_TS + 500, project_id="project-ghost"),
+        _session("old-ghost", BASE_TS, project_id="project-ghost"),
+        _session("old-live", BASE_TS + 1, project_id="project-live"),
+    ]
+    rows.extend(_session(f"recent-{index:02d}", BASE_TS + 100 + index) for index in range(25))
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    sessions = models.get_cli_sessions()
+    by_id = {session["session_id"]: session for session in sessions}
+
+    # Inside the recent window: still present, and back in "Unassigned".
+    assert "newest-ghost" in by_id
+    assert by_id["newest-ghost"]["project_id"] is None
+    # Outside the window: not resurrected as an orphan chip-only row. The
+    # live-project row in the same db proves the cap itself still recovers.
+    assert "old-ghost" not in by_id
+    assert by_id["old-live"]["project_id"] == "project-live"
+
+
+def test_unresolvable_project_overflow_is_not_marked_hidden(fake_hermes_home, tmp_path):
+    """End of the same chain: routes must see None, so no orphan default_hidden."""
+    _register_projects(tmp_path, "project-live")
+
+    rows = [_session("stale-assigned", BASE_TS, project_id="project-ghost")]
+    rows.extend(_session(f"recent-{index:02d}", BASE_TS + 100 + index) for index in range(25))
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    sessions = sorted(
+        models.get_cli_sessions(), key=lambda s: s["updated_at"], reverse=True
+    )
+    kept = routes._cap_recent_cli_sessions(sessions)
+    by_id = {row["session_id"]: row for row in kept}
+
+    assert not any(
+        row.get("default_hidden") and not row.get("project_id") for row in kept
+    )
+    # It is plain unassigned overflow now, so the recent cap drops it outright
+    # instead of parking it under a chip nothing can select.
+    assert "stale-assigned" not in by_id
+
+
+# ── Finding 4: lineage project id on the ``tip is row`` early return ──────────
+
+
+def test_lineage_project_id_kept_when_root_is_the_freshest_segment():
+    """The assignment lives on a newer EMPTY continuation (agent_sessions:468).
+
+    ``compression_tip()`` resolves the project id across the whole lineage but
+    returns the ROOT as the tip (the continuation has no messages), so the
+    ``tip is row`` early return has to apply it too.
+    """
+    root = _session(
+        "root", 100.0, ended_at=110.0, end_reason="compression", messages=4,
+    )
+    root["actual_message_count"] = 4
+    root["last_activity"] = 120.0
+    empty_tip = _session("tip", 200.0, project_id="project-123", parent="root", title="")
+    empty_tip["actual_message_count"] = 0
+    empty_tip["last_activity"] = 200.0
+
+    projected = agent_sessions._project_agent_session_rows([root, empty_tip])
+
+    assert [row["id"] for row in projected] == ["root"]
+    assert projected[0]["project_id"] == "project-123"
+
+
+def test_assignment_on_empty_continuation_reaches_the_sidebar(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """Same case end-to-end: the recovery pass must find and keep the lineage."""
+    monkeypatch.setattr(models, "CLI_VISIBLE_SESSION_LIMIT", 5)
+    _register_projects(tmp_path, "project-123")
+
+    rows = [
+        _session("root-with-messages", BASE_TS, ended_at=BASE_TS + 1, end_reason="compression"),
+        _session(
+            "empty-continuation",
+            BASE_TS + 2,
+            project_id="project-123",
+            parent="root-with-messages",
+            messages=0,
+        ),
+    ]
+    rows.extend(_session(f"recent-{index:02d}", BASE_TS + 100 + index) for index in range(25))
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    sessions = models.get_cli_sessions()
+    by_id = {session["session_id"]: session for session in sessions}
+
+    assert "root-with-messages" in by_id
+    assert by_id["root-with-messages"]["project_id"] == "project-123"
+    # The empty continuation is not a separately addressable conversation.
+    assert "empty-continuation" not in by_id
+
+
+# ── greptile P1, second half: compression segments eating the raw window ──────
+
+
+def test_candidate_window_widens_when_segments_consume_it(tmp_path):
+    """``limit`` counts logical conversations, so a short window must re-widen.
+
+    12 ten-segment chains: the first 8x candidate window (80 raw rows) only
+    reaches 8 whole chains, so a request for 10 conversations came back with 8.
+    """
+    rows = []
+    for index in range(12):
+        rows.extend(_lineage(f"chain{index:02d}", BASE_TS + index * 10_000, 10))
+    db_path = tmp_path / "state.db"
+    _write_state_db(db_path, rows)
+
+    projected = agent_sessions.read_importable_agent_session_rows(
+        db_path, limit=10, exclude_sources=None
+    )
+
+    assert len(projected) == 10
+    assert len({row["_lineage_root_id"] for row in projected}) == 10
+
+
+def test_project_assignment_filters_are_exact_complements(tmp_path):
+    """'assigned' and 'unassigned' must partition the logical conversations."""
+    rows = [
+        _session("plain-a", BASE_TS + 10),
+        _session("plain-b", BASE_TS + 20),
+        _session("owned", BASE_TS + 30, project_id="project-a"),
+    ]
+    # A lineage whose assignment only exists on the tip is assigned as a whole.
+    rows.extend(_lineage("chain", BASE_TS + 40, 3, tip_project_id="project-b"))
+    db_path = tmp_path / "state.db"
+    _write_state_db(db_path, rows)
+
+    def _ids(**kwargs):
+        return {
+            row["id"]
+            for row in agent_sessions.read_importable_agent_session_rows(
+                db_path, limit=50, exclude_sources=None, **kwargs
+            )
+        }
+
+    everything = _ids()
+    assigned = _ids(project_assignment="assigned")
+    unassigned = _ids(project_assignment="unassigned")
+
+    assert assigned == {"owned", "chain-seg2"}
+    assert unassigned == {"plain-a", "plain-b"}
+    assert assigned | unassigned == everything
+    assert not assigned & unassigned
+
+
+def test_project_assignment_rejects_unknown_values(tmp_path):
+    db_path = tmp_path / "state.db"
+    _write_state_db(db_path, [_session("plain", BASE_TS)])
+
+    with pytest.raises(ValueError):
+        agent_sessions.read_importable_agent_session_rows(
+            db_path, limit=5, project_assignment="maybe"
+        )
+
+
+def test_assigned_filter_is_empty_on_schemas_without_project_id(tmp_path):
+    db_path = tmp_path / "state.db"
+    _write_state_db(db_path, [_session("plain", BASE_TS)], lineage_columns=False)
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute("ALTER TABLE sessions DROP COLUMN project_id")
+
+    assert agent_sessions.read_importable_agent_session_rows(
+        db_path, limit=5, exclude_sources=None, project_assignment="assigned"
+    ) == []
+    unassigned = agent_sessions.read_importable_agent_session_rows(
+        db_path, limit=5, exclude_sources=None, project_assignment="unassigned"
+    )
+    assert [row["id"] for row in unassigned] == ["plain"]
+
+
+# ── Rebase guard: upstream's kanban pass shares the system-chip helper ────────
+
+
+def test_kanban_second_pass_still_projects_rows(fake_hermes_home, tmp_path):
+    """The system-chip helper keeps the (sid, source) signature kanban calls.
+
+    Upstream's kanban pass calls ``_state_row_project_id(sid, _source)``; giving
+    that helper a row-dict signature turned the whole pass into a swallowed
+    TypeError and silently dropped every kanban row.
+    """
+    _register_projects(tmp_path, "project-live")
+
+    rows = [_session("kanban-old", BASE_TS, source="kanban")]
+    rows.extend(_session(f"recent-{index:02d}", BASE_TS + 100 + index) for index in range(25))
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    sessions = models.get_cli_sessions()
+    by_id = {session["session_id"]: session for session in sessions}
+
+    assert "kanban-old" in by_id
+    # Upstream semantics: kanban rows get no chip from this helper.
+    assert by_id["kanban-old"]["project_id"] is None
