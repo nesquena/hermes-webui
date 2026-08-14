@@ -1398,21 +1398,54 @@ def _configured_model_ids(raw_models: object) -> list[str]:
     return model_ids
 
 
+def _configured_model_label_overrides(raw_models: object) -> dict[str, str]:
+    """Return ONLY operator-supplied labels from a config allowlist, by model id.
+
+    Label provenance, kept separate from ``_configured_model_options`` on
+    purpose. That function synthesizes ``label == id`` when the operator supplied
+    none, which erases the difference between::
+
+        models: ["model-a"]                              # no label chosen
+        models: [{"id": "model-a", "label": "model-a"}]  # label chosen, == id
+
+    Callers deciding whether a configured label should beat an endpoint-derived
+    or title-cased label must ask here rather than compare ``label != id``: a
+    nonblank ``label`` key is authoritative even when it equals the id, and a
+    bare-string entry never yields an override so the derived (title-cased) label
+    still wins for it (#6657, greptile api/config.py:7293).
+
+    Mirrors ``_configured_model_options``' shape support: only list entries that
+    are dicts can carry a label, first occurrence of an id wins, and the
+    mapping (``models:`` as a dict) shape carries no labels at all.
+    """
+    overrides: dict[str, str] = {}
+    if not isinstance(raw_models, list):
+        return overrides
+    seen: set[str] = set()
+    for item in raw_models:
+        if not isinstance(item, dict):
+            continue
+        candidate = item.get("id") or item.get("model") or item.get("name")
+        model_id = str(candidate or "").strip()
+        if not model_id or model_id in seen:
+            continue
+        seen.add(model_id)
+        label = str(item.get("label") or "").strip()
+        if label:
+            overrides[model_id] = label
+    return overrides
+
+
 def _configured_model_options(raw_models: object) -> list[dict[str, str]]:
-    """Return picker option rows from supported config allowlist shapes."""
-    labels: dict[str, str] = {}
-    if isinstance(raw_models, list):
-        for item in raw_models:
-            if not isinstance(item, dict):
-                continue
-            candidate = item.get("id") or item.get("model") or item.get("name")
-            model_id = str(candidate or "").strip()
-            if not model_id or model_id in labels:
-                continue
-            label = str(item.get("label") or model_id).strip() or model_id
-            labels[model_id] = label
+    """Return picker option rows from supported config allowlist shapes.
+
+    A row's ``label`` falls back to its ``id`` when the operator supplied none,
+    so a row on its own cannot tell you whether a label was chosen — use
+    ``_configured_model_label_overrides`` when that provenance matters.
+    """
+    overrides = _configured_model_label_overrides(raw_models)
     return [
-        {"id": model_id, "label": labels.get(model_id, model_id)}
+        {"id": model_id, "label": overrides.get(model_id) or model_id}
         for model_id in _configured_model_ids(raw_models)
     ]
 
@@ -5689,20 +5722,12 @@ def _static_models_catalog_without_live_probes() -> dict:
             # (custom_providers[].models[].label). Falling back to
             # _get_label_for_model() title-cases the raw id and mangles
             # namespaced Bedrock ids like "us.anthropic.claude-opus-4-8" into
-            # "Us.anthropic.claude Opus 4 8". Build a label map from the config
-            # options so a clean label such as "Claude Opus 4.8" survives.
-            _label_map: dict[str, str] = {}
-            for _opt in _configured_model_options(entry.get("models")):
-                _oid = str(_opt.get("id") or "").strip()
-                _olabel = str(_opt.get("label") or "").strip()
-                # _configured_model_options synthesizes the id AS the label when the
-                # operator supplied none (config.py:1411), so an entry like
-                # `models: [gpt-4o-mini]` arrives with label == id. Storing that made
-                # the map short-circuit the derived label and render "gpt-4o-mini"
-                # where master rendered "GPT 4O Mini". Only an operator-supplied
-                # label — one that differs from the id — belongs in the map.
-                if _oid and _olabel and _olabel != _oid:
-                    _label_map[_oid] = _olabel
+            # "Us.anthropic.claude Opus 4 8". _configured_model_label_overrides
+            # reads provenance off the raw config items, so a clean label such as
+            # "Claude Opus 4.8" survives, an explicit label that happens to equal
+            # the id is still honoured, and a bare-string entry keeps falling
+            # through to the derived label instead of rendering its raw id.
+            _label_map = _configured_model_label_overrides(entry.get("models"))
 
             configured_ids: list[str] = []
             model_id = str(entry.get("model") or "").strip()
@@ -7638,17 +7663,11 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 # (and ".../-v1:0" -> "0"). Built per entry BEFORE the live-row
                 # loop so a prewarmed/probed duplicate of a configured model gets
                 # the operator label, not the endpoint's (deep-review 2026-08-13).
-                _cp_label_map: dict = {}
-                for _opt in _configured_model_options(_cp.get("models")):
-                    _oid = str(_opt.get("id") or "").strip()
-                    _olabel = str(_opt.get("label") or "").strip()
-                    # _configured_model_options synthesizes the id AS the label
-                    # when the operator supplied none, so an entry like
-                    # `models: [gpt-4o-mini]` arrives with label == id. Only an
-                    # operator-supplied label — one that differs from the id —
-                    # belongs in the map.
-                    if _oid and _olabel and _olabel != _oid:
-                        _cp_label_map[_oid] = _olabel
+                # _configured_model_label_overrides reads provenance off the raw
+                # config items, so an explicit label equal to the model id keeps
+                # its authority over the endpoint label while a bare-string entry
+                # contributes nothing and still falls through (#6657).
+                _cp_label_map = _configured_model_label_overrides(_cp.get("models"))
 
                 _cp_base_url = str(_cp.get("base_url") or "").strip()
                 _cp_api_key = str(_cp.get("api_key") or "").strip()
