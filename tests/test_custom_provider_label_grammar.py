@@ -172,6 +172,81 @@ def test_configured_endpoint_beats_named_slug_for_same_shape():
     assert model == "free"
 
 
+# ── Hostile config: a malformed base_url must not break routing ──────────────
+
+# Two unguarded `urlparse` sites sit on the resolve path and raise for these:
+# `.port` in `_custom_endpoint_slugs_for_base_url` (reached by the new
+# longest-known-prefix pass, which walks EVERY configured base_url, so one bad
+# entry anywhere made every `@custom:` id with >=3 colons raise) and `urlparse`
+# itself in `_normalize_base_url_for_match` (a PRE-EXISTING crash on
+# upstream/master, reproduced there for `model.base_url = "http://[::1/v1"`).
+_MALFORMED_BASE_URLS = [
+    "http://gw:notaport/v1",   # port is not an integer -> .port raises
+    "http://gw:99999999/v1",   # port out of range -> .port raises
+    "http://[::1/v1",          # unterminated bracket -> urlparse itself raises
+    "http://a]b/v1",           # stray closing bracket -> urlparse itself raises
+    "http://[::1]:notaport/",  # bracketed host, bad port -> .port raises
+]
+
+
+@pytest.mark.parametrize("bad_url", _MALFORMED_BASE_URLS)
+def test_malformed_base_url_derives_no_slugs_instead_of_raising(bad_url):
+    """The producer answers "matches nothing" for an unparseable authority."""
+    assert config._custom_endpoint_slugs_for_base_url(bad_url) == set()
+
+
+@pytest.mark.parametrize("bad_url", _MALFORMED_BASE_URLS)
+def test_malformed_base_url_normalizes_instead_of_raising(bad_url):
+    """The match-normalizer degrades to the raw URL rather than throwing."""
+    assert config._normalize_base_url_for_match(bad_url) == bad_url.rstrip("/").lower()
+
+
+def test_unparseable_base_urls_stay_distinct_when_compared():
+    """Fail-closed, not fail-open: the #3837 probe-key gate compares two
+    normalized base URLs with no emptiness guard, so unparseable URLs must not
+    all collapse to one value that makes any two of them look identical."""
+    normalized = [config._normalize_base_url_for_match(u) for u in _MALFORMED_BASE_URLS]
+    assert all(normalized), "an unparseable URL must not normalize to a blank"
+    assert len(set(normalized)) == len(normalized), "distinct URLs must stay distinct"
+    assert config._normalize_base_url_for_match(
+        "http://[::1/v1"
+    ) != config._normalize_base_url_for_match("http://[::2/v1")
+
+
+@pytest.mark.parametrize("bad_url", _MALFORMED_BASE_URLS)
+def test_malformed_configured_base_url_does_not_break_qualified_id_parsing(bad_url):
+    """A bad `custom_providers[].base_url` must not 500 unrelated model routing."""
+    model, provider, _ = _resolve_with_cfg(
+        "@custom:llm:8080:qwen3",
+        custom_providers=[{"name": "gw", "base_url": bad_url}],
+    )
+    assert provider == "custom:llm:8080"
+    assert model == "qwen3"
+
+
+@pytest.mark.parametrize("bad_url", _MALFORMED_BASE_URLS)
+def test_malformed_active_model_base_url_does_not_break_qualified_id_parsing(bad_url):
+    """Same for the active `model.base_url`, the other source of endpoint slugs."""
+    model, provider, _ = _resolve_with_cfg("@custom:llm:8080:qwen3", base_url=bad_url)
+    assert provider == "custom:llm:8080"
+    assert model == "qwen3"
+
+
+def test_one_malformed_base_url_does_not_hide_its_valid_siblings():
+    """Degrade per-entry, not per-config: the good endpoint still wins the prefix
+    pass even when an unrelated provider carries an unparseable base_url."""
+    model, provider, _ = _resolve_with_cfg(
+        "@custom:gw:8080:free",
+        base_url="http://gw:8080/v1",
+        custom_providers=[
+            {"name": "broken", "base_url": "http://gw:notaport/v1"},
+            {"name": "gw", "base_url": "http://gw:8080/v1"},
+        ],
+    )
+    assert provider == "custom:gw:8080"
+    assert model == "free"
+
+
 # ── Frontend: getModelLabel() fallback mirrors the same grammar ──────────────
 
 _DRIVER = r"""

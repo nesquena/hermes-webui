@@ -1570,13 +1570,32 @@ def _canonicalise_provider_id(name: object) -> str:
 
 
 def _normalize_base_url_for_match(value: object) -> str:
+    """Comparable form of a base URL; the raw lowercased URL when unparseable.
+
+    ``urlparse`` raises ``ValueError("Invalid IPv6 URL")`` for an authority with
+    mismatched brackets (``http://[::1/v1``, ``http://a]b/v1``). Every caller is
+    on a request path — provider resolution (``_resolve_configured_provider_id``),
+    the catalog build, and the #3837 probe-key check — so one fat-fingered or
+    hostile ``base_url`` in config must not 500 the request (#6657 review).
+
+    The fallback is the raw lowercased URL, NOT ``""``, and that choice is
+    load-bearing: the #3837 gate hands the stored LM Studio key to a probe only
+    when the caller-supplied base URL normalizes to the configured one, and it
+    compares the two results directly without an emptiness guard. Collapsing
+    every unparseable URL to ``""`` would make any two of them compare equal and
+    open that gate; distinct raw URLs stay distinct, so the comparison remains
+    fail-closed and only a genuinely identical URL still matches.
+    """
     url = str(value or "").strip().rstrip("/")
     if not url:
         return ""
-    parsed_url = urlparse(url if "://" in url else f"http://{url}")
-    scheme = (parsed_url.scheme or "http").lower()
-    netloc = (parsed_url.netloc or parsed_url.path).lower().rstrip("/")
-    path = parsed_url.path.rstrip("/")
+    try:
+        parsed_url = urlparse(url if "://" in url else f"http://{url}")
+        scheme = (parsed_url.scheme or "http").lower()
+        netloc = (parsed_url.netloc or parsed_url.path).lower().rstrip("/")
+        path = parsed_url.path.rstrip("/")
+    except ValueError:
+        return url.lower()
     if not parsed_url.netloc:
         path = ""
     return f"{scheme}://{netloc}{path}"
@@ -1604,15 +1623,25 @@ def _custom_endpoint_slugs_for_base_url(value: object) -> set[str]:
     therefore the one the qualified-ID grammar parses, and it is emitted first
     here. The unbracketed spellings stay in the set for backwards-compatible
     *matching* only (this set feeds membership checks, never new IDs).
+
+    A base URL whose authority cannot be parsed derives NO slugs (it matches
+    nothing) rather than raising: ``urlparse``/``.port`` raise ``ValueError`` for
+    a malformed authority (``http://gw:notaport``, ``http://[::1``,
+    ``http://gw:99999999``), and this set feeds request-path membership checks in
+    ``resolve_model_provider`` and ``_known_custom_provider_slugs``. One bad
+    ``base_url`` anywhere in config must not break routing for every other id.
     """
     url = str(value or "").strip().rstrip("/")
     if not url:
         return set()
-    parsed_url = urlparse(url if "://" in url else f"http://{url}")
-    host = (parsed_url.hostname or "").strip().lower()
+    try:
+        parsed_url = urlparse(url if "://" in url else f"http://{url}")
+        host = (parsed_url.hostname or "").strip().lower()
+        port = parsed_url.port
+    except (ValueError, TypeError):
+        return set()
     if not host:
         return set()
-    port = parsed_url.port
     if port is None:
         scheme = (parsed_url.scheme or "http").lower()
         port = 443 if scheme == "https" else 80
