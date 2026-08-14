@@ -423,6 +423,124 @@ def _keyed_edge_driver(
     return _run_node(script)
 
 
+def _no_worker_two_page_driver(mode: str) -> dict:
+    notification_options = _notification_helper_source()
+    show_notification = extract_function(MESSAGES_JS, "_showPwaNotification")
+    request_permission = extract_function(MESSAGES_JS, "requestNotificationPermission")
+    send_notification = extract_function(MESSAGES_JS, "sendBrowserNotification")
+    page_source = json.dumps(
+        "\n".join([notification_options, show_notification, request_permission, send_notification]),
+    )
+    script = textwrap.dedent(
+        f"""
+        const vm = require('vm');
+        const records = new Set();
+        let directDeliveries = 0;
+        const directTags = [];
+        const mode = {json.dumps(mode)};
+        function makeDb() {{
+          return {{
+            objectStoreNames: {{contains: () => true}},
+            createObjectStore: () => ({{}}),
+            transaction: () => {{
+              const tx = {{oncomplete: null, onerror: null, onabort: null, error: null}};
+              tx.objectStore = () => ({{
+                add(value) {{
+                  const request = {{onsuccess: null, onerror: null, error: null}};
+                  queueMicrotask(() => {{
+                    const key = JSON.stringify([value.streamId, value.lastEventId]);
+                    if (records.has(key)) {{
+                      request.error = {{name: 'ConstraintError'}};
+                      let prevented = false;
+                      request.onerror?.({{preventDefault: () => {{prevented = true;}}}});
+                      tx.error = request.error;
+                      tx.onerror?.({{preventDefault: () => {{}}}});
+                      if (prevented) queueMicrotask(() => tx.oncomplete?.({{}}));
+                      else tx.onabort?.({{}});
+                      return;
+                    }}
+                    records.add(key);
+                    request.onsuccess?.({{}});
+                    queueMicrotask(() => tx.oncomplete?.({{}}));
+                  }});
+                  return request;
+                }},
+              }});
+              return tx;
+            }},
+            close: () => {{}},
+          }};
+        }}
+        const indexedDB = {{
+          open() {{
+            const request = {{onupgradeneeded: null, onsuccess: null, onerror: null, onblocked: null, result: makeDb()}};
+            queueMicrotask(() => {{
+              request.onupgradeneeded?.({{target: {{result: request.result}}}});
+              request.onsuccess?.({{target: {{result: request.result}}}});
+            }});
+            return request;
+          }},
+        }};
+        class Port {{
+          constructor() {{ this.peer = null; this.onmessage = null; }}
+          postMessage(data) {{ this.peer?.onmessage?.({{data}}); }}
+          close() {{}}
+          start() {{}}
+        }}
+        class MessageChannel {{
+          constructor() {{ this.port1 = new Port(); this.port2 = new Port(); this.port1.peer = this.port2; this.port2.peer = this.port1; }}
+        }}
+        function makePage() {{
+          let registration;
+          if (mode === 'rejected') registration = {{getRegistration: () => Promise.reject(new Error('registration rejected'))}};
+          else if (mode === 'missing') registration = undefined;
+          else if (mode === 'missing-api') registration = {{getRegistration: () => Promise.resolve({{active: {{}}}})}};
+          else if (mode === 'activation-delay') {{
+            registration = {{
+              getRegistration: () => new Promise(resolve => setTimeout(
+                () => resolve({{active: null, installing: {{}}}}),
+                2100,
+              )),
+            }};
+          }} else registration = {{getRegistration: () => Promise.resolve({{active: null}})}};
+          const context = {{
+            Promise, MessageChannel, indexedDB, queueMicrotask, setTimeout, clearTimeout,
+            navigator: registration ? {{serviceWorker: registration}} : {{}},
+            location: {{origin: 'https://webui.test', href: 'https://webui.test/'}},
+            S: {{session: {{}}}},
+            _sessionUrlForSid: sid => '/?session=' + encodeURIComponent(sid),
+            assistantDisplayName: () => 'Hermes',
+            window: {{_notificationsEnabled: true}},
+            _isBackgroundedForBrowserNotification: () => true,
+            showToast: () => {{}}, t: key => key,
+            Notification: function(_title, options) {{
+              directDeliveries += 1;
+              directTags.push(options.tag);
+              return {{}};
+            }},
+          }};
+          context.Notification.permission = 'granted';
+          context.window.Notification = context.Notification;
+          vm.runInNewContext({page_source}, context);
+          return identity => context.sendBrowserNotification(
+            'Response complete', 'The task finished.',
+            {{sid: '{FIXTURE['sid']}', forceHidden: true, eventIdentity: identity}},
+          );
+        }}
+        (async () => {{
+          const pageA = makePage();
+          const pageB = makePage();
+          const first = {{streamId: 'stream-6673', lastEventId: 'stream-6673:1'}};
+          const second = {{streamId: 'stream-6673', lastEventId: 'stream-6673:2'}};
+          const firstResults = await Promise.all([pageA(first), pageB(first)]);
+          const secondResults = await Promise.all([pageA(second), pageB(second)]);
+          console.log(JSON.stringify({{firstResults, secondResults, directDeliveries, directTags, records: [...records]}}));
+        }})().catch(error => {{ console.error(error.stack || error); process.exitCode = 1; }});
+        """,
+    )
+    return _run_node(script)
+
+
 def test_one_event_alerts_once_across_two_background_subscribers():
     result = _two_subscriber_driver()
 
@@ -474,13 +592,18 @@ def test_visible_tab_does_not_claim_an_ineligible_keyed_event():
     }
 
 
-@pytest.mark.parametrize("worker_response", ["inactive", "missing"])
-def test_keyed_delivery_fails_closed_without_a_worker(worker_response: str):
-    result = _keyed_edge_driver(worker_response=worker_response)
+@pytest.mark.parametrize("mode", ["missing", "missing-api", "inactive", "rejected", "activation-delay"])
+def test_no_worker_modes_share_page_claim_and_alert_each_distinct_identity(mode: str):
+    result = _no_worker_two_page_driver(mode)
 
-    assert result["result"] == "unavailable"
-    assert result["claimAttempts"] == 0
-    assert result["directFallbacks"] == 0
+    assert sorted(result["firstResults"]) == ["duplicate", "shown"]
+    assert sorted(result["secondResults"]) == ["duplicate", "shown"]
+    assert result["directDeliveries"] == 2
+    assert result["directTags"] == [FIXTURE["expected_tag"], FIXTURE["expected_tag"]]
+    assert result["records"] == [
+        '["stream-6673","stream-6673:1"]',
+        '["stream-6673","stream-6673:2"]',
+    ]
 
 
 @pytest.mark.parametrize("worker_response", ["timeout", "unknown"])
@@ -588,17 +711,10 @@ def test_public_sender_awaits_delivery_after_permission_grant():
 
 
 @pytest.mark.parametrize("delivery", ["inactive-service-worker", "rejected-service-worker"])
-def test_direct_fallback_when_service_worker_registration_unavailable(delivery: str):
-    result = _driver(
-        delivery=delivery,
-        sends=[_send("Clarification needed", "Choose a value.")],
-        via_public_sender=True,
-    )
-
-    call = result["calls"][0]
-    assert call["method"] == "direct"
-    assert call["options"]["tag"] == FIXTURE["expected_tag"]
-    assert call["options"]["renotify"] is True
+def test_page_claim_delivers_when_service_worker_registration_unavailable(delivery: str):
+    mode = "inactive" if delivery == "inactive-service-worker" else "rejected"
+    result = _no_worker_two_page_driver(mode)
+    assert result["directDeliveries"] == 2
 
 
 def test_categories_and_denial_keep_existing_behavior():

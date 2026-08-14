@@ -134,6 +134,15 @@ def test_claim_options_are_same_origin_and_in_scope_without_changing_click_routi
     assert "samePath(client.url)" in SW_JS
 
 
+def test_page_and_worker_share_the_notification_claim_store():
+    assert "const _NOTIFICATION_CLAIM_DB='hermes-webui-notification-claims-v1';" in MESSAGES_JS
+    assert "const _NOTIFICATION_CLAIM_STORE='event-identities';" in MESSAGES_JS
+    assert "function _claimAndShowPage(" in MESSAGES_JS
+    assert "const NOTIFICATION_CLAIM_DB = 'hermes-webui-notification-claims-v1';" in SW_JS
+    assert "const NOTIFICATION_CLAIM_STORE = 'event-identities';" in SW_JS
+    assert "keyPath: ['streamId', 'lastEventId']" in SW_JS
+
+
 def test_settings_expose_permission_and_test_controls():
     assert "notificationPermissionStatus" in INDEX_HTML
     assert 'id="notificationPermissionButtonWrap"' in INDEX_HTML

@@ -94,11 +94,15 @@ that breaks the page for everyone).
 ## Repeat notification ownership gate (#6673)
 
 `tests/browser_issue6673_service_worker.py` serves the real build, waits for the
-service worker to activate, and uses two controlled pages. Submit one
-`(streamId, lastEventId)` concurrently from both pages, then submit the next
-distinct identity. Reload one page and replay the first identity; the first two
-identities must each have one owner, the replay must be a duplicate, and the
-notification data URL must remain same-origin and in scope.
+service worker to activate, and uses two controlled pages. The pages invoke the
+production `attachLiveStream()` listener with a boundary EventSource, so the gate
+covers listener, sender, claim, and display composition. Submit one
+`(streamId, lastEventId)` from both pages, then submit the next distinct identity.
+Reload one page and replay the first identity; the first two identities must each
+have one owner, the replay must not create another notification, and the
+notification data URL must remain same-origin and in scope. The focused model also
+covers missing, inactive, rejected, and activation-delay registrations through a
+shared page-side IndexedDB claim.
 
 ```bash
 python tests/browser_issue6673_service_worker.py

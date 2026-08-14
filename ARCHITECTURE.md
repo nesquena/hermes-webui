@@ -105,17 +105,20 @@ actions. The topbar remains focused on conversation context and the workspace/fi
 
 Browser notification ownership:
 
-    static/messages.js  Owns eligibility, exact SSE identity capture, and
-                        normalized notification presentation options.
-    static/sw.js        Owns identity-bearing native notification claims and
-                        delivery. IndexedDB is the durable cross-tab claim store.
+    static/messages.js  Owns eligibility, exact SSE identity capture, normalized
+                        presentation options, and the page-side claim when no
+                        active worker can coordinate delivery.
+    static/sw.js        Owns identity-bearing claims and delivery when active;
+                        both contexts use the same IndexedDB claim store.
 
 Identity-bearing approval, clarification, and completion notifications use the
-opaque `(streamId, lastEventId)` tuple as their claim key. Site-data clearing is
-the reset boundary because the replay contract does not define a safe retention
-horizon. Unkeyed manual test notifications retain the existing service-worker-first
-path and direct fallback. Notification-click routing remains owned by the existing
-`notificationclick` handler.
+opaque `(streamId, lastEventId)` tuple as their claim key. An active worker is the
+preferred owner; a page atomically claims the same key before direct delivery when
+registration is missing, inactive, rejected, or delayed during activation. Site-data
+clearing is the reset boundary because the replay contract does not define a safe
+retention horizon. Unkeyed manual test notifications retain the existing
+service-worker-first path and direct fallback. Notification-click routing remains
+owned by the existing `notificationclick` handler.
 
 State directory (runtime data, separate from source):
 

@@ -9117,6 +9117,8 @@ function _notificationOptions(body,options={}){
   return {body:body||'',tag:sid?`hermes-${sid}`:'hermes-webui',renotify:true,icon:'static/favicon-192.png',badge:'static/favicon-32.png',data:{url}};
 }
 const _NOTIFICATION_IDENTITY_MAX_LENGTH=512;
+const _NOTIFICATION_CLAIM_DB='hermes-webui-notification-claims-v1';
+const _NOTIFICATION_CLAIM_STORE='event-identities';
 function _captureNotificationEventIdentity(streamId,event){
   return {streamId,lastEventId:event&&event.lastEventId};
 }
@@ -9132,6 +9134,57 @@ function _isValidNotificationIdentity(identity){
     identity.streamId.length<=_NOTIFICATION_IDENTITY_MAX_LENGTH&&
     typeof identity.lastEventId==='string'&&identity.lastEventId.length>0&&
     identity.lastEventId.length<=_NOTIFICATION_IDENTITY_MAX_LENGTH;
+}
+function _openNotificationClaimDb(){
+  return new Promise((resolve,reject)=>{
+    let request;
+    try{request=indexedDB.open(_NOTIFICATION_CLAIM_DB,1);}catch(e){reject(e);return;}
+    request.onupgradeneeded=event=>{
+      const db=event.target.result;
+      if(!db.objectStoreNames.contains(_NOTIFICATION_CLAIM_STORE)){
+        db.createObjectStore(_NOTIFICATION_CLAIM_STORE,{keyPath:['streamId','lastEventId']});
+      }
+    };
+    request.onsuccess=()=>resolve(request.result);
+    request.onerror=()=>reject(request.error||new Error('notification claim database open failed'));
+    request.onblocked=()=>reject(new Error('notification claim database open blocked'));
+  });
+}
+function _claimNotificationIdentity(db,identity){
+  return new Promise((resolve,reject)=>{
+    let transaction;
+    let outcome='claimed';
+    let settled=false;
+    const resolveOnce=value=>{if(settled)return;settled=true;resolve(value);};
+    const rejectOnce=error=>{if(settled)return;settled=true;reject(error);};
+    try{
+      transaction=db.transaction(_NOTIFICATION_CLAIM_STORE,'readwrite');
+      const request=transaction.objectStore(_NOTIFICATION_CLAIM_STORE).add(identity);
+      request.onerror=event=>{
+        if(request.error&&request.error.name==='ConstraintError'){
+          event.preventDefault();outcome='duplicate';return;
+        }
+        rejectOnce(request.error||new Error('notification claim failed'));
+      };
+      transaction.oncomplete=()=>resolveOnce(outcome);
+      transaction.onerror=event=>{
+        if(outcome==='duplicate'){event.preventDefault();return;}
+        rejectOnce(transaction.error||new Error('notification claim transaction failed'));
+      };
+      transaction.onabort=()=>{
+        if(outcome==='duplicate'&&!transaction.error){resolveOnce('duplicate');return;}
+        rejectOnce(transaction.error||new Error('notification claim transaction aborted'));
+      };
+    }catch(e){rejectOnce(e);}
+  });
+}
+function _claimAndShowPage(title,opts,identity,direct){
+  if(typeof indexedDB==='undefined'||!indexedDB||typeof indexedDB.open!=='function') return Promise.resolve('unavailable');
+  return _openNotificationClaimDb().then(db=>_claimNotificationIdentity(db,identity).then(status=>{
+    try{db.close();}catch(_){ }
+    if(status!=='claimed')return status;
+    try{direct();return 'shown';}catch(_){return 'ambiguous';}
+  })).catch(()=> 'unavailable');
 }
 function _claimAndShowNotification(active,title,opts,identity,direct){
   if(typeof MessageChannel!=='function') return Promise.resolve('unavailable');
@@ -9197,15 +9250,21 @@ function _showPwaNotification(title,body,options={}){
     ]);
     return reg$.then(reg=>{
       if(identityBearing){
-        if(!reg||!reg.active)return 'unavailable';
-        return _claimAndShowNotification(reg.active,title||botName,opts,identity,direct);
+        if(!reg||!reg.active)return _claimAndShowPage(title||botName,opts,identity,direct);
+        return _claimAndShowNotification(reg.active,title||botName,opts,identity,direct).then(status=>
+          status==='unavailable'
+            ? _claimAndShowPage(title||botName,opts,identity,direct)
+            : status
+        );
       }
       return (reg&&reg.active&&reg.showNotification)
         ? reg.showNotification(title||botName,opts)
         : direct();
-    }).catch(()=>identityBearing?'ambiguous':direct());
+    }).catch(()=>identityBearing?_claimAndShowPage(title||botName,opts,identity,direct):direct());
   }
-  return identityBearing?Promise.resolve('unavailable'):Promise.resolve(direct());
+  return identityBearing
+    ? _claimAndShowPage(title||botName,opts,identity,direct)
+    : Promise.resolve(direct());
 }
 function requestNotificationPermission(){
   if(!('Notification' in window)){
