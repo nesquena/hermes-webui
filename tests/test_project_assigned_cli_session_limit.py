@@ -716,6 +716,43 @@ def test_schema_without_project_id_retains_prior_behavior(fake_hermes_home, tmp_
     ]
 
 
+def test_unassigned_refill_runs_when_the_mixed_window_under_delivers(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """A SHORT mixed first pass is still a shortfall the refill must repair.
+
+    The first pass can return fewer than ``CLI_VISIBLE_SESSION_LIMIT``
+    conversations with plenty left in the db, because compression segments spend
+    its RAW candidate window (8x, then 32x) before the logical slice. Gating the
+    refill on "the first pass came back full" left the unassigned window short in
+    exactly that case. Three 43-segment assigned chains saturate both candidate
+    windows and yield 3 of the 4 requested conversations; the narrower
+    unassigned-only query skips those chains and can still deliver 4.
+    """
+    monkeypatch.setattr(models, "CLI_VISIBLE_SESSION_LIMIT", 4)
+    _register_projects(tmp_path, "project-live")
+
+    rows = [_session(f"plain-{index:02d}", BASE_TS + 100 + index) for index in range(10)]
+    for index in range(3):
+        rows.extend(_lineage(
+            f"deep{index}",
+            BASE_TS + 2000 + index * 1000,
+            43,
+            project_id="project-live",
+            step=1.0,
+        ))
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    sessions = models.get_cli_sessions()
+    unassigned = sorted(s["session_id"] for s in sessions if s["project_id"] is None)
+
+    # Was 0: the mixed pass returned 3 conversations, so the old "was it
+    # saturated?" gate concluded the db had nothing left to give.
+    assert unassigned == ["plain-06", "plain-07", "plain-08", "plain-09"]
+    # The lineage-heavy assigned conversations are still there, once each.
+    assert sum(1 for s in sessions if s["project_id"] == "project-live") == 3
+
+
 # ── Rebase guard: upstream's kanban pass shares the system-chip helper ────────
 
 

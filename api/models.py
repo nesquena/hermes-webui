@@ -7822,11 +7822,13 @@ def _load_cli_sessions_uncached(
         def _merge_state_row(row: dict) -> bool:
             """Add ``row`` unless its lineage is already represented.
 
-            Returns True only when a NEW logical conversation was added, so the
-            callers below budget conversations rather than rows. An already
-            represented lineage is upgraded in place: the recovery pass sees the
-            same conversation carrying its resolved project assignment, and the
-            projection loop must read that richer row.
+            Returns True only when a NEW logical conversation was added, which is
+            what lets recovery pass 1 spend its per-project budget on
+            conversations rather than rows. An already represented lineage is
+            upgraded in place: the recovery pass sees the same conversation
+            carrying its resolved project assignment, and the projection loop
+            must read that richer row. Pass 2 needs no budget of its own (its
+            query limit is the bound) and ignores the result.
             """
             lineage_ids = _lineage_ids(row)
             existing = next(
@@ -7871,7 +7873,17 @@ def _load_cli_sessions_uncached(
                 )
             )
             try:
+                # An assigned conversation ALREADY inside the recent window
+                # occupies one of its project's slots, so this pass tops each
+                # project UP TO the bound instead of stacking a second bound on
+                # top of the window.
                 kept_per_project: dict[str, int] = {}
+                for row in state_rows:
+                    seeded_project_id = _interactive_row_project_id(row)
+                    if seeded_project_id is not None:
+                        kept_per_project[seeded_project_id] = (
+                            kept_per_project.get(seeded_project_id, 0) + 1
+                        )
                 for row in read_importable_agent_session_rows(
                     db_path,
                     limit=query_limit,
@@ -7885,19 +7897,28 @@ def _load_cli_sessions_uncached(
                         # the row to the normal window so it stays reachable
                         # under "Unassigned" (#6659 review finding 3).
                         continue
-                    if per_project_limit is not None:
-                        kept = kept_per_project.get(project_id, 0)
-                        if kept >= per_project_limit:
-                            continue
-                        kept_per_project[project_id] = kept + 1
-                    _merge_state_row(row)
+                    if (
+                        per_project_limit is not None
+                        and kept_per_project.get(project_id, 0) >= per_project_limit
+                    ):
+                        continue
+                    if _merge_state_row(row):
+                        # Spend the budget on LOGICAL conversations only: a row
+                        # that merely upgrades an already-represented lineage
+                        # (a compression segment, or a window row learning its
+                        # assignment) costs its project nothing.
+                        kept_per_project[project_id] = (
+                            kept_per_project.get(project_id, 0) + 1
+                        )
             except Exception:
                 logger.debug("Project-assigned CLI recovery pass failed", exc_info=True)
 
         # --- Recovery pass 2: top the interactive window back up to
         # CLI_VISIBLE_SESSION_LIMIT *unassigned* conversations. Only runs when
-        # the window was actually saturated and came up short, so a schema with
-        # no assignments (and a small state.db) pays nothing.
+        # the window came up short AND something other than an empty database
+        # can explain it: either it was saturated, or assigned conversations
+        # inside it displaced unassigned candidates. A profile with no
+        # assignments and a small state.db still pays nothing.
         unassigned_target = (
             visible_session_limit if visible_session_limit is not None
             else CLI_VISIBLE_SESSION_LIMIT
@@ -7907,8 +7928,14 @@ def _load_cli_sessions_uncached(
         )
         if (
             unassigned_target
-            and first_pass_count >= unassigned_target
             and unassigned_seen < unassigned_target
+            and (
+                first_pass_count >= unassigned_target
+                # A short MIXED first pass can still be under-delivering: the
+                # narrower unassigned-only query reaches conversations the mixed
+                # candidate window spent on assigned rows and segments.
+                or unassigned_seen < first_pass_count
+            )
         ):
             try:
                 for row in read_importable_agent_session_rows(
