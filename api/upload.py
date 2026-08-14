@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 
 from api.config import MAX_UPLOAD_BYTES, STATE_DIR
-from api.helpers import j
+from api.helpers import arm_connection_close, j
 from api.models import get_session
 from api.profiles import _profiles_match, get_active_profile_name as _get_active_profile_name
 from api.workspace import (
@@ -47,7 +47,7 @@ _MAX_EXTRACTED_BYTES = 10 * MAX_UPLOAD_BYTES
 
 def _reject_before_read(handler, message, status):
     """Reject without reading the body; close so unread bytes can't poison HTTP/1.1 reuse."""
-    handler.close_connection = True
+    arm_connection_close(handler)
     return j(handler, {'error': message}, status=status)
 
 
@@ -217,7 +217,7 @@ def handle_upload(handler):
             content_length = int(handler.headers.get('Content-Length', 0) or 0)
         except (TypeError, ValueError):
             # A non-numeric Content-Length is rejected before the body is read.
-            handler.close_connection = True
+            arm_connection_close(handler)
             raise ValueError('Invalid Content-Length') from None
         if content_length > MAX_UPLOAD_BYTES:
             return _reject_before_read(handler, f'File too large (max {MAX_UPLOAD_BYTES//1024//1024}MB)', 413)
@@ -226,7 +226,7 @@ def handle_upload(handler):
         except ValueError:
             # parse_multipart validates Content-Length/boundary before reading;
             # a ValueError here means the body was never consumed.
-            handler.close_connection = True
+            arm_connection_close(handler)
             raise
         session_id = fields.get('session_id', '')
         if 'file' not in files:
@@ -406,7 +406,7 @@ def handle_upload_extract(handler):
             content_length = int(handler.headers.get('Content-Length', 0) or 0)
         except (TypeError, ValueError):
             # A non-numeric Content-Length is rejected before the body is read.
-            handler.close_connection = True
+            arm_connection_close(handler)
             raise ValueError('Invalid Content-Length') from None
         if content_length > MAX_UPLOAD_BYTES:
             return _reject_before_read(handler, f'File too large (max {MAX_UPLOAD_BYTES//1024//1024}MB)', 413)
@@ -415,7 +415,7 @@ def handle_upload_extract(handler):
         except ValueError:
             # parse_multipart validates Content-Length/boundary before reading;
             # a ValueError here means the body was never consumed.
-            handler.close_connection = True
+            arm_connection_close(handler)
             raise
         session_id = fields.get('session_id', '')
         if 'file' not in files:
@@ -449,7 +449,7 @@ def handle_transcribe(handler):
             content_length = int(handler.headers.get('Content-Length', 0) or 0)
         except (TypeError, ValueError):
             # A non-numeric Content-Length is rejected before the body is read.
-            handler.close_connection = True
+            arm_connection_close(handler)
             raise ValueError('Invalid Content-Length') from None
         if content_length > MAX_UPLOAD_BYTES:
             return _reject_before_read(handler, f'File too large (max {MAX_UPLOAD_BYTES//1024//1024}MB)', 413)
@@ -458,7 +458,7 @@ def handle_transcribe(handler):
         except ValueError:
             # parse_multipart validates Content-Length/boundary before reading;
             # a ValueError here means the body was never consumed.
-            handler.close_connection = True
+            arm_connection_close(handler)
             raise
         if 'file' not in files:
             return j(handler, {'error': 'No file field in request'}, status=400)
@@ -644,7 +644,7 @@ def handle_workspace_upload(handler):
             content_length = int(handler.headers.get('Content-Length', 0) or 0)
         except (TypeError, ValueError):
             # A non-numeric Content-Length is rejected before the body is read.
-            handler.close_connection = True
+            arm_connection_close(handler)
             raise ValueError('Invalid Content-Length') from None
         if content_length > MAX_UPLOAD_BYTES:
             return _reject_before_read(handler, f'File too large (max {MAX_UPLOAD_BYTES//1024//1024}MB)', 413)
@@ -654,7 +654,7 @@ def handle_workspace_upload(handler):
         except ValueError:
             # parse_multipart validates Content-Length/boundary before reading;
             # a ValueError here means the body was never consumed.
-            handler.close_connection = True
+            arm_connection_close(handler)
             raise
         session_id = fields.get('session_id', '')
         subpath = fields.get('path', '')
