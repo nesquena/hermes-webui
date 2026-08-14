@@ -11,6 +11,20 @@ import pytest
 ROOT = Path(__file__).parent.parent
 EXTENSION_SETTINGS_JS = ROOT / "static" / "extension_settings.js"
 
+_VALIDATED_READ = """
+function readValidated(p){
+  const fs = require('fs');
+  const expectedSize = fs.statSync(p).size;
+  let src = null;
+  for(let attempt = 0; attempt < 5; attempt++){
+    src = fs.readFileSync(p, 'utf8');
+    if(Buffer.byteLength(src, 'utf8') === expectedSize) return src;
+  }
+  throw new Error('source read incomplete: ' + p + ' (' +
+    Buffer.byteLength(src, 'utf8') + '/' + expectedSize + ' bytes)');
+}
+"""
+
 
 def _run_node(script: str):
     node = shutil.which("node")
@@ -60,7 +74,9 @@ def test_extension_settings_runtime_normalizes_persists_resets_and_clears():
             removeItem(key) {{ store.delete(key); }}
           }}
         }};
-        eval(fs.readFileSync({str(EXTENSION_SETTINGS_JS)!r}, 'utf8'));
+{_VALIDATED_READ}
+        const settingsSrc = readValidated({str(EXTENSION_SETTINGS_JS)!r});
+        eval(settingsSrc);
 
         const settings = window.HermesExtensionSettings.settingsForExtension('demo.ext');
         assert.deepStrictEqual(settings.schema.map(field => field.key), ['flag', 'mode', 'count']);

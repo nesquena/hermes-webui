@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.js_source_loader import read_js_source
+
 
 ROOT = Path(__file__).resolve().parents[1]
 UI_JS_PATH = ROOT / "static" / "ui.js"
@@ -27,7 +29,7 @@ PHASE0_DOC_PATH = (
 
 def _read_required_text(path: Path, label: str) -> str:
     assert path.exists(), f"{label} not found at {path}"
-    return path.read_text(encoding="utf-8")
+    return read_js_source(path)
 
 
 def _ui_js() -> str:

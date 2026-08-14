@@ -8,6 +8,7 @@ from urllib.parse import quote
 import api.config as api_config
 import api.routes as routes
 from api.updates import WEBUI_VERSION
+from tests.js_source_loader import read_js_source
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -124,7 +125,7 @@ def test_index_shell_and_static_route_use_selected_root(tmp_path, monkeypatch):
     temp_static = _get("/static/ui.js")
     assert temp_static.status == 200
     assert bytes(temp_static.body) == b"console.log('temp static');\n"
-    assert bytes(temp_static.body) != (ROOT / "static" / "ui.js").read_bytes()
+    assert bytes(temp_static.body) != read_js_source(ROOT / "static" / "ui.js").encode("utf-8")
 
     traversal = _get("/static/../api/routes.py")
     assert traversal.status == 404

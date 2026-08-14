@@ -17,9 +17,11 @@ from api.streaming import (
 
 ROOT = Path(__file__).resolve().parents[1]
 
+from tests.js_source_loader import read_js_source  # noqa: E402
+
 
 def _read(relpath: str) -> str:
-    return (ROOT / relpath).read_text(encoding="utf-8")
+    return read_js_source(ROOT / relpath)
 
 
 def _compressed_listener_block() -> str:
