@@ -344,7 +344,7 @@ process.stdout.write(JSON.stringify({
 def test_grouped_production_height_matrix_uses_actual_list_geometry():
     playwright_factory = _require_playwright()
     fixture = """
-document.body.innerHTML = '<input id="sessionSearch" value=""><div id="sessionList" style="height:320px;overflow:auto;width:320px;"></div><div id="batchActionBar"></div>';
+document.body.innerHTML = '<input id="sessionSearch" value=""><div class="session-list" id="sessionList" style="flex:none;box-sizing:border-box;height:320px;overflow:auto;width:320px;"></div><div id="batchActionBar"></div>';
 const style = document.createElement('style');
 style.textContent = __STYLE__;
 document.head.appendChild(style);
@@ -400,10 +400,10 @@ const _sessionSwipeReturnOffsets = new Map();
 const NO_PROJECT_FILTER = '__none__';
 const SESSION_SWIPE_DURATION_MS = 0;
 const SESSION_SWIPE_REFLOW_LEAD_MS = 0;
-    const SESSION_VIRTUAL_ROW_HEIGHT = 40;
+const SESSION_VIRTUAL_ROW_HEIGHT = 52;
 const SESSION_VIRTUAL_BUFFER_ROWS = 0;
-    const SESSION_VIRTUAL_THRESHOLD_ROWS = 80;
-    const SESSION_GROUP_HEADER_HEIGHT = 40;
+const SESSION_VIRTUAL_THRESHOLD_ROWS = 80;
+const SESSION_GROUP_HEADER_HEIGHT = 30;
 const SESSION_ARCHIVED_PAGE_SIZE = 25;
 const SESSION_ARCHIVED_MAX_LOADED_LIMIT = 100;
 const SESSION_LIST_FLIP_TIMEOUT_MS = 0;
@@ -518,13 +518,20 @@ try {
       return rect.bottom > bounds.top && rect.top < bounds.bottom;
     }).map((row) => row.dataset.sid);
   };
-  const fullyVisible = (sid) => {
-    const row = list.querySelector(`[data-sid="${sid}"]`);
-    if (!row) return false;
-    const listRect = list.getBoundingClientRect();
-    const rowRect = row.getBoundingClientRect();
-    return rowRect.top >= listRect.top - 0.5 && rowRect.bottom <= listRect.bottom + 0.5;
-  };
+      const fullyVisible = (sid) => {
+        const row = list.querySelector(`[data-sid="${sid}"]`);
+        if (!row) return false;
+        const listRect = list.getBoundingClientRect();
+        const rowRect = row.getBoundingClientRect();
+        return rowRect.top >= listRect.top - 0.5 && rowRect.bottom <= listRect.bottom + 0.5;
+      };
+      const intersects = (sid) => {
+        const row = list.querySelector(`[data-sid="${sid}"]`);
+        if (!row) return false;
+        const listRect = list.getBoundingClientRect();
+        const rowRect = row.getBoundingClientRect();
+        return rowRect.bottom > listRect.top && rowRect.top < listRect.bottom;
+      };
   renderSessionListFromCache();
   _sessionVirtualScrollList = list;
   _scheduleSessionVirtualizedRender();
@@ -539,18 +546,27 @@ try {
   list.scrollTop = 0;
   renderSessionListFromCache();
   window.groupedGeometry.belowVisible = fullyVisible(belowSid);
+  const belowRow = list.querySelector(`[data-sid="${belowSid}"]`);
+  const belowRect = belowRow.getBoundingClientRect();
+  const belowListRect = list.getBoundingClientRect();
+  window.groupedGeometry.belowGeometry = {top: belowRect.top, bottom: belowRect.bottom, listTop: belowListRect.top, listBottom: belowListRect.bottom, scrollTop: list.scrollTop};
   window.groupedGeometry.belowRows = visibleIds();
-  const aboveSid = ROW_TOTAL > 1 ? 'session-1' : 'session-0';
-  activeSid = null;
-  list.scrollTop = list.scrollHeight;
-  renderSessionListFromCache();
-  activeSid = aboveSid;
-  renderSessionListFromCache();
+      const aboveSid = 'session-0';
+      activeSid = null;
+      list.scrollTop = list.scrollHeight;
+      renderSessionListFromCache();
+      const aboveBeforeScrollTop = list.scrollTop;
+      const abovePreRenderVisible = intersects(aboveSid);
+      activeSid = aboveSid;
+      renderSessionListFromCache();
   const aboveRow = list.querySelector(`[data-sid="${aboveSid}"]`);
   const aboveRect = aboveRow.getBoundingClientRect();
-  const aboveListRect = list.getBoundingClientRect();
-  window.groupedGeometry.aboveVisible = fullyVisible(aboveSid);
-  window.groupedGeometry.aboveGeometry = {top: aboveRect.top, bottom: aboveRect.bottom, listTop: aboveListRect.top, listBottom: aboveListRect.bottom, scrollTop: list.scrollTop};
+      const aboveListRect = list.getBoundingClientRect();
+      window.groupedGeometry.aboveVisible = fullyVisible(aboveSid);
+      window.groupedGeometry.aboveIntersects = intersects(aboveSid);
+      window.groupedGeometry.abovePreRenderVisible = abovePreRenderVisible;
+      window.groupedGeometry.aboveGeometry = {top: aboveRect.top, bottom: aboveRect.bottom, listTop: aboveListRect.top, listBottom: aboveListRect.bottom, scrollTop: list.scrollTop};
+      window.groupedGeometry.aboveBeforeScrollTop = aboveBeforeScrollTop;
   activeSid = null;
   list.scrollTop = Math.floor(list.scrollHeight / 2);
   renderSessionListFromCache();
@@ -594,7 +610,13 @@ try {
             assert observed["virtualTotal"] == total, (total, case, observed)
             assert observed["headers"] > 0
             assert observed["belowVisible"], (total, case, observed)
-            assert observed["aboveVisible"], (total, case, observed["aboveGeometry"])
+            assert abs(observed["belowGeometry"]["bottom"] - observed["belowGeometry"]["listBottom"]) <= 0.5, (total, case, observed["belowGeometry"])
+            assert observed["aboveIntersects"], (total, case, observed["aboveGeometry"])
+            if observed["abovePreRenderVisible"]:
+                assert observed["aboveGeometry"]["scrollTop"] == observed["aboveBeforeScrollTop"], (total, case, observed["aboveGeometry"])
+            else:
+                assert observed["aboveVisible"], (total, case, observed["aboveGeometry"])
+                assert abs(observed["aboveGeometry"]["top"] - observed["aboveGeometry"]["listTop"]) <= 0.5, (total, case, observed["aboveGeometry"])
             assert observed["visibleScrollStable"], (total, case, observed)
             assert observed["searchRefreshScrollStable"], (total, case, observed)
             assert observed["sourceTabsHeight"] > 0 if case[0] else observed["sourceTabsHeight"] == 0
