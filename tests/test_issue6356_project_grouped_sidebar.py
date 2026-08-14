@@ -221,6 +221,7 @@ const SESSION_VIRTUAL_ROW_HEIGHT = 32;
 const SESSION_VIRTUAL_BUFFER_ROWS = 0;
 const SESSION_VIRTUAL_THRESHOLD_ROWS = 0;
 const SESSION_GROUP_HEADER_HEIGHT = 30;
+const SESSION_PINNED_GROUP_HEADER_HEIGHT = 28;
 const SESSION_ARCHIVED_PAGE_SIZE = 25;
 const SESSION_ARCHIVED_MAX_LOADED_LIMIT = 100;
 const SESSION_LIST_FLIP_TIMEOUT_MS = 0;
@@ -404,6 +405,7 @@ const SESSION_VIRTUAL_ROW_HEIGHT = 52;
 const SESSION_VIRTUAL_BUFFER_ROWS = 12;
 const SESSION_VIRTUAL_THRESHOLD_ROWS = 80;
 const SESSION_GROUP_HEADER_HEIGHT = 30;
+const SESSION_PINNED_GROUP_HEADER_HEIGHT = 28;
 const SESSION_ARCHIVED_PAGE_SIZE = 25;
 const SESSION_ARCHIVED_MAX_LOADED_LIMIT = 100;
 const SESSION_LIST_FLIP_TIMEOUT_MS = 0;
@@ -1251,30 +1253,62 @@ def _extract_js_function(source, name):
 def test_grouped_active_row_lookup_resolves_lineage_parent():
     helper = _active_row_helper()
     script = """
-const parent = {session_id: 'parent', _child_sessions: [{session_id: 'child'}]};
-const _allSessions = [parent];
+const rawParent = {session_id: 'parent'};
+const renderedParent = {session_id: 'parent', _child_sessions: [{session_id: 'child'}]};
+const _allSessions = [rawParent];
 function _sessionLineageContainsSession(session, sid) {
   return !!(session && sid && (session.session_id === sid || (session._child_sessions || []).some(child => child && child.session_id === sid)));
 }
 __HELPER__
 const list = {querySelectorAll: () => [{dataset: {sid: 'parent'}}]};
-const row = _findGroupedActiveRow(list, 'child');
+const row = _findGroupedActiveRow(list, 'child', [renderedParent]);
 process.stdout.write(JSON.stringify({resolved: row && row.dataset.sid}));
 """.replace("__HELPER__", helper)
     assert _run_node_json(script) == {"resolved": "parent"}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_grouped_offsets_use_the_pinned_header_height():
+    groups = "\n".join(
+        [
+            _extract_js_function(SESSIONS_JS, "_buildSessionSidebarGroups"),
+            _extract_js_function(SESSIONS_JS, "_buildSidebarRenderEntries"),
+        ]
+    )
+    script = f"""
+const NO_PROJECT_FILTER='__none__';
+const SESSION_VIRTUAL_ROW_HEIGHT=52;
+const SESSION_GROUP_HEADER_HEIGHT=30;
+const SESSION_PINNED_GROUP_HEADER_HEIGHT=28;
+let _activeProject=null;
+function _serverNowMs(){{return 0;}}
+{groups}
+const entries=_buildSidebarRenderEntries(
+  [{{session_id:'pinned',pinned:true,project_id:'p1'}},{{session_id:'project',project_id:'p1'}}],
+  true,
+  [{{project_id:'p1',name:'Project'}}],
+  {{}},
+);
+process.stdout.write(JSON.stringify(entries.filter(entry=>entry.kind==='header').slice(0,2).map(entry=>({{pinned:!!entry.group.isPinned,height:entry.height}}))));
+"""
+    assert _run_node_json(script) == [
+        {"pinned": True, "height": 28},
+        {"pinned": False, "height": 30},
+    ]
 
 
 def _active_row_helper():
     try:
         return _extract_js_function(SESSIONS_JS, "_findGroupedActiveRow")
     except ValueError:
-        return """function _findGroupedActiveRow(list, activeSidForSidebar) {
+        return """function _findGroupedActiveRow(list, activeSidForSidebar, renderedSidebarRows) {
   if (!list || !activeSidForSidebar || typeof list.querySelectorAll !== 'function') return null;
 const rows = [...list.querySelectorAll('.session-item[data-sid]')];
   const exact = rows.find(row => row.dataset.sid === activeSidForSidebar);
   if (exact) return exact;
+  const sourceRows = Array.isArray(renderedSidebarRows) ? renderedSidebarRows : (Array.isArray(_allSessions) ? _allSessions : []);
   return rows.find(row => {
-    const rowSession = Array.isArray(_allSessions) ? _allSessions.find(item => item && item.session_id === row.dataset.sid) : null;
+    const rowSession = sourceRows.find(item => item && item.session_id === row.dataset.sid);
     return !!(rowSession && _sessionLineageContainsSession(rowSession, activeSidForSidebar));
   }) || null;
 }"""

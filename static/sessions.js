@@ -4067,6 +4067,7 @@ function _makeSessionSwipeAffordance(side, icon, label){
 }
 const SESSION_VIRTUAL_ROW_HEIGHT = 52;
 const SESSION_GROUP_HEADER_HEIGHT = 30; // 28px header box + 2px top margin
+const SESSION_PINNED_GROUP_HEADER_HEIGHT = 28;
 const SESSION_VIRTUAL_BUFFER_ROWS = 12;
 const SESSION_VIRTUAL_THRESHOLD_ROWS = 80;
 let _sessionVirtualScrollList = null;
@@ -7672,7 +7673,7 @@ function _buildSidebarRenderEntries(rows,grouped,projects,collapsedMap){
   const collapsed=collapsedMap||{};const entries=[];
   for(const group of groups){
     const groupKey=group.collapseKey||group.label;
-    entries.push({kind:'header',key:'header:'+groupKey,groupKey,group,height:SESSION_GROUP_HEADER_HEIGHT,collapsed:!!collapsed[groupKey]});
+    entries.push({kind:'header',key:'header:'+groupKey,groupKey,group,height:group.isPinned?SESSION_PINNED_GROUP_HEADER_HEIGHT:SESSION_GROUP_HEADER_HEIGHT,collapsed:!!collapsed[groupKey]});
     if(!collapsed[groupKey]) for(const session of group.items||[]) entries.push({kind:'row',key:'row:'+(session.session_id||''),groupKey,group,session,height:SESSION_VIRTUAL_ROW_HEIGHT});
   }
   return entries;
@@ -7788,14 +7789,15 @@ function _bindGroupedProjectDropTarget(hdr,targetProject,targetLabel){
   hdr.addEventListener('dragend',clear);
 }
 
-function _findGroupedActiveRow(list, activeSidForSidebar){
+function _findGroupedActiveRow(list, activeSidForSidebar, renderedSidebarRows){
   if(!list||!activeSidForSidebar||typeof list.querySelectorAll!=='function') return null;
   const rows=[...list.querySelectorAll('.session-item[data-sid]')];
   const exact=rows.find(row=>row.dataset.sid===activeSidForSidebar);
   if(exact) return exact;
+  const sourceRows=Array.isArray(renderedSidebarRows)?renderedSidebarRows:(Array.isArray(_allSessions)?_allSessions:[]);
   return rows.find(row=>{
     const rowSid=row.dataset.sid;
-    const rowSession=Array.isArray(_allSessions)?_allSessions.find(item=>item&&item.session_id===rowSid):null;
+    const rowSession=sourceRows.find(item=>item&&item.session_id===rowSid);
     return !!(rowSession&&_sessionLineageContainsSession(rowSession,activeSidForSidebar));
   })||null;
 }
@@ -7869,7 +7871,7 @@ function renderSessionListFromCache(){
   const groupedMode=!!window._sidebarGroupByProject;
   let groupedActiveWasVisibleBeforeRender=false;
   if(groupedMode&&activeSidForSidebar&&typeof list.getBoundingClientRect==='function'){
-    const activeRow=_findGroupedActiveRow(list,activeSidForSidebar);
+    const activeRow=_findGroupedActiveRow(list,activeSidForSidebar,sessions);
     if(activeRow&&typeof activeRow.getBoundingClientRect==='function'){
       const listRect=list.getBoundingClientRect();
       const rowRect=activeRow.getBoundingClientRect();
@@ -8258,7 +8260,7 @@ function renderSessionListFromCache(){
   if(groupedMode){
     list.scrollTop=listScrollTopBeforeRender;
     if(shouldMoveSidebarToActiveForMode){
-      const activeRow=_findGroupedActiveRow(list,activeSidForSidebar);
+      const activeRow=_findGroupedActiveRow(list,activeSidForSidebar,sessions);
       if(activeRow&&typeof activeRow.getBoundingClientRect==='function'){
         const listRect=list.getBoundingClientRect();
         const rowRect=activeRow.getBoundingClientRect();
