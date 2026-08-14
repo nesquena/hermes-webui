@@ -1221,6 +1221,13 @@
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_virtualize_transcript">Experimental. Renders only the visible portion of very long chat transcripts (over 80 messages) to speed up scrolling. Off by default because it can cause scroll flicker on long sessions with large tool-call blocks. Turn it on to try it; leave it off for the full transcript to render at once (and so the browser's Find (Ctrl+F) matches the whole conversation).</div>
             </div>
             <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsAutoSquashAfterCompression" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_auto_squash_after_compression">Compact compression snapshots automatically</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_auto_squash_after_compression">After each context compression, archive and verify the complete snapshot, replace it with the compression summary, and keep only the recent continuation tail. Archives remain restorable. Applies to future compressions only.</div>
+            </div>
+            <div class="settings-field">
               <label for="settingsSendKey" data-i18n="settings_label_send_key">Send Key</label>
               <select id="settingsSendKey" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
                 <option value="enter">Enter (Shift+Enter for newline)</option>

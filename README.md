@@ -287,6 +287,9 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Send key: Enter (default) or Ctrl/Cmd+Enter
 - Show/hide CLI sessions toggle (enabled by default)
 - Token usage display toggle (off by default, also via `/usage` command)
+- Optional automatic transcript compaction after context compression: archive the hidden
+  pre-compression snapshot with a verified gzip checksum, retain only the current tail in
+  the continuation, and keep the full transcript restorable (off by default)
 - Control Center always opens on the Conversation tab; resets on close
 - Unsaved changes guard -- discard/save prompt when closing with unpersisted changes
 - Cron completion alerts -- toast notifications and unread badges scoped to the active profile on the Tasks tab and session sidebar

@@ -8871,15 +8871,10 @@ _STATE_DB_DISPLAY_ROW_BACKSTOP = 50000
 
 
 def _manual_squash_state_db_since_timestamp(session) -> float | None:
-    """Return the durable post-squash SQLite floor for a verified squash sidecar."""
-    if getattr(session, "compression_anchor_mode", None) != "manual":
-        return None
-    if getattr(session, "parent_session_id", None) not in (None, ""):
-        return None
+    """Return the durable SQLite floor for a verified compacted sidecar."""
+    mode = str(getattr(session, "compression_anchor_mode", None) or "")
     messages = list(getattr(session, "messages", None) or [])
     if not messages or not isinstance(messages[0], dict):
-        return None
-    if messages[0].get("_squash_summary") is not True:
         return None
     try:
         boundary = float(getattr(session, "truncation_boundary", None))
@@ -8888,7 +8883,21 @@ def _manual_squash_state_db_since_timestamp(session) -> float | None:
         return None
     if boundary <= 0 or watermark != boundary:
         return None
-    return boundary
+    if mode == "manual":
+        if getattr(session, "parent_session_id", None) not in (None, ""):
+            return None
+        if messages[0].get("_squash_summary") is not True:
+            return None
+        return boundary
+    if mode == "automatic_tail":
+        if getattr(session, "parent_session_id", None) in (None, ""):
+            return None
+        if getattr(session, "pre_compression_snapshot", False):
+            return None
+        if getattr(session, "compression_anchor_visible_idx", None) != 0:
+            return None
+        return boundary
+    return None
 
 
 def _state_db_backstop_limit_for_display(session, msg_before) -> int | None:
@@ -9155,18 +9164,13 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
     """
     cli_messages = list(cli_messages or [])
     sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)
-    is_squashed_transcript = (
-        len(sidecar_messages) == 1
-        and isinstance(sidecar_messages[0], dict)
-        and sidecar_messages[0].get("_squash_summary") is True
-        and getattr(session, "truncation_watermark", None) is not None
-    )
+    compaction_floor = _manual_squash_state_db_since_timestamp(session)
     if cli_messages:
-        if is_squashed_transcript:
+        if compaction_floor is not None:
             return merge_session_messages_append_only(
                 sidecar_messages,
                 cli_messages,
-                truncation_watermark=getattr(session, "truncation_watermark", None),
+                truncation_watermark=compaction_floor,
                 truncation_boundary=getattr(session, "truncation_boundary", None),
             )
         if sidecar_messages and sidecar_messages != cli_messages:

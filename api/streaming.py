@@ -5978,6 +5978,118 @@ def _is_context_compression_marker(msg):
     return is_context_compression_marker(msg)
 
 
+def _compression_tail_after_latest_compaction(
+    messages,
+    active_turn_identity=None,
+    *,
+    anchor_visible_idx=None,
+):
+    """Return the durable continuation tail after the latest compression marker."""
+    rows = list(messages or [])
+    marker_idx = None
+    for idx, message in enumerate(rows):
+        if _is_context_compression_marker(message):
+            marker_idx = idx
+    active_idx = None
+    if isinstance(active_turn_identity, dict) and active_turn_identity.get("token"):
+        for idx, message in enumerate(rows):
+            if _active_turn_token_matches(message, active_turn_identity):
+                active_idx = idx
+                break
+    # The current user turn is authoritative. A marker left over from an older
+    # compression can sit thousands of rows earlier and must not keep that
+    # already-summarized prefix alive. Settled history intentionally omits the
+    # live-only compression divider, so the marker is only a fallback when the
+    # active-turn identity is unavailable.
+    boundary_idx = active_idx if active_idx is not None else marker_idx
+    if boundary_idx is not None:
+        return copy.deepcopy(rows[boundary_idx:])
+    try:
+        anchor_idx = int(anchor_visible_idx)
+    except (TypeError, ValueError):
+        return rows
+    visible = visible_messages_for_anchor(rows, auto_compression=True)
+    if anchor_idx < 0 or anchor_idx >= len(visible):
+        return rows
+    anchor_message = visible[anchor_idx]
+    raw_anchor_idx = next(
+        (idx for idx, message in enumerate(rows) if message is anchor_message),
+        None,
+    )
+    if raw_anchor_idx is None or raw_anchor_idx + 1 >= len(rows):
+        return rows
+    boundary_idx = raw_anchor_idx + 1
+    return copy.deepcopy(rows[boundary_idx:])
+
+
+def _tool_call_summaries_after_dropping_prefix(tool_calls, dropped_message_count):
+    """Keep tail tool summaries and rebase their assistant-message indices."""
+    try:
+        dropped = max(0, int(dropped_message_count or 0))
+    except (TypeError, ValueError):
+        dropped = 0
+    kept = []
+    for item in tool_calls or []:
+        if not isinstance(item, dict):
+            kept.append(copy.deepcopy(item))
+            continue
+        idx = item.get("assistant_msg_idx")
+        if isinstance(idx, int):
+            if idx < dropped:
+                continue
+            item = copy.deepcopy(item)
+            item["assistant_msg_idx"] = idx - dropped
+            kept.append(item)
+            continue
+        kept.append(copy.deepcopy(item))
+    return kept
+
+
+def _auto_tail_boundary_timestamp(message):
+    """Return a positive numeric timestamp suitable for a SQLite read floor."""
+    if not isinstance(message, dict):
+        return None
+    raw = message.get("_ts") or message.get("timestamp")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _maybe_start_auto_snapshot_squash(
+    snapshot_sid,
+    continuation_sid,
+    summary,
+    *,
+    settings=None,
+):
+    """Schedule opt-in snapshot squash; return whether a worker was started."""
+    try:
+        if settings is None:
+            from api.config import load_settings
+
+            settings = load_settings()
+        if not bool((settings or {}).get("auto_squash_after_compression")):
+            return False
+        from api.session_squash import start_auto_snapshot_squash_job
+
+        return bool(
+            start_auto_snapshot_squash_job(
+                snapshot_sid,
+                continuation_sid,
+                summary,
+            )
+        )
+    except Exception:
+        logger.exception(
+            "failed to schedule auto snapshot squash parent=%s continuation=%s",
+            snapshot_sid,
+            continuation_sid,
+        )
+        return False
+
+
 def _compact_summary_text(raw_text: str | None) -> str | None:
     """Normalize a text blob used in compression summary cards."""
     if not isinstance(raw_text, str):
@@ -6016,6 +6128,45 @@ def _compression_summary_from_messages(messages):
         if text:
             return text
     return None
+
+
+def _auto_snapshot_summary_from_compression(display_messages, context_messages):
+    """Prefer the current model-context marker over stale rendered dividers."""
+    def raw_marker_text(messages):
+        for message in reversed(messages or []):
+            if not isinstance(message, dict) or not _is_context_compression_marker(message):
+                continue
+            content = message.get("content")
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                return "\n".join(
+                    _message_content_part_text(part)
+                    for part in content
+                    if isinstance(part, dict)
+                )
+        return None
+
+    raw = raw_marker_text(context_messages) or raw_marker_text(display_messages)
+    if not isinstance(raw, str):
+        return None
+    text = raw.strip()
+    marker_match = re.match(r"^\[CONTEXT COMPACTION[^\]]*\]\s*", text, re.IGNORECASE)
+    if marker_match:
+        text = text[marker_match.end():].lstrip()
+    footer_matches = list(
+        re.finditer(r"(?m)^--- END OF CONTEXT SUMMARY[^\n]*", text)
+    )
+    if footer_matches and len(text) - footer_matches[-1].start() <= 1000:
+        text = text[:footer_matches[-1].start()].rstrip()
+    lines = text.splitlines()
+    first_heading = next(
+        (idx for idx, line in enumerate(lines) if line.lstrip().startswith("## ")),
+        None,
+    )
+    if first_heading is not None:
+        lines = lines[first_heading:]
+    return "\n".join(lines).strip() or None
 
 
 def _find_current_user_turn(messages, msg_text):
@@ -10217,6 +10368,7 @@ def _run_agent_streaming(
                 # reference to the Lock is released.
                 _compression_origin_session_id = session_id
                 _compression_continuation_session_id = None
+                _auto_snapshot_squash_summary = None
                 _agent_sid = getattr(agent, 'session_id', None)
                 _compressed = False
                 if _agent_sid and _agent_sid != session_id:
@@ -10840,9 +10992,14 @@ def _run_agent_streaming(
                     s.compression_anchor_message_key = (
                         _compression_anchor_message_key(anchor_msg) if anchor_msg else None
                     )
+                    _auto_snapshot_squash_summary = (
+                        _auto_snapshot_summary_from_compression(
+                            s.messages,
+                            s.context_messages,
+                        )
+                    )
                     s.compression_anchor_summary = _compact_summary_text(
-                        _compression_summary_from_messages(s.messages)
-                        or _compression_summary_from_messages(s.context_messages)
+                        _auto_snapshot_squash_summary
                     )
                     if _compression_continuation_session_id is None:
                         _compression_continuation_session_id = s.session_id
@@ -11201,8 +11358,59 @@ def _run_agent_streaming(
                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
                     put('cancel', _cancel_event_payload('Cancelled by user'))
                     return
+                if (
+                    _compressed
+                    and _compression_continuation_session_id
+                    and _compression_origin_session_id
+                    != _compression_continuation_session_id
+                    and _auto_snapshot_squash_summary
+                ):
+                    _continuation_tail = _compression_tail_after_latest_compaction(
+                        s.messages,
+                        active_turn_identity=_active_turn_identity,
+                        anchor_visible_idx=s.compression_anchor_visible_idx,
+                    )
+                    _continuation_tail_boundary = (
+                        _auto_tail_boundary_timestamp(_continuation_tail[0])
+                        if _continuation_tail
+                        else None
+                    )
+                    if (
+                        _continuation_tail
+                        and _continuation_tail_boundary is not None
+                        and len(_continuation_tail) < len(s.messages or [])
+                        and _maybe_start_auto_snapshot_squash(
+                            _compression_origin_session_id,
+                            _compression_continuation_session_id,
+                            _auto_snapshot_squash_summary,
+                        )
+                    ):
+                        _dropped_message_count = len(s.messages or []) - len(
+                            _continuation_tail
+                        )
+                        s.messages = _continuation_tail
+                        s.tool_calls = _tool_call_summaries_after_dropping_prefix(
+                            s.tool_calls,
+                            _dropped_message_count,
+                        )
+                        s.compression_anchor_visible_idx = 0
+                        s.compression_anchor_message_key = _compression_anchor_message_key(
+                            _continuation_tail[0]
+                        )
+                        s.compression_anchor_mode = "automatic_tail"
+                        s.truncation_watermark = _continuation_tail_boundary
+                        s.truncation_boundary = _continuation_tail_boundary
                 with _stream_writeback_stage(_writeback_timings, "session_save"):
                     s.save()
+                if getattr(s, "compression_anchor_mode", None) == "automatic_tail":
+                    try:
+                        s.path.with_suffix(".json.bak").unlink(missing_ok=True)
+                    except OSError:
+                        logger.warning(
+                            "auto tail compaction could not remove stale backup for %s",
+                            s.session_id,
+                            exc_info=True,
+                        )
                 if cancel_event.is_set():
                     _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
                     try:

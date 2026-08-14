@@ -53,6 +53,9 @@ class SquashError(Exception):
 
 _JOBS: dict[str, dict] = {}
 _JOBS_LOCK = threading.Lock()
+_AUTO_SNAPSHOT_SIDS: set[str] = set()
+_AUTO_SNAPSHOT_LOCK = threading.Lock()
+MIN_AUTO_SUMMARY_CHARS = 80
 
 
 def _job_snapshot(job: dict) -> dict:
@@ -104,6 +107,46 @@ def _atomic_write(path: Path, payload: bytes) -> None:
         os.replace(tmp_name, path)
     finally:
         Path(tmp_name).unlink(missing_ok=True)
+
+
+def _restore_verified_archive(
+    archive_path: Path,
+    session_path: Path,
+    expected_sha256: str,
+) -> dict:
+    """Atomically restore one verified gzip archive and return its JSON payload."""
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{session_path.name}.", suffix=".restore.tmp", dir=session_path.parent
+    )
+    tmp_path = Path(tmp_name)
+    digest = hashlib.sha256()
+    try:
+        with gzip.open(archive_path, "rb") as source, os.fdopen(fd, "wb") as target:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+                target.write(chunk)
+            target.flush()
+            os.fsync(target.fileno())
+        if digest.hexdigest() != expected_sha256:
+            raise SquashError("rollback archive checksum verification failed", 500)
+        os.replace(tmp_path, session_path)
+        restored = json.loads(session_path.read_text(encoding="utf-8"))
+        if not isinstance(restored, dict):
+            raise SquashError("rollback archive did not contain a session object", 500)
+        return restored
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def _rollback_failed_squash(
+    session,
+    archive_path: Path,
+    session_path: Path,
+    original_sha256: str,
+) -> None:
+    restored = _restore_verified_archive(archive_path, session_path, original_sha256)
+    for key, value in restored.items():
+        setattr(session, key, value)
 
 
 def _archive_original(session_path: Path, archive_dir: Path, original_sha: str) -> tuple[Path, Path]:
@@ -317,12 +360,22 @@ def _busy_fields(session) -> dict:
     return busy
 
 
-def _apply_squash(session, sid: str, summary: str) -> dict:
+def _apply_squash(
+    session,
+    sid: str,
+    summary: str,
+    *,
+    preserve_snapshot_lineage: bool = False,
+) -> dict:
     """Archive, mutate, save, verify. Caller holds the per-session agent lock."""
     session_path = session.path
     before_count = len(session.messages or [])
     before_bytes = session_path.stat().st_size
     original_sha = _sha256(session_path)
+    original_parent_session_id = getattr(session, "parent_session_id", None)
+    original_pre_compression_snapshot = bool(
+        getattr(session, "pre_compression_snapshot", False)
+    )
     archive_root = session_path.parent.parent / "session-squash-archives" / sid
     archive_path, manifest_path = _archive_original(session_path, archive_root, original_sha)
     if _gzip_payload_sha256(archive_path) != original_sha:
@@ -339,6 +392,8 @@ def _apply_squash(session, sid: str, summary: str) -> dict:
         "_ts": now,
         "_squash_summary": True,
     }
+    if preserve_snapshot_lineage:
+        visible_message["_auto_snapshot_squash"] = True
     context_message = dict(visible_message)
     context_message["content"] = SQUASH_MARKER_PREFIX + summary
 
@@ -352,11 +407,14 @@ def _apply_squash(session, sid: str, summary: str) -> dict:
     session.pending_attachments = []
     session.pending_started_at = None
     session.pending_user_source = None
-    # A squashed transcript is a new standalone display/context root. Any
-    # parent (fork or pre-compression snapshot) lets WebUI stitch the archived
-    # lineage back in before the _squash_summary marker is noticed, defeating
-    # the squash and hanging the browser on "Loading conversation".
-    session.parent_session_id = None
+    # Manual squash creates a standalone display/context root. Automatic
+    # snapshot squash preserves the compression chain so the live continuation
+    # can stitch this compact summary before its recent tail.
+    session.parent_session_id = (
+        original_parent_session_id if preserve_snapshot_lineage else None
+    )
+    if preserve_snapshot_lineage:
+        session.pre_compression_snapshot = original_pre_compression_snapshot
     session.anchor_activity_scenes = {}
     session.compression_anchor_visible_idx = 0
     session.compression_anchor_message_key = {
@@ -366,7 +424,9 @@ def _apply_squash(session, sid: str, summary: str) -> dict:
         "attachments": 0,
     }
     session.compression_anchor_summary = summary[:1000]
-    session.compression_anchor_mode = "manual"
+    session.compression_anchor_mode = (
+        "automatic_snapshot" if preserve_snapshot_lineage else "manual"
+    )
     session.truncation_watermark = now
     session.truncation_boundary = now
     session.updated_at = now
@@ -378,20 +438,34 @@ def _apply_squash(session, sid: str, summary: str) -> dict:
     try:
         persisted = json.loads(session_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, ValueError) as exc:
-        raise SquashError(f"post-squash verification failed (unreadable sidecar: {exc})", 500)
+        _rollback_failed_squash(session, archive_path, session_path, original_sha)
+        raise SquashError(
+            f"post-squash verification failed and was rolled back (unreadable sidecar: {exc})",
+            500,
+        ) from exc
     ok = (
         len(persisted.get("messages") or []) == 1
         and (persisted.get("messages") or [{}])[0].get("_squash_summary") is True
         and len(persisted.get("context_messages") or []) == 1
-        and persisted.get("compression_anchor_mode") == "manual"
+        and persisted.get("compression_anchor_mode")
+        == ("automatic_snapshot" if preserve_snapshot_lineage else "manual")
         and persisted.get("truncation_watermark") == now
         and persisted.get("truncation_boundary") == now
-        and persisted.get("parent_session_id") is None
+        and persisted.get("parent_session_id")
+        == (original_parent_session_id if preserve_snapshot_lineage else None)
+        and (
+            not preserve_snapshot_lineage
+            or persisted.get("pre_compression_snapshot") is True
+        )
         and persisted.get("active_stream_id") is None
         and persisted.get("pending_user_message") is None
     )
     if not ok:
-        raise SquashError("post-squash verification failed (persisted state mismatch)", 500)
+        _rollback_failed_squash(session, archive_path, session_path, original_sha)
+        raise SquashError(
+            "post-squash verification failed and was rolled back (persisted state mismatch)",
+            500,
+        )
     try:
         session_path.with_suffix(".json.bak").unlink(missing_ok=True)
     except OSError:
@@ -404,6 +478,118 @@ def _apply_squash(session, sid: str, summary: str) -> dict:
         "archive_path": str(archive_path),
         "manifest_path": str(manifest_path),
     }
+
+
+def start_auto_snapshot_squash_job(
+    snapshot_sid: str,
+    continuation_sid: str,
+    summary: str,
+) -> bool:
+    """Start a fail-open squash of one completed compression snapshot."""
+    snapshot_sid = str(snapshot_sid or "").strip()
+    continuation_sid = str(continuation_sid or "").strip()
+    summary = str(summary or "").strip()
+    if (
+        not snapshot_sid
+        or not continuation_sid
+        or snapshot_sid == continuation_sid
+        or len(summary) < MIN_AUTO_SUMMARY_CHARS
+    ):
+        return False
+    with _AUTO_SNAPSHOT_LOCK:
+        if snapshot_sid in _AUTO_SNAPSHOT_SIDS:
+            return False
+        _AUTO_SNAPSHOT_SIDS.add(snapshot_sid)
+    thread = threading.Thread(
+        target=_run_auto_snapshot_squash_job,
+        args=(snapshot_sid, continuation_sid, summary),
+        daemon=True,
+        name=f"auto-snapshot-squash-{snapshot_sid[:12]}",
+    )
+    thread.start()
+    return True
+
+
+def _run_auto_snapshot_squash_job(
+    snapshot_sid: str,
+    continuation_sid: str,
+    summary: str,
+) -> None:
+    """Archive and compact an inactive snapshot without blocking its live child."""
+    try:
+        from api.models import get_session
+        from api.session_ops import _live_active_stream_id
+        from api.routes import _get_session_agent_lock, _publish_session_list_changed
+
+        lock = _get_session_agent_lock(snapshot_sid)
+        if not lock.acquire(timeout=30):
+            logger.warning("auto snapshot squash skipped busy session %s", snapshot_sid)
+            return
+        try:
+            snapshot = get_session(snapshot_sid)
+            continuation = get_session(continuation_sid, metadata_only=True)
+            if not getattr(snapshot, "pre_compression_snapshot", False):
+                logger.warning(
+                    "auto snapshot squash refused non-snapshot session %s", snapshot_sid
+                )
+                return
+            if getattr(continuation, "parent_session_id", None) != snapshot_sid:
+                logger.warning(
+                    "auto snapshot squash refused broken lineage %s -> %s",
+                    snapshot_sid,
+                    continuation_sid,
+                )
+                return
+            if _live_active_stream_id(snapshot) or _busy_fields(snapshot):
+                logger.warning("auto snapshot squash skipped active session %s", snapshot_sid)
+                return
+            messages = snapshot.messages or []
+            if (
+                len(messages) == 1
+                and isinstance(messages[0], dict)
+                and messages[0].get("_auto_snapshot_squash") is True
+            ):
+                return
+            if not messages:
+                logger.warning("auto snapshot squash skipped empty session %s", snapshot_sid)
+                return
+            result = _apply_squash(
+                snapshot,
+                snapshot_sid,
+                summary,
+                preserve_snapshot_lineage=True,
+            )
+        finally:
+            try:
+                lock.release()
+            except RuntimeError:
+                pass
+        try:
+            _publish_session_list_changed(
+                "auto_snapshot_squash",
+                profile=getattr(snapshot, "profile", None),
+                session_id=continuation_sid,
+            )
+        except Exception:
+            logger.warning(
+                "auto snapshot squash session-list publish failed for %s",
+                snapshot_sid,
+                exc_info=True,
+            )
+        logger.info(
+            "auto snapshot squash completed session=%s continuation=%s before=%s after=%s",
+            snapshot_sid,
+            continuation_sid,
+            result.get("before"),
+            result.get("after"),
+        )
+    except Exception:
+        # Fail open: if archive/checksum/lineage validation fails, the complete
+        # parent snapshot remains available for the continuation to stitch.
+        logger.exception("auto snapshot squash failed for %s", snapshot_sid)
+    finally:
+        with _AUTO_SNAPSHOT_LOCK:
+            _AUTO_SNAPSHOT_SIDS.discard(snapshot_sid)
 
 
 # ── job orchestration ────────────────────────────────────────────────────

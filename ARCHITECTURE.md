@@ -331,6 +331,21 @@ agent run alive across a WebUI service restart and is not a general-purpose brow
 6. Puts ('done', {session: ...}) into queue
 7. Finally block: restores env vars, pops stream_id from STREAMS
 
+Optional post-compression transcript compaction is owned by the session JSON
+projection, not by model context or `state.db`. When
+`auto_squash_after_compression` is enabled, a successful automatic compression
+uses the durable `pre_compression_snapshot` parent as the full-history source,
+persists the continuation as the current-turn tail, and stamps an
+`automatic_tail` watermark so older SQLite rows cannot repopulate that tail on
+reload. A daemon worker waits for the session mutation lock, verifies the
+parent/continuation relationship, writes and verifies a gzip archive plus SHA-256
+manifest, and only then replaces the hidden parent transcript with the existing
+compression summary. The parent remains a compression snapshot so lineage and
+restore continue to work. Missing markers, summaries, timestamps, locks, or
+lineage proof fail open: the full transcript stays in place. The setting is off
+by default and affects future automatic compressions only; it does not sweep
+existing sessions or `_run_journal` files.
+
 on_token callback:
     if text is None: return  # end-of-stream sentinel from AIAgent
     put('token', {'text': text})

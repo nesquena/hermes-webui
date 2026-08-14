@@ -77,6 +77,46 @@ def test_ordinary_truncation_cannot_use_squash_state_db_read_floor():
     assert _manual_squash_state_db_since_timestamp(session) is None
 
 
+def test_automatic_tail_uses_boundary_as_state_db_read_floor():
+    from api.routes import _manual_squash_state_db_since_timestamp
+
+    tail = _message("user", "tour courant", 200.0, message_id="tail-200")
+    session = SimpleNamespace(
+        messages=[tail],
+        parent_session_id="archived-snapshot",
+        pre_compression_snapshot=False,
+        truncation_watermark=200.0,
+        truncation_boundary=200.0,
+        compression_anchor_mode="automatic_tail",
+        compression_anchor_visible_idx=0,
+    )
+
+    assert _manual_squash_state_db_since_timestamp(session) == 200.0
+
+
+def test_automatic_tail_watermark_blocks_older_state_db_replay():
+    from api.routes import _merged_session_messages_for_display
+
+    tail = _message("user", "tour courant", 200.0, message_id="tail-200")
+    session = SimpleNamespace(
+        session_id="continuation",
+        messages=[tail],
+        session_source="webui",
+        parent_session_id="archived-snapshot",
+        pre_compression_snapshot=False,
+        truncation_watermark=200.0,
+        truncation_boundary=200.0,
+        compression_anchor_mode="automatic_tail",
+        compression_anchor_visible_idx=0,
+    )
+    state_db_messages = [
+        _message("user", "ancien prompt", 100.0, message_id=1),
+        _message("assistant", "ancienne réponse", 110.0, message_id=2),
+    ]
+
+    assert _merged_session_messages_for_display(session, state_db_messages) == [tail]
+
+
 def test_non_squash_short_sidecar_keeps_existing_merge_behavior():
     from api.routes import _merged_session_messages_for_display
 

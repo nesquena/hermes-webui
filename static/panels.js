@@ -9028,6 +9028,8 @@ function _preferencesPayloadFromUi(){
     // and reset to off). Unchecking clears the marker.
     payload.virtualize_transcript_optin=virtualizeTranscriptCb.checked;
   }
+  const autoSquashAfterCompressionCb=$('settingsAutoSquashAfterCompression');
+  if(autoSquashAfterCompressionCb) payload.auto_squash_after_compression=autoSquashAfterCompressionCb.checked;
   const showTpsCb=$('settingsShowTps');
   if(showTpsCb) payload.show_tps=showTpsCb.checked;
   const fadeTextCb=$('settingsFadeTextEffect');
@@ -9707,6 +9709,13 @@ async function loadSettingsPanel(){
         // Re-render the open transcript so the change takes effect immediately
         // (full render when off, windowed when on).
         if(typeof renderMessages==='function'){ try{ renderMessages({preserveScroll:true}); }catch(e){ console.warn('[virtualize_transcript] renderMessages failed on toggle:',e); } }
+        _schedulePreferencesAutosave();
+      },{once:false});
+    }
+    const autoSquashAfterCompressionCb=$('settingsAutoSquashAfterCompression');
+    if(autoSquashAfterCompressionCb){
+      autoSquashAfterCompressionCb.checked=!!settings.auto_squash_after_compression;
+      autoSquashAfterCompressionCb.addEventListener('change',()=>{
         _schedulePreferencesAutosave();
       },{once:false});
     }
