@@ -16988,42 +16988,58 @@ def _serve_static(handler, parsed):
     # being applied we refuse to serve static bytes (503 + no-store); the
     # client's post-update reload lands after the restart, on the new coherent
     # revision.
-    from api.updates import update_in_progress
+    #
+    # Read-ticket lifecycle (drain): every request that may touch the served
+    # tree takes a read ticket via begin_static_read(); the updater's freeze
+    # (api.updates.freeze_static_serving) sets the flag and then waits for all
+    # in-flight tickets to be released before running its first mutating git
+    # command. A request admitted just before the freeze therefore always
+    # finishes reading the OLD revision's bytes — it can never observe bytes
+    # written by the updater under the old version token (TOCTOU). The ticket
+    # is released as soon as the file bytes are in memory; the response write
+    # below only sends already-read bytes, so a slow client cannot stall an
+    # update's drain.
+    from api.updates import begin_static_read, end_static_read
 
-    if update_in_progress():
+    if not begin_static_read():
         return j(handler, {"error": "server is updating; retry shortly"}, status=503)
-    # Strip the leading '/static/' prefix, then resolve and sandbox
-    rel = parsed.path[len("/static/") :]
-    static_file = (static_root / rel).resolve()
     try:
-        static_file.relative_to(static_root)
-    except ValueError:
-        return j(handler, {"error": "not found"}, status=404)
-    if not static_file.exists() or not static_file.is_file():
-        return j(handler, {"error": "not found"}, status=404)
-    ext = static_file.suffix.lower()
-    ct = _STATIC_MIME.get(ext.lstrip("."), "text/plain")
-    ct_header = f"{ct}; charset=utf-8" if ct in _TEXT_MIME_TYPES else ct
+        # Strip the leading '/static/' prefix, then resolve and sandbox
+        rel = parsed.path[len("/static/") :]
+        static_file = (static_root / rel).resolve()
+        try:
+            static_file.relative_to(static_root)
+        except ValueError:
+            return j(handler, {"error": "not found"}, status=404)
+        if not static_file.exists() or not static_file.is_file():
+            return j(handler, {"error": "not found"}, status=404)
+        ext = static_file.suffix.lower()
+        ct = _STATIC_MIME.get(ext.lstrip("."), "text/plain")
+        ct_header = f"{ct}; charset=utf-8" if ct in _TEXT_MIME_TYPES else ct
 
-    # Look up or populate the per-file cache (raw, optional gzip, ETag).
-    # Keyed by absolute path; invalidated by (size, nanosecond mtime).
-    st = static_file.stat()
-    sig = (st.st_size, st.st_mtime_ns)
-    cache_key = str(static_file)
-    raw = gz = etag = None
-    with _STATIC_CACHE_LOCK:
-        cached = _STATIC_CACHE.get(cache_key)
-        if cached and cached[0] == sig:
-            _, raw, gz, etag = cached
-    if raw is None:
-        raw = static_file.read_bytes()
-        # Weak ETag: equality semantics, derived from filesystem identity.
-        etag = f'W/"{sig[0]:x}-{sig[1]:x}"'
-        gz = (gzip.compress(raw, compresslevel=6)
-              if ct in _COMPRESSIBLE_MIME and len(raw) > 1024
-              else None)
+        # Look up or populate the per-file cache (raw, optional gzip, ETag).
+        # Keyed by absolute path; invalidated by (size, nanosecond mtime).
+        st = static_file.stat()
+        sig = (st.st_size, st.st_mtime_ns)
+        cache_key = str(static_file)
+        raw = gz = etag = None
         with _STATIC_CACHE_LOCK:
-            _STATIC_CACHE[cache_key] = (sig, raw, gz, etag)
+            cached = _STATIC_CACHE.get(cache_key)
+            if cached and cached[0] == sig:
+                _, raw, gz, etag = cached
+        if raw is None:
+            raw = static_file.read_bytes()
+            # Weak ETag: equality semantics, derived from filesystem identity.
+            etag = f'W/"{sig[0]:x}-{sig[1]:x}"'
+            gz = (gzip.compress(raw, compresslevel=6)
+                  if ct in _COMPRESSIBLE_MIME and len(raw) > 1024
+                  else None)
+            with _STATIC_CACHE_LOCK:
+                _STATIC_CACHE[cache_key] = (sig, raw, gz, etag)
+    finally:
+        # Tree access is done — release the read ticket so an update freeze
+        # can drain. Everything below only touches in-memory bytes.
+        end_static_read()
 
     # The page template substitutes __WEBUI_VERSION__ at request time (see the
     # `/`/`/index.html`/`/session/` branch above), and static/sw.js's

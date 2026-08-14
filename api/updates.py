@@ -43,13 +43,47 @@ _summary_cache: OrderedDict = OrderedDict()
 _cache_lock = threading.Lock()
 _check_in_progress = False
 _apply_lock = threading.Lock()   # prevents concurrent stash/pull/pop on same repo
-# Issue #6992: set while an in-place WebUI update is mutating the checkout this
-# process serves from. `_serve_static()` in api/routes.py refuses to serve
-# /static/* bytes while it is set, so a request can never receive a
-# mixed-revision bundle (new JS + old CSS) under one versioned URL and have it
-# cached immutable for a year. Plain bool: reads/writes are GIL-atomic, and
-# this is checked on the hot static-serving path.
-_UPDATE_IN_PROGRESS = False
+# Issue #6992: freeze model for in-place WebUI updates.
+#
+# An in-place self-update mutates the working tree this process serves
+# /static/* from (git stash/pull/pop for apply_update, checkout/clean/reset
+# for apply_force_update). During that window a request could receive bytes
+# from two different revisions under one versioned URL and cache them
+# immutable for a year. The freeze state below coordinates the update
+# lifecycle with the static-serving path in api/routes._serve_static():
+#
+#   * frozen flag — while set, _serve_static() refuses to serve any /static/*
+#     bytes (503 + no-store), so a request that arrives after the freeze can
+#     never observe a tree mid-mutation.
+#   * reader count — every _serve_static() call that may touch the tree takes
+#     a read ticket (begin_static_read/end_static_read). freeze_static_serving()
+#     sets the flag and then DRAINS: it waits until every in-flight reader has
+#     released its ticket, so a request admitted just before the freeze always
+#     finishes serving the OLD revision's bytes before the updater's first
+#     mutating git command runs (TOCTOU hole #1).
+#   * generation token — each freeze bumps a generation; the caller receives
+#     the generation as an ownership token and unfreeze_static_serving() only
+#     clears the flag while that token is still current. A stale owner (an
+#     update that finished or failed while a newer one was starting) can never
+#     clear the newer update's freeze (handoff hole #2).
+#   * persist-until-replacement — on a SUCCESSFUL update the freeze is NOT
+#     cleared: static stays 503 through the scheduled-restart delay until the
+#     os.execv replaces the process (the new process starts with a fresh,
+#     unfrozen state). Only failure / no-op (no restart scheduled) clears the
+#     freeze, because only then is the working tree coherent again
+#     (restart-delay hole #3).
+#
+# All freeze state is process-local; the restart (or the OS supervisor after
+# os._exit) clears it by replacing the process image.
+_UPDATE_FREEZE_LOCK = threading.Lock()
+_UPDATE_FREEZE_DRAINED = threading.Condition(_UPDATE_FREEZE_LOCK)
+_frozen = False
+_freeze_generation = 0
+_active_readers = 0
+# Bounded drain: a pathological reader (e.g. a client stalling mid-download
+# while we hold a ticket) must not hang the update forever. After the bound we
+# proceed with a warning — mirroring _wait_until_restart_safe()'s policy.
+_FREEZE_DRAIN_MAX_WAIT_S = 30.0
 CACHE_TTL = 1800  # 30 minutes
 _AGENT_GATEWAY_RESTART_RETRY_DELAY_S = 1.0
 _FORCE_DIRTY_PROBE_TIMEOUT = 5
@@ -1943,31 +1977,104 @@ def _discard_local_changes(path: Path, reset_ref: str) -> bool:
     return ok
 
 
-def set_update_in_progress() -> None:
-    """Freeze versioned static serving while an in-place update mutates the WebUI checkout.
+def freeze_static_serving(max_drain_wait_s: float = _FREEZE_DRAIN_MAX_WAIT_S) -> int:
+    """Freeze /static/* serving and drain in-flight readers (issue #6992).
 
-    Called (for ``target == 'webui'``) under ``_apply_lock`` before any git
-    command that can change the working tree this process serves /static/*
-    from. Cleared by :func:`clear_update_in_progress` once the working tree is
-    coherent again — the scheduled ``os.execv`` restart then serves the new
-    revision (issue #6992).
+    Sets the freeze flag (new requests get 503 from _serve_static), bumps the
+    generation and returns the new generation as an ownership token, then
+    waits — bounded by *max_drain_wait_s* — until every reader admitted before
+    the freeze has released its read ticket. Only after the drain returns is
+    it safe for the caller to run the first mutating git command: no request
+    can read bytes written by the updater under the old version token.
+
+    The token must be handed to :func:`unfreeze_static_serving`; the freeze
+    is cleared only while the token is still the current generation, so a
+    stale owner can never clear a newer update's freeze.
+
+    On a SUCCESSFUL update the caller must NOT unfreeze — the freeze persists
+    until the scheduled ``os.execv`` replaces the process. Callers should
+    unfreeze only when the attempt failed or was a no-op (no restart
+    scheduled), i.e. when the working tree is coherent again.
     """
-    global _UPDATE_IN_PROGRESS
-    _UPDATE_IN_PROGRESS = True
+    global _freeze_generation, _frozen
+    with _UPDATE_FREEZE_LOCK:
+        _freeze_generation += 1
+        token = _freeze_generation
+        _frozen = True
+        deadline = time.monotonic() + max(0.0, max_drain_wait_s)
+        while _active_readers > 0:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                logger.warning(
+                    "update freeze drain timed out after %.0fs with %d active "
+                    "static reader(s); proceeding with mutation",
+                    max_drain_wait_s, _active_readers,
+                )
+                break
+            _UPDATE_FREEZE_DRAINED.wait(remaining)
+    return token
 
 
-def clear_update_in_progress() -> None:
-    """Resume normal static serving after an update attempt finishes.
+def unfreeze_static_serving(token: int) -> bool:
+    """Clear the freeze, but only while *token* still owns it (current generation).
 
-    Safe to call even when the flag was never set (agent-target updates).
+    Returns True if this call cleared the freeze. Returns False — leaving the
+    freeze untouched — when a newer update has taken over ownership (stale
+    handoff) or the freeze was already cleared; in either case the caller must
+    not assume the freeze state changed.
     """
-    global _UPDATE_IN_PROGRESS
-    _UPDATE_IN_PROGRESS = False
+    global _frozen
+    with _UPDATE_FREEZE_LOCK:
+        if token != _freeze_generation or not _frozen:
+            return False
+        _frozen = False
+        return True
+
+
+def reset_update_freeze() -> None:
+    """Force-clear the freeze regardless of ownership.
+
+    Test/teardown helper only. Production code uses freeze/unfreeze with
+    generation tokens; a real replacement (os.execv) clears the flag simply
+    by starting a fresh process.
+    """
+    global _frozen
+    with _UPDATE_FREEZE_LOCK:
+        _frozen = False
 
 
 def update_in_progress() -> bool:
     """True while an in-place WebUI update may be mutating the served checkout."""
-    return _UPDATE_IN_PROGRESS
+    return _frozen
+
+
+def begin_static_read() -> bool:
+    """Take a read ticket before touching the served tree in _serve_static().
+
+    Returns False when a freeze is active — the caller must refuse to serve
+    (503 + no-store) without touching any file. Returns True with the reader
+    counted; the caller MUST pair it with :func:`end_static_read` (finally),
+    otherwise the update drain can block forever.
+    """
+    with _UPDATE_FREEZE_LOCK:
+        if _frozen:
+            return False
+        global _active_readers
+        _active_readers += 1
+        return True
+
+
+def end_static_read() -> None:
+    """Release a read ticket taken by :func:`begin_static_read`.
+
+    Wakes any freeze drain waiting for readers to finish.
+    """
+    with _UPDATE_FREEZE_LOCK:
+        global _active_readers
+        _active_readers -= 1
+        if _active_readers < 0:
+            _active_readers = 0
+        _UPDATE_FREEZE_DRAINED.notify_all()
 
 
 def apply_force_update(target: str, channel=None) -> dict:
@@ -1997,12 +2104,9 @@ def apply_force_update(target: str, channel=None) -> dict:
 
     if not _apply_lock.acquire(blocking=False):
         return {'ok': False, 'message': 'Update already in progress'}
-    try:
-        # Freeze /static/* serving while this checkout is being mutated in
-        # place (issue #6992) — cleared in the finally below once the working
-        # tree is coherent again.
-        if target == 'webui':
-            set_update_in_progress()
+    freeze_token = None
+
+    def _locked(channel: str) -> dict:
         if target == 'webui':
             path = REPO_ROOT
         elif target == 'agent':
@@ -2103,10 +2207,25 @@ def apply_force_update(target: str, channel=None) -> dict:
         if target == 'agent':
             response['gateway_restart'] = gateway_result.get('status')
         return response
+
+    try:
+        # Freeze /static/* serving while this checkout is being mutated in
+        # place (issue #6992): set the flag and DRAIN in-flight readers before
+        # the first mutating git command, so a request admitted just before
+        # the freeze can never read bytes written by the updater.
+        if target == 'webui':
+            freeze_token = freeze_static_serving()
+        response = _locked(channel)
+        # Lifecycle (issue #6992): on SUCCESS the freeze persists until the
+        # scheduled restart replaces this process (static stays 503 through
+        # the restart-delay window); failure / no-op lifts it here — BEFORE
+        # releasing _apply_lock, so a waiting handoff update can never observe
+        # our unfreeze racing with its own freeze.
+        if freeze_token is not None and not response.get('restart_scheduled'):
+            unfreeze_static_serving(freeze_token)
+        return response
     finally:
         _apply_lock.release()
-        if target == 'webui':
-            clear_update_in_progress()
 
 
 def apply_update(target, channel=None):
@@ -2120,18 +2239,25 @@ def apply_update(target, channel=None):
 
     if not _apply_lock.acquire(blocking=False):
         return {'ok': False, 'message': 'Update already in progress'}
+    freeze_token = None
     try:
         # Freeze /static/* serving while this checkout is being mutated in
-        # place (issue #6992) — cleared in the finally below once the working
-        # tree is coherent again (the scheduled restart then serves the new
-        # revision).
+        # place (issue #6992): set the flag and DRAIN in-flight readers before
+        # the first mutating git command, so a request admitted just before
+        # the freeze can never read bytes written by the updater.
         if target == 'webui':
-            set_update_in_progress()
-        return _apply_update_inner(target, channel)
+            freeze_token = freeze_static_serving()
+        response = _apply_update_inner(target, channel)
+        # Lifecycle (issue #6992): on SUCCESS the freeze persists until the
+        # scheduled restart replaces this process (static stays 503 through
+        # the restart-delay window); failure / no-op lifts it here — BEFORE
+        # releasing _apply_lock, so a waiting handoff update can never observe
+        # our unfreeze racing with its own freeze.
+        if freeze_token is not None and not response.get('restart_scheduled'):
+            unfreeze_static_serving(freeze_token)
+        return response
     finally:
         _apply_lock.release()
-        if target == 'webui':
-            clear_update_in_progress()
 
 
 def _restore_stash_after_pull_failure(

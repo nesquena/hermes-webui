@@ -11,17 +11,31 @@ and CSS from the old one under the SAME versioned URL (the reported ``Refine``
 button with none of its new CSS), and the mismatched pair was cached
 indefinitely because the client/server skew check saw a token match.
 
-Fix (this PR):
-  1. While an in-place WebUI update is being applied (flag set by
-     ``api.updates`` under ``_apply_lock``), ``_serve_static()`` refuses to
-     serve static bytes: 503 + no-store, so nothing mixed is ever served or
-     cached. The client's post-update reload lands on the restarted server,
-     which serves one coherent revision.
-  2. ``immutable`` is only claimed when the token provably matches the revision
+Fix (this PR) — freeze lifecycle in ``api.updates`` + ``api.routes._serve_static()``:
+  1. While an in-place WebUI update is being applied, ``_serve_static()``
+     refuses to serve static bytes: 503 + no-store, so nothing mixed is ever
+     served or cached. The client's post-update reload lands on the restarted
+     server, which serves one coherent revision.
+  2. Reader drain (TOCTOU hole): every request that may touch the tree takes a
+     read ticket (``begin_static_read``/``end_static_read``); the freeze sets
+     the flag and then waits for all in-flight tickets before the first
+     mutating git command, so a request admitted just before the freeze always
+     finishes serving the OLD revision's bytes.
+  3. Generation-owned handoff (handoff hole): each freeze returns an ownership
+     token; ``unfreeze_static_serving`` only clears while the token is still
+     current, so an earlier update can never clear a newer update's freeze.
+  4. Persist-until-replacement (restart-delay hole): a successful update
+     (restart scheduled) keeps static frozen at 503 through the restart delay
+     until ``os.execv`` replaces the process; failure / no-op clears the
+     freeze because the working tree is coherent again.
+  5. ``immutable`` is only claimed when the token provably matches the revision
      this process was started on (``v == WEBUI_VERSION``); any other token is
      served with a short ``max-age=300`` instead of a year-long immutable cache.
 """
 
+import pathlib
+import threading
+import time
 import urllib.parse
 
 import pytest
@@ -61,12 +75,12 @@ class FakeHandler:
 
 @pytest.fixture(autouse=True)
 def _reset_update_flag():
-    """Ensure the update-freeze flag never leaks between tests."""
+    """Ensure the update-freeze state never leaks between tests."""
     import api.updates as upd
 
-    upd.clear_update_in_progress()
+    upd.reset_update_freeze()
     yield
-    upd.clear_update_in_progress()
+    upd.reset_update_freeze()
 
 
 def _serve(path: str):
@@ -84,7 +98,7 @@ def test_static_requests_frozen_503_during_update_window():
     """While an update is in progress, /static/* must not be served at all."""
     import api.updates as upd
 
-    upd.set_update_in_progress()
+    upd.freeze_static_serving()
     handler = _serve("/static/style.css?v=v-test-new")
 
     assert handler.status == 503
@@ -100,7 +114,7 @@ def test_no_mixed_revision_pair_served_during_update_window():
     window serves nothing, so a mixed (new JS + old CSS) pair cannot occur."""
     import api.updates as upd
 
-    upd.set_update_in_progress()
+    upd.freeze_static_serving()
     js_handler = _serve("/static/messages.js?v=v-test-new")
     css_handler = _serve("/static/style.css?v=v-test-new")
 
@@ -111,12 +125,12 @@ def test_no_mixed_revision_pair_served_during_update_window():
 
 
 def test_static_serving_resumes_after_update_window():
-    """Once the update attempt finishes (flag cleared), serving works again."""
+    """Once the freeze is lifted (failure/no-op path), serving works again."""
     import api.updates as upd
 
-    upd.set_update_in_progress()
+    upd.freeze_static_serving()
     assert _serve("/static/style.css?v=v-test-new").status == 503
-    upd.clear_update_in_progress()
+    upd.reset_update_freeze()
 
     handler = _serve("/static/style.css?v=v-test-new")
     assert handler.status == 200
@@ -171,17 +185,25 @@ def test_static_unversioned_request_keeps_short_cache(monkeypatch):
 def test_update_progress_flag_helpers():
     import api.updates as upd
 
-    upd.clear_update_in_progress()
+    upd.reset_update_freeze()
     assert upd.update_in_progress() is False
-    upd.set_update_in_progress()
+    token = upd.freeze_static_serving()
     assert upd.update_in_progress() is True
-    upd.clear_update_in_progress()
+    assert upd.unfreeze_static_serving(token) is True
+    assert upd.update_in_progress() is False
+    # A stale token can never clear a newer freeze (generation ownership).
+    token_a = upd.freeze_static_serving()
+    token_b = upd.freeze_static_serving()
+    assert upd.unfreeze_static_serving(token_a) is False
+    assert upd.update_in_progress() is True
+    assert upd.unfreeze_static_serving(token_b) is True
     assert upd.update_in_progress() is False
 
 
 def test_apply_update_freezes_static_during_apply(monkeypatch):
-    """apply_update('webui') must hold the freeze flag while the checkout is
-    being mutated and release it once the attempt finishes."""
+    """apply_update('webui') must hold the freeze while the checkout is being
+    mutated and — because the update succeeds (restart scheduled) — KEEP it
+    until the replacement, per the persist-until-replacement lifecycle."""
     import api.updates as upd
 
     observed = {}
@@ -189,7 +211,8 @@ def test_apply_update_freezes_static_during_apply(monkeypatch):
     def fake_inner(target, channel):
         observed["target"] = target
         observed["flag_during_apply"] = upd.update_in_progress()
-        return {"ok": True, "message": "fake ok", "target": target}
+        return {"ok": True, "message": "fake ok", "target": target,
+                "restart_scheduled": True}
 
     monkeypatch.setattr(upd, "_apply_update_inner", fake_inner)
 
@@ -197,7 +220,10 @@ def test_apply_update_freezes_static_during_apply(monkeypatch):
     assert resp["ok"] is True
     assert observed["target"] == "webui"
     assert observed["flag_during_apply"] is True
-    assert upd.update_in_progress() is False
+    # Success → freeze persists until the scheduled restart replaces the process.
+    assert upd.update_in_progress() is True
+    assert _serve("/static/messages.js?v=v-test-new").status == 503
+    upd.reset_update_freeze()
 
 
 def test_apply_update_agent_does_not_freeze_webui_static(monkeypatch):
@@ -220,8 +246,9 @@ def test_apply_update_agent_does_not_freeze_webui_static(monkeypatch):
 
 
 def test_apply_force_update_freezes_static_during_apply(monkeypatch):
-    """apply_force_update('webui') must hold the freeze flag through the
-    checkout/clean/reset mutation and release it afterwards."""
+    """apply_force_update('webui') must hold the freeze through the
+    checkout/clean/reset mutation and — because the update succeeds (restart
+    scheduled) — KEEP it until the replacement."""
     import api.updates as upd
 
     observed = {}
@@ -242,4 +269,207 @@ def test_apply_force_update_freezes_static_during_apply(monkeypatch):
     assert resp["ok"] is True
     assert resp.get("restart_scheduled") is True
     assert observed.get("flag_during_reset") is True
+    # Success → freeze persists until the scheduled restart replaces the process.
+    assert upd.update_in_progress() is True
+    assert _serve("/static/messages.js?v=v-test-new").status == 503
+    upd.reset_update_freeze()
+
+
+# ── Maintainer-review regressions: lifecycle holes #1-#3 ───────────────────
+
+
+def test_freeze_drains_inflight_reader_before_mutation(monkeypatch):
+    """TOCTOU hole #1: a request admitted just before the freeze must finish
+    serving the OLD revision's bytes before the updater mutates the tree; the
+    updater's freeze waits (drain) for the reader, and no request admitted
+    after the freeze reads anything (503). Exercises the real production path
+    (_serve_static → read_bytes) with an event-gated file read."""
+    import api.updates as upd
+    from api import config as api_config
+    from api import routes
+
+    # Use the real static tree with a fresh cache so the gated read_bytes is
+    # actually exercised (cache hits would bypass the file read entirely).
+    monkeypatch.setattr(routes, "_STATIC_CACHE", {}, raising=True)
+    expected_old_bytes = (api_config.get_static_root() / "messages.js").read_bytes()
+    monkeypatch.setattr(upd, "WEBUI_VERSION", "v-test-1")
+
+    reader_started = threading.Event()
+    reader_release = threading.Event()
+    real_read_bytes = pathlib.Path.read_bytes
+
+    def gated_read_bytes(self, *args, **kwargs):
+        if str(self).endswith("messages.js"):
+            reader_started.set()
+            assert reader_release.wait(10), "test timed out releasing the reader"
+        return real_read_bytes(self, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "read_bytes", gated_read_bytes)
+
+    result = {}
+
+    def do_request():
+        handler = _serve("/static/messages.js?v=v-test-1")
+        result["status"] = handler.status
+        result["body"] = bytes(handler.body)
+
+    reader = threading.Thread(target=do_request)
+    reader.start()
+    assert reader_started.wait(10), "reader never reached read_bytes"
+
+    freeze_result = {}
+
+    def do_freeze():
+        freeze_result["token"] = upd.freeze_static_serving()
+        freeze_result["done"] = True
+
+    freezer = threading.Thread(target=do_freeze)
+    freezer.start()
+
+    # Wait for the freeze flag to be set, then verify the updater is blocked
+    # in the drain (not done) and that new requests are rejected (503).
+    deadline = time.monotonic() + 10
+    while not upd.update_in_progress() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert upd.update_in_progress() is True, "freeze flag never set"
+    time.sleep(0.2)
+    assert not freeze_result.get("done"), \
+        "freeze returned before the in-flight reader drained"
+    assert _serve("/static/messages.js?v=v-test-1").status == 503
+
+    # Release the reader: it serves the pre-mutation bytes untouched, then the
+    # freeze drain completes and the updater may safely mutate.
+    reader_release.set()
+    reader.join(10)
+    assert result["status"] == 200
+    assert result["body"] == expected_old_bytes
+    freezer.join(10)
+    assert freeze_result.get("done") is True
+    assert upd.update_in_progress() is True
+
+
+def test_apply_update_success_keeps_freeze_until_replacement(monkeypatch):
+    """Restart-delay hole #3: a successful update (restart scheduled) must keep
+    /static/* frozen at 503 until the replacement happens; the replacement
+    (new process) starts unfrozen."""
+    import api.updates as upd
+
+    monkeypatch.setattr(
+        upd, "_apply_update_inner",
+        lambda target, channel: {"ok": True, "message": "ok", "target": target,
+                                 "restart_scheduled": True},
+    )
+    resp = upd.apply_update("webui")
+    assert resp["ok"] is True and resp.get("restart_scheduled") is True
+    assert upd.update_in_progress() is True
+    assert _serve("/static/messages.js?v=v-test-new").status == 503
+
+    # Simulate the replacement: the new process starts unfrozen.
+    upd.reset_update_freeze()
+    assert _serve("/static/messages.js?v=v-test-new").status == 200
+
+
+def test_apply_update_failure_clears_freeze(monkeypatch):
+    """A failed update leaves the tree coherent again → freeze must be lifted."""
+    import api.updates as upd
+
+    monkeypatch.setattr(
+        upd, "_apply_update_inner",
+        lambda target, channel: {"ok": False, "message": "fetch failed",
+                                 "target": target},
+    )
+    resp = upd.apply_update("webui")
+    assert resp["ok"] is False
     assert upd.update_in_progress() is False
+    assert _serve("/static/messages.js?v=v-test-new").status == 200
+
+
+def test_apply_update_noop_clears_freeze(monkeypatch):
+    """An up-to-date no-op schedules no restart → freeze must be lifted."""
+    import api.updates as upd
+
+    monkeypatch.setattr(
+        upd, "_apply_update_inner",
+        lambda target, channel: {"ok": True, "message": "already up to date",
+                                 "target": target, "up_to_date": True},
+    )
+    resp = upd.apply_update("webui")
+    assert resp["ok"] is True and resp.get("restart_scheduled") is None
+    assert upd.update_in_progress() is False
+    assert _serve("/static/messages.js?v=v-test-new").status == 200
+
+
+def test_handoff_a_cannot_clear_b_freeze():
+    """Handoff hole #2: update A's stale unfreeze must never clear update B's
+    freeze — ownership is generation-scoped."""
+    import api.updates as upd
+
+    # A freezes (e.g. successful update awaiting its scheduled restart).
+    token_a = upd.freeze_static_serving()
+    assert upd.update_in_progress() is True
+    # B starts while A's freeze persists (restart-delay window) → B owns now.
+    token_b = upd.freeze_static_serving()
+    # A's stale unfreeze is a no-op.
+    assert upd.unfreeze_static_serving(token_a) is False
+    assert upd.update_in_progress() is True
+    assert _serve("/static/messages.js?v=v-test-new").status == 503
+    # B clears its own freeze (e.g. B failed or was a no-op).
+    assert upd.unfreeze_static_serving(token_b) is True
+    assert upd.update_in_progress() is False
+    assert _serve("/static/messages.js?v=v-test-new").status == 200
+
+
+def test_sequential_successful_updates_keep_freeze_until_replacement(monkeypatch):
+    """A→B lock handoff through the real apply_update path: B takes over the
+    freeze while A's is still pending and neither clears the other's."""
+    import api.updates as upd
+
+    def ok_inner(target, channel):
+        return {"ok": True, "message": "ok", "target": target,
+                "restart_scheduled": True}
+
+    monkeypatch.setattr(upd, "_apply_update_inner", ok_inner)
+
+    resp_a = upd.apply_update("webui")  # A: success, freeze persists
+    assert resp_a["ok"] is True
+    assert upd.update_in_progress() is True
+    resp_b = upd.apply_update("webui")  # B: success, takes over the freeze
+    assert resp_b["ok"] is True
+    assert upd.update_in_progress() is True
+    assert _serve("/static/messages.js?v=v-test-new").status == 503
+    upd.reset_update_freeze()
+
+
+def test_apply_force_update_failure_clears_freeze(monkeypatch):
+    """Force-update failure (fetch) → freeze must be lifted."""
+    import api.updates as upd
+
+    def fake_run_git(args, cwd, timeout=10):
+        if args and args[0] == "fetch":
+            return ("could not resolve host: origin", False)
+        return ("", True)
+
+    monkeypatch.setattr(upd, "_run_git", fake_run_git)
+
+    resp = upd.apply_force_update("webui")
+    assert resp["ok"] is False
+    assert upd.update_in_progress() is False
+    assert _serve("/static/messages.js?v=v-test-new").status == 200
+
+
+def test_apply_force_update_noop_clears_freeze(monkeypatch):
+    """Force-update no-op (already up to date, nothing to force) schedules no
+    restart → freeze must be lifted."""
+    import api.updates as upd
+
+    def fake_run_git(args, cwd, timeout=10):
+        return ("", True)
+
+    monkeypatch.setattr(upd, "_run_git", fake_run_git)
+    monkeypatch.setattr(upd, "_select_apply_compare_ref", lambda path, channel, target: None)
+
+    resp = upd.apply_force_update("webui")
+    assert resp["ok"] is True and resp.get("up_to_date") is True
+    assert resp.get("restart_scheduled") is None
+    assert upd.update_in_progress() is False
+    assert _serve("/static/messages.js?v=v-test-new").status == 200
