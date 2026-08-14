@@ -414,6 +414,100 @@ def test_reload_mcp_error_is_generic(monkeypatch):
     assert calls == ["shutdown"]
 
 
+def test_reload_mcp_installs_profile_override(monkeypatch):
+    """`/reload-mcp`'s re-discovery must assert the profile home.
+
+    Greptile P1: the reload closure previously called discover_mcp_tools()
+    without a context-local override, so a concurrent stream mutating
+    HERMES_HOME could make the reload discover the WRONG profile's
+    servers.  The closure now installs the override exactly like the
+    stream worker's discovery closure.
+    """
+    import os
+    from api import profiles
+    from api.commands import execute_agent_command
+
+    calls = []
+    override_token = "tok-123"
+
+    class _FakeOverride:
+        def set_hermes_home_override(self, home):
+            calls.append(("set", home))
+            return override_token
+
+        def reset_hermes_home_override(self, token):
+            calls.append(("reset", token))
+
+        def get_default_hermes_root(self):
+            calls.append("default_root")
+            return "/default/hermes/home"
+
+    monkeypatch.setattr(
+        profiles, "_resolve_hermes_home_override", lambda: _FakeOverride()
+    )
+
+    def shutdown():
+        calls.append("shutdown")
+
+    def discover():
+        calls.append("discover")
+        return []
+
+    _install_fake_mcp_tool(monkeypatch, shutdown=shutdown, discover=discover, servers={})
+    monkeypatch.setenv("HERMES_HOME", "/profiles/alpha")
+
+    output = execute_agent_command("/reload-mcp")
+
+    assert ("set", "/profiles/alpha") in calls, (
+        "reload discovery must assert the captured profile home"
+    )
+    assert "discover" in calls
+    assert ("reset", override_token) in calls
+    assert "Reloaded MCP servers from configuration." in output
+
+
+def test_reload_mcp_default_profile_uses_default_root(monkeypatch):
+    """With HERMES_HOME unset, the reload override falls back to the root."""
+    import os
+    from api import profiles
+    from api.commands import execute_agent_command
+
+    calls = []
+    override_token = "tok-456"
+
+    class _FakeOverride:
+        def set_hermes_home_override(self, home):
+            calls.append(("set", home))
+            return override_token
+
+        def reset_hermes_home_override(self, token):
+            calls.append(("reset", token))
+
+        def get_default_hermes_root(self):
+            calls.append("default_root")
+            return "/default/hermes/home"
+
+    monkeypatch.setattr(
+        profiles, "_resolve_hermes_home_override", lambda: _FakeOverride()
+    )
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+
+    def shutdown():
+        calls.append("shutdown")
+
+    def discover():
+        calls.append("discover")
+        return []
+
+    _install_fake_mcp_tool(monkeypatch, shutdown=shutdown, discover=discover, servers={})
+
+    execute_agent_command("/reload-mcp")
+
+    assert "default_root" in calls
+    assert ("set", "/default/hermes/home") in calls
+    assert ("reset", override_token) in calls
+
+
 def test_reload_skills_command_formats_helper_diff(monkeypatch):
     """`/reload-skills` should summarize the shared helper diff in printable text."""
     def reload_skills():

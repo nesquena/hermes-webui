@@ -285,9 +285,35 @@ def _run_reload_mcp_command() -> str:
             from api.streaming import _mcp_retry_discovery, _mcp_wait_readiness
 
             def _reload_discover():
+                """Re-discover MCP tools; returns bool.
+
+                Installs the captured profile-home override exactly like
+                the stream worker's discovery closure, so a background
+                reload run can never read another stream's HERMES_HOME
+                after env mutation (Greptile P1).
+                """
+                _mcp_home_token = None
                 try:
-                    discover_mcp_tools()
-                    return True
+                    from api.profiles import _resolve_hermes_home_override
+                    _hc_mod = _resolve_hermes_home_override()
+                    if _hc_mod is not None:
+                        _mcp_home = _profile_home
+                        if not _mcp_home:
+                            _mcp_home = getattr(
+                                _hc_mod, 'get_default_hermes_root', lambda: ''
+                            )()
+                        if _mcp_home:
+                            _mcp_home_token = _hc_mod.set_hermes_home_override(
+                                str(_mcp_home)
+                            )
+                    try:
+                        discover_mcp_tools()
+                        return True
+                    except Exception:
+                        return False
+                    finally:
+                        if _mcp_home_token is not None:
+                            _hc_mod.reset_hermes_home_override(_mcp_home_token)
                 except Exception:
                     return False
 
