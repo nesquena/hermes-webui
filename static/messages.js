@@ -2009,7 +2009,7 @@ async function send(){
       upsertActiveSessionForLocalTurn({title:S.session&&S.session.title||displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now()});
     }
     const currentInflight=_stampInflightTurnState();
-    markInflight(activeSid, streamId);
+    if(_ownsSendPane()) markInflight(activeSid, streamId);
     if(typeof saveInflightState==='function'){
       saveInflightState(activeSid,{streamId,messages:currentInflight.messages||optimisticMessages,uploaded:uploadedNames,toolCalls:currentInflight.toolCalls||[],activeTurnToken:currentInflight.activeTurnToken||null});
     }

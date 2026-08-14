@@ -251,7 +251,11 @@ function hideClarifyCard() {{ visibleCall('clarify'); }}
 function removeThinking() {{ visibleCall('worklog'); }}
 function clearLiveToolCards() {{}}
 function _fetchYoloState() {{}}
-function markInflight(sid, streamId) {{ calls.marked.push([sid, streamId]); }}
+function markInflight(sid, streamId) {{
+  const payload = JSON.stringify({{sid, streamId, ts: Date.now()}});
+  localStorage.setItem('hermes-webui-inflight', payload);
+  calls.marked.push([sid, streamId]);
+}}
 function saveInflightState(sid, state) {{
   calls.saved.push([sid, JSON.parse(JSON.stringify(state))]);
 }}
@@ -297,6 +301,8 @@ async function send() {{{send_body}}}
     streamId: 'B-stream', activeTurnToken: 'B-token',
     messages: S.messages.slice(), uploaded: [], toolCalls: [],
   }};
+  const bMarker = JSON.stringify({{sid: 'B', streamId: 'B-stream', ts: 123}});
+  localStorage.setItem('hermes-webui-inflight', bMarker);
   const visibleSessionBefore = JSON.parse(JSON.stringify(S.session));
   const visibleMessagesBefore = JSON.parse(JSON.stringify(S.messages));
   const visibleInflightBefore = JSON.parse(JSON.stringify(INFLIGHT.B));
@@ -310,6 +316,7 @@ async function send() {{{send_body}}}
   assert.strictEqual(S.activeStreamId, 'B-stream');
   assert.strictEqual(S.busy, true);
   assert.deepStrictEqual(INFLIGHT.B, visibleInflightBefore);
+  assert.strictEqual(localStorage.getItem('hermes-webui-inflight'), bMarker);
   assert.strictEqual(calls.attach.length, 0);
   assert.strictEqual(calls.worklog, 1);
   assert.strictEqual(calls.topbar, 0);
@@ -327,7 +334,7 @@ async function send() {{{send_body}}}
   assert(aUser);
   assert.deepStrictEqual(aUser.attachments, ['a.txt']);
   assert.strictEqual(aUser._active_turn_token, 'A-token');
-  assert.deepStrictEqual(calls.marked, [['A', 'A-stream']]);
+  assert.deepStrictEqual(calls.marked, []);
   const persisted = calls.saved.filter(item => item[0] === 'A').at(-1)[1];
   assert.strictEqual(persisted.streamId, 'A-stream');
   assert.strictEqual(persisted.activeTurnToken, 'A-token');
