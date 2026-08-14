@@ -92,25 +92,18 @@ def is_human_user_turn(message: object) -> bool:
 
 def _human_user_turn_sql_predicate(message_cols: set[str], alias: str = "m") -> str:
     """Build the native-SQL equivalent of :func:`is_human_user_turn`."""
-    required = {
-        "role",
-        "content",
-        "display_kind",
-        "source",
-        "_source",
-        "_compressed_summary",
-    }
+    required = {"role", "content"}
     if not required.issubset(message_cols):
         return "NULL"
-    clauses = [
-        f"{alias}.role = 'user'",
-        f"({alias}.display_kind IS NULL OR TRIM({alias}.display_kind) = '')",
-    ]
-    clauses.extend([
-        f"COALESCE({alias}.source, '') <> 'process_wakeup'",
-        f"COALESCE({alias}._source, '') <> 'process_wakeup'",
-        f"COALESCE({alias}._compressed_summary, 0) = 0",
-    ])
+    clauses = [f"{alias}.role = 'user'"]
+    if "display_kind" in message_cols:
+        clauses.append(f"({alias}.display_kind IS NULL OR TRIM({alias}.display_kind) = '')")
+    if "source" in message_cols:
+        clauses.append(f"COALESCE({alias}.source, '') <> 'process_wakeup'")
+    if "_source" in message_cols:
+        clauses.append(f"COALESCE({alias}._source, '') <> 'process_wakeup'")
+    if "_compressed_summary" in message_cols:
+        clauses.append(f"COALESCE({alias}._compressed_summary, 0) = 0")
     content = f"{alias}.content"
     content_text = f"LOWER(LTRIM(CAST({content} AS TEXT)))"
     clauses.extend([

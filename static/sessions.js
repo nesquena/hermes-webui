@@ -5234,8 +5234,10 @@ function _mergeOptimisticFirstTurnSessions(fetchedSessions){
   const merged=Array.isArray(fetchedSessions)?[...fetchedSessions]:[];
   const bySid=new Map();
   merged.forEach((s,idx)=>{if(s&&s.session_id) bySid.set(s.session_id,idx);});
+  const owners=typeof _localTurnOwners!=='undefined'&&_localTurnOwners instanceof Map
+    ?_localTurnOwners:new Map();
   const sendInProgress=typeof _sendInProgress!=='undefined'&&_sendInProgress;
-  for(const [sid,owner] of _localTurnOwners){
+  for(const [sid,owner] of owners){
     if(sendInProgress&&sid===_sendInProgressSid) continue;
     const idx=bySid.has(sid)?bySid.get(sid):-1;
     if(idx<0){
@@ -5262,12 +5264,12 @@ function _mergeOptimisticFirstTurnSessions(fetchedSessions){
     if(!_isOptimisticFirstTurnSessionRow(local)) continue;
     const sid=local.session_id;
     const idx=bySid.has(sid)?bySid.get(sid):-1;
+    const owner=owners.get(sid);
     if(idx>=0){
       const fetched=merged[idx]||{};
       const fetchedIsServerIdle=_isServerIdleSessionRow(fetched);
       const localCount=Number(local.message_count||0);
       const fetchedCount=Number(fetched.message_count||0);
-      const owner=_localTurnOwners.get(sid);
       const fetchedDirect=Number(fetched.user_message_count);
       const fetchedLineage=Number(fetched._lineage_user_message_count);
       const directSatisfied=!!owner&&(owner.directCount===null

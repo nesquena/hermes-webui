@@ -614,7 +614,7 @@ def test_sidebar_lineage_count_matches_detail_merge_and_fails_closed_for_unknown
     monkeypatch.setattr(routes.Session, "load", lambda sid: {"lineage-tip": tip, "lineage-parent": parent}.get(sid))
     row = {"session_id": "lineage-tip", "_lineage_tip_id": "lineage-tip", "parent_session_id": "lineage-parent"}
     monkeypatch.setattr(routes, "get_state_db_session_messages", lambda *args, **kwargs: [
-        {"role": "user", "content": "state turn", "timestamp": 2.0},
+        {"role": "user", "timestamp": 2.0},
     ])
     routes._project_sidebar_lineage_user_counts([row])
     assert "_lineage_user_message_count" not in row
@@ -723,7 +723,7 @@ def test_role_column_present_reports_real_user_turn_count(tmp_path):
     assert row["actual_user_message_count"] == 2
 
 
-def test_state_db_missing_provenance_columns_reports_unknown_user_turns(tmp_path):
+def test_state_db_missing_content_column_reports_unknown_user_turns(tmp_path):
     db = tmp_path / "state.db"
     conn = sqlite3.connect(db)
     conn.execute(
@@ -735,16 +735,41 @@ def test_state_db_missing_provenance_columns_reports_unknown_user_turns(tmp_path
     )
     conn.execute(
         "CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, "
-        "content TEXT, display_kind TEXT, timestamp REAL)"
+        "display_kind TEXT, timestamp REAL)"
     )
     conn.execute(
-        "INSERT INTO messages VALUES (1, 's1', 'user', 'wake', NULL, 1)"
+        "INSERT INTO messages VALUES (1, 's1', 'user', NULL, 1)"
     )
     conn.commit()
     conn.close()
 
     row = agent_sessions.read_importable_agent_session_rows(db, exclude_sources=None)[0]
     assert row["actual_user_message_count"] is None
+
+
+def test_real_agent_state_db_schema_reports_text_user_turns(tmp_path):
+    db = tmp_path / "state.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, model TEXT, "
+        "message_count INTEGER, started_at REAL, source TEXT, session_source TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO sessions VALUES ('s1', 'CLI Session', 'gpt', 2, 1, 'cli', 'cli')"
+    )
+    conn.execute(
+        "CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, "
+        "content TEXT, timestamp REAL, active INTEGER, compacted INTEGER)"
+    )
+    conn.executemany(
+        "INSERT INTO messages VALUES (?, 's1', ?, ?, ?, 1, 0)",
+        [(1, "user", "ordinary", 1), (2, "assistant", "reply", 2)],
+    )
+    conn.commit()
+    conn.close()
+
+    row = agent_sessions.read_importable_agent_session_rows(db, exclude_sources=None)[0]
+    assert row["actual_user_message_count"] == 1
 
 
 def test_compact_uses_the_canonical_human_turn_truth_table():

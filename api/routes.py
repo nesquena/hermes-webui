@@ -9101,12 +9101,20 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
 def _project_sidebar_lineage_user_counts(rows: list[dict]) -> None:
     """Attach exact logical counts, omitting them when reconstruction is unknown."""
     operation_cache = {}
+    count_cache = {}
     from api.agent_sessions import is_human_user_turn
     for row in rows:
         if not isinstance(row, dict) or not row.get("_lineage_tip_id"):
             continue
         sid = str(row.get("_lineage_tip_id") or row.get("session_id") or "").strip()
         if not sid:
+            continue
+        if sid in count_cache:
+            cached_count = count_cache[sid]
+            if cached_count is not None:
+                row["_lineage_user_message_count"] = cached_count
+            else:
+                row.pop("_lineage_user_message_count", None)
             continue
         if sid not in operation_cache:
             try:
@@ -9115,11 +9123,15 @@ def _project_sidebar_lineage_user_counts(rows: list[dict]) -> None:
                 operation_cache[sid] = None
         tip = operation_cache[sid]
         if not tip:
+            count_cache[sid] = None
+            row.pop("_lineage_user_message_count", None)
             continue
         result = _webui_sidecar_lineage_stitch(
             tip, load_session=Session.load, cache=operation_cache,
         )
         if not result.get("complete"):
+            count_cache[sid] = None
+            row.pop("_lineage_user_message_count", None)
             continue
         state_db_messages = get_state_db_session_messages(
             tip.session_id,
@@ -9127,10 +9139,11 @@ def _project_sidebar_lineage_user_counts(rows: list[dict]) -> None:
             profile=getattr(tip, "profile", None) or None,
         )
         if state_db_messages and not all(
-            isinstance(message, dict)
-            and {"display_kind", "source", "_source", "_compressed_summary"}.issubset(message)
+            isinstance(message, dict) and {"role", "content"}.issubset(message)
             for message in state_db_messages
         ):
+            count_cache[sid] = None
+            row.pop("_lineage_user_message_count", None)
             continue
         display_messages = merge_session_messages_append_only(
             result["messages"],
@@ -9138,9 +9151,10 @@ def _project_sidebar_lineage_user_counts(rows: list[dict]) -> None:
             truncation_watermark=getattr(tip, "truncation_watermark", None),
             truncation_boundary=getattr(tip, "truncation_boundary", None),
         )
-        row["_lineage_user_message_count"] = sum(
+        count_cache[sid] = sum(
             1 for message in display_messages if is_human_user_turn(message)
         )
+        row["_lineage_user_message_count"] = count_cache[sid]
 
 
 def _merged_session_messages_for_display(session, cli_messages=None) -> list:
