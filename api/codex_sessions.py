@@ -279,8 +279,8 @@ def _is_synthetic_user_text(text: str) -> bool:
     stripped = text.strip()
     if not stripped:
         return False
-    for opening, closing in _SYNTHETIC_BLOCKS:
-        if stripped.startswith(opening) and stripped.rstrip().endswith(closing):
+    for opening, closing_marker in _SYNTHETIC_BLOCKS:
+        if stripped.startswith(opening) and stripped.rstrip().endswith(closing_marker):
             return True
     return bool(_AGENTS_MD_INSTRUCTIONS_RE.match(stripped))
 

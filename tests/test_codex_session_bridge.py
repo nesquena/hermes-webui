@@ -641,7 +641,6 @@ def test_bounded_counter_caps_read_bytes(tmp_path):
     assert rollout.stat().st_size > codex.CODEX_SIDEBAR_COUNT_BYTES
 
     read_bytes = []
-    real_open = codex.Path.open if hasattr(codex, "Path") else None
 
     import pathlib
 
