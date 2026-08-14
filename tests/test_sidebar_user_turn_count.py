@@ -321,7 +321,7 @@ def _harness(body: str) -> str:
 _OVERLAPPING_LINEAGE = """
 const sessions = [
   {session_id:'parent', title:'Duplicate Assistant Text Blocks', message_count:64, user_message_count:21, updated_at:300, last_message_at:300, pre_compression_snapshot:true, _lineage_root_id:'parent', _compression_segment_count:2},
-  {session_id:'child', title:'Duplicate Assistant Text Blocks', parent_session_id:'parent', message_count:86, user_message_count:29, updated_at:200, last_message_at:200, _lineage_root_id:'parent', _compression_segment_count:2},
+  {session_id:'child', title:'Duplicate Assistant Text Blocks', parent_session_id:'parent', message_count:86, user_message_count:29, _lineage_user_message_count:29, updated_at:200, last_message_at:200, _lineage_root_id:'parent', _compression_segment_count:2},
 ];
 const collapsed = _collapseSessionLineageForSidebar(sessions);
 """
@@ -448,7 +448,7 @@ def test_compressed_continuation_lineage_renders_the_tip_count():
 const sessions = [
   {session_id:'seg1', title:'Graphify', message_count:400, user_message_count:40, updated_at:10, last_message_at:10, _lineage_root_id:'seg1', _compression_segment_count:1, pre_compression_snapshot:true},
   {session_id:'seg2', title:'Graphify', parent_session_id:'seg1', message_count:900, user_message_count:75, updated_at:20, last_message_at:20, _lineage_root_id:'seg1', _compression_segment_count:2, pre_compression_snapshot:true},
-  {session_id:'seg3', title:'Graphify', parent_session_id:'seg2', message_count:1400, user_message_count:118, updated_at:30, last_message_at:30, _lineage_root_id:'seg1', _compression_segment_count:3},
+  {session_id:'seg3', title:'Graphify', parent_session_id:'seg2', message_count:1400, user_message_count:118, _lineage_user_message_count:118, updated_at:30, last_message_at:30, _lineage_root_id:'seg1', _compression_segment_count:3},
 ];
 const collapsed = _collapseSessionLineageForSidebar(sessions);
 const segmentSum = collapsed[0]._lineage_segments
@@ -478,7 +478,7 @@ def test_compressed_fork_continuation_lineage_renders_the_tip_count():
     result = json.loads(_run_node(_harness("""
 const sessions = [
   {session_id:'fork-seg13', title:'Release review (fork)', message_count:2490, user_message_count:180, updated_at:200, last_message_at:200, pre_compression_snapshot:true, _lineage_root_id:'fork-root', _compression_segment_count:13},
-  {session_id:'fork-seg14', title:'Release review (fork)', parent_session_id:'fork-seg13', message_count:2532, user_message_count:191, updated_at:150, last_message_at:150, _lineage_root_id:'fork-root', _compression_segment_count:14},
+  {session_id:'fork-seg14', title:'Release review (fork)', parent_session_id:'fork-seg13', message_count:2532, user_message_count:191, _lineage_user_message_count:191, updated_at:150, last_message_at:150, _lineage_root_id:'fork-root', _compression_segment_count:14},
 ];
 const collapsed = _collapseSessionLineageForSidebar(sessions);
 const segmentSum = collapsed[0]._lineage_segments
@@ -508,6 +508,46 @@ console.log(JSON.stringify({rendered: metaTextFor(row, 'detailed')}));
     assert result["rendered"] == "12 msgs · Telegram · read-only"
 
 
+@requires_node
+def test_local_turn_owner_is_idempotent_across_initial_title_and_stream_upserts():
+    result = json.loads(_run_node(_harness("""
+const _localTurnOwners = new Map();
+var _allSessions = [{session_id:'send', message_count:8, user_message_count:2, _lineage_segments:[{}], _lineage_user_message_count:2}];
+S = {session:{session_id:'send', message_count:8, user_message_count:2, _lineage_segments:[{}], _lineage_user_message_count:2}, messages:[{},{}]};
+eval(extractFunc('resolveLocalTurnCountOwner'));
+const upsertStart=src.indexOf('function upsertActiveSessionForLocalTurn');
+const upsertEnd=src.indexOf('\\nfunction _sessionRowsWithActiveEphemeralSession', upsertStart);
+eval(src.slice(upsertStart, upsertEnd));
+const owner = resolveLocalTurnCountOwner();
+upsertActiveSessionForLocalTurn({messageCount:9, userTurnOwner:owner});
+upsertActiveSessionForLocalTurn({messageCount:9, userTurnOwner:owner});
+upsertActiveSessionForLocalTurn({messageCount:9, userTurnOwner:owner});
+console.log(JSON.stringify({direct:S.session.user_message_count, logical:_allSessions[0]._lineage_user_message_count, token:owner.token}));
+""")))
+    assert result["direct"] == 3
+    assert result["logical"] == 3
+    assert result["token"]
+
+
+def test_process_wakeup_restamp_preserves_count_and_advances_data_version(tmp_path):
+    db = tmp_path / "state.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, model TEXT, message_count INTEGER, started_at REAL, source TEXT)")
+    conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, display_kind TEXT, source TEXT, timestamp REAL)")
+    conn.execute("INSERT INTO sessions VALUES ('w', 'Wakeup', 'm', 1, 1, 'cli')")
+    conn.execute("INSERT INTO messages VALUES (1, 'w', 'user', 'wake', '', 'process_wakeup', 1)")
+    conn.commit()
+    before = agent_sessions.read_importable_agent_session_rows(db, exclude_sources=None)[0]
+    version_before = models._sqlite_data_version(db)
+    conn.execute("UPDATE messages SET display_kind = 'gateway' WHERE id = 1")
+    conn.commit()
+    after = agent_sessions.read_importable_agent_session_rows(db, exclude_sources=None)[0]
+    version_after = models._sqlite_data_version(db)
+    conn.close()
+    assert before["actual_user_message_count"] == after["actual_user_message_count"] == 0
+    assert version_after != version_before
+
+
 # ---------------------------------------------------------------------------
 # Producer accuracy: the sidebar label is a factual claim, so a row that cannot
 # separate user turns from total messages must report "unknown", not the total.
@@ -534,6 +574,8 @@ def _make_state_db(path, *, with_messages_table=True, with_role=True,
         if with_role:
             cols.append("role TEXT")
         cols.append("timestamp REAL")
+        cols.append("content TEXT")
+        cols.append("display_kind TEXT")
         conn.execute(f"CREATE TABLE messages ({', '.join(cols)})")
         for sid, role, ts in messages:
             names, values = [], []
@@ -542,6 +584,8 @@ def _make_state_db(path, *, with_messages_table=True, with_role=True,
             if with_role:
                 names.append("role"); values.append(role)
             names.append("timestamp"); values.append(ts)
+            names.append("content"); values.append(f"message {ts}")
+            names.append("display_kind"); values.append(None)
             conn.execute(
                 f"INSERT INTO messages ({', '.join(names)}) "
                 f"VALUES ({', '.join('?' * len(values))})", values
@@ -565,6 +609,22 @@ def test_role_column_present_reports_real_user_turn_count(tmp_path):
     row = agent_sessions.read_importable_agent_session_rows(db, exclude_sources=None)[0]
     assert row["actual_message_count"] == 7
     assert row["actual_user_message_count"] == 2
+
+
+def test_compact_uses_the_canonical_human_turn_truth_table():
+    session = models.Session(session_id="truth-table")
+    session.messages = [
+        {"role": "user", "content": "ordinary"},
+        {"role": "user", "content": "hidden", "display_kind": "gateway"},
+        {"role": "user", "content": "wake", "_source": "process_wakeup"},
+        {"role": "user", "content": "summary", "_compressed_summary": True},
+        {"role": "user", "content": "[context compaction: old]"},
+        {"role": "user", "content": "[Your active task list was preserved across context compression]\n- [ ] task"},
+        {"role": "user", "content": "Continue from the compressed conversation context above. This marker exists because no human user turn was available."},
+        {"role": "user", "content": "Continue from the compressed conversation context above. This marker exists because the compacted transcript contained no preserved user turn."},
+        {"role": "user", "content": {"type": "text", "value": "structured"}},
+    ]
+    assert session.compact()["user_message_count"] == 2
 
 
 @pytest.mark.parametrize("shape", ["no_role_column", "no_messages_table", "no_session_id"])

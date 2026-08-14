@@ -2526,6 +2526,8 @@ def _build_session_list_cache_payload(
         diag_stage("filter_archived_sessions")
     diag_stage("visible_lineage_metadata")
     _enrich_sidebar_lineage_metadata(scoped)
+    diag_stage("lineage_user_message_counts")
+    _project_sidebar_lineage_user_counts(scoped)
     # Delegated subagent children (#5307) are view-only, owned by the delegate
     # runner. Coerce their sidebar rows to read_only=True + is_cli_session=False
     # so the UI never offers delete / edit / truncate / pin affordances on them
@@ -8892,7 +8894,8 @@ def _limited_webui_messages_for_display(session, state_db_messages) -> list:
     archived history, then merge only newer state.db rows that have not reached
     the sidecar yet.
     """
-    sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)
+    stitch = _webui_sidecar_lineage_stitch(session)
+    sidecar_messages = stitch["messages"] if stitch["complete"] else list(getattr(session, "messages", []) or [])
     return _limited_webui_messages_for_display_with_sidecar(
         session,
         sidecar_messages,
@@ -9019,7 +9022,7 @@ def _messages_start_with_visible_prefix(messages, prefix) -> bool:
         return False
 
 
-def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) -> list:
+def _webui_sidecar_lineage_stitch(session, *, max_hops: int = 20, load_session=None, cache=None) -> dict:
     """Return WebUI sidecar messages stitched across compression snapshots.
 
     WebUI compression continuations persist the archived transcript in a parent
@@ -9029,32 +9032,53 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
     ``parent_session_id`` but must remain independent conversations.
     """
     segments = []
+    load_session = load_session or Session.load
+    cache = cache if cache is not None else {}
     current = session
     session_messages = list(getattr(session, "messages", []) or [])
     source = str(getattr(session, "session_source", "") or "").strip().lower()
     root_is_fork = source == "fork"
     seen = {str(getattr(session, "session_id", "") or "")}
+    hit_hop_cap = True
     for _ in range(max(0, int(max_hops))):
         parent_id = str(getattr(current, "parent_session_id", "") or "").strip()
-        if not parent_id or parent_id in seen or not is_safe_session_id(parent_id):
+        if not parent_id:
+            hit_hop_cap = False
             break
-        parent = Session.load(parent_id)
-        if not parent or not getattr(parent, "pre_compression_snapshot", False):
+        if parent_id in seen or not is_safe_session_id(parent_id):
+            return {"complete": False, "messages": [], "reason": "invalid_chain"}
+        if parent_id in cache:
+            parent = cache[parent_id]
+        else:
+            try:
+                parent = load_session(parent_id)
+            except Exception:
+                parent = None
+            cache[parent_id] = parent
+        if not parent:
+            return {"complete": False, "messages": [], "reason": "missing_parent"}
+        if not getattr(parent, "pre_compression_snapshot", False):
+            hit_hop_cap = False
             break
         parent_source = str(getattr(parent, "session_source", "") or "").strip().lower()
         if root_is_fork and parent_source != "fork":
+            hit_hop_cap = False
             break
         if not segments and _messages_start_with_visible_prefix(
             session_messages,
             getattr(parent, "messages", []) or [],
         ):
-            return session_messages
+            return {"complete": True, "messages": session_messages, "segments": []}
         segments.append(parent)
         seen.add(parent_id)
         current = parent
 
+    if hit_hop_cap and segments:
+        return {"complete": False, "messages": [], "reason": "hop_cap"}
     if not segments:
-        return list(getattr(session, "messages", []) or [])
+        if hit_hop_cap and getattr(current, "parent_session_id", None):
+            return {"complete": False, "messages": [], "reason": "hop_cap"}
+        return {"complete": True, "messages": session_messages, "segments": []}
 
     merged = []
     for segment in reversed(segments):
@@ -9064,11 +9088,41 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
             truncation_watermark=getattr(segment, "truncation_watermark", None),
             truncation_boundary=getattr(segment, "truncation_boundary", None),
         )
-    return merge_session_messages_append_only(
-        merged,
-        getattr(session, "messages", []) or [],
-        truncation_watermark=None,
-    )
+    return {"complete": True, "messages": merge_session_messages_append_only(
+        merged, session_messages, truncation_watermark=None,
+    ), "segments": segments}
+
+
+def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) -> list:
+    result = _webui_sidecar_lineage_stitch(session, max_hops=max_hops)
+    return result["messages"] if result["complete"] else list(getattr(session, "messages", []) or [])
+
+
+def _project_sidebar_lineage_user_counts(rows: list[dict]) -> None:
+    """Attach exact logical counts, omitting them when reconstruction is unknown."""
+    operation_cache = {}
+    from api.agent_sessions import is_human_user_turn
+    for row in rows:
+        if not isinstance(row, dict) or not (row.get("_lineage_tip_id") or row.get("parent_session_id")):
+            continue
+        sid = str(row.get("_lineage_tip_id") or row.get("session_id") or "").strip()
+        if not sid:
+            continue
+        if sid not in operation_cache:
+            try:
+                operation_cache[sid] = Session.load(sid)
+            except Exception:
+                operation_cache[sid] = None
+        tip = operation_cache[sid]
+        if not tip:
+            continue
+        result = _webui_sidecar_lineage_stitch(
+            tip, load_session=Session.load, cache=operation_cache,
+        )
+        if result.get("complete"):
+            row["_lineage_user_message_count"] = sum(
+                1 for message in result["messages"] if is_human_user_turn(message)
+            )
 
 
 def _merged_session_messages_for_display(session, cli_messages=None) -> list:
@@ -10045,6 +10099,7 @@ _SIDEBAR_SESSION_RESPONSE_FIELDS = {
     "_lineage_root_id",
     "_lineage_tip_id",
     "_compression_segment_count",
+    "_lineage_user_message_count",
     "_lineage_collapsed_count",
     "_parent_lineage_root_id",
     "_parent_lineage_tip_id",
@@ -12922,8 +12977,14 @@ def handle_get(handler, parsed) -> bool:
                         state_db_messages,
                     )
                 else:
+                    _detail_stitch = _webui_sidecar_lineage_stitch(s)
+                    _detail_sidecar_messages = (
+                        _detail_stitch["messages"]
+                        if _detail_stitch["complete"]
+                        else list(getattr(s, "messages", []) or [])
+                    )
                     _all_msgs = merge_session_messages_append_only(
-                        _webui_sidecar_lineage_messages_for_display(s),
+                        _detail_sidecar_messages,
                         state_db_messages,
                         truncation_watermark=getattr(s, "truncation_watermark", None),
                         truncation_boundary=getattr(s, "truncation_boundary", None),

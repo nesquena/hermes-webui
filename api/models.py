@@ -1,5 +1,6 @@
 """Hermes Web UI -- Session model and in-memory session store."""
 import collections
+import atexit
 import copy
 import datetime
 import hashlib
@@ -36,6 +37,7 @@ from api.workspace import get_last_workspace
 from api.usage import prompt_cache_hit_percent
 from api.agent_sessions import (
     _is_continuation_session,
+    is_human_user_turn,
     is_cli_session_row,
     normalize_agent_session_source,
     open_state_db_readonly,
@@ -78,6 +80,48 @@ _CLI_SESSIONS_CACHE_INVALIDATION_VERSION = 0
 # _CLAUDE_CODE_PARSE_CACHE / _SIDECAR_METADATA_CACHE LRU pattern.
 _CLI_SESSIONS_CACHE: "collections.OrderedDict[tuple, tuple]" = collections.OrderedDict()
 _CLI_SESSIONS_CACHE_MAX_ENTRIES = 8
+_SQLITE_FINGERPRINT_CONNECTIONS = {}
+_SQLITE_FINGERPRINT_LOCK = threading.RLock()
+
+
+def _close_sqlite_fingerprint_connections():
+    with _SQLITE_FINGERPRINT_LOCK:
+        for conn in list(_SQLITE_FINGERPRINT_CONNECTIONS.values()):
+            try:
+                conn.close()
+            except Exception:
+                pass
+        _SQLITE_FINGERPRINT_CONNECTIONS.clear()
+
+
+def _sqlite_data_version(db_path: Path):
+    """Read data_version from one persistent read-only connection per DB."""
+    import sqlite3
+    key = str(Path(db_path).resolve())
+    with _SQLITE_FINGERPRINT_LOCK:
+        conn = _SQLITE_FINGERPRINT_CONNECTIONS.get(key)
+        try:
+            if conn is None:
+                conn = sqlite3.connect(
+                    f"file:{key}?mode=ro",
+                    uri=True,
+                    timeout=0.05,
+                    check_same_thread=False,
+                )
+                conn.execute("PRAGMA busy_timeout=50")
+                _SQLITE_FINGERPRINT_CONNECTIONS[key] = conn
+            return conn.execute("PRAGMA data_version").fetchone()[0]
+        except Exception:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            _SQLITE_FINGERPRINT_CONNECTIONS.pop(key, None)
+            return None
+
+
+atexit.register(_close_sqlite_fingerprint_connections)
 _CLI_SESSIONS_CACHE_WAIT_SECONDS = 0.25
 # Event waits that keep stale rows visible while a rebuild is in flight.
 _CLI_SESSIONS_CACHE_STALE_WAIT_SECONDS = 0.10
@@ -1711,11 +1755,9 @@ class Session:
         n = 0
         for m in messages:
             if isinstance(m, dict):
-                # Inline role check to avoid the _message_role helper call
-                # on every iteration. dict.get('role') with default '' is
-                # materially faster than a function call for the hot loop.
-                role = m.get('role')
-                if isinstance(role, str) and role == 'user':
+                # Use the same semantic predicate as state.db projections so
+                # sidecar and imported rows cannot disagree about user turns.
+                if is_human_user_turn(m):
                     n += 1
         return n
 
@@ -7174,13 +7216,10 @@ def _sqlite_content_fingerprint(db_path: Path):
     COLLIDE with a previously cached stamp (same nanosecond bucket + a WAL frame
     that lands at the same offset/size after a prior checkpoint truncation), so a
     freshly-committed gateway/CLI session is intermittently served from the stale
-    Python cache. PRAGMA data_version does NOT help here either — read from a
-    fresh per-request connection it always reports that connection's own initial
-    value and never advances (verified). A cheap content fingerprint over the
-    sessions/messages tables, read on a fresh connection, DOES advance on every
-    commit (incl. external gateway writes) and is immune to mtime granularity.
-    Cost is a pair of indexed COUNT/MAX queries (sub-ms), far cheaper than the
-    full uncached session scan this key gates.
+    Python cache. A persistent read-only connection samples PRAGMA data_version
+    across external commits, while a fresh connection still supplies the
+    existing MAX(rowid) content fallback. The combined token observes in-place
+    display metadata updates without adding a full session scan to the hot path.
     """
     try:
         if not Path(db_path).exists():
@@ -7224,7 +7263,7 @@ def _sqlite_content_fingerprint(db_path: Path):
                     parts.append(row[0] if row else None)
                 except Exception:
                     parts.append(None)
-            return tuple(parts)
+            return (_sqlite_data_version(db_path), *parts)
         finally:
             try:
                 conn.close()
@@ -7846,6 +7885,7 @@ def _load_cli_sessions_uncached(
                     'end_reason': row.get('end_reason'),
                     'actual_message_count': row.get('actual_message_count'),
                     'user_message_count': row.get('actual_user_message_count'),
+                    'actual_user_message_count': row.get('actual_user_message_count'),
                     '_lineage_root_id': row.get('_lineage_root_id'),
                     '_lineage_tip_id': row.get('_lineage_tip_id'),
                     '_compression_segment_count': row.get('_compression_segment_count'),

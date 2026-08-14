@@ -1,10 +1,96 @@
 """Shared helpers for reading Hermes Agent sessions from state.db."""
 import logging
+import json
 import sqlite3
 from contextlib import closing
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+from api.compression_anchor import is_context_compression_marker
+
+_TODO_INJECTION_HEADER = "[Your active task list was preserved across context compression]"
+_LEGACY_CONTINUATION_HANDOFFS = {
+    "Continue from the compressed conversation context above. This marker exists because no human user turn was available.",
+    "Continue from the compressed conversation context above. This marker exists because the compacted transcript contained no preserved user turn.",
+}
+
+
+def _human_turn_content_text(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict):
+                for key in ("text", "content"):
+                    value = part.get(key)
+                    if isinstance(value, str):
+                        parts.append(value)
+                        break
+        return "\n".join(parts)
+    if content is None:
+        return ""
+    return str(content)
+
+
+def _is_structured_serialized_content(content: str) -> bool:
+    if not content.lstrip().startswith(("{", "[")):
+        return False
+    try:
+        return isinstance(json.loads(content), (dict, list))
+    except (TypeError, ValueError):
+        return False
+
+
+def is_human_user_turn(message: object) -> bool:
+    """Return whether one persisted message is a canonical human turn."""
+    if not isinstance(message, dict) or message.get("role") != "user":
+        return False
+    display_kind = message.get("display_kind")
+    if display_kind is not None and str(display_kind).strip():
+        return False
+    if message.get("_source") == "process_wakeup" or message.get("source") == "process_wakeup":
+        return False
+    if message.get("_compressed_summary"):
+        return False
+    content = message.get("content")
+    text = _human_turn_content_text(content)
+    if isinstance(content, str) and _is_structured_serialized_content(content):
+        return False
+    if is_context_compression_marker(message) or text.lstrip().startswith(_TODO_INJECTION_HEADER):
+        return False
+    return text.strip() not in _LEGACY_CONTINUATION_HANDOFFS
+
+
+def _human_user_turn_sql_predicate(message_cols: set[str], alias: str = "m") -> str:
+    """Build the native-SQL equivalent of :func:`is_human_user_turn`."""
+    required = {"role", "content", "display_kind"}
+    if not required.issubset(message_cols):
+        return "NULL"
+    clauses = [
+        f"{alias}.role = 'user'",
+        f"({alias}.display_kind IS NULL OR TRIM({alias}.display_kind) = '')",
+    ]
+    if "source" in message_cols:
+        clauses.append(f"COALESCE({alias}.source, '') <> 'process_wakeup'")
+    if "_source" in message_cols:
+        clauses.append(f"COALESCE({alias}._source, '') <> 'process_wakeup'")
+    if "_compressed_summary" in message_cols:
+        clauses.append(f"COALESCE({alias}._compressed_summary, 0) = 0")
+    content = f"{alias}.content"
+    content_text = f"LOWER(LTRIM(CAST({content} AS TEXT)))"
+    clauses.extend([
+        f"typeof({content}) = 'text'",
+        f"NOT (typeof({content}) = 'text' AND json_valid({content}) AND json_type({content}) IN ('array', 'object'))",
+        f"{content_text} NOT LIKE '[context compaction%'",
+        f"{content_text} NOT LIKE '[your active task list was preserved across context compression]%'",
+        f"{content_text} NOT LIKE '[session arc summary%'",
+        f"{content} NOT IN ({', '.join(repr(value) for value in sorted(_LEGACY_CONTINUATION_HANDOFFS))})",
+    ])
+    return "(" + " AND ".join(clauses) + ")"
 
 
 def open_state_db_readonly(db_path: Path, log: logging.Logger | None = None) -> sqlite3.Connection:
@@ -623,15 +709,22 @@ def read_importable_agent_session_rows(
 
         if use_messages_join:
             actual_count_expr = f"COUNT(m.{count_col})"
-            if 'role' in message_cols:
-                user_message_count_expr = "COUNT(CASE WHEN LOWER(m.role) = 'user' THEN 1 END)"
-            else:
-                # No role column, so user turns are not separable from the total.
-                # Report NULL rather than the total: consumers that only need a
-                # coarse liveness signal fall back to ``actual_message_count``,
-                # while anything displaying the number as a user-turn count must
-                # be able to tell "unknown" from "every message was a user turn".
+            human_predicate = _human_user_turn_sql_predicate(message_cols)
+            if human_predicate == "NULL":
                 user_message_count_expr = "NULL"
+            else:
+                # Structured content needs the Python classifier, so an SQL
+                # projection must fail closed for that row rather than count
+                # only the scalar siblings and present a partial truth.
+                structured_content = (
+                    "EXISTS (SELECT 1 FROM messages sm "
+                    "WHERE sm.session_id = s.id AND "
+                    "(typeof(sm.content) <> 'text' OR sm.content LIKE '{%' OR sm.content LIKE '[%'))"
+                )
+                user_message_count_expr = (
+                    f"CASE WHEN {structured_content} THEN NULL "
+                    f"ELSE COUNT(CASE WHEN {human_predicate} THEN 1 END) END"
+                )
             last_activity_expr = "MAX(m.timestamp)" if messages_has_timestamp else "NULL"
             join_clause = "LEFT JOIN messages m ON m.session_id = s.id"
             group_by_clause = "GROUP BY s.id"
