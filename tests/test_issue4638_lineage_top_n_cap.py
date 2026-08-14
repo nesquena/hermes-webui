@@ -13,6 +13,9 @@ cap (enrich all), (4) lists at/under the cap probe everything.
 """
 from __future__ import annotations
 
+import inspect
+
+import api.agent_sessions as agent_sessions
 import api.models as models
 
 
@@ -87,3 +90,10 @@ def test_enrichment_failure_is_swallowed(monkeypatch):
     monkeypatch.setattr(models, "_active_state_db_path", lambda: ":memory:")
     # Must not raise.
     models._enrich_sidebar_lineage_metadata(_sessions(10))
+
+
+def test_lineage_message_stats_pin_the_covering_session_timestamp_index():
+    source = inspect.getsource(agent_sessions.read_session_lineage_metadata)
+
+    assert "FROM {messages_from}" in source
+    assert '"messages INDEXED BY idx_messages_session"' in source

@@ -25,6 +25,8 @@ even when it falls beyond the cap.
 """
 from __future__ import annotations
 
+import sqlite3
+
 import api.models as models
 
 
@@ -32,9 +34,10 @@ def _capture_probed_ids(monkeypatch):
     """Patch _read_state_db_sidebar_overrides to record both id tiers it is asked for."""
     seen = {}
 
-    def _fake_read(db_path, id_set, count_session_ids=None):
+    def _fake_read(db_path, id_set, count_session_ids=None, sidebar_message_counts=None):
         seen["source_ids"] = set(id_set)
         seen["count_ids"] = None if count_session_ids is None else set(count_session_ids)
+        seen["sidebar_message_counts"] = sidebar_message_counts
         return {}
 
     monkeypatch.setattr(models, "_read_state_db_sidebar_overrides", _fake_read)
@@ -106,7 +109,7 @@ def test_list_under_cap_counts_everything(monkeypatch):
 
 def test_override_failure_is_swallowed(monkeypatch):
     """Override lookup must fail open — a DB error never breaks /api/sessions."""
-    def _boom(db_path, id_set, count_session_ids=None):
+    def _boom(db_path, id_set, count_session_ids=None, sidebar_message_counts=None):
         raise RuntimeError("db down")
 
     monkeypatch.setattr(models, "_read_state_db_sidebar_overrides", _boom)
@@ -117,7 +120,7 @@ def test_override_failure_is_swallowed(monkeypatch):
 
 def test_capped_rows_still_receive_source_overrides(monkeypatch):
     """A row beyond the COUNT cap must still get its SOURCE metadata applied."""
-    def _fake_read(db_path, id_set, count_session_ids=None):
+    def _fake_read(db_path, id_set, count_session_ids=None, sidebar_message_counts=None):
         # Return a webui source override for s400 (beyond the default 300 cap).
         return {
             "s400": {
@@ -171,3 +174,94 @@ def test_stale_cli_json_beyond_cap_stays_webui_via_real_db(monkeypatch, tmp_path
     assert sessions[400].get("session_source") == "webui", (
         "session_source must be reclassified to webui from state.db"
     )
+
+
+def _state_db_with_competing_message_indexes(path):
+    conn = sqlite3.connect(str(path))
+    conn.executescript(
+        """
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            source TEXT,
+            session_source TEXT,
+            title TEXT,
+            message_count INTEGER
+        );
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY,
+            session_id TEXT,
+            role TEXT,
+            content TEXT,
+            timestamp REAL
+        );
+        CREATE INDEX idx_messages_session ON messages(session_id, timestamp);
+        CREATE INDEX idx_messages_session_id ON messages(session_id, id);
+        """
+    )
+    for sid, count in (("same", 2), ("advanced", 3)):
+        conn.execute(
+            "INSERT INTO sessions (id, source, title, message_count) VALUES (?, 'webui', ?, ?)",
+            (sid, sid, count),
+        )
+        conn.executemany(
+            "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, 'user', 'x', ?)",
+            [(sid, float(index + 1)) for index in range(count)],
+        )
+    conn.commit()
+    conn.close()
+
+
+def _captured_message_aggregate(monkeypatch, db, **kwargs):
+    statements = []
+
+    def open_traced(_path):
+        conn = sqlite3.connect(str(db))
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(models, "open_state_db_readonly", open_traced)
+    result = models._read_state_db_sidebar_overrides(
+        db,
+        {"same", "advanced"},
+        count_session_ids={"same", "advanced"},
+        **kwargs,
+    )
+    aggregate = next(
+        statement for statement in statements
+        if "COUNT(*) AS actual_message_count" in statement
+    )
+    return result, aggregate
+
+
+def test_message_count_aggregation_uses_covering_session_timestamp_index(monkeypatch, tmp_path):
+    db = tmp_path / "state.db"
+    _state_db_with_competing_message_indexes(db)
+
+    result, aggregate = _captured_message_aggregate(monkeypatch, db)
+
+    conn = sqlite3.connect(str(db))
+    try:
+        plan = " ".join(
+            str(row[3]) for row in conn.execute("EXPLAIN QUERY PLAN " + aggregate)
+        )
+    finally:
+        conn.close()
+    assert "INDEXED BY idx_messages_session" in aggregate
+    assert "COVERING INDEX idx_messages_session" in plan
+    assert result["advanced"]["_state_db_message_count"] == 3
+
+
+def test_message_count_aggregation_only_reads_rows_ahead_of_sidebar(monkeypatch, tmp_path):
+    db = tmp_path / "state.db"
+    _state_db_with_competing_message_indexes(db)
+
+    result, aggregate = _captured_message_aggregate(
+        monkeypatch,
+        db,
+        sidebar_message_counts={"same": 2, "advanced": 1},
+    )
+
+    assert "'advanced'" in aggregate
+    assert "'same'" not in aggregate
+    assert result["same"]["_state_db_message_count"] == 2
+    assert result["advanced"]["_state_db_message_count"] == 3

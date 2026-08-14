@@ -1073,22 +1073,36 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
             # so the query can't raise and collapse the whole lineage metadata.
             messages_has_session_id = False
             messages_has_timestamp = False
+            messages_covering_index_present = False
             if has_messages_table:
                 cur.execute("PRAGMA table_info(messages)")
                 _message_cols = {row[1] for row in cur.fetchall()}
                 messages_has_session_id = 'session_id' in _message_cols
                 messages_has_timestamp = 'timestamp' in _message_cols
+                if messages_has_session_id and messages_has_timestamp:
+                    try:
+                        cur.execute("PRAGMA index_info(idx_messages_session)")
+                        messages_covering_index_present = [
+                            str(row[2]) for row in cur.fetchall()
+                        ][:2] == ['session_id', 'timestamp']
+                    except sqlite3.Error:
+                        messages_covering_index_present = False
             use_messages_query = has_messages_table and messages_has_session_id
             row_ids = list(rows)
             if use_messages_query:
                 last_at_expr = "MAX(timestamp) AS last_message_at" if messages_has_timestamp else "NULL AS last_message_at"
+                messages_from = (
+                    "messages INDEXED BY idx_messages_session"
+                    if messages_covering_index_present
+                    else "messages"
+                )
                 for i in range(0, len(row_ids), IN_CHUNK):
                     chunk = row_ids[i:i + IN_CHUNK]
                     placeholders = ','.join('?' * len(chunk))
                     cur.execute(
                         f"""
                         SELECT session_id, COUNT(*) AS actual_message_count, {last_at_expr}
-                        FROM messages
+                        FROM {messages_from}
                         WHERE session_id IN ({placeholders})
                         GROUP BY session_id
                         """,

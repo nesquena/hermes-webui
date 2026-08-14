@@ -379,13 +379,15 @@ def _read_active_profile_file() -> str:
 # is the canonical replacement for scattered `if name == 'default':` checks
 # in switch_profile, get_active_hermes_home, _validate_profile_name, etc.
 #
-# Cost note: list_profiles_api() shells out via hermes_cli (non-trivial), so
-# we memoize the lookup. The cache is invalidated whenever profiles are
-# created, deleted, renamed, or cloned — i.e. on every mutation site we
-# control.
+# Cost note: list_profiles_api() walks every profile's skills and gateway state,
+# so it is non-trivial. The literal ``default`` mapping is authoritative at
+# process start; seed the cache as loaded with that known value so the first
+# sidebar profile filter cannot trigger a full profile inventory. The cache is
+# invalidated whenever profiles are created, deleted, renamed, or cloned — i.e.
+# on every mutation site we control — and then repopulates aliases lazily.
 _root_profile_name_cache: set[str] = {'default'}
 _root_profile_name_cache_lock = threading.Lock()
-_root_profile_name_cache_loaded = False
+_root_profile_name_cache_loaded = True
 
 
 def _invalidate_root_profile_cache() -> None:

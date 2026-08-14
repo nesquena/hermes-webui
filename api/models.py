@@ -6035,6 +6035,7 @@ def _read_state_db_sidebar_overrides(
     db_path: Path,
     session_ids: set[str],
     count_session_ids: set[str] | None = None,
+    sidebar_message_counts: dict[str, int] | None = None,
 ) -> dict[str, dict]:
     """Return cheap state.db source/title overrides for sidebar rows.
 
@@ -6049,16 +6050,31 @@ def _read_state_db_sidebar_overrides(
     it would silently drop rows (e.g. a stale ``cli`` JSON row whose state.db
     source is ``webui``) from the default sidebar. The expensive part is the
     ``messages`` aggregation (``COUNT(*)``/``MAX(timestamp)`` GROUP BY), which is
-    what blocked /api/sessions for 5-18s on power users; that scan is restricted
-    to ``count_session_ids`` (the top-N paint-priority rows). When
-    ``count_session_ids`` is None, both tiers cover the full set (caller opted
-    out of the cap).
+    what blocked /api/sessions for 5-18s on power users. That scan is restricted
+    first to ``count_session_ids`` (the top-N paint-priority rows), then — when
+    ``sidebar_message_counts`` is supplied — to rows whose transactional
+    ``sessions.message_count`` is actually ahead of the sidebar snapshot. The
+    standard covering ``idx_messages_session(session_id, timestamp)`` index is
+    selected explicitly so SQLite cannot choose the non-covering
+    ``idx_messages_session_id`` index and reread large message rows.
+
+    When ``count_session_ids`` is None, the top-N cap is disabled. When
+    ``sidebar_message_counts`` is None, the mismatch filter is disabled for
+    compatibility with direct callers.
     """
     wanted = {str(sid) for sid in (session_ids or set()) if sid}
     if count_session_ids is None:
         count_wanted = set(wanted)
     else:
         count_wanted = {str(sid) for sid in count_session_ids if sid} & wanted
+    normalized_sidebar_counts: dict[str, int] | None = None
+    if sidebar_message_counts is not None:
+        normalized_sidebar_counts = {}
+        for sid, count in sidebar_message_counts.items():
+            try:
+                normalized_sidebar_counts[str(sid)] = max(0, int(count or 0))
+            except (TypeError, ValueError):
+                normalized_sidebar_counts[str(sid)] = 0
     if not wanted or not db_path.exists():
         return {}
     try:
@@ -6083,12 +6099,21 @@ def _read_state_db_sidebar_overrides(
             messages_has_session_id = False
             messages_has_timestamp = False
             messages_has_title_fields = False
+            messages_covering_index_present = False
             if has_messages_table:
                 cur.execute("PRAGMA table_info(messages)")
                 message_cols = {str(row[1]) for row in cur.fetchall()}
                 messages_has_session_id = 'session_id' in message_cols
                 messages_has_timestamp = 'timestamp' in message_cols
                 messages_has_title_fields = {'session_id', 'role', 'content', 'timestamp'}.issubset(message_cols)
+                if messages_has_session_id and messages_has_timestamp:
+                    try:
+                        cur.execute("PRAGMA index_info(idx_messages_session)")
+                        messages_covering_index_present = [
+                            str(row[2]) for row in cur.fetchall()
+                        ][:2] == ['session_id', 'timestamp']
+                    except Exception:
+                        messages_covering_index_present = False
 
             overrides: dict[str, dict] = {}
             delegated_title_ids: set[str] = set()
@@ -6096,6 +6121,7 @@ def _read_state_db_sidebar_overrides(
             chunk_size = 500
             for i in range(0, len(ids), chunk_size):
                 chunk = ids[i:i + chunk_size]
+                aggregate_ids: set[str] = set()
                 placeholders = ','.join('?' * len(chunk))
                 cur.execute(
                     f"""
@@ -6127,21 +6153,32 @@ def _read_state_db_sidebar_overrides(
                         entry['_state_db_source_label'] = source_meta.get('source_label')
                     if row['message_count'] is not None:
                         try:
-                            entry['_state_db_message_count'] = max(0, int(row['message_count'] or 0))
+                            state_message_count = max(0, int(row['message_count'] or 0))
+                            entry['_state_db_message_count'] = state_message_count
+                            if sid in count_wanted and (
+                                normalized_sidebar_counts is None
+                                or state_message_count > normalized_sidebar_counts.get(sid, 0)
+                            ):
+                                aggregate_ids.add(sid)
                         except (TypeError, ValueError):
                             pass
                     if entry:
                         overrides[sid] = entry
                 if has_messages_table and messages_has_session_id:
-                    count_chunk = [sid for sid in chunk if sid in count_wanted]
+                    count_chunk = [sid for sid in chunk if sid in aggregate_ids]
                     if not count_chunk:
                         continue
                     count_placeholders = ','.join('?' * len(count_chunk))
                     last_at_expr = "MAX(timestamp) AS last_message_at" if messages_has_timestamp else "NULL AS last_message_at"
+                    messages_from = (
+                        "messages INDEXED BY idx_messages_session"
+                        if messages_covering_index_present
+                        else "messages"
+                    )
                     cur.execute(
                         f"""
                         SELECT session_id, COUNT(*) AS actual_message_count, {last_at_expr}
-                        FROM messages
+                        FROM {messages_from}
                         WHERE session_id IN ({count_placeholders})
                         GROUP BY session_id
                         """,
@@ -6210,6 +6247,15 @@ def _apply_sidebar_state_db_overrides(sessions: list[dict]) -> None:
     except (TypeError, ValueError):
         _cap = 300
     all_ids = {str(s.get('session_id')) for s in sessions if s.get('session_id')}
+    sidebar_message_counts: dict[str, int] = {}
+    for session in sessions:
+        sid = str(session.get('session_id') or '')
+        if not sid:
+            continue
+        try:
+            sidebar_message_counts[sid] = max(0, int(session.get('message_count') or 0))
+        except (TypeError, ValueError):
+            sidebar_message_counts[sid] = 0
     if _cap > 0 and len(sessions) > _cap:
         count_ids = {str(s.get('session_id')) for s in sessions[:_cap] if s.get('session_id')}
     else:
@@ -6219,6 +6265,7 @@ def _apply_sidebar_state_db_overrides(sessions: list[dict]) -> None:
             _active_state_db_path(),
             all_ids,
             count_session_ids=count_ids,
+            sidebar_message_counts=sidebar_message_counts,
         )
     except Exception:
         return
