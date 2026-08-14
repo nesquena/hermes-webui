@@ -57,17 +57,31 @@ if [ ! -d "$itdir" ]; then error_exit "Failed to create $itdir"; fi
 # logic: if not set and file exists, use file value, else use default. Create file for persistence when the container is re-run
 # reasoning: needed when using docker compose as the file will exist in the stopped container, and changing the value from environment variables or configuration file must be propagated from the root init phase to the hermeswebui runtime phase
 it=$itdir/hermeswebui_user_uid
-if [ -z "${WANTED_UID+x}" ]; then
-  if [ -f $it ]; then WANTED_UID=$(cat $it); fi
+# Remember where the value came from. Auto-detection must never overwrite an
+# identity the operator chose explicitly — including the legitimate value 1024,
+# which is also the built-in default and was therefore indistinguishable from
+# "unset" (#7027). The source is persisted next to the value because `su` drops
+# the environment when this script re-enters as the runtime user, so an explicit
+# choice would otherwise look like a detected one on the second pass.
+it_source=$itdir/hermeswebui_user_uid_source
+_wanted_uid_source=""
+if [ -n "${WANTED_UID+x}" ]; then
+  _wanted_uid_source=explicit
+elif [ -f $it ]; then
+  WANTED_UID=$(cat $it)
+  if [ -f $it_source ]; then _wanted_uid_source=$(cat $it_source); fi
 fi
-# Auto-detect from mounted volumes if still unset (#569, #668).
+# Auto-detect from mounted volumes if still unset (#569, #668, #7027).
 # On macOS, host UIDs start at 501. Using the wrong UID means the container
 # user cannot read the bind-mounted files, making the workspace appear empty.
 # In two-container setups (hermes-agent + hermes-webui), the shared hermes-home
 # volume may be owned by the agent container's UID — detect from there first.
-if [ -z "${WANTED_UID+x}" ] || [ "${WANTED_UID}" = "1024" ]; then
-  # Priority 1: hermes-home shared volume — covers two-container Zeabur/Compose setups (#668)
-  for _probe_dir in "/home/hermeswebui/.hermes" "$HERMES_HOME" "/opt/data"; do
+if [ "$_wanted_uid_source" != "explicit" ] && { [ -z "${WANTED_UID+x}" ] || [ "${WANTED_UID}" = "1024" ]; }; then
+  # Priority 1: the configured state dir first (#7027) — in a single-container
+  # deploy it is a bind mount by definition, so its owner is the host identity
+  # the container has to match — then the hermes-home shared volume, which
+  # covers two-container Zeabur/Compose setups (#668)
+  for _probe_dir in "${HERMES_WEBUI_STATE_DIR:-/app/data}" "/home/hermeswebui/.hermes" "$HERMES_HOME" "/opt/data"; do
     if [ -d "$_probe_dir" ]; then
       _detected_uid=$(stat -c '%u' "$_probe_dir" 2>/dev/null || echo "")
       if [ -n "$_detected_uid" ] && [ "$_detected_uid" != "0" ]; then
@@ -78,8 +92,10 @@ if [ -z "${WANTED_UID+x}" ] || [ "${WANTED_UID}" = "1024" ]; then
     fi
   done
 fi
-if [ -z "${WANTED_UID+x}" ] || [ "${WANTED_UID}" = "1024" ]; then
-  # Priority 2: /workspace bind-mount — the standard single-container mount point
+if [ "$_wanted_uid_source" != "explicit" ] && { [ -z "${WANTED_UID+x}" ] || [ "${WANTED_UID}" = "1024" ]; }; then
+  # Priority 2: /workspace bind-mount — a useful signal when it is actually
+  # bind-mounted, but a stock image ships /workspace owned by the build-time
+  # 1024, which says nothing about the host, so it stays below the state dir (#7027)
   if [ -d "/workspace" ]; then
     _detected_uid=$(stat -c '%u' "/workspace" 2>/dev/null || echo "")
     if [ -n "$_detected_uid" ] && [ "$_detected_uid" != "0" ]; then
@@ -90,16 +106,22 @@ if [ -z "${WANTED_UID+x}" ] || [ "${WANTED_UID}" = "1024" ]; then
 fi
 WANTED_UID=${WANTED_UID:-1024}
 write_privtmpfile $it "$WANTED_UID"
+write_privtmpfile $it_source "${_wanted_uid_source:-detected}"
 echo "-- WANTED_UID: \"${WANTED_UID}\""
 
 it=$itdir/hermeswebui_user_gid
-if [ -z "${WANTED_GID+x}" ]; then
-  if [ -f $it ]; then WANTED_GID=$(cat $it); fi
+it_source=$itdir/hermeswebui_user_gid_source
+_wanted_gid_source=""
+if [ -n "${WANTED_GID+x}" ]; then
+  _wanted_gid_source=explicit
+elif [ -f $it ]; then
+  WANTED_GID=$(cat $it)
+  if [ -f $it_source ]; then _wanted_gid_source=$(cat $it_source); fi
 fi
-# Auto-detect GID from mounted volumes to match (#569, #668)
-if [ -z "${WANTED_GID+x}" ] || [ "${WANTED_GID}" = "1024" ]; then
-  # Priority 1: hermes-home shared volume
-  for _probe_dir in "/home/hermeswebui/.hermes" "$HERMES_HOME" "/opt/data"; do
+# Auto-detect GID from mounted volumes to match (#569, #668, #7027)
+if [ "$_wanted_gid_source" != "explicit" ] && { [ -z "${WANTED_GID+x}" ] || [ "${WANTED_GID}" = "1024" ]; }; then
+  # Priority 1: configured state dir first, then the hermes-home shared volume
+  for _probe_dir in "${HERMES_WEBUI_STATE_DIR:-/app/data}" "/home/hermeswebui/.hermes" "$HERMES_HOME" "/opt/data"; do
     if [ -d "$_probe_dir" ]; then
       _detected_gid=$(stat -c '%g' "$_probe_dir" 2>/dev/null || echo "")
       if [ -n "$_detected_gid" ] && [ "$_detected_gid" != "0" ]; then
@@ -110,8 +132,8 @@ if [ -z "${WANTED_GID+x}" ] || [ "${WANTED_GID}" = "1024" ]; then
     fi
   done
 fi
-if [ -z "${WANTED_GID+x}" ] || [ "${WANTED_GID}" = "1024" ]; then
-  # Priority 2: /workspace bind-mount
+if [ "$_wanted_gid_source" != "explicit" ] && { [ -z "${WANTED_GID+x}" ] || [ "${WANTED_GID}" = "1024" ]; }; then
+  # Priority 2: /workspace bind-mount — lower priority for the same reason as UID (#7027)
   if [ -d "/workspace" ]; then
     _detected_gid=$(stat -c '%g' "/workspace" 2>/dev/null || echo "")
     if [ -n "$_detected_gid" ] && [ "$_detected_gid" != "0" ]; then
@@ -122,6 +144,7 @@ if [ -z "${WANTED_GID+x}" ] || [ "${WANTED_GID}" = "1024" ]; then
 fi
 WANTED_GID=${WANTED_GID:-1024}
 write_privtmpfile $it "$WANTED_GID"
+write_privtmpfile $it_source "${_wanted_gid_source:-detected}"
 echo "-- WANTED_GID: \"${WANTED_GID}\""
 
 echo "== Most Environment variables set"
