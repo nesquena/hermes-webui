@@ -85,7 +85,7 @@ def test_insights_absolute_range_start_end_filters_by_window(monkeypatch, tmp_pa
             "estimated_cost": "0.0010", "model": "gpt-x",
         },
     ]
-    data = _call_insights(monkeypatch, tmp_path, entries, query=f"start={int(start_ts)}&end={int(end_ts)}", now=now)
+    data = _call_insights(monkeypatch, tmp_path, entries, query=f"start={_day(start_ts)}&end={_day(end_ts)}", now=now)
     # Session counts: in_window counted; older and newer excluded by the absolute window.
     assert data["total_sessions"] == 1
     assert data["total_input_tokens"] == 1200
@@ -197,6 +197,266 @@ def test_insights_absolute_range_valid_epoch_still_supported(monkeypatch, tmp_pa
     assert data["total_sessions"] == 1
     assert data["effective_start"] is not None
     assert data["effective_end"] is not None
+
+
+def test_insights_absolute_range_numeric_start_keeps_exact_precision(monkeypatch, tmp_path):
+    """A NUMERIC `start` is an exact Unix boundary: it must NOT be rounded
+    down to local midnight (the old code aligned every start to the day's
+    midnight), which admitted rows before the requested numeric start on the
+    start day.  Regression for Greptile P1 'Numeric endpoints retain precision
+    only on one special date' (review #4940944324)."""
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))        # server clock 2026-05-04 12:00
+    numeric_start = time.mktime((2026, 5, 1, 10, 0, 0, 0, 0, -1))  # 2026-05-01 10:00
+    entries = [
+        {"session_id": "before_numeric_start", "updated_at": numeric_start - 3600,
+         "created_at": numeric_start - 3600, "message_count": 1, "input_tokens": 500,
+         "output_tokens": 100, "estimated_cost": "0.0050", "model": "gpt-x"},
+        {"session_id": "after_numeric_start", "updated_at": numeric_start + 3600,
+         "created_at": numeric_start + 3600, "message_count": 1, "input_tokens": 10,
+         "output_tokens": 5, "estimated_cost": "0.0001", "model": "gpt-x"},
+    ]
+    # Numeric start exact; date-string end (whole day) today clamps to now.
+    data = _call_insights(monkeypatch, tmp_path, entries,
+                          query=f"start={int(numeric_start)}&end=2026-05-04", now=now)
+    # Only the session strictly after the numeric start is admitted.
+    assert data["total_sessions"] == 1
+    assert data["total_input_tokens"] == 10
+
+
+def test_insights_absolute_range_numeric_end_past_date_not_widened(monkeypatch, tmp_path):
+    """A NUMERIC `end` on a past date is an EXACT exclusive boundary: the old
+    code widened it to the following local midnight, so rows after the
+    requested numeric end on the end date leaked in.  Regression for Greptile
+    P1 'Numeric endpoints retain precision only on one special date'."""
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    numeric_end = time.mktime((2026, 5, 2, 14, 0, 0, 0, 0, -1))   # 2026-05-02 14:00 (past day)
+    start = time.mktime((2026, 5, 1, 0, 0, 0, 0, 0, -1))          # 2026-05-01 00:00
+    entries = [
+        {"session_id": "at_end_exact", "updated_at": numeric_end, "created_at": numeric_end,
+         "message_count": 1, "input_tokens": 999, "output_tokens": 999,
+         "estimated_cost": "0.9999", "model": "gpt-x"},
+        {"session_id": "after_numeric_end_same_day", "updated_at": numeric_end + 3600,
+         "created_at": numeric_end + 3600, "message_count": 1, "input_tokens": 700,
+         "output_tokens": 200, "estimated_cost": "0.0070", "model": "gpt-x"},
+        {"session_id": "in_range", "updated_at": start + 3600, "created_at": start + 3600,
+         "message_count": 1, "input_tokens": 10, "output_tokens": 5,
+         "estimated_cost": "0.0001", "model": "gpt-x"},
+    ]
+    # Numeric start AND numeric end: exact [start, end), both on past dates.
+    data = _call_insights(monkeypatch, tmp_path, entries,
+                          query=f"start={int(start)}&end={int(numeric_end)}", now=now)
+    # start=2026-05-01 00:00 (exact), end=2026-05-02 14:00 exact exclusive:
+    # at_end and after_end both OUT (the old widened end admitted them), in OUT.
+    assert data["total_sessions"] == 1
+    assert data["total_input_tokens"] == 10
+
+
+def test_insights_absolute_range_numeric_midnight_is_exact_not_whole_day(monkeypatch, tmp_path):
+    """A numeric `end` exactly at today's midnight is an EXACT boundary, not a
+    whole-day 'today' selection: rows stamped after that midnight (but before
+    the server clock) must stay OUT.  Regression for Greptile P1 'Numeric
+    endpoints retain precision only on one special date'."""
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))          # server clock 2026-05-04 12:00
+    today_midnight = time.mktime((2026, 5, 4, 0, 0, 0, 0, 0, -1))
+    start = time.mktime((2026, 5, 1, 0, 0, 0, 0, 0, -1))
+    entries = [
+        {"session_id": "before_midnight", "updated_at": today_midnight - 60,
+         "created_at": today_midnight - 60, "message_count": 1, "input_tokens": 10,
+         "output_tokens": 5, "estimated_cost": "0.0001", "model": "gpt-x"},
+        {"session_id": "after_midnight_today", "updated_at": today_midnight + 60,
+         "created_at": today_midnight + 60, "message_count": 1, "input_tokens": 999,
+         "output_tokens": 999, "estimated_cost": "0.9999", "model": "gpt-x"},
+    ]
+    # Numeric end == today midnight: exact exclusive boundary.
+    data = _call_insights(monkeypatch, tmp_path, entries,
+                          query=f"start={int(start)}&end={int(today_midnight)}", now=now)
+    assert data["total_sessions"] == 1
+    assert data["total_input_tokens"] == 10
+
+
+def test_insights_absolute_range_state_db_numeric_end_not_widened(monkeypatch, tmp_path):
+    """The CLI/state.db path applies the same exact numeric-end boundary: a
+    numeric end on a past date is not widened to the next midnight, so a CLI
+    session after the requested numeric end stays OUT.  Regression for Greptile
+    P1 'Numeric endpoints retain precision only on one special date'."""
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    numeric_end = time.mktime((2026, 5, 2, 14, 0, 0, 0, 0, -1))
+    start = time.mktime((2026, 5, 1, 0, 0, 0, 0, 0, -1))
+    state_rows = [
+        {"id": "cli_after_end", "source": "cli", "model": "gpt-5.5", "message_count": 1,
+         "input_tokens": 700, "output_tokens": 200, "estimated_cost_usd": 0.0070,
+         "started_at": numeric_end + 3600, "ended_at": numeric_end + 3600},
+        {"id": "cli_in", "source": "cli", "model": "gpt-5.5", "message_count": 1,
+         "input_tokens": 10, "output_tokens": 5, "estimated_cost_usd": 0.0001,
+         "started_at": start + 3600, "ended_at": start + 3600},
+    ]
+    data = _call_insights_with_state_db(monkeypatch, tmp_path, [], state_rows,
+                                        query=f"start={int(start)}&end={int(numeric_end)}", now=now)
+    # cli_after_end (past the numeric end on the end day) stays OUT.
+    assert data["total_sessions"] == 1
+    assert data["total_input_tokens"] == 10
+
+
+def test_insights_absolute_range_fallback_reports_mode_trailing(monkeypatch, tmp_path):
+    """A custom-range request that fails closed to the trailing window must
+    report mode='trailing' so the client renders the window actually served,
+    never the rejected raw inputs.  Regression for Greptile P1 'custom range
+    that normalizes to trailing still displays the raw custom range'."""
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    entries = [
+        {"session_id": "today", "updated_at": now, "created_at": now,
+         "message_count": 1, "input_tokens": 10, "output_tokens": 5,
+         "estimated_cost": "0.0001", "model": "gpt-x"},
+    ]
+    future = now + (30 * 86400)
+    # All-future start -> falls back to the trailing window.
+    data = _call_insights(monkeypatch, tmp_path, entries, query=f"start={int(future)}", now=now)
+    assert data["mode"] == "trailing"
+    assert data["effective_start"] is None
+    # A genuinely custom (valid) request reports mode='custom' + effective bounds.
+    start_ts = now - (2 * 86400)
+    data2 = _call_insights(monkeypatch, tmp_path, entries,
+                           query=f"start={int(start_ts)}&end={int(now)}", now=now)
+    assert data2["mode"] == "custom"
+    assert data2["effective_start"] is not None
+
+
+def test_insights_refresh_restores_button_when_latest_regardless_of_animate():
+    # The refresh button must be restored by the LATEST request no matter
+    # whether that request was animated.  An old animated request superseded
+    # by a non-animated one left the button disabled forever (review #4940944324,
+    # "A superseding non-animated load can permanently disable Refresh").
+    load = _function_body(PANELS_JS, "loadInsights")
+    assert "if (animate && refreshBtn && reqToken === _insightsReqToken)" not in load
+    assert "if (refreshBtn && reqToken === _insightsReqToken)" in load
+
+
+def test_insights_footer_keys_off_server_mode_not_raw_inputs():
+    # A custom request that fell back to the trailing window must render the
+    # trailing window actually served, never the rejected raw inputs.  The
+    # footer keys off the server's `mode` field + effective bounds; reading
+    # the raw date inputs back would show a future/invalid range (review
+    # #4940944324, "custom range that normalizes to trailing ...").
+    render = _function_body(PANELS_JS, "_renderInsights")
+    assert "d.mode === 'custom'" in render
+    # No raw-input fallback for the range label anymore.
+    assert "$('insightsStart') || {}).value || '…'" not in render
+
+
+def test_insights_refresh_restored_by_latest_request_runtime():
+    """Deferred-Promise runtime test for the superseding-load bug (review
+    #4940944324): an ANIMATED request A disables #insightsRefreshBtn; a
+    NON-animated request B then supersedes A.  B is the latest and finishing
+    B must restore the button even though B itself never animated - otherwise
+    A's disabled state sticks forever.  Exercises BOTH success and error
+    orderings (B finishing before/after the stale A)."""
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        pytest.skip("node not available")
+
+    load_fn = _function_body(PANELS_JS, "loadInsights")
+    # _function_body() starts at "function loadInsights(" which drops the
+    # `async` modifier the real source declares (the body awaits).  Restore it
+    # so the extracted function stays async exactly like the shipped source.
+    if load_fn.startswith("function loadInsights("):
+        load_fn = "async " + load_fn
+
+    harness = textwrap.dedent(
+        """
+        %(load_fn)s
+
+        // Mutable holders so BOTH scenarios read the `$`-resolved elements.
+        let curBox = { innerHTML: '' };
+        let curBtn = { style: {}, disabled: false };
+
+        // ---- deferred-promise control ----
+        function deferred() {
+          let resolve, reject;
+          const p = new Promise((res, rej) => { resolve = res; reject = rej; });
+          return { p, resolve, reject };
+        }
+
+        // api() returns a controllable promise per call path, keyed by call count.
+        let callSeq = 0;
+        const dq = [];           // ordered deferreds for all api() calls
+        let apiDeferreds = null; // snapshot AFTER each loadInsights() returns
+        function api(path) {
+          const d = deferred();
+          d.qkey = callSeq++;
+          dq.push(d);
+          return d.p;
+        }
+        global._insightsReqToken = 0;
+        global.api = api;
+        global._renderInsights = () => {};
+        global._syncSystemHealthMonitorVisibility = () => {};
+        global.pollSystemHealth = () => {};
+        global.t = k => k;
+        global.esc = s => s;
+        global.$ = (id) => {
+          if (id === 'insightsContent') return curBox;
+          if (id === 'insightsRefreshBtn') return curBtn;
+          if (id === 'insightsPeriod') return { value: 'custom' };
+          if (id === 'insightsStart' || id === 'insightsEnd') return { value: '' };
+          return null;
+        };
+
+        function snapshotLatest(n) {
+          // the LAST `n` deferreds are the current in-flight load's sub-promises
+          const s = dq.slice(-n);
+          return s;
+        }
+        function hitAll(arr, fn) { for (const d of arr) fn(d); }
+        function resolveAll(arr) { hitAll(arr, d => d.resolve({ total_sessions: 0 })); }
+        function rejectAll(arr) { hitAll(arr, d => d.reject(new Error('boom'))); }
+
+        // --- Scenario SUCCESS: animated A, then non-animated B supersedes ---
+        curBox = { innerHTML: '' };
+        curBtn = { style: {}, disabled: false };
+        const pa = loadInsights(true);           // A: 3 api() calls
+        if (curBtn.disabled !== true) throw new Error('A should disable the button');
+        const aDeferreds = snapshotLatest(3);
+        const pb = loadInsights();               // B: 3 api() calls (supersedes A)
+        const bDeferreds = snapshotLatest(3);
+        // Resolve B (latest) FIRST...
+        resolveAll(bDeferreds);
+        await pb;
+        if (curBtn.disabled) throw new Error('latest (non-animated) B must restore the button');
+        // ...then the stale A.  Its finally must be rejected by the token guard.
+        resolveAll(aDeferreds);
+        await pa;
+        if (curBtn.disabled) throw new Error('stale A must be rejected; button stays enabled');
+
+        // --- Scenario ERROR: latest non-animated B rejects, stale A rejects after ---
+        curBox = { innerHTML: '' };
+        curBtn = { style: {}, disabled: false };
+        global._insightsReqToken = 0;
+        const pa2 = loadInsights(true);          // A2 (animated): disables
+        if (curBtn.disabled !== true) throw new Error('A2 should disable the button');
+        const a2d = snapshotLatest(3);
+        const pb2 = loadInsights();              // B2 (non-animated, latest)
+        const b2d = snapshotLatest(3);
+        rejectAll(b2d);                          // latest errors first
+        await pb2;
+        if (curBtn.disabled) throw new Error('latest (non-animated, erroring) B must restore the button');
+        rejectAll(a2d);                          // stale A2 errors after
+        await pa2;
+        if (curBtn.disabled) throw new Error('stale A2 must be rejected; button stays enabled');
+
+        console.log(JSON.stringify({ successPass: true, errorPass: true }));
+        """
+    ) % {"load_fn": load_fn}
+
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=60, check=False)
+    assert proc.returncode == 0, f"node harness failed:\n{proc.stdout}\n{proc.stderr}"
+    out = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert out["successPass"] is True
+    assert out["errorPass"] is True
 
 
 def _function_body(src, name):
@@ -311,10 +571,13 @@ def test_insights_absolute_range_explicit_today_end_admits_no_future_same_day(mo
             "estimated_cost": "0.9999", "model": "gpt-x",
         },
     ]
-    # Explicit end = today midnight.  A session BEFORE the server clock but
-    # after that boundary still belongs; the future-stamped one must not leak.
+    # Explicit WHOLE-DAY end = today's calendar day, sent as a DATE STRING.
+    # (A numeric value exactly at today's midnight is now an exact `end`
+    # boundary, not a whole-day selection - see the numeric-precision tests.)
+    # A session BEFORE the server clock but after the day's start belongs;
+    # the future-stamped one must not leak.
     data = _call_insights(monkeypatch, tmp_path, entries,
-                          query=f"start={int(start_ts)}&end={int(today_midnight)}", now=now)
+                          query=f"start={int(start_ts)}&end=2026-05-04", now=now)
     assert data["total_sessions"] == 1
     assert data["total_input_tokens"] == 200
 
@@ -540,7 +803,7 @@ def test_insights_absolute_range_dst_transition_daily_buckets(monkeypatch, tmp_p
             },
         ]
         data = _call_insights(monkeypatch, tmp_path, entries,
-                              query=f"start={int(start_ts)}&end={int(end_ts)}", now=now)
+                              query=f"start=2026-03-06&end=2026-03-10", now=now)
         dates = [d["date"] for d in data["daily_tokens"]]
         assert dates == ["2026-03-06", "2026-03-07", "2026-03-08", "2026-03-09", "2026-03-10"]
         assert data["period_days"] == 5
@@ -592,7 +855,7 @@ def test_insights_absolute_range_dst_end_boundary_next_local_midnight(monkeypatc
             },
         ]
         data = _call_insights(monkeypatch, tmp_path, entries,
-                              query=f"start={int(start_ts)}&end={int(end_ts)}", now=now)
+                              query=f"start=2026-03-06&end=2026-03-08", now=now)
         # Spring-forward: the OLD fixed +86400s cutoff lands at 2026-03-09
         # 01:00 EDT (Mar 9 00:00 EST + 86400s), so an 00:30 EDT session of
         # the NEXT date would leak INTO the window.  The next-local-midnight
@@ -632,7 +895,7 @@ def test_insights_absolute_range_excludes_session_exactly_at_next_midnight(monke
         },
     ]
     data = _call_insights(monkeypatch, tmp_path, entries,
-                          query=f"start={int(start_ts)}&end={int(end_ts)}", now=now)
+                          query=f"start=2026-05-01&end=2026-05-02", now=now)
     # The session exactly at the exclusive next-midnight cutoff is excluded.
     assert data["total_sessions"] == 1
     assert data["total_input_tokens"] == 10
@@ -658,7 +921,7 @@ def test_insights_absolute_range_state_db_excludes_row_exactly_at_next_midnight(
          "started_at": next_midnight, "ended_at": next_midnight},
     ]
     data = _call_insights_with_state_db(monkeypatch, tmp_path, [], state_rows,
-                                        query=f"start={int(start_ts)}&end={int(end_ts)}", now=now)
+                                        query=f"start=2026-05-01&end=2026-05-02", now=now)
     assert data["total_sessions"] == 1
     assert data["total_input_tokens"] == 10
     assert data["total_output_tokens"] == 5
@@ -754,7 +1017,7 @@ def test_insights_absolute_range_beyond_366_days_keeps_series_in_sync(monkeypatc
             "estimated_cost": "0.0123", "model": "gpt-x",
         },
     ]
-    data = _call_insights(monkeypatch, tmp_path, entries, query=f"start={int(start_ts)}&end={int(end_ts)}", now=now)
+    data = _call_insights(monkeypatch, tmp_path, entries, query=f"start={_day(start_ts)}&end={_day(end_ts)}", now=now)
     # Filtering uses the FULL window (400+ days), so the session is counted.
     assert data["total_sessions"] == 1
     assert data["total_input_tokens"] == 1200

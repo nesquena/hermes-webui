@@ -4445,24 +4445,24 @@ async function loadInsights(animate) {
     refreshBtn.disabled = true;
   }
   const period = ($('insightsPeriod') || {}).value || '30';
-    const qs = new URLSearchParams();
-    if (period === 'custom') {
-      const startEl = $('insightsStart');
-      const endEl = $('insightsEnd');
-      const startVal = startEl && startEl.value;
-      const endVal = endEl && endEl.value;
-      // Send RAW YYYY-MM-DD strings, not browser-local epoch seconds: the
-      // server interprets them in ITS OWN timezone, so a browser in another
-      // timezone can never shift the selected calendar day.
-      if (startVal) qs.set('start', startVal);
-      if (endVal) qs.set('end', endVal);
-    } else {
-      qs.set('days', period);
-    }
-    // Latest-request guard: date inputs fire one load per change; a slower
-    // earlier response must never overwrite a newer range.  Each call takes
-    // its own token; only the newest token may render.
-    const reqToken = ++_insightsReqToken;
+  const qs = new URLSearchParams();
+  if (period === 'custom') {
+    const startEl = $('insightsStart');
+    const endEl = $('insightsEnd');
+    const startVal = startEl && startEl.value;
+    const endVal = endEl && endEl.value;
+    // Send RAW YYYY-MM-DD strings, not browser-local epoch seconds: the
+    // server interprets them in ITS OWN timezone, so a browser in another
+    // timezone can never shift the selected calendar day.
+    if (startVal) qs.set('start', startVal);
+    if (endVal) qs.set('end', endVal);
+  } else {
+    qs.set('days', period);
+  }
+  // Latest-request guard: date inputs fire one load per change; a slower
+  // earlier response must never overwrite a newer range.  Each call takes
+  // its own token; only the newest token may render.
+  const reqToken = ++_insightsReqToken;
   try {
     const [data, wikiStatus, skillUsage] = await Promise.all([
       api(`/api/insights?${qs.toString()}`),
@@ -4477,7 +4477,12 @@ async function loadInsights(animate) {
     if (reqToken !== _insightsReqToken) return;
     box.innerHTML = `<div style="color:var(--accent);font-size:12px">${esc(t('error_prefix') + e.message)}</div>`;
   } finally {
-    if (animate && refreshBtn && reqToken === _insightsReqToken) {
+    // Restore the refresh button when THIS request is the latest, regardless
+    // of whether it initiated the animation.  A superseding NON-animated
+    // request (e.g. a date change while an animated refresh is in flight)
+    // owns the shared control now; gating restoration on `animate` would
+    // leave the button permanently disabled after A(superseded)->B(latest).
+    if (refreshBtn && reqToken === _insightsReqToken) {
       refreshBtn.style.opacity = '';
       refreshBtn.disabled = false;
     }
@@ -4878,16 +4883,22 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
     </div>`;
 
   const periodSel = $('insightsPeriod');
-    const isCustomRange = periodSel && periodSel.value === 'custom';
-    // The server reports the EFFECTIVE calendar window it actually queried
-    // (after swap, DST alignment, and the 5-year cap), so the footer can
-    // never disagree with the rendered totals/chart.  Fall back to the raw
-    // inputs only if the server omits the effective bounds.
-    const effStart = isCustomRange && d.effective_start;
-    const effEnd = isCustomRange && d.effective_end;
-    const rangeLabel = isCustomRange
-      ? (effStart && effEnd ? effStart + ' → ' + effEnd : (($('insightsStart') || {}).value || '…') + ' → ' + (($('insightsEnd') || {}).value || '…'))
-      : t('insights_footer').replace('{days}', d.period_days);
+  // The server tells us which window it ACTUALLY served: "custom" means a
+  // real absolute window was queried (after swap/clamp/DST/5yr-cap), while
+  // "trailing" means the request fell back to the trailing days-window (e.g.
+  // an all-future or fully-invalid custom range).  Never trust the raw
+  // selector/inputs for a range that the server rejected and replaced - that
+  // would render a future/invalid range while the cards/chart show the
+  // trailing query (Greptile P1: 'custom range normalizes to trailing').
+  const isCustomRange = periodSel && periodSel.value === 'custom' && d.mode === 'custom';
+  // The server reports the EFFECTIVE calendar window it actually queried
+  // (after swap, DST alignment, and the 5-year cap).  Use it verbatim; the
+  // trailing footer shows the literal day count instead.
+  const effStart = isCustomRange && d.effective_start;
+  const effEnd = isCustomRange && d.effective_end;
+  const rangeLabel = isCustomRange
+    ? (effStart && effEnd ? effStart + ' → ' + effEnd : t('insights_footer').replace('{days}', d.period_days))
+    : t('insights_footer').replace('{days}', d.period_days);
     box.innerHTML = `
       ${_renderSystemHealthPanel()}
       ${_renderLlmWikiStatus(wikiStatus)}
