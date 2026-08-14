@@ -51,6 +51,7 @@ def test_put_writes_event_id_to_side_channel_dict():
         "put() must write event_id to STREAM_LAST_EVENT_ID[stream_id] — "
         "this is the side-channel the SSE consumer reads at emit time"
     )
+    assert 'event_id = f"{stream_id}:fallback:{fallback_event_seq[0]}"' in put_body
 
 
 def test_stream_channel_queue_item_carries_per_event_id_with_legacy_fallback():
@@ -74,6 +75,7 @@ def test_gateway_queue_item_carries_per_event_id_with_legacy_fallback():
         "subscribers while preserving legacy queue compatibility"
     )
     assert "q.put_nowait(queue_item)" in put_body
+    assert 'event_id = f"{stream_id}:fallback:{fallback_event_seq[0]}"' in put_body
 
 
 def test_sse_handler_reads_event_id_from_side_channel():

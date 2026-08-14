@@ -105,6 +105,8 @@ actions. The topbar remains focused on conversation context and the workspace/fi
 
 Browser notification ownership:
 
+    api/streaming.py    Emits a per-stream fallback SSE id when journal setup or
+    api/gateway_chat.py append fails, preserving identity for live subscribers.
     static/messages.js  Owns eligibility, exact SSE identity capture, normalized
                         presentation options, and the page-side claim when no
                         active worker can coordinate delivery.
@@ -112,7 +114,9 @@ Browser notification ownership:
                         both contexts use the same IndexedDB claim store.
 
 Identity-bearing approval, clarification, and completion notifications use the
-opaque `(streamId, lastEventId)` tuple as their claim key. An active worker is the
+opaque `(streamId, lastEventId)` tuple as their claim key. Live producers retain
+that tuple even when run-journal persistence is unavailable by issuing a bounded
+per-stream fallback SSE id. An active worker is the
 preferred owner; a page atomically claims the same key before direct delivery when
 registration is missing, inactive, rejected, or delayed during activation. Site-data
 clearing is the reset boundary because the replay contract does not define a safe

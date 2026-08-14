@@ -102,7 +102,9 @@ Reload one page and replay the first identity; the first two identities must eac
 have one owner, the replay must not create another notification, and the
 notification data URL must remain same-origin and in scope. The focused model also
 covers missing, inactive, rejected, and activation-delay registrations through a
-shared page-side IndexedDB claim.
+shared page-side IndexedDB claim. Live streaming and gateway producers also emit
+per-stream fallback SSE ids when run-journal initialization or append fails, so
+the production path retains an exact identity for the claim.
 
 ```bash
 python tests/browser_issue6673_service_worker.py

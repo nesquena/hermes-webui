@@ -945,6 +945,7 @@ def _run_gateway_chat_streaming(
     except Exception:
         run_journal = None
         logger.debug("Failed to initialize gateway run journal for stream %s", stream_id, exc_info=True)
+    fallback_event_seq = [0]
     cancel_event = threading.Event()
     with STREAMS_LOCK:
         CANCEL_FLAGS[stream_id] = cancel_event
@@ -970,6 +971,10 @@ def _run_gateway_chat_streaming(
                     STREAM_LAST_EVENT_ID[stream_id] = event_id
             except Exception:
                 logger.debug("Failed to append gateway event %s for stream %s", event, stream_id, exc_info=True)
+        if not event_id:
+            fallback_event_seq[0] += 1
+            event_id = f"{stream_id}:fallback:{fallback_event_seq[0]}"
+            STREAM_LAST_EVENT_ID[stream_id] = event_id
         if event_id and hasattr(q, "note_last_event_id"):
             try:
                 q.note_last_event_id(event_id)
