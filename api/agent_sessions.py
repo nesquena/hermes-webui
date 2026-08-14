@@ -17,7 +17,6 @@ _LEGACY_CONTINUATION_HANDOFFS = {
 _STRUCTURED_TEXT_TYPES = {"text", "input_text", "output_text"}
 _COMPRESSION_SUMMARY_PREFIXES = (
     "[context compaction",
-    "context compaction",
     "[context summary]:",
     "[session arc summary",
     "[end of prior context — compaction summary below]",
@@ -745,7 +744,7 @@ def read_importable_agent_session_rows(
                 # only the scalar siblings and present a partial truth.
                 structured_content = (
                     "EXISTS (SELECT 1 FROM messages sm "
-                    "WHERE sm.session_id = s.id AND "
+                    "WHERE sm.session_id = s.id AND sm.role = 'user' AND "
                     "(typeof(sm.content) <> 'text' OR sm.content LIKE '{%' OR sm.content LIKE '[%'))"
                 )
                 user_message_count_expr = (

@@ -634,6 +634,38 @@ def test_sidebar_lineage_count_matches_detail_merge_and_fails_closed_for_unknown
     routes._project_sidebar_lineage_user_counts([row])
     assert row["_lineage_user_message_count"] == 2
 
+    row = {"session_id": "lineage-tip", "_lineage_tip_id": "lineage-tip", "parent_session_id": "lineage-parent"}
+    monkeypatch.setattr(routes, "get_state_db_session_messages", lambda *args, **kwargs: [
+        {"role": "user", "content": '[{"type":"text","text":"structured"}]'},
+    ])
+    routes._project_sidebar_lineage_user_counts([row])
+    assert "_lineage_user_message_count" not in row
+
+
+def test_partial_incomplete_sidecar_lineage_preserves_collected_ancestors(monkeypatch):
+    child = SimpleNamespace(
+        session_id="a" * 32,
+        parent_session_id="b" * 32,
+        session_source="webui",
+        messages=[{"role": "user", "content": "new turn", "timestamp": 2.0}],
+    )
+    parent = SimpleNamespace(
+        session_id="b" * 32,
+        parent_session_id="c" * 32,
+        pre_compression_snapshot=True,
+        session_source="webui",
+        messages=[{"role": "user", "content": "old turn", "timestamp": 1.0}],
+    )
+    monkeypatch.setattr(
+        routes.Session,
+        "load",
+        lambda sid: {"b" * 32: parent}.get(sid),
+    )
+    assert [m["content"] for m in routes._webui_sidecar_lineage_messages_for_display(child)] == [
+        "old turn",
+        "new turn",
+    ]
+
 
 def test_process_wakeup_restamp_preserves_count_and_advances_data_version(tmp_path):
     db = tmp_path / "state.db"
@@ -763,13 +795,17 @@ def test_real_agent_state_db_schema_reports_text_user_turns(tmp_path):
     )
     conn.executemany(
         "INSERT INTO messages VALUES (?, 's1', ?, ?, ?, 1, 0)",
-        [(1, "user", "ordinary", 1), (2, "assistant", "reply", 2)],
+        [
+            (1, "user", "ordinary", 1),
+            (2, "assistant", '[{"type":"text","text":"reply"}]', 2),
+            (3, "user", "again", 3),
+        ],
     )
     conn.commit()
     conn.close()
 
     row = agent_sessions.read_importable_agent_session_rows(db, exclude_sources=None)[0]
-    assert row["actual_user_message_count"] == 1
+    assert row["actual_user_message_count"] == 2
 
 
 def test_compact_uses_the_canonical_human_turn_truth_table():
@@ -786,6 +822,13 @@ def test_compact_uses_the_canonical_human_turn_truth_table():
         {"role": "user", "content": {"type": "text", "text": "structured"}},
     ]
     assert session.compact()["user_message_count"] == 2
+
+
+def test_context_compaction_prose_remains_a_human_turn():
+    assert agent_sessions.is_human_user_turn({
+        "role": "user",
+        "content": "Context compaction is broken, please fix it",
+    })
 
 
 @pytest.mark.parametrize("content", [None, [], [{"type": "image_url"}], {"type": "tool_use", "id": "x"}, {"type": "text", "value": "missing text key"}])

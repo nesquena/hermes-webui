@@ -2416,6 +2416,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _smdEndParser();
     if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
     _clearOwnerInflightState();
+    if(typeof clearLocalTurnCountOwner==='function') clearLocalTurnCountOwner(activeSid);
     _clearStreamHidden(activeSid, streamId);  // #4416: terminal path, drop hidden tracker
     _clearStreamNotificationBackground(activeSid, streamId);
     _flushReasoningToAnchor();
@@ -6794,6 +6795,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       try{if(source&&source.readyState!==2)source.close();}catch(_){ }
       _clearOwnerInflightState();
+      if(typeof clearLocalTurnCountOwner==='function') clearLocalTurnCountOwner(activeSid);
       _clearStreamHidden(activeSid, streamId);  // #4416: terminal path, drop hidden tracker
       _clearStreamNotificationBackground(activeSid, streamId);
       _clearApprovalForOwner();
@@ -7053,6 +7055,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _streamFadeCleanupReduceMotionListener();
     if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
     _clearOwnerInflightState();
+    if(typeof clearLocalTurnCountOwner==='function') clearLocalTurnCountOwner(activeSid);
     _closeSource(source);
     _clearApprovalForOwner();
     _clearClarifyForOwner('terminal');
@@ -7122,6 +7125,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           replayOnly=true;
         }else if(!st.active){
           _clearOwnerInflightState();
+          if(typeof clearLocalTurnCountOwner==='function') clearLocalTurnCountOwner(activeSid);
           _clearApprovalForOwner();
           _clearClarifyForOwner('terminal');
           if(S.session&&S.session.session_id===activeSid){
