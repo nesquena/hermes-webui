@@ -1514,6 +1514,53 @@ function _getCachedRender(text, isUser){
   _renderCache.set(key, rendered);
   return rendered;
 }
+// ── Message-level media snapshot stamping ─────────────────────────────────
+// /api/media serves a file's CURRENT bytes. Since ETag revalidation (#6922),
+// an in-place overwrite (same filename) also rewrites every historical chat
+// preview that referenced it — the old/new comparison is lost. At settle time
+// the backend freezes the bytes of each local-file MEDIA: reference into a
+// content-addressed store and stamps the message with
+// `_media_snapshots: {path: digest}`. This helper rewrites the rendered HTML
+// of ONE message to append `&snap=<digest>` to the matching /api/media URLs
+// (and `data-snap` on lazy-preview placeholders), so old previews keep
+// showing the file as it was when the message was emitted.
+// Runs AFTER the text-keyed render cache: the cache stays pure-text, and each
+// message stamps its own digests — two messages with identical text but
+// different snapshots (exactly the old/new case) resolve independently.
+function _stampMediaSnapshots(html, snaps){
+  if(!html || !snaps || typeof snaps !== 'object') return html;
+  let out = String(html);
+  // Direct media URLs: rewrite each COMPLETE `path=` query value atomically.
+  // Value-level parsing (decode the whole value, exact map lookup) instead of
+  // substring split/join: when one path is a PREFIX of another
+  // (/tmp/a.png vs /tmp/a.png.backup) the naive rewrite corrupts the longer
+  // URL and drops its own digest. Matching is boundary-aware — the value runs
+  // to the next `&` separator or an attribute quote/whitespace — so nothing
+  // outside the value ever moves.
+  out = out.replace(/api\/media[?&]path=([^&"'\s<>]+)/g, (match, encodedPath)=>{
+    let decoded;
+    try{ decoded = decodeURIComponent(encodedPath); }
+    catch(e){ return match; }
+    const digest = snaps[decoded];
+    if(typeof digest === 'string' && /^[0-9a-f]{64}$/.test(digest)){
+      return match + '&snap=' + digest;
+    }
+    return match;
+  });
+  // Lazy-preview placeholders: data-path="<html-escaped raw path>" — match the
+  // complete attribute value, unescape HTML entities, then exact lookup (same
+  // prefix-safety: a longer path's attribute can never be partially matched).
+  const _unescapeHtml=(s)=>String(s||'').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&amp;/g,'&');
+  out = out.replace(/data-path="([^"]*)"/g, (match, rawValue)=>{
+    const decoded = _unescapeHtml(rawValue);
+    const digest = snaps[decoded];
+    if(typeof digest === 'string' && /^[0-9a-f]{64}$/.test(digest)){
+      return match + ' data-snap="' + digest + '"';
+    }
+    return match;
+  });
+  return out;
+}
 function _currentMessageRenderWindowSize(){
   return Math.max(
     MESSAGE_RENDER_WINDOW_DEFAULT,
@@ -7408,7 +7455,7 @@ function renderMd(raw){
     // Stash [label](url) links before autolink so the URL in href= is not re-linked
     const _link_stash=[];
     t=t.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^\s\)]+)\)/g,(_,lb,u)=>{_link_stash.push(_markdownAnchor(lb,u));return `\x00L${_link_stash.length-1}\x00`;});
-    t=t.replace(/(https?:\/\/[^\s<>"')\]]+)/g,(url)=>{const trail=url.match(/[.,;:!?)]$/)?url.slice(-1):'';const clean=trail?url.slice(0,-1):url;return `<a href="${clean}" target="_blank" rel="noopener">${esc(clean)}</a>${trail}`;});
+    t=t.replace(/(https?:\/\/[^\s<>"')\]\uFF09]+)/g,(url)=>{const trail=url.match(/[.,;:!?)\uFF09\uFF0C\uFF1B\uFF1A\uFF01\uFF1F\u3001\u3002]$/)?url.slice(-1):'';const clean=trail?url.slice(0,-1):url;return `<a href="${clean}" target="_blank" rel="noopener">${esc(clean)}</a>${trail}`;});
     t=t.replace(/\x00L(\d+)\x00/g,(_,i)=>_link_stash[+i]);
     t=t.replace(/\x00G(\d+)\x00/g,(_,i)=>_img_stash[+i]);
     // Escape any plain text that isn't already wrapped in a tag we produced
@@ -7710,9 +7757,11 @@ function renderMd(raw){
   // Stash <a>, <img> and <pre> blocks so autolink never runs inside them.
   const _al_stash=[];
   s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>|<img\b[^>]*>|<pre\b[^>]*>[\s\S]*?<\/pre>)/g,m=>{_al_stash.push(m);return `\x00B${_al_stash.length-1}\x00`;});
-  s=s.replace(/(https?:\/\/[^\s<>"'\)\]]+)/g,(url)=>{
-    // Strip trailing punctuation that was likely not part of the URL
-    const trail=url.match(/[.,;:!?)]$/)?url.slice(-1):'';
+  s=s.replace(/(https?:\/\/[^\s<>"')\]\uFF09]+)/g,(url)=>{
+    // Strip trailing punctuation that was likely not part of the URL.
+    // CJK full-width punctuation (）。，；：！？、) is included because LLMs
+    // frequently use full-width delimiters in Chinese/Japanese text.
+    const trail=url.match(/[.,;:!?)]$/)||url.match(/[\uFF09\uFF0C\uFF1B\uFF1A\uFF01\uFF1F\u3001\u3002]$/)?url.slice(-1):'';
     const clean=trail?url.slice(0,-1):url;
     return `<a href="${clean}" target="_blank" rel="noopener">${esc(clean)}</a>${trail}`;
   });
@@ -13425,7 +13474,13 @@ function _bindTransparentFadeCleanup(body){
   body.addEventListener('animationend', e=>{
     const span = e.target;
     if(!span || !span.classList || !span.classList.contains('stream-fade-word')) return;
-    span.replaceWith(document.createTextNode(span.textContent || ''));
+    // Keep the animated inline node stable for the lifetime of the live turn,
+    // exactly like _streamFadeBindCleanup() in messages.js. Replacing each word
+    // with a fresh text node makes native scroll anchoring choose a new anchor
+    // while the transparent prose row is still growing, producing a visible
+    // vertical bounce. Final settlement rebuilds plain persisted DOM.
+    span.classList.remove('is-new');
+    if(span.style) span.style.removeProperty('--stream-fade-ms');
   });
 }
 
@@ -16564,6 +16619,13 @@ function renderMessages(options){
       }).join('')}</div>`;
     }
     let bodyHtml = _getCachedRender(displayContent, isUser);
+    // Message-level media snapshots: settled assistant messages carry a
+    // path→digest map (written at settle time) freezing the file bytes the
+    // turn emitted. Stamp it AFTER the text-keyed render cache so identical
+    // text with different snapshots (old/new comparison) never collides.
+    if(!isUser && m && m._media_snapshots && typeof m._media_snapshots==='object'){
+      bodyHtml = _stampMediaSnapshots(bodyHtml, m._media_snapshots);
+    }
     if(!isUser&&m.provider_details){
       const summary=m.provider_details_label||'Provider details';
       bodyHtml += `<details class="provider-error-details"><summary>${esc(String(summary))}</summary><pre><code>${esc(String(m.provider_details))}</code></pre></details>`;
@@ -16784,10 +16846,15 @@ function renderMessages(options){
         if(!firstSeg&&thinkingText&&window._showThinking!==false&&!((isCompactWorklogMode()||isTransparentStream())&&_assistantThinkingBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs))) orderedSeg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
         const isLastTextPart=partIdx===lastTextPartIdx;
         const partBodyHtml=_getCachedRender(partDisplayText,false);
+        // Message-level media snapshots: transparent ordered segments carry the
+        // same per-message path→digest map as the main transcript; stamp it so
+        // historical previews freeze (&snap=) instead of following overwrites.
+        // Inlined in the template (no intermediate variable) so test-harness
+        // block extraction of the ordered-segment slice stays self-contained.
         if(isLastTextPart&&statusHtml){
           orderedSeg.insertAdjacentHTML('beforeend', statusHtml);
         }
-        orderedSeg.insertAdjacentHTML('beforeend', `${isLastTextPart?filesHtml:''}<div class="msg-body">${partBodyHtml}</div>${isLastTextPart?footHtml:''}`);
+        orderedSeg.insertAdjacentHTML('beforeend', `${isLastTextPart?filesHtml:''}<div class="msg-body">${(typeof m!=='undefined'&&m&&m._media_snapshots&&typeof m._media_snapshots==='object')?_stampMediaSnapshots(partBodyHtml,m._media_snapshots):partBodyHtml}</div>${isLastTextPart?footHtml:''}`);
         blocks.appendChild(orderedSeg);
         if(!firstSeg) firstSeg=orderedSeg;
       });
@@ -19165,7 +19232,8 @@ function loadDiffInline(container){
   root.querySelectorAll('.diff-inline-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
-    fetch('api/media?path='+encodeURIComponent(path))
+    const snapQuery=_mediaSnapQuery(el);
+    fetch('api/media?path='+encodeURIComponent(path)+snapQuery)
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
         if(text.length>DIFF_MAX_SIZE){
@@ -19194,8 +19262,18 @@ function _mediaSessionQuery(){
   return mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'';
 }
 
+// Message-level media snapshots: lazy preview loaders (pdf/html/csv/diff/
+// excalidraw) build their fetch URL from data-path at load time. The stamping
+// pass in _stampMediaSnapshots carries the content digest in data-snap;
+// append it here so the preview shows the file as the message emitted it.
+function _mediaSnapQuery(el){
+  const snap=el&&el.dataset?el.dataset.snap:'';
+  return (snap&&/^[0-9a-f]{64}$/.test(snap))?('&snap='+snap):'';
+}
+
 function _csvMediaUrl(path, opts={}){
   let url='api/media?path='+encodeURIComponent(path)+_mediaSessionQuery();
+  if(opts.snap) url+='&snap='+encodeURIComponent(opts.snap);
   if(opts.download) url+='&download=1';
   return url;
 }
@@ -19235,8 +19313,9 @@ function loadCsvInline(container){
   root.querySelectorAll('.csv-inline-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
-    const mediaUrl=_csvMediaUrl(path);
-    const downloadUrl=_csvMediaUrl(path,{download:true});
+    const snap=_mediaSnapQuery(el).replace(/^&snap=/,'');
+    const mediaUrl=_csvMediaUrl(path,{snap:snap||undefined});
+    const downloadUrl=_csvMediaUrl(path,{download:true,snap:snap||undefined});
     fetch(mediaUrl)
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
@@ -19255,7 +19334,8 @@ function loadExcalidrawInline(container){
   root.querySelectorAll('.excalidraw-inline-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
-    fetch('api/media?path='+encodeURIComponent(path))
+    const snapQuery=_mediaSnapQuery(el);
+    fetch('api/media?path='+encodeURIComponent(path)+snapQuery)
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
         if(text.length>EXCALIDRAW_MAX_SIZE){
@@ -19384,14 +19464,15 @@ function loadPdfInline(container){
     const path=el.dataset.path;
     const fname=path.split('/').pop()||path;
     const mediaSessionId=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)?String(S.session.session_id):'';
+    const snapQuery=_mediaSnapQuery(el);
     const publicMediaUrl='api/media?path='+encodeURIComponent(path);
-    const mediaUrl=publicMediaUrl+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'');
+    const mediaUrl=publicMediaUrl+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'')+snapQuery;
     const loadPdf=(pdfjsLib)=>{
       fetch(mediaUrl)
         .then(r=>{if(!r.ok) throw new Error(r.status); return r.arrayBuffer();})
         .then(buf=>{
           if(buf.byteLength>PDF_MAX_SIZE){
-            const dlUrl=publicMediaUrl+'&download=1';
+            const dlUrl=publicMediaUrl+'&download=1'+snapQuery;
             el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_too_large')}</span></div>`;
             return;
           }
@@ -19399,7 +19480,7 @@ function loadPdfInline(container){
         })
         .then(pdf=>{
           if(!pdf) return;
-          const dlUrl=publicMediaUrl+'&download=1';
+          const dlUrl=publicMediaUrl+'&download=1'+snapQuery;
           const total=pdf.numPages;
           const pagesLabel=total>1?` · ${total} pages`:'';
           const wrap=document.createElement('div');
@@ -19438,7 +19519,7 @@ function loadPdfInline(container){
           renderPage(1);
         })
         .catch(()=>{
-          const dlUrl=publicMediaUrl+'&download=1';
+          const dlUrl=publicMediaUrl+'&download=1'+snapQuery;
           el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_error')}</span></div>`;
         });
     };
@@ -19458,7 +19539,7 @@ function loadPdfInline(container){
       window.addEventListener('pdfjs-ready',()=>{ _pdfjsReady=true; loadPdf(window._pdfjsLib); },{once:true});
       setTimeout(()=>{
         if(!_pdfjsReady){
-          const dlUrl=publicMediaUrl+'&download=1';
+          const dlUrl=publicMediaUrl+'&download=1'+snapQuery;
           if(el.parentNode){
             el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_error')}</span></div>`;
           }
@@ -19479,22 +19560,23 @@ function loadHtmlInline(container){
     const path=el.dataset.path;
     const fname=path.split('/').pop()||path;
     const mediaSessionId=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)?String(S.session.session_id):'';
+    const snapQuery=_mediaSnapQuery(el);
     const publicMediaUrl='api/media?path='+encodeURIComponent(path);
-    const mediaUrl=publicMediaUrl+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'');
+    const mediaUrl=publicMediaUrl+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'')+snapQuery;
     fetch(mediaUrl, {cache:'no-store'})
       .then(r=>{if(!r.ok) throw new Error(r.status); return r.text();})
       .then(html=>{
         if(html.length>HTML_MAX_SIZE){
-          const openUrl=publicMediaUrl+'&inline=1';
+          const openUrl=publicMediaUrl+'&inline=1'+snapQuery;
           el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${openUrl}" target="_blank" rel="noopener">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_too_large')}</span></div>`;
           return;
         }
-        const openUrl=publicMediaUrl+'&inline=1';
+        const openUrl=publicMediaUrl+'&inline=1'+snapQuery;
         const safeHtml=html.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
         el.outerHTML=`<div class="html-preview-wrap"><div class="html-preview-header"><span>${t('html_sandbox_label')}</span><a href="${openUrl}" target="_blank" rel="noopener" class="html-open-link">${t('html_open_full')} ↗</a></div><iframe srcdoc="${safeHtml}" sandbox="allow-scripts" class="html-preview-iframe" loading="lazy"></iframe></div>`;
       })
       .catch(()=>{
-        const dlUrl=publicMediaUrl+'&download=1';
+        const dlUrl=publicMediaUrl+'&download=1'+snapQuery;
         el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_error')}</span></div>`;
       });
   });

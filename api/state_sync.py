@@ -210,6 +210,10 @@ def sync_session_title(session_id: str, title: str, profile: Optional[str] = Non
     title refreshes (where state.db already holds the initial auto-title) are
     effectively no-ops at the state.db layer -- acceptable because the primary
     goal is ensuring ``hermes sessions list`` is not blank.
+
+    On a title collision (two sessions with the same auto-title), the title is
+    de-duplicated via ``get_next_title_in_lineage`` (e.g. "My Session" ->
+    "My Session #2") and retried, so the second session is never left blank.
     """
     if not title:
         return
@@ -219,7 +223,16 @@ def sync_session_title(session_id: str, title: str, profile: Optional[str] = Non
     try:
         # Ensure the session row exists (idempotent) so the UPDATE has a target.
         db.ensure_session(session_id=session_id, source='webui')
-        db.set_auto_title_if_empty(session_id, title)
+        try:
+            db.set_auto_title_if_empty(session_id, title)
+        except ValueError:
+            # state.db enforces uniqueness on sessions.title, so a byte-identical
+            # auto-title generated for two sessions raises ValueError here. Derive
+            # a de-duplicated variant (e.g. "My Session" -> "My Session #2") and
+            # retry instead of leaving the second row blank (#6964).
+            alt = db.get_next_title_in_lineage(title)
+            if alt and alt != title:
+                db.set_auto_title_if_empty(session_id, alt)
     except Exception:
         logger.debug("Failed to sync session title to state.db for %s", session_id)
     finally:

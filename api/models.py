@@ -1225,6 +1225,7 @@ class Session:
                  truncation_watermark=None,
                  truncation_boundary=None,
                  clear_generation=None,
+                 intentional_shrink_generation=None,
                  gateway_routing=None, gateway_routing_history=None,
                  llm_title_generated: bool=False,
                  manual_title: bool=False,
@@ -1321,6 +1322,7 @@ class Session:
         self.truncation_watermark = truncation_watermark
         self.truncation_boundary = truncation_boundary
         self.clear_generation = clear_generation
+        self.intentional_shrink_generation = intentional_shrink_generation
         self.gateway_routing = gateway_routing if isinstance(gateway_routing, dict) else None
         self.gateway_routing_history = gateway_routing_history if isinstance(gateway_routing_history, list) else []
         self.llm_title_generated = bool(llm_title_generated)
@@ -1406,6 +1408,7 @@ class Session:
             'truncation_watermark',
             'truncation_boundary',
             'clear_generation',
+            'intentional_shrink_generation',
             'gateway_routing', 'gateway_routing_history', 'llm_title_generated', 'manual_title',
             'parent_session_id',
             'worktree_path', 'worktree_branch', 'worktree_repo_root', 'worktree_created_at',
@@ -4624,6 +4627,10 @@ def _evict_sessions_over_cap(cap: int | None = None) -> int:
     CALLER CONTRACT: the global ``LOCK`` MUST already be held (every call site
     mutates ``SESSIONS`` under ``LOCK``). This function never acquires ``LOCK``
     or any stream lock itself, so it cannot introduce a lock-ordering deadlock.
+    Under that same held ``LOCK`` it publishes the cap it enforced into
+    ``api.config._LAST_APPLIED_SESSIONS_CACHE_MAX`` for nonblocking diagnostics
+    (#6351); any future edit that can change ``cap`` after that point must move
+    the publish down with it.
 
     Returns the number of sessions evicted. If every over-cap candidate is
     active/unsaved, the cache may temporarily exceed ``cap`` — that is the
@@ -4636,6 +4643,11 @@ def _evict_sessions_over_cap(cap: int | None = None) -> int:
             cap = SESSIONS_MAX
     if not isinstance(cap, int) or cap < 1:
         cap = SESSIONS_MAX if isinstance(SESSIONS_MAX, int) and SESSIONS_MAX >= 1 else 1
+    # Diagnostics owns the field; this function owns the decision. Publishing the
+    # normalized cap here, rather than from the resolver, is what makes the health
+    # payload report a cap eviction actually applied — including the getter-failure
+    # fallback and explicit/normalized calls, which never reach the resolver (#6351).
+    _cfg._LAST_APPLIED_SESSIONS_CACHE_MAX = cap
     evicted = 0
     # Iterate over a snapshot of ids in LRU order (oldest first). We stop as
     # soon as we are at/below the cap. Skipping a non-evictable oldest entry and
@@ -8414,6 +8426,12 @@ _SESSION_MESSAGE_DISPLAY_METADATA_KEYS = (
     "_statusCard",
     "_anchor_stream_id",
     "_anchor_activity_scene",
+    # Map of absolute media path -> content-addressed snapshot digest, stamped
+    # at turn-settle time (api/media_snapshots.py) so historical previews keep
+    # showing the file bytes the turn emitted even after the file is
+    # overwritten in place. Display-only metadata: must survive the
+    # sidecar/state.db merge exactly like the other keys above.
+    "_media_snapshots",
 )
 
 

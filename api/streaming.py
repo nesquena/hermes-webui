@@ -85,6 +85,61 @@ from api.process_event_utils import (
 )
 
 
+def get_stream_runtime_snapshot() -> dict[str, object]:
+    """Return aggregate stream observations without waiting on the registry.
+
+    The registry is copied under a nonblocking ``STREAMS_LOCK`` acquire and the
+    lock is released before any channel lock is touched, so registry and channel
+    locks are never nested. Each channel is then read through its nonblocking
+    owner method: a channel busy with its own producer or subscriber work counts
+    as one unavailable channel and the loop keeps summing its siblings.
+    """
+    result = {
+        "available": False,
+        "active": 0,
+        "agent_instances": 0,
+        "subscribers": 0,
+        "offline_buffered_events": 0,
+        "offline_dropped_events": 0,
+        "subscriber_dropped_events": 0,
+        "unavailable_channels": 0,
+    }
+    try:
+        if not STREAMS_LOCK.acquire(blocking=False):
+            return result
+        try:
+            channels = list(STREAMS.values())
+            agent_count = len(AGENT_INSTANCES)
+        finally:
+            STREAMS_LOCK.release()
+        result["available"] = True
+        result["active"] = len(channels)
+        result["agent_instances"] = agent_count
+        for channel in channels:
+            try:
+                snapshot = channel.try_diagnostic_snapshot()
+                if snapshot is None:
+                    result["unavailable_channels"] += 1
+                    continue
+                result["subscribers"] += max(0, int(snapshot.get("subscriber_count", 0)))
+                result["offline_buffered_events"] += max(
+                    0, int(snapshot.get("offline_buffered_events", 0))
+                )
+                result["offline_dropped_events"] += max(
+                    0, int(snapshot.get("offline_dropped_events", 0))
+                )
+                result["subscriber_dropped_events"] += max(
+                    0, int(snapshot.get("subscriber_dropped_events", 0))
+                )
+            except Exception:
+                result["unavailable_channels"] += 1
+    except Exception:
+        # Keep the aggregates already summed from channels that read cleanly; a
+        # late unexpected failure must not discard successful sibling counts.
+        return result
+    return result
+
+
 def _session_payload_with_full_messages(session, *, tool_calls=None):
     """Return compact session metadata plus the embedded full transcript.
 
@@ -1746,6 +1801,24 @@ def _prepare_marker_clean_writeback(
     return [], list(previous_context_messages or []), provenance
 
 
+def _annotate_media_snapshots_for_settled_messages(messages) -> None:
+    """Freeze local-file MEDIA: bytes at settle time so historical previews
+    keep showing the version the turn emitted, even after the file is
+    overwritten in place (#6922 follow-up).
+
+    Runs AFTER the display merge so the annotation rides the exact messages the
+    frontend will render. The store is content-addressed and the annotator is
+    idempotent (already-stored digests short-circuit), so re-settling the same
+    transcript is cheap. Never raises — snapshotting is best-effort durability.
+    """
+    try:
+        from api.media_snapshots import annotate_media_snapshots
+
+        annotate_media_snapshots(messages)
+    except Exception:
+        logger.debug("Media snapshot annotation failed during settle", exc_info=True)
+
+
 def _settle_result_messages(
     session,
     previous_messages,
@@ -1808,6 +1881,7 @@ def _settle_result_messages(
         source=source,
         verification_nudge_provenance=verification_nudge_provenance,
     )
+    _annotate_media_snapshots_for_settled_messages(session.messages)
     _compact_session_image_parts_for_persistence(session)
     _advance_truncation_watermark_after_commit(session)  # #3831
     return result_messages
@@ -9585,6 +9659,12 @@ def _run_agent_streaming(
                     # field the cached agent silently retains the previous
                     # profile's SOUL.md (and any other profile-scoped context).
                     _profile_home or '',
+                    # Terminal backend identity: sessions switching between
+                    # remote (SSH) and local backends must not reuse a cached
+                    # agent that carries stale terminal env vars (#5937).
+                    _safe_profile_runtime_env.get('TERMINAL_ENV', '') or '',
+                    _safe_profile_runtime_env.get('TERMINAL_SSH_HOST', '') or '',
+                    _safe_profile_runtime_env.get('TERMINAL_SSH_USER', '') or '',
                 ], sort_keys=True)
                 _agent_sig = _hashlib.sha256(_sig_blob.encode()).hexdigest()[:16]
 
