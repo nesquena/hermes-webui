@@ -231,8 +231,90 @@ class TestBackdropDismissalPreserved:
         assert "lb.onclick = () => _closeImgLightbox(lb);" in src
 
     def test_drag_flag_reset_on_viewport_click(self):
-        """state.dragged must be consumed and cleared on every viewport
-        click so the post-drag suppression is one-shot per gesture."""
-        src = UI.read_text(encoding="utf-8")
-        assert "const wasDragged = state.dragged;" in src
-        assert "state.dragged = false;" in src
+            """state.dragged must be consumed and cleared on every viewport
+            click so the post-drag suppression is one-shot per gesture."""
+            src = UI.read_text(encoding="utf-8")
+            assert "const wasDragged = state.dragged;" in src
+            assert "state.dragged = false;" in src
+
+
+    class TestPanClamped:
+        def test_clamp_function_exists(self):
+            """_imgClampPan must exist and be called before every transform
+            so the image can never be dragged wholly out of the clipped viewport
+            with no reset path (the previous behaviour)."""
+            src = UI.read_text(encoding="utf-8")
+            assert "function _imgClampPan()" in src
+            assert "_imgClampPan();" in src
+
+        def test_clamp_centers_undersized_axis(self):
+            """When the scaled image fits entirely inside the viewport on an
+            axis, _imgClampPan must center that axis so the image stays fully
+            visible and reachable without manual panning."""
+            src = UI.read_text(encoding="utf-8")
+            # The axis-centering formula: (size.width - scaledW) / 2
+            assert "state.x = (size.width - scaledW) / 2;" in src
+            assert "state.y = (size.height - scaledH) / 2;" in src
+
+        def test_clamp_bounds_overflow_axis(self):
+            """When the scaled image is larger than the viewport on an axis,
+            _imgClampPan must clamp the offset between -(scaled - viewport) and
+            0 so the image edge never moves past the viewport edge."""
+            src = UI.read_text(encoding="utf-8")
+            assert "state.x = Math.max(size.width - scaledW, Math.min(0, state.x));" in src
+            assert "state.y = Math.max(size.height - scaledH, Math.min(0, state.y));" in src
+
+
+    class TestSidebarSwipeExcludesLightbox:
+        def test_img_lightbox_in_swipe_target(self):
+            """_isInteractiveSwipeTarget must include .img-lightbox so the
+            window-level PWA sidebar swipe recogniser does not claim touches
+            that start inside the lightbox's left-edge viewport during a
+            two-finger pinch."""
+            src = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
+            assert ".img-lightbox" in src
+            assert "_isInteractiveSwipeTarget" in src
+
+
+    class TestKeyboardAccessibleZoom:
+        def test_fit_keyboard_shortcut(self):
+            """Pressing F must call lb._zoom.fit() to reset the zoom to fit,
+            making the zoom control keyboard-operable rather than pointer-only."""
+            src = UI.read_text(encoding="utf-8")
+            assert "e.key==='f' || e.key==='F'" in src
+            assert "lb._zoom && lb._zoom.fit" in src
+
+        def test_zoom_plus_minus_shortcuts(self):
+            """Pressing +/- must zoom in/out toward the viewport centre
+            via lb._zoom.zoomBy, exposing zoom control to the keyboard."""
+            src = UI.read_text(encoding="utf-8")
+            assert "e.key==='+' || e.key==='='" in src
+            assert "e.key==='-' || e.key==='_'" in src
+            assert "lb._zoom.zoomBy" in src
+
+        def test_fit_and_zoomBy_exposed_on_state(self):
+            """The mount return must expose fit() and zoomBy(factor) so the
+            keyboard handler and the in-DOM fit button can drive the zoom
+            without pointer interaction."""
+            src = UI.read_text(encoding="utf-8")
+            assert "state.fit = _fit;" in src
+            assert "state.zoomBy = function(factor)" in src
+
+
+    class TestFitButtonPresent:
+        def test_fit_button_created_in_lightbox(self):
+            """A visible fit/reset button must be created inside the lightbox
+            so users can reset the zoom without relying on gestures."""
+            src = UI.read_text(encoding="utf-8")
+            assert "fitBtn" in src
+            assert "fitBtn.className = 'img-lightbox-fit';" in src
+            assert "fitBtn.onclick" in src
+            assert "lb._zoom.fit" in src
+            assert "lb.appendChild(fitBtn);" in src
+
+        def test_fit_button_css(self):
+            """The .img-lightbox-fit selector must exist in style.css with
+            positioning and hover state matching the lightbox button style."""
+            css = STYLE.read_text(encoding="utf-8")
+            assert ".img-lightbox-fit{" in css
+            assert ".img-lightbox-fit:hover" in css

@@ -427,7 +427,7 @@ function _isPwaStandalone(){
 }
 
 function _isInteractiveSwipeTarget(target){
-  try{return !!(target&&target.closest&&target.closest('input,textarea,select,button,a,[contenteditable="true"],.topbar-chips,.composer-left,.sidebar,.rightpanel'));}
+  try{return !!(target&&target.closest&&target.closest('input,textarea,select,button,a,[contenteditable="true"],.topbar-chips,.composer-left,.sidebar,.rightpanel,.img-lightbox'));}
   catch(_){return false;}
 }
 

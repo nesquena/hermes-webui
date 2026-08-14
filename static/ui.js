@@ -2516,7 +2516,30 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
     };
   }
 
+  function _imgClampPan() {
+    // Keep the transformed canvas inside the clipped viewport: an axis
+    // whose scaled size fits inside the stage gets centered, an overflow
+    // axis is clamped so the image can never be dragged wholly out of
+    // view (no reset path existed before — closing and reopening the
+    // lightbox was the only recovery). Called from _imgApplyTransform so
+    // every pan/pinch/wheel/resize/nav path is covered.
+    const size = _imgViewportSize();
+    const scaledW = state.boxW * state.scale;
+    const scaledH = state.boxH * state.scale;
+    if(scaledW <= size.width){
+      state.x = (size.width - scaledW) / 2;
+    } else {
+      state.x = Math.max(size.width - scaledW, Math.min(0, state.x));
+    }
+    if(scaledH <= size.height){
+      state.y = (size.height - scaledH) / 2;
+    } else {
+      state.y = Math.max(size.height - scaledH, Math.min(0, state.y));
+    }
+  }
+
   function _imgApplyTransform() {
+    _imgClampPan();
     canvas.style.transform = 'translate(' + Math.round(state.x) + 'px,' + Math.round(state.y) + 'px) scale(' + state.scale + ')';
     canvas.style.transformOrigin = '0 0';
   }
@@ -2728,6 +2751,12 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
     lb._imgZoomResizeHandler = _onResize;
   }
 
+  // Expose keyboard-operable fit/zoom so the lightbox is not pointer-only.
+  state.fit = _fit;
+  state.zoomBy = function(factor){
+    _imgSetScale(state.scale * factor);
+  };
+
   if(img.complete && img.naturalWidth){
     _onImgLoad();
   }
@@ -2760,8 +2789,17 @@ function _openImgLightboxWithNav(src, alt, images, index) {
   cls.setAttribute('aria-label', 'Close');
   cls.textContent = '×';
   cls.onclick = () => _closeImgLightbox(lb);
+  // Fit/reset control — zoom is not pointer-only; a keyboard/button path
+  // recovers the image after it has been zoomed/panned out of view.
+  const fitBtn = document.createElement('button');
+  fitBtn.className = 'img-lightbox-fit';
+  fitBtn.setAttribute('aria-label', 'Reset zoom to fit (F)');
+  fitBtn.setAttribute('title', 'Reset zoom to fit (F)');
+  fitBtn.textContent = 'Fit';
+  fitBtn.onclick = e => { e.stopPropagation(); if(lb._zoom && lb._zoom.fit) lb._zoom.fit(); };
   lb.appendChild(viewport);
   lb.appendChild(cls);
+  lb.appendChild(fitBtn);
   // Prev/Next navigation — store index and images on lb so a single set of
   // handlers reads live values without closure churn on every nav.
   lb._navIndex = index;
@@ -2793,6 +2831,9 @@ function _openImgLightboxWithNav(src, alt, images, index) {
   // Single keyboard handler — reads lb._navX live, no remove/add churn.
   lb._keyHandler = e => {
     if(e.key==='Escape'){ _closeImgLightbox(lb); return; }
+    if(e.key==='f' || e.key==='F'){ if(lb._zoom && lb._zoom.fit) lb._zoom.fit(); return; }
+    if(e.key==='+' || e.key==='='){ e.preventDefault(); if(lb._zoom && lb._zoom.zoomBy) lb._zoom.zoomBy(1.25); return; }
+    if(e.key==='-' || e.key==='_'){ e.preventDefault(); if(lb._zoom && lb._zoom.zoomBy) lb._zoom.zoomBy(1/1.25); return; }
     if(lb._navImages){
       if(e.key==='ArrowLeft'){ e.preventDefault(); _navigateLightbox(lb, -1); }
       if(e.key==='ArrowRight'){ e.preventDefault(); _navigateLightbox(lb, 1); }
