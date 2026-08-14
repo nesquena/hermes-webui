@@ -165,7 +165,7 @@ def test_agent_force_preserves_agent_process_guards(monkeypatch, tmp_path):
     seen = []
     monkeypatch.setattr(agent_update, "_run", lambda args, root, timeout: seen.append(args) or _run_result())
     result = agent_update.apply_agent_update(force=True)
-    assert result["outcome"] == "noop"
+    assert result["outcome"] == "updated"
     assert all("--force" not in args for args in seen)
 
 
@@ -283,14 +283,16 @@ def test_supported_remote_gateway_environment_sources_fail_closed(monkeypatch, t
     assert agent_update._resolve_target().unsupported_reason == "remote gateway owner"
 
 
-def test_agent_update_noop_is_safe(monkeypatch, tmp_path):
+def test_agent_update_same_sha_success_still_reloads_for_dependency_changes(monkeypatch, tmp_path):
     target = _target(tmp_path)
     monkeypatch.setattr(agent_update, "_resolve_target", lambda: target)
     monkeypatch.setattr(agent_update, "_identity", lambda root, exe: {"healthy": True})
     monkeypatch.setattr(agent_update, "_marker", lambda root: False)
     monkeypatch.setattr(agent_update, "_run", lambda *a: _run_result())
     monkeypatch.setattr(agent_update, "_git_sha", lambda root: "same")
-    assert agent_update.apply_agent_update()["outcome"] == "noop"
+    result = agent_update.apply_agent_update()
+    assert result["outcome"] == "updated"
+    assert result["reload_eligible"] is True
 
 
 def test_agent_zip_install_uses_conservative_success(monkeypatch, tmp_path):
@@ -305,7 +307,7 @@ def test_agent_zip_install_uses_conservative_success(monkeypatch, tmp_path):
     assert result["reload_eligible"] is True
 
 
-def test_agent_update_noop_and_missing_sha_are_safe(monkeypatch, tmp_path):
+def test_agent_update_missing_sha_is_safe(monkeypatch, tmp_path):
     target = _target(tmp_path)
     monkeypatch.setattr(agent_update, "_resolve_target", lambda: target)
     monkeypatch.setattr(agent_update, "_identity", lambda root, exe: {"healthy": True})

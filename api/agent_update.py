@@ -267,7 +267,8 @@ def apply_agent_update(*, force: bool = False) -> dict:
     elif before is None or after is None:
         outcome = "updated"
     else:
-        outcome = "updated" if before != after else "noop"
+        # Equal Git HEAD can still hide dependency or generated-install changes.
+        outcome = "updated"
     warning = output if any(token in output.lower() for token in ("warning", "warn", "failed to refresh")) else ""
     return AgentUpdateResult(outcome, 0, output or f"Agent update {outcome}", warning, before, after, marker_before, marker_after, reload_eligible=outcome in {"updated", "repaired"}).as_dict()
 
