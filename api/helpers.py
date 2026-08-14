@@ -201,6 +201,50 @@ def _security_headers(handler):
     )
 
 
+def arm_connection_close(handler) -> None:
+    """Mark the connection dead BEFORE a reject-before-read response is written.
+
+    A rejection that answers without consuming the request body leaves those
+    bytes queued in ``rfile``; reusing the connection makes the next HTTP/1.1
+    request parse mid-body (the classic ``{}GET ... -> 501``). Arming must
+    happen before the response is flushed so ``advertise_connection_close()``
+    can serialize it into the response headers.
+
+    Best-effort: handler stubs and read-only doubles may reject the attribute,
+    and a failure here must never turn a 4xx into a 500.
+    """
+    try:
+        handler.close_connection = True
+    except Exception:
+        pass
+
+
+def advertise_connection_close(handler) -> None:
+    """Serialize ``close_connection`` into exactly one ``Connection: close`` header.
+
+    ``BaseHTTPRequestHandler`` tracks ``close_connection`` internally but never
+    writes it to the wire, so a server-side close is invisible to the client: a
+    pooled client reuses the socket and fails with BrokenPipeError instead of
+    opening a fresh connection. Call this from ``end_headers()``, before the
+    header buffer is flushed.
+
+    Dedup is derived from the pending header buffer rather than a private flag,
+    because the SSE endpoints send their own ``Connection: close`` (and
+    ``send_header`` itself flips ``close_connection`` when they do) — keying off
+    a flag we set ourselves would emit the header twice on every stream.
+
+    Both attribute reads are defensive: partially-built handler stubs in the
+    test suite carry neither ``close_connection`` nor ``_headers_buffer``, and
+    header emission must not depend on their presence.
+    """
+    if not getattr(handler, 'close_connection', False):
+        return
+    for raw in getattr(handler, '_headers_buffer', None) or ():
+        if raw[:11].lower() == b'connection:':
+            return
+    handler.send_header('Connection', 'close')
+
+
 def flush_pending_auth_cookies(handler) -> None:
     pending = getattr(handler, '_pending_set_cookies', None)
     if not pending:
