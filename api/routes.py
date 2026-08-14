@@ -24868,10 +24868,10 @@ def _handle_approval_respond(handler, body):
                 matched_mirror = current_mirror
                 yolo_transition = None
                 if enable_yolo:
-                    # Set the WebUI flag before resuming this request so the
-                    # SSE reader can auto-answer a prompt emitted immediately
-                    # afterward. The transition helper makes a failed relay's
-                    # rollback safe against overlapping enables from other tabs.
+                    # Register the enable intent before resuming this request,
+                    # but keep the shared flag unchanged until the relay succeeds.
+                    # That prevents the SSE reader from auto-approving a later
+                    # prompt based on an unconfirmed, eventually-failed relay.
                     yolo_transition = begin_session_yolo_transition(sid)
                 relay_succeeded = False
                 try:

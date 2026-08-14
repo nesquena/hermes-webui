@@ -104,11 +104,13 @@ Use this when the connected gateway advertises approval support and you want too
 
 When YOLO is enabled for a gateway-backed browser session, WebUI approves the
 current card and automatically answers later Runs API approval requests while
-the WebUI session flag remains active. This is client-managed compatibility
-behavior: the current Runs API has no session-YOLO toggle, so a request briefly
-reaches the approval boundary before WebUI answers it, and Agent-owned policy
-such as unrestricted computer-use mode is unchanged. Native API session YOLO
-is tracked in [Hermes Agent PR #61946](https://github.com/NousResearch/hermes-agent/pull/61946).
+the WebUI session flag remains active. The flag is committed only after the
+current approval relay succeeds; a later prompt that races that unconfirmed
+relay remains visible instead of being speculatively auto-approved. This is
+client-managed compatibility behavior: the current Runs API has no session-YOLO
+toggle, so a request briefly reaches the approval boundary before WebUI answers
+it, and Agent-owned policy such as unrestricted computer-use mode is unchanged.
+Native API session YOLO is tracked in [Hermes Agent PR #61946](https://github.com/NousResearch/hermes-agent/pull/61946).
 
 `HERMES_WEBUI_CHAT_BACKEND` is intentionally strict: only `gateway`,
 `api_server`, or `api-server` enable the bridge. Generic truthy values such as

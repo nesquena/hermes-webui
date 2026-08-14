@@ -55,11 +55,13 @@ _yolo_transitions: dict[str, dict] = {}
 
 
 def begin_session_yolo_transition(session_key: str) -> object | None:
-    """Speculatively enable YOLO until one approval relay settles.
+    """Register a pending YOLO enable until one approval relay settles.
 
     Multiple tabs may relay approvals for different runs in the same session.
     Track every in-flight enable intent so one failed relay cannot undo another
-    successful or explicit enable.
+    successful or explicit enable. Do not publish an unconfirmed enable to the
+    shared session flag: the gateway stream may only auto-approve later prompts
+    after a relay succeeds or an explicit enable wins.
     """
     session_key = str(session_key or "").strip()
     if not session_key:
@@ -75,12 +77,11 @@ def begin_session_yolo_transition(session_key: str) -> object | None:
             }
             _yolo_transitions[session_key] = transition
         transition["tokens"].add(token)
-        enable_session_yolo(session_key)
     return token
 
 
 def finish_session_yolo_transition(session_key: str, token: object | None, *, succeeded: bool) -> None:
-    """Commit or roll back one speculative YOLO enable without stale writes."""
+    """Settle one pending YOLO enable without exposing or applying stale state."""
     session_key = str(session_key or "").strip()
     if not session_key or token is None:
         return
@@ -89,7 +90,11 @@ def finish_session_yolo_transition(session_key: str, token: object | None, *, su
         if transition is None or token not in transition["tokens"]:
             return
         transition["tokens"].remove(token)
-        transition["committed"] = transition["committed"] or bool(succeeded)
+        if succeeded:
+            transition["committed"] = True
+            # The first confirmed relay commits YOLO immediately. Any remaining
+            # tokens may fail later but cannot revoke this successful enable.
+            enable_session_yolo(session_key)
         if transition["tokens"]:
             return
         _yolo_transitions.pop(session_key, None)

@@ -174,7 +174,8 @@ def _run_with_approval_events(monkeypatch, *, yolo_enabled, auto_error=None):
     monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setattr(gateway_chat, "update_active_run", lambda *a, **k: None)
     monkeypatch.setattr(gateway_chat, "_publish_gateway_run_id", lambda *a, **k: None)
-    monkeypatch.setattr(gateway_chat, "_gateway_session_yolo_enabled", lambda _sid: yolo_enabled)
+    if yolo_enabled is not None:
+        monkeypatch.setattr(gateway_chat, "_gateway_session_yolo_enabled", lambda _sid: yolo_enabled)
     monkeypatch.setattr(gateway_chat, "_auto_approve_gateway_run", fake_auto)
     monkeypatch.setattr(config, "gateway_supports_approval_identity_v1", lambda *_a, **_k: True)
     monkeypatch.setattr("api.route_approvals.submit_gateway_pending_mirror", lambda _sid, data: (data, 1))
@@ -238,6 +239,49 @@ def test_gateway_yolo_auto_approval_failure_falls_back_to_visible_card(monkeypat
 
 
 @pytest.mark.skipif(not APPROVAL_AVAILABLE, reason="tools.approval unavailable")
+def test_inflight_yolo_relay_does_not_auto_approve_later_prompt(monkeypatch):
+    from api import route_approvals
+
+    sid = "browser-session"
+    disable_session_yolo(sid)
+    token = route_approvals.begin_session_yolo_transition(sid)
+    try:
+        _final, _requests, approvals, browser_events = _run_with_approval_events(
+            monkeypatch,
+            yolo_enabled=None,
+        )
+
+        assert approvals == []
+        assert [event[1]["approval_id"] for event in browser_events if event[0] == "approval"] == [
+            "approval-1",
+            "approval-2",
+        ]
+    finally:
+        route_approvals.finish_session_yolo_transition(sid, token, succeeded=False)
+        disable_session_yolo(sid)
+
+
+@pytest.mark.skipif(not APPROVAL_AVAILABLE, reason="tools.approval unavailable")
+def test_overlapping_yolo_relays_publish_only_confirmed_success():
+    from api import route_approvals
+
+    sid = "webui-yolo-overlapping-relays"
+    disable_session_yolo(sid)
+    first = route_approvals.begin_session_yolo_transition(sid)
+    second = route_approvals.begin_session_yolo_transition(sid)
+    try:
+        assert is_session_yolo_enabled(sid) is False
+        route_approvals.finish_session_yolo_transition(sid, first, succeeded=True)
+        assert is_session_yolo_enabled(sid) is True
+        route_approvals.finish_session_yolo_transition(sid, second, succeeded=False)
+        assert is_session_yolo_enabled(sid) is True
+    finally:
+        route_approvals.finish_session_yolo_transition(sid, first, succeeded=False)
+        route_approvals.finish_session_yolo_transition(sid, second, succeeded=False)
+        disable_session_yolo(sid)
+
+
+@pytest.mark.skipif(not APPROVAL_AVAILABLE, reason="tools.approval unavailable")
 @pytest.mark.parametrize("relay_fails", [False, True])
 def test_card_yolo_uses_plain_runs_approval_and_rolls_back_on_failure(monkeypatch, relay_fails):
     from api import route_approvals as route_approvals
@@ -255,10 +299,11 @@ def test_card_yolo_uses_plain_runs_approval_and_rolls_back_on_failure(monkeypatc
         return data
 
     calls = []
+    states_during_relay = []
 
     def fake_respond(_self, got_run_id, approval_id, choice):
         calls.append((got_run_id, approval_id, choice))
-        assert is_session_yolo_enabled(sid) is True
+        states_during_relay.append(bool(is_session_yolo_enabled(sid)))
         if relay_fails:
             raise RunnerClientError("relay failed")
         return {"resolved": 1}
@@ -289,6 +334,7 @@ def test_card_yolo_uses_plain_runs_approval_and_rolls_back_on_failure(monkeypatc
             },
         )
         assert calls == [(run_id, "approval-route", "once")]
+        assert states_during_relay == [False]
         assert captured["status"] == (502 if relay_fails else 200)
         assert captured["payload"]["ok"] is (not relay_fails)
         assert is_session_yolo_enabled(sid) is (not relay_fails)
