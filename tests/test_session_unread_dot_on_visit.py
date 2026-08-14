@@ -370,7 +370,6 @@ let _releaseApi;
 const _apiResult = new Promise((res) => {{ _releaseApi = res; }});
 let _apiCalled = false;
 async function api(url) {{ _apiCalled = true; return _apiResult; }}
-async function _apiSessionNav(_sid, url, opts) {{ return api(url, opts); }}
 
 {get_counts}
 {save_counts}
