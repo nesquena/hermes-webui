@@ -4856,7 +4856,40 @@ _available_models_live_rebuild_ts: float = 0.0
 _available_models_cache_source_fingerprint: dict | None = None
 _AVAILABLE_MODELS_CACHE_TTL: float = 86400.0  # 24 hours
 _SESSION_VISIT_MODELS_FRESHNESS_SECONDS: float = 300.0
-_available_models_cache_lock = threading.RLock()  # must be RLock: cold path refactoring moved slow work inside this lock, requiring re-entry
+_available_models_cache_lock = threading.RLock()
+
+# Provider auth-status enumeration cache. ``list_available_providers()``
+# (core) probes EVERY known provider's credential source serially — AWS IMDS
+# dial, gh CLI subprocess, token exchange, per-endpoint /models — and the
+# webui re-runs it on every catalog rebuild even though auth status only
+# changes when the user edits credentials. Cache the enumeration briefly
+# (keyed by profile) so a rebuild after the first one skips the probes
+# entirely. Auth status changing within the TTL is harmless: it self-heals
+# on the next expiry, and the caller still re-checks ``get_auth_status``
+# per authenticated provider below.
+_PROVIDER_ENUM_CACHE: dict[str, tuple[float, list]] = {}
+_PROVIDER_ENUM_CACHE_TTL_SECONDS = 120.0
+_PROVIDER_ENUM_CACHE_LOCK = threading.Lock()
+
+
+def _list_available_providers_cached(profile_key: str) -> list:
+    """Return ``list_available_providers()``, cached per profile for a short TTL.
+
+    The uncached core call can take seconds (serial per-provider probes).
+    Keep the cache small and TTL-bounded so credential edits are picked up
+    within two minutes and memory stays flat.
+    """
+    now = time.monotonic()
+    with _PROVIDER_ENUM_CACHE_LOCK:
+        hit = _PROVIDER_ENUM_CACHE.get(profile_key)
+        if hit is not None and now - hit[0] < _PROVIDER_ENUM_CACHE_TTL_SECONDS:
+            return hit[1]
+    from hermes_cli.models import list_available_providers as _lap
+
+    result = _lap()
+    with _PROVIDER_ENUM_CACHE_LOCK:
+        _PROVIDER_ENUM_CACHE[profile_key] = (now, result)
+    return result  # must be RLock: cold path refactoring moved slow work inside this lock, requiring re-entry
 _cache_build_cv = threading.Condition(_available_models_cache_lock)  # shares underlying RLock so notify_all() is safe inside with _available_models_cache_lock
 _cache_build_in_progress = False  # True while a cold path is actively building
 
@@ -6781,7 +6814,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             from hermes_cli.models import list_available_providers as _lap
             from hermes_cli.auth import get_auth_status as _gas
 
-            for _p in _lap():
+            for _p in _list_available_providers_cached(_active_profile_name or "default"):
                 if not _p.get("authenticated"):
                     continue
                 try:
