@@ -9,6 +9,16 @@ Before the fix, a prewarmed live row duplicating a configured model entered
 `_seen_custom_ids` first, so the configured duplicate was skipped and the
 operator label never won on the active-base-URL path.
 
+Re-review 2026-08-14: label PROVENANCE also has to survive. Both catalog paths
+used to infer "the operator supplied a label" from `label != id`, which collapsed
+the two distinct configs `models: ["model-a"]` and
+`models: [{"id": "model-a", "label": "model-a"}]` — in the explicit-dict case an
+endpoint or derived label could replace the operator's literal choice. The maps
+now read the raw configured items through
+`_configured_model_label_overrides()`, so a nonblank `label` key is authoritative
+even when it equals the id, while a bare-string entry still contributes nothing
+and keeps falling through to the derived label.
+
 The hot-path tests use a real loopback HTTP server as the custom endpoint:
 `_read_custom_endpoint_models` is a nested function (not monkeypatchable), and
 the conftest's network isolation permits loopback — so the probe runs for real
@@ -182,6 +192,24 @@ def test_prewarmed_row_keeps_endpoint_label_without_config_label(live_endpoint, 
     assert row["label"] == "Endpoint Label"
 
 
+def test_prewarmed_row_honors_explicit_label_equal_to_id(live_endpoint, _sync_rebuild):
+    """Re-review gap 2, hot path: an explicit label that happens to equal the
+    model id is still the operator's choice and must beat the endpoint label."""
+    _ModelsEndpoint.payload = {"data": [{"id": "model-a", "name": "Endpoint Label"}]}
+    result = _models_with_cfg(
+        model_cfg=_active_cfg(live_endpoint),
+        custom_providers=[
+            {**_gateway_cfg(live_endpoint), "models": [{"id": "model-a", "label": "model-a"}]}
+        ],
+    )
+    row = _row_by_model_id(result.get("groups", []), "custom:mygateway", "model-a")
+    assert row is not None
+    assert row["label"] == "model-a", (
+        "an explicitly configured label must win even when it equals the id, "
+        f"got {row['label']!r}"
+    )
+
+
 # ── Cold path: network-free catalog ──────────────────────────────────────────
 
 def test_cold_catalog_takes_configured_label():
@@ -207,3 +235,80 @@ def test_cold_catalog_derives_label_without_config_label():
     row = _row_by_model_id(result.get("groups", []), "custom:mygateway", "model-a")
     assert row is not None
     assert row["label"] != "model-a", "bare id must not render as its own label"
+
+
+def test_cold_catalog_honors_explicit_label_equal_to_id():
+    """Re-review gap 2, cold path: `{"id": "model-a", "label": "model-a"}` is a
+    label choice and must not be title-cased away."""
+    result = _cold_catalog_with_cfg(
+        model_cfg=_active_cfg("https://gw.example.com/v1"),
+        custom_providers=[
+            {
+                **_gateway_cfg("https://gw.example.com/v1"),
+                "models": [{"id": "model-a", "label": "model-a"}],
+            }
+        ],
+    )
+    row = _row_by_model_id(result.get("groups", []), "custom:mygateway", "model-a")
+    assert row is not None
+    assert row["label"] == "model-a", (
+        f"explicit label must survive verbatim, got {row['label']!r}"
+    )
+
+
+def test_cold_catalog_distinguishes_bare_string_from_explicit_label():
+    """The two configs are not the same input, so they must not render alike."""
+    base = "https://gw.example.com/v1"
+    bare = _cold_catalog_with_cfg(
+        model_cfg=_active_cfg(base),
+        custom_providers=[{**_gateway_cfg(base), "models": ["model-a"]}],
+    )
+    explicit = _cold_catalog_with_cfg(
+        model_cfg=_active_cfg(base),
+        custom_providers=[
+            {**_gateway_cfg(base), "models": [{"id": "model-a", "label": "model-a"}]}
+        ],
+    )
+    bare_row = _row_by_model_id(bare.get("groups", []), "custom:mygateway", "model-a")
+    explicit_row = _row_by_model_id(explicit.get("groups", []), "custom:mygateway", "model-a")
+    assert bare_row is not None and explicit_row is not None
+    assert explicit_row["label"] == "model-a"
+    assert bare_row["label"] != explicit_row["label"]
+
+
+# ── Provenance helper: the unit that carries the explicit-label bit ──────────
+
+
+def test_label_overrides_only_carry_operator_supplied_labels():
+    """`_configured_model_label_overrides` is the provenance source of truth."""
+    assert config._configured_model_label_overrides(["model-a"]) == {}
+    assert config._configured_model_label_overrides([{"id": "model-a"}]) == {}
+    assert config._configured_model_label_overrides(
+        [{"id": "model-a", "label": "model-a"}]
+    ) == {"model-a": "model-a"}
+    assert config._configured_model_label_overrides(
+        [{"id": "model-a", "label": "Operator Label"}]
+    ) == {"model-a": "Operator Label"}
+    # Blank/whitespace labels are not a choice.
+    assert config._configured_model_label_overrides([{"id": "model-a", "label": "   "}]) == {}
+    # First occurrence of an id wins, matching _configured_model_ids' dedup.
+    assert config._configured_model_label_overrides(
+        [{"id": "model-a", "label": "First"}, {"id": "model-a", "label": "Second"}]
+    ) == {"model-a": "First"}
+    # Unsupported shapes degrade to "no override", never to a synthesized one.
+    assert config._configured_model_label_overrides({"model-a": {"label": "X"}}) == {}
+    assert config._configured_model_label_overrides(None) == {}
+
+
+def test_configured_model_options_still_synthesizes_row_labels():
+    """The row builder keeps its id-as-label fallback — the provenance split must
+    not change what the picker renders for shapes that carry no label."""
+    assert config._configured_model_options(["model-a"]) == [
+        {"id": "model-a", "label": "model-a"}
+    ]
+    assert config._configured_model_options([{"id": "model-a"}]) == [
+        {"id": "model-a", "label": "model-a"}
+    ]
+    assert config._configured_model_options([{"id": "model-a", "label": "Operator Label"}]) == [
+        {"id": "model-a", "label": "Operator Label"}
+    ]
