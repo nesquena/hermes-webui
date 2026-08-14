@@ -206,6 +206,17 @@ def test_settings_system_version_controls_wrap_on_phone_widths():
     assert ".settings-version-badge" in mobile_css and "white-space:nowrap" in mobile_css.replace(" ", ""), (
         "Individual version badges should stay intact while the group wraps."
     )
+    status_rule = _rule_body(mobile_css, "#checkUpdatesStatus")
+    status_decls = _declarations(status_rule)
+    assert status_decls.get("white-space") == "normal", (
+        "Update status text must wrap on phone widths after the latest-tag suffix."
+    )
+    assert status_decls.get("overflow-wrap") == "anywhere", (
+        "Long latest-tag tokens must be allowed to break on phone widths."
+    )
+    assert status_decls.get("min-width") == "0", (
+        "Update status must shrink inside the stacked System header on phones."
+    )
 
 
 def test_rightpanel_mobile_slide_over_css():
