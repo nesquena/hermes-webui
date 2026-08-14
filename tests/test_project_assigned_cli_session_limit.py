@@ -740,6 +740,33 @@ def test_kanban_second_pass_still_projects_rows(fake_hermes_home, tmp_path):
     assert by_id["kanban-old"]["project_id"] is None
 
 
+def test_background_row_chip_is_the_same_on_both_projection_paths(
+    fake_hermes_home, tmp_path
+):
+    """One kanban row must not report two different chips.
+
+    The interactive projection loop is also what a ``source_filter='kanban'``
+    scan walks, so resolving state.db assignments there without excusing
+    background sources gave the SAME row ``None`` in the default view (its own
+    bounded second pass) and a resolved id under ``?source=kanban``.
+    """
+    _register_projects(tmp_path, "project-live")
+
+    rows = [_session("kan-1", BASE_TS, source="kanban", project_id="project-live")]
+    rows.extend(
+        _session(f"recent-{index:02d}", BASE_TS + 100 + index) for index in range(25)
+    )
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    default_view = {s["session_id"]: s for s in models.get_cli_sessions()}
+    kanban_view = {s["session_id"]: s for s in models.get_cli_sessions("kanban")}
+
+    assert "kan-1" in default_view
+    assert "kan-1" in kanban_view
+    assert default_view["kan-1"]["project_id"] is None
+    assert kanban_view["kan-1"]["project_id"] == default_view["kan-1"]["project_id"]
+
+
 # ── The all-profiles sidebar view runs the same recovery passes ───────────────
 
 

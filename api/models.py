@@ -72,6 +72,11 @@ WEBHOOK_PROJECT_CHIP_LIMIT = 200
 # higher project-chip cap so project-assigned kanban rows stay addressable when
 # the toggle is on, without letting them dominate the default sidebar window.
 KANBAN_PROJECT_CHIP_LIMIT = 200
+# Sources with their own bounded project-chip pass. They are kept out of the
+# interactive CLI window and out of its recovery passes, and they keep the
+# system-chip answer wherever they are projected, so the same background row can
+# never report two different project chips.
+BACKGROUND_CLI_SOURCES = ("cron", "webhook", "kanban")
 _CLI_SESSIONS_CACHE_TTL_SECONDS = 5.0
 # While a turn is actively streaming, hold the CLI/cron projection longer than
 # one poll interval (mirrors the route-level #4808 hold-down). The frontend
@@ -7733,7 +7738,12 @@ def _load_cli_sessions_uncached(
         return project_id if project_id in _known_project_ids() else None
 
     def _state_row_project_id(sid: str, source: str | None) -> str | None:
-        """Dedicated system-source chip for a background row, else None."""
+        """Dedicated system-source chip for a background row, else None.
+
+        cron and webhook own an auto-provisioned project; kanban deliberately
+        does not, so it falls through to None (upstream behaviour) and is
+        reachable through the normal sidebar list instead of a chip.
+        """
         if is_cron_session(sid, source):
             return _cron_pid()
         if is_webhook_session(sid, source):
@@ -7746,10 +7756,19 @@ def _load_cli_sessions_uncached(
         Single resolved value for both the cap decisions below and the projected
         payload, so the code that budgets a row and the code that renders it can
         never disagree about which project it belongs to.
+
+        Background sources keep the system-chip answer even when a
+        ``source_filter`` routes them through this loop, so one kanban row cannot
+        report a resolved ``project_id`` here and ``None`` from its own bounded
+        second pass further down.
         """
         sid = row['id']
         source = row.get('source')
-        if is_cron_session(sid, source) or is_webhook_session(sid, source):
+        if (
+            str(source or '').strip().lower() in BACKGROUND_CLI_SOURCES
+            or is_cron_session(sid, source)
+            or is_webhook_session(sid, source)
+        ):
             return _state_row_project_id(sid, source)
         return _resolved_project_id(row.get('project_id'))
 
@@ -7776,7 +7795,7 @@ def _load_cli_sessions_uncached(
         # Background sources have independent bounded passes below. Keeping them
         # out of this 20-row interactive window prevents a busy worker source
         # (especially kanban) from evicting every CLI/TUI/ACP conversation.
-        exclude_sources=("cron", "webhook", "kanban") if source_filter is None else None,
+        exclude_sources=BACKGROUND_CLI_SOURCES if source_filter is None else None,
         include_sources=None if source_filter is None else (source_filter,),
     )
     if source_filter is None:
@@ -7789,7 +7808,7 @@ def _load_cli_sessions_uncached(
         #      owes to an unassigned conversation (#6659 review findings 1-2).
         # Both passes are keyed on the LOGICAL conversation (lineage), never the
         # raw row, so compression segments cannot consume either budget.
-        interactive_excluded = ("cron", "webhook", "kanban")
+        interactive_excluded = BACKGROUND_CLI_SOURCES
         first_pass_count = len(state_rows)
         represented_rows: dict[str, dict] = {}
 
