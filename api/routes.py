@@ -11,6 +11,7 @@ import errno
 import io
 import gzip
 import json
+import math
 from api.sse_chunked import end_sse_headers
 import logging
 import os
@@ -531,6 +532,43 @@ def _session_visible_to_active_profile(session_profile, handler=None) -> bool:
     if not isinstance(session_profile, str):
         session_profile = None
     return _profiles_match(session_profile, active_profile)
+
+
+def _is_empty_session_placeholder(session) -> bool:
+    """Return whether a session has no durable or active ownership state."""
+    if not _is_default_or_empty_session_title(getattr(session, 'title', 'Untitled')):
+        return False
+    for field in (
+        'messages', 'context_messages', 'queue',
+        'pending_queue_item', 'pending_turn_intent', 'pending_queue_outcome',
+        'queue_transfer', 'pending_user_message', 'pending_attachments',
+        'pending_user_source', 'active_stream_id', 'composer_draft',
+        'worktree_path', 'worktree_branch', 'worktree_repo_root',
+        'process_wakeup_pause', 'project_id', 'parent_session_id',
+        'tool_calls', 'archived', 'pinned', 'gateway_routing',
+        'gateway_routing_history', 'share_token', 'share_created_at',
+        'is_cli_session', 'source_tag', 'raw_source', 'session_source',
+        'source_label', 'read_only',
+        'pre_compression_snapshot', 'compression_anchor_message_key',
+        'compression_anchor_summary', 'compression_anchor_engine',
+        'compression_anchor_mode', 'compression_anchor_details',
+        'context_engine', 'context_engine_state',
+        'post_compression_context_tokens_estimate', 'compression_recovery',
+        'recommended_recovery_action', 'compression_recovery_source_session_id',
+        'compression_recovery_action', 'llm_title_generated', 'manual_title',
+        'anchor_activity_scenes',
+    ):
+        if getattr(session, field, None):
+            return False
+    for field in (
+        'pending_started_at', 'worktree_created_at',
+        'compression_anchor_visible_idx', 'truncation_watermark',
+        'truncation_boundary', 'clear_generation',
+        'intentional_shrink_generation',
+    ):
+        if getattr(session, field, None) is not None:
+            return False
+    return True
 
 
 def _is_profile_agnostic_foreign_session(cli_meta) -> bool:
@@ -3115,6 +3153,10 @@ def _clear_stale_stream_state(session) -> bool:
             if getattr(session, "active_stream_id", None) != stream_id:
                 return False
         _materialize_pending_user_turn_before_error(session)
+        try:
+            _settle_claimed_queue_item(session, outcome="error", stream_id=stream_id)
+        except Exception:
+            logger.debug("Failed to settle stale stream queue item", exc_info=True)
         session.active_stream_id = None
         if hasattr(session, "pending_user_message"):
             session.pending_user_message = None
@@ -3126,6 +3168,8 @@ def _clear_stale_stream_state(session) -> bool:
             session.pending_user_source = None
         if hasattr(session, "pending_queue_item"):
             session.pending_queue_item = None
+        if hasattr(session, "pending_turn_intent"):
+            session.pending_turn_intent = None
         try:
             # Runtime cleanup is not user activity; do not bubble old sessions
             # to the top of the sidebar just because a stale stream flag was
@@ -9668,6 +9712,182 @@ from api.models import (
 _COMPRESSION_RECOVERY_START_LOCK = threading.Lock()
 
 
+def _compression_queue_transfer_matches(child, parent_sid: str) -> bool:
+    transfer = getattr(child, "queue_transfer", None)
+    if not isinstance(transfer, dict):
+        return False
+    state = str(transfer.get("state") or "").strip().lower()
+    child_sid = str(getattr(child, "session_id", "") or "")
+    return (
+        state in {"pending", "owned"}
+        and str(getattr(child, "parent_session_id", "") or "") == str(parent_sid)
+        and str(transfer.get("parent_session_id") or "") == str(parent_sid)
+        and str(transfer.get("child_session_id") or "") == child_sid
+    )
+
+
+def _recover_compression_queue_transfer(parent_sid: str, child_sid: str):
+    """Complete a parent-authoritative compression queue handoff.
+
+    The parent remains the owner until the child sidecar contains its lineage,
+    queue, and the small owned marker in one save. The marker is never used to
+    discover a child; it only makes a successful child save idempotent when the
+    subsequent parent clear was interrupted.
+    """
+    if not parent_sid or not child_sid or parent_sid == child_sid:
+        return None
+    from api.models import Session
+
+    # Resolve both IDs before acquiring either lock, then acquire the distinct
+    # lock objects in a stable order. Compression aliases parent/child IDs to
+    # one lock, so identity-based deduplication avoids self-deadlock.
+    locks = []
+    for sid in sorted({str(parent_sid), str(child_sid)}):
+        candidate = _get_session_agent_lock(sid)
+        if not any(candidate is lock for lock in locks):
+            locks.append(candidate)
+    acquired = []
+    try:
+        for lock in locks:
+            lock.acquire()
+            acquired.append(lock)
+
+        child = Session.load(child_sid)
+        if child is None:
+            return None
+        if not _compression_queue_transfer_matches(child, parent_sid):
+            return child
+        parent = Session.load(parent_sid)
+        if parent is None:
+            return child
+        parent_generation = getattr(parent, "clear_generation", None)
+        child_generation = getattr(child, "clear_generation", None)
+
+        def cache_sessions(*sessions):
+            with LOCK:
+                for value in sessions:
+                    sid = str(getattr(value, "session_id", "") or "")
+                    if not sid:
+                        continue
+                    SESSIONS[sid] = value
+                    SESSIONS.move_to_end(sid)
+
+        def clear_parent():
+            parent.queue = []
+            parent.queue_transfer = None
+            parent.save(touch_updated_at=False)
+            cache_sessions(parent)
+
+        # A clear that happened after admission fences the old parent's queue.
+        # Do this before looking at either queue so stale work is never merged
+        # into a newer cleared conversation.
+        if (
+            parent_generation is not None
+            and child_generation is not None
+            and parent_generation != child_generation
+        ):
+            if getattr(parent, "queue", None) or getattr(parent, "queue_transfer", None):
+                clear_parent()
+            return child
+        parent_items = [
+            _canonical_queue_item(item, source="webui_queue")
+            for item in (getattr(parent, "queue", None) or [])
+            if isinstance(item, dict)
+        ]
+        if not parent_items:
+            return child
+        child_items = [
+            _canonical_queue_item(item, source="webui_queue")
+            for item in (getattr(child, "queue", None) or [])
+            if isinstance(item, dict)
+        ]
+
+        # If child ownership already committed, only the parent clear remains.
+        # This is the crash/restart boundary: never merge the old parent again
+        # after the child has begun consuming its durable queue.
+        owned_transfer = getattr(child, "queue_transfer", None)
+        owned_ids = {
+            str(item_id)
+            for item_id in (owned_transfer or {}).get("item_ids", [])
+            if str(item_id or "")
+        } if isinstance(owned_transfer, dict) else set()
+        parent_ids = {str(item.get("id") or "") for item in parent_items}
+        if (
+            isinstance(owned_transfer, dict)
+            and str(owned_transfer.get("state") or "").strip().lower() == "owned"
+            and _compression_queue_transfer_matches(child, parent_sid)
+            and parent_ids <= owned_ids
+            and (
+                child_generation is None
+                or owned_transfer.get("clear_generation") in (None, child_generation)
+            )
+        ):
+            try:
+                clear_parent()
+            except Exception:
+                logger.warning(
+                    "Compression child %s owns queue but parent %s clear is pending",
+                    child_sid,
+                    parent_sid,
+                    exc_info=True,
+                )
+            return child
+
+        merged = []
+        positions = {}
+        for item in [*parent_items, *child_items]:
+            item_id = str(item.get("id") or "")
+            if not item_id:
+                continue
+            if item_id in positions:
+                # The continuation is the newer owner when an interrupted transfer
+                # left the same accepted item in both sidecars.
+                merged[positions[item_id]] = item
+            else:
+                positions[item_id] = len(merged)
+                merged.append(item)
+        saved_child_queue = copy.deepcopy(getattr(child, "queue", None) or [])
+        saved_child_parent = getattr(child, "parent_session_id", None)
+        saved_child_transfer = copy.deepcopy(getattr(child, "queue_transfer", None))
+        child.queue = merged
+        child.parent_session_id = parent_sid
+        child.queue_transfer = {
+            "version": 1,
+            "state": "owned",
+            "parent_session_id": parent_sid,
+            "child_session_id": child_sid,
+            "item_ids": [str(item.get("id")) for item in merged],
+            "clear_generation": child_generation if child_generation is not None else parent_generation,
+        }
+        # Child ownership lands first. If the process dies after this save, the
+        # next recovery pass sees the lineage and owned item ids and can safely
+        # retry only the parent clear.
+        try:
+            child.save(touch_updated_at=False)
+        except Exception:
+            child.queue = saved_child_queue
+            child.parent_session_id = saved_child_parent
+            child.queue_transfer = saved_child_transfer
+            raise
+        cache_sessions(child)
+        try:
+            clear_parent()
+        except Exception:
+            # The child sidecar is already the durable owner. Keep its cache
+            # entry and let a later teardown/reload retry only the parent clear.
+            cache_sessions(parent)
+            logger.warning(
+                "Compression queue parent %s clear failed after child %s ownership committed",
+                parent_sid,
+                child_sid,
+                exc_info=True,
+            )
+        return child
+    finally:
+        for lock in reversed(acquired):
+            lock.release()
+
+
 def _pre_compression_continuation_session_id(session) -> str | None:
     """Return the newest visible descendant for a hidden compression snapshot.
 
@@ -9685,7 +9905,7 @@ def _pre_compression_continuation_session_id(session) -> str | None:
         return None
     # #2980 hardening: the resolved continuation is written to the client's
     # URL/localStorage, so it must stay within the requested snapshot's own
-    # profile. Children are matched only by parent_session_id below; a
+    # profile. Children are matched only by durable parent_session_id; a
     # crafted/corrupt foreign-profile sidecar whose parent_session_id collided
     # with this snapshot's id would otherwise leak cross-profile. Pin the
     # snapshot's profile and reject any child that isn't profile-matched.
@@ -9828,14 +10048,61 @@ def _pre_compression_continuation_session_id(session) -> str | None:
             return None
         return latest_sid
 
+    def _prefer_persisted_rows(memory_rows, persisted_rows):
+        persisted_ids = {
+            _safe_first(_row_value(row, "session_id"))
+            for row in persisted_rows
+            if _safe_first(_row_value(row, "session_id"))
+        }
+        return [
+            row for row in memory_rows
+            if _safe_first(_row_value(row, "session_id")) not in persisted_ids
+        ] + list(persisted_rows)
+
+    def _queue_recovery_needed(rows):
+        if (
+            getattr(session, "_loaded_metadata_only", False)
+            or getattr(session, "queue", None)
+            or getattr(session, "queue_transfer", None)
+        ):
+            return True
+        return any(
+            bool(_row_value(row, "queue"))
+            or isinstance(_row_value(row, "queue_transfer"), dict)
+            for row in rows
+        )
+
     memory_seen_ids: set[str] = set()
     rows = _child_rows_from_memory(memory_seen_ids)
-    index_rows = _child_rows_from_index(memory_seen_ids)
+    # The compact index/sidecar is authoritative after a restart; do not let a
+    # stale in-memory object with the same id hide its durable lineage.
+    index_rows = _child_rows_from_index(set())
     if index_rows is not None:
-        return _resolve_from_rows(rows + index_rows)
-
-    rows.extend(_child_rows_from_sidecars(memory_seen_ids))
-    return _resolve_from_rows(rows)
+        resolved = _resolve_from_rows(_prefer_persisted_rows(rows, index_rows))
+        if resolved:
+            if not _queue_recovery_needed(rows + index_rows):
+                return resolved
+            try:
+                recovered = _recover_compression_queue_transfer(sid, resolved)
+            except Exception:
+                logger.debug("compression queue transfer recovery failed", exc_info=True)
+                return None
+            return resolved if recovered is not None else None
+        sidecar_rows = _child_rows_from_sidecars(set())
+        rows = _prefer_persisted_rows(rows + index_rows, sidecar_rows)
+    else:
+        rows = _prefer_persisted_rows(rows, _child_rows_from_sidecars(set()))
+    resolved = _resolve_from_rows(rows)
+    if resolved:
+        if not _queue_recovery_needed(rows):
+            return resolved
+        try:
+            recovered = _recover_compression_queue_transfer(sid, resolved)
+        except Exception:
+            logger.debug("compression queue transfer recovery failed", exc_info=True)
+            return None
+        return resolved if recovered is not None else None
+    return None
 
 from api.workspace import (
     load_workspaces,
@@ -14987,6 +15254,9 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Subagent sessions are view-only and cannot store a draft from WebUI", 400)
         text = body.get("text")
         files = body.get("files")
+        if_empty = body.get("if_empty", False)
+        if not isinstance(if_empty, bool):
+            return bad(handler, "if_empty must be a boolean", 400)
         # Stage-326 hardening (per Opus advisor): size + type validation on
         # the draft inputs. Without this, a misbehaving or malicious client
         # can persist multi-MB strings into the session JSON on every keystroke
@@ -15010,6 +15280,11 @@ def handle_post(handler, parsed) -> bool:
         with _get_session_agent_lock(sid):
             _draft_mark("acquired_lock")
             current_draft = dict(getattr(s, "composer_draft", {}) or {})
+            if if_empty and (
+                str(current_draft.get("text") or "")
+                or list(current_draft.get("files") or [])
+            ):
+                return j(handler, {"ok": False, "conflict": True, "draft": current_draft}, status=409)
             next_draft = dict(current_draft)
             if text is not None:
                 next_draft["text"] = text
@@ -15260,7 +15535,17 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Session not found", 404)
         sid = body["session_id"]
         with _get_session_agent_lock(sid):
-            had_sidecar_messages = bool(s.messages or [])
+            s = _authoritative_session_locked(sid, fallback=s)
+            had_sidecar_messages = bool(
+                s.messages
+                or getattr(s, "queue", None)
+                or getattr(s, "active_stream_id", None)
+                or getattr(s, "pending_user_message", None)
+                or getattr(s, "pending_queue_item", None)
+                or getattr(s, "pending_turn_intent", None)
+                or getattr(s, "pending_queue_outcome", None)
+                or getattr(s, "queue_transfer", None)
+            )
             # Clear is a full truncate-to-empty: route through the SAME helper the
             # /api/session/truncate handler uses (single source of truth) so the
             # display + context arrays are emptied AND the truncation watermark is
@@ -15303,7 +15588,11 @@ def handle_post(handler, parsed) -> bool:
             s.pending_started_at = None
             s.pending_user_source = None
             s.pending_queue_item = None
-            s.clear_generation = uuid.uuid4().hex if had_sidecar_messages else None
+            s.pending_turn_intent = None
+            s.pending_queue_outcome = {"state": "cleared", "item_id": None}
+            s.queue = []
+            s.queue_transfer = None
+            s.clear_generation = uuid.uuid4().hex if had_sidecar_messages else (s.clear_generation or None)
             # Reset the title via the rename helper so clearing a manually-named
             # session also clears manual_title/llm_title_generated — otherwise the
             # reused session keeps its manual-title protection and never auto-names
@@ -15325,6 +15614,9 @@ def handle_post(handler, parsed) -> bool:
                     and persisted.get("pending_started_at") is None
                     and persisted.get("pending_user_source") is None
                     and persisted.get("pending_queue_item") is None
+                    and persisted.get("pending_turn_intent") is None
+                    and persisted.get("queue") == []
+                    and persisted.get("pending_queue_outcome", {}).get("state") == "cleared"
                     and persisted.get("clear_generation") == s.clear_generation
                 )
             except (OSError, json.JSONDecodeError, ValueError):
@@ -21509,7 +21801,14 @@ def _handle_background(handler, body):
     return j(handler, {"task_id": task_id, "stream_id": stream_id, "session_id": bg.session_id})
 
 
-def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, started_at: float | None, source: str = "webui") -> None:
+def _checkpoint_user_message_for_eager_session_save(
+    s,
+    msg: str,
+    attachments,
+    started_at: float | None,
+    source: str = "webui",
+    queue_item_id: str | None = None,
+) -> None:
     """Materialize the current user turn for eager first-turn persistence.
 
     The streaming thread still receives ``pending_user_message`` so existing
@@ -21518,22 +21817,52 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
     """
     if not msg and not attachments:
         return
-    existing = list(getattr(s, "messages", None) or [])
-    if existing:
-        latest = existing[-1]
-        if isinstance(latest, dict) and latest.get("role") == "user":
-            latest_text = " ".join(str(latest.get("content") or "").split())
-            msg_text = " ".join(str(msg or "").split())
-            if latest_text == msg_text:
-                return
-    user_msg = {"role": "user", "content": msg}
     from api.process_event_utils import build_active_turn_token, stamp_message_source
+
+    active_turn_token = build_active_turn_token(
+        getattr(s, "active_stream_id", None), started_at,
+    )
+    stable_queue_item_id = str(queue_item_id or "").strip() or None
+    existing = list(getattr(s, "messages", None) or [])
+    for latest in existing:
+        if not isinstance(latest, dict) or latest.get("role") != "user":
+            continue
+        existing_queue_item_ids = {
+            str(latest.get("queue_item_id") or "").strip(),
+            str(latest.get("_queue_item_id") or "").strip(),
+        }
+        if stable_queue_item_id or active_turn_token:
+            if stable_queue_item_id and stable_queue_item_id in existing_queue_item_ids:
+                return
+            if active_turn_token and latest.get("_active_turn_token") == active_turn_token:
+                return
+            continue
+        try:
+            started_timestamp = float(started_at)
+            latest_timestamp = float(latest.get("timestamp"))
+        except (TypeError, ValueError):
+            continue
+        if (
+            math.isfinite(started_timestamp)
+            and started_timestamp > 0
+            and math.isfinite(latest_timestamp)
+            and latest_timestamp == started_timestamp
+            and " ".join(str(latest.get("content") or "").split())
+            == " ".join(str(msg or "").split())
+            and (latest.get("_source") or "webui") == (source or "webui")
+            and list(latest.get("attachments") or []) == list(attachments or [])
+        ):
+            return
+    user_msg = {"role": "user", "content": msg}
 
     stamp_message_source(
         user_msg,
         source,
-        active_turn_token=build_active_turn_token(getattr(s, "active_stream_id", None), started_at),
+        active_turn_token=active_turn_token,
     )
+    if stable_queue_item_id:
+        user_msg["queue_item_id"] = stable_queue_item_id
+        user_msg["_queue_item_id"] = stable_queue_item_id
     if isinstance(started_at, (int, float)) and started_at > 0:
         user_msg["timestamp"] = float(started_at)
     if attachments:
@@ -21590,6 +21919,7 @@ def _prepare_chat_start_session_for_stream(
     source: str = "webui",
     queue_item_id: str | None = None,
     pending_queue_item: dict | None = None,
+    pending_turn_intent: dict | None = None,
 ):
     """Persist chat-start state according to webui.session_save_mode.
 
@@ -21615,6 +21945,12 @@ def _prepare_chat_start_session_for_stream(
     s.pending_started_at = started_at if started_at is not None else time.time()
     s.pending_user_source = source
     s.pending_queue_item = copy.deepcopy(pending_queue_item) if pending_queue_item else None
+    s.pending_turn_intent = copy.deepcopy(pending_turn_intent) if isinstance(pending_turn_intent, dict) else None
+    s.pending_queue_outcome = {
+        "state": "claimed" if queue_item_id else "owned",
+        "item_id": str(queue_item_id) if queue_item_id else None,
+        "stream_id": stream_id,
+    }
     current_title = getattr(s, "title", None)
     if _is_default_or_empty_session_title(current_title):
         provisional_title = _provisional_title_from_prompt(msg, current_title or "Untitled")
@@ -21624,7 +21960,12 @@ def _prepare_chat_start_session_for_stream(
         checkpoint_text = (
             pending_queue_item["display_text"]
             if isinstance(pending_queue_item, dict) and "display_text" in pending_queue_item
-            else msg
+            else (
+                pending_turn_intent.get("display_text")
+                if isinstance(pending_turn_intent, dict)
+                and pending_turn_intent.get("display_text") is not None
+                else msg
+            )
         )
         _checkpoint_user_message_for_eager_session_save(
             s,
@@ -21632,6 +21973,7 @@ def _prepare_chat_start_session_for_stream(
             attachments,
             s.pending_started_at,
             source=source,
+            queue_item_id=queue_item_id,
         )
     queue_before_save = None
     if queue_item_id is not None:
@@ -21798,6 +22140,12 @@ def _restore_start_state_after_thread_failure(
     session_lock = _get_session_agent_lock(session_id)
     with session_lock:
         current = _authoritative_session_locked(session_id, fallback=original_session)
+        admitted_generation = admitted_state.get("clear_generation")
+        if (
+            claimed_queue_item is not None
+            and getattr(current, "clear_generation", None) != admitted_generation
+        ):
+            return
         current_queue = [
             copy.deepcopy(item)
             for item in (getattr(current, "queue", None) or [])
@@ -21880,6 +22228,10 @@ def _start_chat_stream_for_session(
     display_text: str | None = None,
     model_explicit_pick_signature: str | None = None,
     clear_recovery: bool = False,
+    recovery: dict | None = None,
+    goal_state: dict | None = None,
+    turn_intent: dict | None = None,
+    queue_generation: str | None = None,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn."""
     if external_runtime_owned is None:
@@ -21892,13 +22244,6 @@ def _start_chat_stream_for_session(
         stale_response["_status"] = 409
         return stale_response
     attachments = attachments or []
-
-    # #1932: check if this session has a pending goal continuation flag.
-    # The streaming hook sets PENDING_GOAL_CONTINUATION when goal_continue fires,
-    # so the next chat/start for this session is automatically treated as goal-related.
-    if not goal_related and s.session_id in PENDING_GOAL_CONTINUATION:
-        goal_related = True
-        PENDING_GOAL_CONTINUATION.discard(s.session_id)
 
     # process_complete wakeup (ours-original, Option B): if this session has a
     # pending process_complete marker (set by api/background_process.py drain),
@@ -21950,6 +22295,13 @@ def _start_chat_stream_for_session(
                     stream_id = uuid.uuid4().hex
                 pre_start_state = copy.deepcopy(s.__dict__)
                 queue = list(getattr(s, "queue", None) or [])
+                if queue_generation is not None and str(queue_generation) != str(getattr(s, "clear_generation", None)):
+                    return {
+                        "accepted": False,
+                        "reason": "cleared",
+                        "session_id": s.session_id,
+                        "_status": 409,
+                    }
                 if claim_queue_head:
                     if not queue:
                         return {"accepted": False, "reason": "empty", "session_id": s.session_id}
@@ -21966,24 +22318,36 @@ def _start_chat_stream_for_session(
                     queued_item = queue[0]
                     claimed_queue_item = copy.deepcopy(queued_item)
                     pending_queue_item = _canonical_queue_item(queued_item, source=source)
-                    attachments = list(queued_item.get("files") or [])
-                    msg = _compose_queued_turn_message(queued_item.get("text"), attachments)
-                    model = queued_item.get("model") or s.model
-                    model_provider = queued_item.get("model_provider") or getattr(s, "model_provider", None)
-                    workspace = s.workspace
                 elif queue:
                     if len(queue) >= 100:
                         return {"error": "queue is full", "_status": 409}
                     if not isinstance(queue[0], dict) or not str(queue[0].get("id") or ""):
                         return {"error": "invalid durable queue item", "_status": 409}
-                    incoming_text = msg if display_text is None else str(display_text)
+                    incoming_text = msg
+                    incoming_display = (
+                        str(display_text) if display_text is not None else incoming_text
+                    )
+                    direct_goal_related = bool(goal_related)
+                    if not direct_goal_related and s.session_id in PENDING_GOAL_CONTINUATION:
+                        direct_goal_related = True
+                        PENDING_GOAL_CONTINUATION.discard(s.session_id)
+                    recovery_payload = copy.deepcopy(recovery) if isinstance(recovery, dict) else {}
+                    recovery_payload["clear"] = bool(clear_recovery)
                     appended_item = _build_queue_item(
                         incoming_text,
                         attachments,
                         model,
                         model_provider,
                         source=source,
-                        display_text=incoming_text,
+                        display_text=incoming_display,
+                        workspace=workspace,
+                        goal_related=direct_goal_related,
+                        goal_state=goal_state,
+                        moa_config=moa_config,
+                        recovery=recovery_payload,
+                        dispatch={"backend": "gateway" if backend_is_gateway else "local"},
+                        model_explicit_pick_signature=model_explicit_pick_signature,
+                        intent=turn_intent,
                     )
                     queue.append(appended_item)
                     appended_queue_item_id = str(appended_item.get("id") or "")
@@ -21991,15 +22355,79 @@ def _start_chat_stream_for_session(
                     queue_item_id = str(queue[0].get("id") or "")
                     if not queue_item_id:
                         return {"error": "invalid durable queue item", "_status": 409}
-                    queued_item = queue[0]
-                    claimed_queue_item = copy.deepcopy(queued_item)
-                    pending_queue_item = _canonical_queue_item(queued_item, source=source)
-                    attachments = list(queued_item.get("files") or [])
-                    msg = _compose_queued_turn_message(queued_item.get("text"), attachments)
-                    model = queued_item.get("model") or s.model
-                    model_provider = queued_item.get("model_provider") or getattr(s, "model_provider", None)
+                    claimed_queue_item = copy.deepcopy(queue[0])
+                    pending_queue_item = _canonical_queue_item(queue[0], source=source)
                 if pending_queue_item is not None:
-                    source = pending_queue_item.get("source") or source
+                    active_intent = _build_turn_intent(
+                        pending_queue_item.get("text") or "",
+                        pending_queue_item.get("files") or [],
+                        pending_queue_item.get("model") or s.model,
+                        pending_queue_item.get("model_provider") or getattr(s, "model_provider", None),
+                        workspace=pending_queue_item.get("workspace") or s.workspace,
+                        source=pending_queue_item.get("source") or source,
+                        display_text=pending_queue_item.get("display_text"),
+                        item_id=pending_queue_item.get("id"),
+                        intent=pending_queue_item.get("intent"),
+                        goal_related=pending_queue_item.get("goal_related", False),
+                        goal_state=pending_queue_item.get("goal_state"),
+                        moa_config=pending_queue_item.get("moa_config"),
+                        recovery=pending_queue_item.get("recovery"),
+                        dispatch=pending_queue_item.get("dispatch"),
+                    )
+                    pending_queue_item["intent"] = active_intent
+                    attachments = list(active_intent.get("attachments") or pending_queue_item.get("files") or [])
+                    msg = _compose_queued_turn_message(active_intent.get("agent_text"), attachments)
+                    model = active_intent.get("model") or s.model
+                    model_provider = active_intent.get("model_provider") or getattr(s, "model_provider", None)
+                    workspace = active_intent.get("workspace") or s.workspace
+                    source = active_intent.get("source") or source
+                    goal_related = bool(active_intent.get("goal_related"))
+                    goal_state = copy.deepcopy(active_intent.get("goal_state"))
+                    moa_config = copy.deepcopy(active_intent.get("moa_config"))
+                    recovery_intent = active_intent.get("recovery")
+                    clear_recovery = bool(isinstance(recovery_intent, dict) and recovery_intent.get("clear"))
+                    model_explicit_pick_signature = active_intent.get("model_explicit_pick_signature")
+                else:
+                    if not goal_related and s.session_id in PENDING_GOAL_CONTINUATION:
+                        goal_related = True
+                        PENDING_GOAL_CONTINUATION.discard(s.session_id)
+                    intent_message = msg
+                    intent_attachments = attachments
+                    intent_display_text = display_text
+                    recovery_payload = copy.deepcopy(recovery) if isinstance(recovery, dict) else {}
+                    recovery_payload["clear"] = bool(clear_recovery)
+                    active_intent = _build_turn_intent(
+                        intent_message,
+                        intent_attachments,
+                        model,
+                        model_provider,
+                        workspace=workspace,
+                        source=source,
+                        display_text=intent_display_text,
+                        goal_related=goal_related,
+                        goal_state=goal_state,
+                        moa_config=moa_config,
+                        recovery=recovery_payload,
+                        dispatch={"backend": "gateway" if backend_is_gateway else "local"},
+                        model_explicit_pick_signature=model_explicit_pick_signature,
+                        intent=turn_intent,
+                    )
+                    attachments = list(active_intent.get("attachments") or intent_attachments or [])
+                    msg = _compose_queued_turn_message(active_intent.get("agent_text"), attachments)
+                    goal_related = bool(active_intent.get("goal_related"))
+                    moa_config = copy.deepcopy(active_intent.get("moa_config"))
+                active_intent["clear_generation"] = getattr(s, "clear_generation", None)
+                active_dispatch = (
+                    copy.deepcopy(active_intent.get("dispatch"))
+                    if isinstance(active_intent.get("dispatch"), dict)
+                    else {}
+                )
+                active_dispatch.update({
+                    "backend": "gateway" if backend_is_gateway else "local",
+                    "queue_item_id": queue_item_id,
+                    "claim_queue_head": bool(claim_queue_head),
+                })
+                active_intent["dispatch"] = active_dispatch
                 if model_explicit_pick_signature is not None:
                     s.model_explicit_pick_signature = model_explicit_pick_signature
                 if clear_recovery:
@@ -22018,6 +22446,7 @@ def _start_chat_stream_for_session(
                     source=source,
                     queue_item_id=queue_item_id,
                     pending_queue_item=pending_queue_item,
+                    pending_turn_intent=active_intent,
                 )
                 admitted_state = copy.deepcopy(s.__dict__)
                 break
@@ -22071,7 +22500,12 @@ def _start_chat_stream_for_session(
         STREAM_GOAL_RELATED[stream_id] = True
     diag.stage("worker_thread_start") if diag else None
     worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
-    worker_kwargs = {"model_provider": model_provider, "goal_related": goal_related}
+    worker_kwargs = {
+        "model_provider": model_provider,
+        "goal_related": goal_related,
+        "command": copy.deepcopy(active_intent.get("command"))
+        if isinstance(active_intent, dict) else None,
+    }
     if moa_config and not backend_is_gateway:
         worker_kwargs["moa_config"] = moa_config
     if backend_is_gateway:
@@ -22140,6 +22574,14 @@ def _start_chat_stream_for_session(
                 "attachments": copy.deepcopy(claimed_queue_item.get("files") or []),
             }
         )
+    if appended_queue_item_id:
+        appended = next(
+            (item for item in (getattr(s, "queue", None) or []) if isinstance(item, dict) and str(item.get("id") or "") == appended_queue_item_id),
+            None,
+        )
+        if appended is not None:
+            response["queued_item_id"] = appended_queue_item_id
+            response["queued_item"] = copy.deepcopy(appended)
     if normalized_model:
         response["effective_model"] = model
     if model_provider:
@@ -22179,6 +22621,8 @@ def _chat_start_response_from_run_start(result):
         "effective_model_provider",
         "queue_item_id",
         "queue_item",
+        "queued_item_id",
+        "queued_item",
         "display_text",
         "attachments",
         "queue",
@@ -22217,6 +22661,7 @@ def _start_run(
     source: str,
     route: str,
     diag=None,
+    goal_related: bool = False,
     moa_config=None,
     gateway_chat_enabled: bool | None = None,
     queue_item_id: str | None = None,
@@ -22224,6 +22669,10 @@ def _start_run(
     display_text: str | None = None,
     model_explicit_pick_signature: str | None = None,
     clear_recovery: bool = False,
+    recovery: dict | None = None,
+    goal_state: dict | None = None,
+    turn_intent: dict | None = None,
+    queue_generation: str | None = None,
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
 
@@ -22251,23 +22700,75 @@ def _start_run(
         runtime_adapter_runner_enabled,
     )
 
-    if runtime_adapter_enabled() or runtime_adapter_runner_enabled():
-        runner_queue_present = bool(getattr(s, "queue", None))
-        if runtime_adapter_runner_enabled():
-            with _get_session_agent_lock(s.session_id):
-                try:
-                    runner_session = _authoritative_session_locked(s.session_id, fallback=s)
-                except KeyError:
-                    runner_session = s
-                runner_queue_present = bool(getattr(runner_session, "queue", None))
-        if runtime_adapter_runner_enabled() and (
-            queue_item_id is not None or claim_queue_head or runner_queue_present
-        ):
-            return {
-                "error": "durable WebUI queue is unsupported in runner-local mode",
-                "_status": 501,
-            }
+    if runtime_adapter_runner_enabled() and (queue_item_id is not None or claim_queue_head):
+        return {
+            "error": "durable WebUI queue is unsupported in runner-local mode",
+            "_status": 501,
+        }
 
+    recovery_payload = copy.deepcopy(recovery) if isinstance(recovery, dict) else {}
+    recovery_payload["clear"] = bool(clear_recovery)
+    try:
+        normalized_intent = _build_turn_intent(
+            msg,
+            attachments,
+            model,
+            model_provider,
+            workspace=workspace,
+            source=source,
+            display_text=display_text,
+            goal_related=goal_related,
+            goal_state=goal_state,
+            moa_config=moa_config,
+            recovery=recovery_payload,
+            dispatch={"backend": "gateway" if gateway_chat_enabled else "local"},
+            model_explicit_pick_signature=model_explicit_pick_signature,
+            intent=turn_intent,
+        )
+    except ValueError as exc:
+        return {
+            "error": str(exc),
+            "error_code": "queue_command_preprocess",
+            "_status": 400,
+        }
+    normalized_dispatch = normalized_intent.get("command")
+    normalized_dispatch = (
+        normalized_dispatch.get("dispatch")
+        if isinstance(normalized_dispatch, dict)
+        else None
+    )
+    normalized_command = normalized_intent.get("command")
+    if (
+        gateway_chat_enabled
+        and isinstance(normalized_command, dict)
+        and normalized_command.get("name") == "moa"
+    ):
+        return {
+            "error": "MoA prompt transforms are unavailable on gateway-backed sessions",
+            "error_code": "queue_command_preprocess",
+            "_status": 409,
+        }
+    if normalized_dispatch in {"browser_local", "transform_required"}:
+        error_code = (
+            "queue_browser_command"
+            if normalized_dispatch == "browser_local"
+            else "queue_command_preprocess"
+        )
+        return {
+            "error": (
+                "browser-only slash commands must be handled by the active WebUI"
+                if normalized_dispatch == "browser_local"
+                else "prompt-transform slash commands must be preprocessed before execution"
+            ),
+            "error_code": error_code,
+            "_status": 409,
+        }
+    normalized_message = _compose_queued_turn_message(
+        normalized_intent.get("agent_text") or msg,
+        normalized_intent.get("attachments") or attachments or [],
+    )
+
+    if runtime_adapter_enabled() or runtime_adapter_runner_enabled():
         def _legacy_start_run(request: StartRunRequest) -> dict:
             return _start_chat_stream_for_session(
                 s,
@@ -22286,6 +22787,11 @@ def _start_run(
                 display_text=display_text,
                 model_explicit_pick_signature=model_explicit_pick_signature,
                 clear_recovery=clear_recovery,
+                recovery=recovery,
+                goal_related=goal_related,
+                goal_state=goal_state,
+                turn_intent=request.intent or turn_intent,
+                queue_generation=queue_generation,
             )
 
         def _legacy_adapter_factory():
@@ -22301,13 +22807,14 @@ def _start_run(
             result = adapter.start_run(
                 StartRunRequest(
                     session_id=s.session_id,
-                    message=msg,
+                    message=normalized_message,
                     attachments=attachments,
                     workspace=workspace,
                     profile=getattr(s, "profile", None),
                     provider=model_provider,
                     model=model,
                     source=source,
+                    intent=normalized_intent,
                     metadata={"route": route},
                 )
             )
@@ -22317,21 +22824,26 @@ def _start_run(
 
     return _start_chat_stream_for_session(
         s,
-        msg=msg,
-        attachments=attachments,
-        workspace=workspace,
-        model=model,
-        model_provider=model_provider,
+        msg=normalized_message,
+        attachments=list(normalized_intent.get("attachments") or attachments or []),
+        workspace=normalized_intent.get("workspace") or workspace,
+        model=normalized_intent.get("model") or model,
+        model_provider=normalized_intent.get("model_provider") or model_provider,
         normalized_model=normalized_model,
         diag=diag,
-        source=source,
-        moa_config=moa_config,
+        source=normalized_intent.get("source") or source,
+        moa_config=normalized_intent.get("moa_config") or moa_config,
         external_runtime_owned=gateway_chat_enabled,
         queue_item_id=queue_item_id,
         claim_queue_head=claim_queue_head,
         display_text=display_text,
         model_explicit_pick_signature=model_explicit_pick_signature,
         clear_recovery=clear_recovery,
+        recovery=recovery,
+        goal_state=normalized_intent.get("goal_state") or goal_state,
+        turn_intent=normalized_intent,
+        queue_generation=queue_generation,
+        goal_related=bool(normalized_intent.get("goal_related")),
     )
 
 
@@ -22422,6 +22934,10 @@ def _server_turn_started_payload(
                 ),
             }
         )
+    queued_item = response.get("queued_item")
+    if isinstance(queued_item, dict):
+        payload["queued_item_id"] = response.get("queued_item_id") or queued_item.get("id")
+        payload["queued_item"] = copy.deepcopy(queued_item)
     if "queue" in response or session is not None:
         payload["queue"] = copy.deepcopy(
             response.get("queue")
@@ -22464,6 +22980,44 @@ def drain_queued_session_turn(session_id: str):
             "error": "durable WebUI queue is unsupported in runner-local mode",
             "_status": 501,
         }
+    # A compression child may have durably saved its queue before the archived
+    # parent was cleared. Complete that two-sidecar handoff before selecting a
+    # head; doing it outside the child lock avoids reacquiring an aliased lock.
+    with _get_session_agent_lock(session_id):
+        try:
+            session = _authoritative_session_locked(session_id)
+        except KeyError:
+            return {"error": "Session not found", "_status": 404}
+        if getattr(session, "pre_compression_snapshot", False):
+            return {
+                "error": "cannot drain a pre-compression snapshot",
+                "session_id": session_id,
+                "_status": 409,
+            }
+        parent_sid = str(getattr(session, "parent_session_id", "") or "").strip()
+        if parent_sid and not _compression_queue_transfer_matches(session, parent_sid):
+            parent_sid = ""
+    if parent_sid:
+        try:
+            recovered = _recover_compression_queue_transfer(parent_sid, session_id)
+        except Exception:
+            logger.warning(
+                "Compression queue recovery failed before draining child %s",
+                session_id,
+                exc_info=True,
+            )
+            return {
+                "error": "compression queue transfer is unavailable",
+                "session_id": session_id,
+                "_status": 409,
+            }
+        if recovered is None:
+            return {
+                "error": "compression queue transfer is unavailable",
+                "session_id": session_id,
+                "_status": 409,
+            }
+
     with _get_session_agent_lock(session_id):
         try:
             session = _authoritative_session_locked(session_id)
@@ -22482,19 +23036,28 @@ def drain_queued_session_turn(session_id: str):
         item_id = str(item.get("id") or "") if isinstance(item, dict) else ""
         if not item_id:
             return {"error": "invalid durable queue item", "_status": 409}
+        item = _canonical_queue_item(item, source="webui_queue")
+        queue_generation = getattr(session, "clear_generation", None)
+        item_intent = item.get("intent") if isinstance(item.get("intent"), dict) else {}
     response = _start_run(
         session,
-        msg=_compose_queued_turn_message(item.get("text"), item.get("files") or []),
-        attachments=list(item.get("files") or []),
-        workspace=session.workspace,
-        model=item.get("model") or session.model,
-        model_provider=item.get("model_provider") or getattr(session, "model_provider", None),
+        msg=_compose_queued_turn_message(
+            item_intent.get("raw_text") or item.get("text"),
+            item_intent.get("attachments") or item.get("files") or [],
+        ),
+        attachments=list(item_intent.get("attachments") or item.get("files") or []),
+        workspace=item_intent.get("workspace") or session.workspace,
+        model=item_intent.get("model") or item.get("model") or session.model,
+        model_provider=item_intent.get("model_provider") or item.get("model_provider") or getattr(session, "model_provider", None),
         normalized_model=False,
-        source="webui_queue",
+        source=item_intent.get("source") or item.get("source") or "webui_queue",
         route="/api/chat/queue",
         gateway_chat_enabled=webui_gateway_chat_enabled(get_config()),
         queue_item_id=item_id,
         claim_queue_head=True,
+        goal_state=item_intent.get("goal_state"),
+        turn_intent=item_intent,
+        queue_generation=queue_generation,
     )
     _fanout_server_turn_started(session_id, response, source="webui_queue")
     return response
@@ -22872,14 +23435,16 @@ def _handle_goal_command(handler, body):
                 return bad(handler, "invalid profile", 400)
         except ImportError:
             requested_profile = ""
-    if requested_profile and not _profiles_match(getattr(s, "profile", None), requested_profile):
-        has_persisted_turns = bool(
-            getattr(s, "messages", None)
-            or getattr(s, "context_messages", None)
-            or getattr(s, "pending_user_message", None)
-        )
-        if not has_persisted_turns:
+    active_profile = _get_active_profile_name()
+    if not _session_visible_to_active_profile(getattr(s, "profile", None), handler):
+        if (
+            requested_profile
+            and _profiles_match(requested_profile, active_profile)
+            and _is_empty_session_placeholder(s)
+        ):
             s.profile = requested_profile
+        else:
+            return bad(handler, "Session not found", 404)
 
     current_stream_id = getattr(s, "active_stream_id", None)
     stream_running = False
@@ -23090,16 +23655,11 @@ def _handle_chat_start(handler, body, diag=None):
             except ImportError:
                 requested_profile = ""
         session_profile = getattr(s, "profile", None)
-        has_persisted_turns = bool(
-            getattr(s, "messages", None)
-            or getattr(s, "context_messages", None)
-            or getattr(s, "pending_user_message", None)
-        )
         if not _session_visible_to_active_profile(session_profile, handler):
             if (
                 requested_profile
                 and _profiles_match(requested_profile, active_profile)
-                and not has_persisted_turns
+                and _is_empty_session_placeholder(s)
             ):
                 # Empty placeholders can still be retagged when the
                 # requested profile matches the active request profile.
@@ -23110,6 +23670,9 @@ def _handle_chat_start(handler, body, diag=None):
         msg = str(body.get("message", "")).strip()
         if not msg:
             return bad(handler, "message is required")
+        typed_intent = body.get("intent")
+        if typed_intent is not None and not isinstance(typed_intent, dict):
+            return bad(handler, "intent must be an object", 400)
         display_text = body.get("display_text")
         if display_text is not None:
             display_text = str(display_text)
@@ -23232,10 +23795,14 @@ def _handle_chat_start(handler, body, diag=None):
             "source": "webui",
             "route": "/api/chat/start",
             "diag": diag,
+            "goal_related": bool(body.get("goal_related")),
+            "goal_state": body.get("goal_state"),
             "gateway_chat_enabled": gateway_chat_enabled,
             "display_text": display_text,
+            "turn_intent": typed_intent,
             "model_explicit_pick_signature": explicit_pick_signature,
             "clear_recovery": bool(recovery),
+            "recovery": recovery,
         }
         if not gateway_chat_enabled and moa_config is not None:
             start_run_kwargs["moa_config"] = moa_config
@@ -23380,6 +23947,419 @@ def _queue_response(session, *, item=None):
     return payload
 
 
+_QUEUE_INTENT_VERSION = 1
+
+# This is the server-side safety boundary for the browser's COMMANDS registry.
+# Browser handlers have side effects (clear, model, workspace, etc.) that a
+# durable queue drain cannot reproduce. Keep the denylist explicit and fail
+# closed at queue admission; ordinary unknown slash text remains a prompt.
+_QUEUE_BROWSER_ONLY_COMMANDS = frozenset({
+    "help", "clear", "compress", "compact", "model", "workspace", "terminal",
+    "new", "usage", "theme", "personality", "skills", "use", "stop", "goal",
+    "queue", "interrupt", "steer", "title", "retry", "undo", "btw", "background",
+    "status", "voice", "reasoning", "yolo", "branch", "reload-mcp", "reload-skills",
+    "codex-runtime", "credits", "pet", "sessions", "resume",
+})
+_QUEUE_SERVER_TRANSFORM_COMMANDS = frozenset({"moa"})
+
+
+def _queue_dynamic_command_dispatch(name: str) -> str | None:
+    """Return the server boundary for plugin, CLI-only, or bundle commands."""
+    try:
+        from api.commands import list_command_bundles, list_commands
+
+        for command in list_commands():
+            if not isinstance(command, dict):
+                continue
+            names = {str(command.get("name") or "").strip().lower()}
+            names.update(
+                str(alias).strip().lower()
+                for alias in (command.get("aliases") or [])
+                if str(alias).strip()
+            )
+            if name in names and (
+                command.get("category") == "Plugin" or command.get("cli_only")
+            ):
+                return "browser_local"
+        if any(
+            isinstance(bundle, dict)
+            and str(bundle.get("name") or "").strip().lower() == name
+            for bundle in list_command_bundles()
+        ):
+            return "transform_required"
+    except Exception:
+        # An unavailable optional registry cannot make a command executable;
+        # unknown slash text remains a literal prompt below.
+        return None
+    return None
+
+
+def _queue_command_semantics(raw_text: str) -> tuple[dict, str]:
+    """Classify slash input without pretending classification executes it."""
+    raw = str(raw_text or "")
+    stripped = raw.strip()
+    if not stripped.startswith("/"):
+        return {
+            "name": None,
+            "args": "",
+            "raw": raw,
+            "dispatch": "prompt",
+            "capability": "agent_prompt",
+        }, raw
+    from api.commands import _parse_agent_command
+
+    name, args = _parse_agent_command(stripped)
+    args = args.strip()
+    if name in _QUEUE_SERVER_TRANSFORM_COMMANDS:
+        return (
+            {
+                "name": name,
+                "args": args,
+                "raw": raw,
+                "dispatch": "server_transform",
+                "capability": "server",
+            },
+            args,
+        )
+    if name in _QUEUE_BROWSER_ONLY_COMMANDS:
+        return (
+            {
+                "name": name,
+                "args": args,
+                "raw": raw,
+                "dispatch": "browser_local",
+                "capability": "browser",
+            },
+            raw,
+        )
+    dynamic_dispatch = _queue_dynamic_command_dispatch(name)
+    if dynamic_dispatch == "browser_local":
+        return (
+            {
+                "name": name,
+                "args": args,
+                "raw": raw,
+                "dispatch": dynamic_dispatch,
+                "capability": "browser",
+            },
+            raw,
+        )
+    if dynamic_dispatch == "transform_required":
+        return (
+            {
+                "name": name,
+                "args": args,
+                "raw": raw,
+                "dispatch": dynamic_dispatch,
+                "capability": "server",
+                "transform": "bundle",
+            },
+            raw,
+        )
+    return (
+        {
+            "name": None,
+            "args": "",
+            "raw": raw,
+            "dispatch": "prompt",
+            "capability": "agent_prompt",
+        },
+        raw,
+    )
+
+
+def _server_visible_intent_raw_text(text, display_text=None) -> str:
+    """Return the command candidate used for admission-only classification."""
+    message = text if isinstance(text, str) else str(text or "")
+    if isinstance(display_text, str) and display_text.lstrip().startswith("/"):
+        return display_text
+    return message
+
+
+def _queue_attachment_paths(attachments):
+    return [
+        str(attachment.get("path") or attachment.get("name") or "").strip()
+        for attachment in (attachments or [])
+        if isinstance(attachment, dict)
+    ]
+
+
+def _primary_turn_text(message, attachments):
+    """Remove only the exact server attachment suffix from the primary text."""
+    primary = str(message or "").strip()
+    paths = [path for path in _queue_attachment_paths(attachments) if path]
+    if paths:
+        suffix = f"\n\n[Attached files: {', '.join(paths)}]"
+        if primary.endswith(suffix):
+            return primary[: -len(suffix)].rstrip()
+    return primary
+
+
+def _validated_transformed_agent_text(primary, transformed, attachments):
+    """Accept a display transform only when it matches the primary payload."""
+    primary_agent = _primary_turn_text(primary, attachments)
+    expected = str(transformed or "").strip()
+    if not expected:
+        return None
+    if primary_agent == expected:
+        return expected
+    prefix = f"\n\n{expected}"
+    if primary_agent.endswith(prefix):
+        context = primary_agent[: -len(prefix)].rstrip()
+        if context:
+            return f"{context}\n\n{expected}"
+    return None
+
+
+def _resolve_typed_prompt_transform(raw: str, stored_intent: dict | None):
+    """Recompute a client-declared prompt transform at the server boundary."""
+    semantics, _ = _queue_command_semantics(raw)
+    command = stored_intent.get("command") if isinstance(stored_intent, dict) else None
+    transform = None
+    command_name = str(semantics.get("name") or "").strip().lower()
+    command_args = str(semantics.get("args") or "").strip()
+    typed_transform = (
+        str(command.get("transform") or "").strip().lower()
+        if isinstance(command, dict)
+        else ""
+    )
+    if semantics.get("dispatch") == "server_transform" and typed_transform == "moa":
+        transform = "moa"
+    elif semantics.get("dispatch") == "transform_required" and typed_transform == "bundle":
+        transform = "bundle"
+    elif semantics.get("dispatch") == "prompt" and typed_transform == "bundle":
+        from api.commands import _parse_agent_command
+
+        parsed_name, _args = _parse_agent_command(str(raw or "").strip())
+        if str(command.get("name") or "").strip().lower() != parsed_name:
+            return None, None
+        command_name = parsed_name
+        command_args = _args.strip()
+        transform = "bundle"
+    if transform is None:
+        return None, None
+    if (
+        not isinstance(stored_intent, dict)
+        or type(stored_intent.get("version")) is not int
+        or stored_intent.get("version") != _QUEUE_INTENT_VERSION
+    ):
+        return None, None
+    typed_name = str(command.get("name") or "").strip().lower()
+    declared_args = str(command.get("args") or "").strip()
+    declared_raw = str(command.get("raw") or "").strip()
+    if typed_name != command_name or (declared_args and declared_args != command_args):
+        return None, None
+    if declared_raw and declared_raw != str(raw or "").strip():
+        return None, None
+    if transform == "moa":
+        if command_name != "moa":
+            return None, None
+        return (
+            {
+                **semantics,
+                "transform": "moa",
+            },
+            command_args,
+        )
+    try:
+        from api.commands import resolve_bundle_command
+
+        resolved = resolve_bundle_command(raw)
+    except KeyError as exc:
+        raise ValueError("bundle command not found") from exc
+    except Exception as exc:
+        raise ValueError("bundle command could not be resolved") from exc
+    message = str((resolved or {}).get("message") or "").strip()
+    name = str((resolved or {}).get("name") or command_name or "").strip().lower()
+    if not message or not name:
+        raise ValueError("bundle command returned no invocation text")
+    return (
+        {
+            "name": name,
+            "args": command_args,
+            "raw": raw,
+            "dispatch": "server_transform",
+            "capability": "server",
+            "transform": "bundle",
+        },
+        message,
+    )
+
+
+def _build_turn_intent(
+    raw_text,
+    files,
+    model,
+    model_provider,
+    *,
+    workspace=None,
+    source="webui",
+    display_text=None,
+    item_id=None,
+    goal_related=False,
+    goal_state=None,
+    moa_config=None,
+    recovery=None,
+    dispatch=None,
+    model_explicit_pick_signature=None,
+    intent=None,
+):
+    stored_intent = (
+        intent
+        if (
+            isinstance(intent, dict)
+            and type(intent.get("version")) is int
+            and intent.get("version") == _QUEUE_INTENT_VERSION
+        )
+        else None
+    )
+    primary = str(raw_text or "").strip()
+    primary_agent_text = _primary_turn_text(primary, files)
+    display = primary if display_text is None else str(display_text)
+    attachments = [copy.deepcopy(item) for item in (files or [])]
+    raw = primary
+    command, agent_text = _queue_command_semantics(primary_agent_text)
+    display_slash = display.lstrip().startswith("/")
+    primary_slash = primary_agent_text.lstrip().startswith("/")
+    if display_slash and primary_slash and display.strip() != primary_agent_text.strip():
+        raise ValueError("display_text does not match the executable prompt")
+    display_semantics = None
+    if display_slash and not primary_slash:
+        display_semantics, _ = _queue_command_semantics(display)
+        stored_command = stored_intent.get("command") if stored_intent else None
+        stored_bundle = (
+            isinstance(stored_command, dict)
+            and str(stored_command.get("transform") or "").strip().lower() == "bundle"
+        )
+        display_transform = display_semantics.get("dispatch") in {
+            "server_transform",
+            "transform_required",
+        } or stored_bundle
+        if display_transform:
+            transformed_command, transformed_text = _resolve_typed_prompt_transform(
+                display, stored_intent
+            )
+            if transformed_command is None:
+                raise ValueError("display_text requires a matching versioned prompt intent")
+            agent_text = _validated_transformed_agent_text(
+                primary,
+                transformed_text,
+                attachments,
+            )
+            if agent_text is None:
+                raise ValueError("display_text does not match the executable prompt")
+            raw = display
+            command = transformed_command
+        else:
+            literal_display = display.strip()
+            if not literal_display or not (
+                primary_agent_text == literal_display
+                or primary_agent_text.endswith(f"\n\n{literal_display}")
+            ):
+                raise ValueError("display_text does not match the executable prompt")
+            raw = display
+            command = display_semantics
+            agent_text = primary_agent_text
+    else:
+        transformed_command, transformed_text = _resolve_typed_prompt_transform(
+            primary_agent_text, stored_intent
+        )
+        if transformed_command is not None:
+            command, agent_text = transformed_command, transformed_text
+    if not display_slash and display_text is not None:
+        if primary == _compose_queued_turn_message(display, attachments):
+            raw = display
+    if raw == primary and primary_agent_text != primary and not display_slash:
+        agent_text = primary_agent_text
+    if str(command.get("dispatch") or "").strip().lower() == "transform_required":
+        raise ValueError("prompt transform requires a matching versioned intent")
+    if moa_config in (None, True) and command.get("name") == "moa":
+        try:
+            from api.commands import resolve_moa_config
+
+            moa_config = resolve_moa_config()
+        except Exception:
+            moa_config = None
+    return {
+        "version": _QUEUE_INTENT_VERSION,
+        "id": item_id,
+        "raw_text": raw,
+        "display_text": display,
+        "agent_text": agent_text,
+        "attachments": attachments,
+        "model": model,
+        "model_provider": model_provider,
+        "workspace": workspace,
+        "source": str(source or "webui"),
+        "command": command,
+        "goal_related": bool(goal_related),
+        "goal_state": copy.deepcopy(goal_state) if isinstance(goal_state, dict) else None,
+        "moa_config": copy.deepcopy(moa_config) if isinstance(moa_config, dict) else None,
+        "recovery": copy.deepcopy(recovery) if isinstance(recovery, dict) else {},
+        "dispatch": (
+            copy.deepcopy(dispatch)
+            if isinstance(dispatch, dict)
+            else {"backend": "gateway" if webui_gateway_chat_enabled(get_config()) else "local"}
+        ),
+        "model_explicit_pick_signature": model_explicit_pick_signature,
+    }
+
+
+def _queue_item_with_intent(item, *, source="webui"):
+    result = copy.deepcopy(item) if isinstance(item, dict) else {}
+    result.setdefault("id", uuid.uuid4().hex)
+    if not isinstance(result.get("text"), str):
+        result["text"] = str(result.get("text") or "")
+    if not isinstance(result.get("display_text"), str):
+        result["display_text"] = result.get("text") or ""
+    if not isinstance(result.get("files"), list):
+        result["files"] = []
+    result.setdefault("model", None)
+    result.setdefault("model_provider", None)
+    result.setdefault("source", source or "webui")
+    result.setdefault("created_at", time.time())
+    if result.get("_queued_at") is None:
+        try:
+            result["_queued_at"] = int(float(result["created_at"]) * 1000)
+        except (TypeError, ValueError):
+            result["_queued_at"] = int(time.time() * 1000)
+    intent_text = result.get("text") or ""
+    intent_files = result.get("files") or []
+    intent_display = result.get("display_text")
+    intent = _build_turn_intent(
+        intent_text,
+        intent_files,
+        result.get("model"),
+        result.get("model_provider"),
+        workspace=result.get("workspace"),
+        source=result.get("source") or source,
+        display_text=intent_display,
+        item_id=str(result.get("id") or ""),
+        intent=result.get("intent"),
+        goal_related=result.get("goal_related", False),
+        goal_state=result.get("goal_state"),
+        moa_config=result.get("moa_config"),
+        recovery=result.get("recovery"),
+        dispatch=result.get("dispatch"),
+        model_explicit_pick_signature=result.get("model_explicit_pick_signature"),
+    )
+    result["text"] = intent.get("raw_text") or result.get("text") or ""
+    result["display_text"] = intent.get("display_text") or result["text"]
+    result["files"] = [copy.deepcopy(item) for item in (intent.get("attachments") or [])]
+    result["intent"] = intent
+    result["workspace"] = intent.get("workspace")
+    result["model"] = intent.get("model")
+    result["model_provider"] = intent.get("model_provider")
+    result["source"] = intent.get("source") or result.get("source") or source
+    result["goal_related"] = bool(intent.get("goal_related"))
+    result["goal_state"] = copy.deepcopy(intent.get("goal_state"))
+    result["moa_config"] = copy.deepcopy(intent.get("moa_config"))
+    result["recovery"] = copy.deepcopy(intent.get("recovery") or {})
+    result["dispatch"] = copy.deepcopy(intent.get("dispatch") or {})
+    result["model_explicit_pick_signature"] = intent.get("model_explicit_pick_signature")
+    return result
+
+
 def _build_queue_item(
     text,
     files,
@@ -23391,10 +24371,18 @@ def _build_queue_item(
     item_id=None,
     created_at=None,
     queued_at=None,
+    workspace=None,
+    goal_related=False,
+    goal_state=None,
+    moa_config=None,
+    recovery=None,
+    dispatch=None,
+    model_explicit_pick_signature=None,
+    intent=None,
 ):
     raw_text = text if isinstance(text, str) else str(text or "")
     created = created_at if created_at is not None else time.time()
-    return {
+    item = {
         "id": item_id or uuid.uuid4().hex,
         "text": raw_text,
         "display_text": raw_text if display_text is None else str(display_text),
@@ -23405,39 +24393,99 @@ def _build_queue_item(
         "created_at": created,
         "_queued_at": queued_at if queued_at is not None else int(created * 1000),
     }
+    item["intent"] = _build_turn_intent(
+        raw_text,
+        files,
+        model,
+        model_provider,
+        workspace=workspace,
+        source=source,
+        display_text=item["display_text"],
+        item_id=item["id"],
+        goal_related=goal_related,
+        goal_state=goal_state,
+        moa_config=moa_config,
+        recovery=recovery,
+        dispatch=dispatch,
+        model_explicit_pick_signature=model_explicit_pick_signature,
+        intent=intent,
+    )
+    item["text"] = item["intent"].get("raw_text") or item["text"]
+    item["display_text"] = item["intent"].get("display_text") or item["display_text"]
+    item["workspace"] = item["intent"].get("workspace")
+    item["goal_related"] = bool(item["intent"].get("goal_related"))
+    item["goal_state"] = copy.deepcopy(item["intent"].get("goal_state"))
+    item["moa_config"] = copy.deepcopy(item["intent"].get("moa_config"))
+    item["recovery"] = copy.deepcopy(item["intent"].get("recovery") or {})
+    item["dispatch"] = copy.deepcopy(item["intent"].get("dispatch") or {})
+    item["model_explicit_pick_signature"] = item["intent"].get(
+        "model_explicit_pick_signature"
+    )
+    return item
 
 
 def _canonical_queue_item(item, *, source="webui"):
-    result = copy.deepcopy(item) if isinstance(item, dict) else {}
-    result.setdefault("id", uuid.uuid4().hex)
-    if not isinstance(result.get("text"), str):
-        result["text"] = str(result.get("text") or "")
-    if not isinstance(result.get("display_text"), str):
-        result["display_text"] = result.get("text") or ""
-    if not isinstance(result.get("files"), list):
-        result["files"] = []
-    result.setdefault("model", None)
-    result.setdefault("model_provider", None)
-    if not result.get("source"):
-        result["source"] = source
-    if result.get("created_at") is None:
-        result["created_at"] = time.time()
-    if result.get("_queued_at") is None:
-        try:
-            result["_queued_at"] = int(float(result["created_at"]) * 1000)
-        except (TypeError, ValueError):
-            result["_queued_at"] = int(time.time() * 1000)
-    return result
+    return _queue_item_with_intent(item, source=source)
+
+
+def _settle_claimed_queue_item(session, *, outcome: str, stream_id: str | None = None) -> str | None:
+    """Persist the ownership outcome for the item removed at stream admission.
+
+    Callers hold the owning session lock. Once a claimed item has entered
+    runtime ownership, every terminal outcome consumes it exactly once and
+    leaves only the later queue tail. Admission failure before the worker owns
+    the stream is handled separately by ``_restore_start_state_after_thread_failure``.
+    """
+    existing = getattr(session, "pending_queue_outcome", None)
+    existing_state = str(existing.get("state") or "").strip().lower() if isinstance(existing, dict) else ""
+    existing_item_id = str(existing.get("item_id") or "").strip() if isinstance(existing, dict) else ""
+    existing_stream_id = str(existing.get("stream_id") or "").strip() if isinstance(existing, dict) else ""
+    terminal_states = {"completed", "cancelled", "error", "failed"}
+    if existing_state == "cleared":
+        return "cleared"
+    pending = getattr(session, "pending_queue_item", None)
+    if not isinstance(pending, dict):
+        if (
+            existing_state == "completed"
+            and str(outcome or "").strip().lower() == "cancelled"
+            and stream_id
+            and existing_stream_id == str(stream_id)
+        ):
+            session.pending_queue_outcome = {**existing, "state": "cancelled"}
+            return "cancelled"
+        return existing_state if existing_state in terminal_states else None
+    item = _canonical_queue_item(pending, source=getattr(session, "pending_user_source", None) or "webui")
+    item_id = str(item.get("id") or "").strip()
+    if not item_id:
+        return None
+    if existing_state in terminal_states and existing_item_id:
+        return existing_state
+    intent = getattr(session, "pending_turn_intent", None)
+    captured_generation = intent.get("clear_generation") if isinstance(intent, dict) else None
+    current_generation = getattr(session, "clear_generation", None)
+    state = str(outcome or "").strip().lower()
+    if isinstance(intent, dict) and captured_generation != current_generation:
+        state = "cleared"
+    elif state == "owned":
+        state = "completed"
+    elif state not in terminal_states and state != "cleared":
+        state = "owned"
+    if state in terminal_states or state == "cleared":
+        session.queue = [
+            entry for entry in (getattr(session, "queue", None) or [])
+            if not isinstance(entry, dict) or str(entry.get("id") or "") != item_id
+        ]
+    session.pending_queue_outcome = {
+        "state": state,
+        "item_id": item_id,
+        "stream_id": stream_id or getattr(session, "active_stream_id", None),
+    }
+    return state
 
 
 def _compose_queued_turn_message(text, attachments):
     base = str(text or "").strip()
-    paths = [
-        str(attachment.get("path") or attachment.get("name") or "").strip()
-        for attachment in (attachments or [])
-        if isinstance(attachment, dict)
-    ]
-    paths = [path for path in paths if path]
+    paths = [path for path in _queue_attachment_paths(attachments) if path]
     if not paths:
         return base
     if not base:
@@ -23448,40 +24496,53 @@ def _compose_queued_turn_message(text, attachments):
 def _handle_chat_queue(handler, body):
     from api.runtime_adapter import runtime_adapter_runner_enabled
 
+    def _queue_error(message, status=400, error_code="queue_failed"):
+        return j(handler, {"error": message, "error_code": error_code}, status=status)
+
     if runtime_adapter_runner_enabled():
-        return j(
-            handler,
-            {"error": "durable WebUI queue is unsupported in runner-local mode"},
-            status=501,
+        return _queue_error(
+            "durable WebUI queue is unsupported in runner-local mode",
+            501,
+            "queue_unsupported",
         )
     if not isinstance(body, dict):
-        return bad(handler, "queue payload must be an object", 400)
+        return _queue_error("queue payload must be an object", 400, "queue_invalid_request")
     sid = body.get("session_id")
     if not isinstance(sid, str) or not sid.strip() or not is_safe_session_id(sid.strip()):
-        return bad(handler, "valid session_id is required", 400)
+        return _queue_error("valid session_id is required", 400, "queue_invalid_request")
     sid = sid.strip()
     action = str(body.get("action") or "").strip().lower()
     if action not in {"enqueue", "edit", "delete", "reorder", "clear", "combine"}:
-        return bad(handler, "invalid queue action", 400)
+        return _queue_error("invalid queue action", 400, "queue_invalid_request")
     try:
         session = get_session(sid)
     except KeyError:
-        return bad(handler, "Session not found", 404)
+        return _queue_error("Session not found", 404, "queue_unavailable")
+    except Exception as exc:
+        logger.exception("failed to load durable queue session %s", sid)
+        return _queue_error(_sanitize_error(exc), 500, "queue_update_failed")
     if not _session_visible_to_active_profile(getattr(session, "profile", None), handler):
-        return bad(handler, "Session not found", 404)
+        return _queue_error("Session not found", 404, "queue_unavailable")
     continuation_sid = _pre_compression_continuation_session_id(session)
     if getattr(session, "pre_compression_snapshot", False):
         if not continuation_sid or continuation_sid == sid:
-            return bad(handler, "session continuation is unavailable", 409)
+            return _queue_error("session continuation is unavailable", 409, "queue_unavailable")
         sid = continuation_sid
         try:
             session = get_session(sid)
         except KeyError:
-            return bad(handler, "Session not found", 404)
+            return _queue_error("Session not found", 404, "queue_unavailable")
+        except Exception as exc:
+            logger.exception("failed to load durable queue continuation %s", sid)
+            return _queue_error(_sanitize_error(exc), 500, "queue_update_failed")
     if _session_is_subagent_view_only(sid):
-        return bad(handler, "Subagent sessions are view-only", 400)
+        return _queue_error("Subagent sessions are view-only", 400, "queue_unsupported")
     if getattr(session, "read_only", False):
-        return bad(handler, "Read-only imported sessions cannot be modified from WebUI", 403)
+        return _queue_error(
+            "Read-only imported sessions cannot be modified from WebUI",
+            403,
+            "queue_read_only",
+        )
 
     item = None
     enqueue_accepted = False
@@ -23489,28 +24550,76 @@ def _handle_chat_queue(handler, body):
         with _get_session_agent_lock(sid):
             session = _ensure_full_session_before_mutation(sid, get_session(sid))
             if not _session_visible_to_active_profile(getattr(session, "profile", None), handler):
-                return bad(handler, "Session not found", 404)
+                return _queue_error("Session not found", 404, "queue_unavailable")
             if getattr(session, "pre_compression_snapshot", False):
-                return bad(handler, "session continuation is unavailable", 409)
+                return _queue_error("session continuation is unavailable", 409, "queue_unavailable")
             if _session_is_subagent_view_only(sid):
-                return bad(handler, "Subagent sessions are view-only", 400)
+                return _queue_error("Subagent sessions are view-only", 400, "queue_unsupported")
             if getattr(session, "read_only", False):
-                return bad(handler, "Read-only imported sessions cannot be modified from WebUI", 403)
+                return _queue_error(
+                    "Read-only imported sessions cannot be modified from WebUI",
+                    403,
+                    "queue_read_only",
+                )
             old_queue = list(getattr(session, "queue", None) or [])
             queue = [dict(entry) for entry in old_queue if isinstance(entry, dict)]
             if action == "enqueue":
                 if len(queue) >= 100:
-                    return bad(handler, "queue is full", 409)
+                    return _queue_error("queue is full", 409, "queue_full")
                 if not isinstance(body.get("text", ""), str):
-                    return bad(handler, "text must be a string", 400)
+                    return _queue_error("text must be a string", 400, "queue_invalid_request")
                 if "model" in body and body.get("model") is not None and not isinstance(body.get("model"), str):
-                    return bad(handler, "model must be a string", 400)
+                    return _queue_error("model must be a string", 400, "queue_invalid_request")
                 if "model_provider" in body and body.get("model_provider") is not None and not isinstance(body.get("model_provider"), str):
-                    return bad(handler, "model_provider must be a string", 400)
+                    return _queue_error("model_provider must be a string", 400, "queue_invalid_request")
+                if "workspace" in body and body.get("workspace") is not None and not isinstance(body.get("workspace"), str):
+                    return _queue_error("workspace must be a string", 400, "queue_invalid_request")
                 text = body.get("text", "")
+                typed_intent = body.get("intent")
+                if typed_intent is not None and not isinstance(typed_intent, dict):
+                    return _queue_error("intent must be an object", 400, "queue_invalid_request")
+                if "display_text" in body and not isinstance(body.get("display_text"), str):
+                    return _queue_error("display_text must be a string", 400, "queue_invalid_request")
+                raw_intent_text = _server_visible_intent_raw_text(
+                    text, body.get("display_text")
+                )
+                command_semantics, _ = _queue_command_semantics(raw_intent_text)
+                if command_semantics.get("dispatch") == "browser_local":
+                    return j(
+                        handler,
+                        {
+                            "error": "browser-only slash commands must be handled by the active WebUI",
+                            "error_code": "queue_browser_command",
+                        },
+                        status=409,
+                    )
+                if (
+                    command_semantics.get("dispatch") == "server_transform"
+                    and not str(command_semantics.get("args") or "").strip()
+                ):
+                    return j(
+                        handler,
+                        {
+                            "error": "prompt-transform slash commands require a prompt",
+                            "error_code": "queue_command_preprocess",
+                        },
+                        status=400,
+                    )
+                if (
+                    webui_gateway_chat_enabled(get_config())
+                    and command_semantics.get("name") == "moa"
+                ):
+                    return j(
+                        handler,
+                        {
+                            "error": "MoA prompt transforms are unavailable on gateway-backed sessions",
+                            "error_code": "queue_command_preprocess",
+                        },
+                        status=409,
+                    )
                 raw_files = body.get("files") if "files" in body else body.get("attachments", [])
                 if not text.strip() and not raw_files:
-                    return bad(handler, "text or attachments are required", 400)
+                    return _queue_error("text or attachments are required", 400, "queue_invalid_request")
                 files = _queue_attachment_metadata(
                     sid,
                     raw_files,
@@ -23542,48 +24651,114 @@ def _handle_chat_queue(handler, body):
                     profile_provider=profile_provider,
                 )
                 if not model:
-                    return bad(handler, "model is required", 400)
+                    return _queue_error("model is required", 400, "queue_invalid_request")
+                gateway_enabled = webui_gateway_chat_enabled(get_config())
+                requested_moa = bool(body.get("moa_config"))
+                moa_config = None
+                if requested_moa:
+                    if gateway_enabled:
+                        return j(
+                            handler,
+                            {
+                                "error": "MoA prompt transforms are unavailable on gateway-backed sessions",
+                                "error_code": "queue_command_preprocess",
+                            },
+                            status=409,
+                        )
+                    from api.commands import resolve_moa_config
+
+                    try:
+                        moa_config = resolve_moa_config()
+                    except RuntimeError as exc:
+                        return _queue_error(str(exc), 503, "queue_command_preprocess")
+                queue_workspace = (
+                    str(resolve_trusted_workspace(body["workspace"]))
+                    if body.get("workspace")
+                    else str(getattr(session, "workspace", None) or "")
+                )
                 item = _build_queue_item(
                     text,
                     files,
                     model,
                     provider,
                     source="webui",
+                    display_text=body.get("display_text"),
+                    workspace=queue_workspace,
+                    goal_related=bool(body.get("goal_related")),
+                    goal_state=body.get("goal_state"),
+                    moa_config=moa_config,
+                    recovery=body.get("recovery"),
+                    dispatch={"backend": "gateway" if gateway_enabled else "local"},
+                    intent=typed_intent,
                 )
                 queue.append(item)
             elif action in {"edit", "delete"}:
                 item_id = str(body.get("item_id") or "").strip()
                 if not item_id:
-                    return bad(handler, "item_id is required", 400)
+                    return _queue_error("item_id is required", 400, "queue_invalid_request")
                 index = next((i for i, entry in enumerate(queue) if str(entry.get("id") or "") == item_id), -1)
                 if index < 0:
-                    return bad(handler, "queue item not found", 404)
+                    return _queue_error("queue item not found", 404, "queue_item_not_found")
                 if action == "edit":
                     if not isinstance(body.get("text"), str):
-                        return bad(handler, "text must be a string", 400)
+                        return _queue_error("text must be a string", 400, "queue_invalid_request")
                     if not body["text"].strip() and not queue[index].get("files"):
-                        return bad(handler, "text or attachments are required", 400)
+                        return _queue_error("text or attachments are required", 400, "queue_invalid_request")
                     if any(key in body for key in ("files", "attachments", "model", "model_provider")):
-                        return bad(handler, "queued attachment and model metadata is immutable", 400)
+                        return _queue_error(
+                            "queued attachment and model metadata is immutable",
+                            400,
+                            "queue_invalid_request",
+                        )
                     queue[index]["text"] = body["text"]
                     queue[index]["display_text"] = body["text"]
+                    queue[index].pop("intent", None)
+                    queue[index] = _queue_item_with_intent(queue[index], source=queue[index].get("source") or "webui")
                     item = queue[index]
                 else:
                     item = queue.pop(index)
             elif action == "reorder":
                 item_ids = body.get("item_ids")
                 if not isinstance(item_ids, list) or any(not isinstance(value, str) for value in item_ids):
-                    return bad(handler, "item_ids must be a list", 400)
+                    return _queue_error("item_ids must be a list", 400, "queue_invalid_request")
                 ids = [str(value).strip() for value in item_ids]
                 current_ids = [str(entry.get("id") or "") for entry in queue]
                 if len(ids) != len(set(ids)) or set(ids) != set(current_ids):
-                    return bad(handler, "item_ids must contain every queued item exactly once", 400)
+                    return _queue_error(
+                        "item_ids must contain every queued item exactly once",
+                        400,
+                        "queue_invalid_request",
+                    )
                 by_id = {str(entry.get("id")): entry for entry in queue}
                 queue = [by_id[value] for value in ids]
             elif action == "clear":
                 queue = []
             elif action == "combine":
                 if len(queue) > 1:
+                    for entry in queue:
+                        display_text = entry.get("display_text")
+                        if display_text is None:
+                            display_text = entry.get("text")
+                        intent = entry.get("intent")
+                        command = intent.get("command") if isinstance(intent, dict) else None
+                        semantics, _ = _queue_command_semantics(str(display_text or ""))
+                        non_literal_intent = isinstance(command, dict) and (
+                            str(command.get("dispatch") or "prompt").strip().lower() != "prompt"
+                            or bool(str(command.get("name") or "").strip())
+                            or bool(str(command.get("transform") or "").strip())
+                        )
+                        if (
+                            display_text != entry.get("text")
+                            or semantics.get("dispatch") != "prompt"
+                            or non_literal_intent
+                            or entry.get("moa_config") is not None
+                            or (isinstance(intent, dict) and intent.get("moa_config") is not None)
+                        ):
+                            return _queue_error(
+                                "cannot combine transformed queue items",
+                                409,
+                                "queue_command_preprocess",
+                            )
                     first = queue[0]
                     queue = [_build_queue_item(
                         "\n\n".join(str(entry.get("text") or "") for entry in queue),
@@ -23591,6 +24766,7 @@ def _handle_chat_queue(handler, body):
                         first.get("model") or "",
                         first.get("model_provider"),
                         source=first.get("source") or "webui",
+                        workspace=first.get("workspace") or getattr(session, "workspace", None),
                     )]
             session.queue = queue
             try:
@@ -23618,10 +24794,10 @@ def _handle_chat_queue(handler, body):
         )
         return j(handler, _queue_response(session, item=item))
     except ValueError as exc:
-        return bad(handler, str(exc), 400)
+        return _queue_error(str(exc), 400, "queue_invalid_request")
     except Exception as exc:
         logger.exception("failed to mutate durable queue for session %s", sid)
-        return bad(handler, _sanitize_error(exc), 500)
+        return _queue_error(_sanitize_error(exc), 500, "queue_update_failed")
 
 
 def _handle_chat_sync(handler, body):

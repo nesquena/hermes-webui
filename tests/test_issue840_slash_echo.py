@@ -1,11 +1,118 @@
 """Tests for slash command echo (#840) — user message shown in chat after /skills, /help, etc."""
+import json
 import os
+import re
+import shutil
+import subprocess
+
+import pytest
 
 _SRC = os.path.join(os.path.dirname(__file__), "..")
 
 
 def _read(name):
     return open(os.path.join(_SRC, name), encoding="utf-8").read()
+
+
+def _js_function(src, name):
+    markers = (f"async function {name}(", f"function {name}(")
+    start = next((src.find(marker) for marker in markers if src.find(marker) >= 0), -1)
+    if start < 0:
+        raise AssertionError(f"{name}() not found")
+    parens = 0
+    brace = -1
+    for idx in range(src.index("(", start), len(src)):
+        if src[idx] == "(":
+            parens += 1
+        elif src[idx] == ")":
+            parens -= 1
+        elif src[idx] == "{" and parens == 0:
+            brace = idx
+            break
+    if brace < 0:
+        raise AssertionError(f"{name}() body not found")
+    depth = 1
+    for idx in range(brace + 1, len(src)):
+        if src[idx] == "{":
+            depth += 1
+        elif src[idx] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start : idx + 1]
+    raise AssertionError(f"{name}() body is unbalanced")
+
+
+def _builtin_probe():
+    commands = _read("static/commands.js")
+    messages = _read("static/messages.js")
+    start = commands.index("const COMMANDS=[")
+    end = commands.index("];", start) + 2
+    registry = commands[start:end]
+    names = sorted(set(re.findall(r"fn:([A-Za-z_$][\w$]*)", registry)))
+    handlers = []
+    for name in names:
+        if name == "cmdHelp":
+            handlers.append(
+                "function cmdHelp(){snapshots.help=S.messages.map(m=>m.role+':'+m.content);S.messages.push({role:'assistant',content:'help'});return true;}"
+            )
+        elif name == "cmdClear":
+            handlers.append(
+                "function cmdClear(){snapshots.clear=S.messages.map(m=>m.role+':'+m.content);return true;}"
+            )
+        elif name == "cmdPersonality":
+            handlers.append(
+                "function cmdPersonality(){snapshots.optout=S.messages.map(m=>m.role+':'+m.content);return false;}"
+            )
+        else:
+            handlers.append(f"function {name}(){{return true;}}")
+    helpers = "\n".join(
+        _js_function(messages, name)
+        for name in (
+            "_slashCommandMatch",
+            "_echoSlashUserMessage",
+            "_finishSlashCommand",
+            "_runBuiltinSlashCommand",
+        )
+    )
+    script = f"""
+const S={{session:{{session_id:'sid'}},messages:[]}};
+const input={{value:''}};
+const snapshots={{}};
+function $(id){{return id==='msg'?input:null;}}
+function parseCommand(text){{
+  if(!text.startsWith('/'))return null;
+  const parts=text.slice(1).split(/\\s+/);
+  return {{name:parts[0].toLowerCase(),args:parts.slice(1).join(' ').trim()}};
+}}
+function renderMessages(){{}}
+function autoResize(){{}}
+function hideCmdDropdown(){{}}
+function t(key){{return key;}}
+{chr(10).join(handlers)}
+{registry}
+{helpers}
+async function run(text,key){{
+  S.messages=[];
+  input.value=text;
+  const result=await _runBuiltinSlashCommand(text,{{echo:true}});
+  return {{result,messages:S.messages,snapshot:snapshots[key]||[]}};
+}}
+(async()=>{{
+  const output={{
+    echo:await run('/help','help'),
+    noEcho:await run('/clear','clear'),
+    optout:await run('/personality test','optout'),
+  }};
+  console.log(JSON.stringify(output));
+}})().catch(error=>{{console.error(error.stack||error);process.exit(1);}});
+"""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not on PATH")
+    result = subprocess.run(
+        [node, "-"], input=script, capture_output=True, text=True, check=True
+    )
+    return json.loads(result.stdout)
 
 
 class TestExecuteCommandReturnValue:
@@ -110,56 +217,36 @@ class TestSendSlashIntercept:
     """send() in messages.js must push user message for echo-worthy commands."""
 
     def test_send_checks_noecho_flag(self):
-        src = _read("static/messages.js")
-        idx = src.find("Slash command intercept")
-        block = src[idx:idx + 1400]
-        assert "_cmd.noEcho" in block or "cmd.noEcho" in block, (
-            "send() must check the command's noEcho flag before pushing user message (#840)"
-        )
+        result = _builtin_probe()
+        assert result["echo"]["messages"][0]["content"] == "/help"
+        assert result["noEcho"]["messages"] == []
 
     def test_send_pushes_user_message_for_echo_commands(self):
-        src = _read("static/messages.js")
-        idx = src.find("Slash command intercept")
-        block = src[idx:idx + 1400]
-        assert "role:'user'" in block and "content:text" in block, (
-            "send() must push {role:'user', content:text} for echo-worthy slash commands (#840)"
-        )
+        result = _builtin_probe()
+        assert [
+            {key: message[key] for key in ("role", "content")}
+            for message in result["echo"]["messages"]
+        ] == [
+            {"role": "user", "content": "/help"},
+            {"role": "assistant", "content": "help"},
+        ]
 
     def test_send_pushes_user_message_before_running_handler(self):
         """Ordering fix: cmdHelp-style handlers push their assistant response
         synchronously.  The user message must be pushed BEFORE the handler
         runs so S.messages ends up [user, assistant] — not [assistant, user]
         which would display in reverse chronological order."""
-        src = _read("static/messages.js")
-        idx = src.find("Slash command intercept")
-        block = src[idx:idx + 1400]
-        user_push_pos = block.find("role:'user'")
-        handler_call_pos = block.find("_cmd.fn(")
-        if handler_call_pos == -1:
-            handler_call_pos = block.find("cmd.fn(")
-        assert user_push_pos != -1, "user message push not found in intercept block"
-        assert handler_call_pos != -1, "handler invocation not found in intercept block"
-        assert user_push_pos < handler_call_pos, (
-            "User message must be pushed BEFORE the handler runs — otherwise "
-            "sync handlers like cmdHelp push the assistant response first and "
-            "the chat displays in reverse chronological order."
-        )
+        result = _builtin_probe()
+        assert result["echo"]["snapshot"] == ["user:/help"]
 
     def test_send_rolls_back_user_push_on_handler_optout(self):
-        """If a handler returns false (opt-out — e.g. /reasoning <level>),
+        """If an echo-worthy handler opts out,
         the pre-pushed user message must be popped so the normal send path
         can add it cleanly for forwarding to the agent."""
-        src = _read("static/messages.js")
-        idx = src.find("Slash command intercept")
-        block = src[idx:idx + 1400]
-        assert "S.messages.pop()" in block, (
-            "send() must S.messages.pop() the user message on handler opt-out "
-            "to avoid duplicating the user turn when falling through to "
-            "the normal send path."
-        )
-        assert "===false" in block or "=== false" in block, (
-            "opt-out must be detected by handler returning === false"
-        )
+        result = _builtin_probe()
+        assert result["optout"]["result"] == {"matched": True, "handled": False}
+        assert result["optout"]["snapshot"] == ["user:/personality test"]
+        assert result["optout"]["messages"] == []
 
 
 def test_compress_has_no_echo_flag():

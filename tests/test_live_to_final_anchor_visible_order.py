@@ -452,7 +452,7 @@ def test_live_processed_anchor_rekeys_when_stream_id_is_known():
 
     stream_idx = send.index("S.activeStreamId = streamId;")
     pending_idx = send.index("S.session.pending_started_at=startData.pending_started_at;")
-    ensure_idx = send.index("if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();", pending_idx)
+    ensure_idx = send.index("if(_ownerVisible&&typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();", pending_idx)
     stop_idx = send.index("if(typeof updateSendBtn==='function') updateSendBtn();", ensure_idx)
     assert stream_idx < pending_idx < ensure_idx < stop_idx
 
@@ -490,10 +490,10 @@ def test_server_started_turn_also_creates_processed_anchor_before_stop_button_re
 
 def test_direct_start_creates_live_shell_before_reconciling_retained_queue():
     send = _function_body(MESSAGES_JS, "send")
-    post_start = send.split("if(S.session&&typeof startData.pending_started_at==='number')", 1)[1]
+    post_start = send.split("if(_ownerVisible&&typeof startData.pending_started_at==='number')", 1)[1]
     post_start = post_start.split("if(typeof updateSendBtn==='function')", 1)[0]
 
-    ensure_idx = post_start.index("if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();")
+    ensure_idx = post_start.index("if(_ownerVisible&&typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();")
     reconcile_idx = post_start.index("_reconcileServerTurnStarted(activeSid,startData);")
     assert ensure_idx < reconcile_idx
 

@@ -56,17 +56,15 @@ def test_composer_captured_and_cleared_before_upload_await():
     """The fix: capture + textarea wipe must run before uploadPendingFiles()."""
     body = _function_body(MESSAGES_JS, "send")
 
-    capture_idx = body.index("const _submittedDraftTextForClear=$('msg').value||'';")
-    # The wipe sits immediately after the capture.
-    wipe_rel = body.index("$('msg').value='';autoResize();", capture_idx)
-    assert wipe_rel - capture_idx < 120, "the textarea wipe must sit immediately after the capture"
+    capture_idx = body.index("const _sendOwnerDraftText=")
+    wipe_idx = body.index("$('msg').value='';autoResize();", capture_idx)
 
     upload_idx = body.index("uploaded=await uploadPendingFiles(")
     directive_await_idx = body.index("const _directivePayload = await _pending.promise;")
 
-    assert capture_idx < upload_idx, (
-        "composer capture+clear must happen BEFORE the uploadPendingFiles() await "
-        "(salvage of #4750 — closes the re-entrant double-send race)"
+    assert capture_idx < wipe_idx < upload_idx, (
+        "the owner draft must be captured and the visible composer cleared before "
+        "the uploadPendingFiles() await"
     )
     assert capture_idx < directive_await_idx, (
         "composer capture+clear must happen BEFORE the forced-skill-directive await too"

@@ -396,6 +396,104 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     assert all(len(item) == 3 and item[2] for item in events)
 
 
+def test_gateway_success_serialization_failure_keeps_durable_transcript_and_done(
+    tmp_path, monkeypatch
+):
+    from api import routes
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"answer"}}]}\n\n'
+            yield b"data: [DONE]\n\n"
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr(
+        streaming,
+        "_load_webui_prefill_context",
+        lambda _cfg: {"status": "not_configured", "messages": []},
+    )
+    monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda *_args: [])
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda *_args, **_kwargs: FakeResponse())
+    monkeypatch.setattr(gateway_chat, "RunJournalWriter", lambda *_args, **_kwargs: None)
+
+    def fail_session_serialization(*_args, **_kwargs):
+        raise RuntimeError("success serialization failed")
+
+    monkeypatch.setattr(streaming, "_session_payload_with_full_messages", fail_session_serialization)
+
+    session = new_session()
+    stream_id = "stream-gateway-success-serialization-failure"
+    session.active_stream_id = stream_id
+    session.pending_user_message = "Say hello"
+    session.pending_attachments = []
+    session.pending_started_at = 123
+    session.pending_queue_item = {
+        "id": "claimed-success",
+        "text": "Say hello",
+        "display_text": "Say hello",
+        "files": [],
+    }
+    session.pending_turn_intent = {"clear_generation": session.clear_generation}
+    session.queue = []
+    session.save()
+
+    settlements = []
+    original_settle = routes._settle_claimed_queue_item
+
+    def settle(current, *, outcome, stream_id=None):
+        settlements.append((outcome, stream_id))
+        return original_settle(current, outcome=outcome, stream_id=stream_id)
+
+    monkeypatch.setattr(routes, "_settle_claimed_queue_item", settle)
+    channel = create_stream_channel()
+    subscriber = channel.subscribe()
+    STREAMS[stream_id] = channel
+
+    gateway_chat._run_gateway_chat_streaming(
+        session.session_id,
+        "Say hello",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+        model_provider="openai",
+    )
+
+    events = []
+    while not subscriber.empty():
+        events.append(subscriber.get_nowait())
+    event_pairs = [(item[0], item[1]) for item in events]
+    assert [event for event, _data in event_pairs[-2:]] == ["done", "stream_end"]
+    done = event_pairs[-2][1]
+    assert done["session_id"] == session.session_id
+    assert "usage" in done
+    assert "session" not in done
+    saved = models.Session.load(session.session_id)
+    assert [message["role"] for message in saved.messages] == ["user", "assistant"]
+    assert saved.messages[-1]["content"] == "answer"
+    assert not any(message.get("_error") for message in saved.messages)
+    assert saved.pending_queue_outcome == {
+        "state": "completed",
+        "item_id": "claimed-success",
+        "stream_id": stream_id,
+    }
+    assert settlements == [("completed", stream_id)]
+    assert saved.active_stream_id is None
+    assert saved.queue == []
+
+
 def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp_path, monkeypatch):
     """Gateway terminal errors must survive an empty assistant stream."""
     from unittest.mock import MagicMock

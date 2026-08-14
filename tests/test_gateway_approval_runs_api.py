@@ -1944,8 +1944,12 @@ def test_gateway_worker_prelude_exception_retires_failed_start_after_waiter_cons
     lifecycle = gateway_chat._STREAM_RUN_LIFECYCLE
     run_ids = gateway_chat._STREAM_RUN_IDS
     observed = {}
+    worker_errors = []
+    saved_messages = []
+    events = []
     waiter_thread = None
     session = SimpleNamespace(
+        session_id=sid,
         profile=None,
         workspace="/tmp",
         context_messages=[],
@@ -1954,27 +1958,35 @@ def test_gateway_worker_prelude_exception_retires_failed_start_after_waiter_cons
         pending_user_source="webui",
         process_wakeup_pause={},
         pending_started_at=time.time(),
-        save=lambda: None,
         title="title",
     )
+
+    def save():
+        saved_messages.append([dict(message) for message in session.messages])
+
+    session.save = save
 
     def waiter():
         observed["result"] = wait_for_gateway_run_id(stream_id, 1.0)
 
-    worker_thread = threading.Thread(
-        target=gateway_chat._run_gateway_chat_streaming,
-        kwargs={
-            "session_id": sid,
-            "msg_text": "hi",
-            "model": "test-model",
-            "workspace": "/tmp",
-            "stream_id": stream_id,
-        },
-        daemon=True,
-    )
+    def run_worker():
+        try:
+            gateway_chat._run_gateway_chat_streaming(
+                session_id=sid,
+                msg_text="hi",
+                model="test-model",
+                workspace="/tmp",
+                stream_id=stream_id,
+            )
+        except BaseException as exc:
+            worker_errors.append(exc)
+
+    worker_thread = threading.Thread(target=run_worker, daemon=True)
 
     try:
-        gateway_chat.STREAMS[stream_id] = SimpleNamespace(put_nowait=lambda *_args, **_kwargs: None)
+        gateway_chat.STREAMS[stream_id] = SimpleNamespace(
+            put_nowait=lambda event: events.append(event)
+        )
         mark_starting(stream_id)
         waiter_thread = threading.Thread(target=waiter, daemon=True)
         waiter_thread.start()
@@ -1992,6 +2004,15 @@ def test_gateway_worker_prelude_exception_retires_failed_start_after_waiter_cons
             assert not worker_thread.is_alive()
         waiter_thread.join(timeout=5)
         assert not waiter_thread.is_alive()
+        assert worker_errors == []
+        assert saved_messages and saved_messages[-1][-1]["_error"] is True
+        apperrors = [data for event, data in events if event == "apperror"]
+        assert len(apperrors) == 1
+        assert apperrors[0]["type"] == "gateway_error"
+        assert apperrors[0]["message"] == "prelude boom"
+        assert apperrors[0]["session_id"] == sid
+        assert apperrors[0]["terminal_session_persisted"] is True
+        assert "session" not in apperrors[0]
         assert observed["result"] == (True, None)
         assert stream_id not in lifecycle
         assert stream_id not in run_ids

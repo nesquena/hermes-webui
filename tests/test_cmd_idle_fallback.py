@@ -150,7 +150,7 @@ class TestBusyPathsStillWork:
 
     def test_interrupt_still_cancels_when_busy(self):
         """When S.busy && S.activeStreamId, cmdInterrupt must still call cancelStream."""
-        body = self._get_function_body("cmdInterrupt", window=1200)
+        body = self._get_function_body("cmdInterrupt", window=1800)
         assert "cancelStream" in body
 
     def test_steer_still_calls_trySteer_when_busy(self):

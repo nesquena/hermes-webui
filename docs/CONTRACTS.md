@@ -81,17 +81,53 @@ contributor guidance; it does not change runtime behavior or CI gates.
 
 ### Durable WebUI queue
 
-Accepted WebUI queue items live in the owning session sidecar, including their
-editable text, uploaded attachment metadata, model/provider choice, creation
-time, and stable item id. The queue is scoped to that session and profile. A
-local-agent or gateway stream teardown claims at most the next item and starts
-it through the normal chat-start path; the claim and pending-turn state share
-one session save.
+For the legacy-direct and gateway backends, an accepted item lives in the
+owning session sidecar as a versioned turn intent. It includes the stable item
+id, raw/display/agent text, attachments, model/provider/workspace/source,
+command semantics, goal state, MoA configuration, recovery flags, and dispatch
+metadata. Claiming the head and persisting the pending turn happen under the
+same session lock and use the normal chat-start preprocessing path; a server
+drain never invokes browser handlers.
 
-Sidecar persistence makes accepted items retained and recoverable across a
-WebUI process restart. There is deliberately no startup scheduler, so a
-restart alone does not automatically resume a retained queue. Browser storage
-is only a legacy review-to-composer fallback and never auto-submits an item.
+Slash input is classified before either idle or busy submission: the WebUI
+command registry owns browser-local commands, server prompt transforms
+(including local MoA and supported bundles) carry a typed raw/display/agent intent,
+and unregistered slash-prefixed text remains literal agent text. The queue API
+rejects recognized browser-only commands, gateway-unsupported MoA, and
+unprepared transforms rather than turning them into prompts.
+
+Queue API failures retain diagnostic text in `error` alongside a stable `queue_*`
+`error_code`. The WebUI translates recognized queue codes and uses a localized
+queue-operation fallback for unknown or uncoded errors; raw server diagnostics
+are never used as user-facing toast text.
+
+Compression transfer is parent-authoritative until the normal continuation
+save atomically contains the child lineage and queue. Snapshot preservation
+keeps the archived parent's queue intact; teardown/reload recovery acquires the
+parent and child locks in deterministic order, fences mismatched clear
+generations, saves merged child ownership before clearing the parent, and
+deduplicates by stable item id with the child record winning. A small owned
+transfer record may make a committed child save idempotent after a crash, but
+`parent_session_id` in the durable child sidecar is the only discovery lineage.
+Child-save failure leaves the
+parent authoritative and blocks drain. After child ownership commits, a parent
+clear failure is retried without rewriting the child. Once a claimed item
+enters runtime ownership, completion, cancellation, and runtime error/failed
+outcomes consume that item exactly once and advance to the later queue tail;
+the terminal state is recorded in `pending_queue_outcome`. A chat-start
+admission failure before worker ownership is established is a separate rollback
+path and may restore the claimed item. Conversation clear writes an empty queue
+together with empty pending/active state and fences old teardown drains with a
+clear generation.
+
+The runner-local backend advertises an `unsupported` queue capability. Queue
+enqueue/edit/delete/reorder/combine and server drain fail closed for that
+backend; WebUI does not accept or persist new browser-owned queue items, and
+queue attempts do not upload files or clear the composer. The pre-existing
+one-time legacy draft restore may still read and clear old browser storage.
+Direct runner-owned starts remain supported. Legacy-direct and gateway
+advertise the `server` capability. A process restart does not schedule retained
+server-side work automatically.
 
 When a change touches streaming, recovery, replay, compression, context
 reconstruction, cancellation, approval/clarify, session metadata, or run state,

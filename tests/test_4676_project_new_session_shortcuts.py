@@ -74,7 +74,17 @@ def test_project_quick_create_styles_exist_and_are_discrete_to_pointer_layouts()
     assert "@media (hover:none) and (pointer:coarse)" in css
 
 
-def _run_new_session_case(options, active_project=None):
+def _run_new_session_case(
+    options: dict,
+    *,
+    active_project: str | None,
+    draft_text: str = "",
+    pending_files: list[dict] | None = None,
+    fail_draft_save: bool = False,
+    null_new_session: bool = False,
+    switch_during_create: bool = False,
+    full: bool = False,
+):
     _DRIVER = r"""
 const fs = require('fs');
 const [path, argsJson] = process.argv.slice(-2);
@@ -126,6 +136,7 @@ globalThis._oldestIdx = 0;
 globalThis.INFLIGHT = {};
 globalThis.S = {
   session: args.session || null,
+  pendingFiles: args.pendingFiles || [],
   toolCalls: [],
   messages: [],
   activeProfile: 'default',
@@ -135,11 +146,21 @@ globalThis.S = {
 };
 globalThis._defaultModel = null;
 globalThis._activeProvider = 'openai';
+globalThis.t = (key) => key;
 globalThis._emptyComposerModelOverride = null;
 globalThis._readPersistedModelState = () => null;
 globalThis._readEmptyComposerModelOverride = () => null;
 globalThis._clearEmptyComposerModelOverride = () => {};
-globalThis.$ = (id) => (id === 'modelSelect' ? { value: 'gpt-4', selectedOptions: [{ dataset: { provider: 'openai' } }] } : null);
+const input = { value: args.draftText || '' };
+const savedDrafts = [];
+globalThis._saveComposerDraftNow = async (...callArgs) => {
+  savedDrafts.push(callArgs);
+  if (args.failDraftSave) throw new Error('draft save failed');
+};
+globalThis.$ = (id) => {
+  if (id === 'msg') return input;
+  return id === 'modelSelect' ? { value: 'gpt-4', selectedOptions: [{ dataset: { provider: 'openai' } }] } : null;
+};
 for (const name of [
   '_setNewSessionPending', 'updateQueueBadge', '_clearPendingSelections',
   'clearLiveToolCards', 'setComposerStatus', 'setStatus', 'updateSendBtn',
@@ -159,6 +180,12 @@ globalThis._defaultModel = null;
 const calls = [];
 globalThis.api = async (_url, opts) => {
   calls.push(JSON.parse(opts.body));
+  if (args.nullNewSession) return undefined;
+  if (args.switchDuringCreate) {
+    S.session = {session_id:'session-B'};
+    S.pendingFiles = [{name:'B.txt'}];
+    input.value = 'B draft';
+  }
   return { session: { session_id: 's-1', messages: [], model: 'gpt-4', model_provider: 'openai', workspace: null, message_count: 0, last_usage: {} } };
 };
 
@@ -166,7 +193,13 @@ eval(newSessionSrc);
 
 (async () => {
   await newSession(false, args.options);
-  console.log(JSON.stringify({ body: calls[0] || {} }));
+  console.log(JSON.stringify({
+    body: calls[0] || {},
+    savedDrafts,
+    input: input.value,
+    pendingFiles: S.pendingFiles,
+    sessionId: S.session && S.session.session_id,
+  }));
 })().catch(err => {
   console.error(String(err && err.stack ? err.stack : err));
   process.exit(1);
@@ -177,6 +210,11 @@ eval(newSessionSrc);
         "activeProject": active_project,
         "options": options,
         "session": {"session_id": "session-1"},
+        "draftText": draft_text,
+        "pendingFiles": pending_files or [],
+        "failDraftSave": fail_draft_save,
+        "nullNewSession": null_new_session,
+        "switchDuringCreate": switch_during_create,
     }
     result = subprocess.run(
         [NODE, "-e", _DRIVER, str(SESSIONS_JS), json.dumps(payload)],
@@ -189,7 +227,8 @@ eval(newSessionSrc);
         raise RuntimeError(
             f"node driver failed:\nSTDOUT={result.stdout}\nSTDERR={result.stderr}"
         )
-    return json.loads(result.stdout.strip().splitlines()[-1])["body"]
+    parsed = json.loads(result.stdout.strip().splitlines()[-1])
+    return parsed if full else parsed["body"]
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -209,6 +248,73 @@ def test_new_session_respects_explicit_project_id_none():
 def test_new_session_falls_back_to_active_project_when_override_missing():
     body = _run_new_session_case({}, active_project="active-project")
     assert body["project_id"] == "active-project"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_new_session_saves_owner_draft_before_clearing_new_chat_composer():
+    result = _run_new_session_case(
+        {},
+        active_project="active-project",
+        draft_text="owner draft",
+        pending_files=[{"name": "owner.txt", "size": 7}],
+        full=True,
+    )
+
+    assert result["savedDrafts"] == [
+        ["session-1", "owner draft", [{"name": "owner.txt", "size": 7}], True]
+    ]
+    assert result["input"] == ""
+    assert result["pendingFiles"] == []
+    assert result["sessionId"] == "s-1"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_new_session_fails_closed_when_owner_draft_save_fails():
+    result = _run_new_session_case(
+        {},
+        active_project="active-project",
+        draft_text="owner draft",
+        pending_files=[{"name": "owner.txt", "size": 7}],
+        fail_draft_save=True,
+        full=True,
+    )
+
+    assert result["body"] == {}
+    assert result["input"] == "owner draft"
+    assert result["pendingFiles"] == [{"name": "owner.txt", "size": 7}]
+    assert result["sessionId"] == "session-1"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_new_session_does_not_clear_owner_when_creation_returns_no_session():
+    result = _run_new_session_case(
+        {},
+        active_project="active-project",
+        draft_text="owner draft",
+        pending_files=[{"name": "owner.txt", "size": 7}],
+        null_new_session=True,
+        full=True,
+    )
+
+    assert result["input"] == "owner draft"
+    assert result["pendingFiles"] == [{"name": "owner.txt", "size": 7}]
+    assert result["sessionId"] == "session-1"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_new_session_does_not_overwrite_concurrent_session_switch():
+    result = _run_new_session_case(
+        {},
+        active_project="active-project",
+        draft_text="owner draft",
+        pending_files=[{"name": "owner.txt", "size": 7}],
+        switch_during_create=True,
+        full=True,
+    )
+
+    assert result["input"] == "B draft"
+    assert result["pendingFiles"] == [{"name": "B.txt"}]
+    assert result["sessionId"] == "session-B"
 
 
 _HELPER = r"""

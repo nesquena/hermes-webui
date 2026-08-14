@@ -116,3 +116,14 @@ def test_draft_save_skips_unchanged_payload_before_persist():
     assert save_idx != -1, "draft route should still save changed drafts"
     assert unchanged_idx < save_idx, "unchanged guard must run before full session save"
     assert 'payload["unchanged"] = True' in src
+
+
+def test_failed_send_restore_compare_and_set_is_locked_and_fail_closed():
+    src = Path(__file__).parents[1].joinpath("api", "routes.py").read_text(encoding="utf-8")
+    draft_idx = src.index('if parsed.path == "/api/session/draft":')
+    lock_idx = src.index("with _get_session_agent_lock(sid):", draft_idx)
+    guard_idx = src.index("if if_empty and (", lock_idx)
+    save_idx = src.index("s.composer_draft = next_draft", guard_idx)
+    assert lock_idx < guard_idx < save_idx
+    assert 'return bad(handler, "if_empty must be a boolean", 400)' in src[draft_idx:lock_idx]
+    assert '"conflict": True' in src[guard_idx:save_idx]

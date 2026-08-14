@@ -22,6 +22,7 @@ import api.config as config
 import api.streaming as streaming
 import api.profiles as profiles
 from api.run_journal import RunJournalWriter, append_run_event
+from api.process_event_utils import build_active_turn_token
 
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
@@ -1478,6 +1479,81 @@ class TestRepairStalePendingIntegration:
         error_msgs = [m for m in s.messages if m.get("_error")]
         assert len(error_msgs) == 1
 
+    def test_repairs_transformed_queued_command_with_queue_identity(self, hermes_home, monkeypatch):
+        s = _make_stale_session(pending_msg="internal command prompt")
+        s.pending_started_at = 1700000100.25
+        s.pending_queue_item = {
+            "id": "queue-transformed-1",
+            "text": "internal command prompt",
+            "display_text": "/status",
+            "files": [],
+            "source": "webui",
+        }
+        s.pending_turn_intent = {"id": "queue-transformed-1", "display_text": "/status"}
+        s.pending_queue_outcome = {"state": "claimed", "item_id": "queue-transformed-1"}
+        s.save()
+
+        assert _repair_stale_pending(s) is True
+        recovered = next(m for m in s.messages if m.get("role") == "user")
+        assert recovered["content"] == "/status"
+        assert recovered["queue_item_id"] == "queue-transformed-1"
+        assert recovered["_queue_item_id"] == "queue-transformed-1"
+        assert recovered["_active_turn_token"] == build_active_turn_token(
+            "stream_1", 1700000100.25,
+        )
+
+    def test_repairs_attachment_only_queued_turn(self, hermes_home, monkeypatch):
+        attachment = {"name": "only.txt", "path": "", "mime": "text/plain"}
+        s = _make_stale_session(pending_msg="")
+        s.pending_started_at = 1700000101.5
+        s.pending_attachments = [attachment]
+        s.pending_queue_item = {
+            "id": "queue-attachment-only",
+            "display_text": "",
+            "files": [attachment],
+            "source": "webui",
+        }
+        s.pending_queue_outcome = {
+            "state": "claimed", "item_id": "queue-attachment-only",
+        }
+        s.save()
+
+        assert _repair_stale_pending(s) is True
+        recovered = next(m for m in s.messages if m.get("role") == "user")
+        assert recovered["content"] == ""
+        assert recovered["attachments"] == [attachment]
+        assert recovered["queue_item_id"] == "queue-attachment-only"
+        assert recovered["_queue_item_id"] == "queue-attachment-only"
+
+    def test_repairs_distinct_same_text_queue_id_instead_of_deduping(self, hermes_home, monkeypatch):
+        s = _make_session(
+            session_id="stale_distinct_queue_ids",
+            messages=[
+                {
+                    "role": "user",
+                    "content": "repeat",
+                    "queue_item_id": "queue-old",
+                    "_queue_item_id": "queue-old",
+                },
+            ],
+        )
+        s.pending_user_message = "repeat"
+        s.pending_started_at = 1700000102.75
+        s.active_stream_id = "stream_distinct"
+        s.pending_queue_item = {
+            "id": "queue-new",
+            "text": "repeat",
+            "display_text": "repeat",
+            "files": [],
+            "source": "webui",
+        }
+        s.pending_queue_outcome = {"state": "claimed", "item_id": "queue-new"}
+        s.save()
+
+        assert _repair_stale_pending(s) is True
+        user_messages = [m for m in s.messages if m.get("role") == "user"]
+        assert [m["_queue_item_id"] for m in user_messages] == ["queue-old", "queue-new"]
+
     def test_recovers_when_messages_nonempty(self, hermes_home, monkeypatch):
         """Pre-check: if messages is non-empty, repair still preserves the
         pending user turn instead of silently discarding it."""
@@ -1490,6 +1566,25 @@ class TestRepairStalePendingIntegration:
         assert [m["content"] for m in s.messages if m["role"] == "user"] == ["hi", "more"]
         assert s.messages[1].get("_recovered") is True
         assert any(m.get("_error") for m in s.messages)
+
+    def test_older_same_text_followed_by_assistant_does_not_count_as_checkpoint(
+        self, hermes_home, monkeypatch,
+    ):
+        """A non-tail legacy payload is history, not this pending turn."""
+        s = _make_session(
+            messages=[
+                {"role": "user", "content": "repeat"},
+                {"role": "assistant", "content": "older answer"},
+            ],
+        )
+        s.pending_user_message = "repeat"
+        s.active_stream_id = "stream_same_text"
+
+        assert _repair_stale_pending(s) is True
+        users = [message for message in s.messages if message.get("role") == "user"]
+        assert len(users) == 2
+        assert users[-1]["content"] == "repeat"
+        assert users[-1].get("_recovered") is True
 
     def test_skips_when_stream_alive(self, hermes_home, monkeypatch):
         """Pre-check: if the stream is still alive in STREAMS, repair is skipped."""

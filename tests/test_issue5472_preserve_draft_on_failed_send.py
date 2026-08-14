@@ -58,12 +58,15 @@ def test_helper_has_new_three_arg_signature_and_guards():
     assert "if(inp && !String(inp.value||'').trim()){" in body
     # Restores text and re-stages files.
     assert "inp.value=restore;" in body
-    assert "S.pendingFiles=files;" in body
+    assert "const merged=[...files];" in body
+    assert "S.pendingFiles=merged;" in body
     # The deferred persist is stale-aware: re-reads the LIVE composer when the
     # failed session is still visible (Codex #5488 catch), rather than the
     # captured snapshot.
     assert "const stillVisible=(S.session&&S.session.session_id)===sid;" in body
     assert "const liveText=inp?String(inp.value||''):restore;" in body
+    assert "await _saveComposerDraftNow(sid, liveText, S.pendingFiles?[...S.pendingFiles]:[],true,true);" in body
+    assert "await _saveComposerDraftNow(sid,restore,files,true,true);" in body
 
 
 def test_send_captures_immutable_snapshot_before_rewrites_and_upload():
@@ -73,12 +76,12 @@ def test_send_captures_immutable_snapshot_before_rewrites_and_upload():
     files_idx = MESSAGES_JS.find(
         "const _failedSendFilesSnapshot=Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];"
     )
-    moa_idx = MESSAGES_JS.find("text=_moaArgs;")
+    transform_idx = MESSAGES_JS.find("_slashPlan=await _prepareSlashTurn")
     upload_idx = MESSAGES_JS.find("uploaded=await uploadPendingFiles(")
     assert snap_idx != -1 and files_idx != -1, "send() must snapshot text + files for #5472"
-    assert moa_idx != -1 and upload_idx != -1
-    # Snapshot happens before both the /moa rewrite and the upload drain.
-    assert snap_idx < moa_idx, "text snapshot must precede the /moa rewrite of `text`"
+    assert transform_idx != -1 and upload_idx != -1
+    # Snapshot happens before prompt-transform planning and the upload drain.
+    assert snap_idx < transform_idx, "text snapshot must precede slash planning"
     assert files_idx < upload_idx, "files snapshot must precede uploadPendingFiles() drain"
 
 
@@ -103,25 +106,21 @@ def test_send_still_clears_composer_on_the_happy_path():
     )
     assert main_clear in MESSAGES_JS, "main send path must clear the persisted draft at send time"
 
-    # Salvage of #4750: the composer textarea capture + wipe was moved UP to run
-    # immediately after capture (right after `_sendInProgressSid=activeSid;`) and
-    # BEFORE `uploadPendingFiles()` / the forced-skill-directive await — so a
-    # re-entrant/interrupt-mode send during the async window can't re-read the
-    # still-populated DOM and double-submit. Verify that ordering here.
-    capture = "const _submittedDraftTextForClear=$('msg').value||'';"
+    # Salvage of #4750: the owner draft is captured before slash planning, then
+    # the textarea is cleared before `uploadPendingFiles()` / the
+    # forced-skill-directive await — so a re-entrant/interrupt-mode send during
+    # the async window can't re-read the original DOM text and double-submit.
+    capture = "const _sendOwnerDraftText="
     assert capture in MESSAGES_JS, "send() must still capture the send-time draft text"
     capture_idx = MESSAGES_JS.index(capture)
-    # The textarea wipe sits immediately after the capture (same 120-char window).
-    window_after_capture = MESSAGES_JS[capture_idx : capture_idx + 120]
-    assert "$('msg').value='';autoResize();" in window_after_capture, (
-        "the composer textarea wipe must sit immediately after the capture"
-    )
+    wipe_idx = MESSAGES_JS.index("$('msg').value='';autoResize();", capture_idx)
     upload_idx = MESSAGES_JS.index("uploaded=await uploadPendingFiles(")
     clear_idx = MESSAGES_JS.index(main_clear)
-    # THE FIX: capture+wipe happen before the upload await (closes the race)...
-    assert capture_idx < upload_idx, (
-        "composer must be captured+cleared BEFORE the uploadPendingFiles() await "
-        "so a re-entrant send can't re-read stale DOM text (salvage of #4750)"
+    # THE FIX: owner capture and wipe happen before the upload await (closes the
+    # race), while the persisted-draft clear remains on the main path.
+    assert capture_idx < wipe_idx < upload_idx, (
+        "owner draft must be captured and the composer cleared BEFORE the "
+        "uploadPendingFiles() await"
     )
     # ...and the captured text is still what feeds the persisted-draft clear.
     assert capture_idx < clear_idx, (
@@ -145,7 +144,7 @@ def test_restore_persist_chains_after_the_clear_promise():
     # POST resolves (avoids an HTTP/2 reorder leaving the server draft empty).
     body = _helper_body()
     assert "clearPromise" in body, "helper must accept the clear promise for ordering"
-    assert "clearPromise.then(_persist,_persist)" in body, (
+    assert "clearPromise.then(runPersist,runPersist)" in body, (
         "re-persist must chain off the clear promise (both fulfill and reject → persist)"
     )
     # And send() must pass the captured clear promise into the restore call.
@@ -183,19 +182,22 @@ def _run_helper_in_node(draft_text, files_snapshot, initial_input, visible_sid, 
         function updateSendBtn(){ state.sendBtnUpdated = true; }
         function renderTray(){ state.trayRendered = true; }
         function _saveComposerDraftNow(sid, text, files){ state.saved = {sid, text, files}; }
+        function api(){ return Promise.resolve({draft:{text:'',files:[]}}); }
 
         %(helper)s
 
         const ret = _restoreComposerDraftAfterFailedSend(%(draft_text)s, %(files)s, %(sid)s);
-        console.log(JSON.stringify({
-          ret,
-          inputValue: state.input.value,
-          resized: state.input.resized,
-          sendBtnUpdated: state.sendBtnUpdated,
-          trayRendered: state.trayRendered,
-          pendingFiles: S.pendingFiles,
-          saved: state.saved,
-        }));
+        Promise.resolve().then(() => {
+          console.log(JSON.stringify({
+            ret,
+            inputValue: state.input.value,
+            resized: state.input.resized,
+            sendBtnUpdated: state.sendBtnUpdated,
+            trayRendered: state.trayRendered,
+            pendingFiles: S.pendingFiles,
+            saved: state.saved,
+          }));
+        });
         """
     ) % {
         "initial_input": json.dumps(initial_input),
@@ -371,6 +373,7 @@ def test_deferred_persist_skips_when_user_switched_away_after_restore():
         function updateSendBtn(){}
         function renderTray(){}
         function _saveComposerDraftNow(sid, text, files){ saveCalls.push({sid, text}); }
+        function api(){ return Promise.resolve({draft:{text:'',files:[]}}); }
 
         %(helper)s
 
@@ -394,9 +397,14 @@ def test_deferred_persist_skips_when_user_switched_away_after_restore():
     )
 
 
-def test_background_failure_persists_snapshot_since_no_live_composer():
-    """A failed send for a NON-visible session (background) has no live composer
-    to read, so the deferred persist saves the captured snapshot for that sid."""
+@pytest.mark.parametrize(
+    ("server_draft", "expected_saves"),
+    [
+        ({"text": "", "files": []}, [{"sid": "sid-1", "text": "bg failed msg"}]),
+        ({"text": "newer owner draft", "files": [{"name": "new.txt"}]}, []),
+    ],
+)
+def test_background_failure_compares_server_draft_before_restore(server_draft, expected_saves):
     node = shutil.which("node")
     if not node:  # pragma: no cover
         pytest.skip("node not available")
@@ -406,12 +414,15 @@ def test_background_failure_persists_snapshot_since_no_live_composer():
         let saveCalls = [];
         const state = {input: {value: "visible session draft"}, pendingFiles: []};
         const $ = (id) => (id === 'msg' ? state.input : null);
-        // The visible session is sid-2; the failed send was for sid-1 (background).
         const S = {pendingFiles: state.pendingFiles, session: {session_id: 'sid-2'}};
         function autoResize(){}
         function updateSendBtn(){}
         function renderTray(){}
-        function _saveComposerDraftNow(sid, text, files){ saveCalls.push({sid, text}); }
+        function _saveComposerDraftNow(sid, text, files, _strict, onlyIfEmpty){
+          if(onlyIfEmpty && (%(server_draft)s.text || %(server_draft)s.files.length)) return Promise.reject(new Error('conflict'));
+          saveCalls.push({sid, text});
+          return Promise.resolve({ok:true});
+        }
 
         %(helper)s
 
@@ -420,12 +431,10 @@ def test_background_failure_persists_snapshot_since_no_live_composer():
           console.log(JSON.stringify({ret, saveCalls, visibleUntouched: state.input.value}));
         });
         """
-    ) % {"helper": body}
+    ) % {"helper": body, "server_draft": json.dumps(server_draft)}
     proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
     out = json.loads(proc.stdout.strip())
-    assert out["ret"] is False, "a background (non-visible) failure must not report a visible restore"
-    assert out["visibleUntouched"] == "visible session draft", "the visible composer must be untouched"
-    assert out["saveCalls"] == [{"sid": "sid-1", "text": "bg failed msg"}], (
-        f"background failure must persist the snapshot for its own sid; got {out['saveCalls']}"
-    )
+    assert out["ret"] is False
+    assert out["visibleUntouched"] == "visible session draft"
+    assert out["saveCalls"] == expected_saves

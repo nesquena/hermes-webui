@@ -52,7 +52,7 @@ def test_preserve_pre_compression_snapshot_clears_runtime_fields_while_restoring
         "pending_user_message": None,
         "pending_attachments": [],
         "pending_started_at": None,
-        "queue": [],
+        "queue": [{"id": "queued", "text": "next turn"}],
         "touch_updated_at": False,
         "skip_index": False,
     }
@@ -107,7 +107,7 @@ def test_preserve_pre_compression_snapshot_load_and_mark_branch_clears_runtime_f
     assert saved["pending_user_message"] is None
     assert saved["pending_attachments"] == []
     assert saved["pending_started_at"] is None
-    assert saved["queue"] == []
+    assert saved["queue"] == [{"id": "archived-queued", "text": "must not replay"}]
 
 
 def test_preserve_pre_compression_snapshot_does_not_leave_continuation_marked_as_snapshot(tmp_path, monkeypatch):

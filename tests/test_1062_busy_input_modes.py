@@ -135,9 +135,12 @@ class TestSlashCommandHandlers:
         for fn_name in ("cmdQueue", "cmdInterrupt"):
             idx = COMMANDS_JS.find(f"function {fn_name}(")
             assert idx >= 0, f"{fn_name} not found"
-            body = COMMANDS_JS[idx:idx + 1200]
+            body = COMMANDS_JS[idx:idx + 1600]
             assert "await queueSessionMessage" in body, (
                 f"{fn_name} must await durable queue acceptance"
+            )
+            assert "workspace" in body, (
+                f"{fn_name} must preserve the owner workspace in the queued turn"
             )
             assert "_clearAcceptedQueueCommandDraft" in body, (
                 f"{fn_name} must clear the accepted draft/files only after acceptance"

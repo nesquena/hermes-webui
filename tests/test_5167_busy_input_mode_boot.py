@@ -167,10 +167,22 @@ class TestAssignmentSitesSyncMirror:
 
 
 class TestReadSitesUnchanged:
-    """The defensive read sites must keep their ||'steer' fallback (belt + braces)."""
+    """Busy sends must read the default mode after shared slash planning."""
 
     def test_messages_read_site_intact(self):
-        assert "const defaultMessageMode=window._defaultMessageMode||'steer';" in MESSAGES_JS
+        busy_start = MESSAGES_JS.index("if(S.busy||compressionRunning){")
+        busy_end = MESSAGES_JS.index(
+            "  if(S.session&&(S.session.read_only||S.session.is_read_only))",
+            busy_start,
+        )
+        busy_body = MESSAGES_JS[busy_start:busy_end]
+        planner_idx = busy_body.index("_prepareSlashTurn(text,{echo:false})")
+        mode_idx = busy_body.index(
+            "const defaultMessageMode=_forceQueue?'queue':(window._defaultMessageMode||'steer');"
+        )
+        assert planner_idx < mode_idx, "busy slash planning must precede default-mode routing"
+        assert "if(_busySlashPlan.kind==='handled') return;" in busy_body
+        assert "_forceQueue=_busySlashPlan.kind==='turn';" in busy_body
 
     def test_ui_read_site_intact(self):
         assert "window._defaultMessageMode||'steer'" in UI_JS

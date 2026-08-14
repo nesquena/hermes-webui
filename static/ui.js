@@ -12,7 +12,8 @@ function assistantDisplayName(){
   return window._botName||'Hermes';
 }
 const INFLIGHT={};  // keyed by session_id while request in-flight
-const SESSION_QUEUES={};  // keyed by session_id; server-backed render cache
+const SESSION_QUEUES={};  // keyed by session_id; server-owned render cache
+const SESSION_QUEUE_CAPABILITIES={};
 const MAX_UPLOAD_BYTES=(window.__HERMES_CONFIG__&&window.__HERMES_CONFIG__.maxUploadBytes)||20*1024*1024;
 const MAX_UPLOAD_MB=Math.round(MAX_UPLOAD_BYTES/1024/1024);
 const $=id=>document.getElementById(id);
@@ -210,16 +211,6 @@ function _clearPersistedSessionQueue(sid){
   try{sessionStorage.removeItem(key);}catch(_){}
   try{localStorage.removeItem(key);}catch(_){}
 }
-function _persistSessionQueueStorage(sid, queue){
-  if(!sid) return;
-  const q=Array.isArray(queue)?queue:[];
-  if(!q.length){_clearPersistedSessionQueue(sid);return;}
-  const key=_queueStorageKey(sid);
-  let payload='[]';
-  try{payload=JSON.stringify(q);}catch(_){return;}
-  try{sessionStorage.setItem(key,payload);}catch(_){}
-  try{localStorage.setItem(key,payload);}catch(_){}
-}
 function _readPersistedSessionQueue(sid){
   if(!sid) return [];
   const key=_queueStorageKey(sid);
@@ -242,6 +233,9 @@ function _readPersistedSessionQueue(sid){
 }
 function hydrateSessionQueue(sid, queue){
   if(!sid) return [];
+  if(typeof S!=='undefined'&&S.session&&S.session.session_id===sid&&S.session.queue_capability){
+    SESSION_QUEUE_CAPABILITIES[sid]=S.session.queue_capability;
+  }
   const next=Array.isArray(queue)?queue.filter(e=>e&&typeof e==='object').map(e=>({...e})):[];
   if(next.length) SESSION_QUEUES[sid]=next;
   else delete SESSION_QUEUES[sid];
@@ -249,6 +243,24 @@ function hydrateSessionQueue(sid, queue){
   return next;
 }
 const _queueMutationChains={};
+function _queueErrorMessage(error,fallbackKey='queue_failed'){
+  let code=error&&error.code;
+  if(!code&&error&&error.body){
+    try{
+      const body=typeof error.body==='string'?JSON.parse(error.body):error.body;
+      code=body&&body.error_code||null;
+    }catch(_){ }
+  }
+  if(typeof code==='string'&&code.startsWith('queue_')&&typeof t==='function'){
+    const translated=t(code);
+    if(translated&&String(translated)!==String(code))return String(translated);
+  }
+  if(typeof t==='function'){
+    const fallback=t(fallbackKey);
+    if(fallback&&String(fallback)!==String(fallbackKey))return String(fallback);
+  }
+  return fallbackKey;
+}
 function _postSessionQueue(sid, body){
   const run=()=>api('/api/chat/queue',{method:'POST',body:JSON.stringify({session_id:sid,...body})})
     .then(response=>{
@@ -260,6 +272,12 @@ function _postSessionQueue(sid, body){
       hydrateSessionQueue(resolvedSid,response&&response.queue);
       updateQueueBadge(resolvedSid);
       return response;
+    })
+    .catch(error=>{
+      if(error&&!error.code&&error.body){
+        try{error.code=JSON.parse(error.body).error_code||null;}catch(_){ }
+      }
+      throw error;
     });
   const next=(_queueMutationChains[sid]||Promise.resolve()).catch(()=>{}).then(run);
   _queueMutationChains[sid]=next;
@@ -269,6 +287,16 @@ function _postSessionQueue(sid, body){
 }
 async function queueSessionMessage(sid, payload){
   if(!sid||!payload) throw new Error('No owning session for queued message');
+  const ownerSession=typeof S!=='undefined'&&S.session&&S.session.session_id===sid?S.session:null;
+  const queueCapability=ownerSession&&ownerSession.queue_capability||SESSION_QUEUE_CAPABILITIES[sid];
+  if(queueCapability!=='server'){
+    const error=new Error(queueCapability
+      ? 'durable WebUI queue is unsupported for this backend'
+      : 'durable WebUI queue capability is unavailable');
+    error.code=queueCapability?'queue_unsupported':'queue_unavailable';
+    error.status=501;
+    throw error;
+  }
   const captured=Array.isArray(payload.files)?payload.files.filter(Boolean):[];
   const uploaded=captured.filter(f=>f&&typeof f==='object'&&String(f.path||'').trim());
   const browserFiles=captured.filter(f=>!(f&&typeof f==='object'&&String(f.path||'').trim()));
@@ -278,9 +306,20 @@ async function queueSessionMessage(sid, payload){
     if(!Array.isArray(result)||result.length!==browserFiles.length) throw new Error('One or more attachments failed to upload');
     files.push(...result);
   }
-  const response=await _postSessionQueue(sid,{action:'enqueue',text:String(payload.text||''),files,
+  const body={action:'enqueue',text:String(payload.text||''),files,
     model:payload.model||'',model_provider:payload.model_provider||null,
-  });
+    workspace:payload.workspace||null,
+  };
+  if(typeof payload.display_text==='string') body.display_text=payload.display_text;
+  if(payload.intent&&typeof payload.intent==='object'){
+    body.intent=JSON.parse(JSON.stringify(payload.intent));
+    body.intent.attachments=[...files];
+    body.intent.model=payload.model||null;
+    body.intent.model_provider=payload.model_provider||null;
+    if(payload.workspace) body.intent.workspace=payload.workspace;
+  }
+  if(payload.moa_config) body.moa_config=payload.moa_config;
+  const response=await _postSessionQueue(sid,body);
   return response;
 }
 async function mutateSessionQueue(sid, action, extra={}){
@@ -8093,7 +8132,11 @@ function _renderQueueChips(sid){
   const inner=document.getElementById('queueChips');
   if(!card||!inner) return;
   const q=_getSessionQueue(sid,false);
-  const key=q.map(e=>{const t=e&&(e.text||e.message||e.content||'');return(e&&e._queued_at||0)+':'+t.length+':'+t.slice(0,20);}).join('|');
+  const key=JSON.stringify(q.map(e=>({
+    id:String(e?.id||''),
+    text:String(e?.display_text??e?.text??e?.message??e?.content??''),
+    files:(Array.isArray(e?.files)?e.files:[]).map(file=>String(file?.path||file?.name||file?.filename||''))
+  })));
   if(key===(_queueRenderKeys[sid]||'')&&key!='') return;
   // Skip re-render if user is actively editing inside the queue panel
   if(inner.contains(document.activeElement)&&document.activeElement!==inner) return;
@@ -8135,7 +8178,7 @@ function _renderQueueChips(sid){
       updateQueueBadge(sid);
     }catch(err){
       delete _queueRenderKeys[sid];
-      showToast((err&&err.message)||'Queue update failed',3500,'error');
+      showToast(_queueErrorMessage(err,'queue_update_failed'),3500,'error');
       updateQueueBadge(sid);
     }
   }
@@ -8156,7 +8199,7 @@ function _renderQueueChips(sid){
     mergeBtn.innerHTML=li('layers',12)+'Combine';
     mergeBtn.onclick=()=>{
       if(hasFiles){
-        if(typeof showToast==='function') showToast(typeof t==='function'?t('queue_combine_attachments_warning'):'Attachments on queued items will be removed',2600,'warning');
+        if(typeof showToast==='function') showToast(typeof t==='function'?t('queue_combine_attachments_warning'):'queue_combine_attachments_warning',2600,'warning');
       }
       void _saveAndRefresh('combine');
     };
@@ -8189,7 +8232,7 @@ function _renderQueueChips(sid){
   let _dragId=null;
   q.forEach((entry,i)=>{
     const _entryId=String(entry&&entry.id||'');
-    const entryText=entry&&(entry.text||entry.message||entry.content||'');
+    const entryText=String(entry?.display_text??entry?.text??entry?.message??entry?.content??'');
     const _files=entry&&Array.isArray(entry.files)?entry.files.filter(Boolean):[];
     const row=document.createElement('div');
     row.className='queue-card-row';
@@ -8226,7 +8269,7 @@ function _renderQueueChips(sid){
       msgSpan.style.overflow='';msgSpan.style.whiteSpace='';msgSpan.style.textOverflow='';
       const newText=msgSpan.textContent.trim();
       if(newText===''&&!_files.length){ msgSpan.textContent=entryText||'—'; return; }
-      if(newText!==entryText){
+      if(newText!==entryText.trim()){
         if(_entryId) void _saveAndRefresh('edit',{item_id:_entryId,text:newText});
       }
     };
@@ -10555,7 +10598,12 @@ function getPendingSessionMessage(session, messagesOverride=null){
   if(!text&&!attachments.length) return null;
   const sourceMessages=Array.isArray(messagesOverride)?messagesOverride:session?.messages;
   const messages=Array.isArray(sourceMessages)?sourceMessages:[];
-  const pendingCandidate={role:'user',content:text};
+  const pendingCandidate={
+    role:'user',
+    content:text,
+    attachments,
+    queue_item_id:pendingItem?.id||null,
+  };
   const _matchesPending=(row)=>{
     if(!row) return false;
     return typeof _sameTranscriptMessage==='function'
@@ -10587,6 +10635,8 @@ function getPendingSessionMessage(session, messagesOverride=null){
     role:'user',
     content:text,
     attachments:attachments.length?attachments:undefined,
+    queue_item_id:pendingItem?.id||undefined,
+    _queue_item_id:pendingItem?.id||undefined,
     _ts:session?.pending_started_at||Date.now()/1000,
     _pending:true,
     _source:pendingItem?.source||session?.pending_user_source||undefined,

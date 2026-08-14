@@ -96,6 +96,7 @@ def _new_session_driver(session_workspace: str, default_workspace: str, switch_w
           _profileSwitchWorkspace:{json.dumps(switch_workspace)},
           activeProfile:'default',
           toolCalls:[],
+          pendingFiles:[],
         }};
         global.window={{}};
         global.document={{createElement:()=>({{dataset:{{}},appendChild:()=>{{}}}})}};
@@ -105,6 +106,9 @@ def _new_session_driver(session_workspace: str, default_workspace: str, switch_w
         function _setNewSessionPending(){{}}
         function updateQueueBadge(){{}}
         function clearLiveToolCards(){{}}
+        function renderTray(){{}}
+        function autoResize(){{}}
+        function _saveComposerDraftNow(){{return Promise.resolve({{ok:true}});}}
         function api(path,opts){{
           captured={{path,body:JSON.parse(opts.body)}};
           return Promise.resolve({{session:{{session_id:'new-session',messages:[],workspace:captured.body.workspace}}}});

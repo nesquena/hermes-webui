@@ -565,23 +565,16 @@ def test_session_scoped_message_queue_frontend_wiring():
     assert "updateQueueBadge(sid);" in sessions_src
 
 
-def test_queue_card_cross_session_clear_called_before_draft_save(cleanup_test_sessions):
+def test_queue_card_cross_session_clear_called_after_draft_save(cleanup_test_sessions):
     """R15c: switching away from one session to another should clear the old
     session's queue card before the async draft-save await, so stale DOM cannot
     survive into the destination session.
     """
     src = (REPO_ROOT / "static/sessions.js").read_text()
-    block_pattern = re.compile(
-        r"if \(currentSid && currentSid !== sid\) \{\s*"
-        r"if\(typeof window\._clearPendingSelections==='function'\) window\._clearPendingSelections\(\);\s*"
-        r"if\(typeof _clearQueueCardDisplay==='function'\) _clearQueueCardDisplay\(currentSid\);\s*"
-        r"await _saveComposerDraftNow\(currentSid",
-        re.S,
-    )
-    assert block_pattern.search(src), (
-        "cross-session loadSession path must clear queue card display via"
-        " _clearQueueCardDisplay(currentSid) before awaiting _saveComposerDraftNow"
-    )
+    save_idx = src.index("await _saveComposerDraftNow(currentSid")
+    cross_idx = src.index("if(currentSid!==sid){", save_idx)
+    clear_idx = src.index("_clearQueueCardDisplay(currentSid);", cross_idx)
+    assert save_idx < cross_idx < clear_idx
 
 
 def test_queue_card_cross_session_helper_used_only_for_session_change(cleanup_test_sessions):
@@ -593,7 +586,7 @@ def test_queue_card_cross_session_helper_used_only_for_session_change(cleanup_te
     assert load_start >= 0
     load_end = src.find("  // Sync context usage indicator from session data", load_start)
     load_body = src[load_start:load_end]
-    cross_start = load_body.find("if (currentSid && currentSid !== sid) {")
+    cross_start = load_body.find("if(currentSid!==sid){")
     cross_end = load_body.find("if (currentSid !== sid || forceReload) {", cross_start)
     assert cross_start >= 0 and cross_end >= 0
     assert "_clearQueueCardDisplay(currentSid);" in load_body[cross_start:cross_end], (

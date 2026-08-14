@@ -1337,14 +1337,15 @@ async function cmdQueue(args){
   if(!S.session){showToast(t('no_active_session'));return;}
   const sid=S.session.session_id;
   const files=[...S.pendingFiles];
+  const workspace=S.session.workspace||null;
   const modelState=typeof _chatPayloadModelState==='function'
     ? _chatPayloadModelState()
     : {model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',model_provider:S.session&&S.session.model_provider||''};
   try{
-    await queueSessionMessage(sid,{text:msg,files,model:modelState.model,model_provider:modelState.model_provider});
+    await queueSessionMessage(sid,{text:msg,files,model:modelState.model,model_provider:modelState.model_provider,workspace});
     _clearAcceptedQueueCommandDraft(sid,msg,files);
     showToast(t('cmd_queue_confirm'),2000);
-  }catch(err){_restoreQueueCommandDraft(sid,msg,files);showToast((err&&err.message)||'Queue failed',3500,'error');}
+  }catch(err){_restoreQueueCommandDraft(sid,msg,files);showToast((typeof _queueErrorMessage==='function'?_queueErrorMessage(err):(typeof t==='function'?t('queue_failed'):'queue_failed')),3500,'error');}
 }
 
 /**
@@ -1365,12 +1366,13 @@ async function cmdInterrupt(args){
   // Queue acceptance must precede cancellation.
   const sid=S.session.session_id;
   const files=[...S.pendingFiles];
+  const workspace=S.session.workspace||null;
   const modelState=typeof _chatPayloadModelState==='function'
     ? _chatPayloadModelState()
     : {model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',model_provider:S.session&&S.session.model_provider||''};
   try{
-    await queueSessionMessage(sid,{text:msg,files,model:modelState.model,model_provider:modelState.model_provider});
-  }catch(err){_restoreQueueCommandDraft(sid,msg,files);showToast((err&&err.message)||'Queue failed',3500,'error');return;}
+    await queueSessionMessage(sid,{text:msg,files,model:modelState.model,model_provider:modelState.model_provider,workspace});
+  }catch(err){_restoreQueueCommandDraft(sid,msg,files);showToast((typeof _queueErrorMessage==='function'?_queueErrorMessage(err):(typeof t==='function'?t('queue_failed'):'queue_failed')),3500,'error');return;}
   _clearAcceptedQueueCommandDraft(sid,msg,files);
   if(typeof cancelStream==='function'){
     if(await cancelStream('slash-interrupt')) showToast(t('cmd_interrupt_confirm'),2000);
@@ -1602,6 +1604,7 @@ async function _trySteer(msg, explicitSteer){
   let result=null;
   const originalMsg=String(msg||'').trim();
   const ownerSid=(typeof S!=='undefined'&&S.session&&S.session.session_id)||null;
+  const ownerWorkspace=(typeof S!=='undefined'&&S.session&&S.session.workspace)||null;
   const ownerStreamId=(typeof S!=='undefined'&&(S.activeStreamId||(S.session&&S.session.active_stream_id)))||null;
   const pendingFilesSnapshot=typeof S!=='undefined'&&Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
   const ownerModelState=typeof _chatPayloadModelState==='function'
@@ -1675,14 +1678,14 @@ async function _trySteer(msg, explicitSteer){
   }
   if(result&&result.fallback==='gateway_steer_queued'&&typeof queueSessionMessage==='function'){
     try{
-      await queueSessionMessage(ownerSid,{text:originalMsg,files:pendingFilesSnapshot,model:ownerModelState.model,model_provider:ownerModelState.model_provider});
+      await queueSessionMessage(ownerSid,{text:originalMsg,files:pendingFilesSnapshot,model:ownerModelState.model,model_provider:ownerModelState.model_provider,workspace:ownerWorkspace});
     }catch(err){
       if(_steerOwnerIsCurrent(ownerSid)){
         const inp=$('msg');
         if(inp&&!String(inp.value||'').trim()){inp.value=_steerRestoreText(originalMsg,explicitSteer);if(typeof autoResize==='function')autoResize();}
         if(typeof renderTray==='function')renderTray();
       }else await _steerPersistDraftForOwner(ownerSid,originalMsg,explicitSteer,pendingFilesSnapshot);
-      showToast((err&&err.message)||'Queue failed',3500,'error');
+      showToast((typeof _queueErrorMessage==='function'?_queueErrorMessage(err):(typeof t==='function'?t('queue_failed'):'queue_failed')),3500,'error');
       return false;
     }
     _steerUploadCache=null;

@@ -8,6 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.test_durable_queue_remediation import _busy_send_node_result
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 COMMANDS_JS = (REPO_ROOT / "static" / "commands.js").read_text(encoding="utf-8")
 MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
@@ -481,8 +483,21 @@ def test_frontend_has_goal_slash_command_and_status_event_handler():
     assert "goal'" in MESSAGES_JS
     assert "source.addEventListener('goal'" in MESSAGES_JS
     assert "source.addEventListener('goal_continue'" in MESSAGES_JS
-    assert "['steer','interrupt','queue','terminal','goal','yolo'].includes(_pc.name)" in MESSAGES_JS
-    assert "queueSessionMessage" in MESSAGES_JS
+    results = _busy_send_node_result(
+        MESSAGES_JS,
+        COMMANDS_JS,
+        ["/goal status", "/steer hint", "/interrupt stop", "/queue later", "/terminal", "/yolo"],
+        record_all_handlers=True,
+    )
+    assert [item["handled"] for item in results] == [
+        [{"name": "goal", "args": "status"}],
+        [{"name": "steer", "args": "hint"}],
+        [{"name": "interrupt", "args": "stop"}],
+        [{"name": "queue", "args": "later"}],
+        [{"name": "terminal", "args": ""}],
+        [{"name": "yolo", "args": ""}],
+    ]
+    assert all(item["queued"] == [] for item in results)
 
 
 def test_frontend_goal_evaluating_state_uses_calm_composer_indicator():

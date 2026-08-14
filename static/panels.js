@@ -4844,9 +4844,10 @@ async function clearConversation() {
   if(!S.session) return;
   const _clrMsg=await showConfirmDialog({title:t('clear_conversation_title'),message:t('clear_conversation_message'),confirmLabel:t('clear'),danger:true,focusCancel:true});
   if(!_clrMsg) return;
+  const clearedSid=S.session.session_id;
   try {
     const data = await api('/api/session/clear', {method:'POST',
-      body: JSON.stringify({session_id: S.session.session_id})});
+      body: JSON.stringify({session_id: clearedSid})});
     S.session = data.session;
     if(typeof hydrateSessionQueue==='function') hydrateSessionQueue(S.session.session_id,data.session.queue);
     S.messages = [];

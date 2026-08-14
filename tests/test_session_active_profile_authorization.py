@@ -11,6 +11,8 @@ import io
 import time
 from urllib.parse import urlparse
 
+import pytest
+
 import api.routes as routes
 import api.upload as upload
 
@@ -70,7 +72,7 @@ class _SimpleSession:
         self.workspace = workspace
         self.model = "test-model"
         self.model_provider = None
-        self.title = "Test"
+        self.title = "Untitled"
         self.messages = messages or []
         self.tool_calls = []
         self.project_id = None
@@ -94,6 +96,58 @@ class _SimpleSession:
         self.estimated_cost = 0.0
         self.cache_read_tokens = 0
         self.cache_write_tokens = 0
+
+
+_FOREIGN_SESSION_OWNERSHIP_STATES = (
+    {
+        "queue": [{"id": "queued-1", "text": "queued"}],
+    },
+    {
+        "pending_queue_item": {"id": "claimed-1", "text": "claimed"},
+        "pending_turn_intent": {"display_text": "claimed"},
+        "pending_queue_outcome": {"state": "claimed", "item_id": "claimed-1"},
+        "pending_user_message": "claimed prompt",
+        "pending_attachments": ["claimed.txt"],
+        "pending_started_at": 1.0,
+        "pending_user_source": "webui",
+    },
+    {
+        "queue_transfer": {"state": "pending", "session_id": "foreign"},
+    },
+    {
+        "active_stream_id": "active-1",
+    },
+    {
+        "title": "Retained title",
+    },
+    {
+        "project_id": "project-1",
+    },
+    {
+        "parent_session_id": "parent-1",
+    },
+    {
+        "compression_recovery": {"source_session_id": "parent-1"},
+    },
+    {
+        "is_cli_session": True,
+    },
+    {
+        "source_tag": "cron",
+    },
+    {
+        "raw_source": "telegram",
+    },
+    {
+        "session_source": "messaging",
+    },
+    {
+        "source_label": "Telegram",
+    },
+    {
+        "read_only": True,
+    },
+)
 
 
 def test_session_duplicate_foreign_profile_session_blocked_by_visibility_guard(monkeypatch):
@@ -172,6 +226,118 @@ def test_chat_start_foreign_persisted_session_returns_404_before_start_run(monke
     routes.handle_post(handler, urlparse("/api/chat/start"))
 
     assert cap["bad"] == ("Session not found", 404)
+
+
+@pytest.mark.parametrize("state", _FOREIGN_SESSION_OWNERSHIP_STATES)
+def test_chat_start_foreign_owned_placeholder_state_is_not_retagged(monkeypatch, state):
+    handler = _FakeHandler()
+    foreign = _SimpleSession("chat_foreign_owned", profile="other")
+    for field, value in state.items():
+        setattr(foreign, field, value)
+
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(
+        routes,
+        "read_body",
+        lambda _handler: {
+            "session_id": "chat_foreign_owned",
+            "message": "hello",
+            "profile": "default",
+        },
+    )
+    monkeypatch.setattr(routes, "_get_or_materialize_session", lambda sid, **_kwargs: foreign)
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(routes, "_start_run", lambda *_, **__: (_ for _ in ()).throw(AssertionError("must not start")))
+
+    cap = _capture(monkeypatch)
+    routes.handle_post(handler, urlparse("/api/chat/start"))
+
+    assert cap["bad"] == ("Session not found", 404)
+    assert foreign.profile == "other"
+
+
+def test_chat_start_retags_truly_empty_foreign_placeholder(monkeypatch):
+    handler = _FakeHandler()
+    empty = _SimpleSession("chat_empty_foreign", profile="other")
+    captured = {}
+
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(
+        routes,
+        "read_body",
+        lambda _handler: {
+            "session_id": "chat_empty_foreign",
+            "message": "hello",
+            "profile": "default",
+        },
+    )
+    monkeypatch.setattr(routes, "_get_or_materialize_session", lambda sid, **_kwargs: empty)
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(routes, "_resolve_chat_workspace_with_recovery", lambda *_args, **_kwargs: "/workspace")
+    monkeypatch.setattr(routes, "_read_profile_model_config", lambda *_args, **_kwargs: (None, None, None))
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda *_args, **_kwargs: ("test-model", None, "test-model"),
+    )
+    def _start_run(session, **_kwargs):
+        captured["profile"] = session.profile
+        return {"ok": True, "stream_id": "stream-test", "session_id": session.session_id}
+
+    monkeypatch.setattr(routes, "_start_run", _start_run)
+
+    cap = _capture(monkeypatch)
+    routes.handle_post(handler, urlparse("/api/chat/start"))
+
+    assert "bad" not in cap
+    assert empty.profile == "default"
+    assert captured["profile"] == "default"
+
+
+@pytest.mark.parametrize("state", _FOREIGN_SESSION_OWNERSHIP_STATES)
+def test_goal_command_foreign_owned_placeholder_state_is_not_retagged(monkeypatch, state):
+    handler = _FakeHandler()
+    foreign = _SimpleSession("goal_foreign_owned", profile="other")
+    for field, value in state.items():
+        setattr(foreign, field, value)
+
+    monkeypatch.setattr(routes, "_session_is_subagent_view_only", lambda _sid: False)
+    monkeypatch.setattr(routes, "get_session", lambda sid, metadata_only=False: foreign)
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
+
+    cap = _capture(monkeypatch)
+    routes._handle_goal_command(
+        handler,
+        {"session_id": "goal_foreign_owned", "profile": "default", "args": "status"},
+    )
+
+    assert cap["bad"] == ("Session not found", 404)
+    assert foreign.profile == "other"
+
+
+def test_goal_command_retags_truly_empty_foreign_placeholder(monkeypatch):
+    from api import goals, runtime_adapter
+
+    handler = _FakeHandler()
+    empty = _SimpleSession("goal_empty_foreign", profile="other")
+    monkeypatch.setattr(routes, "_session_is_subagent_view_only", lambda _sid: False)
+    monkeypatch.setattr(routes, "get_session", lambda sid, metadata_only=False: empty)
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(runtime_adapter, "runtime_adapter_enabled", lambda: False)
+    monkeypatch.setattr(
+        goals,
+        "goal_command_payload",
+        lambda *_args, **_kwargs: {"ok": True, "action": "status"},
+    )
+
+    cap = _capture(monkeypatch)
+    routes._handle_goal_command(
+        handler,
+        {"session_id": "goal_empty_foreign", "profile": "default", "args": "status"},
+    )
+
+    assert "bad" not in cap
+    assert empty.profile == "default"
 
 
 def test_chat_start_body_profile_cannot_retag_visible_empty_session_without_active_profile(monkeypatch):

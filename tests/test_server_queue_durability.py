@@ -877,6 +877,7 @@ def test_runner_local_queue_endpoint_and_drain_fail_closed(monkeypatch, tmp_path
 
     assert status == 501
     assert "unsupported" in response["error"]
+    assert response["error_code"] == "queue_unsupported"
     drain_response = routes.drain_queued_session_turn(session.session_id)
     assert drain_response["_status"] == 501
     assert models.Session.load(session.session_id).queue[0]["id"] == "item"
@@ -1491,7 +1492,7 @@ def test_local_and_gateway_teardown_helpers_call_shared_drain_for_all_outcomes(m
             assert helper(sid) is outcome
 
 
-def test_compression_rotation_keeps_queue_on_live_continuation_only(monkeypatch, tmp_path):
+def test_compression_rotation_keeps_parent_queue_until_child_lineage_save(monkeypatch, tmp_path):
     _session_dir, _attachment_root = _setup(monkeypatch, tmp_path)
     from api import streaming
 
@@ -1524,8 +1525,8 @@ def test_compression_rotation_keeps_queue_on_live_continuation_only(monkeypatch,
     archived_payload = json.loads(
         (_session_dir / f"{old.session_id}.json").read_text(encoding="utf-8")
     )
-    assert archived_payload.get("queue") == []
-    assert Session.load(old.session_id).queue == []
+    assert archived_payload.get("queue") == [item]
+    assert Session.load(old.session_id).queue == [item]
     assert continuation.queue == [item]
 
     worker = _install_start_stubs(monkeypatch)
@@ -1556,7 +1557,9 @@ def test_frontend_queue_is_server_hydrated_and_does_not_drain_on_busy_reset():
     busy_body = ui[ui.index("function setBusy(v)"):ui.index("// ── Queue chip display", ui.index("function setBusy(v)"))]
     assert "queueSessionMessage" not in busy_body
     assert "hydrateSessionQueue(S.session.session_id,data.session.queue)" in sessions
-    assert "review and send when ready" in sessions
+    assert "_browserQueue" not in ui
+    queue_body = ui[ui.index("async function queueSessionMessage"):ui.index("async function mutateSessionQueue")]
+    assert "_persistSessionQueueStorage" not in queue_body
     assert "await queueSessionMessage" in messages
     assert "await queueSessionMessage" in commands
     interrupt_start = commands.index("async function cmdInterrupt(")
