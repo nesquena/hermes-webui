@@ -740,12 +740,12 @@ class TestMediaEndpointUnit(unittest.TestCase):
                 real_open = os.open
                 swapped = {"done": False}
 
-                def _swap_on_first_open(path, *args, **kwargs):
-                    if not swapped["done"]:
-                        swapped["done"] = True
-                        shutil.rmtree(str(alias_dir))
-                        os.symlink(str(denied_sessions), str(alias_dir))
-                    return real_open(path, *args, **kwargs)
+                def _swap_on_first_open(path, *args, _real_open=real_open, _swapped=swapped, _alias_dir=alias_dir, _denied_sessions=denied_sessions, **kwargs):
+                    if not _swapped["done"]:
+                        _swapped["done"] = True
+                        shutil.rmtree(str(_alias_dir))
+                        os.symlink(str(_denied_sessions), str(_alias_dir))
+                    return _real_open(path, *args, **kwargs)
 
                 h2 = _CaptureHandler()
                 with mock.patch.object(os, "open", autospec=True,
@@ -861,24 +861,24 @@ class TestMediaEndpointUnit(unittest.TestCase):
                         swapped = {"done": False}
                         calls = {"n": 0}
 
-                        def _swap_root(path, *args, **kwargs):
+                        def _swap_root(path, *args, _real_open=real_open, _swapped=swapped, _moved=moved, _ws=ws, _denied_sessions=denied_sessions, **kwargs):
                             # Rename the real root dir aside, then put a
                             # symlink to the denied tree at the root pathname.
-                            if not swapped["done"]:
-                                swapped["done"] = True
-                                shutil.rmtree(str(moved), ignore_errors=True)
-                                os.rename(str(ws), str(moved))
-                                os.symlink(str(denied_sessions), str(ws))
-                            return real_open(path, *args, **kwargs)
+                            if not _swapped["done"]:
+                                _swapped["done"] = True
+                                shutil.rmtree(str(_moved), ignore_errors=True)
+                                os.rename(str(_ws), str(_moved))
+                                os.symlink(str(_denied_sessions), str(_ws))
+                            return _real_open(path, *args, **kwargs)
 
-                        def _swap_root_after_retention(path, *args, **kwargs):
-                            calls["n"] += 1
-                            if calls["n"] == 2 and not swapped["done"]:
-                                swapped["done"] = True
-                                shutil.rmtree(str(moved), ignore_errors=True)
-                                os.rename(str(ws), str(moved))
-                                os.symlink(str(denied_sessions), str(ws))
-                            return real_open(path, *args, **kwargs)
+                        def _swap_root_after_retention(path, *args, _real_open=real_open, _swapped=swapped, _calls=calls, _moved=moved, _ws=ws, _denied_sessions=denied_sessions, **kwargs):
+                            _calls["n"] += 1
+                            if _calls["n"] == 2 and not _swapped["done"]:
+                                _swapped["done"] = True
+                                shutil.rmtree(str(_moved), ignore_errors=True)
+                                os.rename(str(_ws), str(_moved))
+                                os.symlink(str(_denied_sessions), str(_ws))
+                            return _real_open(path, *args, **kwargs)
 
                         side_effect = (
                             _swap_root if trigger == "before_retention"
@@ -1009,25 +1009,25 @@ class TestMediaEndpointUnit(unittest.TestCase):
                             swapped = {"done": False}
                             calls = {"n": 0}
 
-                            def _swap_parent(path, *args, **kwargs):
+                            def _swap_parent(path, *args, _real_open=real_open, _swapped=swapped, _moved=moved, _token_dir=token_dir, _denied_sessions=denied_sessions, **kwargs):
                                 # Rename the token parent dir aside, then put a
                                 # symlink to the denied webui state dir at the
                                 # parent pathname.
-                                if not swapped["done"]:
-                                    swapped["done"] = True
-                                    shutil.rmtree(str(moved), ignore_errors=True)
-                                    os.rename(str(token_dir), str(moved))
-                                    os.symlink(str(denied_sessions), str(token_dir))
-                                return real_open(path, *args, **kwargs)
+                                if not _swapped["done"]:
+                                    _swapped["done"] = True
+                                    shutil.rmtree(str(_moved), ignore_errors=True)
+                                    os.rename(str(_token_dir), str(_moved))
+                                    os.symlink(str(_denied_sessions), str(_token_dir))
+                                return _real_open(path, *args, **kwargs)
 
-                            def _swap_parent_midwalk(path, *args, **kwargs):
-                                calls["n"] += 1
-                                if calls["n"] == 2 and not swapped["done"]:
-                                    swapped["done"] = True
-                                    shutil.rmtree(str(moved), ignore_errors=True)
-                                    os.rename(str(token_dir), str(moved))
-                                    os.symlink(str(denied_sessions), str(token_dir))
-                                return real_open(path, *args, **kwargs)
+                            def _swap_parent_midwalk(path, *args, _real_open=real_open, _swapped=swapped, _calls=calls, _moved=moved, _token_dir=token_dir, _denied_sessions=denied_sessions, **kwargs):
+                                _calls["n"] += 1
+                                if _calls["n"] == 2 and not _swapped["done"]:
+                                    _swapped["done"] = True
+                                    shutil.rmtree(str(_moved), ignore_errors=True)
+                                    os.rename(str(_token_dir), str(_moved))
+                                    os.symlink(str(_denied_sessions), str(_token_dir))
+                                return _real_open(path, *args, **kwargs)
 
                             side_effect = (
                                 _swap_parent if trigger == "before_retention"
