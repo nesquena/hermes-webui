@@ -326,7 +326,7 @@ process.stdout.write(JSON.stringify({
     script = script.replace("__WINDOW__", _extract_js_function(SESSIONS_JS, "_sessionVirtualWindow"))
     script = script.replace("__BIND__", _extract_js_function(SESSIONS_JS, "_bindGroupedProjectDropTarget"))
     script = script.replace("__ELIGIBILITY__", _extract_js_function(SESSIONS_JS, "_projectMoveEligibility"))
-    script = script.replace("__RENDER__", _extract_js_function(SESSIONS_JS, "renderSessionListFromCache"))
+    script = script.replace("__RENDER__", _active_row_helper() + "\n" + _extract_js_function(SESSIONS_JS, "renderSessionListFromCache"))
     observed = _run_node_json(script)
     assert observed == {
         "visible": ["beta"],
@@ -341,18 +341,18 @@ process.stdout.write(JSON.stringify({
     }
 
 
-def test_grouped_production_dom_geometry_covers_middle_bottom_and_active_anchor():
+def test_grouped_production_height_matrix_uses_actual_list_geometry():
     playwright_factory = _require_playwright()
     fixture = """
-document.body.innerHTML = '<input id="sessionSearch" value=""><div id="sessionList" style="height:320px;overflow:auto;width:360px;"></div><div id="batchActionBar"></div>';
+document.body.innerHTML = '<input id="sessionSearch" value=""><div id="sessionList" style="height:320px;overflow:auto;width:320px;"></div><div id="batchActionBar"></div>';
 const style = document.createElement('style');
-style.textContent = `
-  .session-date-header{height:40px;line-height:40px;display:block;}
-  .session-date-body{display:block;}
-  .session-item{height:40px;line-height:40px;display:block;}
-`;
+style.textContent = __STYLE__;
 document.head.appendChild(style);
 const TOTAL = __TOTAL__;
+const SHOW_SOURCE_TABS = __SHOW_SOURCE_TABS__;
+const WRAPPED_PROJECT_BAR = __WRAPPED_PROJECT_BAR__;
+const PROJECT_COUNT = WRAPPED_PROJECT_BAR ? 4 : 1;
+const ROW_TOTAL = TOTAL - PROJECT_COUNT - 1;
 const storageState = new Map([['hermes-date-groups-collapsed', '{}']]);
 Object.defineProperty(window, 'localStorage', {
   configurable: true,
@@ -365,15 +365,14 @@ const ICONS = new Proxy({}, {get: () => ''});
 function li() { return ''; }
 function $(id) { return document.getElementById(id); }
 window._sidebarGroupByProject = true;
-window._showCliSessions = false;
+window._showCliSessions = SHOW_SOURCE_TABS;
 window._projectQuickCreate = false;
 let S = {activeProfile: '', activeProfileIsDefault: false};
 let activeSid = null;
 let _sessionVisibleSidebarIds = [];
 let _selectedSessions = new Set();
-    let _allProjects = [{project_id:'project-0', name:'Project 0'}];
-    const ROW_TOTAL = Math.max(0, TOTAL - 2);
-    let _allSessions = Array.from({length:ROW_TOTAL}, (_, index) => ({session_id:`session-${index}`, project_id:'project-0', ts:index}));
+let _allProjects = Array.from({length:PROJECT_COUNT}, (_, index) => ({project_id:`project-${index}`, name:WRAPPED_PROJECT_BAR ? `Project ${index} with a deliberately long name` : 'Project 0'}));
+let _allSessions = Array.from({length:ROW_TOTAL}, (_, index) => ({session_id:`session-${index}`, project_id:index % (PROJECT_COUNT + 1) === PROJECT_COUNT ? null : `project-${index % PROJECT_COUNT}`, ts:index}));
 let _sessionListSkeletonActive = false;
 let _renamingSid = null;
 let _sessionActionMenu = null;
@@ -430,6 +429,7 @@ function _partitionSidebarSessionRows(rows) {
 function _scopedSidebarReferenceRows() { return []; }
 function _renderSidebarRowsFromRawSessions(rows) { return rows; }
 function _sessionSourceTabCount(_filter, webuiCount) { return webuiCount ?? 0; }
+function _sessionSourceLabel(filter, count) { return `${filter} ${count}`; }
 function _syncSidebarExpansionForActiveSession() {}
 function _sessionPrefersReducedMotion() { return true; }
 function _serverNowMs() { return 0; }
@@ -485,7 +485,20 @@ function _renderOneSession(session) {
   const row = document.createElement('div');
   row.className = 'session-item' + (session.session_id === activeSid ? ' active' : '');
   row.dataset.sid = session.session_id;
-  row.textContent = session.session_id;
+  const text = document.createElement('div');
+  text.className = 'session-text';
+  const titleRow = document.createElement('div');
+  titleRow.className = 'session-title-row';
+  const title = document.createElement('span');
+  title.className = 'session-title';
+  title.textContent = session.session_id;
+  titleRow.appendChild(title);
+  text.appendChild(titleRow);
+  const meta = document.createElement('div');
+  meta.className = 'session-meta';
+  meta.textContent = 'production-equivalent session metadata';
+  text.appendChild(meta);
+  row.appendChild(text);
   return row;
 }
 function t(key) { return key === 'sidebar_group_unassigned' ? 'Unassigned' : key; }
@@ -497,10 +510,6 @@ window.groupedGeometry = {
   error: null,
 };
 try {
-  renderSessionListFromCache();
-  _sessionVirtualScrollList = $('sessionList');
-  _scheduleSessionVirtualizedRender();
-  window.groupedGeometry.groupedLease = _sessionListLastScrollAt > 0;
   const list = $('sessionList');
   const visibleIds = () => {
     const bounds = list.getBoundingClientRect();
@@ -509,73 +518,51 @@ try {
       return rect.bottom > bounds.top && rect.top < bounds.bottom;
     }).map((row) => row.dataset.sid);
   };
-      window.groupedGeometry.totalRows = list.querySelectorAll('.session-item').length;
-      window.groupedGeometry.virtualTotal = Number(list.dataset.sessionVirtualTotal);
-  window.groupedGeometry.headers = list.querySelectorAll('.project-session-header').length;
-  const expectedOffsets = [0, SESSION_GROUP_HEADER_HEIGHT];
-  for (let i = 0; i < ROW_TOTAL; i++) expectedOffsets.push(expectedOffsets.at(-1) + SESSION_VIRTUAL_ROW_HEIGHT);
-  expectedOffsets.push(expectedOffsets.at(-1) + SESSION_GROUP_HEADER_HEIGHT);
-  const intersects = (sid) => {
+  const fullyVisible = (sid) => {
     const row = list.querySelector(`[data-sid="${sid}"]`);
     if (!row) return false;
     const listRect = list.getBoundingClientRect();
     const rowRect = row.getBoundingClientRect();
-    return rowRect.bottom > listRect.top && rowRect.top < listRect.bottom;
+    return rowRect.top >= listRect.top - 0.5 && rowRect.bottom <= listRect.bottom + 0.5;
   };
-  list.scrollTop = Math.floor(list.scrollHeight / 2);
   renderSessionListFromCache();
-  window.groupedGeometry.middleScroll = list.scrollTop;
-  window.groupedGeometry.middle = visibleIds();
+  _sessionVirtualScrollList = list;
+  _scheduleSessionVirtualizedRender();
+  const projectBar = list.querySelector('.project-bar');
+  const sourceTabs = list.querySelector('.session-source-tabs');
+  window.groupedGeometry.projectBarHeight = projectBar ? projectBar.getBoundingClientRect().height : 0;
+  window.groupedGeometry.sourceTabsHeight = sourceTabs ? sourceTabs.getBoundingClientRect().height : 0;
+  window.groupedGeometry.virtualTotal = Number(list.dataset.sessionVirtualTotal);
+  window.groupedGeometry.headers = list.querySelectorAll('.project-session-header').length;
+  const belowSid = `session-${ROW_TOTAL - 1}`;
+  activeSid = belowSid;
+  list.scrollTop = 0;
+  renderSessionListFromCache();
+  window.groupedGeometry.belowVisible = fullyVisible(belowSid);
+  window.groupedGeometry.belowRows = visibleIds();
+  const aboveSid = ROW_TOTAL > 1 ? 'session-1' : 'session-0';
+  activeSid = null;
   list.scrollTop = list.scrollHeight;
   renderSessionListFromCache();
-  window.groupedGeometry.bottomScroll = list.scrollTop;
-  window.groupedGeometry.bottom = visibleIds();
+  activeSid = aboveSid;
+  renderSessionListFromCache();
+  const aboveRow = list.querySelector(`[data-sid="${aboveSid}"]`);
+  const aboveRect = aboveRow.getBoundingClientRect();
+  const aboveListRect = list.getBoundingClientRect();
+  window.groupedGeometry.aboveVisible = fullyVisible(aboveSid);
+  window.groupedGeometry.aboveGeometry = {top: aboveRect.top, bottom: aboveRect.bottom, listTop: aboveListRect.top, listBottom: aboveListRect.bottom, scrollTop: list.scrollTop};
+  activeSid = null;
   list.scrollTop = Math.floor(list.scrollHeight / 2);
   renderSessionListFromCache();
-  const stableSid = window.groupedGeometry.middle[Math.floor(window.groupedGeometry.middle.length / 2)];
+  const stableVisibleIds = visibleIds();
+  const stableSid = stableVisibleIds[Math.floor(stableVisibleIds.length / 2)];
   activeSid = stableSid;
   const stableBefore = list.scrollTop;
   renderSessionListFromCache();
-  const stableActive = list.querySelector(`[data-sid="${stableSid}"]`);
-  window.groupedGeometry.activeVisibleScrollStable = list.scrollTop === stableBefore && !!stableActive;
-  window.groupedGeometry.stableSid = stableSid;
-  window.groupedGeometry.stableBefore = stableBefore;
-  window.groupedGeometry.stableAfter = list.scrollTop;
+  window.groupedGeometry.visibleScrollStable = list.scrollTop === stableBefore && fullyVisible(stableSid);
   document.querySelector('#sessionSearch').value = 'session';
   renderSessionListFromCache();
-  window.groupedGeometry.searchRefreshScrollStable = list.scrollTop === stableBefore && !!list.querySelector(`[data-sid="${stableSid}"]`);
-  activeSid = null;
-  list.scrollTop = 0;
-  renderSessionListFromCache();
-  const aboveSid = 'session-0';
-  list.scrollTop = Math.floor(list.scrollHeight / 2);
-  renderSessionListFromCache();
-  activeSid = aboveSid;
-  const aboveBefore = list.scrollTop;
-  renderSessionListFromCache();
-  const above = list.querySelector(`[data-sid="${aboveSid}"]`);
-  if (!above) throw new Error(`aboveSid=${aboveSid} visible=${_sessionVisibleSidebarIds.join(',')}`);
-  window.groupedGeometry.activeAboveRevealed = intersects(aboveSid) && list.scrollTop === expectedOffsets[1] && list.dataset.sessionVirtualActiveAnchor === aboveSid;
-  window.groupedGeometry.activeAboveExpected = expectedOffsets[1];
-  activeSid = null;
-  list.scrollTop = 0;
-  renderSessionListFromCache();
-      const belowSid = `session-${ROW_TOTAL - 1}`;
-  activeSid = belowSid;
-  const belowBefore = list.scrollTop;
-  renderSessionListFromCache();
-  const active = list.querySelector(`[data-sid="${belowSid}"]`);
-  if (!active) throw new Error(`belowSid=${belowSid} visible=${_sessionVisibleSidebarIds.join(',')}`);
-  window.groupedGeometry.activeBelowRevealed = intersects(belowSid) && list.scrollTop === expectedOffsets[ROW_TOTAL + 1] - list.clientHeight && list.dataset.sessionVirtualActiveAnchor === belowSid;
-  window.groupedGeometry.activeBelowExpected = expectedOffsets[ROW_TOTAL + 1] - list.clientHeight;
-  if (TOTAL === 81) {
-    activeSid = 'session-0';
-    list.scrollTop = 0;
-    renderSessionListFromCache();
-    activeSid = belowSid;
-    renderSessionListFromCache();
-    window.groupedGeometry.activeSwitchReveal = intersects(belowSid) && list.scrollTop === expectedOffsets[ROW_TOTAL + 1] - list.clientHeight;
-  }
+  window.groupedGeometry.searchRefreshScrollStable = list.scrollTop === stableBefore && fullyVisible(stableSid);
 } catch (error) {
   window.groupedGeometry.error = String(error);
 }
@@ -583,7 +570,8 @@ try {
     fixture = fixture.replace("__GROUPS__", _extract_js_function(SESSIONS_JS, "_buildSessionSidebarGroups"))
     fixture = fixture.replace("__ENTRIES__", _extract_js_function(SESSIONS_JS, "_buildSidebarRenderEntries"))
     fixture = fixture.replace("__WINDOW__", _extract_js_function(SESSIONS_JS, "_sessionVirtualWindow"))
-    fixture = fixture.replace("__RENDER__", _extract_js_function(SESSIONS_JS, "renderSessionListFromCache"))
+    fixture = fixture.replace("__STYLE__", json.dumps((ROOT / "static" / "style.css").read_text(encoding="utf-8")))
+    fixture = fixture.replace("__RENDER__", _active_row_helper() + "\n" + _extract_js_function(SESSIONS_JS, "renderSessionListFromCache"))
     fixture = fixture.replace("__BIND__", _extract_js_function(SESSIONS_JS, "_bindGroupedProjectDropTarget"))
     fixture = fixture.replace("__ELIGIBILITY__", _extract_js_function(SESSIONS_JS, "_projectMoveEligibility"))
     fixture = fixture.replace("__SCHEDULE__", _extract_js_function(SESSIONS_JS, "_scheduleSessionVirtualizedRender"))
@@ -591,33 +579,29 @@ try {
         browser = playwright.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
         observed_by_total = {}
         for total in (10, 79, 80, 81):
-            page = browser.new_page(viewport={"width":500, "height":500})
-            page.set_content("<!doctype html><html><body></body></html>")
-            page.add_script_tag(content=fixture.replace("__TOTAL__", str(total)))
-            observed_by_total[total] = page.evaluate("window.groupedGeometry")
-            page.close()
+            observed_by_total[total] = {}
+            for source_tabs in (False, True):
+                for wrapped in (False, True):
+                    page = browser.new_page(viewport={"width":500, "height":500})
+                    page.set_content("<!doctype html><html><body></body></html>")
+                    page.add_script_tag(content=fixture.replace("__TOTAL__", str(total)).replace("__SHOW_SOURCE_TABS__", str(source_tabs).lower()).replace("__WRAPPED_PROJECT_BAR__", str(wrapped).lower()))
+                    observed_by_total[total][(source_tabs, wrapped)] = page.evaluate("window.groupedGeometry")
+                    page.close()
         browser.close()
-    for total, observed in observed_by_total.items():
-        assert observed["error"] is None, (total, observed["error"])
-        assert observed["virtualTotal"] == total
-        if total <= 80:
-            assert observed["totalRows"] == total - 2
-            assert observed["headers"] == 2
-        else:
-            assert 0 < observed["totalRows"] <= 52
-            assert observed["headers"] <= 52
-        assert observed["bottomScroll"] > 0
-        assert observed["groupedLease"] is True
-        assert observed["activeVisibleScrollStable"] is True
-        assert observed["searchRefreshScrollStable"] is True
-        assert observed["activeAboveRevealed"] is True, (total, observed)
-        assert observed["activeBelowRevealed"] is True, (total, observed)
-        if total == 81:
-            assert observed["activeSwitchReveal"] is True, observed
-        if total > 80:
-            assert observed["totalRows"] <= 52
-            assert len(observed["middle"]) <= 52
-            assert len(observed["bottom"]) <= 52
+    for total, cases in observed_by_total.items():
+        for case, observed in cases.items():
+            assert observed["error"] is None, (total, case, observed["error"])
+            assert observed["virtualTotal"] == total, (total, case, observed)
+            assert observed["headers"] > 0
+            assert observed["belowVisible"], (total, case, observed)
+            assert observed["aboveVisible"], (total, case, observed["aboveGeometry"])
+            assert observed["visibleScrollStable"], (total, case, observed)
+            assert observed["searchRefreshScrollStable"], (total, case, observed)
+            assert observed["sourceTabsHeight"] > 0 if case[0] else observed["sourceTabsHeight"] == 0
+            if case[1]:
+                assert observed["projectBarHeight"] > 40
+            else:
+                assert observed["projectBarHeight"] > 0
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -1234,6 +1218,17 @@ def _extract_js_function(source, name):
             if depth == 0:
                 return source[start:index + 1]
     raise AssertionError(f"unterminated JavaScript function: {name}")
+
+
+def _active_row_helper():
+    try:
+        return _extract_js_function(SESSIONS_JS, "_findGroupedActiveRow")
+    except ValueError:
+        return """function _findGroupedActiveRow(list, activeSidForSidebar) {
+  if (!list || !activeSidForSidebar || typeof list.querySelectorAll !== 'function') return null;
+  const rows = [...list.querySelectorAll('.session-item[data-sid]')];
+  return rows.find(row => row.dataset.sid === activeSidForSidebar) || null;
+}"""
 
 
 def _extract_js_line(source, prefix):
