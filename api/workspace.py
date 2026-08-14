@@ -1092,6 +1092,50 @@ def open_anchored_fd(workspace: Path, target: Path, *, want_dir: bool) -> int:
         raise
 
 
+def open_anchored_fd_from_root(root_fd: int, rel_parts, *, want_dir: bool) -> int:
+    """Walk ``rel_parts`` from an already-open, already-trusted root directory fd.
+
+    Unlike open_anchored_fd(), this NEVER re-resolves the root pathname: the
+    root fd was opened (and authorized) BEFORE this call, so a later swap of
+    the root pathname for a symlink (TOCTOU on the anchor itself) cannot rebind
+    the walk into the replacement tree. ``rel_parts`` must be the relative
+    components of the already-symlink-resolved target under the resolved root
+    (computed ONCE at authorization time); every component is opened with
+    O_NOFOLLOW (and O_DIRECTORY on parents), so a component swapped to a
+    symlink mid-walk is refused (ELOOP -> FileNotFoundError). Ownership of
+    ``root_fd`` transfers to this function: it is closed on success (after the
+    walk) and on failure. Caller owns and must close the returned leaf fd.
+    """
+    if not _DIR_FD_OK:
+        raise ValueError("open_anchored_fd_from_root requires dir_fd support")
+    if not rel_parts:
+        try:
+            os.close(root_fd)
+        except OSError:
+            pass
+        raise ValueError("Invalid destination: empty relative components")
+    fd = root_fd
+    try:
+        for i, part in enumerate(rel_parts):
+            is_last = i == len(rel_parts) - 1
+            want_directory = (not is_last) or want_dir
+            flags = os.O_RDONLY | _O_NOFOLLOW | (_O_DIRECTORY if want_directory else 0)
+            try:
+                nfd = os.open(part, flags, dir_fd=fd)
+            except OSError:
+                # ELOOP (component is a symlink — swapped in) or missing/wrong type.
+                raise FileNotFoundError(f"Not found: {part}") from None
+            os.close(fd)
+            fd = nfd
+        return fd
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+
+
 def open_anchored_create_fd(root: Path, dest: Path) -> int:
     """Create ``dest`` for exclusive writing race-safely, anchored under ``root``.
 
