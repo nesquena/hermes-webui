@@ -4,6 +4,7 @@ from email.message import Message
 import json
 from pathlib import Path
 import re
+import time
 import urllib.error
 
 import api.gateway_chat as gateway_chat
@@ -519,6 +520,38 @@ def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp
     unknown_errors = [item[1] for item in unknown_events if item[0] == "apperror"]
     assert unknown_errors[-1]["type"] == "error"
     assert "Gateway provider failed" in unknown_errors[-1]["message"]
+    unknown_payload_error = unknown_errors[-1]["session"]["messages"][-1]
+    assert unknown_payload_error.get("_error") is True
+    assert "_turnDuration" not in unknown_payload_error
+
+    response_error[0] = error_text
+    future_stream_id = "stream-gateway-future-duration-terminal-error-test"
+    s = new_session()
+    s.active_stream_id = future_stream_id
+    s.pending_user_message = "Say hello"
+    s.pending_started_at = time.time() + 30
+    s.pending_attachments = []
+    s.save()
+    future_events = []
+    future_channel = MagicMock()
+    future_channel.put_nowait = lambda item: future_events.append(item)
+    STREAMS[future_stream_id] = future_channel
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "Say hello",
+        "test-model",
+        str(tmp_path),
+        future_stream_id,
+        [],
+    )
+    future_errors = [item[1] for item in future_events if item[0] == "apperror"]
+    assert future_errors[-1]["type"] in {"model_not_found", "auth_mismatch"}
+    saved = models.get_session(s.session_id)
+    assert saved.messages[-1].get("_error") is True
+    assert "_turnDuration" not in saved.messages[-1]
+    future_payload_error = future_errors[-1]["session"]["messages"][-1]
+    assert future_payload_error.get("_error") is True
+    assert "_turnDuration" not in future_payload_error
 
     response_error[0] = "partial"
     partial_stream_id = "stream-gateway-partial-terminal-error-test"
@@ -553,6 +586,7 @@ def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp
     assert payload_messages[-2]["_partial"] is True
     assert payload_messages[-2]["content"] == "partial"
     assert payload_messages[-1]["_error"] is True
+    assert "_turnDuration" not in payload_messages[-1]
 
 
 def test_gateway_chat_worker_persists_reasoning_and_tool_state_on_terminal_error(tmp_path, monkeypatch):
@@ -1259,8 +1293,8 @@ def _install_fake_agent_routing(monkeypatch, *, decision, supports,
     import types
 
     img = types.ModuleType("agent.image_routing")
-    img.decide_image_input_mode = lambda p, m, cfg: decision
-    img._lookup_supports_vision = lambda p, m, cfg=None: supports
+    img.decide_image_input_mode = lambda p, m, cfg, **kw: decision
+    img._lookup_supports_vision = lambda p, m, cfg=None, **kw: supports
     aux = types.ModuleType("agent.auxiliary_client")
     aux._read_main_provider = lambda: provider
     aux._read_main_model = lambda: model

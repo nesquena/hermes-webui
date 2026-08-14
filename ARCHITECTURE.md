@@ -235,6 +235,24 @@ Session is a plain Python class (not a dataclass, not SQLAlchemy):
 title_from(): takes messages list, finds first user message, returns first 64 chars.
 Called after run_conversation() completes to set the session title retroactively.
 
+#### Imported `state.db` sidebar projection
+
+`api.models.get_cli_sessions()` projects conversations from the active Hermes
+profile's `state.db` into sidebar-shaped rows. The default projection keeps
+interactive sources (CLI, TUI, ACP, messaging, and similar user-facing sessions)
+in a bounded 20-row candidate window. Background sources use independent recovery
+passes so a high-volume worker source cannot consume that interactive window:
+
+- Cron: up to `CRON_PROJECT_CHIP_LIMIT` rows.
+- Webhook: up to `WEBHOOK_PROJECT_CHIP_LIMIT` rows.
+- Kanban: up to `KANBAN_PROJECT_CHIP_LIMIT` rows.
+
+Source-specific views still use their dedicated bounds, and the later sidebar
+visibility stage decides whether recovered background rows are shown. In
+`all_profiles=True` mode the per-profile source bounds are disabled before rows
+are merged; cross-profile scoping, visibility, deduplication, and final route
+limits remain downstream responsibilities.
+
 ### 4.3 SSE Streaming Engine
 
 This is the most architecturally interesting part. Two endpoints cooperate:

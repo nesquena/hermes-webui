@@ -26,6 +26,7 @@ import traceback
 import urllib.error
 import urllib.request
 import uuid
+import weakref
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -780,7 +781,8 @@ def _save_yaml_config_file(config_path: Path, config_data: dict) -> None:
         raise RuntimeError("PyYAML is required to write Hermes config.yaml") from exc
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(
+    _paths._atomic_write_text(
+        config_path,
         _yaml.safe_dump(_config_for_yaml_save(config_data), sort_keys=False, allow_unicode=True),
         encoding="utf-8",
     )
@@ -1052,6 +1054,10 @@ MIME_MAP = {
     ".m4v": "video/mp4",
     ".webm": "video/webm",
     ".ogv": "video/ogg",
+    # TypeScript source files — served as text/plain to avoid XSS from
+    # same-origin inline execution in _handle_file_raw.
+    ".ts": "text/plain",
+    ".tsx": "text/plain",
 }
 
 # ── Toolsets (from config.yaml or hardcoded default) ─────────────────────────
@@ -2976,7 +2982,13 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         # branch (#3872).
         _cp_lower_cross = (config_provider or "").strip().lower()
         _is_custom_cross = _cp_lower_cross == "custom" or _cp_lower_cross.startswith("custom:")
-        if prefix in _PROVIDER_MODELS and prefix != config_provider and not _is_custom_cross:
+        _canon_prefix = _canonicalise_provider_id(prefix)
+        _canon_config_provider = _canonicalise_provider_id(config_provider)
+        if (
+            _canon_prefix in _PROVIDER_MODELS
+            and _canon_prefix != _canon_config_provider
+            and not _is_custom_cross
+        ):
             return model_id, "openrouter", None
 
     return model_id, config_provider, config_base_url
@@ -3305,8 +3317,20 @@ def _candidate_supports_reasoning(candidate: str) -> bool:
             if major >= 4 or (major == 3 and minor >= 7):
                 return True
         return False
+    # Positive-only prefixed Qwen 3+ detection (e.g. "al-qwen3-8-max-preview"
+    # → tokens ["al","qwen3","8",...]). Scan for any token starting with
+    # "qwen" followed by version >= 3 and immediately allow. Do NOT return
+    # False here — Qwen 2.x embedded in hybrid IDs like
+    # "deepseek-r1-distill-qwen2.5-bakeneko-32b" must fall through to the
+    # DeepSeek detector below.
+    for token in tokens:
+        m = re.match(r"qwen(\d+)", token)
+        if m and int(m.group(1)) >= 3:
+            return True
+    # Terminal guard for standalone/bare Qwen IDs (original behavior):
+    # "qwen" as a standalone token or normalized starting with "qwen" means
+    # this IS a Qwen model — apply the 3+ gate and block 2.x.
     if "qwen" in token_set or normalized.startswith("qwen"):
-        # Restrict to Qwen 3+ (exclude Qwen 2/2.5)
         match = re.search(r"qwen.*?(\d+)(?:\D+(\d+))?", normalized)
         if match:
             major = int(match.group(1))
@@ -3885,6 +3909,33 @@ def resolve_model_reasoning_efforts(
     return filtered
 
 
+def _configured_reasoning_effort_lists(provider_entry, model_id: str) -> list:
+    """Return model-level then provider-level effort lists from config."""
+    if not isinstance(provider_entry, dict):
+        return []
+
+    configured_lists = []
+    models = provider_entry.get("models")
+    if isinstance(models, dict):
+        model_key = str(model_id or "").strip().lower()
+        model_entry = models.get(model_id)
+        if not isinstance(model_entry, dict) and model_key:
+            model_entry = next(
+                (
+                    metadata
+                    for configured_id, metadata in models.items()
+                    if str(configured_id).strip().lower() == model_key
+                    and isinstance(metadata, dict)
+                ),
+                None,
+            )
+        if isinstance(model_entry, dict):
+            configured_lists.append(model_entry.get("reasoning_efforts"))
+
+    configured_lists.append(provider_entry.get("reasoning_efforts"))
+    return configured_lists
+
+
 def _resolve_model_reasoning_efforts_impl(
     model_id: str | None = None,
     provider_id: str | None = None,
@@ -3918,29 +3969,32 @@ def _resolve_model_reasoning_efforts_impl(
     if _nested_route_reasoning_denied(hinted_model):
         return []
 
-    # 0. Provider config: providers.<name>.reasoning_efforts or named
-    # custom_providers[].reasoning_efforts. When the user has explicitly listed
-    # valid efforts for a provider, return that list directly — no heuristics,
-    # no models.dev lookup.
-    # Only short-circuits when the filtered list is non-empty; an all-invalid
-    # list (e.g. typos) falls through to heuristics instead of hiding reasoning.
-    _re_list = None
+    # 0. Model/provider config: a models.<model>.reasoning_efforts list takes
+    # precedence over its provider-level reasoning_efforts list. Explicit valid
+    # config is authoritative — no heuristics or models.dev lookup. Invalid or
+    # empty model metadata falls through to the provider list, then heuristics.
+    _re_lists = []
     try:
         if provider and provider.startswith("custom:"):
             for _entry in _custom_provider_entries():
                 if _custom_provider_slug_from_name(_entry.get("name")) == provider:
-                    _re_list = _entry.get("reasoning_efforts")
+                    _re_lists = _configured_reasoning_effort_lists(
+                        _entry, hinted_model
+                    )
                     break
         elif provider:
             _prov_entry = (cfg.get("providers") or {}).get(provider, {})
             if isinstance(_prov_entry, dict):
-                _re_list = _prov_entry.get("reasoning_efforts")
-        if isinstance(_re_list, list) and _re_list:
-            _filtered = [str(x).strip().lower() for x in _re_list
-                         if str(x).strip().lower() in {*VALID_REASONING_EFFORTS, "none"}]
-            _filtered = list(dict.fromkeys(_filtered))
-            if _filtered:
-                return _filtered
+                _re_lists = _configured_reasoning_effort_lists(
+                    _prov_entry, hinted_model
+                )
+        for _re_list in _re_lists:
+            if isinstance(_re_list, list) and _re_list:
+                _filtered = [str(x).strip().lower() for x in _re_list
+                             if str(x).strip().lower() in {*VALID_REASONING_EFFORTS, "none"}]
+                _filtered = list(dict.fromkeys(_filtered))
+                if _filtered:
+                    return _filtered
     except Exception:
         pass
 
@@ -6906,7 +6960,30 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     and _provider_cfg["models"]
                     and _canonical == _canonicalise_provider_id(active_provider)
                 )
-                if not (_is_known_provider or _has_provider_route or _has_models_only_active_route):
+                # A known provider listed in config.yaml without route
+                # configuration should only appear in the picker when it was
+                # already detected from credential sources (env vars, hermes
+                # auth, credential pool).  Otherwise a provider with
+                # metadata-only entries in config.yaml (e.g.
+                # ``openai-api: {name: "OpenAI API"}``) would still render
+                # in the model selector after the API key is removed (#6335).
+                # Resolve provider aliases on both sides so an alias-named
+                # config key (e.g. ``x-ai`` in providers, ``google`` in
+                # config.yaml) matches credential evidence reported under the
+                # agent's canonical alias (``xai``, ``gemini``) (#6338).
+                # Normalise detected_providers entries into the same
+                # alias-resolved namespace as _canonical so that a WebUI
+                # canonical form in detected_providers (e.g. ``x-ai`` added
+                # by a prior loop iteration) also matches (#6338).
+                _resolved_detected = {
+                    _resolve_provider_alias(_pid) for _pid in detected_providers
+                }
+                _already_credentialed = (
+                    _resolve_provider_alias(_canonical) in _resolved_detected
+                    or _canonical in _resolved_detected
+                )
+                _admit_as_known = _is_known_provider and _already_credentialed
+                if not (_admit_as_known or _has_provider_route or _has_models_only_active_route):
                     continue
 
                 _canonical_to_raw_provider_key.setdefault(_canonical, _pid_key)
@@ -8528,6 +8605,10 @@ def get_sessions_cache_max(config_data: dict | None = None) -> int:
     ``HERMES_WEBUI_SESSIONS_MAX`` env override, then to
     ``DEFAULT_SESSIONS_CACHE_MAX`` — a typo can never disable the bound and
     reintroduce unbounded memory growth.
+
+    This is the sole resolution authority and it is side-effect free. The cap
+    diagnostics report is published by the code that enforces it; see
+    ``_LAST_APPLIED_SESSIONS_CACHE_MAX`` below.
     """
     active_cfg = config_data if isinstance(config_data, dict) else get_config()
     webui_cfg = active_cfg.get("webui", {}) if isinstance(active_cfg, dict) else {}
@@ -8536,7 +8617,10 @@ def get_sessions_cache_max(config_data: dict | None = None) -> int:
         if raw is not None:
             try:
                 value = int(raw)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
+                # OverflowError covers YAML's float infinities (`.inf`, `1e400`),
+                # which safe_load resolves to a real float. Without it a typo
+                # would escape the fallback and raise out of every caller.
                 value = None
             if value is not None and value >= 1:
                 return value
@@ -8545,6 +8629,16 @@ def get_sessions_cache_max(config_data: dict | None = None) -> int:
     if isinstance(SESSIONS_MAX, int) and SESSIONS_MAX >= 1:
         return SESSIONS_MAX
     return DEFAULT_SESSIONS_CACHE_MAX
+
+
+# The cap api/models.py::_evict_sessions_over_cap() last enforced. That function
+# publishes it after its own fallback and range normalization, so a nonblocking
+# diagnostics read reports what eviction applied without re-entering config or
+# profile I/O, and nothing else writes this field. Seeded from the config
+# reload_config() already loaded at import (see `cfg` above) through the getter's
+# dict mode, which reads no file and takes no lock, so the value is right before
+# the first eviction pass instead of after it.
+_LAST_APPLIED_SESSIONS_CACHE_MAX: int = get_sessions_cache_max(cfg)
 CHAT_LOCK = threading.Lock()
 
 
@@ -8760,19 +8854,39 @@ class StreamChannel:
                 self._SUBSCRIBER_QUEUE_MAXSIZE,
             )
 
+    def _diagnostic_counters_locked(self) -> dict[str, object]:
+        """Return the counter dict. CALLER CONTRACT: ``self._lock`` is held."""
+        return {
+            "subscriber_count": len(self._subscribers),
+            "offline_buffered_events": len(self._offline_buffer),
+            # Cumulative over the channel lifetime (ops visibility), vs. the
+            # per-cycle count subscribe_with_snapshot() reports for truncation.
+            "offline_dropped_events": self._offline_dropped_total,
+            # Cumulative per-subscriber queue drops (replay + broadcast) over
+            # the channel lifetime — surfaces slow/backpressured tabs.
+            "subscriber_dropped_events": self._subscriber_dropped_total,
+        }
+
     def diagnostic_snapshot(self) -> dict[str, object]:
         """Return non-sensitive stream observation counters for health checks."""
         with self._lock:
-            return {
-                "subscriber_count": len(self._subscribers),
-                "offline_buffered_events": len(self._offline_buffer),
-                # Cumulative over the channel lifetime (ops visibility), vs. the
-                # per-cycle count subscribe_with_snapshot() reports for truncation.
-                "offline_dropped_events": self._offline_dropped_total,
-                # Cumulative per-subscriber queue drops (replay + broadcast) over
-                # the channel lifetime — surfaces slow/backpressured tabs.
-                "subscriber_dropped_events": self._subscriber_dropped_total,
-            }
+            return self._diagnostic_counters_locked()
+
+    def try_diagnostic_snapshot(self) -> dict[str, object] | None:
+        """Return the same counters without waiting, or ``None`` when busy.
+
+        An aggregate health poll must never stall behind one channel's producer
+        or subscriber work, so a contended channel is reported as unavailable
+        instead of waited on. ``diagnostic_snapshot()`` keeps its blocking
+        contract for the per-stream ``/health?deep=1`` view, which needs the
+        counters of every stream rather than a best-effort aggregate.
+        """
+        if not self._lock.acquire(blocking=False):
+            return None
+        try:
+            return self._diagnostic_counters_locked()
+        finally:
+            self._lock.release()
 
 
 def create_stream_channel() -> StreamChannel:
@@ -8825,6 +8939,52 @@ def unregister_stream_owner(stream_id: str) -> None:
         STREAM_SESSION_OWNERS.pop(stream_id, None)
 
 
+# ── Per-session writeback-ownership registry (#6623 re-gate) ────────────────
+# Maps session_id -> stream_id of the turn that currently owns the session's
+# writeback. Written whenever a turn is admitted (route layer, next to
+# session.active_stream_id), REPLACED when a successor turn is admitted, and
+# NEVER cleared by cancel_stream() — cancel eagerly pops STREAMS/ACTIVE_RUNS
+# and clears ``active_stream_id``, so a delayed finalizer from an old worker
+# cannot tell "the session advanced to a successor" apart from "cancel simply
+# cleared the field" by looking at its own (possibly LRU-evicted, detached)
+# snapshot. This record survives cancel cleanup: the owning worker's own
+# finally clears the entry, and only while it still owns it.
+SESSION_WRITEBACK_OWNERS: dict = {}
+SESSION_WRITEBACK_OWNERS_LOCK = threading.Lock()
+
+
+def register_session_writeback_owner(session_id: str, stream_id: str) -> None:
+    """Record the stream that currently owns a session's writeback."""
+    session_id = str(session_id or "").strip()
+    stream_id = str(stream_id or "").strip()
+    if not session_id or not stream_id:
+        return
+    with SESSION_WRITEBACK_OWNERS_LOCK:
+        SESSION_WRITEBACK_OWNERS[session_id] = stream_id
+
+
+def session_writeback_owner(session_id: str) -> str | None:
+    """Return the stream that currently owns the session's writeback, if any."""
+    session_id = str(session_id or "").strip()
+    if not session_id:
+        return None
+    with SESSION_WRITEBACK_OWNERS_LOCK:
+        owner = SESSION_WRITEBACK_OWNERS.get(session_id)
+    owner = str(owner or "").strip()
+    return owner or None
+
+
+def clear_session_writeback_owner_if_owned(session_id: str, stream_id: str) -> None:
+    """Forget the writeback-ownership entry only while ``stream_id`` still owns it."""
+    session_id = str(session_id or "").strip()
+    stream_id = str(stream_id or "").strip()
+    if not session_id or not stream_id:
+        return
+    with SESSION_WRITEBACK_OWNERS_LOCK:
+        if SESSION_WRITEBACK_OWNERS.get(session_id) == stream_id:
+            SESSION_WRITEBACK_OWNERS.pop(session_id, None)
+
+
 # ── Gateway capability cache ─────────────────────────────────────────────────
 # Probes /v1/capabilities once per base_url/api-key pair and caches the result
 # for 60 s so guarded-turn routing decisions do not add latency on every chat
@@ -8856,6 +9016,7 @@ def get_gateway_caps(base_url: str, api_key: str = "") -> dict:
     caps = {
         "approval_events": False,
         "run_approval_response": False,
+        "approval_identity_v1": False,
         "capabilities_reachable": False,
         "probe_error": None,
         "fetched_at": 0.0,
@@ -8873,6 +9034,7 @@ def get_gateway_caps(base_url: str, api_key: str = "") -> dict:
             features = {}
         caps["approval_events"] = bool(features.get("approval_events"))
         caps["run_approval_response"] = bool(features.get("run_approval_response"))
+        caps["approval_identity_v1"] = bool(features.get("approval_identity_v1"))
     except urllib.error.HTTPError as exc:
         caps["capabilities_reachable"] = True
         caps["probe_error"] = f"{type(exc).__name__}: {exc}"
@@ -8910,6 +9072,11 @@ def gateway_supports_approval(base_url: str, api_key: str = "") -> bool:
     """True only when the gateway advertises both approval_events and run_approval_response."""
     caps = get_gateway_caps(base_url, api_key)
     return bool(caps.get("approval_events") and caps.get("run_approval_response"))
+
+
+def gateway_supports_approval_identity_v1(base_url: str, api_key: str = "") -> bool:
+    """True only when Gateway advertises authoritative approval identities."""
+    return bool(get_gateway_caps(base_url, api_key).get("approval_identity_v1"))
 
 
 def invalidate_gateway_caps(base_url: str | None = None) -> None:
@@ -9098,7 +9265,11 @@ def _clear_thread_env():
 
 
 # ── Per-session agent locks ───────────────────────────────────────────────────
-SESSION_AGENT_LOCKS: dict = {}
+# Weak values keep one lock for every overlapping holder/waiter without leaking
+# one permanent registry entry per deleted session.  A caller's local reference
+# keeps the lock alive for the whole critical section; once no operation can
+# still use it, the registry entry disappears automatically.
+SESSION_AGENT_LOCKS = weakref.WeakValueDictionary()
 SESSION_AGENT_LOCKS_LOCK = threading.Lock()
 
 
@@ -9106,26 +9277,42 @@ def _get_session_agent_lock(session_id: str) -> threading.Lock:
     """Return the per-session Lock used to serialize all Session mutations.
 
     Lock lifecycle invariant:
-      - A Lock is created lazily on first access and lives in SESSION_AGENT_LOCKS
-        for the lifetime of the session.
-      - The entry is pruned in /api/session/delete (under SESSION_AGENT_LOCKS_LOCK)
-        so deleted sessions don't leak a Lock forever.
-      - During context compression the agent may rotate session_id.  The
-        streaming thread migrates the lock entry atomically under
-        SESSION_AGENT_LOCKS_LOCK: it aliases the new session_id to the *same*
-        Lock object and pops the old-id entry (see streaming.py compression
-        block).  This ensures that subsequent callers using the new ID still
-        acquire the same Lock, while the old-id entry is removed to prevent a
-        leak.  The streaming thread already holds the Lock during this
-        migration, so the reference stays alive even after the dict entry is
-        removed.
+      - A Lock is created lazily on first access. The weak registry retains it
+        while any holder or waiter has a strong reference, then reclaims the
+        entry automatically when no overlapping operation can still use it.
+      - During context compression the agent may rotate session_id. The
+        streaming thread atomically aliases both old and new IDs to the *same*
+        Lock object under SESSION_AGENT_LOCKS_LOCK (see streaming.py's
+        compression block). Keeping the old alias prevents a late old-ID caller
+        from creating a second Lock while an earlier holder or waiter still
+        exists. Both weak aliases disappear automatically after all strong
+        references to the Lock are released.
       - Lock contract: hold for the in-memory mutation + s.save() only; never
         across network I/O (LLM calls, HTTP requests).
     """
     with SESSION_AGENT_LOCKS_LOCK:
-        if session_id not in SESSION_AGENT_LOCKS:
-            SESSION_AGENT_LOCKS[session_id] = threading.Lock()
-        return SESSION_AGENT_LOCKS[session_id]
+        lock = SESSION_AGENT_LOCKS.get(session_id)
+        if lock is None:
+            lock = threading.Lock()
+            SESSION_AGENT_LOCKS[session_id] = lock
+        return lock
+
+
+def _alias_session_agent_lock(
+    old_session_id: str,
+    new_session_id: str,
+    lock: threading.Lock,
+) -> None:
+    """Alias a compression continuation to the same live mutation lock.
+
+    Keep the old ID alias while any holder or waiter still references ``lock``.
+    Because the registry values are weak, both aliases disappear automatically
+    once no overlapping operation can use the pre-compression lock. Removing the
+    old alias eagerly would let a late old-ID request create a second lock.
+    """
+    with SESSION_AGENT_LOCKS_LOCK:
+        SESSION_AGENT_LOCKS[old_session_id] = lock
+        SESSION_AGENT_LOCKS[new_session_id] = lock
 
 
 # ── Settings persistence ─────────────────────────────────────────────────────
@@ -9149,6 +9336,7 @@ _SETTINGS_DEFAULTS = {
     "show_claude_code_sessions": True,  # allow filtering Claude Code rows without hiding other imported sources
     "show_cron_sessions": False,  # surface cron sessions in the sidebar (subordinate to show_cli_sessions)
     "show_webhook_sessions": False,  # surface webhook sessions in the sidebar (subordinate to show_cli_sessions)
+    "show_kanban_sessions": False,  # surface kanban worker sessions in the sidebar (subordinate to show_cli_sessions)
     "show_previous_messaging_sessions": False,  # show older Telegram/Discord/etc. reset segments
     "sync_to_insights": False,  # mirror WebUI token usage to state.db for /insights
     "check_for_updates": True,  # check if webui/agent repos are behind upstream
@@ -9412,9 +9600,30 @@ def load_settings() -> dict:
         # Honor a stored True only when that marker is present.
         if not bool(stored.get("virtualize_transcript_optin")):
             settings["virtualize_transcript"] = False
+    # Fall back to the DEFAULTS, not to None, when nothing is stored.
+    #
+    # `_read_raw_settings_file()` returns {} for a MISSING settings.json, and {}
+    # is a dict — so the `isinstance(stored, dict)` arms were always taken,
+    # `stored.get("theme")` was None, and `_normalize_appearance(None, None)`
+    # fell through to its unknown-theme branch and returned ("dark", "default").
+    # `_SETTINGS_DEFAULTS["theme"]` / `["skin"]` were therefore unreachable for
+    # the one case they exist to serve: a user with no settings file yet.
+    #
+    # This is invisible on stock defaults, because dark/default is exactly what
+    # the fallback produces — the two paths agree. It only surfaces once the
+    # defaults are changed, at which point the dict silently does nothing.
+    #
+    # Gate on the PAIR, not per field. A per-field `or settings.get(...)` looks
+    # equivalent and is not: with a stored legacy theme and no skin, `slate`
+    # normalises to ("dark", "slate"), but per-field fallback injects the
+    # default skin and yields ("dark", "default") — silently destroying the
+    # legacy migration. Same distinction the boot script draws in #6808.
+    _has_stored_appearance = isinstance(stored, dict) and (
+        "theme" in stored or "skin" in stored
+    )
     settings["theme"], settings["skin"] = _normalize_appearance(
-        stored.get("theme") if isinstance(stored, dict) else settings.get("theme"),
-        stored.get("skin") if isinstance(stored, dict) else settings.get("skin"),
+        stored.get("theme") if _has_stored_appearance else settings.get("theme"),
+        stored.get("skin") if _has_stored_appearance else settings.get("skin"),
     )
     settings["default_model"] = get_effective_default_model()
     try:
@@ -9472,6 +9681,7 @@ _SETTINGS_BOOL_KEYS = {
     "show_claude_code_sessions",
     "show_cron_sessions",
     "show_webhook_sessions",
+    "show_kanban_sessions",
     "show_previous_messaging_sessions",
     "sync_to_insights",
     "check_for_updates",
@@ -9798,6 +10008,70 @@ if _settings_file_exists:
 
 # ── SESSIONS in-memory cache (LRU OrderedDict) ───────────────────────────────
 SESSIONS: collections.OrderedDict = collections.OrderedDict()
+
+
+def get_runtime_diagnostics_snapshot() -> dict[str, dict[str, object]]:
+    """Return nonblocking scalar observations owned by the config module."""
+    result = {
+        "sessions": {"available": False, "resident": 0, "cap": 0},
+        "models_cache": {
+            "available": False,
+            "groups": 0,
+            "models": 0,
+            "age_seconds": None,
+        },
+    }
+    try:
+        if LOCK.acquire(blocking=False):
+            try:
+                # Held-section discipline: len(), arithmetic, and owner-held
+                # scalars only. Never call anything here that can resolve config
+                # or a profile, touch the filesystem, import a module, or wait on
+                # another lock — the cap is the scalar _evict_sessions_over_cap()
+                # published, precisely so this section stays leaf-nonblocking.
+                result["sessions"] = {
+                    "available": True,
+                    "resident": max(0, int(len(SESSIONS))),
+                    "cap": max(0, int(_LAST_APPLIED_SESSIONS_CACHE_MAX)),
+                }
+            finally:
+                LOCK.release()
+    except Exception:
+        pass
+    try:
+        if _available_models_cache_lock.acquire(blocking=False):
+            try:
+                # Same held-section discipline: len(), isinstance, float(), and
+                # time.monotonic() only. _available_models_cache_lock is an RLock
+                # (see its definition), so a nonblocking acquire from a thread
+                # that already holds it would report available mid-build; safe
+                # here because health collection is never nested inside a
+                # catalog build, and nothing may be added that changes that.
+                snapshot = _available_models_cache
+                groups = snapshot.get("groups") if isinstance(snapshot, dict) else None
+                group_count = len(groups) if isinstance(groups, list) else 0
+                model_count = 0
+                if isinstance(groups, list):
+                    for group in groups:
+                        if isinstance(group, dict):
+                            for bucket in ("models", "extra_models"):
+                                models = group.get(bucket)
+                                if isinstance(models, list):
+                                    model_count += len(models)
+                age = None
+                if snapshot is not None and _available_models_cache_ts:
+                    age = max(0.0, time.monotonic() - float(_available_models_cache_ts))
+                result["models_cache"] = {
+                    "available": True,
+                    "groups": max(0, int(group_count)),
+                    "models": max(0, int(model_count)),
+                    "age_seconds": age,
+                }
+            finally:
+                _available_models_cache_lock.release()
+    except Exception:
+        pass
+    return result
 
 # ── Profile state initialisation ────────────────────────────────────────────
 # Must run after all imports are resolved to correctly patch module-level caches

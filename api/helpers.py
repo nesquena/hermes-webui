@@ -14,6 +14,13 @@ from api.config import IMAGE_EXTS, MD_EXTS
 
 logger = logging.getLogger(__name__)
 
+_PUBLIC_MESSAGE_INTERNAL_FIELDS = frozenset({
+    "api_content",
+    "_state_db_row_id",
+    "_db_row_id",
+    "state_db_row_id",
+})
+
 
 # Treat stalled/closed HTTP clients as normal disconnects.  Long-lived SSE
 # connections often end this way when a browser tab sleeps, a phone switches
@@ -949,10 +956,7 @@ def _redact_value(v, *, _enabled: bool | None = None):
     if isinstance(v, str):
         return _redact_text(v, _enabled=_enabled)
     if isinstance(v, dict):
-        return {
-            key: _redact_value(value, _enabled=_enabled)
-            for key, value in v.items()
-        }
+        return {key: _redact_value(value, _enabled=_enabled) for key, value in v.items()}
     if isinstance(v, list):
         return [_redact_value(item, _enabled=_enabled) for item in v]
     return v
@@ -985,26 +989,207 @@ def _redact_message_content_part(part, *, _enabled: bool):
     return result
 
 
+def _scrub_alias_record(record):
+    """Copy one schema record while removing private replay aliases.
+
+    This deliberately copies only one record level.  Values such as a tool's
+    ``args`` or a function's opaque ``arguments`` are business payloads, not
+    nested WebUI records, so parsing or recursively walking them would corrupt
+    valid user data.
+    """
+    if not isinstance(record, dict):
+        return _copy_json_value(record)
+    return {
+        key: _copy_json_value(value)
+        for key, value in record.items()
+        if key not in _PUBLIC_MESSAGE_INTERNAL_FIELDS
+    }
+
+
+def _scrub_content_part(part):
+    """Scrub one canonical ``messages[*].content[*]`` part."""
+    return _scrub_alias_record(part)
+
+
+def _scrub_function_record(function):
+    """Scrub a tool-call function envelope without parsing arguments."""
+    return _scrub_alias_record(function)
+
+
+def _scrub_tool_call_record(tool_call):
+    """Scrub one canonical tool-call record and its function envelope."""
+    result = _scrub_alias_record(tool_call)
+    if not isinstance(tool_call, dict):
+        return result
+    function = tool_call.get("function")
+    if isinstance(function, dict):
+        result["function"] = _scrub_function_record(function)
+    return result
+
+
+def _scrub_message_record(message, *, preserve_api_content: bool = False):
+    """Scrub one message record along its authoritative nested schema paths."""
+    if not isinstance(message, dict):
+        return _copy_json_value(message)
+    result = _scrub_alias_record(message)
+    if preserve_api_content and isinstance(message.get("api_content"), str) and message.get("api_content"):
+        result["api_content"] = message["api_content"]
+    content = message.get("content")
+    if isinstance(content, list):
+        result["content"] = [_scrub_content_part(part) for part in content]
+    tool_calls = message.get("tool_calls")
+    if isinstance(tool_calls, list):
+        result["tool_calls"] = [_scrub_tool_call_record(call) for call in tool_calls]
+    return result
+
+
+def _scrub_message_records(messages, *, preserve_api_content: bool = False):
+    if not isinstance(messages, list):
+        return _copy_json_value(messages)
+    return [
+        _scrub_message_record(message, preserve_api_content=preserve_api_content)
+        for message in messages
+    ]
+
+
+def _scrub_tool_call_records(tool_calls):
+    if not isinstance(tool_calls, list):
+        return _copy_json_value(tool_calls)
+    return [_scrub_tool_call_record(call) for call in tool_calls]
+
+
+def _scrub_runtime_journal_snapshot(snapshot):
+    """Scrub only the snapshot's real message/tool-call arrays.
+
+    A live tool's ``args`` dictionary is intentionally opaque.  In particular,
+    ``tool_calls[].args.messages[]`` is ordinary business input even though the
+    field name happens to be ``messages``; it is not a transcript container.
+    """
+    if not isinstance(snapshot, dict):
+        return _copy_json_value(snapshot)
+    result = _copy_json_value(snapshot)
+    if isinstance(snapshot.get("messages"), list):
+        result["messages"] = _scrub_message_records(snapshot["messages"])
+    if isinstance(snapshot.get("tool_calls"), list):
+        result["tool_calls"] = _scrub_tool_call_records(snapshot["tool_calls"])
+    return result
+
+
+def scrub_internal_replay_fields(
+    value,
+    *,
+    preserve_message_api_content: bool = False,
+    message_records: bool | None = None,
+):
+    """Copy runtime data and scrub aliases at authoritative schema positions.
+
+    ``message_records`` selects the shape of a bare list (messages versus
+    session-level tool calls).  A session-shaped dictionary follows only its
+    named ``messages``, ``context_messages``, ``tool_calls``, and
+    ``runtime_journal_snapshot`` fields.  No generic key-name recursion is
+    performed, so arbitrary nested tool arguments remain byte-for-byte intact.
+    The Agent boundary may retain a message record's trusted ``api_content``;
+    public/import boundaries use the default, stripping it everywhere.
+    """
+    if isinstance(value, list):
+        if message_records is False:
+            return _scrub_tool_call_records(value)
+        return _scrub_message_records(
+            value,
+            preserve_api_content=preserve_message_api_content,
+        )
+    if not isinstance(value, dict):
+        return _copy_json_value(value)
+    result = _copy_json_value(value)
+    for key, child in value.items():
+        if key in {"messages", "context_messages"} and isinstance(child, list):
+            result[key] = _scrub_message_records(
+                child,
+                preserve_api_content=preserve_message_api_content,
+            )
+        elif key == "tool_calls" and isinstance(child, list):
+            result[key] = _scrub_tool_call_records(child)
+        elif key == "runtime_journal_snapshot" and isinstance(child, dict):
+            result[key] = _scrub_runtime_journal_snapshot(child)
+    return result
+
+
+def _public_message_projection(message, *, _enabled: bool):
+    """Return one public transcript message without internal replay fields."""
+    message = scrub_internal_replay_fields([message], message_records=True)[0]
+    if not isinstance(message, dict):
+        return _redact_value(message, _enabled=_enabled)
+    item = {}
+    allow_native_image = message.get("role") == "user"
+    for key, value in message.items():
+        if key in _PUBLIC_MESSAGE_INTERNAL_FIELDS:
+            continue
+        if allow_native_image and key == "content" and isinstance(value, list):
+            item[key] = [
+                _redact_message_content_part(part, _enabled=_enabled)
+                for part in value
+            ]
+        else:
+            item[key] = _redact_value(value, _enabled=_enabled)
+    return item
+
+
 def _redact_messages(messages, *, _enabled: bool):
     if not isinstance(messages, list):
         return _redact_value(messages, _enabled=_enabled)
-    redacted = []
-    for message in messages:
-        if not isinstance(message, dict):
-            redacted.append(_redact_value(message, _enabled=_enabled))
-            continue
-        item = {}
-        allow_native_image = message.get("role") == "user"
-        for key, value in message.items():
-            if allow_native_image and key == "content" and isinstance(value, list):
-                item[key] = [
-                    _redact_message_content_part(part, _enabled=_enabled)
-                    for part in value
-                ]
-            else:
-                item[key] = _redact_value(value, _enabled=_enabled)
-        redacted.append(item)
-    return redacted
+    return [_public_message_projection(message, _enabled=_enabled) for message in messages]
+
+
+def _redact_tool_calls(tool_calls, *, _enabled: bool):
+    scrubbed = scrub_internal_replay_fields(tool_calls, message_records=False)
+    return _redact_value(scrubbed, _enabled=_enabled)
+
+
+def _redact_nested_message_containers(value, *, _enabled: bool):
+    """Redact only the runtime snapshot's authoritative message arrays."""
+    scrubbed = scrub_internal_replay_fields(value)
+    if not isinstance(scrubbed, dict):
+        return _redact_value(scrubbed, _enabled=_enabled)
+    result = {}
+    for key, child in scrubbed.items():
+        if key == "messages" and isinstance(child, list):
+            result[key] = _redact_messages(child, _enabled=_enabled)
+        elif key == "tool_calls" and isinstance(child, list):
+            result[key] = _redact_tool_calls(child, _enabled=_enabled)
+        else:
+            result[key] = _redact_value(child, _enabled=_enabled)
+    return result
+
+
+def public_session_projection(session_dict: dict) -> dict:
+    """Return a public session payload with redaction and alias stripping.
+
+    Callers use this for every response/export/SSE session payload.  It never
+    mutates the in-memory session or the caller's dictionary.
+    """
+    return redact_session_data(session_dict)
+
+
+def strip_public_internal_fields(value, *, message_records: bool = False):
+    """Deep-copy imported records through the shared schema scrubber.
+
+    JSON import uses this before constructing or saving a ``Session``.  The
+    Four replay aliases belong to a message/content-part/tool-call/function
+    record itself; matching names inside user content or tool arguments are
+    ordinary JSON and must be preserved.  This is intentionally independent of
+    the credential-redaction setting: caller-supplied provider sidecars must
+    never become durable WebUI session state.
+    """
+    return scrub_internal_replay_fields(value, message_records=message_records)
+
+
+def _copy_json_value(value):
+    """Deep-copy JSON-shaped data without applying message-field filtering."""
+    if isinstance(value, dict):
+        return {key: _copy_json_value(child) for key, child in value.items()}
+    if isinstance(value, list):
+        return [_copy_json_value(child) for child in value]
+    return value
 
 
 def redact_session_data(session_dict: dict) -> dict:
@@ -1022,20 +1207,28 @@ def redact_session_data(session_dict: dict) -> dict:
     """
     from api.config import load_settings
     _enabled = bool(load_settings().get("api_redact_enabled", True))
-    result = dict(session_dict)
-    if isinstance(result.get('title'), str):
-        result['title'] = _redact_text(result['title'], _enabled=_enabled)
-    if 'messages' in result:
-        result['messages'] = _redact_messages(result['messages'], _enabled=_enabled)
-    if 'tool_calls' in result:
-        result['tool_calls'] = _redact_value(result['tool_calls'], _enabled=_enabled)
-    if 'todo_state' in result:
-        result['todo_state'] = _redact_value(result['todo_state'], _enabled=_enabled)
-    if 'runtime_journal_snapshot' in result:
-        result['runtime_journal_snapshot'] = _redact_value(
-            result['runtime_journal_snapshot'],
-            _enabled=_enabled,
-        )
+    if not isinstance(session_dict, dict):
+        return {}
+    result = {}
+    for key, value in session_dict.items():
+        if key in _PUBLIC_MESSAGE_INTERNAL_FIELDS:
+            continue
+        if key == 'title' and isinstance(value, str):
+            result[key] = _redact_text(value, _enabled=_enabled)
+        elif key in {'messages', 'context_messages'}:
+            result[key] = _redact_messages(value, _enabled=_enabled)
+        elif key == 'tool_calls' and isinstance(value, list):
+            result[key] = _redact_tool_calls(value, _enabled=_enabled)
+        elif key in {'todo_state', 'runtime_journal_snapshot'}:
+            result[key] = _redact_nested_message_containers(value, _enabled=_enabled)
+        else:
+            # Operational fields (workspace path, ids, config, timestamps, etc.)
+            # are NOT credential-masked: a valid workspace path may legitimately
+            # contain a credential-shaped component, and masking it would corrupt
+            # the authoritative value the client echoes back on the next send.
+            # Deep-copy them through unchanged (only transcript-bearing fields
+            # above carry free-form user/model text worth redacting).
+            result[key] = _copy_json_value(value)
     return result
 
 
