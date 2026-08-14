@@ -1,0 +1,344 @@
+import json
+import multiprocessing
+import os
+from pathlib import Path
+
+import pytest
+
+
+def _patch_store(monkeypatch, models, session_dir: Path) -> None:
+    session_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    with models.LOCK:
+        models.SESSIONS.clear()
+
+
+def _process_writer(
+    session_dir, sid, marker, start_event, ready_queue, result_queue
+):
+    from api import models
+
+    models.SESSION_DIR = Path(session_dir)
+    models.SESSION_INDEX_FILE = Path(session_dir) / "_index.json"
+    session = models.Session.load(sid)
+    assert session is not None
+    session.messages.append({"role": "assistant", "content": marker})
+    ready_queue.put(marker)
+    start_event.wait(timeout=15)
+    try:
+        session.save(skip_index=True)
+    except models.StaleSessionGenerationError:
+        result_queue.put((marker, "stale"))
+    else:
+        result_queue.put((marker, "saved"))
+
+
+def test_stale_loaded_instance_cannot_overwrite_newer_sidecar(
+    tmp_path, monkeypatch
+):
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    sid = "revision-cas"
+    seed = models.Session(
+        session_id=sid,
+        workspace=str(tmp_path),
+        messages=[{"role": "user", "content": "seed"}],
+    )
+    seed.save(skip_index=True)
+    first = models.Session.load(sid)
+    with models.LOCK:
+        models.SESSIONS.pop(sid, None)
+    second = models.Session.load(sid)
+    assert first is not None and second is not None
+
+    second.messages.append({"role": "assistant", "content": "newer"})
+    second.save(skip_index=True)
+    first.title = "stale mutation"
+    with pytest.raises(models.StaleSessionGenerationError):
+        first.save(skip_index=True)
+
+    persisted = json.loads(
+        (session_dir / f"{sid}.json").read_text(encoding="utf-8")
+    )
+    assert persisted["messages"][-1]["content"] == "newer"
+
+
+def test_new_instance_expected_absent_never_overwrites_existing_sid(
+    tmp_path, monkeypatch
+):
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    sid = "create-only"
+    first = models.Session(
+        session_id=sid,
+        workspace=str(tmp_path),
+        messages=[{"role": "user", "content": "first"}],
+    )
+    stale = models.Session(
+        session_id=sid,
+        workspace=str(tmp_path),
+        messages=[{"role": "user", "content": "stale"}],
+    )
+
+    first.save(skip_index=True)
+    with pytest.raises(models.StaleSessionGenerationError):
+        stale.save(skip_index=True)
+    persisted = json.loads(
+        (session_dir / f"{sid}.json").read_text(encoding="utf-8")
+    )
+    assert persisted["messages"] == first.messages
+
+
+def test_generation_is_scoped_per_sid_across_rotation(tmp_path, monkeypatch):
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    old_sid = "parent"
+    new_sid = "continuation"
+    session = models.Session(
+        session_id=old_sid,
+        workspace=str(tmp_path),
+        messages=[{"role": "user", "content": "parent"}],
+    )
+    session.save(skip_index=True)
+
+    session.session_id = new_sid
+    session.parent_session_id = old_sid
+    session.messages.append({"role": "assistant", "content": "continuation"})
+    session.save(skip_index=True)
+    session.session_id = old_sid
+    session.title = "archived parent"
+    session.save(skip_index=True)
+
+    parent = json.loads(
+        (session_dir / f"{old_sid}.json").read_text(encoding="utf-8")
+    )
+    continuation = json.loads(
+        (session_dir / f"{new_sid}.json").read_text(encoding="utf-8")
+    )
+    assert parent["_sidecar_generation_v1"] == 2
+    assert continuation["_sidecar_generation_v1"] == 1
+
+
+@pytest.mark.skipif(os.name == "nt", reason="fork-based multiprocess CAS probe")
+def test_two_process_writers_have_exactly_one_cas_winner(tmp_path, monkeypatch):
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    sid = "multiprocess-cas"
+    models.Session(
+        session_id=sid,
+        workspace=str(tmp_path),
+        messages=[{"role": "user", "content": "base"}],
+    ).save(skip_index=True)
+
+    context = multiprocessing.get_context("fork")
+    start_event = context.Event()
+    ready_queue = context.Queue()
+    result_queue = context.Queue()
+    processes = [
+        context.Process(
+            target=_process_writer,
+            args=(
+                session_dir,
+                sid,
+                marker,
+                start_event,
+                ready_queue,
+                result_queue,
+            ),
+        )
+        for marker in ("writer-a", "writer-b")
+    ]
+    for process in processes:
+        process.start()
+    assert {ready_queue.get(timeout=15), ready_queue.get(timeout=15)} == {
+        "writer-a",
+        "writer-b",
+    }
+    start_event.set()
+    for process in processes:
+        process.join(timeout=20)
+        assert process.exitcode == 0
+
+    results = dict(result_queue.get(timeout=5) for _ in processes)
+    assert sorted(results.values()) == ["saved", "stale"]
+    persisted = json.loads(
+        (session_dir / f"{sid}.json").read_text(encoding="utf-8")
+    )
+    committed = {
+        message.get("content")
+        for message in persisted["messages"]
+        if message.get("content") in {"writer-a", "writer-b"}
+    }
+    assert len(committed) == 1
+    assert persisted["_sidecar_generation_v1"] == 2
+
+
+def test_recovery_expected_absent_uses_create_or_fail(tmp_path, monkeypatch):
+    from api import session_recovery
+
+    session_path = tmp_path / "absent.json"
+    backup_path = session_path.with_suffix(".json.bak")
+    backup_path.write_text(
+        json.dumps(
+            {"messages": [{"role": "user", "content": "backup"}]}
+        ),
+        encoding="utf-8",
+    )
+    competing = {
+        "messages": [{"role": "user", "content": "competing"}]
+    }
+    real_link = session_recovery.os.link
+
+    def competing_link(src, dst):
+        Path(dst).write_text(json.dumps(competing), encoding="utf-8")
+        return real_link(src, dst)
+
+    monkeypatch.setattr(session_recovery.os, "link", competing_link)
+    result = session_recovery.recover_session(session_path)
+    assert result["restored"] is False
+    assert result["stale_generation"] is True
+    assert json.loads(session_path.read_text(encoding="utf-8")) == competing
+
+
+def test_recovery_invalidates_cached_alias_and_publishes_generation(
+    tmp_path, monkeypatch
+):
+    from api import models, session_recovery
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    sid = "recovery-alias"
+    session_path = session_dir / f"{sid}.json"
+    backup_path = session_path.with_suffix(".json.bak")
+    live = {
+        "session_id": sid,
+        "workspace": str(tmp_path),
+        "messages": [{"role": "user", "content": "live"}],
+    }
+    backup = {
+        "session_id": sid,
+        "workspace": str(tmp_path),
+        "messages": [
+            {"role": "user", "content": "one"},
+            {"role": "assistant", "content": "two"},
+            {"role": "user", "content": "three"},
+        ],
+    }
+    session_path.write_text(json.dumps(live), encoding="utf-8")
+    backup_path.write_text(json.dumps(backup), encoding="utf-8")
+    alias = models.Session.load(sid)
+    assert alias is not None
+    with models.LOCK:
+        models.SESSIONS[sid] = alias
+
+    result = session_recovery.recover_session(session_path)
+    assert result["restored"] is True
+    with models.LOCK:
+        assert sid not in models.SESSIONS
+    restored = json.loads(session_path.read_text(encoding="utf-8"))
+    assert restored["_sidecar_generation_v1"] == 1
+    alias.title = "stale alias"
+    with pytest.raises(RuntimeError, match="stale|generation"):
+        alias.save(skip_index=True)
+
+
+def test_backup_is_monotone_across_later_poorer_shrinks(tmp_path, monkeypatch):
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    sid = "monotone-backup"
+    session = models.Session(
+        session_id=sid,
+        workspace=str(tmp_path),
+        messages=[
+            {"role": "user", "content": str(index)} for index in range(10)
+        ],
+    )
+    session.save(skip_index=True)
+    session.messages = session.messages[:2]
+    session.save(skip_index=True)
+    session.messages = [
+        {"role": "user", "content": str(index)} for index in range(5)
+    ]
+    session.save(skip_index=True)
+    session.messages = session.messages[:4]
+    session.save(skip_index=True)
+    backup = json.loads(
+        (session_dir / f"{sid}.json.bak").read_text(encoding="utf-8")
+    )
+    assert len(backup["messages"]) == 10
+
+
+def test_backup_retirement_requires_matching_receipt(tmp_path, monkeypatch):
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    sid = "cleanup"
+    backup_path = session_dir / f"{sid}.json.bak"
+    backup_path.write_text("first backup", encoding="utf-8")
+
+    first_receipt = models._read_sidecar_revision(backup_path, sid)
+    backup_path.write_text("newer foreign backup", encoding="utf-8")
+
+    assert models._retire_backup_if_owned(sid, backup_path, None) is False
+    assert (
+        models._retire_backup_if_owned(sid, backup_path, first_receipt)
+        is False
+    )
+    assert backup_path.read_text(encoding="utf-8") == "newer foreign backup"
+
+    current_receipt = models._read_sidecar_revision(backup_path, sid)
+    assert (
+        models._retire_backup_if_owned(sid, backup_path, current_receipt)
+        is True
+    )
+    assert not backup_path.exists()
+
+
+def test_shrinking_save_fails_closed_when_backup_publish_fails(
+    tmp_path, monkeypatch
+):
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    sid = "backup-fail-closed"
+    session = models.Session(
+        session_id=sid,
+        workspace=str(tmp_path),
+        messages=[
+            {"role": "user", "content": "one"},
+            {"role": "assistant", "content": "two"},
+            {"role": "user", "content": "three"},
+        ],
+    )
+    session.save(skip_index=True)
+    original = json.loads(session.path.read_text(encoding="utf-8"))
+    real_replace = models._safe_replace
+
+    def fail_backup_publish(source, destination):
+        if Path(destination).suffix == ".bak":
+            raise OSError("simulated backup publish failure")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(models, "_safe_replace", fail_backup_publish)
+    session.messages = session.messages[:1]
+    with pytest.raises(RuntimeError, match="backup"):
+        session.save(skip_index=True)
+    persisted = json.loads(session.path.read_text(encoding="utf-8"))
+    assert persisted["messages"] == original["messages"]
+    assert (
+        persisted["_sidecar_generation_v1"]
+        == original["_sidecar_generation_v1"]
+    )

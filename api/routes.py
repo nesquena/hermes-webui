@@ -15153,7 +15153,12 @@ def handle_post(handler, parsed) -> bool:
         session_lock = _get_session_agent_lock(sid)
         if not session_lock.acquire(timeout=5):
             return bad(handler, "Session busy, try again", 503)
+        sidecar_authority = None
         try:
+            from api.models import _session_sidecar_authority
+
+            sidecar_authority = _session_sidecar_authority(sid)
+            sidecar_authority.__enter__()
             with LOCK:
                 SESSIONS.pop(sid, None)
             try:
@@ -15181,6 +15186,8 @@ def handle_post(handler, parsed) -> bool:
                 except Exception:
                     logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
         finally:
+            if sidecar_authority is not None:
+                sidecar_authority.__exit__(None, None, None)
             session_lock.release()
         # Evict outside the mutation lock: lifecycle commit may perform provider
         # I/O and must not hold a per-session Session lock.

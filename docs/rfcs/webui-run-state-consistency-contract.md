@@ -142,6 +142,11 @@ and 5; it does not mark every run-state boundary implemented.
    still owns a live channel. Staleness is measured from the cancellation
    timestamp (falling back to run start), so a long-running turn cancelled
    moments ago is never mistaken for an orphan.
+10. **Sidecar writes are generation-fenced.** A writer may replace a session JSON
+   sidecar only while the exact durable revision it observed is still current.
+   First creation must be create-only, SID rotation must start from an absent
+   revision for the new ID, recovery must invalidate stale in-memory aliases, and
+   a shrinking write must not proceed unless its richest backup is durable.
 
 ## Review Checklist
 
@@ -165,6 +170,8 @@ context reconstruction, or session metadata:
 - If it introduces or changes a reclamation window, what proves an in-flight
   cancellation is not evicted early, and that a wedged one is eventually freed?
 - Can automatic compression or recovery text become visible active-turn content?
+- Can a stale save, repair, recovery, or metadata patch replace a newer sidecar?
+  If the write shrinks history, is backup publication fail-closed and monotone?
 - What test or manual evidence proves the invariant?
 
 ## Existing Issue Map

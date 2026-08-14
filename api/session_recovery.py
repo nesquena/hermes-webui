@@ -30,7 +30,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import sqlite3
 import threading
 from contextlib import closing
@@ -399,22 +398,73 @@ def inspect_session_recovery_status(session_path: Path) -> dict:
 
 
 def recover_session(session_path: Path) -> dict:
-    """Restore session_path from its .bak when the bak has more messages.
+    """Restore from .bak without superseding a newer sidecar generation."""
+    from api.models import _session_sidecar_authority
 
-    Returns a status dict identical to ``inspect_session_recovery_status``
-    plus a "restored" boolean.
-    """
+    with _session_sidecar_authority(
+        session_path.stem,
+        session_dir=session_path.parent,
+    ):
+        return _recover_session_owned(session_path)
+
+
+def _recover_session_owned(session_path: Path) -> dict:
+    """Run one recovery while holding the cross-process SID authority."""
+    from api.models import (
+        _invalidate_cached_session_generation,
+        _read_sidecar_revision,
+    )
+
+    bak_path = session_path.with_suffix('.json.bak')
+    expected_live_revision = _read_sidecar_revision(
+        session_path,
+        session_path.stem,
+    )
+    expected_backup_revision = _read_sidecar_revision(
+        bak_path,
+        session_path.stem,
+    )
     status = inspect_session_recovery_status(session_path)
     if status["recommend"] != "restore":
         return {**status, "restored": False}
-    bak_path = session_path.with_suffix('.json.bak')
-    # Stage the recovery via a tmp copy + atomic replace so a crash mid-restore
-    # cannot leave a half-written session.json.
-    tmp_path = session_path.with_suffix('.json.recover.tmp')
+    if expected_backup_revision.state != "PRESENT":
+        return {**status, "restored": False, "stale_generation": True}
+    tmp_path = session_path.with_suffix(
+        f'.json.recover.tmp.{os.getpid()}.{threading.current_thread().ident}'
+    )
     try:
-        shutil.copyfile(bak_path, tmp_path)
-        tmp_path.replace(session_path)
-    except OSError as exc:
+        backup = json.loads(bak_path.read_text(encoding='utf-8'))
+        if not isinstance(backup, dict):
+            raise ValueError("backup payload is not a session object")
+        base_generation = (
+            expected_live_revision.generation
+            if expected_live_revision.state == "PRESENT"
+            else expected_backup_revision.generation
+        )
+        backup['_sidecar_generation_v1'] = base_generation + 1
+        with open(tmp_path, 'w', encoding='utf-8') as fh:
+            fh.write(json.dumps(backup, ensure_ascii=False, indent=2))
+            fh.flush()
+            os.fsync(fh.fileno())
+        if (
+            _read_sidecar_revision(session_path, session_path.stem)
+            != expected_live_revision
+            or _read_sidecar_revision(bak_path, session_path.stem)
+            != expected_backup_revision
+        ):
+            tmp_path.unlink(missing_ok=True)
+            return {**status, "restored": False, "stale_generation": True}
+        if expected_live_revision.state == "ABSENT":
+            try:
+                os.link(str(tmp_path), str(session_path))
+            except FileExistsError:
+                tmp_path.unlink(missing_ok=True)
+                return {**status, "restored": False, "stale_generation": True}
+            tmp_path.unlink(missing_ok=True)
+        else:
+            tmp_path.replace(session_path)
+        _invalidate_cached_session_generation(session_path.stem)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
         logger.warning("recover_session: copy failed for %s: %s", session_path, exc)
         try:
             tmp_path.unlink(missing_ok=True)
@@ -649,6 +699,8 @@ def _state_db_row_to_sidecar(row: dict) -> dict:
 
 def recover_missing_sidecars_from_state_db(session_dir: Path, state_db_path: Path | None) -> dict:
     """Materialize missing WebUI JSON sidecars from canonical state.db rows."""
+    from api.models import _session_sidecar_authority
+
     rows = _read_state_db_missing_sidecar_rows(session_dir, state_db_path)
     materialized = 0
     details: list[dict] = []
@@ -661,6 +713,7 @@ def recover_missing_sidecars_from_state_db(session_dir: Path, state_db_path: Pat
         if target.exists():
             continue
         payload = _state_db_row_to_sidecar(row)
+        payload['_sidecar_generation_v1'] = 1
         # Per-process/per-thread tmp suffix to avoid corruption under
         # concurrent reconciliation calls (matches api/models.py:484
         # Session.save() convention).
@@ -682,8 +735,9 @@ def recover_missing_sidecars_from_state_db(session_dir: Path, state_db_path: Pat
         # will win and we silently skip rather than overwrite a live sidecar.
         materialized_now = False
         try:
-            os.link(str(tmp), str(target))
-            materialized_now = True
+            with _session_sidecar_authority(sid, session_dir=session_dir):
+                os.link(str(tmp), str(target))
+                materialized_now = True
         except FileExistsError:
             # Live sidecar appeared between the check and the link — keep it.
             pass
