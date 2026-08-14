@@ -85,7 +85,7 @@ def test_show_all_row_uses_i18n_key():
     assert "Afficher tous les {0} modèles" in I18N_JS
 
 
-def test_openrouter_overflow_preserves_hidden_tail(monkeypatch):
+def test_openrouter_curated_group_renders_full_with_bounded_free_augmentation(monkeypatch):
     monkeypatch.setattr(
         config,
         "cfg",
@@ -122,10 +122,13 @@ def test_openrouter_overflow_preserves_hidden_tail(monkeypatch):
     total = len(group["models"]) + len(group.get("extra_models", []))
     capped_total = 2 + config._OPENROUTER_FREE_TIER_AUGMENT_CAP
 
-    assert len(group["models"]) == config._MODEL_PICKER_VISIBLE_TARGET
-    assert total == capped_total, "OpenRouter overflow models must move into extra_models within the capped augmentation budget."
-    assert any(m["id"] == "vendor29/overflow-29:free" for m in group.get("extra_models", [])), (
-        "The last capped free-tier model should land in extra_models once the visible picker cap is reached."
+    # OpenRouter is a curated provider: the curated + augmented group (32
+    # entries) sits under the curated threshold, so it renders in full —
+    # no hidden tail.
+    assert len(group["models"]) == capped_total
+    assert "extra_models" not in group
+    assert any(m["id"] == "vendor29/overflow-29:free" for m in group["models"]), (
+        "The last capped free-tier model should render visibly once the curated cap is reached."
     )
     assert all(m["id"] != "vendor30/overflow-30:free" for bucket in ("models", "extra_models") for m in group.get(bucket, [])), (
         "Free-tier augmentation must stop at the configured cap instead of continuing through the whole live payload."
