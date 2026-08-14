@@ -1823,18 +1823,30 @@ class TestCancelInterrupt:
         publish B through the production path, then prove worker retirement
         neither deletes B nor marks B durable.
 
-        The worker captures generation A before save(). During the save call
-        (which we hold via a barrier), we publish generation B through the
-        production _publish_fallback_notice path. After save returns, the
-        worker records _STREAM_WORKER_SAVED = A. Worker retirement must:
+        The worker captures generation A before save(). During the FIRST save call
+        (held via a barrier), we publish generation B through the production
+        _publish_fallback_notice path ONCE.  _finalize_cancelled_turn saves a
+        SECOND time (to clear active_stream_id); the second save MUST NOT
+        republish B — otherwise the test replaces the in-flight B with another
+        identical B and "B survives retirement" only proves text equality, not
+        preservation of the exact generation-2 publication
+        (gate-certifier blocker #3: generation oracle republishes B during
+        the second save).
 
-        1. NOT pop the live notice (B is current, A was saved — but the
-           compare-and-pop only retires the exact saved generation A, and B
-           is a different generation).
-        2. NOT mark B as durable (B was never saved to disk).
+        After save returns, the worker records _STREAM_WORKER_SAVED = A.
+        Worker retirement must:
 
-        (gate-certifier blocker #4: strengthen generation oracle)
+        1. NOT pop the live notice — B is the current generation, A was saved,
+           and the compare-and-pop only retires the exact saved generation A.
+        2. NOT mark B as durable — B was never saved to disk (the second save
+           did not carry it).  Deep-copied per-save snapshots capture what was
+           actually durable at each save call; B must NOT appear in any
+           durable snapshot.
+
+        (gate-certifier blocker #4: strengthen generation oracle; blocker #3:
+        publish B exactly once during the first held save)
         """
+        import copy
         import threading
         from unittest.mock import Mock
         from api.streaming import (
@@ -1856,20 +1868,35 @@ class TestCancelInterrupt:
         gen_A = _current_notice_generation(stream_id)
         assert gen_A == 1
 
-        # Barrier: publish B during the worker's save() call, AFTER the worker
-        # has captured generation A but BEFORE save returns.
+        # Barrier: publish B during the worker's FIRST save() call, AFTER the
+        # worker has captured generation A but BEFORE save returns.  The
+        # SECOND save must not republish B.
         save_entered = threading.Event()
         b_published = threading.Event()
         save_can_finish = threading.Event()
+        _save_call_count = [0]
+        _save_snapshots = []
+        _published_once = [False]
 
         def _save():
-            save_entered.set()
-            # Publish B while the worker's save is "in flight"
-            assert _publish_fallback_notice(stream_id, dict(_notice_B)) is True
-            gen_B = _current_notice_generation(stream_id)
-            assert gen_B == 2, f"expected gen 2 after B publish, got {gen_B}"
-            b_published.set()
-            save_can_finish.wait(timeout=5)
+            _save_call_count[0] += 1
+            call_n = _save_call_count[0]
+            if call_n == 1:
+                # First save: capture durable snapshot BEFORE publishing B, then
+                # publish B once through the production gate.
+                _save_snapshots.append(copy.deepcopy(ws.messages))
+                save_entered.set()
+                assert not _published_once[0], "B was republished — oracle bug"
+                _published_once[0] = True
+                assert _publish_fallback_notice(stream_id, dict(_notice_B)) is True
+                gen_B = _current_notice_generation(stream_id)
+                assert gen_B == 2, f"expected gen 2 after B publish, got {gen_B}"
+                b_published.set()
+                save_can_finish.wait(timeout=5)
+            else:
+                # Second save (active_stream_id clear): no publish, just snapshot
+                # durable state so the oracle can assert B never landed durably.
+                _save_snapshots.append(copy.deepcopy(ws.messages))
 
         ws = Mock()
         ws.session_id = session_id
@@ -1897,9 +1924,9 @@ class TestCancelInterrupt:
         assert save_entered.wait(timeout=5), "worker save did not start"
         assert b_published.wait(timeout=5), "B was not published during save"
 
-        # At this point: A is on disk (save is still "in flight" but the
-        # _persist_cancelled_turn call before save stamped A), B is the current
-        # map entry with generation 2.
+        # At this point: A was stamped on the cancel-marker row before the first
+        # save (durable snapshot 1 shows A), B is the current map entry with
+        # generation 2.
         assert _current_notice_generation(stream_id) == 2
         assert _STREAM_FALLBACK_NOTICES[stream_id]["message"] == "notice B"
 
@@ -1907,11 +1934,35 @@ class TestCancelInterrupt:
         save_can_finish.set()
         assert worker_done.wait(timeout=5), "worker finalize did not complete"
 
+        # The worker's finalize path calls save() at least once for turn
+        # persistence and then again to clear active_stream_id.  Both calls
+        # must have happened; B must have been published EXACTLY once.
+        assert len(_save_snapshots) >= 1, "no saves captured — oracle empty"
+        assert _published_once[0] is True, (
+            "B was never published — the first save did not run the publish step"
+        )
+
         # Worker recorded the saved generation (A=1), not B
         assert _STREAM_WORKER_SAVED.get(stream_id) == gen_A, (
             f"worker recorded gen {_STREAM_WORKER_SAVED.get(stream_id)} but "
             f"should have recorded A={gen_A}"
         )
+
+        # Durable authority: EVERY saved snapshot must carry notice A, not B.
+        # The first snapshot was taken before B was published (A only).
+        # Subsequent snapshots were taken after B was published but must NOT
+        # reflect it, since the worker never re-stamped.
+        for snapshot_idx, snap in enumerate(_save_snapshots):
+            stamped = [
+                m for m in snap
+                if isinstance(m, dict) and m.get("_fallbackNotice")
+            ]
+            for stamped_msg in stamped:
+                msg = stamped_msg["_fallbackNotice"].get("message")
+                assert msg != "notice B", (
+                    f"snapshot {snapshot_idx}: B appeared in durable state — "
+                    f"the worker must not re-stamp with the post-A publication"
+                )
 
         # Worker retirement: must NOT delete B (B is a different generation)
         _retire_worker_cancelled_state(stream_id)
@@ -1986,3 +2037,239 @@ class TestCancelInterrupt:
         assert cancel_sid not in _STREAM_SETTLEMENT_COMPLETED, (
             "cancelled stream leaked into _STREAM_SETTLEMENT_COMPLETED"
         )
+
+    def test_normal_fallback_turn_retires_all_settlement_state(self):
+        """Production-composed normal completion with a confirmed fallback
+        publishes a notice, saves it via _turn_final_save_commit, and retires
+        ALL registries on teardown — leaving no tombstone.
+
+        Reproduces gate-certifier finding #1: before this fix, a normal
+        successful fallback turn (no cancellation) stamped the notice on the
+        final assistant row and s.save()d it, but never recorded the saved
+        generation.  On teardown, _retire_worker_cancelled_state_locked
+        skipped the compare-retire (no saved generation), fell through to
+        _complete_stream_settlement_participant_locked, and leaked
+        _STREAM_SETTLEMENT_COMPLETED[stream_id] = {'worker'} — one tombstone
+        per normal fallback turn.  The fallback notice also remained in
+        _STREAM_FALLBACK_NOTICES (saved but never retired).
+
+        This test composes the actual production flow — status callback
+        publishes via _publish_fallback_notice → stamp on assistant row →
+        _turn_final_save_commit wraps s.save() → _retire_worker_cancelled_state
+        tears down — and proves every registry returns to baseline.
+        """
+        from unittest.mock import Mock
+        from api.streaming import (
+            _STREAM_FALLBACK_NOTICES, _STREAM_WORKER_SAVED,
+            _STREAM_CANCEL_CLAIMED, _STREAM_SETTLEMENT_TERMINAL,
+            _STREAM_NOTICE_GENERATION, _STREAM_SETTLEMENT_PARTICIPANTS,
+            _STREAM_SETTLEMENT_COMPLETED, _STREAM_FALLBACK_DEAD_LETTER,
+            _publish_fallback_notice, _current_notice_generation,
+            _retire_worker_cancelled_state, _turn_final_save_commit,
+            _clean_fallback_notice,
+        )
+
+        for iteration in range(3):
+            stream_id = f"normal_fallback_turn_{iteration}"
+            session_id = f"sess_normal_fallback_{iteration}"
+
+            # ── 1. Production status-callback publication ──
+            _notice = {
+                "message": f"Switched to fallback model iter{iteration}",
+                "to_model": "fallback-model",
+                "to_provider": "fallback-provider",
+            }
+            assert _publish_fallback_notice(stream_id, dict(_notice)) is True
+            saved_gen = _current_notice_generation(stream_id)
+            assert saved_gen >= 1
+
+            # ── 2. Stamp the notice on the final assistant row (mirrors the
+            #       normal-completion stamp block at streaming.py:11376-11383) ──
+            ws = Mock()
+            ws.session_id = session_id
+            ws.active_stream_id = stream_id
+            ws.messages = [
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": "a"},
+            ]
+            for _dm in reversed(ws.messages):
+                if isinstance(_dm, dict) and _dm.get('role') == 'assistant':
+                    _dm['_fallbackNotice'] = _clean_fallback_notice(_notice)
+                    break
+
+            # ── 3. Turn-finalizing save via _turn_final_save_commit ──
+            save_calls = []
+            ws.save = Mock(
+                side_effect=lambda sc=save_calls, _ws=ws: sc.append(len(_ws.messages))
+            )
+            with _turn_final_save_commit(stream_id, ws):
+                ws.save()
+            assert save_calls, "save was never called"
+            # The saved generation must now be durably recorded for retirement
+            assert _STREAM_WORKER_SAVED.get(stream_id) == saved_gen
+
+            # ── 4. Worker teardown retirement ──
+            _retire_worker_cancelled_state(stream_id)
+
+            # ── 5. Assert every settlement/cancellation registry is back at baseline ──
+            assert stream_id not in _STREAM_SETTLEMENT_COMPLETED, (
+                f"iteration {iteration}: normal fallback turn leaked a tombstone into "
+                f"_STREAM_SETTLEMENT_COMPLETED"
+            )
+            assert stream_id not in _STREAM_SETTLEMENT_PARTICIPANTS, (
+                f"iteration {iteration}: participants record leaked"
+            )
+            assert stream_id not in _STREAM_SETTLEMENT_TERMINAL, (
+                f"iteration {iteration}: terminal fence leaked"
+            )
+            assert stream_id not in _STREAM_FALLBACK_NOTICES, (
+                f"iteration {iteration}: saved notice not retired from _STREAM_FALLBACK_NOTICES"
+            )
+            assert stream_id not in _STREAM_WORKER_SAVED, (
+                f"iteration {iteration}: saved-generation registry not retired"
+            )
+            assert stream_id not in _STREAM_CANCEL_CLAIMED, (
+                f"iteration {iteration}: cancel claim leaked"
+            )
+            assert stream_id not in _STREAM_NOTICE_GENERATION, (
+                f"iteration {iteration}: generation counter leaked"
+            )
+            assert stream_id not in _STREAM_FALLBACK_DEAD_LETTER, (
+                f"iteration {iteration}: dead-letter entry leaked"
+            )
+            # Notice must have been durably persisted on the assistant row
+            fallback_stamps = [
+                m for m in ws.messages
+                if isinstance(m, dict) and m.get('_fallbackNotice')
+            ]
+            assert len(fallback_stamps) == 1
+            assert fallback_stamps[0]['_fallbackNotice']['message'] == _notice['message']
+
+    def test_normal_no_fallback_turn_retires_all_settlement_state(self):
+        """Partner invariant: a normal completed turn with NO fallback must
+        also leave every registry at baseline.  Symmetric to
+        test_normal_fallback_turn_retires_all_settlement_state but skips
+        the publication step; the no-registry-state early return in
+        _retire_worker_cancelled_state_locked must not create any entries.
+        """
+        from api.streaming import (
+            _STREAM_FALLBACK_NOTICES, _STREAM_WORKER_SAVED,
+            _STREAM_CANCEL_CLAIMED, _STREAM_SETTLEMENT_TERMINAL,
+            _STREAM_NOTICE_GENERATION, _STREAM_SETTLEMENT_PARTICIPANTS,
+            _STREAM_SETTLEMENT_COMPLETED, _STREAM_FALLBACK_DEAD_LETTER,
+            _retire_worker_cancelled_state,
+        )
+
+        for iteration in range(3):
+            stream_id = f"normal_no_fb_turn_{iteration}"
+            _retire_worker_cancelled_state(stream_id)
+            assert stream_id not in _STREAM_SETTLEMENT_COMPLETED
+            assert stream_id not in _STREAM_SETTLEMENT_PARTICIPANTS
+            assert stream_id not in _STREAM_SETTLEMENT_TERMINAL
+            assert stream_id not in _STREAM_FALLBACK_NOTICES
+            assert stream_id not in _STREAM_WORKER_SAVED
+            assert stream_id not in _STREAM_CANCEL_CLAIMED
+            assert stream_id not in _STREAM_NOTICE_GENERATION
+            assert stream_id not in _STREAM_FALLBACK_DEAD_LETTER
+
+    def test_normal_fallback_turn_post_save_publication_preserves_unsaved_generation(self):
+        """If a NEWER fallback notice is published DURING the final save
+        (after stamp but before save returns), the worker's retirement must
+        NOT delete the newer unsaved generation — it was never durably saved.
+
+        Same adversarial-schedule shape as the cancel-side generation oracle:
+        the worker stamps gen A and calls save() (which holds a barrier);
+        gen B is published while A is in flight; save returns, recording
+        saved=A; retirement must compare against saved (A) vs current (B)
+        and leave B + its generation counter intact.
+        """
+        import threading
+        from unittest.mock import Mock
+        from api.streaming import (
+            _STREAM_FALLBACK_NOTICES, _STREAM_WORKER_SAVED,
+            _STREAM_CANCEL_CLAIMED, _STREAM_SETTLEMENT_TERMINAL,
+            _STREAM_NOTICE_GENERATION, _STREAM_SETTLEMENT_PARTICIPANTS,
+            _STREAM_SETTLEMENT_COMPLETED,
+            _publish_fallback_notice, _current_notice_generation,
+            _retire_worker_cancelled_state, _turn_final_save_commit,
+            _clean_fallback_notice,
+        )
+
+        stream_id = "normal_fallback_post_save_pub"
+        session_id = "sess_normal_fallback_post_save_pub"
+
+        # ── Publish A ──
+        _notice_a = {"message": "notice A", "to_model": "mA", "to_provider": "pA"}
+        assert _publish_fallback_notice(stream_id, dict(_notice_a)) is True
+        gen_a = _current_notice_generation(stream_id)
+        assert gen_a == 1
+
+        # ── Stamp A on the final assistant row ──
+        ws = Mock()
+        ws.session_id = session_id
+        ws.active_stream_id = stream_id
+        ws.messages = [{"role": "assistant", "content": "a"}]
+        ws.messages[-1]['_fallbackNotice'] = _clean_fallback_notice(_notice_a)
+
+        # ── During save, publish B (gen 2) while A is in flight ──
+        save_entered = threading.Event()
+        b_published = threading.Event()
+        save_can_finish = threading.Event()
+
+        _notice_b = {"message": "notice B", "to_model": "mB", "to_provider": "pB"}
+
+        def _save():
+            save_entered.set()
+            assert _publish_fallback_notice(stream_id, dict(_notice_b)) is True
+            gen_b = _current_notice_generation(stream_id)
+            assert gen_b == 2, f"expected gen 2 after B publish, got {gen_b}"
+            b_published.set()
+            save_can_finish.wait(timeout=5)
+
+        ws.save = Mock(side_effect=_save)
+
+        worker_done = threading.Event()
+
+        def _worker_finalize():
+            with _turn_final_save_commit(stream_id, ws):
+                ws.save()
+            worker_done.set()
+
+        t = threading.Thread(target=_worker_finalize, daemon=True)
+        t.start()
+        assert save_entered.wait(timeout=5), "save did not start"
+        assert b_published.wait(timeout=5), "B was not published during save"
+        save_can_finish.set()
+        assert worker_done.wait(timeout=5), "save did not complete"
+
+        # ── Worker recorded the saved generation (A=1), not B ──
+        assert _STREAM_WORKER_SAVED.get(stream_id) == gen_a, (
+            f"worker recorded gen {_STREAM_WORKER_SAVED.get(stream_id)} but "
+            f"should have recorded A={gen_a}"
+        )
+
+        # ── Worker retirement: must NOT delete B (B is a different generation)
+        #    and must NOT pop the generation counter (B's gen lives there now). ──
+        _retire_worker_cancelled_state(stream_id)
+        assert stream_id in _STREAM_FALLBACK_NOTICES, (
+            "retirement deleted generation B — it should only retire the exact "
+            "saved generation A"
+        )
+        assert _STREAM_FALLBACK_NOTICES[stream_id]["message"] == "notice B", (
+            "retirement changed the live notice — B should be preserved"
+        )
+        # Generation counter stays (B's value) — it is NOT A's.  Only A's
+        # registry entries retire; B persists as the unsaved generation owner.
+        assert _current_notice_generation(stream_id) == 2, (
+            "generation counter must remain at B's value (2) since B is unsaved"
+        )
+
+        # Cleanup (B was never saved — simulate the cancel-side settlement
+        # running later; test isolation requires these pops)
+        _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
+        _STREAM_WORKER_SAVED.pop(stream_id, None)
+        _STREAM_SETTLEMENT_PARTICIPANTS.pop(stream_id, None)
+        _STREAM_SETTLEMENT_COMPLETED.pop(stream_id, None)
+        _STREAM_SETTLEMENT_TERMINAL.discard(stream_id)
+        _STREAM_NOTICE_GENERATION.pop(stream_id, None)
+        _STREAM_CANCEL_CLAIMED.discard(stream_id)

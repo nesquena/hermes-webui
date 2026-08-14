@@ -1084,6 +1084,64 @@ def _retire_worker_cancelled_state(stream_id: str) -> None:
         _retire_worker_cancelled_state_locked(stream_id)
 
 
+@contextlib.contextmanager
+def _turn_final_save_commit(stream_id, session):
+    """Yield for a turn-finalizing ``session.save()``; commit the saved fallback generation.
+
+    Captures the current fallback-notice generation BEFORE the save so the
+    worker's retirement can compare-retire the exact saved generation.  On
+    successful return, records ``_STREAM_WORKER_SAVED[stream_id] = <gen>``
+    under ``STREAMS_LOCK`` and retires any matching dead-letter entry.  On
+    exception, pops the saved registry and transfers the notice into the
+    bounded ``_STREAM_FALLBACK_DEAD_LETTER`` (mirror of the
+    ``_finalize_cancelled_turn`` failed-save disposition) — the notice is not
+    silently lost and the worker does not claim durable ownership of a save
+    that never landed.
+
+    For streams with no fallback state at save time this is a no-op: the save
+    runs unmodified and no registry is mutated.
+    """
+    _saved_generation = None
+    _saved_notice = None
+    if stream_id is not None:
+        with STREAMS_LOCK:
+            _fb = _STREAM_FALLBACK_NOTICES.get(stream_id)
+            _dl = _STREAM_FALLBACK_DEAD_LETTER.get(stream_id)
+            if _fb is not None:
+                _saved_generation = _current_notice_generation(stream_id)
+                _saved_notice = _clean_fallback_notice(_fb)
+            elif _dl is not None:
+                _saved_generation = int(
+                    (_dl or {}).get('generation') or _current_notice_generation(stream_id)
+                )
+                _saved_notice = _clean_fallback_notice(_dead_letter_notice(_dl))
+    try:
+        yield
+    except Exception:
+        if stream_id is not None and _saved_generation is not None:
+            _owner_session_id = str(getattr(session, 'session_id', '') or '') or None
+            _owner_profile = getattr(session, 'profile', None)
+            with STREAMS_LOCK:
+                _STREAM_WORKER_SAVED.pop(stream_id, None)
+                if _saved_notice is not None:
+                    _store_fallback_dead_letter_locked(
+                        stream_id,
+                        _saved_notice,
+                        generation=_saved_generation,
+                        owner_session_id=_owner_session_id,
+                        owner_profile=_owner_profile,
+                        terminal_status='failed',
+                    )
+        raise
+    else:
+        if stream_id is not None and _saved_generation is not None:
+            with STREAMS_LOCK:
+                _STREAM_WORKER_SAVED[stream_id] = int(_saved_generation)
+                _retire_fallback_dead_letter_after_persist_locked(
+                    stream_id, int(_saved_generation),
+                )
+
+
 def _stream_has_cancellation_state_locked(stream_id: str) -> bool:
     """Check whether a stream has ANY cancellation/settlement state.
 
@@ -1124,6 +1182,7 @@ def _retire_worker_cancelled_state_locked(stream_id: str) -> None:
     _dl_entry = _STREAM_FALLBACK_DEAD_LETTER.get(stream_id)
     _saved_gen = _STREAM_WORKER_SAVED.get(stream_id)
     _worker_durably_saved = _saved_gen is not None
+    _notice_retired = False
     if (
         _fb_entry is not None
         and _worker_durably_saved
@@ -1132,9 +1191,36 @@ def _retire_worker_cancelled_state_locked(stream_id: str) -> None:
         and stream_id not in _STREAM_CANCEL_CLAIMED
     ):
         _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
+        _notice_retired = True
     if _worker_durably_saved and _dead_letter_matches_generation(_dl_entry, int(_saved_gen)):
         _retire_fallback_dead_letter_after_persist_locked(stream_id, int(_saved_gen))
     _STREAM_WORKER_SAVED.pop(stream_id, None)
+
+    # Ordinary no-counterpart teardown: the worker durably saved the exact
+    # generation that is current, and no cancel/settlement counterpart ever
+    # registered.  Skip _complete_stream_settlement_participant_locked — that
+    # helper's no-participant branch inserts a {'worker'} tombstone into
+    # _STREAM_SETTLEMENT_COMPLETED, leaking one dict entry per normal fallback
+    # turn (gate-certifier finding: normal fallback settlement still leaks
+    # state).  When the notice was retired (either none existed at teardown
+    # entry or the saved-generation match popped it above), the generation
+    # counter tracked the worker's own saved value — pop it too.  When a
+    # newer unsaved generation was published mid-save (``_notice_retired`` is
+    # False because the generations mismatched), the generation counter now
+    # tracks the live notice's gen and must be left intact so the dead-letter
+    # / cancel-side settlement can still compare-retire against it.
+    _no_counterpart_pending = (
+        stream_id not in _STREAM_SETTLEMENT_PARTICIPANTS
+        and stream_id not in _STREAM_SETTLEMENT_COMPLETED
+        and stream_id not in _STREAM_CANCEL_CLAIMED
+        and stream_id not in _STREAM_SETTLEMENT_TERMINAL
+    )
+    if _no_counterpart_pending:
+        if _fb_entry is None or _notice_retired:
+            _STREAM_NOTICE_GENERATION.pop(stream_id, None)
+        _expire_dead_letter_if_due_locked(stream_id)
+        return
+
     _complete_stream_settlement_participant_locked(stream_id, 'worker')
     _expire_dead_letter_if_due_locked(stream_id)
     # If the worker did NOT durably save, leave the dead-letter entry in place:
@@ -11181,7 +11267,8 @@ def _run_agent_streaming(
                             _error_message['_fallbackNotice'] = _clean_fallback_notice(_pending_fallback_notices[-1])
                         s.messages.append(_error_message)
                         try:
-                            s.save()
+                            with _turn_final_save_commit(stream_id, s):
+                                s.save()
                         except Exception:
                             pass
                         _error_payload['session'] = redact_session_data(
@@ -11634,7 +11721,8 @@ def _run_agent_streaming(
                     put('cancel', _cancel_event_payload('Cancelled by user'))
                     return
                 with _stream_writeback_stage(_writeback_timings, "session_save"):
-                    s.save()
+                    with _turn_final_save_commit(stream_id, s):
+                        s.save()
                 if cancel_event.is_set():
                     _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
                     try:
@@ -12329,7 +12417,8 @@ def _run_agent_streaming(
                                         if isinstance(_dm, dict) and _dm.get('role') == 'assistant':
                                             _dm['_fallbackNotice'] = _clean_fallback_notice(_pending_fallback_notices[-1])
                                             break
-                                s.save()
+                                with _turn_final_save_commit(stream_id, s):
+                                    s.save()
                         logger.info('[webui] self-heal (except path): retry succeeded')
                         return  # skip error emission
                     except Exception as _retry_exc2:
@@ -12447,7 +12536,8 @@ def _run_agent_streaming(
                     _error_message['_fallbackNotice'] = _clean_fallback_notice(_pending_fallback_notices[-1])
                 s.messages.append(_error_message)
                 try:
-                    s.save()
+                    with _turn_final_save_commit(stream_id, s):
+                        s.save()
                 except Exception:
                     pass
                 if not ephemeral:
