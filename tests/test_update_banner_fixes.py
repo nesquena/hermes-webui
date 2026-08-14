@@ -2426,8 +2426,9 @@ function _showUpdateBanner() {{}}
     def test_check_updates_status_wraps_on_narrow_viewports(self):
         """PR #6859 review — mixed updates-available + tag suffix must wrap.
 
-        The production status (`WebUI: 1, Agent: 2 update(s) available · Latest
-        tag: v0.51.913`) is wider than a ~296–351 px phone content area. Pin
+        The production status (`WebUI: 1 update, Agent: 2 updates update(s)
+        available · Latest tag: v0.51.913`) is wider than a ~296–351 px phone
+        content area. Pin
         both the real checkUpdatesNow() string and the CSS wrap rules so a
         later refactor cannot restore nowrap overflow.
         """
