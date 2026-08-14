@@ -281,6 +281,19 @@ const liveAfterCurrentResult = getPendingSessionMessage(
   {{pending_user_message:prompt, pending_started_at:4}},
   [historical, historicalAnswer, currentWorkspaceTail, liveAssistant]
 );
+const liveBoundaryAttachments = [{{name:'live-boundary.txt', path:'live-boundary.txt', mime:'text/plain'}}];
+const liveBoundaryOldUser = {{role:'user', content:prompt, timestamp:100}};
+const liveBoundaryRow = {{role:'assistant', content:'working', _live:true, timestamp:110}};
+const liveBoundaryResult = getPendingSessionMessage(
+  {{pending_user_message:prompt, pending_started_at:101, pending_attachments:liveBoundaryAttachments}},
+  [liveBoundaryOldUser, liveBoundaryRow]
+);
+const liveBoundaryCurrentUser = {{role:'user', content:prompt, timestamp:101}};
+const liveBoundaryCurrentRow = {{role:'assistant', content:'working', _live:true, timestamp:110}};
+const liveBoundaryCurrentResult = getPendingSessionMessage(
+  {{pending_user_message:prompt, pending_started_at:101, pending_attachments:liveBoundaryAttachments}},
+  [liveBoundaryCurrentUser, liveBoundaryCurrentRow]
+);
 const differentTailResult = getPendingSessionMessage(
   {{pending_user_message:prompt, pending_started_at:4}},
   [historical, historicalAnswer, {{role:'user', content:'different prompt', _ts:3}}]
@@ -376,7 +389,11 @@ process.stdout.write(JSON.stringify({{
   exactCurrentTailDedupe: exactCurrentResult===null,
   exactCurrentTailAttachmentsCopied: Array.isArray(currentTail.attachments) && currentTail.attachments[0].name==='note.txt',
   workspaceCurrentTailDedupe: workspaceCurrentResult===null,
-  liveAfterCurrentTailDedupe: liveAfterCurrentResult===null,
+  liveAfterCurrentTailMaterializes: !!liveAfterCurrentResult && liveAfterCurrentResult._pending===true,
+  liveBoundaryMaterializes: !!liveBoundaryResult && liveBoundaryResult._pending===true && liveBoundaryResult.content===prompt && Array.isArray(liveBoundaryResult.attachments) && liveBoundaryResult.attachments[0].name==='live-boundary.txt',
+  liveBoundaryOldRowClean: !Array.isArray(liveBoundaryOldUser.attachments),
+  liveBoundaryExactCurrentDedupe: liveBoundaryCurrentResult===null,
+  liveBoundaryExactCurrentAttachmentsCopied: Array.isArray(liveBoundaryCurrentUser.attachments) && liveBoundaryCurrentUser.attachments[0].name==='live-boundary.txt',
   differentCurrentTailSurvives: !!differentTailResult && differentTailResult.content===prompt && differentTailResult._pending===true,
   compactionBoundaryDedupe: compactionTailResult===null,
   compactionBoundaryCurrentTail: compactionCurrentTail&&compactionCurrentTail.role==='user'&&compactionCurrentTail.content===prompt,
@@ -1027,7 +1044,11 @@ def test_get_pending_session_message_keeps_deferred_repeat_prompt_by_behavior():
     assert result["exactCurrentTailDedupe"] is True
     assert result["exactCurrentTailAttachmentsCopied"] is True
     assert result["workspaceCurrentTailDedupe"] is True
-    assert result["liveAfterCurrentTailDedupe"] is True
+    assert result["liveAfterCurrentTailMaterializes"] is True
+    assert result["liveBoundaryMaterializes"] is True
+    assert result["liveBoundaryOldRowClean"] is True
+    assert result["liveBoundaryExactCurrentDedupe"] is True
+    assert result["liveBoundaryExactCurrentAttachmentsCopied"] is True
     assert result["differentCurrentTailSurvives"] is True
     assert result["compactionBoundaryDedupe"] is True
     assert result["compactionBoundaryCurrentTail"] is True

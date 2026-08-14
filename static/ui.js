@@ -10685,7 +10685,10 @@ function _pendingCurrentTailUserMessage(messages,candidateStart,candidateTimesta
       crossedActivity=true;
       continue;
     }
-    if(msg._live) continue;
+    if(msg._live){
+      crossedActivity=true;
+      continue;
+    }
     return null;
   }
   return null;
