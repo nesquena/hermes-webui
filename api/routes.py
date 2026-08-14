@@ -9032,7 +9032,7 @@ def _webui_sidecar_lineage_stitch(session, *, max_hops: int = 20, load_session=N
     ``parent_session_id`` but must remain independent conversations.
     """
     segments = []
-    load_session = load_session or Session.load
+    load_session = load_session or getattr(Session, "load", None)
     cache = cache if cache is not None else {}
     current = session
     session_messages = list(getattr(session, "messages", []) or [])
@@ -9067,6 +9067,8 @@ def _webui_sidecar_lineage_stitch(session, *, max_hops: int = 20, load_session=N
             break
         if parent_id in seen or not is_safe_session_id(parent_id):
             return {"complete": False, "messages": _best_effort_messages(), "reason": "invalid_chain", "segments": segments}
+        if not callable(load_session):
+            return {"complete": False, "messages": _best_effort_messages(), "reason": "missing_loader", "segments": segments}
         if parent_id in cache:
             parent = cache[parent_id]
         else:
