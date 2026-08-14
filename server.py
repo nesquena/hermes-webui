@@ -331,6 +331,12 @@ class Handler(BaseHTTPRequestHandler):
         extra_frame_src = getattr(self, "_csp_extra_frame_src", None)
         self.send_header("Content-Security-Policy-Report-Only", self.csp_report_only_policy(extra_connect_src, extra_frame_src))
         self.send_header("Report-To", self._CSP_REPORT_TO)
+        if self.close_connection and not getattr(self, "_close_advertised", False):
+            # A reject-before-read leaves the body unread; the client must be
+            # TOLD the connection dies or a pooled client reuses it and breaks.
+            # BaseHTTPRequestHandler does not serialize the flag itself.
+            self.send_header("Connection", "close")
+            self._close_advertised = True
         super().end_headers()
 
     def log_message(self, fmt, *args): pass  # suppress default Apache-style log
