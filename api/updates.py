@@ -1387,7 +1387,7 @@ def check_for_updates(force=False, *, include_agent=True, channel=None):
             webui_future = executor.submit(_check_webui)
             agent_future = executor.submit(_check_agent) if include_agent else None
 
-            budget_start = time.time()
+            budget_start = time.monotonic()
             remaining = _UPDATE_CHECK_BUDGET_S
 
             # Wait for WebUI with the full remaining budget
@@ -1406,20 +1406,38 @@ def check_for_updates(force=False, *, include_agent=True, channel=None):
             if agent_future is not None:
                 # Give the second future only the remaining budget so the
                 # aggregate wait never exceeds _UPDATE_CHECK_BUDGET_S.
-                # (PR #6830, Greptile: per-future waits exceed aggregate)
-                elapsed = time.time() - budget_start
-                remaining = max(0.5, _UPDATE_CHECK_BUDGET_S - elapsed)
-                try:
-                    agent_info = agent_future.result(timeout=remaining)
-                except (FutureTimeoutError, Exception) as e:
+                # An exhausted budget must NOT grant a fresh floor wait —
+                # mark the future timed out without calling result().
+                # (PR #6830, maintainer review)
+                elapsed = time.monotonic() - budget_start
+                remaining = _UPDATE_CHECK_BUDGET_S - elapsed
+                if remaining <= 0 and not agent_future.done():
+                    # Budget exhausted and the agent check is still running —
+                    # mark it timed out without waiting. (PR #6830, maintainer
+                    # review: no fresh floor wait past the aggregate budget)
                     agent_future.cancel()
-                    logger.warning('Agent update check failed or timed out: %s', e)
+                    logger.warning('Agent update check timed out after %ss', _UPDATE_CHECK_BUDGET_S)
                     agent_info = {
                         'name': 'agent',
                         'behind': None,
-                        'error': f'check timed out after {_UPDATE_CHECK_BUDGET_S}s' if isinstance(e, FutureTimeoutError) else str(e),
+                        'error': f'check timed out after {_UPDATE_CHECK_BUDGET_S}s',
                         'stale_check': True,
                     }
+                else:
+                    # If the agent already finished (even after budget expiry)
+                    # result() returns immediately; otherwise wait the remaining
+                    # budget. Preserves partial successful results.
+                    try:
+                        agent_info = agent_future.result(timeout=remaining)
+                    except (FutureTimeoutError, Exception) as e:
+                        agent_future.cancel()
+                        logger.warning('Agent update check failed or timed out: %s', e)
+                        agent_info = {
+                            'name': 'agent',
+                            'behind': None,
+                            'error': f'check timed out after {_UPDATE_CHECK_BUDGET_S}s' if isinstance(e, FutureTimeoutError) else str(e),
+                            'stale_check': True,
+                        }
             else:
                 agent_info = _ignored_agent_update_info()
         finally:
