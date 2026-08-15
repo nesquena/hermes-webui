@@ -1,4 +1,5 @@
 import hashlib
+import io
 import json
 import os
 import stat
@@ -114,6 +115,8 @@ def test_offline_compactor_is_atomic_idempotent_and_reversible(tmp_path):
 
     assert result["status"] == "compacted"
     assert repaired["_sidecar_generation_v1"] == 8
+    sidecar_epoch = repaired["_sidecar_epoch_v1"]
+    assert len(sidecar_epoch) == 32
     assert repaired_text.index('"_sidecar_generation_v1"') < repaired_text.index(
         '"messages"'
     )
@@ -131,11 +134,14 @@ def test_offline_compactor_is_atomic_idempotent_and_reversible(tmp_path):
     assert manifest_payload["output_sha256"] == _sha256(sidecar)
     assert manifest_payload["source_generation"] == 7
     assert manifest_payload["output_generation"] == 8
+    assert manifest_payload["sidecar_epoch"] == sidecar_epoch
 
     restored = restore_manifest(manifest)
     assert restored["status"] == "restored"
     restored_payload = json.loads(sidecar.read_text(encoding="utf-8"))
     assert restored_payload.pop("_sidecar_generation_v1") == 9
+    assert restored_payload.pop("_sidecar_epoch_v1") == sidecar_epoch
+    assert restored["sidecar_epoch"] == sidecar_epoch
     expected_payload = dict(payload)
     expected_payload.pop("_sidecar_generation_v1")
     assert restored_payload == expected_payload
@@ -543,13 +549,18 @@ def test_offline_compactor_serializes_runtime_writer_through_publish(
     assert writer is not None
     writer.title = "newer writer"
     writer_done = threading.Event()
+    writer_errors = []
     writer_thread = None
     writer_finished_before_publish = []
     real_replace = os.replace
 
     def _save_newer():
-        writer.save(skip_index=True)
-        writer_done.set()
+        try:
+            writer.save(skip_index=True)
+        except RuntimeError as exc:
+            writer_errors.append(str(exc))
+        finally:
+            writer_done.set()
 
     def _interleave_writer(source, destination):
         nonlocal writer_thread
@@ -572,9 +583,13 @@ def test_offline_compactor_serializes_runtime_writer_through_publish(
 
     assert writer_finished_before_publish == [False]
     assert writer_done.is_set()
+    assert writer_errors == [
+        "stale sidecar revision for session 'race'; reload before saving"
+    ]
     persisted = json.loads(sidecar.read_text(encoding="utf-8"))
-    assert persisted["title"] == "newer writer"
-    assert persisted["_sidecar_generation_v1"] == 5
+    assert persisted["title"] == "before"
+    assert persisted["messages"] == [_row()]
+    assert persisted["_sidecar_generation_v1"] == 4
 
 
 def test_runtime_save_preserves_and_advances_sidecar_generation(tmp_path, monkeypatch):
@@ -601,6 +616,135 @@ def test_runtime_save_preserves_and_advances_sidecar_generation(tmp_path, monkey
 
     persisted = json.loads(sidecar.read_text(encoding="utf-8"))
     assert persisted["_sidecar_generation_v1"] == 8
+
+
+def test_runtime_save_rejects_owner_loaded_before_offline_compaction(
+    tmp_path,
+    monkeypatch,
+):
+    from api import models
+    from scripts.compact_session_replays import compact_sidecar
+
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    sidecar = tmp_path / "stale-owner.json"
+    duplicate = _row()
+    sidecar.write_text(
+        json.dumps(
+            {
+                "session_id": "stale-owner",
+                "messages": [duplicate, duplicate],
+                "context_messages": [],
+                "_sidecar_generation_v1": 3,
+            }
+        ),
+        encoding="utf-8",
+    )
+    stale_owner = models.Session.load("stale-owner")
+    assert stale_owner is not None
+
+    compact_sidecar(sidecar)
+    fresh_owner = models.Session.load("stale-owner")
+    assert fresh_owner is not None
+    new_turn = {"role": "user", "content": "new durable turn"}
+    fresh_owner.messages.append(new_turn)
+    fresh_owner.save(skip_index=True)
+
+    stale_owner.title = "must not overwrite"
+    with pytest.raises(RuntimeError, match="stale sidecar revision"):
+        stale_owner.save(skip_index=True)
+
+    persisted = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert persisted["messages"] == [duplicate, new_turn]
+    assert persisted["_sidecar_generation_v1"] == 5
+
+
+def test_runtime_save_rejects_delete_recreate_epoch_aba(tmp_path, monkeypatch):
+    from api import models
+
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    original = models.Session(session_id="epoch-aba")
+    original.messages = [{"role": "user", "content": "original"}]
+    original.save(skip_index=True)
+    stale_owner = models.Session.load("epoch-aba")
+    assert stale_owner is not None
+    original_epoch = json.loads(original.path.read_text(encoding="utf-8"))[
+        "_sidecar_epoch_v1"
+    ]
+
+    original.path.unlink()
+    recreated = models.Session(session_id="epoch-aba")
+    recreated.messages = [{"role": "user", "content": "recreated"}]
+    recreated.save(skip_index=True)
+    recreated_payload = json.loads(recreated.path.read_text(encoding="utf-8"))
+    assert recreated_payload["_sidecar_epoch_v1"] != original_epoch
+
+    stale_owner.title = "must not cross epoch"
+    with pytest.raises(RuntimeError, match="stale sidecar revision"):
+        stale_owner.save(skip_index=True)
+
+    assert json.loads(recreated.path.read_text(encoding="utf-8")) == recreated_payload
+
+
+def test_non_target_string_is_copied_in_bounded_chunks():
+    from scripts.compact_session_replays import StreamReader
+
+    value = "x" * 200_000
+    writes = []
+
+    class RecordingWriter(io.StringIO):
+        def write(self, text):
+            writes.append(len(text))
+            return super().write(text)
+
+    output = RecordingWriter()
+    StreamReader(io.StringIO(json.dumps(value))).copy_raw_value(output)
+
+    assert output.getvalue() == json.dumps(value)
+    assert max(writes) <= 65_536
+
+
+def test_non_target_32_mib_string_stays_under_bounded_rss(tmp_path):
+    sidecar = tmp_path / "large-non-target.json"
+    script = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "compact_session_replays.py"
+    )
+    chunk = "x" * (1 << 20)
+    with sidecar.open("w", encoding="utf-8") as handle:
+        handle.write('{"session_id":"large-non-target","metadata":"')
+        for _ in range(32):
+            handle.write(chunk)
+        handle.write(
+            '","messages":['
+            + json.dumps(_row(), separators=(",", ":"))
+            + ','
+            + json.dumps(_row(), separators=(",", ":"))
+            + '],"context_messages":[]}'
+        )
+
+    completed = _run_with_isolated_rss(
+        script,
+        sidecar,
+        "--dry-run",
+        timeout=120,
+    )
+
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    result = json.loads(completed.stdout)
+    assert result["status"] == "would_compact"
+    assert result["max_rss_kib"] < 192 * 1024
+
+
+def test_target_scalar_split_at_reader_boundary_is_not_truncated():
+    from scripts.compact_session_replays import StreamReader
+
+    reader = StreamReader(io.StringIO("12345]"), chunk_chars=1)
+
+    assert reader.decode_value() == 12345
+    assert reader.take() == "]"
 
 
 def test_large_valid_session_can_save_after_no_change_analysis(tmp_path, monkeypatch):
@@ -897,6 +1041,40 @@ def test_large_index_rebuild_scans_metadata_beyond_prefix_and_arrays(
     assert by_id["messages-first"]["message_count"] == 1
     assert by_id["legacy-scenes-first"]["message_count"] == 2
     assert by_id["messages-first"]["title"] == "Messages first"
+
+
+def test_large_index_rebuild_rejects_malformed_and_foreign_session_ids(
+    tmp_path,
+    monkeypatch,
+):
+    from api import models
+
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", type(models.SESSIONS)())
+    monkeypatch.setattr(models, "_INLINE_REPLAY_REPAIR_MAX_BYTES", 1)
+    malformed = tmp_path / "malformed.json"
+    malformed.write_text(
+        '{"session_id":"malformed","junk":not_json,"messages":[]}',
+        encoding="utf-8",
+    )
+    foreign = tmp_path / "filename-authority.json"
+    foreign.write_text(
+        json.dumps(
+            {
+                "session_id": "foreign-id",
+                "title": "must not be indexed",
+                "messages": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    models._write_session_index(updates=None)
+
+    index = json.loads((tmp_path / "_index.json").read_text(encoding="utf-8"))
+    assert index == []
+    assert models.Session.load("foreign-id") is None
 
 
 def test_actual_over_128_mib_index_load_streams_messages_first(tmp_path):

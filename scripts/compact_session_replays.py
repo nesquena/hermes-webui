@@ -18,6 +18,7 @@ import math
 import os
 import pickle
 import resource
+import secrets
 import shutil
 import sqlite3
 import stat as stat_module
@@ -170,6 +171,7 @@ def _durable_empty_assistant_replay_key(message) -> tuple | None:
 
 _CHUNK_CHARS = 1 << 20
 _MAX_ITEM_CHARS = 64 << 20
+_MAX_CAPTURED_STRING_CHARS = 65_536
 _TARGET_ARRAYS = frozenset({'messages', 'context_messages'})
 
 
@@ -259,6 +261,18 @@ class StreamReader:
                 if self._compact_and_fill():
                     continue
                 raise StreamJSONError(f'invalid JSON value: {exc}') from exc
+            if (
+                end == len(self.buffer)
+                and not self.eof
+                and type(value) in (int, float)
+            ):
+                retained = len(self.buffer) - self.pos
+                if retained > _MAX_ITEM_CHARS:
+                    raise StreamJSONError(
+                        f'one JSON item exceeds {_MAX_ITEM_CHARS} characters'
+                    )
+                if self._compact_and_fill():
+                    continue
             self.pos = end
             return value
 
@@ -271,7 +285,7 @@ class StreamReader:
         if not first:
             raise StreamJSONError('invalid JSON value: missing value')
         if first == '"':
-            self._copy_string(output)
+            self._copy_string(output, capture=False)
             return
         if first == '{':
             self._copy_object(output, _depth)
@@ -289,31 +303,70 @@ class StreamReader:
                 self._flush(output, pending)
         self._flush(output, pending)
 
-    def _copy_string(self, output: TextIO | None) -> str:
-        pending = [self.take()]
-        escaped = False
-        while True:
-            char = self.take()
+    def _copy_string(
+        self,
+        output: TextIO | None,
+        *,
+        capture: bool = True,
+    ) -> str | None:
+        opening = self.take()
+        if opening != '"':
+            raise StreamJSONError('invalid JSON string: expected opening quote')
+        pending = [opening]
+        captured = [opening] if capture else None
+        total_chars = 1
+
+        def append(char: str) -> None:
+            nonlocal total_chars
             pending.append(char)
-            if len(pending) > _MAX_ITEM_CHARS:
+            total_chars += 1
+            if total_chars > _MAX_ITEM_CHARS:
                 raise StreamJSONError(
                     f'invalid JSON string: exceeds {_MAX_ITEM_CHARS} characters'
                 )
-            if escaped:
-                escaped = False
-            elif char == '\\':
-                escaped = True
-            elif char == '"':
+            if captured is not None:
+                captured.append(char)
+                if len(captured) > _MAX_CAPTURED_STRING_CHARS:
+                    raise StreamJSONError(
+                        'captured JSON string exceeds the bounded key limit'
+                    )
+            if len(pending) >= 65_536:
+                self._flush(output, pending)
+
+        while True:
+            char = self.take()
+            append(char)
+            if char == '"':
                 break
-        text = ''.join(pending)
+            if char == '\\':
+                escape = self.take()
+                append(escape)
+                if escape == 'u':
+                    for _ in range(4):
+                        digit = self.take()
+                        append(digit)
+                        if digit not in '0123456789abcdefABCDEF':
+                            raise StreamJSONError(
+                                'invalid JSON string: malformed unicode escape'
+                            )
+                elif escape not in '"\\/bfnrt':
+                    raise StreamJSONError(
+                        f'invalid JSON string escape: {escape!r}'
+                    )
+            elif ord(char) < 0x20:
+                raise StreamJSONError(
+                    'invalid JSON string: unescaped control character'
+                )
+        self._flush(output, pending)
+        if captured is None:
+            return None
+        text = ''.join(captured)
         try:
             value = json.loads(text)
         except json.JSONDecodeError as exc:
             raise StreamJSONError(f'invalid JSON string: {exc}') from exc
         if not isinstance(value, str):
             raise StreamJSONError('invalid JSON string')
-        if output is not None:
-            output.write(text)
         return value
 
     def _copy_object(self, output: TextIO | None, depth: int) -> None:
@@ -329,7 +382,7 @@ class StreamReader:
         while True:
             if self.peek() != '"':
                 raise StreamJSONError('invalid JSON object key: expected string')
-            self._copy_string(output)
+            self._copy_string(output, capture=False)
             self._copy_ws(output)
             if self.take() != ':':
                 raise StreamJSONError("invalid JSON object: expected ':'")
@@ -413,8 +466,22 @@ def _valid_generation(value) -> int:
     return value
 
 
-def _copy_with_generation(source: TextIO, target: TextIO, generation: int) -> None:
+def _valid_epoch(value) -> str:
+    if type(value) is not str or len(value) != 32 or any(
+        char not in '0123456789abcdef' for char in value
+    ):
+        raise StreamJSONError('_sidecar_epoch_v1 must be 32 lowercase hex characters')
+    return value
+
+
+def _copy_with_generation(
+    source: TextIO,
+    target: TextIO,
+    generation: int,
+    epoch: str,
+) -> None:
     generation = _valid_generation(generation)
+    epoch = _valid_epoch(epoch)
     reader = StreamReader(source)
     reader.expect('{')
     target.write('{')
@@ -422,17 +489,20 @@ def _copy_with_generation(source: TextIO, target: TextIO, generation: int) -> No
     if reader.peek() == '}':
         reader.take()
         target.write(
+            f'"_sidecar_epoch_v1":{json.dumps(epoch)},'
             f'"_sidecar_generation_v1":{generation}' + '}'
         )
         return
     saw_generation = False
+    saw_epoch = False
     while True:
-        key_buffer = io.StringIO()
-        reader.copy_raw_value(key_buffer)
-        key_text = key_buffer.getvalue()
-        key = json.loads(key_text)
-        if not isinstance(key, str):
+        reader.skip_ws()
+        if reader.peek() != '"':
             raise StreamJSONError('sidecar object key must be a string')
+        key = reader._copy_string(None)
+        if type(key) is not str:
+            raise StreamJSONError('sidecar object key must be a string')
+        key_text = json.dumps(key, ensure_ascii=False)
         target.write(key_text)
         reader.expect(':')
         target.write(':')
@@ -440,6 +510,10 @@ def _copy_with_generation(source: TextIO, target: TextIO, generation: int) -> No
             reader.copy_raw_value(None)
             target.write(str(generation))
             saw_generation = True
+        elif key == '_sidecar_epoch_v1':
+            reader.copy_raw_value(None)
+            target.write(json.dumps(epoch))
+            saw_epoch = True
         else:
             reader.copy_raw_value(target)
         reader.skip_ws()
@@ -447,6 +521,8 @@ def _copy_with_generation(source: TextIO, target: TextIO, generation: int) -> No
         if delimiter == '}':
             if not saw_generation:
                 target.write(f',"_sidecar_generation_v1":{generation}')
+            if not saw_epoch:
+                target.write(f',"_sidecar_epoch_v1":{json.dumps(epoch)}')
             target.write('}')
             return
         if delimiter != ',':
@@ -573,10 +649,13 @@ def transform_sidecar(
     *,
     known: dict[str, ArrayStats] | None = None,
     write_generation: int | None = None,
-    metadata: dict[str, int] | None = None,
+    write_epoch: str | None = None,
+    metadata: dict[str, object] | None = None,
 ) -> dict[str, ArrayStats]:
     if write_generation is not None:
         write_generation = _valid_generation(write_generation)
+    if write_epoch is not None:
+        write_epoch = _valid_epoch(write_epoch)
     stats: dict[str, ArrayStats] = {}
     with source.open('r', encoding='utf-8') as handle:
         reader = StreamReader(handle)
@@ -589,28 +668,43 @@ def transform_sidecar(
             reader.take()
             if metadata is not None:
                 metadata['generation'] = 0
+                metadata['epoch'] = None
             if output is not None:
-                if write_generation is not None:
-                    output.write(
-                        f'"_sidecar_generation_v1":{write_generation}'
+                injected = []
+                if write_epoch is not None:
+                    injected.append(
+                        f'"_sidecar_epoch_v1":{json.dumps(write_epoch)}'
                     )
+                if write_generation is not None:
+                    injected.append(f'"_sidecar_generation_v1":{write_generation}')
+                output.write(','.join(injected))
                 output.write('}')
             return stats
         saw_generation = False
-        if output is not None and write_generation is not None:
-            output.write(
-                f'"_sidecar_generation_v1":{write_generation}'
-            )
-            first_field = False
+        saw_epoch = False
+        if output is not None:
+            injected = []
+            if write_epoch is not None:
+                injected.append(f'"_sidecar_epoch_v1":{json.dumps(write_epoch)}')
+            if write_generation is not None:
+                injected.append(f'"_sidecar_generation_v1":{write_generation}')
+            if injected:
+                output.write(','.join(injected))
+                first_field = False
         while True:
-            key = reader.decode_value()
+            reader.skip_ws()
+            if reader.peek() != '"':
+                raise StreamJSONError('top-level session keys must be strings')
+            key = reader._copy_string(None)
             if type(key) is not str:
                 raise StreamJSONError('top-level session keys must be strings')
             reader.expect(':')
             emit_field = not (
                 output is not None
-                and write_generation is not None
-                and key == '_sidecar_generation_v1'
+                and (
+                    (write_generation is not None and key == '_sidecar_generation_v1')
+                    or (write_epoch is not None and key == '_sidecar_epoch_v1')
+                )
             )
             if output is not None and emit_field:
                 if not first_field:
@@ -647,6 +741,13 @@ def transform_sidecar(
                         )
                     )
                 saw_generation = True
+            elif key == '_sidecar_epoch_v1':
+                source_epoch = _valid_epoch(reader.decode_value())
+                if metadata is not None:
+                    metadata['epoch'] = source_epoch
+                if output is not None and emit_field:
+                    output.write(json.dumps(write_epoch or source_epoch))
+                saw_epoch = True
             else:
                 reader.copy_raw_value(output)
             if output is not None and emit_field:
@@ -664,6 +765,8 @@ def transform_sidecar(
             raise StreamJSONError('trailing data after session object')
         if metadata is not None and not saw_generation:
             metadata['generation'] = 0
+        if metadata is not None and not saw_epoch:
+            metadata['epoch'] = None
         if output is not None:
             output.write('}')
     return stats
@@ -770,7 +873,11 @@ def _sidecar_lock_path(path: Path) -> Path:
 def _validate_sidecar_identity(path: Path) -> str:
     try:
         metadata = _models._read_bounded_session_metadata(path)
-    except (OSError, UnicodeError, ValueError) as exc:
+    except ValueError as exc:
+        raise StreamJSONError(
+            f'invalid JSON while validating sidecar session_id: {exc}'
+        ) from exc
+    except (OSError, UnicodeError) as exc:
         raise StreamJSONError(f'cannot validate sidecar session_id: {path}') from exc
     session_id = metadata.get('session_id')
     if type(session_id) is str and len(session_id) > 150:
@@ -800,9 +907,15 @@ def compact_sidecar(path: Path, *, dry_run: bool = False) -> dict:
         source_mode = stat_module.S_IMODE(path.stat().st_mode)
         source_signature = _signature(path)
         source_sha256 = _sha256(path)
-        source_metadata: dict[str, int] = {}
+        source_metadata: dict[str, object] = {}
         analysis = transform_sidecar(path, metadata=source_metadata)
-        source_generation = source_metadata['generation']
+        source_generation = _valid_generation(source_metadata['generation'])
+        source_epoch = source_metadata['epoch']
+        output_epoch = (
+            _valid_epoch(source_epoch)
+            if source_epoch is not None
+            else secrets.token_hex(16)
+        )
         output_generation = source_generation + 1
         changed = any(value.changed for value in analysis.values())
         result = {
@@ -835,7 +948,9 @@ def compact_sidecar(path: Path, *, dry_run: bool = False) -> dict:
                 raise StreamJSONError('source changed while the backup was copied')
             _fsync_dir(path.parent)
 
-        temp = path.with_name(f'.{path.name}.replay-v10.tmp.{os.getpid()}')
+        temp = path.with_name(
+            f'.{path.name}.replay-v10.tmp.{os.getpid()}.{secrets.token_hex(8)}'
+        )
         manifest = path.with_name(
             f'_replay-v10.{path.name}.{source_sha256[:16]}.manifest.json'
         )
@@ -850,10 +965,11 @@ def compact_sidecar(path: Path, *, dry_run: bool = False) -> dict:
                     output,
                     known=analysis,
                     write_generation=output_generation,
+                    write_epoch=output_epoch,
                 )
                 output.flush()
                 os.fsync(output.fileno())
-            verification_metadata: dict[str, int] = {}
+            verification_metadata: dict[str, object] = {}
             verification = transform_sidecar(temp, metadata=verification_metadata)
             if any(item.changed for item in verification.values()):
                 raise StreamJSONError('written sidecar is not replay-idempotent')
@@ -865,6 +981,8 @@ def compact_sidecar(path: Path, *, dry_run: bool = False) -> dict:
                 raise StreamJSONError('written sidecar counts failed verification')
             if verification_metadata['generation'] != output_generation:
                 raise StreamJSONError('written sidecar generation failed verification')
+            if verification_metadata['epoch'] != output_epoch:
+                raise StreamJSONError('written sidecar epoch failed verification')
             output_sha256 = _sha256(temp)
             if _signature(path) != source_signature or _sha256(path) != source_sha256:
                 raise StreamJSONError('source generation changed during offline repair')
@@ -876,9 +994,12 @@ def compact_sidecar(path: Path, *, dry_run: bool = False) -> dict:
                 'output_sha256': output_sha256,
                 'source_generation': source_generation,
                 'output_generation': output_generation,
+                'sidecar_epoch': output_epoch,
                 'arrays': result['arrays'],
             }
-            manifest_tmp = manifest.with_name(f'.{manifest.name}.tmp.{os.getpid()}')
+            manifest_tmp = manifest.with_name(
+                f'.{manifest.name}.tmp.{os.getpid()}.{secrets.token_hex(8)}'
+            )
             with _open_exclusive_private(manifest_tmp, 'w') as handle:
                 os.fchmod(handle.fileno(), source_mode)
                 handle.write(
@@ -934,8 +1055,15 @@ def restore_manifest(manifest: Path) -> dict:
         current_generation = _valid_generation(
             expected_generation if expected_generation is not None else 0
         )
+        restore_epoch = (
+            _valid_epoch(payload['sidecar_epoch'])
+            if payload.get('sidecar_epoch') is not None
+            else secrets.token_hex(16)
+        )
         restore_generation = current_generation + 1
-        temp = source.with_name(f'.{source.name}.replay-v10.restore.{os.getpid()}')
+        temp = source.with_name(
+            f'.{source.name}.replay-v10.restore.{os.getpid()}.{secrets.token_hex(8)}'
+        )
         try:
             with _open_regular_binary_nofollow(backup, label='backup') as backup_raw:
                 if _sha256_open_file(backup_raw) != payload['source_sha256']:
@@ -945,15 +1073,22 @@ def restore_manifest(manifest: Path) -> dict:
                 try:
                     with _open_exclusive_private(temp, 'w') as output:
                         os.fchmod(output.fileno(), source_mode)
-                        _copy_with_generation(backup_text, output, restore_generation)
+                        _copy_with_generation(
+                            backup_text,
+                            output,
+                            restore_generation,
+                            restore_epoch,
+                        )
                         output.flush()
                         os.fsync(output.fileno())
                 finally:
                     backup_text.detach()
-            restored_metadata: dict[str, int] = {}
+            restored_metadata: dict[str, object] = {}
             transform_sidecar(temp, metadata=restored_metadata)
             if restored_metadata['generation'] != restore_generation:
                 raise StreamJSONError('restored sidecar generation failed verification')
+            if restored_metadata['epoch'] != restore_epoch:
+                raise StreamJSONError('restored sidecar epoch failed verification')
             restored_sha256 = _sha256(temp)
             if (
                 _signature(source) != source_signature
@@ -970,6 +1105,7 @@ def restore_manifest(manifest: Path) -> dict:
         'source_sha256': payload['source_sha256'],
         'output_sha256': restored_sha256,
         'output_generation': restore_generation,
+        'sidecar_epoch': restore_epoch,
     }
 
 

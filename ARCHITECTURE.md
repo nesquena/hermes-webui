@@ -242,19 +242,25 @@ actually needs that repair is marked `_replay_repair_deferred` and blocked from
 save. A large valid projection remains writable, and full session-index rebuilds
 use a bounded streaming top-level metadata scanner that skips transcript and
 scene bodies, accepts metadata before or after those arrays, and refuses files
-without a valid persisted session ID rather than constructing a default ID.
+without a valid persisted session ID matching the sidecar filename rather than
+constructing a default or phantom ID. Skipped values are still fully checked
+against JSON grammar.
 
 `Session.save()` and the tool share an exclusive per-session sidecar lock.
-Every normal save, compact, and restore also advances
-`_sidecar_generation_v1` from the durable value observed under that lock, so a
-normal save interleaved with publication is serialized and receives the next
-generation instead of being silently overwritten. This generation is ordering
-evidence, not the stale-object CAS supplied by PR #7036: a `Session` object kept
-alive across maintenance could still republish its old transcript afterward.
-The command therefore remains strictly offline: always drain and stop every
-WebUI process before running it, then restart from fresh durable state after
-maintenance, because direct delete/recovery paths and older or non-WebUI writers
-may not acquire this maintenance lock:
+Every normal save, compact, and restore advances `_sidecar_generation_v1` from
+the durable value observed under that lock. New sidecars receive a durable
+`_sidecar_epoch_v1`, and the first mutating compaction bootstraps one for a
+legacy sidecar; restore retains that epoch. A loaded mutable `Session` records
+epoch, generation, and exact content digest; save compares that complete
+revision under the lock and fails stale instead of republishing history loaded
+before maintenance. The epoch changes on delete/recreate, preventing
+generation-counter ABA.
+
+The command remains strictly offline: always drain and stop every WebUI process
+before running it, then restart from fresh durable state after maintenance,
+because older, direct, or non-WebUI writers may not acquire this maintenance
+lock. Even `--dry-run` acquires the cooperative lock and may create its private
+`.sidecar-locks/<sid>.lock` metadata:
 
 ```bash
 python scripts/compact_session_replays.py --dry-run ~/.hermes/webui/sessions/<session-id>.json
@@ -265,8 +271,10 @@ The maintenance command is POSIX/WSL-only; on Windows, run it inside WSL rather
 than invoking it from native Python.
 
 The tool performs separate analysis and write passes, validates every copied
-JSON value with RFC 8259's exact whitespace set, limits one decoded JSON item
-to 64 MiB, and transforms only top-level `messages` and `context_messages`.
+JSON value with RFC 8259's exact whitespace set, incrementally validates and
+copies non-target strings with fixed-size buffers, limits one decoded target
+message to 64 MiB, and transforms only top-level `messages` and
+`context_messages`.
 Exact replay membership is tracked
 in a temporary SQLite
 index with a bounded page cache, so RAM does not grow with the number of unique

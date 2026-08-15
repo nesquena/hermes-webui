@@ -1192,11 +1192,11 @@ _BOUNDED_SESSION_METADATA_FIELDS = frozenset((
     *_SESSION_METADATA_FIELDS,
     'message_count',
     'anchor_scene_index',
+    '_sidecar_epoch_v1',
     '_sidecar_generation_v1',
 ))
 _BOUNDED_METADATA_VALUE_CHARS = 65_536
-_JSON_STRING_SPECIAL_RE = re.compile(r'["\\]')
-_JSON_CONTAINER_SPECIAL_RE = re.compile(r'["{}\[\]]')
+_JSON_STRING_SPECIAL_RE = re.compile(r'["\\\x00-\x1f]')
 _JSON_SCALAR_END_RE = re.compile(r'[ \t\r\n,}\]]')
 
 
@@ -1209,6 +1209,7 @@ class _StreamingTopLevelJSONReader:
         self.buffer = ''
         self.pos = 0
         self.eof = False
+        self._capture = None
 
     def _fill(self):
         if self.pos:
@@ -1237,11 +1238,16 @@ class _StreamingTopLevelJSONReader:
         if not char:
             raise ValueError('unexpected end of session JSON')
         self.pos += 1
+        if self._capture is not None:
+            self._capture(char)
         return char
 
     def skip_ws(self):
         while self.peek() and self.peek() in ' \t\r\n':
-            self.pos += 1
+            if self._capture is None:
+                self.pos += 1
+            else:
+                self.take()
 
     def expect(self, expected):
         self.skip_ws()
@@ -1250,6 +1256,15 @@ class _StreamingTopLevelJSONReader:
             raise ValueError(f'expected {expected!r}, got {actual!r}')
 
     def _skip_string_body(self):
+        if self._capture is not None:
+            while True:
+                char = self.take()
+                if char == '"':
+                    return
+                if char == '\\':
+                    self._consume_string_escape()
+                elif ord(char) < 0x20:
+                    raise ValueError('unescaped control character in session JSON string')
         while True:
             if not self.ensure():
                 raise ValueError('unexpected end of session JSON string')
@@ -1260,37 +1275,96 @@ class _StreamingTopLevelJSONReader:
             self.pos = match.end()
             if match.group() == '"':
                 return
-            if not self.ensure():
-                raise ValueError('unexpected end of escaped session JSON string')
-            self.pos += 1
+            if match.group() == '\\':
+                self._consume_string_escape()
+            else:
+                raise ValueError('unescaped control character in session JSON string')
 
-    def _skip_container_body(self, first):
-        closers = [']' if first == '[' else '}']
-        while closers:
-            if not self.ensure():
-                raise ValueError('unexpected end of session JSON container')
-            match = _JSON_CONTAINER_SPECIAL_RE.search(self.buffer, self.pos)
-            if match is None:
-                self.pos = len(self.buffer)
-                continue
-            char = match.group()
-            self.pos = match.end()
-            if char == '"':
+    def _consume_string_escape(self):
+        escape = self.take()
+        if escape == 'u':
+            for _ in range(4):
+                digit = self.take()
+                if digit not in '0123456789abcdefABCDEF':
+                    raise ValueError('malformed unicode escape in session JSON string')
+        elif escape not in '"\\/bfnrt':
+            raise ValueError(f'invalid session JSON string escape: {escape!r}')
+
+    def _skip_container_body(self, first, depth):
+        if depth >= 512:
+            raise ValueError('session JSON nesting exceeds 512 levels')
+        closing = ']' if first == '[' else '}'
+        self.skip_ws()
+        if self.peek() == closing:
+            self.take()
+            return
+        while True:
+            if first == '{':
+                if self.take() != '"':
+                    raise ValueError('session JSON object key must be a string')
                 self._skip_string_body()
-            elif char in '[{':
-                if len(closers) >= 512:
-                    raise ValueError('session JSON nesting exceeds 512 levels')
-                closers.append(']' if char == '[' else '}')
-            elif char != closers.pop():
-                raise ValueError('mismatched session JSON container')
+                self.expect(':')
+            self._consume_value(depth + 1)
+            self.skip_ws()
+            delimiter = self.take()
+            if delimiter == closing:
+                return
+            if delimiter != ',':
+                raise ValueError(
+                    f'expected session JSON container delimiter, got {delimiter!r}'
+                )
+            self.skip_ws()
 
-    def _skip_scalar_body(self):
+    def _skip_scalar_body(self, first):
+        token = [first]
+        if self._capture is not None:
+            while True:
+                char = self.peek()
+                if not char or char in ' \t\r\n,}]':
+                    break
+                token.append(self.take())
+                if len(token) > _BOUNDED_METADATA_VALUE_CHARS:
+                    raise ValueError('session JSON scalar exceeds bounded limit')
+            raw = ''.join(token)
+            try:
+                value = json.loads(
+                    raw,
+                    parse_constant=_reject_bounded_metadata_constant,
+                )
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise ValueError(f'invalid session JSON scalar: {exc}') from exc
+            if isinstance(value, (dict, list, str)):
+                raise ValueError('invalid session JSON scalar')
+            return
         while self.ensure():
             match = _JSON_SCALAR_END_RE.search(self.buffer, self.pos)
             if match is not None:
+                token.append(self.buffer[self.pos:match.start()])
                 self.pos = match.start()
-                return
+                break
+            token.append(self.buffer[self.pos:])
+            if sum(map(len, token)) > _BOUNDED_METADATA_VALUE_CHARS:
+                raise ValueError('session JSON scalar exceeds bounded limit')
             self.pos = len(self.buffer)
+        raw = ''.join(token)
+        try:
+            value = json.loads(raw, parse_constant=_reject_bounded_metadata_constant)
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise ValueError(f'invalid session JSON scalar: {exc}') from exc
+        if isinstance(value, (dict, list, str)):
+            raise ValueError('invalid session JSON scalar')
+
+    def _consume_value(self, depth=0):
+        self.skip_ws()
+        first = self.take()
+        if first in ',}]':
+            raise ValueError('missing JSON value')
+        if first == '"':
+            self._skip_string_body()
+        elif first in '[{':
+            self._skip_container_body(first, depth)
+        else:
+            self._skip_scalar_body(first)
 
     def consume_value(self, max_capture_chars=0):
         """Consume one JSON-shaped value and optionally retain a bounded copy."""
@@ -1298,6 +1372,7 @@ class _StreamingTopLevelJSONReader:
         captured = []
         capture_size = 0
         truncated = False
+        previous_capture = self._capture
 
         def capture(char):
             nonlocal capture_size, truncated
@@ -1307,63 +1382,15 @@ class _StreamingTopLevelJSONReader:
             if capture_size > max_capture_chars:
                 captured.clear()
                 truncated = True
+                self._capture = None
                 return
             captured.append(char)
-
-        first = self.take()
-        if first in ',}]':
-            raise ValueError('missing JSON value')
-        if max_capture_chars <= 0:
-            if first == '"':
-                self._skip_string_body()
-            elif first in '[{':
-                self._skip_container_body(first)
-            else:
-                self._skip_scalar_body()
-            return None
-        capture(first)
-        if first == '"':
-            escaped = False
-            while True:
-                char = self.take()
-                capture(char)
-                if escaped:
-                    escaped = False
-                elif char == '\\':
-                    escaped = True
-                elif char == '"':
-                    break
-        elif first in '[{':
-            closers = [']' if first == '[' else '}']
-            in_string = False
-            escaped = False
-            while closers:
-                char = self.take()
-                capture(char)
-                if in_string:
-                    if escaped:
-                        escaped = False
-                    elif char == '\\':
-                        escaped = True
-                    elif char == '"':
-                        in_string = False
-                    continue
-                if char == '"':
-                    in_string = True
-                elif char in '[{':
-                    if len(closers) >= 512:
-                        raise ValueError('session JSON nesting exceeds 512 levels')
-                    closers.append(']' if char == '[' else '}')
-                elif char in ']}':
-                    if char != closers.pop():
-                        raise ValueError('mismatched session JSON container')
-        else:
-            while True:
-                char = self.peek()
-                if not char or char in ' \t\r\n,}]':
-                    break
-                capture(self.take())
-        return None if truncated else ''.join(captured)
+        try:
+            self._capture = capture if max_capture_chars > 0 else None
+            self._consume_value()
+            return None if truncated or max_capture_chars <= 0 else ''.join(captured)
+        finally:
+            self._capture = previous_capture
 
     def consume_array_count(self):
         """Consume one top-level array and count items without retaining them."""
@@ -1440,6 +1467,38 @@ def _read_bounded_session_metadata(path):
         if reader.peek():
             raise ValueError('trailing data after session object')
     return data
+
+
+def _validated_sidecar_epoch(value):
+    if value is None:
+        return None
+    if type(value) is not str or re.fullmatch(r'[0-9a-f]{32}', value) is None:
+        raise RuntimeError(f'Invalid sidecar epoch: {value!r}')
+    return value
+
+
+def _sidecar_content_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open('rb') as handle:
+        for chunk in iter(lambda: handle.read(4 << 20), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _read_sidecar_revision(path: Path):
+    if not path.exists():
+        return None
+    try:
+        metadata = _read_bounded_session_metadata(path)
+        generation = metadata.get('_sidecar_generation_v1', 0)
+        if type(generation) is not int or generation < 0:
+            raise RuntimeError(f'Invalid sidecar generation: {generation!r}')
+        epoch = _validated_sidecar_epoch(metadata.get('_sidecar_epoch_v1'))
+        return (generation, epoch, _sidecar_content_digest(path))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise RuntimeError(
+            f'Cannot verify sidecar revision for {path.name!r}'
+        ) from exc
 
 
 def _find_top_level_json_key(text, key):
@@ -1535,7 +1594,11 @@ def _load_session_from_path(path: Path) -> "Session | None":
         try:
             data = _read_bounded_session_metadata(path)
             session_id = data.get('session_id') if isinstance(data, dict) else None
-            if type(session_id) is not str or not is_safe_session_id(session_id):
+            if (
+                type(session_id) is not str
+                or not is_safe_session_id(session_id)
+                or session_id != path.stem
+            ):
                 return None
             data['messages'] = []
             session = Session(**data)
@@ -1548,6 +1611,13 @@ def _load_session_from_path(path: Path) -> "Session | None":
     try:
         data = json.loads(path.read_text(encoding='utf-8'))
     except Exception:
+        return None
+    session_id = data.get('session_id') if isinstance(data, dict) else None
+    if (
+        type(session_id) is not str
+        or not is_safe_session_id(session_id)
+        or session_id != path.stem
+    ):
         return None
     data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
     return Session(**data)
@@ -1795,6 +1865,13 @@ class Session:
             if type(raw_sidecar_generation) is int and raw_sidecar_generation >= 0
             else 0
         )
+        raw_sidecar_epoch = kwargs.get('_sidecar_epoch_v1')
+        self._sidecar_epoch_v1 = (
+            _validated_sidecar_epoch(raw_sidecar_epoch)
+            if raw_sidecar_epoch is not None
+            else uuid.uuid4().hex
+        )
+        self._sidecar_revision_v1 = None
 
     @property
     def path(self):
@@ -1850,7 +1927,14 @@ class Session:
                     self.session_id,
                 )
                 return
-        persisted_generation = _read_sidecar_generation(self.path)
+        durable_revision = _read_sidecar_revision(self.path)
+        expected_revision = getattr(self, '_sidecar_revision_v1', None)
+        if durable_revision != expected_revision:
+            raise RuntimeError(
+                f'stale sidecar revision for session {self.session_id!r}; '
+                'reload before saving'
+            )
+        persisted_generation = durable_revision[0] if durable_revision else 0
         output_generation = persisted_generation + 1
         source_mode = (
             stat_module.S_IMODE(self.path.stat().st_mode)
@@ -1871,6 +1955,7 @@ class Session:
         # The full anchor_activity_scenes bodies serialize AFTER messages.
         meta['message_count'] = len(self.messages or [])
         meta['anchor_scene_index'] = _anchor_scene_index_from_records(self.anchor_activity_scenes)
+        meta['_sidecar_epoch_v1'] = self._sidecar_epoch_v1
         meta['_sidecar_generation_v1'] = output_generation
         # Keep the in-memory fingerprint aligned with what we just persisted, so a
         # later metadata-only reload of THIS object (or any fingerprint reader)
@@ -1886,6 +1971,7 @@ class Session:
         _placed = {
             'message_count',
             'anchor_scene_index',
+            '_sidecar_epoch_v1',
             '_sidecar_generation_v1',
             'messages',
             'tool_calls',
@@ -1975,6 +2061,11 @@ class Session:
                 pass
             raise
         self._sidecar_generation_v1 = output_generation
+        self._sidecar_revision_v1 = (
+            output_generation,
+            self._sidecar_epoch_v1,
+            hashlib.sha256(payload.encode('utf-8')).hexdigest(),
+        )
         if not skip_index:
             _write_session_index(updates=[self])
 
@@ -2017,7 +2108,8 @@ class Session:
         # cache write is only committed if the file didn't change under us
         # during the parse (TOCTOU guard against an atomic replace mid-read).
         _pre_read_sig = _sidecar_stat_signature(p)
-        data = json.loads(p.read_text(encoding='utf-8'))
+        source_bytes = p.read_bytes()
+        data = json.loads(source_bytes.decode('utf-8'))
         if inline_repair:
             data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(
                 data.get('messages')
@@ -2025,6 +2117,17 @@ class Session:
         else:
             _collapsed_partials = False
         session = cls(**data)
+        loaded_generation = data.get('_sidecar_generation_v1', 0)
+        if type(loaded_generation) is not int or loaded_generation < 0:
+            raise RuntimeError(
+                f'Invalid sidecar generation for {p.name!r}: {loaded_generation!r}'
+            )
+        loaded_epoch = _validated_sidecar_epoch(data.get('_sidecar_epoch_v1'))
+        session._sidecar_revision_v1 = (
+            loaded_generation,
+            loaded_epoch,
+            hashlib.sha256(source_bytes).hexdigest(),
+        )
         session._replay_repair_deferred = bool(
             not inline_repair
             and (
