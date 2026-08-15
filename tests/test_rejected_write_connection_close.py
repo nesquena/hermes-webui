@@ -8,6 +8,8 @@ The connection must close after those early rejections.
 from types import SimpleNamespace
 from typing import Any, cast
 
+import pytest
+
 
 def test_auth_rejected_write_closes_connection(monkeypatch):
     import api.auth as auth
@@ -63,6 +65,7 @@ def test_sidecar_provenance_rejected_closes_connection(monkeypatch):
     handler = SimpleNamespace(
         path="/api/extensions/ext1/sidecar/proxy",
         command="POST",
+        headers={"Content-Length": "15"},
         close_connection=False,
     )
     monkeypatch.setattr(routes, "_match_extension_sidecar_proxy_path", lambda _path: ("ext1", "/proxy"))
@@ -87,6 +90,7 @@ def test_sidecar_get_provenance_rejected_keeps_connection(monkeypatch):
     handler = SimpleNamespace(
         path="/api/extensions/ext1/sidecar/proxy",
         command="GET",
+        headers={},
         close_connection=False,
     )
     monkeypatch.setattr(routes, "_match_extension_sidecar_proxy_path", lambda _path: ("ext1", "/proxy"))
@@ -96,6 +100,116 @@ def test_sidecar_get_provenance_rejected_keeps_connection(monkeypatch):
     routes._handle_extension_sidecar_proxy(handler, SimpleNamespace(path=handler.path, query=""), "GET")
 
     assert handler.close_connection is False
+
+
+# ── Framing, not the method, decides whether a rejection must close ──────────
+#
+# The re-gate found both halves of the same mistake: `read_request_body` is a
+# static per-method flag, so it neither proves a body is pending (a body-less
+# DELETE closed a healthy connection) nor proves one is absent (a GET carrying a
+# declared body kept the connection and poisoned it). Both directions below run
+# against the production handler.
+
+
+def _rejected_sidecar_call(monkeypatch, method, headers, **kwargs):
+    """Drive a provenance-rejected sidecar proxy call; return the handler."""
+    import api.routes as routes
+
+    handler = SimpleNamespace(
+        path="/api/extensions/ext1/sidecar/proxy",
+        command=method,
+        headers=headers,
+        close_connection=False,
+    )
+    monkeypatch.setattr(routes, "_match_extension_sidecar_proxy_path", lambda _path: ("ext1", "/proxy"))
+    monkeypatch.setattr(routes, "_check_same_origin_browser_request", lambda _handler, **_: False)
+    monkeypatch.setattr(routes, "j", lambda _handler, _payload, status=200: None)
+
+    routes._handle_extension_sidecar_proxy(
+        cast(Any, handler), SimpleNamespace(path=handler.path, query=""), method, **kwargs
+    )
+    return handler
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"Content-Length": "12"},
+        {"Transfer-Encoding": "chunked"},
+        {"Content-Length": "banana"},  # unreadable framing proves nothing is absent
+    ],
+    ids=["content-length", "chunked", "garbage-content-length"],
+)
+def test_sidecar_get_with_a_declared_body_closes_connection(headers, monkeypatch):
+    """A GET may still declare a body — those bytes are unread, so close.
+
+    Reproduced by the gate as a 403 WITHOUT `Connection: close`, followed by
+    `501 Unsupported method ('{}GET')` on the same socket.
+    """
+    handler = _rejected_sidecar_call(monkeypatch, "GET", headers)
+
+    assert handler.close_connection is True
+
+
+@pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
+@pytest.mark.parametrize(
+    "headers", [{}, {"Content-Length": "0"}], ids=["no-content-length", "zero-content-length"]
+)
+def test_bodyless_write_method_rejection_keeps_connection(method, headers, monkeypatch):
+    """A write method with no declared body has nothing unread — keep-alive.
+
+    `read_request_body=True` is passed for every one of these (that is what the
+    real unsafe-method call site does), so this is exactly the case the old
+    per-method gate got wrong in the over-close direction.
+    """
+    handler = _rejected_sidecar_call(monkeypatch, method, headers, read_request_body=True)
+
+    assert handler.close_connection is False
+
+
+@pytest.mark.parametrize(
+    ("headers", "expected"),
+    [
+        ({}, False),
+        ({"Content-Length": "0"}, False),
+        ({"Content-Length": " 0 "}, False),
+        ({"Content-Length": ""}, False),
+        ({"Content-Length": "12"}, True),
+        ({"Content-Length": "-1"}, True),
+        ({"Content-Length": "banana"}, True),
+        ({"content-length": "7"}, True),
+        ({"Transfer-Encoding": "chunked"}, True),
+        ({"transfer-encoding": "Chunked"}, True),
+        ({"Transfer-Encoding": "identity"}, False),
+        ({"Transfer-Encoding": ""}, False),
+    ],
+)
+def test_request_declares_body_reads_the_framing_headers(headers, expected):
+    from api.helpers import request_declares_body
+
+    handler = SimpleNamespace(headers=headers)
+
+    assert request_declares_body(cast(Any, handler)) is expected
+
+
+def test_request_declares_body_is_case_insensitive_on_a_real_message():
+    """Production handlers carry an email.message.Message, not a dict."""
+    from email.parser import Parser
+
+    from api.helpers import request_declares_body
+
+    message = Parser().parsestr("Host: x\r\ntransfer-encoding: Chunked\r\n\r\n")
+
+    assert request_declares_body(cast(Any, SimpleNamespace(headers=message))) is True
+
+
+def test_request_declares_body_tolerates_a_handler_without_headers():
+    """Never raise on a rejection path: an exception there becomes a 500."""
+    from api.helpers import request_declares_body
+
+    assert request_declares_body(cast(Any, SimpleNamespace())) is False
+    assert request_declares_body(cast(Any, SimpleNamespace(headers=None))) is False
+    assert request_declares_body(cast(Any, SimpleNamespace(headers=object()))) is False
 
 
 def test_csp_report_rate_limited_closes_connection(monkeypatch):
@@ -134,6 +248,90 @@ def test_upload_oversize_rejects_before_read(monkeypatch):
 
     upload.handle_upload(handler)
 
+    assert handler.close_connection is True
+
+
+# ── Multipart framing preflight: chunked uploads must close, empty ones must not ─
+#
+# All four multipart handlers keyed on Content-Length alone, so a chunked upload
+# (which has none) was read as length 0, matched no parts, and was rejected with
+# "No file field in request" and keep-alive intact — leaving every chunk byte on
+# the socket, which is the exact poisoning this PR exists to prevent.
+# http.server never decodes chunked framing, so the only safe answer is 411 with
+# the connection armed for close.
+
+_MULTIPART_HANDLERS = [
+    "handle_upload",
+    "handle_upload_extract",
+    "handle_transcribe",
+    "handle_workspace_upload",
+]
+
+
+class _NeverRead:
+    """An rfile that fails the test if a reject-before-read path reads the body."""
+
+    def read(self, *_args):
+        raise AssertionError("the body must not be read on a reject-before-read path")
+
+
+def _run_multipart_handler(monkeypatch, handler_name, headers, rfile):
+    import api.upload as upload
+
+    answered: dict[str, Any] = {}
+
+    def _record(_handler, payload, status=200):
+        answered["payload"] = payload
+        answered["status"] = status
+        return True
+
+    monkeypatch.setattr(upload, "j", _record)
+    handler = SimpleNamespace(headers=headers, rfile=rfile, close_connection=False)
+
+    getattr(upload, handler_name)(cast(Any, handler))
+    return handler, answered
+
+
+@pytest.mark.parametrize("handler_name", _MULTIPART_HANDLERS)
+def test_chunked_multipart_rejected_before_read_closes_connection(handler_name, monkeypatch):
+    handler, answered = _run_multipart_handler(
+        monkeypatch,
+        handler_name,
+        {"Content-Type": "multipart/form-data; boundary=x", "Transfer-Encoding": "chunked"},
+        _NeverRead(),
+    )
+
+    assert answered["status"] == 411, answered
+    assert "Transfer-Encoding" in answered["payload"]["error"], answered
+    assert handler.close_connection is True
+
+
+@pytest.mark.parametrize("handler_name", _MULTIPART_HANDLERS)
+def test_bodyless_multipart_rejection_keeps_connection(handler_name, monkeypatch):
+    """A well-framed upload with no body is rejected with nothing left unread."""
+    handler, answered = _run_multipart_handler(
+        monkeypatch,
+        handler_name,
+        {"Content-Type": "multipart/form-data; boundary=x", "Content-Length": "0"},
+        SimpleNamespace(read=lambda *_args: b""),
+    )
+
+    assert answered["status"] == 400, answered
+    assert handler.close_connection is False
+
+
+@pytest.mark.parametrize("handler_name", _MULTIPART_HANDLERS)
+def test_non_numeric_content_length_still_closes(handler_name, monkeypatch):
+    """The pre-existing invalid-Content-Length reject keeps its 400 and its close."""
+    handler, answered = _run_multipart_handler(
+        monkeypatch,
+        handler_name,
+        {"Content-Type": "multipart/form-data; boundary=x", "Content-Length": "banana"},
+        _NeverRead(),
+    )
+
+    assert answered["status"] == 400, answered
+    assert answered["payload"]["error"] == "Invalid Content-Length", answered
     assert handler.close_connection is True
 
 
