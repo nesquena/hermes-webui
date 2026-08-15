@@ -279,15 +279,21 @@ def _run_reload_mcp_command() -> str:
             # waits on the shared readiness event so its synchronous
             # report below is still accurate.
             #
-            # The authority is keyed deterministically at the DEFAULT
-            # profile (''), the same key the startup kickoff and
-            # default-profile turns consult.  /reload-mcp is a GLOBAL
+            # The authority is keyed by the CANONICAL resolved default
+            # profile-home path (the same key the startup kickoff and
+            # default-profile turns consult).  /reload-mcp is a GLOBAL
             # operation (it shuts down and reconnects every configured
             # server), so it deliberately does NOT key off the exec-time
             # HERMES_HOME env: a concurrent stream can mutate that
             # process-global while the command runs, which would make the
             # reload capture another profile (Greptile P1).
-            from api.streaming import _mcp_retry_discovery, _mcp_wait_readiness
+            from api.streaming import (
+                _canonical_readiness_key,
+                _invalidate_mcp_readiness,
+                _mcp_retry_discovery,
+                _mcp_wait_readiness,
+                _prepare_global_reload,
+            )
 
             def _reload_discover():
                 """Re-discover MCP tools; returns bool.
@@ -320,6 +326,12 @@ def _run_reload_mcp_command() -> str:
                 except Exception:
                     return False
 
+            # Coordinate the global shutdown with every live discovery
+            # owner (cancel + bounded join) so a body mid-discovery cannot
+            # re-register old-config servers after the registry is cleared.
+            _prepare_global_reload()
+            shutdown_mcp_servers()
+
             try:
                 from api.profiles import _resolve_hermes_home_override
                 _reload_override_available = _resolve_hermes_home_override() is not None
@@ -328,7 +340,9 @@ def _run_reload_mcp_command() -> str:
 
             if _reload_override_available:
                 _readiness = _mcp_retry_discovery(
-                    '', _reload_discover, "mcp-reload"
+                    _canonical_readiness_key(''),
+                    _reload_discover,
+                    "mcp-reload",
                 )
                 _reload_status = _mcp_wait_readiness(_readiness)
             else:
@@ -339,6 +353,12 @@ def _run_reload_mcp_command() -> str:
                 _reload_status = (
                     "completed" if _reload_discover() else "failed"
                 )
+
+            # The global reload rebuilt the registry: every OTHER
+            # profile's readiness is stale.  Remove those entries so each
+            # profile's next turn re-runs discovery instead of trusting a
+            # state whose servers were just shut down.
+            _invalidate_mcp_readiness(except_key=_canonical_readiness_key(''))
 
             with _lock:
                 connected_servers = set(_servers.keys())

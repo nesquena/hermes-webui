@@ -199,7 +199,9 @@ class TestGenerations:
         Regression (maintainer review): `_mcp_wait_readiness` used to set
         'failed' after the cap without retiring the owner, so the thread
         could later finish and overwrite the terminal outcome to
-        'completed' after the caller had already proceeded.
+        'completed' after the caller had already proceeded.  Round 9:
+        the thread POINTER is retained (execution continues) but the
+        generation is fenced so a late finish can never publish.
         """
         _old_cap = streaming._MCP_READINESS_WAIT_CAP_S
         streaming._MCP_READINESS_WAIT_CAP_S = 0.15
@@ -209,7 +211,10 @@ class TestGenerations:
                 "profile-g", discover, "tg"
             )
             assert streaming._mcp_wait_readiness(readiness) == "failed"
-            assert readiness.thread is None, "timed-out owner must be retired"
+            assert readiness.thread is not None, (
+                "the thread pointer must not be cleared while execution "
+                "continues (maintainer review round 9)"
+            )
             time.sleep(0.7)  # let the retired thread actually finish
             assert readiness.status == "failed", (
                 "a late-finishing retired generation must never publish "
@@ -217,6 +222,121 @@ class TestGenerations:
             )
         finally:
             streaming._MCP_READINESS_WAIT_CAP_S = _old_cap
+
+    def test_runner_skips_discovery_when_cancelled(self):
+        """A cancelled runner performs NO discovery side effects.
+
+        Regression (maintainer review round 9): generation-fencing only
+        protected the final label — a retired body could still call
+        discover_mcp_tools() and mutate the process-global MCP registry.
+        The runner now checks the cancel token BEFORE discovery, so a run
+        retired by timeout or superseded by retry that has not started
+        does no work.
+        """
+        calls = []
+
+        def discover():
+            calls.append("discover")
+            return True
+
+        readiness = streaming._McpReadiness()
+        readiness.cancel.set()
+        event = threading.Event()
+        streaming._discovery_runner(
+            discover, readiness, event, readiness.gen, readiness.cancel
+        )
+        assert calls == [], "cancelled runner must not call discover_fn"
+        assert readiness.status == "pending"
+        assert event.is_set()
+
+    def test_retry_joins_old_body_before_replacement(self):
+        """Retry while the prior owner runs must JOIN it first — never overlap.
+
+        Regression (maintainer review round 9): retry used to bump the
+        generation and start a replacement immediately, leaving BOTH
+        discovery bodies alive and mutating the global registry.  Retry
+        now cancels and joins the old body (bounded) before starting the
+        new one — at most one discovery body is ever alive per profile.
+        """
+        timeline = []
+        lock = threading.Lock()
+
+        def make_logging_discover(duration, label):
+            def _discover():
+                with lock:
+                    timeline.append((label + "-start", time.monotonic()))
+                time.sleep(duration)
+                with lock:
+                    timeline.append((label + "-end", time.monotonic()))
+                return True
+
+            return _discover
+
+        slow = make_logging_discover(0.3, "old")
+        r = streaming._ensure_mcp_discovery("profile-p", slow, "tp1")
+        time.sleep(0.1)  # old body is running
+        fast = make_logging_discover(0.05, "new")
+        r2 = streaming._mcp_retry_discovery("profile-p", fast, "tp2")
+        assert streaming._mcp_wait_readiness(r2) == "completed"
+        with lock:
+            old_end = max(t for ev, t in timeline if ev == "old-end")
+            new_start = min(t for ev, t in timeline if ev == "new-start")
+        assert new_start >= old_end - 0.01, (
+            "the replacement body started before the old body finished — "
+            "two discovery bodies were alive for one profile"
+        )
+
+    def test_canonical_key_startup_and_default_turn_share_entry(self, monkeypatch):
+        """Startup and a default-profile turn must share ONE readiness entry.
+
+        Regression (maintainer review round 9): startup keyed readiness
+        as '' while real default turns keyed by the resolved home path,
+        so the logical default profile held two entries and a global
+        reload refreshed only one.
+        """
+        import sys
+        from types import ModuleType
+
+        from api import profiles
+
+        class _FakeOverride:
+            def set_hermes_home_override(self, home):
+                return "tok"
+
+            def reset_hermes_home_override(self, token):
+                pass
+
+            def get_default_hermes_root(self):
+                return "/default/hermes/home"
+
+        monkeypatch.setattr(
+            profiles, "_resolve_hermes_home_override", lambda: _FakeOverride()
+        )
+
+        # Fake tools.mcp_tool so _startup_mcp_discovery can import it.
+        tools_pkg = ModuleType("tools")
+        tools_pkg.__path__ = []
+        mcp_tool = ModuleType("tools.mcp_tool")
+        mcp_tool.discover_mcp_tools = lambda: []
+        monkeypatch.setitem(sys.modules, "tools", tools_pkg)
+        monkeypatch.setitem(sys.modules, "tools.mcp_tool", mcp_tool)
+
+        streaming._startup_mcp_discovery()
+        r_startup = streaming._MCP_READINESS.get("/default/hermes/home")
+        assert r_startup is not None, (
+            "startup must key readiness by the canonical resolved default "
+            "home, not ''"
+        )
+        assert streaming._MCP_READINESS.get("") is None, (
+            "the '' key must never coexist with the canonical default key"
+        )
+        # A default-profile turn ('') resolves to the same canonical key.
+        turn_disc, turn_started = _make_discover(0.05)
+        r_turn = streaming._ensure_mcp_discovery("", turn_disc, "t-turn")
+        assert r_turn is r_startup, (
+            "startup and a default turn must share ONE readiness entry"
+        )
+        assert streaming._mcp_wait_readiness(r_turn) == "completed"
 
     def test_retry_while_pending_never_creates_two_owners(self):
         """A retry while the prior owner is still running must be single-flight.

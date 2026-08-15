@@ -476,11 +476,67 @@ def test_reload_mcp_uses_default_profile_authority(monkeypatch):
     assert "discover" in calls
     assert ("reset", override_token) in calls
     assert "Reloaded MCP servers from configuration." in output
-    default_readiness = streaming._MCP_READINESS.get("")
+    default_readiness = streaming._MCP_READINESS.get("/default/hermes/home")
     assert default_readiness is not None, (
-        "reload must update the DEFAULT profile readiness authority"
+        "reload must update the DEFAULT profile readiness authority "
+        "(canonical resolved home key)"
     )
     assert streaming._mcp_wait_readiness(default_readiness) == "completed"
+
+
+def test_reload_mcp_invalidates_other_profile_entries(monkeypatch):
+    """A global reload must invalidate every OTHER profile's readiness.
+
+    Regression (maintainer review round 9): the reload refreshed only its
+    own key, leaving default-path and named-profile entries falsely
+    'completed' after their servers were deleted by the global shutdown.
+    The reload now removes every other entry so each profile's next turn
+    re-runs discovery.
+    """
+    from api import profiles
+    from api import streaming
+    from api.commands import execute_agent_command
+
+    class _FakeOverride:
+        def set_hermes_home_override(self, home):
+            return "tok"
+
+        def reset_hermes_home_override(self, token):
+            pass
+
+        def get_default_hermes_root(self):
+            return "/default/hermes/home"
+
+    monkeypatch.setattr(
+        profiles, "_resolve_hermes_home_override", lambda: _FakeOverride()
+    )
+
+    # Seed a stale named-profile entry and a stale default entry.
+    stale_named = streaming._McpReadiness()
+    stale_named.status = "completed"
+    streaming._MCP_READINESS["/profiles/beta"] = stale_named
+    stale_default = streaming._McpReadiness()
+    stale_default.status = "completed"
+    streaming._MCP_READINESS["/default/hermes/home"] = stale_default
+
+    def shutdown():
+        pass
+
+    def discover():
+        return []
+
+    _install_fake_mcp_tool(monkeypatch, shutdown=shutdown, discover=discover, servers={})
+
+    execute_agent_command("/reload-mcp")
+
+    assert "/profiles/beta" not in streaming._MCP_READINESS, (
+        "named-profile readiness must be invalidated by a global reload"
+    )
+    refreshed = streaming._MCP_READINESS.get("/default/hermes/home")
+    assert refreshed is not None, (
+        "the reload's own canonical entry must stay (refreshed by the run)"
+    )
+    assert streaming._mcp_wait_readiness(refreshed) == "completed"
 
 
 def test_reload_mcp_legacy_agent_runs_inline(monkeypatch):

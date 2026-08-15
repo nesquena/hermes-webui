@@ -241,14 +241,25 @@ _STREAMING_CRON_PROFILE_HOME: contextvars.ContextVar[str | None] = contextvars.C
 #               surfaced (logged) at the stream boundary and turns
 #               proceed without waiting
 #
-# Readiness is GENERATION-based and SINGLE-FLIGHT:
+# Readiness is GENERATION-based, PHYSICALLY SINGLE-FLIGHT, and keyed by
+# ONE CANONICAL resolved profile-home path:
 #   * `_McpReadiness.gen` is bumped whenever a new owner run starts
 #     (restart, explicit retry) or a wait times out (retirement).  A run
 #     only publishes its terminal outcome if its generation is still
 #     current, so a late-finishing owner can never flip state over a
-#     timed-out wait or a newer run — and never registers tools into a
-#     turn that already proceeded.
-#   * Exactly ONE current owner thread exists per profile home.  A turn
+#     timed-out wait or a newer run.
+#   * Ownership is PHYSICAL, not just label-fenced: at most ONE discovery
+#     body is ever alive per profile.  A retry sets the old run's cancel
+#     token and JOINS it (bounded by the readiness cap) before starting
+#     the replacement; if the old body is still alive after the cap the
+#     retry is REJECTED.  A timed-out wait retires the generation WITHOUT
+#     clearing the thread pointer — execution continues, and the cancel
+#     token prevents a not-yet-started body from doing any work.
+#   * The registry key is `_canonical_readiness_key(profile_home)`: the
+#     resolved profile-home path.  Startup, turns, retries and the
+#     /reload-mcp command all normalize to the same key, so the default
+#     profile can never hold two entries ('') plus resolved path.
+#   * Exactly ONE current owner thread exists per canonical key.  A turn
 #     that finds the profile still `pending` waits on the shared
 #     readiness event — the FIRST tool-bearing turn must not silently
 #     omit a configured server — and every later turn subscribes to the
@@ -260,6 +271,11 @@ _STREAMING_CRON_PROFILE_HOME: contextvars.ContextVar[str | None] = contextvars.C
 #     (bool): production closures never swallow failures into a fake
 #     'completed', and a thrown run is recorded as 'failed' by the
 #     runner.
+#   * A global /reload-mcp coordinates with every live owner (cancel +
+#     bounded join before shutdown) and then INVALIDATES every other
+#     readiness entry so each profile's next turn re-runs discovery
+#     instead of trusting a stale 'completed'/'failed' state whose
+#     servers were just shut down.
 #
 # The discovery thread re-asserts the profile home through hermes-agent's
 # CONTEXT-LOCAL override (`set_hermes_home_override`), resolved via the
@@ -275,6 +291,29 @@ _MCP_READINESS_LOCK = threading.Lock()
 _MCP_READINESS_WAIT_CAP_S = 120.0
 
 
+def _canonical_readiness_key(profile_home):
+    """Resolve the ONE canonical readiness key for a profile home.
+
+    The stream worker keys readiness by the RESOLVED profile-home path
+    (even for the default profile).  Startup and /reload-mcp must use
+    the SAME key instead of '' — otherwise the logical default profile
+    holds two entries and a global reload refreshes only one
+    (maintainer review round 9).
+    """
+    if profile_home:
+        return str(profile_home)
+    try:
+        from api.profiles import _resolve_hermes_home_override
+        _hc_mod = _resolve_hermes_home_override()
+        if _hc_mod is not None:
+            _root = getattr(_hc_mod, 'get_default_hermes_root', lambda: '')()
+            if _root:
+                return str(_root)
+    except Exception:
+        pass
+    return ''
+
+
 class _McpReadiness:
     """Profile-scoped MCP discovery readiness.
 
@@ -284,27 +323,38 @@ class _McpReadiness:
         thread: the current owner thread (one per profile)
         gen:    generation counter — bumped on restart/retry/timeout
                 retirement so a stale owner can never publish.
+        cancel: threading.Event — set to ask the current body not to
+                start (or to keep waiting) discovery; used by retry and
+                timeout retirement to fence side effects, not just the
+                final label.
     """
 
-    __slots__ = ("status", "event", "thread", "gen")
+    __slots__ = ("status", "event", "thread", "gen", "cancel")
 
     def __init__(self):
         self.status = "pending"
         self.event = threading.Event()
         self.thread = None
         self.gen = 0
+        self.cancel = threading.Event()
 
 
-def _discovery_runner(discover_fn, readiness, event, gen):
+def _discovery_runner(discover_fn, readiness, event, gen, cancel):
     """Run one discovery generation and publish its terminal outcome.
 
     Only the generation captured at start may publish: a retry or a
     timed-out wait bumps `readiness.gen`, retiring this run, so a
     late-finishing owner can never flip the readiness over the caller's
-    terminal outcome (or register tools into a turn that already
-    proceeded).  The closure returns an explicit bool outcome — a thrown
-    run is recorded as failed.
+    terminal outcome.  The `cancel` token is checked BEFORE discovery so
+    a voided run never performs side effects (registration) — a body
+    already mid-discovery cannot be preempted, but the label stays
+    fenced and the thread is only ever replaced after a bounded join.
+    The closure returns an explicit bool outcome — a thrown run is
+    recorded as failed.
     """
+    if cancel.is_set():
+        event.set()
+        return
     try:
         outcome = discover_fn()  # production closures return bool
     except Exception:
@@ -318,13 +368,14 @@ def _discovery_runner(discover_fn, readiness, event, gen):
 def _ensure_mcp_discovery(profile_home, discover_fn, thread_name):
     """Return the profile's readiness, spawning the discovery owner if needed.
 
-    Exactly one discovery thread per profile home: callers after the first
-    subscribe to the SAME readiness event instead of spawning again or
-    paying a fresh wait.  Completed/failed profiles are NOT re-run here —
-    an explicit retry goes through `_mcp_retry_discovery` (or /reload-mcp).
-    A pending run whose owner died is restarted as a NEW generation so
-    waiters can never hang forever on a stale run.
+    Exactly one discovery thread per canonical profile-home key: callers
+    after the first subscribe to the SAME readiness event instead of
+    spawning again or paying a fresh wait.  Completed/failed profiles are
+    NOT re-run here — an explicit retry goes through `_mcp_retry_discovery`
+    (or /reload-mcp).  A pending run whose owner died is restarted as a
+    NEW generation so waiters can never hang forever on a stale run.
     """
+    profile_home = _canonical_readiness_key(profile_home)
     with _MCP_READINESS_LOCK:
         readiness = _MCP_READINESS.get(profile_home)
         if readiness is None:
@@ -341,9 +392,16 @@ def _ensure_mcp_discovery(profile_home, discover_fn, thread_name):
             readiness.gen += 1
             _gen = readiness.gen
             readiness.event = threading.Event()
+            readiness.cancel = threading.Event()
             readiness.thread = threading.Thread(
                 target=_discovery_runner,
-                args=(discover_fn, readiness, readiness.event, _gen),
+                args=(
+                    discover_fn,
+                    readiness,
+                    readiness.event,
+                    _gen,
+                    readiness.cancel,
+                ),
                 name=thread_name,
                 daemon=True,
             )
@@ -357,10 +415,12 @@ def _mcp_wait_readiness(readiness):
     Bounded by `_MCP_READINESS_WAIT_CAP_S` (discovery's own internal
     timeouts plus a hang-safety cap); a stuck run cannot hang the turn
     forever.  If the cap is hit while the run is still pending, the
-    CURRENT generation is RETIRED (gen bumped, status 'failed', owner
-    released) so a late-finishing thread can never publish terminal
-    state over the caller's outcome.  If a retry started a newer
-    generation mid-wait, the wait rides the newer run.
+    CURRENT generation is RETIRED (gen bumped, status 'failed', cancel
+    token set) so a late-finishing thread can never publish terminal
+    state over the caller's outcome — but the thread POINTER is NOT
+    cleared while execution continues, and a not-yet-started body sees
+    the cancel token and performs no discovery side effects.  If a retry
+    started a newer generation mid-wait, the wait rides the newer run.
     """
     if readiness.status == "pending":
         _deadline = time.monotonic() + _MCP_READINESS_WAIT_CAP_S
@@ -380,7 +440,7 @@ def _mcp_wait_readiness(readiness):
                 if readiness.gen == _gen and readiness.status == "pending":
                     readiness.gen += 1
                     readiness.status = "failed"
-                    readiness.thread = None
+                    readiness.cancel.set()
     return readiness.status
 
 
@@ -408,29 +468,90 @@ def _mcp_retry_discovery(profile_home, discover_fn, thread_name):
     """Force a fresh discovery run, retiring the current generation.
 
     This is the explicit retry path (mirrors /reload-mcp semantics) and
-    is SINGLE-FLIGHT: the previous owner — even if still running — is
-    retired by bumping the generation so it can never publish, and
-    exactly one current owner exists afterwards.  Registering tools
-    mid-turn never mutates an in-flight Agent snapshot: hermes-agent
-    only applies registered tools in its per-turn prologue refresh.
+    is PHYSICALLY single-flight: the previous owner — even if still
+    running — is cancelled and JOINED (bounded by the readiness cap)
+    before a replacement starts, so two discovery bodies are never alive
+    for one profile.  If the old body is still alive after the cap, the
+    retry is REJECTED (the existing readiness is returned unchanged)
+    rather than running two bodies.  Registering tools mid-turn never
+    mutates an in-flight Agent snapshot: hermes-agent only applies
+    registered tools in its per-turn prologue refresh.
     """
+    profile_home = _canonical_readiness_key(profile_home)
     with _MCP_READINESS_LOCK:
         readiness = _MCP_READINESS.get(profile_home)
         if readiness is None:
             readiness = _McpReadiness()
             _MCP_READINESS[profile_home] = readiness
+        _old_thread = readiness.thread
+        _old_cancel = readiness.cancel
+    if _old_thread is not None and _old_thread.is_alive():
+        # Acknowledge cancellation: a body that has not yet started
+        # discovery will see the cancel token and do no work; a body
+        # mid-discovery finishes (bounded by its internal timeouts).
+        _old_cancel.set()
+        _old_thread.join(timeout=_MCP_READINESS_WAIT_CAP_S)
+    with _MCP_READINESS_LOCK:
+        if _old_thread is not None and _old_thread.is_alive():
+            # Physical single-flight: the old body is STILL alive beyond
+            # the cap.  Reject the replacement rather than running two
+            # discovery bodies for one profile.
+            return readiness
         readiness.status = "pending"
         readiness.gen += 1
         _gen = readiness.gen
         readiness.event = threading.Event()
+        readiness.cancel = threading.Event()
         readiness.thread = threading.Thread(
             target=_discovery_runner,
-            args=(discover_fn, readiness, readiness.event, _gen),
+            args=(
+                discover_fn,
+                readiness,
+                readiness.event,
+                _gen,
+                readiness.cancel,
+            ),
             name=thread_name,
             daemon=True,
         )
         readiness.thread.start()
     return readiness
+
+
+def _prepare_global_reload():
+    """Coordinate a global /reload-mcp with every live discovery owner.
+
+    Sets every live owner's cancel token and joins it (bounded by the
+    readiness cap) BEFORE `shutdown_mcp_servers()` clears the
+    process-global registry, so a body mid-discovery cannot re-register
+    old-config servers after the registry is torn down.
+    """
+    with _MCP_READINESS_LOCK:
+        _live = [
+            (r.cancel, r.thread)
+            for r in list(_MCP_READINESS.values())
+            if r.thread is not None and r.thread.is_alive()
+        ]
+    for _cancel, _thread in _live:
+        _cancel.set()
+        _thread.join(timeout=_MCP_READINESS_WAIT_CAP_S)
+
+
+def _invalidate_mcp_readiness(except_key=None):
+    """Remove every readiness entry except the reload's own refreshed one.
+
+    A global reload rebuilt the process-global MCP registry, so any
+    other profile's 'completed'/'failed' readiness is stale — its next
+    turn must re-run discovery instead of trusting old state whose
+    servers were just shut down.  The except_key entry was refreshed by
+    the reload run itself and stays.
+    """
+    except_key = _canonical_readiness_key(except_key or '')
+    with _MCP_READINESS_LOCK:
+        for _key in [k for k in list(_MCP_READINESS) if k != except_key]:
+            _entry = _MCP_READINESS.pop(_key, None)
+            if _entry is not None and _entry.thread is not None:
+                _entry.cancel.set()
 
 
 def _startup_mcp_discovery():
