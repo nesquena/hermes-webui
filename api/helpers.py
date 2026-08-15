@@ -219,6 +219,94 @@ def arm_connection_close(handler) -> None:
         pass
 
 
+_UNFRAMED_TRANSFER_CODINGS = frozenset({'', 'identity'})
+
+
+def _framing_header(handler, name: str) -> str | None:
+    """Read one framing header, tolerating handler stubs and plain dicts.
+
+    A real handler carries an ``email.message.Message``, whose ``get()`` is
+    case-insensitive like the wire; the suite's ``SimpleNamespace(headers={...})``
+    doubles are plain dicts, which are not, so fall back to a case-insensitive
+    scan for those. A missing or odd ``headers`` must never raise: every caller
+    is on a rejection path where an exception becomes a spurious 500.
+    """
+    headers = getattr(handler, 'headers', None)
+    if headers is None:
+        return None
+    try:
+        value = headers.get(name)
+        if value is None and isinstance(headers, dict):
+            lowered = name.lower()
+            for key, candidate in headers.items():
+                if str(key).lower() == lowered:
+                    value = candidate
+                    break
+    except Exception:
+        return None
+    return None if value is None else str(value)
+
+
+def request_declares_body(handler) -> bool:
+    """True when the request's framing declares a body that is still queued.
+
+    Keyed on the wire, not on the method: ``Transfer-Encoding`` present (chunked
+    framing hides the length until the terminating chunk is read) or
+    ``Content-Length`` present and non-zero. The method proves nothing in either
+    direction -- a GET may carry a declared body and a POST/PUT/DELETE may carry
+    none -- and a static per-method flag therefore both misses body-bearing
+    "read" requests (whose unread bytes poison the next pooled request) and
+    kills healthy keep-alive on body-less writes.
+
+    An unparseable ``Content-Length`` counts as a declared body: a value we
+    cannot interpret does not prove the body's absence, and the safe assumption
+    for connection reuse is that bytes are pending.
+    """
+    coding = _framing_header(handler, 'Transfer-Encoding')
+    if coding is not None and coding.strip().lower() not in _UNFRAMED_TRANSFER_CODINGS:
+        return True
+    raw_length = _framing_header(handler, 'Content-Length')
+    if raw_length is None or not raw_length.strip():
+        return False
+    try:
+        return int(raw_length.strip()) != 0
+    except ValueError:
+        return True
+
+
+def unsupported_transfer_encoding(handler) -> str | None:
+    """Return the transfer coding this server cannot decode, or ``None``.
+
+    ``BaseHTTPRequestHandler`` never decodes ``Transfer-Encoding``: it hands
+    every reader a raw ``rfile``, so a chunked body reads back as its literal
+    chunk framing while a ``Content-Length``-based reader sees length 0 and
+    consumes nothing at all. Such a request can only be rejected -- and only
+    with the connection armed for close, because its chunk bytes are still
+    queued on the socket.
+    """
+    coding = _framing_header(handler, 'Transfer-Encoding')
+    if coding is None:
+        return None
+    normalized = coding.strip()
+    if normalized.lower() in _UNFRAMED_TRANSFER_CODINGS:
+        return None
+    return normalized
+
+
+def arm_connection_close_if_body_pending(handler) -> bool:
+    """Arm close for a reject-before-read, but only if a body was really declared.
+
+    Returns whether the connection was armed. Use this instead of
+    ``arm_connection_close()`` wherever the rejection can also fire on a request
+    with no body: closing then would drop a pooled client's healthy connection
+    for no framing reason.
+    """
+    if not request_declares_body(handler):
+        return False
+    arm_connection_close(handler)
+    return True
+
+
 def advertise_connection_close(handler) -> None:
     """Serialize ``close_connection`` into exactly one ``Connection: close`` header.
 

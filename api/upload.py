@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 
 from api.config import MAX_UPLOAD_BYTES, STATE_DIR
-from api.helpers import arm_connection_close, j
+from api.helpers import arm_connection_close, j, unsupported_transfer_encoding
 from api.models import get_session
 from api.profiles import _profiles_match, get_active_profile_name as _get_active_profile_name
 from api.workspace import (
@@ -49,6 +49,62 @@ def _reject_before_read(handler, message, status):
     """Reject without reading the body; close so unread bytes can't poison HTTP/1.1 reuse."""
     arm_connection_close(handler)
     return j(handler, {'error': message}, status=status)
+
+
+class _RejectBeforeRead(ValueError):
+    """A rejection raised before any byte of the request body was consumed.
+
+    Carries the status the caller must answer with. Subclasses ``ValueError`` so
+    that if one ever escapes an unusual call path, each handler's existing
+    ``except ValueError`` still answers 400 with the same message instead of
+    turning it into a 500.
+    """
+
+    def __init__(self, message: str, status: int):
+        super().__init__(message)
+        self.message = message
+        self.status = status
+
+
+def _read_multipart_or_reject(handler):
+    """Framing preflight + body read, shared by all four multipart handlers.
+
+    Returns ``(fields, files)``. Raises ``_RejectBeforeRead`` when the request
+    must be refused before its body is read -- the caller answers through
+    ``_reject_before_read()``, which arms ``Connection: close`` first, because the
+    declared body is still queued in ``rfile`` and a reused HTTP/1.1 connection
+    would parse those bytes as the next request line.
+
+    Framing is judged from the headers, not from a present ``Content-Length``:
+
+    * ``Transfer-Encoding: chunked`` carries no Content-Length, so the old code
+      read it as length 0, found no parts, and answered "No file field in
+      request" with keep-alive intact -- leaving every chunk byte on the socket
+      to poison the next pooled request. ``http.server`` cannot decode chunked
+      framing at all (``rfile`` is the raw socket), so 411 is the only honest
+      answer.
+    * a non-numeric or oversized Content-Length cannot be read either, and
+      ``parse_multipart()`` validates the boundary and the length before its
+      first ``rfile.read()`` — so every raise below is still pre-read.
+    """
+    content_type = handler.headers.get('Content-Type', '')
+    coding = unsupported_transfer_encoding(handler)
+    if coding is not None:
+        raise _RejectBeforeRead(
+            f'Unsupported Transfer-Encoding: {coding} (uploads require a Content-Length)',
+            411,
+        )
+    try:
+        content_length = int(handler.headers.get('Content-Length', 0) or 0)
+    except (TypeError, ValueError):
+        raise _RejectBeforeRead('Invalid Content-Length', 400) from None
+    if content_length > MAX_UPLOAD_BYTES:
+        raise _RejectBeforeRead(
+            f'File too large (max {MAX_UPLOAD_BYTES//1024//1024}MB)', 413)
+    try:
+        return parse_multipart(handler.rfile, content_type, content_length)
+    except ValueError as exc:
+        raise _RejectBeforeRead(str(exc), 400) from None
 
 
 def parse_multipart(rfile, content_type, content_length) -> tuple:
@@ -212,22 +268,10 @@ def _write_office_upload_sidecar(workspace: Path, dest: Path, file_bytes: bytes)
 def handle_upload(handler):
     import traceback as _tb
     try:
-        content_type = handler.headers.get('Content-Type', '')
         try:
-            content_length = int(handler.headers.get('Content-Length', 0) or 0)
-        except (TypeError, ValueError):
-            # A non-numeric Content-Length is rejected before the body is read.
-            arm_connection_close(handler)
-            raise ValueError('Invalid Content-Length') from None
-        if content_length > MAX_UPLOAD_BYTES:
-            return _reject_before_read(handler, f'File too large (max {MAX_UPLOAD_BYTES//1024//1024}MB)', 413)
-        try:
-            fields, files = parse_multipart(handler.rfile, content_type, content_length)
-        except ValueError:
-            # parse_multipart validates Content-Length/boundary before reading;
-            # a ValueError here means the body was never consumed.
-            arm_connection_close(handler)
-            raise
+            fields, files = _read_multipart_or_reject(handler)
+        except _RejectBeforeRead as rejection:
+            return _reject_before_read(handler, rejection.message, rejection.status)
         session_id = fields.get('session_id', '')
         if 'file' not in files:
             return j(handler, {'error': 'No file field in request'}, status=400)
@@ -401,22 +445,10 @@ def handle_upload_extract(handler):
     """Handle archive upload and extraction."""
     import traceback as _tb
     try:
-        content_type = handler.headers.get('Content-Type', '')
         try:
-            content_length = int(handler.headers.get('Content-Length', 0) or 0)
-        except (TypeError, ValueError):
-            # A non-numeric Content-Length is rejected before the body is read.
-            arm_connection_close(handler)
-            raise ValueError('Invalid Content-Length') from None
-        if content_length > MAX_UPLOAD_BYTES:
-            return _reject_before_read(handler, f'File too large (max {MAX_UPLOAD_BYTES//1024//1024}MB)', 413)
-        try:
-            fields, files = parse_multipart(handler.rfile, content_type, content_length)
-        except ValueError:
-            # parse_multipart validates Content-Length/boundary before reading;
-            # a ValueError here means the body was never consumed.
-            arm_connection_close(handler)
-            raise
+            fields, files = _read_multipart_or_reject(handler)
+        except _RejectBeforeRead as rejection:
+            return _reject_before_read(handler, rejection.message, rejection.status)
         session_id = fields.get('session_id', '')
         if 'file' not in files:
             return j(handler, {'error': 'No file field in request'}, status=400)
@@ -444,22 +476,10 @@ def handle_transcribe(handler):
     import traceback as _tb
     temp_path = None
     try:
-        content_type = handler.headers.get('Content-Type', '')
         try:
-            content_length = int(handler.headers.get('Content-Length', 0) or 0)
-        except (TypeError, ValueError):
-            # A non-numeric Content-Length is rejected before the body is read.
-            arm_connection_close(handler)
-            raise ValueError('Invalid Content-Length') from None
-        if content_length > MAX_UPLOAD_BYTES:
-            return _reject_before_read(handler, f'File too large (max {MAX_UPLOAD_BYTES//1024//1024}MB)', 413)
-        try:
-            fields, files = parse_multipart(handler.rfile, content_type, content_length)
-        except ValueError:
-            # parse_multipart validates Content-Length/boundary before reading;
-            # a ValueError here means the body was never consumed.
-            arm_connection_close(handler)
-            raise
+            fields, files = _read_multipart_or_reject(handler)
+        except _RejectBeforeRead as rejection:
+            return _reject_before_read(handler, rejection.message, rejection.status)
         if 'file' not in files:
             return j(handler, {'error': 'No file field in request'}, status=400)
         filename, file_bytes = files['file']
@@ -639,23 +659,10 @@ def handle_workspace_upload(handler):
     """
     import traceback as _tb
     try:
-        content_type = handler.headers.get('Content-Type', '')
         try:
-            content_length = int(handler.headers.get('Content-Length', 0) or 0)
-        except (TypeError, ValueError):
-            # A non-numeric Content-Length is rejected before the body is read.
-            arm_connection_close(handler)
-            raise ValueError('Invalid Content-Length') from None
-        if content_length > MAX_UPLOAD_BYTES:
-            return _reject_before_read(handler, f'File too large (max {MAX_UPLOAD_BYTES//1024//1024}MB)', 413)
-
-        try:
-            fields, files = parse_multipart(handler.rfile, content_type, content_length)
-        except ValueError:
-            # parse_multipart validates Content-Length/boundary before reading;
-            # a ValueError here means the body was never consumed.
-            arm_connection_close(handler)
-            raise
+            fields, files = _read_multipart_or_reject(handler)
+        except _RejectBeforeRead as rejection:
+            return _reject_before_read(handler, rejection.message, rejection.status)
         session_id = fields.get('session_id', '')
         subpath = fields.get('path', '')
 

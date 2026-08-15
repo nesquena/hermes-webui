@@ -2926,6 +2926,7 @@ from api.helpers import (
     bad,
     safe_resolve,
     arm_connection_close,
+    arm_connection_close_if_body_pending,
     j,
     t,
     read_body,
@@ -5882,12 +5883,14 @@ def _handle_extension_sidecar_proxy(
     # DELETE fell through the CSRF compatibility path that intentionally admits
     # non-browser clients, giving unsafe methods weaker provenance than GET.
     if not _check_same_origin_browser_request(handler, require_provenance=True):
-        # Provenance rejection runs before read_body(); when a body is pending,
-        # close-and-advertise rather than reusing an HTTP/1.1 connection whose
-        # unread body would corrupt the next request (same class as _check_csrf).
-        # GET (read_request_body=False) has nothing unread — keep-alive survives.
-        if read_request_body:
-            arm_connection_close(handler)
+        # Provenance rejection runs before read_body(), so close-and-advertise
+        # whenever the request DECLARED a body (Content-Length non-zero, or any
+        # Transfer-Encoding): those bytes are still queued in rfile and a reused
+        # HTTP/1.1 connection would parse them as the next request line (same
+        # class as _check_csrf). Gating on read_request_body instead was wrong in
+        # both directions — it missed a GET that carries a declared body, and it
+        # closed a healthy connection on a body-less DELETE/PUT/PATCH.
+        arm_connection_close_if_body_pending(handler)
         return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
     try:
         request_body = _read_body_bytes(handler) if read_request_body else None
