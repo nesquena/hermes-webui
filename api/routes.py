@@ -11152,19 +11152,28 @@ def _handle_insights(handler, parsed) -> bool:
             start_ts = None
             end_ts = None
         if start_ts is not None:
-            # Cap absurd custom windows (accidental/malicious huge ranges) at 5
-            # years so the daily series cannot balloon into millions of buckets.
-            # The window is clamped BEFORE filtering so totals and the chart are
-            # always computed over the same interval.
-            max_window = 5 * 365 * 86400
-            if end_ts - start_ts > max_window:
-                start_ts = end_ts - max_window
             # Operate on local calendar dates (DST-safe), not fixed 86400s, so
             # a spring-forward/fall-back day yields exactly one bucket and the
             # daily series stays aligned with the filtered totals.
             start_day = _datetime.fromtimestamp(start_ts).date()
             end_day = _datetime.fromtimestamp(end_ts).date()
             now_day = _datetime.fromtimestamp(now).date()
+            # Cap absurd custom windows at 5 CALENDAR years so the daily series
+            # cannot balloon into millions of buckets.  Walk end_day back 5
+            # calendar years instead of subtracting a fixed 5*365*86400 seconds:
+            # a valid five-calendar-year span containing a leap day (e.g.
+            # 2021-05-04..2026-05-04, 1826 days) would exceed the fixed-seconds
+            # cap and silently lose its first requested day (Greptile P1).
+            # The window is clamped BEFORE filtering so totals and the chart
+            # are always computed over the same interval.
+            try:
+                min_start = end_day.replace(year=end_day.year - 5)
+            except ValueError:
+                # Feb 29 in a non-leap target year -> Feb 28
+                min_start = end_day.replace(year=end_day.year - 5, day=28)
+            if start_day < min_start:
+                start_day = min_start
+                start_ts = _time.mktime(start_day.timetuple())
             today_midnight = _time.mktime((now_day.year, now_day.month, now_day.day, 0, 0, 0, 0, 0, -1))
             days = max((end_day - start_day).days + 1, 1)
             # Admission cutoffs, end-exclusivity.  A DATE endpoint uses a
