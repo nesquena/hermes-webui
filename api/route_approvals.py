@@ -6,6 +6,7 @@ Extracts approval state, not handlers, by design.
 import queue
 import threading
 import uuid
+from contextlib import contextmanager
 
 from api.session_events import publish_session_list_changed
 
@@ -52,10 +53,30 @@ _GATEWAY_AGENT_IDENTITY_V1 = "_gateway_agent_identity_v1"
 _gateway_relay_owners: dict[tuple[str, str], str] = {}
 _yolo_transition_lock = threading.Lock()
 _yolo_transitions: dict[str, dict] = {}
-# Serialize the Runs stream's auto-approve-vs-mirror decision with the ordinary
-# session-YOLO route's final mirror snapshot and flag commit. This closes the
-# handoff gap without holding tools.approval._lock across a network request.
-_gateway_yolo_handoff_lock = threading.Lock()
+_gateway_yolo_handoff_guard = threading.Lock()
+_gateway_yolo_handoffs: dict[str, dict] = {}
+
+
+@contextmanager
+def gateway_yolo_handoff(session_key: str):
+    """Serialize one session's YOLO toggles with gateway approval dispatch."""
+    session_key = str(session_key or "").strip()
+    with _gateway_yolo_handoff_guard:
+        entry = _gateway_yolo_handoffs.get(session_key)
+        if entry is None:
+            entry = {"lock": threading.Lock(), "users": 0}
+            _gateway_yolo_handoffs[session_key] = entry
+        entry["users"] += 1
+    lock = entry["lock"]
+    lock.acquire()
+    try:
+        yield
+    finally:
+        lock.release()
+        with _gateway_yolo_handoff_guard:
+            entry["users"] -= 1
+            if entry["users"] == 0:
+                _gateway_yolo_handoffs.pop(session_key, None)
 
 
 def begin_session_yolo_transition(session_key: str) -> object | None:

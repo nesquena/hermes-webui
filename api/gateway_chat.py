@@ -337,13 +337,35 @@ def _gateway_session_yolo_enabled(session_id: str) -> bool:
         return False
 
 
-def _prepare_gateway_run_approval(session_id: str, approval_data: dict) -> tuple[bool, dict | None, int]:
-    """Atomically choose auto-approval or publish an actionable run mirror."""
-    from api.route_approvals import _gateway_yolo_handoff_lock, submit_gateway_pending_mirror
+def _settle_gateway_run_approval(
+    session_id: str,
+    approval_data: dict,
+    base_url: str,
+    api_key: str,
+) -> tuple[bool, dict | None, int]:
+    """Auto-approve or mirror one run approval at a session-linearized point."""
+    from api.route_approvals import gateway_yolo_handoff, submit_gateway_pending_mirror
 
-    with _gateway_yolo_handoff_lock:
+    run_id = str(approval_data.get("run_id") or "").strip()
+    identity_v1 = bool(approval_data.get("_gateway_agent_identity_v1"))
+    with gateway_yolo_handoff(session_id):
         if _gateway_session_yolo_enabled(session_id):
-            return True, None, 0
+            try:
+                _auto_approve_gateway_run(
+                    base_url,
+                    api_key,
+                    run_id,
+                    approval_data["approval_id"] if identity_v1 else "",
+                )
+                return True, None, 0
+            except Exception:
+                # Fail closed: if remote approval fails, surface the real card
+                # before allowing a same-session toggle to pass the handoff.
+                logger.warning(
+                    "WebUI YOLO could not auto-approve run %s; showing approval card",
+                    run_id,
+                    exc_info=True,
+                )
         head, total = submit_gateway_pending_mirror(session_id, approval_data)
         return False, head, total
 
@@ -662,34 +684,15 @@ def _run_gateway_runs_api_streaming(
                     from api.config import gateway_supports_approval_identity_v1
                     identity_v1 = bool(approval_data.get("_gateway_raw_approval_id_present")) and gateway_supports_approval_identity_v1(base_url, api_key)
                     approval_data["_gateway_agent_identity_v1"] = identity_v1
-                    should_auto_approve, head, total = _prepare_gateway_run_approval(
+                    auto_approved, head, total = _settle_gateway_run_approval(
                         session_id,
                         approval_data,
+                        base_url,
+                        api_key,
                     )
-                    if should_auto_approve:
-                        try:
-                            _auto_approve_gateway_run(
-                                base_url,
-                                api_key,
-                                run_id,
-                                approval_data["approval_id"] if identity_v1 else "",
-                            )
-                            sse_event = "message"
-                            continue
-                        except Exception:
-                            # Fail closed: if remote approval fails, surface the
-                            # real card instead of claiming YOLO handled it.
-                            logger.warning(
-                                "WebUI YOLO could not auto-approve run %s; showing approval card",
-                                run_id,
-                                exc_info=True,
-                            )
-                            from api.route_approvals import (
-                                _gateway_yolo_handoff_lock,
-                                submit_gateway_pending_mirror,
-                            )
-                            with _gateway_yolo_handoff_lock:
-                                head, total = submit_gateway_pending_mirror(session_id, approval_data)
+                    if auto_approved:
+                        sse_event = "message"
+                        continue
                     put_gateway_event("approval", {**(head or approval_data), "pending_count": total})
                 sse_event = "message"
                 continue

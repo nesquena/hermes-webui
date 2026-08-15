@@ -9939,7 +9939,7 @@ from api.route_approvals import (  # noqa: F401 — re-exports for backward comp
     _GATEWAY_MIRROR_FLAG,
     _GATEWAY_MIRROR_TOKEN,
     _gateway_mirror_entry_token,
-    _gateway_yolo_handoff_lock,
+    gateway_yolo_handoff,
     begin_session_yolo_transition,
     claim_gateway_approval_relay_owner,
     finish_session_yolo_transition,
@@ -15602,8 +15602,9 @@ def handle_post(handler, parsed) -> bool:
         sid = str(body["session_id"] or "").strip()
         enabled = bool(body.get("enabled", True))
         if not enabled:
-            set_session_yolo_enabled(sid, False)
-            return j(handler, {"ok": True, "yolo_enabled": bool(is_session_yolo_enabled(sid))})
+            with gateway_yolo_handoff(sid):
+                set_session_yolo_enabled(sid, False)
+                return j(handler, {"ok": True, "yolo_enabled": bool(is_session_yolo_enabled(sid))})
 
         # Hold a tentative transition across both authoritative mirror snapshots.
         # While it is pending, the gateway stream must surface any new approval
@@ -15624,7 +15625,7 @@ def handle_post(handler, parsed) -> bool:
             # auto-approve-vs-mirror decision. A stream that arrives after this
             # snapshot cannot publish a parked mirror from a stale disabled-state
             # read; it re-checks the committed flag and auto-approves instead.
-            with _gateway_yolo_handoff_lock:
+            with gateway_yolo_handoff(sid):
                 with _lock:
                     reconcile_gateway_pending_mirror_locked(sid)
                     queue = _pending.get(sid)
