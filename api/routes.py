@@ -12902,8 +12902,15 @@ def handle_get(handler, parsed) -> bool:
                     # same merge pipeline the load branch uses.
                     from api.models import Session as _Session
                     _foreign_full = _Session.load(sid) if not getattr(s, "messages", None) else s
+                    # Mirror the load branch's defensive row backstop so a
+                    # pathological >50k-row state.db is read with the same
+                    # boundaries on both response modes (Greptile review).
+                    _foreign_state_kwargs = {"profile": _session_profile}
+                    _foreign_backstop = _state_db_backstop_limit_for_display(_foreign_full, None)
+                    if _foreign_backstop is not None:
+                        _foreign_state_kwargs["limit"] = _foreign_backstop
                     _foreign_state_messages = get_state_db_session_messages(
-                        sid, profile=_session_profile
+                        sid, **_foreign_state_kwargs
                     )
                     _metadata_display_msgs = merge_session_messages_append_only(
                         _webui_sidecar_lineage_messages_for_display(_foreign_full),
