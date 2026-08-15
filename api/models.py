@@ -4216,7 +4216,7 @@ def _repair_stale_pending(session) -> bool:
         return False
 
 
-def _sync_sidecar_from_state_db_if_newer(session) -> bool:
+def _sync_sidecar_from_state_db_if_newer(session) -> bool | Session:
     """Read-side self-heal when WebUI sidecar lags Hermes state.db.
 
     A WebUI stream can lose its terminal ``done``/``stream_end`` path while the
@@ -4364,6 +4364,19 @@ def _sync_sidecar_from_state_db_if_newer(session) -> bool:
             state_messages=state_messages,
         )
 
+        locked_pre_revision = _coerce_sidecar_revision(
+            locked._sidecar_revisions.get(sid),
+            sid,
+        )
+        alias_pre_revision = _coerce_sidecar_revision(
+            session._sidecar_revisions.get(sid),
+            sid,
+        )
+        alias_owned_pre_save_revision = (
+            locked_pre_revision is not None
+            and alias_pre_revision == locked_pre_revision
+        )
+
         # Mutate + persist the freshly-loaded, locked object. Because we hold the
         # lock and reloaded under it, this save cannot clobber a concurrent
         # writer's newer record.
@@ -4383,22 +4396,38 @@ def _sync_sidecar_from_state_db_if_newer(session) -> bool:
             )
             return False
 
-        # Durable write succeeded — reflect the reconciled state on the caller's
-        # shared/cached object so the in-flight read returns the recovered data.
-        session.messages = merged_messages
-        session.context_messages = merged_context
-        session.active_stream_id = None
-        session.pending_user_message = None
-        session.pending_attachments = []
-        session.pending_started_at = None
-        session.pending_user_source = None
+        locked_post_revision = _coerce_sidecar_revision(
+            locked._sidecar_revisions.get(sid),
+            sid,
+        )
+        if locked_post_revision is None:
+            logger.error(
+                "Session %s: state.db sync saved without a durable revision owner",
+                sid,
+            )
+            return False
+
+        # Only an alias that owned the exact pre-save revision may inherit the
+        # post-save authority. Otherwise return the freshly-saved owner so the
+        # caller replaces the stale alias instead of blessing unsaved fields.
+        if alias_owned_pre_save_revision:
+            session.messages = merged_messages
+            session.context_messages = merged_context
+            session.active_stream_id = None
+            session.pending_user_message = None
+            session.pending_attachments = []
+            session.pending_started_at = None
+            session.pending_user_source = None
+            session._sidecar_revisions[sid] = _sidecar_revision_record(
+                locked_post_revision
+            )
         logger.info(
             "Session %s: synced sidecar from newer state.db transcript (%d -> %d messages)",
             sid,
             locked_count,
             len(merged_messages),
         )
-        return True
+        return True if alias_owned_pre_save_revision else locked
     finally:
         lock.release()
 
@@ -5285,7 +5314,15 @@ def _resolve_session_once(
                 )
         if not metadata_only:
             try:
-                _sync_sidecar_from_state_db_if_newer(cached)
+                sync_result = _sync_sidecar_from_state_db_if_newer(cached)
+                if isinstance(sync_result, Session):
+                    with LOCK:
+                        current = SESSIONS.get(sid)
+                        if current is cached or current is None:
+                            SESSIONS[sid] = sync_result
+                            cached = sync_result
+                        else:
+                            cached = current
             except Exception:
                 logger.debug(
                     "state.db newer-sidecar sync failed on cache hit for session %s", sid, exc_info=True,
@@ -5308,7 +5345,17 @@ def _resolve_session_once(
                 _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
         if not metadata_only:
             try:
-                synced_from_state = _sync_sidecar_from_state_db_if_newer(s)
+                sync_result = _sync_sidecar_from_state_db_if_newer(s)
+                synced_from_state = bool(sync_result)
+                if isinstance(sync_result, Session):
+                    stale_loaded = s
+                    s = sync_result
+                    if cache_on_miss:
+                        with LOCK:
+                            if SESSIONS.get(sid) is stale_loaded:
+                                SESSIONS[sid] = s
+                                if promote_cache:
+                                    SESSIONS.move_to_end(sid)
                 repaired = False if synced_from_state else _repair_stale_pending(s)
                 # If the stale-pending repair did not fire but the session
                 # already carries a pending-journal-retry marker (e.g. set on

@@ -246,6 +246,11 @@ so a stale alias or repair cannot overwrite a sidecar that appeared concurrently
 Out-of-band replacements increment `_sidecar_generation_v1` and invalidate cached
 aliases before later saves can proceed.
 
+When a State DB self-heal saves through a freshly loaded owner, the caller's
+cached alias inherits the new revision only if it owned the exact pre-save
+revision. Otherwise the self-heal returns and installs the freshly saved owner;
+it never grants a stale alias authority over unrelated unsaved fields.
+
 Sidecar, primary-backup, and incomparable-backup archive publications flush the
 file before atomic publication and fsync the parent directory on POSIX. Native
 Windows keeps atomic publication and file flushing, but Python does not expose an
