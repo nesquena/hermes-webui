@@ -287,6 +287,7 @@ def _run_reload_mcp_command() -> str:
             # reload capture another profile (Greptile P1).
             from api.streaming import (
                 _MCP_READINESS_WAIT_CAP_S,
+                _MCP_RELOAD_FENCE,
                 _canonical_readiness_key,
                 _invalidate_mcp_readiness,
                 _mcp_retry_discovery,
@@ -331,13 +332,21 @@ def _run_reload_mcp_command() -> str:
             # Fail CLOSED: if any owner survived the join cap, abort the
             # reload rather than run a discovery body concurrently with a
             # registry rebuild (Greptile review round 10).
-            if not _prepare_global_reload():
-                return (
-                    "MCP reload aborted: a discovery run is still in "
-                    f"progress after waiting {int(_MCP_READINESS_WAIT_CAP_S)}s. "
-                    "Retry once it finishes."
-                )
-            shutdown_mcp_servers()
+            #
+            # The owner-creation FENCE is held for the whole teardown
+            # window: while /reload-mcp snapshots/joins live owners and
+            # shuts down the registry, a concurrent stream worker cannot
+            # CREATE a new discovery owner — so the snapshot is COMPLETE
+            # and no new body registers servers into or after the
+            # shutdown (Greptile review round 11).
+            with _MCP_RELOAD_FENCE:
+                if not _prepare_global_reload():
+                    return (
+                        "MCP reload aborted: a discovery run is still in "
+                        f"progress after waiting {int(_MCP_READINESS_WAIT_CAP_S)}s. "
+                        "Retry once it finishes."
+                    )
+                shutdown_mcp_servers()
 
             try:
                 from api.profiles import _resolve_hermes_home_override

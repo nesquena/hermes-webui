@@ -275,7 +275,12 @@ _STREAMING_CRON_PROFILE_HOME: contextvars.ContextVar[str | None] = contextvars.C
 #     bounded join before shutdown) and then INVALIDATES every other
 #     readiness entry so each profile's next turn re-runs discovery
 #     instead of trusting a stale 'completed'/'failed' state whose
-#     servers were just shut down.
+#     servers were just shut down.  Owner CREATION is fenced behind
+#     `_MCP_RELOAD_FENCE` for the reload's teardown window (snapshot
+#     through shutdown), so a concurrent stream cannot create a new
+#     discovery body that registers servers into or after the shutdown —
+#     the reload validates a COMPLETE owner snapshot, not a stale one
+#     (Greptile round 11).
 #
 # The discovery thread re-asserts the profile home through hermes-agent's
 # CONTEXT-LOCAL override (`set_hermes_home_override`), resolved via the
@@ -289,6 +294,16 @@ _STREAMING_CRON_PROFILE_HOME: contextvars.ContextVar[str | None] = contextvars.C
 _MCP_READINESS: dict = {}
 _MCP_READINESS_LOCK = threading.Lock()
 _MCP_READINESS_WAIT_CAP_S = 120.0
+
+# Fence held by /reload-mcp across its teardown window (owner snapshot
+# through `shutdown_mcp_servers`).  Owner CREATION (_ensure_mcp_discovery
+# / _mcp_retry_discovery) blocks on this fence, so a concurrent stream
+# cannot create a discovery body whose registrations overlap the
+# registry shutdown/rebuild (Greptile round 11).  It is a plain lock,
+# not the readiness lock: waiting turns never contend (they only wait on
+# readiness events), only new-owner creation does — and that is bounded
+# by the reload's own join cap.
+_MCP_RELOAD_FENCE = threading.Lock()
 
 
 def _canonical_readiness_key(profile_home):
@@ -376,36 +391,41 @@ def _ensure_mcp_discovery(profile_home, discover_fn, thread_name):
     NEW generation so waiters can never hang forever on a stale run.
     """
     profile_home = _canonical_readiness_key(profile_home)
-    with _MCP_READINESS_LOCK:
-        readiness = _MCP_READINESS.get(profile_home)
-        if readiness is None:
-            readiness = _McpReadiness()
-            _MCP_READINESS[profile_home] = readiness
-        if (
-            readiness.status == "pending"
-            and (readiness.thread is None or not readiness.thread.is_alive())
-        ):
-            # Owner thread died without finishing; restart it as a new
-            # generation so waiters can never hang forever on a stale
-            # run.  Completed/failed profiles are NOT re-run here — only
-            # explicit retries (_mcp_retry_discovery / /reload-mcp).
-            readiness.gen += 1
-            _gen = readiness.gen
-            readiness.event = threading.Event()
-            readiness.cancel = threading.Event()
-            readiness.thread = threading.Thread(
-                target=_discovery_runner,
-                args=(
-                    discover_fn,
-                    readiness,
-                    readiness.event,
-                    _gen,
-                    readiness.cancel,
-                ),
-                name=thread_name,
-                daemon=True,
-            )
-            readiness.thread.start()
+    with _MCP_RELOAD_FENCE:
+        # Owner creation is fenced behind a global reload's teardown so a
+        # new discovery body can never register servers into (or after) a
+        # registry shutdown (Greptile round 11).  Waiting turns never
+        # contend on the fence — only new-owner creation does.
+        with _MCP_READINESS_LOCK:
+            readiness = _MCP_READINESS.get(profile_home)
+            if readiness is None:
+                readiness = _McpReadiness()
+                _MCP_READINESS[profile_home] = readiness
+            if (
+                readiness.status == "pending"
+                and (readiness.thread is None or not readiness.thread.is_alive())
+            ):
+                # Owner thread died without finishing; restart it as a new
+                # generation so waiters can never hang forever on a stale
+                # run.  Completed/failed profiles are NOT re-run here — only
+                # explicit retries (_mcp_retry_discovery / /reload-mcp).
+                readiness.gen += 1
+                _gen = readiness.gen
+                readiness.event = threading.Event()
+                readiness.cancel = threading.Event()
+                readiness.thread = threading.Thread(
+                    target=_discovery_runner,
+                    args=(
+                        discover_fn,
+                        readiness,
+                        readiness.event,
+                        _gen,
+                        readiness.cancel,
+                    ),
+                    name=thread_name,
+                    daemon=True,
+                )
+                readiness.thread.start()
     return readiness
 
 
@@ -491,30 +511,34 @@ def _mcp_retry_discovery(profile_home, discover_fn, thread_name):
         # mid-discovery finishes (bounded by its internal timeouts).
         _old_cancel.set()
         _old_thread.join(timeout=_MCP_READINESS_WAIT_CAP_S)
-    with _MCP_READINESS_LOCK:
-        if _old_thread is not None and _old_thread.is_alive():
-            # Physical single-flight: the old body is STILL alive beyond
-            # the cap.  Reject the replacement rather than running two
-            # discovery bodies for one profile.
-            return readiness
-        readiness.status = "pending"
-        readiness.gen += 1
-        _gen = readiness.gen
-        readiness.event = threading.Event()
-        readiness.cancel = threading.Event()
-        readiness.thread = threading.Thread(
-            target=_discovery_runner,
-            args=(
-                discover_fn,
-                readiness,
-                readiness.event,
-                _gen,
-                readiness.cancel,
-            ),
-            name=thread_name,
-            daemon=True,
-        )
-        readiness.thread.start()
+    with _MCP_RELOAD_FENCE:
+        # Owner creation is fenced behind a global reload's teardown so a
+        # new discovery body can never register servers into (or after) a
+        # registry shutdown (Greptile round 11).
+        with _MCP_READINESS_LOCK:
+            if _old_thread is not None and _old_thread.is_alive():
+                # Physical single-flight: the old body is STILL alive beyond
+                # the cap.  Reject the replacement rather than running two
+                # discovery bodies for one profile.
+                return readiness
+            readiness.status = "pending"
+            readiness.gen += 1
+            _gen = readiness.gen
+            readiness.event = threading.Event()
+            readiness.cancel = threading.Event()
+            readiness.thread = threading.Thread(
+                target=_discovery_runner,
+                args=(
+                    discover_fn,
+                    readiness,
+                    readiness.event,
+                    _gen,
+                    readiness.cancel,
+                ),
+                name=thread_name,
+                daemon=True,
+            )
+            readiness.thread.start()
     return readiness
 
 
@@ -531,6 +555,12 @@ def _prepare_global_reload():
     False if any owner survived the cap: the caller MUST fail closed
     (abort the reload) rather than run a discovery body concurrently
     with a registry rebuild (Greptile review round 10).
+
+    The caller MUST hold `_MCP_RELOAD_FENCE` for the duration (snapshot
+    through `shutdown_mcp_servers`): owner creation blocks on the fence,
+    so the snapshot below is COMPLETE — a concurrent stream cannot
+    create a new owner whose registrations would overlap the shutdown
+    (Greptile review round 11).
     """
     with _MCP_READINESS_LOCK:
         _live = [

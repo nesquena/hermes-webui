@@ -338,6 +338,120 @@ class TestGenerations:
         )
         assert streaming._mcp_wait_readiness(r_turn) == "completed"
 
+    def test_owner_creation_waits_for_reload_teardown(self):
+        """A concurrent stream cannot create an owner during reload teardown.
+
+        Regression (Greptile review round 11): the reload validated only
+        the owners it SNAPSHOTTED.  A stream worker creating a new owner
+        during the join phase could register servers into (or after) the
+        registry shutdown — overlapping teardown even though every
+        snapshot owner terminated.  Owner creation now blocks on
+        `_MCP_RELOAD_FENCE` for the reload's teardown window, so the
+        reload's snapshot is complete and a new body can only start
+        against the fresh registry.
+        """
+        timeline = []
+        lock = threading.Lock()
+
+        def make_logging_discover(duration, label):
+            def _discover():
+                with lock:
+                    timeline.append((label + "-start", time.monotonic()))
+                time.sleep(duration)
+                with lock:
+                    timeline.append((label + "-end", time.monotonic()))
+                return True
+
+            return _discover
+
+        # A live owner that blocks until released (simulates a discovery
+        # body mid-connect during the reload's join phase).
+        zombie_readiness = streaming._McpReadiness()
+        release = threading.Event()
+
+        def zombie_discover():
+            with lock:
+                timeline.append(("zombie-start", time.monotonic()))
+            release.wait(5.0)
+            with lock:
+                timeline.append(("zombie-end", time.monotonic()))
+            return True
+
+        zt = threading.Thread(
+            target=streaming._discovery_runner,
+            args=(
+                zombie_discover,
+                zombie_readiness,
+                zombie_readiness.event,
+                zombie_readiness.gen,
+                zombie_readiness.cancel,
+            ),
+            name="mcp-fence-test-zombie",
+            daemon=True,
+        )
+        zombie_readiness.thread = zt
+        zt.start()
+        streaming._MCP_READINESS["/profiles/zombie"] = zombie_readiness
+
+        reload_done = threading.Event()
+
+        def _do_prepare():
+            streaming._prepare_global_reload()
+            reload_done.set()
+
+        # Hold the reload fence exactly like /reload-mcp does across
+        # snapshot + join + shutdown.
+        with streaming._MCP_RELOAD_FENCE:
+            rt = threading.Thread(target=_do_prepare, daemon=True)
+            rt.start()
+            # Prepare has set the zombie's cancel token → it is inside the
+            # bounded join, still waiting on the zombie.
+            assert zombie_readiness.cancel.wait(2.0), "prepare never started join"
+            time.sleep(0.1)
+
+            # A stream worker for a NEW profile tries to create an owner
+            # mid-teardown.  It must BLOCK on the fence, not create a
+            # discovery body that overlaps the shutdown.
+            ensure_done = threading.Event()
+            ensure_holder = {}
+
+            def _do_ensure():
+                ensure_holder["readiness"] = streaming._ensure_mcp_discovery(
+                    "profile-new", make_logging_discover(0.05, "new"), "t-new"
+                )
+                ensure_done.set()
+
+            et = threading.Thread(target=_do_ensure, daemon=True)
+            et.start()
+            time.sleep(0.3)
+            assert "profile-new" not in streaming._MCP_READINESS, (
+                "owner creation must be fenced during the reload teardown"
+            )
+            assert not ensure_done.is_set(), (
+                "_ensure_mcp_discovery returned while the reload fence was held"
+            )
+
+            # Let the zombie finish → prepare's join returns (owner
+            # terminated) → teardown completes.
+            release.set()
+            rt.join(timeout=2.0)
+            assert reload_done.is_set(), "prepare did not finish"
+
+        # Fence released: the fenced creator may now create its owner.
+        et.join(timeout=2.0)
+        new_readiness = ensure_holder.get("readiness")
+        assert new_readiness is not None, "fenced owner creation never ran"
+        assert streaming._mcp_wait_readiness(new_readiness) == "completed"
+
+        # No overlap: the new body started only AFTER the zombie ended.
+        with lock:
+            zombie_end = max(t for ev, t in timeline if ev == "zombie-end")
+            new_start = min(t for ev, t in timeline if ev == "new-start")
+        assert new_start >= zombie_end - 0.01, (
+            "the fenced owner started discovery while the reload teardown "
+            "was still in progress"
+        )
+
     def test_retry_while_pending_never_creates_two_owners(self):
         """A retry while the prior owner is still running must be single-flight.
 
