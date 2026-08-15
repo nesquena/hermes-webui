@@ -531,6 +531,55 @@ def test_unresolvable_project_id_leaves_the_session_unassigned(
     assert by_id["old-live"]["project_id"] == "project-live"
 
 
+@pytest.mark.parametrize(
+    "row_profile, active, expected",
+    [
+        (None, None, True),
+        ("", None, True),
+        ("default", None, True),
+        (None, "default", True),
+        ("", "default", True),
+        ("default", "default", True),
+        # Renamed root: the legacy 'default' tag and the display name are the
+        # same profile, in both directions.
+        ("kinni", "default", True),
+        ("default", "kinni", True),
+        (None, "kinni", True),
+        # Genuinely different profiles never cross.
+        ("other", "default", False),
+        ("default", "other", False),
+        ("other", "other", True),
+    ],
+)
+def test_profile_scoped_project_ids_uses_the_canonical_profile_match(
+    fake_hermes_home, tmp_path, monkeypatch, row_profile, active, expected
+):
+    """Ownership is decided by ``_profiles_match``, not by a local copy of it.
+
+    ``api/profiles.py::_profiles_match`` documents that it exists so callers
+    stop duplicating this None/''/'default'/renamed-root matrix. Each row asserts
+    the catalog read agrees with the canonical helper cell for cell, so the two
+    cannot drift apart the way the duplicated body could.
+    """
+    import api.profiles as profiles
+
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: active)
+    monkeypatch.setattr(
+        profiles, "_is_root_profile", lambda name: name in {"default", "kinni"}
+    )
+    (tmp_path / "projects.json").write_text(
+        json.dumps([
+            {"project_id": "p1", "name": "P1", "color": "#000",
+             "profile": row_profile, "created_at": 1.0},
+        ]),
+        encoding="utf-8",
+    )
+    models.clear_cli_sessions_cache()
+
+    assert profiles._profiles_match(row_profile, active) is expected
+    assert ("p1" in models.profile_scoped_project_ids()) is expected
+
+
 def test_unresolvable_project_overflow_is_not_marked_hidden(fake_hermes_home, tmp_path):
     """End of the same chain: routes must see None, so no orphan default_hidden."""
     _register_projects(tmp_path, "project-live")
