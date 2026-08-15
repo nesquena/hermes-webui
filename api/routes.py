@@ -12909,6 +12909,17 @@ def handle_get(handler, parsed) -> bool:
                     _foreign_backstop = _state_db_backstop_limit_for_display(_foreign_full, None)
                     if _foreign_backstop is not None:
                         _foreign_state_kwargs["limit"] = _foreign_backstop
+                    # The limited-load path may also apply a sidecar-derived
+                    # since_timestamp floor (_state_db_since_timestamp_for_limited_display),
+                    # but that floor only fires when the sidecar and state.db
+                    # share an IDENTICAL prefix (counts AND visible keys must
+                    # match, otherwise it bails to the full read). Under that
+                    # guard the filtered state.db rows are all present in the
+                    # sidecar, so the append-only merge dedupes them and the
+                    # filtered result equals this full merge; and a metadata
+                    # poll carries no msg_limit from which to derive a floor
+                    # anyway. The unbounded read here therefore yields the
+                    # same display count as every load mode.
                     _foreign_state_messages = get_state_db_session_messages(
                         sid, **_foreign_state_kwargs
                     )
