@@ -92,8 +92,8 @@ def _record_tombstone_process(session_dir, sid, peer_sid, result_queue):
     models.SESSION_INDEX_FILE = Path(session_dir) / "_index.json"
     real_load = models._load_webui_deleted_session_tombstone
 
-    def load_then_wait_for_peer():
-        current = real_load()
+    def load_then_wait_for_peer(**kwargs):
+        current = real_load(**kwargs)
         marker_dir = Path(session_dir) / "tombstone-read-markers"
         marker_dir.mkdir(parents=True, exist_ok=True)
         (marker_dir / sid).write_text("read", encoding="utf-8")
@@ -359,6 +359,58 @@ def test_delete_fails_closed_when_tombstone_cannot_be_persisted(
     )
     assert captured["status"] == 500
     assert sidecar.exists()
+
+
+@pytest.mark.parametrize("operation", ["record", "clear"])
+def test_deleted_tombstone_rmw_fails_closed_on_corrupt_fence(
+    tmp_path, monkeypatch, operation
+):
+    from api import models
+
+    _patch_store(monkeypatch, tmp_path)
+    existing_sid = "existing-deleted"
+    models._record_webui_deleted_session_tombstone(existing_sid)
+    tombstone = models._webui_deleted_session_tombstone_file()
+    corrupt_bytes = b'{"version": 1, "ids": ["existing-deleted"'
+    tombstone.write_bytes(corrupt_bytes)
+
+    with pytest.raises(json.JSONDecodeError):
+        if operation == "record":
+            models._record_webui_deleted_session_tombstone("new-deleted")
+        else:
+            models._clear_webui_deleted_session_tombstone(existing_sid)
+
+    assert tombstone.read_bytes() == corrupt_bytes
+
+
+def test_delete_route_fails_closed_without_unlinking_when_tombstone_is_corrupt(
+    tmp_path, monkeypatch
+):
+    from api import models, routes
+
+    session_dir = _patch_store(monkeypatch, tmp_path)
+    _prepare_delete_route(monkeypatch, models, routes)
+    existing_sid = "existing-deleted-route"
+    target_sid = "target-delete-route"
+    models._record_webui_deleted_session_tombstone(existing_sid)
+    tombstone = models._webui_deleted_session_tombstone_file()
+    corrupt_bytes = b'{"version": 1, "ids": ["existing-deleted-route"'
+    tombstone.write_bytes(corrupt_bytes)
+
+    target = models.Session(
+        session_id=target_sid,
+        messages=[{"role": "user", "content": "must remain after refused delete"}],
+    )
+    target.save(skip_index=True)
+    sidecar = session_dir / f"{target_sid}.json"
+
+    captured = _invoke_post(
+        monkeypatch, routes, "/api/session/delete", {"session_id": target_sid}
+    )
+
+    assert captured["status"] == 500
+    assert sidecar.exists()
+    assert tombstone.read_bytes() == corrupt_bytes
 
 
 def test_new_tombstone_survives_capacity_trim(tmp_path, monkeypatch):

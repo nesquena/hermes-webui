@@ -1109,8 +1109,17 @@ def _load_webui_deleted_session_tombstone_ids(
     return ordered
 
 
-def _load_webui_deleted_session_tombstone() -> frozenset[str]:
-    return frozenset(_load_webui_deleted_session_tombstone_ids())
+def _load_webui_deleted_session_tombstone(
+    *,
+    session_dir: Path | None = None,
+    strict: bool = False,
+) -> frozenset[str]:
+    return frozenset(
+        _load_webui_deleted_session_tombstone_ids(
+            session_dir=session_dir,
+            strict=strict,
+        )
+    )
 
 
 def _webui_deleted_session_is_tombstoned(
@@ -1173,14 +1182,14 @@ def _record_webui_deleted_session_tombstone(sid: str) -> None:
     with _webui_deleted_session_tombstone_authority():
         # Keep this public load in the RMW path: tests and diagnostics can gate
         # the exact read while the persisted order remains independently retained.
-        current = _load_webui_deleted_session_tombstone()
+        current = _load_webui_deleted_session_tombstone(strict=True)
         if sid in current:
             _fsync_sidecar_directory(SESSION_DIR)
             return
-        ordered = _load_webui_deleted_session_tombstone_ids()
+        ordered = _load_webui_deleted_session_tombstone_ids(strict=True)
         ordered.append(sid)
         _save_webui_deleted_session_tombstone(ordered)
-        if sid not in _load_webui_deleted_session_tombstone():
+        if sid not in _load_webui_deleted_session_tombstone(strict=True):
             raise RuntimeError(f"Deleted-session tombstone dropped new SID {sid!r}")
 
 
@@ -1189,12 +1198,12 @@ def _clear_webui_deleted_session_tombstone(sid: str) -> None:
     if not sid:
         return
     with _webui_deleted_session_tombstone_authority():
-        current = _load_webui_deleted_session_tombstone()
+        current = _load_webui_deleted_session_tombstone(strict=True)
         if sid not in current:
             return
         ordered = [
             current_sid
-            for current_sid in _load_webui_deleted_session_tombstone_ids()
+            for current_sid in _load_webui_deleted_session_tombstone_ids(strict=True)
             if current_sid != sid
         ]
         if ordered:
