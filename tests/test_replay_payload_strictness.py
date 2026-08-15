@@ -1,5 +1,6 @@
 import copy
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -166,8 +167,151 @@ def test_default_prefix_accepts_only_exact_structured_payload():
     identical = copy.deepcopy(first)
     different = _structured_assistant("file:///B.png")
 
-    assert _messages_have_prefix([identical], [first]) is True
-    assert _messages_have_prefix([different], [first]) is False
+    assert _messages_have_prefix([identical], [first]) is False
+    assert _messages_have_prefix(
+        [identical], [first], allow_exact_payload=True
+    ) is True
+    assert _messages_have_prefix(
+        [different], [first], allow_exact_payload=True
+    ) is False
+
+
+def test_exact_prefix_mode_rejects_lossy_structured_identity_matches():
+    from api.streaming import (
+        _message_replay_key,
+        _messages_have_prefix,
+    )
+
+    first = {
+        "role": "assistant",
+        "content": [
+            {"type": "text", "text": "same visible text"},
+            {"type": "image_url", "image_url": "file:///A.png", "detail": True},
+        ],
+    }
+    different_image = copy.deepcopy(first)
+    different_image["content"][1]["image_url"] = "file:///B.png"
+    different_scalar_type = copy.deepcopy(first)
+    different_scalar_type["content"][1]["detail"] = 1
+
+    assert _message_replay_key(first) is None
+    assert _message_replay_key(different_image) is None
+    assert not _messages_have_prefix(
+        [copy.deepcopy(first)], [first], key_fn=_message_replay_key
+    )
+    assert not _messages_have_prefix(
+        [different_image], [first], allow_exact_payload=True
+    )
+    assert not _messages_have_prefix(
+        [different_scalar_type], [first], allow_exact_payload=True
+    )
+
+
+def test_exact_prefix_mode_rejects_container_subclasses():
+    from api.streaming import _message_replay_key, _messages_have_prefix
+
+    class MessageDict(dict):
+        pass
+
+    first = {"role": "assistant", "content": "same visible text"}
+    subclassed = MessageDict(copy.deepcopy(first))
+
+    assert _message_replay_key(subclassed) is None
+    assert not _messages_have_prefix(
+        [subclassed], [first], key_fn=_message_replay_key
+    )
+    assert not _messages_have_prefix(
+        [subclassed], [first], allow_exact_payload=True
+    )
+
+
+def test_exact_prefix_mode_requires_identical_nonempty_attachments():
+    from api.streaming import _message_replay_key, _messages_have_prefix
+
+    first = {
+        "role": "user",
+        "content": "same visible text",
+        "attachments": [{"name": "A.pdf"}],
+    }
+    identical = copy.deepcopy(first)
+    different = copy.deepcopy(first)
+    different["attachments"][0]["name"] = "B.pdf"
+
+    assert _message_replay_key(first) is None
+    assert not _messages_have_prefix(
+        [identical], [first], key_fn=_message_replay_key
+    )
+    assert not _messages_have_prefix([identical], [first])
+    assert _messages_have_prefix(
+        [identical], [first], allow_exact_payload=True
+    )
+    assert not _messages_have_prefix(
+        [different], [first], allow_exact_payload=True
+    )
+
+
+def _settle_structured_result(previous, result):
+    from api.streaming import _settle_result_messages
+
+    prompt = "continue the active turn"
+    session = SimpleNamespace(
+        session_id="strict-structured-prefix",
+        messages=copy.deepcopy(previous),
+        context_messages=copy.deepcopy(previous),
+        truncation_watermark=None,
+    )
+    _settle_result_messages(
+        session,
+        copy.deepcopy(previous),
+        copy.deepcopy(previous),
+        copy.deepcopy(result),
+        prompt,
+        "webui",
+        {
+            "token": "stream:strict-structured-prefix",
+            "text": prompt,
+            "timestamp": 200.0,
+            "source": "webui",
+            "attachments": [],
+            "current_turn_user_idx": len(previous),
+            "turn_id": "turn:strict-structured-prefix",
+        },
+    )
+    return session
+
+
+def test_settle_preserves_exact_structured_assistant_delta():
+    previous = [_structured_assistant("file:///A.png")]
+    previous[0]["id"] = "structured-assistant-a"
+    repeated_delta = copy.deepcopy(previous[0])
+    answer = {"role": "assistant", "content": "new answer"}
+
+    session = _settle_structured_result(previous, [repeated_delta, answer])
+
+    assert len(session.messages) == len(session.context_messages) == 4
+    for projection in (session.messages, session.context_messages):
+        assert sum(isinstance(row.get("content"), list) for row in projection) == 2
+        assert sum(row.get("role") == "user" for row in projection) == 1
+        assert projection[-1]["content"] == "new answer"
+
+
+def test_settle_strips_exact_structured_prefix_from_full_history():
+    previous = [_structured_assistant("file:///A.png")]
+    previous[0]["id"] = "structured-assistant-a"
+    current_user = {"role": "user", "content": "continue the active turn"}
+    answer = {"role": "assistant", "content": "new answer"}
+
+    session = _settle_structured_result(previous, [*previous, current_user, answer])
+
+    assert len(session.messages) == len(session.context_messages) == 3
+    for projection in (session.messages, session.context_messages):
+        assert sum(isinstance(row.get("content"), list) for row in projection) == 1
+        assert [row.get("role") for row in projection] == [
+            "assistant",
+            "user",
+            "assistant",
+        ]
+        assert projection[-1]["content"] == "new answer"
 
 
 def test_display_merge_collapses_only_exact_durable_empty_replay():

@@ -65,6 +65,7 @@ from api.todo_state import attach_todo_state, emit_todo_state
 from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
 from api.models import (
+    _STRUCTURED_REPLAY_FIELDS,
     _canonical_message_digest,
     _collapse_duplicate_durable_empty_assistant_replays,
     _collapse_duplicate_incomplete_message_ids,
@@ -1592,6 +1593,47 @@ def _active_turn_boundary_is_valid(identity):
     return isinstance(identity.get('current_turn_user_idx'), int)
 
 
+def _result_has_authoritative_full_history_prefix(
+    result_messages,
+    previous_context,
+    identity,
+    msg_text,
+):
+    """Prove that an exact result prefix is history, not a lookalike delta."""
+    if not _active_turn_boundary_is_valid(identity):
+        return False
+    result_messages = list(result_messages or [])
+    previous_context = list(previous_context or [])
+    current_turn_user_idx = identity['current_turn_user_idx']
+    if current_turn_user_idx < 0 or current_turn_user_idx > len(previous_context):
+        return False
+    if current_turn_user_idx >= len(result_messages):
+        return False
+    current_turn = result_messages[current_turn_user_idx]
+    expected_text = identity.get('text') if identity.get('text') is not None else msg_text
+    if (
+        type(current_turn) is not dict
+        or current_turn.get('role') != 'user'
+        or _normalize_user_text(current_turn.get('content'))
+        != _normalize_user_text(expected_text)
+    ):
+        return False
+    if current_turn_user_idx < len(previous_context):
+        previous_current_turn = previous_context[current_turn_user_idx]
+        if (
+            type(previous_current_turn) is not dict
+            or previous_current_turn.get('role') != 'user'
+            or _normalize_user_text(previous_current_turn.get('content'))
+            != _normalize_user_text(expected_text)
+        ):
+            return False
+    return _messages_have_prefix(
+        result_messages,
+        previous_context,
+        allow_exact_payload=True,
+    )
+
+
 def _active_turn_token_matches(message, identity):
     token = identity.get('token') if isinstance(identity, dict) else None
     if not token:
@@ -1653,7 +1695,14 @@ def _owner_projection_current_turn_row(messages, identity):
     return None
 
 
-def _find_active_turn_checkpoint_index(result_messages, previous_context, identity, msg_text):
+def _find_active_turn_checkpoint_index(
+    result_messages,
+    previous_context,
+    identity,
+    msg_text,
+    *,
+    allow_exact_prefix=False,
+):
     result_messages = list(result_messages or [])
     if not isinstance(identity, dict):
         return None
@@ -1667,7 +1716,11 @@ def _find_active_turn_checkpoint_index(result_messages, previous_context, identi
     candidates = []
     current_turn_user_idx = identity['current_turn_user_idx']
     previous_context = list(previous_context or [])
-    if _messages_have_prefix(result_messages, previous_context):
+    if _messages_have_prefix(
+        result_messages,
+        previous_context,
+        allow_exact_payload=allow_exact_prefix,
+    ):
         candidates.append(current_turn_user_idx)
     else:
         offset = current_turn_user_idx - len(previous_context)
@@ -1709,7 +1762,15 @@ def _materialize_active_turn_user(identity, msg_text, source):
     return message
 
 
-def _settle_current_turn_boundary(previous_context, result_messages, identity, msg_text, source):
+def _settle_current_turn_boundary(
+    previous_context,
+    result_messages,
+    identity,
+    msg_text,
+    source,
+    *,
+    allow_exact_prefix=False,
+):
     """Insert the pending turn before assistant/tool output when it is absent."""
     result_messages = list(result_messages or [])
     if not result_messages or not isinstance(identity, dict):
@@ -1719,12 +1780,17 @@ def _settle_current_turn_boundary(previous_context, result_messages, identity, m
         previous_context,
         identity,
         msg_text,
+        allow_exact_prefix=allow_exact_prefix,
     )
     if _checkpoint_idx is not None:
         _mark_active_turn_checkpoint(result_messages[_checkpoint_idx], identity)
         return result_messages
     previous_context = list(previous_context or [])
-    if _messages_have_prefix(result_messages, previous_context):
+    if _messages_have_prefix(
+        result_messages,
+        previous_context,
+        allow_exact_payload=allow_exact_prefix,
+    ):
         insert_at = len(previous_context)
     elif _active_turn_boundary_is_valid(identity):
         insert_at = identity['current_turn_user_idx'] - len(previous_context)
@@ -1836,6 +1902,14 @@ def _settle_result_messages(
     source,
     active_turn_identity,
 ):
+    result_has_authoritative_full_history_prefix = (
+        _result_has_authoritative_full_history_prefix(
+            result_messages,
+            previous_context_messages,
+            active_turn_identity,
+            msg_text,
+        )
+    )
     (
         result_messages,
         next_context_messages,
@@ -1862,6 +1936,7 @@ def _settle_result_messages(
             active_turn_identity,
             msg_text,
             source,
+            allow_exact_prefix=True,
         )
     session.context_messages = (
         _deduplicate_context_messages(next_context_messages)
@@ -1875,6 +1950,7 @@ def _settle_result_messages(
             active_turn_identity,
             msg_text,
             source,
+            allow_exact_prefix=True,
         )
     previous_display_for_writeback, session.context_messages = _align_current_turn_display(
         previous_messages,
@@ -1888,6 +1964,9 @@ def _settle_result_messages(
         msg_text,
         source=source,
         verification_nudge_provenance=verification_nudge_provenance,
+        result_has_authoritative_full_history_prefix=(
+            result_has_authoritative_full_history_prefix
+        ),
     )
     _annotate_media_snapshots_for_settled_messages(session.messages)
     _compact_session_image_parts_for_persistence(session)
@@ -5827,16 +5906,75 @@ def _comparison_keys_equal(left, right):
     return left is not None and right is not None and left == right
 
 
-def _messages_have_prefix(messages, prefix, *, key_fn=None):
+def _message_content_has_nontext_parts(content) -> bool:
+    """Return True when visible-text identity would discard content structure."""
+    if type(content) is not list:
+        return type(content) not in (str, type(None))
+    for part in content:
+        if type(part) is not dict:
+            return True
+        part_type = part.get('type')
+        if type(part_type) is not str:
+            return True
+        if part_type.lower() not in ('', 'text', 'input_text', 'output_text'):
+            return True
+    return False
+
+
+def _structured_replay_value_is_nonempty(value) -> bool:
+    """Classify empty JSON containers without invoking foreign equality hooks."""
+    if value is None:
+        return False
+    if type(value) in (str, list, dict):
+        return bool(value)
+    return True
+
+
+def _message_requires_exact_prefix_payload(message) -> bool:
+    """Return True when coarse visible identity is destructive for a prefix."""
+    if type(message) is not dict:
+        return True
+    if type(message.get('content', '')) not in (str, type(None)):
+        return True
+    return bool(
+        any(
+            _structured_replay_value_is_nonempty(message.get(field))
+            for field in _STRUCTURED_REPLAY_FIELDS
+        )
+        or _structured_replay_value_is_nonempty(message.get('api_content'))
+    )
+
+
+def _messages_have_prefix(
+    messages,
+    prefix,
+    *,
+    key_fn=None,
+    allow_exact_payload=False,
+):
     strict_keys_only = key_fn is not None
     key_fn = key_fn or _message_identity
     if len(messages or []) < len(prefix or []):
         return False
     for idx, expected in enumerate(prefix or []):
         actual = (messages or [])[idx]
+        if strict_keys_only:
+            if _comparison_keys_equal(key_fn(actual), key_fn(expected)):
+                continue
+            return False
+        if (
+            _message_requires_exact_prefix_payload(actual)
+            or _message_requires_exact_prefix_payload(expected)
+        ):
+            if allow_exact_payload and _comparison_keys_equal(
+                _canonical_message_digest(actual),
+                _canonical_message_digest(expected),
+            ):
+                continue
+            return False
         if _comparison_keys_equal(key_fn(actual), key_fn(expected)):
             continue
-        if not strict_keys_only and _comparison_keys_equal(
+        if allow_exact_payload and _comparison_keys_equal(
             _canonical_message_digest(actual),
             _canonical_message_digest(expected),
         ):
@@ -5850,7 +5988,16 @@ def _message_replay_key(msg):
     durable_empty_key = _durable_empty_assistant_replay_key(msg)
     if durable_empty_key is not None:
         return ('durable_empty', durable_empty_key)
-    if _message_has_structured_replay_fields(msg):
+    if type(msg) is not dict:
+        return None
+    if (
+        _message_has_structured_replay_fields(msg)
+        or _message_content_has_nontext_parts(msg.get('content', ''))
+        or any(
+            _structured_replay_value_is_nonempty(msg.get(field))
+            for field in _STRUCTURED_REPLAY_FIELDS
+        )
+    ):
         return None
     identity = _message_identity(msg)
     # ``api_content`` is a provider-facing replay sidecar.  It must participate
@@ -5868,8 +6015,6 @@ def _message_replay_key(msg):
         if sidecar is not None:
             return (*identity, sidecar)
         return identity
-    if not isinstance(msg, dict):
-        return None
     if (
         str(msg.get('role') or '') == 'assistant'
         and not _is_admissible_empty_text_content(msg.get('content'))
@@ -6569,6 +6714,7 @@ def _merge_display_messages_after_agent_result(
     msg_text,
     source: str = "webui",
     verification_nudge_provenance=None,
+    result_has_authoritative_full_history_prefix=False,
 ):
     """Keep UI transcript durable while allowing model context to compact.
 
@@ -6650,6 +6796,15 @@ def _merge_display_messages_after_agent_result(
     result_messages, _ = _collapse_duplicate_incomplete_message_ids(result_messages)
     if not result_messages:
         return previous_display
+    if not result_has_authoritative_full_history_prefix:
+        result_has_authoritative_full_history_prefix = (
+            _result_has_authoritative_full_history_prefix(
+                result_messages,
+                previous_context,
+                _active_turn_identity,
+                msg_text,
+            )
+        )
     previous_user_tail = _stale_user_tail_candidate(_last_user_row(previous_context))
 
     # ── Backfill normal turns from previous_context that are missing from
@@ -6771,7 +6926,11 @@ def _merge_display_messages_after_agent_result(
                 )
                 previous_display = _backfilled
 
-    if _messages_have_prefix(result_messages, previous_context):
+    if _messages_have_prefix(
+        result_messages,
+        previous_context,
+        allow_exact_payload=result_has_authoritative_full_history_prefix,
+    ):
         candidates = result_messages[len(previous_context):]
         # Normalize stale merges only in the new-turn slice; never rewrite
         # historical rows in the already-committed previous_context prefix.
@@ -6950,7 +7109,11 @@ def _assistant_reply_added_after_current_turn(result_messages, previous_context,
     """Return True only when the just-finished turn produced assistant text."""
     result_messages = list(result_messages or [])
     previous_context = list(previous_context or [])
-    if _messages_have_prefix(result_messages, previous_context):
+    if _messages_have_prefix(
+        result_messages,
+        previous_context,
+        allow_exact_payload=True,
+    ):
         candidates = result_messages[len(previous_context):]
     else:
         current_user_idx = _find_current_user_turn(result_messages, msg_text)
