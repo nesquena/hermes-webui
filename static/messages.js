@@ -397,6 +397,17 @@ function enhanceMarkdownTables(root){
   const filterLabel=typeof t==='function'?t('markdown_table_filter'):'Filter table';
   tables.forEach((table)=>{
     if(table.closest('.csv-table-wrap')) return;
+    // Wrap in a horizontally scrollable container so wide tables keep their
+    // natural column widths on narrow viewports instead of crushing each
+    // column to a few characters (mobile chat). Same pattern as csv-table-wrap.
+    const tableParent=table.parentElement;
+    let scrollWrap=null;
+    if(tableParent&&!tableParent.classList.contains('markdown-table-scroll')){
+      scrollWrap=document.createElement('div');
+      scrollWrap.className='markdown-table-scroll';
+      tableParent.insertBefore(scrollWrap, table);
+      scrollWrap.appendChild(table);
+    }
     const headRows=table.tHead?Array.from(table.tHead.rows):[];
     const body=table.tBodies&&table.tBodies.length?table.tBodies[0]:table;
     const bodyRows=Array.from(body.rows||[]).filter((row)=>row.parentElement===body);
@@ -405,7 +416,7 @@ function enhanceMarkdownTables(root){
     table.setAttribute('data-markdown-table-enhanced','1');
     bodyRows.forEach((row,idx)=>{ row.dataset.markdownTableOriginalIndex=String(idx); });
 
-    if(bodyRows.length>=4&&table.parentElement){
+    if(bodyRows.length>=4&&(scrollWrap||table.parentElement)){
       const filter=document.createElement('input');
       filter.type='search';
       filter.className='markdown-table-filter';
@@ -419,7 +430,11 @@ function enhanceMarkdownTables(root){
           row.hidden=!!query&&!_markdownTableText(row.textContent).toLowerCase().includes(query);
         });
       });
-      table.parentElement.insertBefore(filter,table);
+      // Keep the filter above the scroll container (stays visible while the
+      // table scrolls horizontally).
+      const insertAnchor=scrollWrap||table;
+      const anchorParent=scrollWrap?scrollWrap.parentElement:table.parentElement;
+      if(anchorParent) anchorParent.insertBefore(filter, insertAnchor);
     }
 
     Array.from(headerRow.cells||[]).forEach((cell,colIdx)=>{

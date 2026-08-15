@@ -2382,6 +2382,13 @@
   .msg-body th{background:rgba(255,255,255,.07);padding:6px 10px;text-align:left;font-weight:600;border:1px solid var(--border2);}
   .msg-body td{padding:5px 10px;border:1px solid rgba(255,255,255,.06);}
   .msg-body tr:nth-child(even){background:rgba(255,255,255,.03);}
+  /* W8: wide tables wrap at word boundaries and only overflow — and the
+     wrapper scrolls — when a column's widest unbreakable token cannot fit.
+     The chat body's overflow-wrap:anywhere would otherwise crush columns to
+     one character on narrow viewports. */
+  .markdown-table-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:8px 0;max-width:100%;}
+  .markdown-table-scroll>table{width:auto;min-width:100%;margin:0;}
+  .markdown-table-scroll th,.markdown-table-scroll td{overflow-wrap:normal;word-break:normal;}
   .markdown-table-filter{display:block;width:min(260px,100%);margin:8px 0 4px;padding:5px 8px;border:1px solid var(--border2);border-radius:6px;background:var(--input-bg);color:var(--text);font:inherit;font-size:12px;}
   .markdown-table-filter:focus{outline:1px solid var(--accent);outline-offset:1px;}
   .markdown-table-sort{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;min-height:20px;padding:0;border:0;background:transparent;color:inherit;font:inherit;font-weight:inherit;text-align:left;cursor:pointer;}
@@ -2884,7 +2891,7 @@
   .preview-pdf-wrap{display:flex;flex:1;min-height:360px;border:1px solid var(--border2);border-radius:8px;overflow:hidden;background:#fff;}
   .preview-pdf-frame{width:100%;height:100%;min-height:70vh;border:none;background:#fff;}
   /* Markdown rendered preview */
-  .preview-md{font-size:13px;line-height:1.7;color:var(--text);flex:1;overflow-y:auto;min-height:0;}
+  .preview-md{font-size:13px;line-height:1.7;color:var(--text);flex:1;overflow-y:auto;overflow-x:auto;min-height:0;}
   .preview-md p{margin-bottom:10px;}.preview-md p:last-child{margin-bottom:0;}
   .preview-md h1,.preview-md h2,.preview-md h3,.preview-md h4,.preview-md h5,.preview-md h6{font-weight:700;color:var(--strong,var(--text));line-height:1.3;}
   .preview-md h1{font-size:24px;margin:24px 0 12px;border-bottom:1px solid var(--border);padding-bottom:6px;}
@@ -2907,6 +2914,12 @@
   .preview-md a{color:var(--blue);text-decoration:underline;}
   .preview-md hr{border:none;border-top:1px solid var(--border);margin:12px 0;}
   .preview-md table{border-collapse:collapse;width:100%;margin:8px 0;font-size:12px;}
+  /* W8: preview tables fill the pane (min-width:100%), wrap at word
+     boundaries, and the pane scrolls horizontally only when a column's
+     widest unbreakable token cannot fit (mirror of the chat
+     .markdown-table-scroll pattern). */
+  .preview-md table{width:auto;min-width:100%;}
+  .preview-md th,.preview-md td{overflow-wrap:normal;word-break:normal;}
   .preview-md th{background:var(--hover-bg);padding:6px 10px;text-align:left;font-weight:600;border:1px solid var(--border2);}
   .preview-md td{padding:5px 10px;border:1px solid var(--border2);}
   .preview-md tr:nth-child(even){background:var(--code-inline-bg);}
