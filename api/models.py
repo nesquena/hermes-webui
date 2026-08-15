@@ -6716,21 +6716,21 @@ def profile_scoped_project_ids() -> frozenset[str]:
     the row out of "Unassigned" and turn it into a ``default_hidden`` row with no
     project chip left to reveal it (#6659 review finding 3).
 
-    Profile/alias matching mirrors ``ensure_cron_project`` so the two never
-    disagree about which profile owns a project. Read-only.
+    Profile/alias matching is delegated to ``api.profiles._profiles_match``,
+    the canonical helper every other profile-scoped read already uses, so this
+    set cannot disagree with the rest of the app about which profile owns a
+    project (renamed root, legacy ``'default'`` tag, and a missing ``profile``
+    key are all its business, not ours). Read-only.
     """
-    from api.profiles import get_active_profile_name, _is_root_profile
+    from api.profiles import get_active_profile_name, _profiles_match
 
-    active = get_active_profile_name() or 'default'
+    active = get_active_profile_name()
     resolved: set[str] = set()
     for p in load_projects():
         project_id = str(p.get('project_id') or '').strip()
         if not project_id:
             continue
-        row_profile = p.get('profile')
-        if row_profile == active or (
-            _is_root_profile(row_profile or 'default') and _is_root_profile(active)
-        ):
+        if _profiles_match(p.get('profile'), active):
             resolved.add(project_id)
     return frozenset(resolved)
 
