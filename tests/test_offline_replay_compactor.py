@@ -131,6 +131,63 @@ def test_offline_compactor_is_atomic_idempotent_and_reversible(tmp_path):
     assert _sha256(backup) == original_sha
 
 
+def test_offline_compactor_uses_shared_partial_identity(tmp_path):
+    from api import models
+    from scripts import compact_session_replays as compactor
+
+    assert (
+        compactor._repo_partial_message_signature
+        is models._partial_message_signature
+    )
+
+    sidecar = tmp_path / "partial-replays.json"
+    logical_partial = {
+        "role": "assistant",
+        "content": "partial answer",
+        "reasoning": "same reasoning",
+        "_partial": True,
+        "_partial_tool_calls": [
+            {
+                "name": "lookup",
+                "args": {"query": "same"},
+                "done": False,
+            }
+        ],
+    }
+    first = {
+        **logical_partial,
+        "timestamp": 1000,
+        "model": "provider-a/model",
+        "request_id": "request-a",
+    }
+    second = {
+        **logical_partial,
+        "timestamp": 2000,
+        "model": "provider-b/model",
+        "request_id": "request-b",
+    }
+    sidecar.write_text(
+        json.dumps(
+            {
+                "session_id": "partial-replays",
+                "messages": [first, second],
+                "context_messages": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = compactor.compact_sidecar(sidecar)
+    repaired = json.loads(sidecar.read_text(encoding="utf-8"))
+
+    assert result["arrays"]["messages"] == {
+        "input": 2,
+        "output": 1,
+        "removed": 1,
+    }
+    assert repaired["messages"] == [first]
+
+
 def test_offline_compactor_memory_is_bounded_for_many_replays(tmp_path):
     sidecar = tmp_path / "many-replays.json"
     replay = json.dumps(_row(), ensure_ascii=False, separators=(",", ":"))

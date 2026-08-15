@@ -29,113 +29,143 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-try:
-    from api.models import (  # noqa: E402
-        _durable_empty_assistant_replay_key,
-        _incomplete_reasoning_message_id,
-        _partial_message_signature,
-    )
-except ImportError:
-    # Compatibility with WebUI revisions predating the shared strict replay
-    # classifiers. This fallback is deliberately narrower: it grants deletion
-    # authority only to fully JSON-stable, byte-equivalent logical rows.
-    _STRUCTURED_FIELDS = frozenset({
-        'tool_call_id',
-        'tool_calls',
-        'function_call',
-        'function_calls',
-        '_partial_tool_calls',
-        'refusal',
-        'attachments',
-    })
+# Compatibility helpers shared by the independently imported classifier
+# fallbacks below. A WebUI base can expose one classifier without the others;
+# importing them as one group would silently discard the available semantics.
+_STRUCTURED_FIELDS = frozenset({
+    'tool_call_id',
+    'tool_calls',
+    'function_call',
+    'function_calls',
+    '_partial_tool_calls',
+    'refusal',
+    'attachments',
+})
 
-    def _strict_json_tree(value) -> bool:
-        if value is None or type(value) in (str, int, bool):
-            return True
-        if type(value) is float:
-            return math.isfinite(value)
-        if type(value) is list:
-            return all(_strict_json_tree(item) for item in value)
-        if type(value) is dict:
-            return all(
-                type(key) is str and _strict_json_tree(item)
-                for key, item in value.items()
-            )
-        return False
 
-    def _message_digest(message):
-        if not _strict_json_tree(message):
-            return None
-        try:
-            payload = json.dumps(
-                message,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(',', ':'),
-                allow_nan=False,
-            ).encode('utf-8')
-        except (TypeError, ValueError):
-            return None
-        return hashlib.sha256(payload).digest()
-
-    def _typed_scalar(value):
-        if isinstance(value, bool):
-            return None
-        if type(value) is str:
-            return ('str', value) if value else None
-        if type(value) is int:
-            return ('int', value)
-        if type(value) is float and math.isfinite(value):
-            return ('float', value)
-        return None
-
-    def _plain_empty_assistant(message) -> bool:
-        return bool(
-            type(message) is dict
-            and message.get('role') == 'assistant'
-            and (
-                message.get('content') is None
-                or (
-                    type(message.get('content')) is str
-                    and not message['content'].strip()
-                )
-            )
-            and not any(field in message for field in _STRUCTURED_FIELDS)
+def _strict_json_tree(value) -> bool:
+    if value is None or type(value) in (str, int, bool):
+        return True
+    if type(value) is float:
+        return math.isfinite(value)
+    if type(value) is list:
+        return all(_strict_json_tree(item) for item in value)
+    if type(value) is dict:
+        return all(
+            type(key) is str and _strict_json_tree(item)
+            for key, item in value.items()
         )
+    return False
 
-    def _partial_message_signature(message):
-        if type(message) is not dict:
-            return None
-        return _message_digest(message)
 
-    def _incomplete_reasoning_message_id(message):
-        if not _plain_empty_assistant(message):
-            return None
-        if str(message.get('finish_reason') or '').lower() != 'incomplete':
-            return None
-        message_id = _typed_scalar(message.get('id'))
-        digest = _message_digest(message)
-        if message_id is None or digest is None:
-            return None
+def _message_digest(message):
+    if not _strict_json_tree(message):
+        return None
+    try:
+        payload = json.dumps(
+            message,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(',', ':'),
+            allow_nan=False,
+        ).encode('utf-8')
+    except (TypeError, ValueError):
+        return None
+    return hashlib.sha256(payload).digest()
+
+
+def _typed_scalar(value):
+    if isinstance(value, bool):
+        return None
+    if type(value) is str:
+        return ('str', value) if value else None
+    if type(value) is int:
+        return ('int', value)
+    if type(value) is float and math.isfinite(value):
+        return ('float', value)
+    return None
+
+
+def _plain_empty_assistant(message) -> bool:
+    content = message.get('content') if type(message) is dict else None
+    return bool(
+        type(message) is dict
+        and message.get('role') == 'assistant'
+        and (
+            content is None
+            or (
+                type(content) is str
+                and not content.strip()
+            )
+        )
+        and not any(field in message for field in _STRUCTURED_FIELDS)
+    )
+
+
+from api import models as _models  # noqa: E402
+
+_repo_partial_message_signature = getattr(
+    _models,
+    '_partial_message_signature',
+    None,
+)
+_repo_incomplete_reasoning_message_id = getattr(
+    _models,
+    '_incomplete_reasoning_message_id',
+    None,
+)
+_repo_durable_empty_assistant_replay_key = getattr(
+    _models,
+    '_durable_empty_assistant_replay_key',
+    None,
+)
+
+
+def _partial_message_signature(message) -> tuple | None:
+    if callable(_repo_partial_message_signature):
+        result = _repo_partial_message_signature(message)
+        return result if isinstance(result, tuple) else None
+    if type(message) is not dict:
+        return None
+    digest = _message_digest(message)
+    return ('exact', digest) if digest is not None else None
+
+
+def _incomplete_reasoning_message_id(message) -> tuple | None:
+    if callable(_repo_incomplete_reasoning_message_id):
+        result = _repo_incomplete_reasoning_message_id(message)
+        return result if isinstance(result, tuple) else None
+    if not _plain_empty_assistant(message):
+        return None
+    if str(message.get('finish_reason') or '').lower() != 'incomplete':
+        return None
+    message_id = _typed_scalar(message.get('id'))
+    digest = _message_digest(message)
+    if message_id is None or digest is None:
+        return None
+    return ('message_id', message_id, digest)
+
+
+def _durable_empty_assistant_replay_key(message) -> tuple | None:
+    if callable(_repo_durable_empty_assistant_replay_key):
+        result = _repo_durable_empty_assistant_replay_key(message)
+        return result if isinstance(result, tuple) else None
+    if not _plain_empty_assistant(message) or message.get('_partial'):
+        return None
+    if str(message.get('finish_reason') or '').lower() == 'incomplete':
+        return None
+    digest = _message_digest(message)
+    if digest is None:
+        return None
+    message_id = _typed_scalar(message.get('id'))
+    if message_id is not None:
         return ('message_id', message_id, digest)
-
-    def _durable_empty_assistant_replay_key(message):
-        if not _plain_empty_assistant(message) or message.get('_partial'):
-            return None
-        if str(message.get('finish_reason') or '').lower() == 'incomplete':
-            return None
-        digest = _message_digest(message)
-        if digest is None:
-            return None
-        message_id = _typed_scalar(message.get('id'))
-        if message_id is not None:
-            return ('message_id', message_id, digest)
-        stream_id = _typed_scalar(message.get('_recovered_stream_id'))
-        timestamp = message.get('timestamp', message.get('_ts'))
-        timestamp_key = _typed_scalar(timestamp)
-        if stream_id is None or timestamp_key is None:
-            return None
-        return ('recovered', stream_id, timestamp_key, digest)
+    stream_id = _typed_scalar(message.get('_recovered_stream_id'))
+    timestamp = message.get('timestamp', message.get('_ts'))
+    timestamp_key = _typed_scalar(timestamp)
+    if stream_id is None or timestamp_key is None:
+        return None
+    return ('recovered', stream_id, timestamp_key, digest)
 
 _CHUNK_CHARS = 1 << 20
 _MAX_ITEM_CHARS = 64 << 20
