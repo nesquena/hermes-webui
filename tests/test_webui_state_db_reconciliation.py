@@ -1436,8 +1436,11 @@ def test_state_db_reconciliation_preserves_repeated_sidecar_rows(monkeypatch, tm
     routes.handle_get(handler, urlparse(handler.path))
     assert handler.status == 200
     messages = handler.response_json["session"]["messages"]
-    assert [m["content"] for m in messages] == ["", "", "done"]
-    assert handler.response_json["session"]["message_count"] == 3
+    # The two sidecar rows are byte-for-byte identical strict JSON payloads, so
+    # session load repairs them as one replay. Distinct timestamps, ids, model
+    # provenance, request ids, or other durable payload fields remain separate.
+    assert [m["content"] for m in messages] == ["", "done"]
+    assert handler.response_json["session"]["message_count"] == 2
 
 
 def test_cancelled_partial_sidecar_owns_display_over_state_db_replay(monkeypatch, tmp_path):

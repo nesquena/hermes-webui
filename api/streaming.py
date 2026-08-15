@@ -1897,6 +1897,42 @@ def _annotate_media_snapshots_for_settled_messages(messages) -> None:
         logger.debug("Media snapshot annotation failed during settle", exc_info=True)
 
 
+def _has_replay_safe_history_prefix(messages, previous_context) -> bool:
+    """Return whether the complete prior context is a conclusive replay prefix."""
+    previous_context = list(previous_context or [])
+    return bool(
+        previous_context
+        and _messages_have_prefix(
+            messages,
+            previous_context,
+            key_fn=_message_replay_key,
+        )
+    )
+
+
+def _collapse_replays_with_history_boundary(messages, previous_context):
+    """Reduce exact replays without crossing a proven history/delta boundary.
+
+    The Agent can return a full history without echoing the separately supplied
+    current user message. In that shape the previous assistant and the new
+    assistant are adjacent even though they belong to different user turns. A
+    whole-list reduction before stable IDs are assigned would erase a legitimate
+    repeated answer. When the complete prior context is a replay-safe prefix,
+    reduce the historical prefix and current delta independently; otherwise fail
+    closed to the existing whole-list strict reducer.
+    """
+    messages = list(messages or [])
+    previous_context = list(previous_context or [])
+    if _has_replay_safe_history_prefix(messages, previous_context):
+        boundary = len(previous_context)
+        history, history_changed = _collapse_replayed_assistant_rows(
+            messages[:boundary]
+        )
+        delta, delta_changed = _collapse_replayed_assistant_rows(messages[boundary:])
+        return history + delta, bool(history_changed or delta_changed)
+    return _collapse_replayed_assistant_rows(messages)
+
+
 def _settle_result_messages(
     session,
     previous_messages,
@@ -1925,18 +1961,40 @@ def _settle_result_messages(
     )
     if result_messages:
         # Classify exact adjacent replays before generated stable IDs make two
-        # source-identical assistant rows artificially distinct. The shallow
-        # metadata-restoration projection shares the kept row dict, so the one
-        # minted ID remains identical in display and provider context.
-        result_messages, _ = _collapse_replayed_assistant_rows(result_messages)
-        next_context_messages, _ = _collapse_replayed_assistant_rows(
-            next_context_messages
+        # source-identical assistant rows artificially distinct. Keep a proven
+        # prior-history prefix separate from its delta: the current user message
+        # is supplied out of band, so equal assistants on that boundary are two
+        # legitimate turns rather than an adjacent replay.
+        result_messages, _ = _collapse_replays_with_history_boundary(
+            result_messages,
+            previous_context_messages,
+        )
+        next_context_messages, _ = _collapse_replays_with_history_boundary(
+            next_context_messages,
+            previous_context_messages,
         )
         _assign_stable_message_ids(
             result_messages,
             previous_messages,
             previous_context_messages,
         )
+        if _has_replay_safe_history_prefix(
+            next_context_messages,
+            previous_context_messages,
+        ):
+            # Establish the out-of-band user-turn boundary before replay overlap
+            # removal. Otherwise a legitimate repeated assistant answer at the
+            # start of the delta looks like the previous context tail and is
+            # stripped. Inconclusive structured rows deliberately skip this
+            # fast path and retain the existing delta semantics.
+            next_context_messages = _settle_current_turn_boundary(
+                previous_context_messages,
+                next_context_messages,
+                active_turn_identity,
+                msg_text,
+                source,
+                allow_exact_prefix=True,
+            )
         next_context_messages = _dedupe_replayed_context_messages(
             previous_context_messages,
             next_context_messages,

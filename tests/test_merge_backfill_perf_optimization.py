@@ -75,21 +75,19 @@ def test_backfill_optimization_matches_reference_listslice_semantics():
 
     def reference_merge(previous_display, previous_context, result_messages, msg_text):
         # Faithful re-implementation of the PRE-optimization inner loop using the
-        # original `in context_keys[_cursor:]` list-slice membership test.
+        # original `in context_keys[_cursor:]` list-slice membership test. Apply
+        # the production replay reducer before and after that loop so this oracle
+        # isolates only the count-dict optimization under the current strict
+        # exact-payload contract.
         previous_display = list(previous_display or [])
-        _partial_seen = set()
-        _deduped_rev = []
-        for m in reversed(previous_display):
-            if isinstance(m, dict) and m.get("_partial"):
-                key = streaming._message_identity(m)
-                if key is not None:
-                    if key in _partial_seen:
-                        continue
-                    _partial_seen.add(key)
-            _deduped_rev.append(m)
-        previous_display = list(reversed(_deduped_rev))
         previous_context = list(previous_context or [])
         result_messages = list(result_messages or [])
+        previous_display, _ = streaming._collapse_replayed_assistant_rows(
+            previous_display
+        )
+        previous_context, _ = streaming._collapse_replayed_assistant_rows(
+            previous_context
+        )
         if not result_messages:
             return previous_display
         if previous_display and previous_context:
@@ -140,6 +138,9 @@ def test_backfill_optimization_matches_reference_listslice_semantics():
                 if len(_backfilled) > len(previous_display):
                     previous_display = _backfilled
         # Both share the identical tail-merge logic after backfill; compare backfill output.
+        previous_display, _ = streaming._collapse_replayed_assistant_rows(
+            previous_display
+        )
         return previous_display
 
     rng = random.Random(2026)

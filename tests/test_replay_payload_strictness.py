@@ -403,6 +403,14 @@ def test_display_merge_collapses_only_exact_durable_empty_replay():
             {"role": "assistant", "content": "same", "reasoning": "beta"},
         ),
         (
+            {"role": "assistant", "content": "same", "model": "model-a"},
+            {"role": "assistant", "content": "same", "model": "model-b"},
+        ),
+        (
+            {"role": "assistant", "content": "same", "request_id": "request-a"},
+            {"role": "assistant", "content": "same", "request_id": "request-b"},
+        ),
+        (
             {
                 "role": "assistant",
                 "content": [
@@ -520,6 +528,37 @@ def test_settle_collapses_idless_exact_assistant_before_stable_id_assignment():
         assert len(assistants) == 1
         assert assistants[0]["content"] == "same"
         assert type(assistants[0].get("id")) is int
+
+
+def test_settle_preserves_idless_repeated_answer_across_current_turn_boundary():
+    previous = [
+        {"role": "user", "content": "Say it once."},
+        {"role": "assistant", "content": "same"},
+    ]
+    result = [*copy.deepcopy(previous), {"role": "assistant", "content": "same"}]
+
+    session = _settle_structured_result(previous, result)
+
+    for projection in (session.messages, session.context_messages):
+        assert [row.get("role") for row in projection] == [
+            "user",
+            "assistant",
+            "user",
+            "assistant",
+        ]
+        assert [
+            row.get("content")
+            for row in projection
+            if row.get("role") == "assistant"
+        ] == ["same", "same"]
+        assistant_ids = [
+            row.get("id")
+            for row in projection
+            if row.get("role") == "assistant"
+        ]
+        assert type(assistant_ids[-1]) is int
+        if assistant_ids[0] is not None:
+            assert assistant_ids[0] != assistant_ids[-1]
 
 
 @pytest.mark.parametrize(
