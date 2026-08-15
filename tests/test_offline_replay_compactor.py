@@ -210,13 +210,21 @@ def test_compactor_rejects_session_id_too_long_for_artifact_names(tmp_path):
     assert not list(tmp_path.glob("*replay-v10*"))
 
 
-def test_offline_compactor_uses_shared_partial_identity(tmp_path):
+def test_offline_compactor_preserves_distinct_strict_partials(
+    tmp_path,
+    monkeypatch,
+):
     from api import models
     from scripts import compact_session_replays as compactor
 
     assert (
         compactor._repo_partial_message_signature
         is models._partial_message_signature
+    )
+    monkeypatch.setattr(
+        compactor,
+        "_repo_partial_message_signature",
+        compactor._message_digest,
     )
 
     sidecar = tmp_path / "partial-replays.json"
@@ -245,6 +253,7 @@ def test_offline_compactor_uses_shared_partial_identity(tmp_path):
         "model": "provider-b/model",
         "request_id": "request-b",
     }
+    assert type(compactor._message_digest(first)) is bytes
     sidecar.write_text(
         json.dumps(
             {
@@ -261,10 +270,63 @@ def test_offline_compactor_uses_shared_partial_identity(tmp_path):
 
     assert result["arrays"]["messages"] == {
         "input": 2,
+        "output": 2,
+        "removed": 0,
+    }
+    assert repaired["messages"] == [first, second]
+
+
+def test_offline_compactor_collapses_identical_partials_with_bytes_signature(
+    tmp_path,
+    monkeypatch,
+):
+    from scripts import compact_session_replays as compactor
+
+    monkeypatch.setattr(
+        compactor,
+        "_repo_partial_message_signature",
+        compactor._message_digest,
+    )
+    sidecar = tmp_path / "identical-partial-replays.json"
+    partial = {
+        "role": "assistant",
+        "content": "partial answer",
+        "reasoning": "same reasoning",
+        "_partial": True,
+        "timestamp": 1000,
+        "model": "provider-a/model",
+        "request_id": "request-a",
+        "_partial_tool_calls": [
+            {
+                "name": "lookup",
+                "args": {"query": "same"},
+                "done": False,
+            }
+        ],
+    }
+    duplicate = json.loads(json.dumps(partial))
+    assert type(compactor._message_digest(partial)) is bytes
+    sidecar.write_text(
+        json.dumps(
+            {
+                "session_id": "identical-partial-replays",
+                "messages": [partial, duplicate],
+                "context_messages": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = compactor.compact_sidecar(sidecar)
+    repaired = json.loads(sidecar.read_text(encoding="utf-8"))
+
+    assert result["status"] == "compacted"
+    assert result["arrays"]["messages"] == {
+        "input": 2,
         "output": 1,
         "removed": 1,
     }
-    assert repaired["messages"] == [first]
+    assert repaired["messages"] == [partial]
 
 
 def test_offline_compactor_memory_is_bounded_for_many_replays(tmp_path):

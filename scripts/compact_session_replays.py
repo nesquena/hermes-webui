@@ -123,10 +123,10 @@ _repo_durable_empty_assistant_replay_key = getattr(
 )
 
 
-def _partial_message_signature(message) -> tuple | None:
+def _partial_message_signature(message) -> bytes | tuple | None:
     if callable(_repo_partial_message_signature):
         result = _repo_partial_message_signature(message)
-        return result if isinstance(result, tuple) else None
+        return result if isinstance(result, (bytes, tuple)) else None
     if type(message) is not dict:
         return None
     digest = _message_digest(message)
