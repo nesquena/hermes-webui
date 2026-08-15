@@ -1265,6 +1265,7 @@ def test_card_yolo_response_does_not_overwrite_switched_session_state():
         script = "\n".join([
             "const toasts=[]; let pillUpdates=0;",
             "const S={session:{session_id:'old-session'}};",
+            "let _loadSessionGeneration=1;",
             "let _approvalSessionId='old-session';",
             "let _approvalCurrentId='approval-1';",
             "let _approvalResponding=null;",
@@ -1296,5 +1297,13 @@ def test_card_yolo_response_does_not_overwrite_switched_session_state():
     )
     run(
         "async()=>{S.session.session_id='new-session';const e=new Error('relay failed');e.body=JSON.stringify({error:'relay failed',yolo_enabled:true});throw e;}",
+        False,
+    )
+    run(
+        "async()=>{_loadSessionGeneration=2;return {ok:true,yolo_enabled:true};}",
+        True,
+    )
+    run(
+        "async()=>{_loadSessionGeneration=2;const e=new Error('relay failed');e.body=JSON.stringify({error:'relay failed',yolo_enabled:true});throw e;}",
         False,
     )

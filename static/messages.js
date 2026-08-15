@@ -7266,11 +7266,21 @@ function _updateYoloPill() {
 async function toggleYoloFromApproval() {
   const sid = S.session && S.session.session_id;
   if (!sid) return false;
-  const result = await respondApproval('once', {yolo: true});
+  const responseGeneration = typeof _loadSessionGeneration === 'number'
+    ? _loadSessionGeneration
+    : null;
+  const result = await respondApproval('once', {
+    yolo: true,
+    _sessionGeneration: responseGeneration,
+  });
   if (!result) return false;
-  // The approval request may outlive a session switch. Do not apply the
-  // original session's authoritative state to the newly active session.
-  if (!S || !S.session || S.session.session_id !== sid) return true;
+  // The approval request may outlive a session switch or same-session reload.
+  // Do not apply the original view's authoritative state to a newer view.
+  const sameSessionView = responseGeneration === null || (
+    typeof _loadSessionGeneration === 'number' &&
+    _loadSessionGeneration === responseGeneration
+  );
+  if (!S || !S.session || S.session.session_id !== sid || !sameSessionView) return true;
   _yoloEnabled = !!result.yolo_enabled;
   _updateYoloPill();
   showToast(t(_yoloEnabled ? 'yolo_enabled' : 'yolo_disabled'));
@@ -7654,7 +7664,10 @@ async function respondApproval(choice) {
       try { errorPayload = JSON.parse(e.body); } catch (_) { /* non-JSON HTTP error */ }
     }
     if (options.yolo && errorPayload && typeof errorPayload.yolo_enabled === 'boolean'
-      && S && S.session && S.session.session_id === sid) {
+      && S && S.session && S.session.session_id === sid
+      && (typeof options._sessionGeneration !== 'number'
+        || (typeof _loadSessionGeneration === 'number'
+          && _loadSessionGeneration === options._sessionGeneration))) {
       _yoloEnabled = errorPayload.yolo_enabled;
       _updateYoloPill();
     }
