@@ -1231,7 +1231,7 @@ def test_preserved_task_list_attaches_once_per_render():
     src = _read("static/ui.js")
 
     assert "function _latestPreservedCompressionTaskListMessages" in src
-    assert ".reverse().find(m=>_isPreservedCompressionTaskListMessage(m))" in src
+    assert "for(let i=msgs.length-1;i>=0;i--){\n    if(_isPreservedCompressionTaskListMessage(msgs[i])){latest=msgs[i];break;}" in src
     assert "const preservedCompressionTaskMessages=_latestPreservedCompressionTaskListMessages(S.messages);" in src
     assert "S.messages.filter(m=>_isPreservedCompressionTaskListMessage(m))" not in src
     assert "let preservedCompressionTaskCardsAttached=!!referenceNode;" in src

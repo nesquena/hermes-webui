@@ -85,29 +85,8 @@ function extractFunc(name) {{
 # Tier 1: Structural assertions — verify recycling machinery in source
 # ═══════════════════════════════════════════════════════════════════════════
 
-def test_js_recycle_flag_exists():
-    """ui.js declares the _msgNodeRecycleEnabled flag."""
-    assert '_msgNodeRecycleEnabled' in JS
-
-
 def test_js_recycle_stash_exists():
-    """ui.js declares the _recycleStash Map."""
     assert '_recycleStash' in JS
-
-
-def test_js_recycle_flag_lifecycle():
-    """_scheduleMessageVirtualizedRender sets _msgNodeRecycleEnabled=true
-    before the compensate call and clears it in finally."""
-    fn_match = re.search(
-        r'function _scheduleMessageVirtualizedRender\(force\)\{(.+?)^(?=function )',
-        JS, re.DOTALL | re.MULTILINE
-    )
-    assert fn_match, "_scheduleMessageVirtualizedRender not found"
-    body = fn_match.group(1)
-    assert '_msgNodeRecycleEnabled=true' in body
-    finally_match = re.search(r'finally\{([^}]*)\}', body)
-    assert finally_match, "no finally block in _scheduleMessageVirtualizedRender"
-    assert '_msgNodeRecycleEnabled=false' in finally_match.group(1)
 
 
 def test_js_stash_populated_before_wipe():
@@ -1156,7 +1135,9 @@ console.log(JSON.stringify({
         source = _extract_func_script(JS) + r"""
 const fn = extractFunc('_scheduleMessageVirtualizedRender');
 const dragGuard = fn.indexOf('if(_scrollbarDragActive)');
-const afterDrag = fn.indexOf('_msgNodeRecycleEnabled=true', dragGuard);
+// _deferClearProgrammaticScroll only appears in the drag block; the normal
+// path is the _compensateScrollForMeasurementDelta call after it.
+const afterDrag = fn.indexOf('_deferClearProgrammaticScroll', dragGuard);
 const normalPath = fn.slice(afterDrag, afterDrag + 200);
 const usesCompensate = normalPath.includes('_compensateScrollForMeasurementDelta');
 console.log(JSON.stringify({ uses_compensate: usesCompensate }));

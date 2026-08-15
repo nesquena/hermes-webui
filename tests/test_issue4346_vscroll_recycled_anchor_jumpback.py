@@ -140,6 +140,7 @@ function clearTimeout(){}
 function setTimeout(cb){ cb(); return 1; }
 function _deferClearProgrammaticScroll(){}
 function requestAnimationFrame(cb){ cb(); }
+let _messageVirtualScrollActive = false;
 eval(extractFunc('_compensateScrollForMeasurementDelta'));
 _compensateScrollForMeasurementDelta(()=>{});
 console.log(JSON.stringify({scrollHistory}));
@@ -191,6 +192,7 @@ function clearTimeout(){}
 function setTimeout(cb){ cb(); return 1; }
 function _deferClearProgrammaticScroll(){}
 function requestAnimationFrame(cb){ cb(); }
+let _messageVirtualScrollActive = false;
 eval(extractFunc('_compensateScrollForMeasurementDelta'));
 _compensateScrollForMeasurementDelta(()=>{});
 console.log(JSON.stringify({scrollHistory}));
@@ -234,6 +236,7 @@ function clearTimeout(){}
 function setTimeout(cb){ cb(); return 1; }
 function _deferClearProgrammaticScroll(){}
 function requestAnimationFrame(cb){ cb(); }
+let _messageVirtualScrollActive = false;
 eval(extractFunc('_compensateScrollForMeasurementDelta'));
 _compensateScrollForMeasurementDelta(()=>{});
 console.log(JSON.stringify({scrollTopMutated}));

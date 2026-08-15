@@ -2255,6 +2255,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(_isActiveSession() && S.activeStreamId!==streamId) return;
     delete INFLIGHT[activeSid];
     clearInflightState(activeSid);
+    // The settled render that follows this will see INFLIGHT[sid] === undefined
+    // and skip the streaming clear in _updateMessageVirtualMeasurements. Clear
+    // the prev-measured set here so the settled render re-measures every row
+    // instead of reusing streaming heights for the same rawIdx. (#P1 settled
+    // height regression)
+    if(typeof _messageVirtualPrevMeasuredSet !== 'undefined') _messageVirtualPrevMeasuredSet.clear();
     _clearActivePaneInflightIfOwner();
     _resumeSessionStreamAfterLiveChat(activeSid);
   }
