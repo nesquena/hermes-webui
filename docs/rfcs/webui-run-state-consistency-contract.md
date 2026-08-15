@@ -164,7 +164,11 @@ and 5; it does not mark every run-state boundary implemented.
    generation. Any deletion path must decide and act while holding the same SID
    authority, revalidate its payload and exact revision at the deletion point,
    publish a durable tombstone before unlinking, and remove the primary sidecar,
-   backup, and backup archives before reporting success.
+   backup, backup archives, and session-owned replay-v10 recovery artifacts
+   before reporting success. Hidden ephemeral deletion follows this rule after
+   both cancellation and normal completion, with the agent lock acquired before
+   the SID authority. Its response-level cleanup may remain best-effort, but a
+   protocol failure must be logged and must not fall back to a raw unlink.
 
 ## Review Checklist
 

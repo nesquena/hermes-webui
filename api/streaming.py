@@ -2056,18 +2056,80 @@ def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.') -> Non
         })
 
 
-def _cleanup_ephemeral_cancelled_turn(session) -> None:
-    """Remove transient /btw session state after a cancel without saving it."""
+def _clear_ephemeral_turn_state(session) -> None:
+    """Clear transient stream fields on an in-memory hidden session."""
     session.active_stream_id = None
     session.pending_user_message = None
     session.pending_attachments = []
     session.pending_started_at = None
     session.pending_user_source = None
+
+
+def _cleanup_ephemeral_cancelled_turn(session) -> None:
+    """Remove transient /btw session state after a cancel without saving it."""
+    _clear_ephemeral_turn_state(session)
+    _cleanup_ephemeral_session_sidecar_locked(session, outcome="cancelled")
+
+
+def _cleanup_ephemeral_session_sidecar_locked(session, *, outcome: str) -> bool:
+    """Best-effort hidden-session delete while the caller holds its agent lock.
+
+    Lock order stays agent lock -> SID sidecar authority, matching manual and
+    hidden-background deletion. Any validation or durable-delete failure leaves
+    the HTTP/SSE outcome best-effort, but it is logged and never falls back to a
+    direct unlink outside the tombstone protocol.
+    """
+    sid = str(getattr(session, "session_id", "") or "").strip()
     try:
-        import pathlib
-        pathlib.Path(session.path).unlink(missing_ok=True)
+        from api.models import (
+            _coerce_sidecar_revision,
+            _delete_session_sidecar_artifacts_locked,
+            _read_sidecar_snapshot,
+            _session_sidecar_authority,
+            is_safe_session_id,
+        )
+
+        if not is_safe_session_id(sid):
+            raise ValueError(f"Unsafe ephemeral session_id {sid!r}")
+        directory = Path(SESSION_DIR).resolve()
+        expected_path = (directory / f"{sid}.json").resolve()
+        session_path = Path(getattr(session, "path", "")).resolve()
+        if session_path != expected_path:
+            raise ValueError(
+                f"Ephemeral session path {session_path} does not match SID {sid!r}"
+            )
+        expected_revision = _coerce_sidecar_revision(
+            getattr(session, "_sidecar_revisions", {}).get(sid),
+            sid,
+        )
+        if expected_revision is None:
+            raise RuntimeError(
+                f"Ephemeral session {sid!r} has no owned sidecar revision"
+            )
+        with _session_sidecar_authority(sid, session_dir=directory):
+            current_revision, _payload = _read_sidecar_snapshot(expected_path, sid)
+            if current_revision != expected_revision:
+                raise RuntimeError(
+                    f"Ephemeral session {sid!r} changed before {outcome} cleanup"
+                )
+            deleted = _delete_session_sidecar_artifacts_locked(
+                sid,
+                session_dir=directory,
+                expected_revision=current_revision,
+            )
+            if not deleted:
+                raise RuntimeError(
+                    f"Ephemeral session {sid!r} lost revision authority during cleanup"
+                )
+        return True
     except Exception:
-        logger.debug("Failed to clean up ephemeral cancelled session", exc_info=True)
+        logger.warning(
+            "Failed to clean up %s ephemeral session %s through durable sidecar protocol",
+            outcome,
+            sid or "<invalid>",
+            exc_info=True,
+        )
+        return False
 
 
 def _resolve_current_session_for_write(session):
@@ -10085,11 +10147,13 @@ def _run_agent_streaming(
                 })
                 if _checkpoint_stop is not None:
                     _checkpoint_stop.set()
-                try:
-                    import pathlib
-                    pathlib.Path(s.path).unlink(missing_ok=True)
-                except Exception:
-                    pass
+                with _agent_lock:
+                    _ephemeral_deleted = _cleanup_ephemeral_session_sidecar_locked(
+                        s,
+                        outcome="completed",
+                    )
+                    if _ephemeral_deleted:
+                        _clear_ephemeral_turn_state(s)
                 return  # skip all normal persistence for ephemeral sessions
             if _checkpoint_stop is not None:
                 _checkpoint_stop.set()

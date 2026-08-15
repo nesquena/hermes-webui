@@ -1167,6 +1167,32 @@ class SessionDeleteTombstoneError(RuntimeError):
     """A sidecar delete could not durably fence stale writers."""
 
 
+def _offline_replay_artifact_paths(sidecar: Path) -> list[Path]:
+    """Return replay-v10 recovery artifacts owned by one session sidecar."""
+    sidecar = Path(sidecar)
+    name = sidecar.name
+
+    def is_owned(candidate_name: str) -> bool:
+        return bool(
+            (
+                candidate_name.startswith(f"{name}.replay-v10.")
+                and candidate_name.endswith(".bak")
+            )
+            or (
+                candidate_name.startswith(f"_replay-v10.{name}.")
+                and candidate_name.endswith(".manifest.json")
+            )
+            or candidate_name.startswith(f".{name}.replay-v10.tmp.")
+            or candidate_name.startswith(f".{name}.replay-v10.restore.")
+            or (
+                candidate_name.startswith(f"._replay-v10.{name}.")
+                and ".manifest.json.tmp." in candidate_name
+            )
+        )
+
+    return [candidate for candidate in sidecar.parent.iterdir() if is_owned(candidate.name)]
+
+
 def _delete_session_sidecar_artifacts_locked(
     sid: str,
     *,
@@ -1200,8 +1226,9 @@ def _delete_session_sidecar_artifacts_locked(
     _invalidate_cached_session_generation(sid)
     backup = sidecar.with_suffix(".json.bak")
     archived_backups = list(directory.glob(f"{sidecar.name}.bak.archive-*"))
+    replay_artifacts = _offline_replay_artifact_paths(sidecar)
     failures = []
-    for artifact in (sidecar, backup, *archived_backups):
+    for artifact in (sidecar, backup, *archived_backups, *replay_artifacts):
         try:
             artifact.unlink(missing_ok=True)
         except Exception as exc:
@@ -1209,10 +1236,11 @@ def _delete_session_sidecar_artifacts_locked(
 
     remaining = [
         artifact
-        for artifact in (sidecar, backup, *archived_backups)
+        for artifact in (sidecar, backup, *archived_backups, *replay_artifacts)
         if artifact.exists()
     ]
     remaining.extend(directory.glob(f"{sidecar.name}.bak.archive-*"))
+    remaining.extend(_offline_replay_artifact_paths(sidecar))
     _fsync_sidecar_directory(directory)
     if failures or remaining:
         cause = failures[0] if failures else None

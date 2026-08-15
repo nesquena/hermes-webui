@@ -280,6 +280,17 @@ not guaranteed across sudden power loss on native Windows. POSIX ignores only
 filesystem-declared unsupported directory-fsync errors (`EINVAL`/`ENOTSUP`);
 permission and I/O failures propagate.
 
+Hidden ephemeral (`/btw`) sessions use the same deletion protocol on both
+cancelled and normally completed turns. Callers keep the canonical lock order
+(agent lock, then SID authority), validate the session ID, canonical sidecar
+path, embedded payload, and exact owned revision, and then invoke the shared
+artifact-removal helper. The durable tombstone is published before removing the
+primary, `.json.bak`, incomparable-backup archives, or session-owned replay-v10
+backup/manifest/temporary artifacts. Cleanup remains best-effort for the SSE
+response, but protocol failures are warning-logged and never fall back to a raw
+sidecar unlink; a successful normal cleanup clears transient in-memory stream
+fields so final recovery does not attempt to recreate the deleted sidecar.
+
 #### Imported `state.db` sidebar projection
 
 `api.models.get_cli_sessions()` projects conversations from the active Hermes

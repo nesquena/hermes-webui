@@ -2,13 +2,18 @@ import builtins
 import errno
 import hashlib
 import json
+import logging
 import multiprocessing
 import os
+import queue
 import sqlite3
+import sys
 import threading
 import time
+import types
 from contextlib import contextmanager
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -19,6 +24,26 @@ def _patch_store(monkeypatch, models, session_dir: Path) -> None:
     monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
     with models.LOCK:
         models.SESSIONS.clear()
+
+
+def _seed_sidecar_delete_artifacts(sidecar: Path) -> tuple[list[Path], Path]:
+    artifacts = [
+        sidecar,
+        sidecar.with_suffix(".json.bak"),
+        sidecar.with_name(f"{sidecar.name}.bak.archive-deadbeef"),
+        sidecar.with_name(f"{sidecar.name}.replay-v10.deadbeef.bak"),
+        sidecar.with_name(f"_replay-v10.{sidecar.name}.deadbeef.manifest.json"),
+        sidecar.with_name(f".{sidecar.name}.replay-v10.tmp.probe"),
+        sidecar.with_name(f".{sidecar.name}.replay-v10.restore.probe"),
+        sidecar.with_name(
+            f"._replay-v10.{sidecar.name}.deadbeef.manifest.json.tmp.probe"
+        ),
+    ]
+    for artifact in artifacts[1:]:
+        artifact.write_text("recoverable hidden transcript", encoding="utf-8")
+    unrelated = sidecar.with_name("unrelated.json.replay-v10.deadbeef.bak")
+    unrelated.write_text("must survive", encoding="utf-8")
+    return artifacts, unrelated
 
 
 def _process_writer(
@@ -286,6 +311,230 @@ def test_hidden_background_cleanup_uses_agent_and_sidecar_authorities(
         assert sid not in models.SESSIONS
     with pytest.raises(models.StaleSessionGenerationError):
         stale_alias.save(skip_index=True)
+
+
+def test_hidden_ephemeral_cancel_cleanup_uses_durable_sidecar_delete_protocol(
+    tmp_path,
+    monkeypatch,
+):
+    from api import models, streaming
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    monkeypatch.setattr(streaming, "SESSION_DIR", session_dir)
+    sid = "hidden-ephemeral-cancel"
+    session = models.Session(
+        session_id=sid,
+        workspace=str(tmp_path),
+        messages=[{"role": "user", "content": "private side question"}],
+    )
+    session.active_stream_id = "ephemeral-stream"
+    session.pending_user_message = "private side question"
+    session.pending_attachments = ["secret.txt"]
+    session.pending_started_at = time.time()
+    session.pending_user_source = "webui"
+    session.save(skip_index=True)
+    with models.LOCK:
+        models.SESSIONS[sid] = session
+    artifacts, unrelated = _seed_sidecar_delete_artifacts(session.path)
+
+    with streaming._get_session_agent_lock(sid):
+        streaming._finalize_cancelled_turn(session, ephemeral=True)
+
+    assert session.active_stream_id is None
+    assert session.pending_user_message is None
+    assert session.pending_attachments == []
+    assert session.pending_started_at is None
+    assert session.pending_user_source is None
+    assert all(not artifact.exists() for artifact in artifacts)
+    assert unrelated.read_text(encoding="utf-8") == "must survive"
+    assert sid in models._load_webui_deleted_session_tombstone()
+    with models.LOCK:
+        assert sid not in models.SESSIONS
+    with pytest.raises(models.StaleSessionGenerationError):
+        session.save(skip_index=True)
+
+
+def test_hidden_ephemeral_cleanup_logs_tombstone_failure_without_unlinking(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    from api import models, streaming
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    monkeypatch.setattr(streaming, "SESSION_DIR", session_dir)
+    sid = "hidden-ephemeral-tombstone-failure"
+    session = models.Session(session_id=sid, workspace=str(tmp_path))
+    session.active_stream_id = "ephemeral-stream"
+    session.save(skip_index=True)
+    with models.LOCK:
+        models.SESSIONS[sid] = session
+    artifacts, _unrelated = _seed_sidecar_delete_artifacts(session.path)
+
+    def reject_tombstone(_sid):
+        raise OSError("synthetic tombstone persistence failure")
+
+    monkeypatch.setattr(
+        models,
+        "_record_webui_deleted_session_tombstone",
+        reject_tombstone,
+    )
+    with caplog.at_level(logging.WARNING, logger="api.streaming"):
+        with streaming._get_session_agent_lock(sid):
+            streaming._finalize_cancelled_turn(session, ephemeral=True)
+
+    assert all(artifact.exists() for artifact in artifacts)
+    assert sid not in models._load_webui_deleted_session_tombstone()
+    with models.LOCK:
+        assert models.SESSIONS.get(sid) is session
+    assert f"cancelled ephemeral session {sid}" in caplog.text
+    assert "synthetic tombstone persistence failure" in caplog.text
+
+
+def test_hidden_ephemeral_cleanup_rejects_noncanonical_session_path(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    from api import models, streaming
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    monkeypatch.setattr(streaming, "SESSION_DIR", session_dir)
+    sid = "hidden-ephemeral-path-check"
+    session = models.Session(session_id=sid, workspace=str(tmp_path))
+    session.save(skip_index=True)
+    outside = tmp_path / "outside.json"
+    outside.write_text("do not unlink", encoding="utf-8")
+    noncanonical = types.SimpleNamespace(
+        session_id=sid,
+        path=outside,
+        _sidecar_revisions=session._sidecar_revisions,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="api.streaming"):
+        with streaming._get_session_agent_lock(sid):
+            deleted = streaming._cleanup_ephemeral_session_sidecar_locked(
+                noncanonical,
+                outcome="cancelled",
+            )
+
+    assert deleted is False
+    assert session.path.exists()
+    assert outside.read_text(encoding="utf-8") == "do not unlink"
+    assert sid not in models._load_webui_deleted_session_tombstone()
+    assert "does not match SID" in caplog.text
+
+
+def test_hidden_ephemeral_normal_completion_uses_durable_sidecar_delete_protocol(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    from api import config, models, streaming
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    monkeypatch.setattr(config, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(streaming, "SESSION_DIR", session_dir)
+    sid = "hidden-ephemeral-complete"
+    stream_id = "hidden-ephemeral-stream"
+    session = models.Session(
+        session_id=sid,
+        workspace=str(tmp_path),
+        title="btw: private side question",
+    )
+    session.active_stream_id = stream_id
+    session.pending_user_message = "private side question"
+    session.pending_started_at = time.time()
+    session.pending_user_source = "webui"
+    session.save(skip_index=True)
+    with models.LOCK:
+        models.SESSIONS[sid] = session
+    artifacts, unrelated = _seed_sidecar_delete_artifacts(session.path)
+    event_queue = queue.Queue()
+    streaming.STREAMS[stream_id] = event_queue
+
+    class SuccessfulEphemeralAgent:
+        def __init__(self, **kwargs):
+            self.session_id = kwargs.get("session_id")
+            self.context_compressor = None
+            self.session_prompt_tokens = 3
+            self.session_completion_tokens = 2
+            self.session_estimated_cost_usd = 0.001
+            self.session_cache_read_tokens = 0
+            self.session_cache_write_tokens = 0
+            self.ephemeral_system_prompt = None
+            self._last_error = None
+
+        def run_conversation(self, **kwargs):
+            history = list(kwargs.get("conversation_history") or [])
+            return {
+                "messages": history
+                + [
+                    {"role": "user", "content": kwargs["persist_user_message"]},
+                    {"role": "assistant", "content": "private answer"},
+                ]
+            }
+
+        def interrupt(self, _message):
+            pass
+
+    fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")
+    fake_runtime_module.resolve_runtime_provider = mock.Mock(
+        return_value={
+            "provider": "openai",
+            "api_key": "synthetic-key",
+            "base_url": None,
+        }
+    )
+    fake_hermes_cli = types.ModuleType("hermes_cli")
+    fake_hermes_cli.runtime_provider = fake_runtime_module
+    fake_hermes_state = types.ModuleType("hermes_state")
+    fake_hermes_state.SessionDB = mock.Mock(return_value=None)
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.runtime_provider",
+        fake_runtime_module,
+    )
+    monkeypatch.setitem(sys.modules, "hermes_state", fake_hermes_state)
+    monkeypatch.setattr(streaming, "get_session", lambda _sid: session)
+    monkeypatch.setattr(
+        streaming,
+        "_get_ai_agent",
+        lambda: SuccessfulEphemeralAgent,
+    )
+    monkeypatch.setattr(
+        streaming,
+        "resolve_model_provider",
+        lambda *_args, **_kwargs: ("test-model", "openai", None),
+    )
+    monkeypatch.setattr(config, "get_config", lambda: {})
+    monkeypatch.setattr(config, "_resolve_cli_toolsets", lambda _cfg: [])
+
+    with caplog.at_level(logging.ERROR, logger="api.streaming"):
+        streaming._run_agent_streaming(
+            session_id=sid,
+            msg_text="private side question",
+            model="test-model",
+            workspace=str(tmp_path),
+            stream_id=stream_id,
+            ephemeral=True,
+        )
+
+    assert any(
+        event == "done" and payload.get("answer") == "private answer"
+        for event, payload in list(event_queue.queue)
+    )
+    assert all(not artifact.exists() for artifact in artifacts)
+    assert unrelated.read_text(encoding="utf-8") == "must survive"
+    assert sid in models._load_webui_deleted_session_tombstone()
+    assert "_last_resort_sync_from_core failed" not in caplog.text
+    with models.LOCK:
+        assert sid not in models.SESSIONS
 
 
 @pytest.mark.parametrize(
