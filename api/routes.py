@@ -15604,51 +15604,60 @@ def handle_post(handler, parsed) -> bool:
             set_session_yolo_enabled(sid, False)
             return j(handler, {"ok": True, "yolo_enabled": bool(is_session_yolo_enabled(sid))})
 
-        # A run-backed approval is remote execution truth. Relay that exact
-        # mirror before committing YOLO; never let this ordinary toggle bypass
-        # the approval-card route's `(session, run)` single-flight owner.
-        run_mirror = gateway_pending_mirror(sid)
-        if run_mirror:
-            relay_payload, relay_status = _relay_gateway_run_approval(
-                sid,
-                run_mirror,
-                "once",
-                enable_yolo=True,
-            )
-            return j(handler, relay_payload, status=relay_status)
+        # Hold a tentative transition across both authoritative mirror snapshots.
+        # While it is pending, the gateway stream must surface any new approval
+        # instead of auto-approving it before this toggle can relay or commit it.
+        yolo_transition = begin_session_yolo_transition(sid)
+        try:
+            run_mirror = gateway_pending_mirror(sid)
+            if run_mirror:
+                relay_payload, relay_status = _relay_gateway_run_approval(
+                    sid,
+                    run_mirror,
+                    "once",
+                    enable_yolo=True,
+                )
+                return j(handler, relay_payload, status=relay_status)
 
-        # No remote prompt existed at the first authoritative snapshot, so this
-        # is an explicit session enable. Reconcile once more under the approval
-        # lock before clearing local pending state: a run mirror may have arrived
-        # between the snapshot and this mutation.
-        set_session_yolo_enabled(sid, True)
-        with _lock:
-            reconcile_gateway_pending_mirror_locked(sid)
-            queue = _pending.get(sid)
-            entries = queue if isinstance(queue, list) else [queue] if queue else []
-            run_mirror = next(
-                (
-                    dict(entry)
-                    for entry in entries
-                    if isinstance(entry, dict)
-                    and entry.get(_GATEWAY_MIRROR_FLAG)
-                    and str(entry.get("run_id") or "").strip()
-                ),
-                None,
-            )
-            if run_mirror is None:
-                _pending.pop(sid, None)
-        if run_mirror:
-            relay_payload, relay_status = _relay_gateway_run_approval(
-                sid,
-                run_mirror,
-                "once",
-                enable_yolo=True,
-            )
-            return j(handler, relay_payload, status=relay_status)
+            # No remote prompt existed at the first authoritative snapshot, so
+            # reconcile once more under the approval lock before committing YOLO
+            # or clearing local pending state. A run mirror may have arrived
+            # between the first snapshot and this mutation.
+            with _lock:
+                reconcile_gateway_pending_mirror_locked(sid)
+                queue = _pending.get(sid)
+                entries = queue if isinstance(queue, list) else [queue] if queue else []
+                run_mirror = next(
+                    (
+                        dict(entry)
+                        for entry in entries
+                        if isinstance(entry, dict)
+                        and entry.get(_GATEWAY_MIRROR_FLAG)
+                        and str(entry.get("run_id") or "").strip()
+                    ),
+                    None,
+                )
+                if run_mirror is None:
+                    _pending.pop(sid, None)
+            if run_mirror:
+                relay_payload, relay_status = _relay_gateway_run_approval(
+                    sid,
+                    run_mirror,
+                    "once",
+                    enable_yolo=True,
+                )
+                return j(handler, relay_payload, status=relay_status)
 
-        resolve_gateway_approval(sid, "once", resolve_all=True)
-        return j(handler, {"ok": True, "yolo_enabled": bool(is_session_yolo_enabled(sid))})
+            # No run-backed approval was present while the transition was held;
+            # this is now an explicit session enable. Commit only after both
+            # snapshots so an approval observed in the race remains visible.
+            finish_session_yolo_transition(sid, yolo_transition, succeeded=True)
+            yolo_transition = None
+            resolve_gateway_approval(sid, "once", resolve_all=True)
+            return j(handler, {"ok": True, "yolo_enabled": bool(is_session_yolo_enabled(sid))})
+        finally:
+            if yolo_transition is not None:
+                finish_session_yolo_transition(sid, yolo_transition, succeeded=False)
 
     if parsed.path == "/api/btw":
         return _handle_btw(handler, body)
@@ -25015,7 +25024,11 @@ def _handle_approval_respond(handler, body):
                     "ok": True,
                     "choice": choice,
                     "local_retired": True,
-                    **({"yolo_enabled": True} if enable_yolo else {}),
+                    **(
+                        {"yolo_enabled": bool(is_session_yolo_enabled(sid))}
+                        if enable_yolo
+                        else {}
+                    ),
                 })
             if handled_no_run_mirror:
                 relay_payload, relay_status = _gateway_approval_failure(
@@ -25064,14 +25077,22 @@ def _handle_approval_respond(handler, body):
             "ok": True,
             "choice": choice,
             "stale_cleared": True,
-            **({"yolo_enabled": True} if enable_yolo else {}),
+            **(
+                {"yolo_enabled": bool(is_session_yolo_enabled(sid))}
+                if enable_yolo
+                else {}
+            ),
         })
     if ok and enable_yolo:
         set_session_yolo_enabled(sid, True)
     return j(handler, {
         "ok": ok,
         "choice": choice,
-        **({"yolo_enabled": True} if ok and enable_yolo else {}),
+        **(
+            {"yolo_enabled": bool(is_session_yolo_enabled(sid))}
+            if ok and enable_yolo
+            else {}
+        ),
     })
 
 

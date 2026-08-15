@@ -708,3 +708,139 @@ def test_yolo_post_preserves_mirror_while_owned_relay_fails(monkeypatch):
         with routes._lock:
             routes._pending.pop(sid, None)
             routes._gateway_queues.pop(sid, None)
+
+
+@pytest.mark.skipif(not APPROVAL_AVAILABLE, reason="tools.approval unavailable")
+def test_yolo_post_keeps_transition_unconfirmed_until_second_mirror_check(monkeypatch):
+    from api import route_approvals, routes
+
+    sid = "webui-yolo-post-transition-window"
+    handler = object()
+    observed_transition_states = []
+    observed_gateway_states = []
+    response = {}
+    mirror = {
+        "command": "touch /tmp/webui-yolo-test",
+        "description": "test",
+        "approval_id": "approval-transition-window",
+        "run_id": "run-transition-window",
+        "_gateway_mirror": True,
+        "_gateway_agent_identity_v1": True,
+    }
+    disable_session_yolo(sid)
+
+    def fake_j(_handler, data, status=200, extra_headers=None):
+        response.update(payload=data, status=status)
+        return data
+
+    def fake_reconcile(_sid):
+        with route_approvals._yolo_transition_lock:
+            observed_transition_states.append(bool(route_approvals._yolo_transitions.get(sid)))
+        routes._pending[sid] = [dict(mirror)]
+        return mirror, 1, True
+
+    def fake_relay(_sid, _mirror, _choice, *, enable_yolo):
+        assert enable_yolo is True
+        with route_approvals._yolo_transition_lock:
+            observed_transition_states.append(bool(route_approvals._yolo_transitions.get(sid)))
+        observed_gateway_states.append(gateway_chat._gateway_session_yolo_enabled(sid))
+        return {
+            "ok": True,
+            "choice": "once",
+            "relayed": True,
+            "yolo_enabled": False,
+        }, 200
+
+    monkeypatch.setattr(routes, "j", fake_j)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"session_id": sid, "enabled": True})
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "_handle_extension_sidecar_proxy", lambda *_a, **_k: False)
+    monkeypatch.setattr(routes, "gateway_pending_mirror", lambda _sid: None)
+    monkeypatch.setattr(routes, "reconcile_gateway_pending_mirror_locked", fake_reconcile)
+    monkeypatch.setattr(routes, "_relay_gateway_run_approval", fake_relay)
+
+    try:
+        routes.handle_post(handler, urllib.parse.urlparse("/api/session/yolo"))
+        assert response["status"] == 200
+        assert response["payload"]["ok"] is True
+        assert observed_transition_states == [True, True]
+        assert observed_gateway_states == [False]
+        assert is_session_yolo_enabled(sid) is False
+    finally:
+        disable_session_yolo(sid)
+        with routes._lock:
+            routes._pending.pop(sid, None)
+            routes._gateway_queues.pop(sid, None)
+
+
+@pytest.mark.skipif(not APPROVAL_AVAILABLE, reason="tools.approval unavailable")
+def test_no_run_approval_success_reports_authoritative_yolo_state(monkeypatch):
+    from api import routes
+
+    sid = "webui-no-run-authoritative-success"
+    response = {}
+    disable_session_yolo(sid)
+
+    def fake_j(_handler, data, status=200, extra_headers=None):
+        response.update(payload=data, status=status)
+        return data
+
+    original_set = routes.set_session_yolo_enabled
+
+    def racing_enable(session_key, enabled):
+        original_set(session_key, enabled)
+        disable_session_yolo(session_key)
+
+    monkeypatch.setattr(routes, "j", fake_j)
+    monkeypatch.setattr(routes, "get_session", lambda _sid: SimpleNamespace(active_stream_id=None))
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: True)
+    monkeypatch.setattr(routes, "resolve_gateway_pending_local_no_run_mirror", lambda *_a: (True, 1, None, 0))
+    monkeypatch.setattr(routes, "set_session_yolo_enabled", racing_enable)
+
+    try:
+        routes._handle_approval_respond(
+            object(),
+            {"session_id": sid, "choice": "once", "approval_id": "approval-no-run", "yolo": True},
+        )
+        assert response["status"] == 200
+        assert response["payload"]["ok"] is True
+        assert response["payload"]["yolo_enabled"] is False
+    finally:
+        disable_session_yolo(sid)
+
+
+@pytest.mark.skipif(not APPROVAL_AVAILABLE, reason="tools.approval unavailable")
+def test_local_approval_success_reports_authoritative_yolo_state(monkeypatch):
+    from api import routes
+
+    sid = "webui-local-authoritative-success"
+    response = {}
+    disable_session_yolo(sid)
+
+    def fake_j(_handler, data, status=200, extra_headers=None):
+        response.update(payload=data, status=status)
+        return data
+
+    original_set = routes.set_session_yolo_enabled
+
+    def racing_enable(session_key, enabled):
+        original_set(session_key, enabled)
+        disable_session_yolo(session_key)
+
+    monkeypatch.setattr(routes, "j", fake_j)
+    monkeypatch.setattr(routes, "get_session", lambda _sid: SimpleNamespace(active_stream_id=None))
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: False)
+    monkeypatch.setattr("api.runtime_adapter.runtime_adapter_enabled", lambda: False)
+    monkeypatch.setattr(routes, "_resolve_approval_legacy", lambda *_a: True)
+    monkeypatch.setattr(routes, "set_session_yolo_enabled", racing_enable)
+
+    try:
+        routes._handle_approval_respond(
+            object(),
+            {"session_id": sid, "choice": "once", "approval_id": "approval-local", "yolo": True},
+        )
+        assert response["status"] == 200
+        assert response["payload"]["ok"] is True
+        assert response["payload"]["yolo_enabled"] is False
+    finally:
+        disable_session_yolo(sid)
