@@ -10764,8 +10764,8 @@ function _pendingActiveTurnUserMessage(messages, session){
   if(!Number.isFinite(startedAt)||startedAt<=0) return null;
   const list=Array.isArray(messages)?messages:[];
   const activeTokenValue=session&&(session.active_turn_token??session.activeTurnToken);
-  const activeToken=typeof activeTokenValue==='string'?activeTokenValue.trim():'';
-  const hasActiveToken=!!activeToken;
+  const activeToken=typeof activeTokenValue==='string'?activeTokenValue:'';
+  const hasActiveToken=typeof activeTokenValue==='string'&&activeTokenValue.trim().length>0;
   for(let i=list.length-1;i>=0;i--){
     const msg=list[i];
     if(!msg) continue;
@@ -10773,8 +10773,10 @@ function _pendingActiveTurnUserMessage(messages, session){
       ||(typeof _isCanonicalAssistantToolCallEnvelope==='function'&&_isCanonicalAssistantToolCallEnvelope(msg))
       ||String(msg.role||'')==='tool');
     if(isActivity){
-      const rowToken=typeof msg._active_turn_token==='string'?msg._active_turn_token.trim():'';
-      if(hasActiveToken?rowToken!==activeToken:!!rowToken) return null;
+      const rowToken=typeof msg._active_turn_token==='string'?msg._active_turn_token:'';
+      const hasRowToken=typeof msg._active_turn_token==='string'
+        &&msg._active_turn_token.trim().length>0;
+      if(hasActiveToken?(!hasRowToken||rowToken!==activeToken):hasRowToken) return null;
       continue;
     }
     if(String(msg.role||'')!=='user') continue;

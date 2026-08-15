@@ -290,18 +290,24 @@ function summarizePending(row){{
     attachments:row.attachments,
   }};
 }}
-function runCase(name, boundary, merge, activeTurnToken){{
+function runCase(name, boundary, merge, activeTurnToken, userTurnToken, olderAttachments, trailingRows){{
   const older={{id:name+'-older',role:'user',content:'same prompt',_ts:3,
-    attachments:[{{path:'older-'+name}}]}};
-  const messages=[older,boundary];
+    attachments:olderAttachments??[{{path:'older-'+name}}]}};
+  if(userTurnToken) older._active_turn_token=userTurnToken;
+  const messages=[older,boundary,...(trailingRows||[])];
   const session={{pending_user_message:'same prompt',pending_started_at:3,
     pending_attachments:[{{path:'pending-'+name}}]}};
   if(activeTurnToken) session.active_turn_token=activeTurnToken;
   const before=JSON.stringify(older.attachments);
+  const currentTailOwner=_pendingCurrentTailUserMessage(
+    messages,session.pending_started_at,undefined,
+    session.active_turn_token??session.activeTurnToken,
+  );
   const pendingOwner=_pendingActiveTurnUserMessage(messages,session);
   const pending=getPendingSessionMessage(session,messages);
   const merged=merge?_mergePendingSessionMessage(session,messages):null;
-  return {{name,pendingOwner:pendingOwner&&pendingOwner.id,pending:summarizePending(pending),
+  return {{name,currentTailOwner:currentTailOwner&&currentTailOwner.id,
+    pendingOwner:pendingOwner&&pendingOwner.id,pending:summarizePending(pending),
     merged,before,after:JSON.stringify(older.attachments),
     pendingIndex:messages.findIndex(row=>row&&row._pending),
     boundaryIndex:messages.indexOf(boundary),rows:messages.map(summarizePending)}};
@@ -320,13 +326,40 @@ const cases=[
 const exactUser={{id:'exact-user',role:'user',content:'same prompt',_ts:3,
   _active_turn_token:' exact-turn '}};
 const exactMessages=[exactUser,{{role:'assistant',content:'working',_live:true,_ts:4,
-  _active_turn_token:'exact-turn'}}];
+  _active_turn_token:' exact-turn '}}];
 const exactSession={{pending_user_message:'same prompt',pending_started_at:3,
   active_turn_token:' exact-turn '}};
 const legacyUser={{id:'legacy-user',role:'user',content:'same prompt',_ts:3}};
 const legacyMessages=[legacyUser,{{role:'assistant',content:'working',_live:true,_ts:4}}];
 const legacySession={{pending_user_message:'same prompt',pending_started_at:3}};
+const inverseCases=[
+  runCase('raw-distinct-live',{{role:'assistant',content:'working',_live:true,_ts:4,
+    _active_turn_token:'raw-live'}},true,' raw-live ',' raw-live ',[]),
+  runCase('raw-distinct-canonical-tool-call',{{role:'assistant',_ts:4,
+    tool_calls:[{{id:'call-1',function:{{name:'lookup'}}}}],
+    _active_turn_token:'raw-tool-call'}},true,' raw-tool-call ',' raw-tool-call ',[]),
+  runCase('raw-distinct-tool-result',{{role:'tool',content:'result',_ts:4,
+    _active_turn_token:'raw-tool-result'}},true,' raw-tool-result ',' raw-tool-result ',[]),
+  runCase('authoritative-live-missing',{{role:'assistant',content:'working',_live:true,_ts:4}},
+    true,' authoritative-missing ',' authoritative-missing ',[]),
+  runCase('authoritative-live-blank',{{role:'assistant',content:'working',_live:true,_ts:4,
+    _active_turn_token:'   '}},true,' authoritative-blank ',' authoritative-blank ',[]),
+];
+const mixedCases=[
+  runCase('mixed-tagged-live',{{role:'assistant',content:'working',_live:true,_ts:4}},true,
+    undefined,undefined,[],[{{role:'assistant',content:'later working',_live:true,_ts:5,
+      _active_turn_token:'mixed-live'}}]),
+  runCase('mixed-canonical-tool-call',{{role:'assistant',content:'working',_live:true,_ts:4}},true,
+    undefined,undefined,[],[{{role:'assistant',_ts:5,
+      tool_calls:[{{id:'call-2',function:{{name:'lookup'}}}}],
+      _active_turn_token:'mixed-tool-call'}}]),
+  runCase('mixed-tool-result',{{role:'assistant',content:'working',_live:true,_ts:4}},true,
+    undefined,undefined,[],[{{role:'tool',content:'result',_ts:5,
+      _active_turn_token:'mixed-tool-result'}}]),
+];
 process.stdout.write(JSON.stringify({{cases,
+  inverseCases,
+  mixedCases,
   exactOwner:_pendingActiveTurnUserMessage(exactMessages,exactSession)?.id,
   legacyOwner:_pendingActiveTurnUserMessage(legacyMessages,legacySession)?.id
 }}));
@@ -350,6 +383,33 @@ process.stdout.write(JSON.stringify({{cases,
             "attachments": [{"path": f"pending-{case['name']}"}],
         }, case
         assert case["before"] == case["after"], case
+        assert case["merged"] is True, case
+        assert any(row == case["pending"] for row in case["rows"]), case
+        if "live" in case["name"]:
+            assert case["pendingIndex"] < case["boundaryIndex"], case
+    for case in result["mixedCases"]:
+        assert case["before"] == case["after"], case
+        assert case["currentTailOwner"] is None, case
+        assert case["pendingOwner"] is None, case
+        assert case["pending"] == {
+            "role": "user",
+            "content": "same prompt",
+            "pending": True,
+            "attachments": [{"path": f"pending-{case['name']}"}],
+        }, case
+        assert case["merged"] is True, case
+        assert any(row == case["pending"] for row in case["rows"]), case
+        assert case["pendingIndex"] < case["boundaryIndex"], case
+    for case in result["inverseCases"]:
+        assert case["before"] == case["after"], case
+        assert case["currentTailOwner"] is None, case
+        assert case["pendingOwner"] is None, case
+        assert case["pending"] == {
+            "role": "user",
+            "content": "same prompt",
+            "pending": True,
+            "attachments": [{"path": f"pending-{case['name']}"}],
+        }, case
         assert case["merged"] is True, case
         assert any(row == case["pending"] for row in case["rows"]), case
         if "live" in case["name"]:

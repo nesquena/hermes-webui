@@ -3408,15 +3408,15 @@ function _mergePendingSessionMessage(session,messages){
   if(!Array.isArray(messages)) return false;
   const liveAssistantIdx=messages.findIndex(m=>m&&m.role==='assistant'&&m._live);
   const currentTurnMessages=liveAssistantIdx>=0?messages.slice(0,liveAssistantIdx):messages;
-  const liveAssistant=liveAssistantIdx>=0?messages[liveAssistantIdx]:null;
-  const liveBoundaryToken=_opaqueActiveTurnToken(liveAssistant&&liveAssistant._active_turn_token);
+  const suffixHasToken=liveAssistantIdx>=0&&messages.slice(liveAssistantIdx).some(row=>
+    _opaqueActiveTurnToken(row&&row._active_turn_token)
+  );
   const activeTurnToken=_opaqueActiveTurnToken(
     session&&(session.active_turn_token??session.activeTurnToken),
   );
   const pendingText=String(session&&session.pending_user_message||'').trim();
   const matchingUsers=activeTurnToken?messages.filter(row=>row&&String(row.role||'')==='user'
       &&_opaqueActiveTurnToken(row._active_turn_token)===activeTurnToken):[];
-  const ambiguousTokenRows=!!(activeTurnToken&&matchingUsers.length>1);
   if(activeTurnToken&&pendingText){
     const existing=matchingUsers.length===1?matchingUsers[0]:null;
     const pendingOwner=typeof _pendingActiveTurnUserMessage==='function'
@@ -3437,7 +3437,7 @@ function _mergePendingSessionMessage(session,messages){
       return false;
     }
   }
-  const pendingSourceMessages=ambiguousTokenRows||liveBoundaryToken?messages:currentTurnMessages;
+  const pendingSourceMessages=activeTurnToken||suffixHasToken?messages:currentTurnMessages;
   const pendingMsg=typeof getPendingSessionMessage==='function'?getPendingSessionMessage(session,pendingSourceMessages):null;
   if(!pendingMsg) return false;
   if(_hasCurrentTailUserDuplicate(pendingSourceMessages,pendingMsg,activeTurnToken)) return false;
