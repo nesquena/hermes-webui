@@ -7832,6 +7832,13 @@ def _load_cli_sessions_uncached(
             carrying its resolved project assignment, and the projection loop
             must read that richer row. Pass 2 needs no budget of its own (its
             query limit is the bound) and ignores the result.
+
+            "Upgrade" is one-way. Overwriting a row that already carries a
+            RESOLVED project_id with a projection that has none would delete the
+            chip this whole function exists to restore — and swap the row's
+            identity from the lineage tip back to its root. Pass 2 projects the
+            same conversations as pass 1 without the assignment context, so it
+            must never be able to win that race.
             """
             lineage_ids = _lineage_ids(row)
             existing = next(
@@ -7839,8 +7846,14 @@ def _load_cli_sessions_uncached(
                 None,
             )
             if existing is not None:
-                existing.clear()
-                existing.update(row)
+                if (
+                    _resolved_project_id(row.get('project_id')) is not None
+                    or _resolved_project_id(existing.get('project_id')) is None
+                ):
+                    # Either the incoming row adds an assignment, or the row on
+                    # file has none to lose: overwriting cannot drop a chip.
+                    existing.clear()
+                    existing.update(row)
                 for value in lineage_ids:
                     represented_rows[value] = existing
                 return False
