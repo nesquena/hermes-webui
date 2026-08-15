@@ -87,6 +87,14 @@ def test_stream_writeback_diagnostics_cover_final_writeback_stages():
     assert (
         'with _stream_writeback_stage(_writeback_timings, "session_save"):\n'
         '                    s.save()'
+    ) in src or (
+        # The production settlement-leak fix wraps the save in a generation-
+        # owned committer that tracks the fallback-notice generation; accept
+        # the wrapped form too as long as s.save() still lands inside the
+        # session_save stage.
+        'with _stream_writeback_stage(_writeback_timings, "session_save"):\n'
+        '                    with _turn_final_save_commit(stream_id, s):\n'
+        '                        s.save()'
     ) in src
     assert src.index('with _stream_writeback_stage(_writeback_timings, "session_save")') < src.index(
         'with _stream_writeback_stage(_writeback_timings, "state_sync")'
