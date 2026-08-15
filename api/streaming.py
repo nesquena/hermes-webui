@@ -1608,10 +1608,39 @@ def _result_has_authoritative_full_history_prefix(
     msg_text,
 ):
     """Prove that an exact result prefix is history, not a lookalike delta."""
-    if not _active_turn_boundary_is_valid(identity):
-        return False
     result_messages = list(result_messages or [])
     previous_context = list(previous_context or [])
+    # Even when an older Agent cannot expose its current-turn index/turn id, a
+    # complete byte-structural replay of the durable context followed only by
+    # assistant/tool output is conclusive history. This is deliberately the
+    # canonical digest comparator, not visible-text equivalence: payload-
+    # distinct lookalikes still fail closed and are preserved.
+    exact_boundary = len(previous_context)
+    exact_out_of_band_delta = result_messages[exact_boundary:]
+    if (
+        previous_context
+        and any(
+            type(message) is dict and message.get('role') == 'user'
+            for message in previous_context
+        )
+        and exact_out_of_band_delta
+        and all(
+            _is_context_compression_marker(message)
+            or (
+                type(message) is dict
+                and message.get('role') in ('assistant', 'tool')
+            )
+            for message in exact_out_of_band_delta
+        )
+        and _messages_have_prefix(
+            result_messages,
+            previous_context,
+            key_fn=_canonical_message_digest,
+        )
+    ):
+        return True
+    if not _active_turn_boundary_is_valid(identity):
+        return False
     current_turn_user_idx = identity['current_turn_user_idx']
     if current_turn_user_idx < 0 or current_turn_user_idx > len(previous_context):
         return False
@@ -1904,6 +1933,38 @@ def _align_current_turn_display(previous_display, previous_context, identity):
     context = list(previous_context or [])
     if not isinstance(identity, dict):
         return display, context
+    # Legacy/eager checkpoints may predate the request-local token. Stamp the
+    # exact indexed context row only when its pending-turn timestamp also
+    # matches; index + visible text alone can point at an older identical prompt
+    # and would retoken historical data. Existing token matches remain valid.
+    context, _ = _mark_active_turn_checkpoint_in_history(
+        context,
+        identity,
+        identity.get('text'),
+        allow_index_fallback=False,
+    )
+    if (
+        not _active_turn_has_checkpoint(context, identity)
+        and _active_turn_boundary_is_valid(identity)
+    ):
+        idx = identity['current_turn_user_idx']
+        candidate = context[idx] if 0 <= idx < len(context) else None
+        candidate_timestamp = (
+            candidate.get('timestamp', candidate.get('_ts'))
+            if isinstance(candidate, dict)
+            else None
+        )
+        identity_timestamp = identity.get('timestamp')
+        if (
+            isinstance(candidate, dict)
+            and candidate.get('role') == 'user'
+            and _normalize_user_text(candidate.get('content'))
+            == _normalize_user_text(identity.get('text'))
+            and isinstance(candidate_timestamp, (int, float))
+            and isinstance(identity_timestamp, (int, float))
+            and float(candidate_timestamp) == float(identity_timestamp)
+        ):
+            _mark_active_turn_checkpoint(candidate, identity)
     display, _ = _mark_active_turn_checkpoint_in_history(
         display,
         identity,
