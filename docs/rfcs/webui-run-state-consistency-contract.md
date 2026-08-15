@@ -144,16 +144,20 @@ and 5; it does not mark every run-state boundary implemented.
    moments ago is never mistaken for an orphan.
 10. **Sidecar writes are generation-fenced.** A writer may replace a session JSON
    sidecar only while the exact durable revision it observed is still current.
-   First creation must be create-only even on filesystems without hard-link
-   support, and SID rotation must start from an absent revision for the new ID.
+   Text publication must use canonical LF bytes so the stored digest matches the
+   file on native Windows. First creation must use an atomic create-only primitive:
+   hard-link on POSIX, create-only rename on Windows, or fail closed when neither
+   is available. SID rotation must start from an absent revision for the new ID.
    A raw metadata patch may advance only aliases that owned the exact pre-write
-   revision; stale aliases are invalidated and reloaded instead. Recovery must
-   recheck durable deletes under the SID authority, validate the embedded SID,
-   and invalidate stale in-memory aliases. A shrinking write must not proceed
-   unless its recoverable history is durable: row count alone does not prove
-   dominance, an incomparable primary backup is archived content-addressedly
-   before the latest snapshot is promoted, and backup retirement requires
-   matching receipts for both the backup and the committed live generation.
+   revision; stale aliases are invalidated and reloaded instead, and callers must
+   adopt the returned revision owner before model resolution or turn start.
+   Recovery must recheck durable deletes under the SID authority, validate the
+   embedded SID, and invalidate stale in-memory aliases. A shrinking write must
+   not proceed unless its recoverable history is durable: row count alone does
+   not prove dominance; malformed, non-object, foreign-SID, and incomparable
+   primary backups are archived byte-for-byte and content-addressedly before the
+   valid live snapshot is promoted; and backup retirement requires matching
+   receipts for both the backup and the committed live generation.
 
 ## Review Checklist
 

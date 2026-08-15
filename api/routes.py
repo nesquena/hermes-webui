@@ -22430,6 +22430,8 @@ def start_session_turn(
 
     try:
         workspace = _resolve_chat_workspace_with_recovery(s, None)
+        s = getattr(workspace, "session", s)
+        workspace = str(workspace)
     except WorkspaceBindingPersistenceError as e:
         return {"error": str(e), "_status": 500}
     except ValueError as e:
@@ -23093,6 +23095,8 @@ def _handle_chat_start(handler, body, diag=None):
         diag.stage("resolve_workspace") if diag else None
         try:
             workspace = _resolve_chat_workspace_with_recovery(s, body.get("workspace"))
+            s = getattr(workspace, "session", s)
+            workspace = str(workspace)
         except WorkspaceBindingPersistenceError as e:
             return bad(handler, str(e), 500)
         except ValueError as e:
@@ -23242,24 +23246,33 @@ def _handle_chat_start(handler, body, diag=None):
 
 
 
-def _resolve_chat_workspace_with_recovery(s, requested_workspace) -> str:
+class _ResolvedChatWorkspace(str):
+    """String-compatible workspace resolution carrying the durable SID owner."""
+
+    def __new__(cls, workspace, session):
+        resolved = super().__new__(cls, str(workspace))
+        resolved.session = session
+        return resolved
+
+
+def _resolve_chat_workspace_with_recovery(s, requested_workspace) -> _ResolvedChatWorkspace:
     """Recover stale implicit session workspaces without hiding explicit errors."""
     explicit = requested_workspace not in (None, "")
     if explicit:
-        return str(resolve_trusted_workspace(requested_workspace))
+        return _ResolvedChatWorkspace(resolve_trusted_workspace(requested_workspace), s)
     stored_workspace = getattr(s, "workspace", None)
     workspace, recovered = resolve_implicit_workspace_with_recovery(
         stored_workspace,
         get_last_workspace,
     )
     if not recovered:
-        return str(workspace)
+        return _ResolvedChatWorkspace(workspace, s)
     persisted = persist_recovered_workspace_binding(
         s,
         workspace,
         expected_workspace=stored_workspace,
     )
-    return str(persisted.workspace)
+    return _ResolvedChatWorkspace(persisted.workspace, persisted)
 
 
 def _normalize_chat_attachments(raw_attachments):

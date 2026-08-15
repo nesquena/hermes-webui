@@ -1,4 +1,6 @@
+import builtins
 import errno
+import hashlib
 import json
 import multiprocessing
 import os
@@ -69,6 +71,39 @@ def test_stale_loaded_instance_cannot_overwrite_newer_sidecar(
     assert persisted["messages"][-1]["content"] == "newer"
 
 
+def test_native_windows_newlines_do_not_invalidate_second_save(
+    tmp_path, monkeypatch
+):
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    sid = "windows-newline-revision"
+    real_open = builtins.open
+
+    def windows_text_open(file, mode="r", *args, **kwargs):
+        if mode == "w" and ".tmp." in str(file) and kwargs.get("newline") is None:
+            kwargs["newline"] = "\r\n"
+        return real_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", windows_text_open)
+    session = models.Session(
+        session_id=sid,
+        workspace=str(tmp_path),
+        messages=[{"role": "user", "content": "first"}],
+    )
+    session.save(skip_index=True)
+    session.messages.append({"role": "assistant", "content": "second"})
+
+    session.save(skip_index=True)
+
+    persisted = json.loads(
+        (session_dir / f"{sid}.json").read_text(encoding="utf-8")
+    )
+    assert persisted["_sidecar_generation_v1"] == 2
+    assert persisted["messages"][-1]["content"] == "second"
+
+
 def test_new_instance_expected_absent_never_overwrites_existing_sid(
     tmp_path, monkeypatch
 ):
@@ -95,6 +130,27 @@ def test_new_instance_expected_absent_never_overwrites_existing_sid(
         (session_dir / f"{sid}.json").read_text(encoding="utf-8")
     )
     assert persisted["messages"] == first.messages
+
+
+def test_create_only_publish_fails_closed_without_atomic_primitive(
+    tmp_path, monkeypatch
+):
+    from api import models
+
+    source = tmp_path / "source.tmp"
+    destination = tmp_path / "destination.json"
+    source.write_bytes(b'{"complete": true}')
+
+    def unsupported_link(*_args, **_kwargs):
+        raise OSError(errno.EXDEV, "hard links unsupported")
+
+    monkeypatch.setattr(models.os, "link", unsupported_link)
+
+    with pytest.raises(OSError, match="hard links unsupported"):
+        models._publish_sidecar_no_replace(source, destination)
+
+    assert not destination.exists()
+    assert source.read_bytes() == b'{"complete": true}'
 
 
 def test_generation_is_scoped_per_sid_across_rotation(tmp_path, monkeypatch):
@@ -362,6 +418,113 @@ def test_shrinking_save_fails_closed_when_backup_publish_fails(
     )
 
 
+def test_malformed_backup_is_archived_before_live_snapshot_promotion(
+    tmp_path, monkeypatch
+):
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    sid = "malformed-backup-recovery"
+    session = models.Session(
+        session_id=sid,
+        workspace=str(tmp_path),
+        messages=[
+            {"role": "user", "content": "one"},
+            {"role": "assistant", "content": "two"},
+            {"role": "user", "content": "three"},
+        ],
+    )
+    session.save(skip_index=True)
+    before_shrink = session.path.read_bytes()
+    malformed = b'{"broken":'
+    backup_path = session.path.with_suffix(".json.bak")
+    backup_path.write_bytes(malformed)
+    session.messages = session.messages[:1]
+
+    session.save(skip_index=True)
+
+    archive = backup_path.with_name(
+        f"{backup_path.name}.archive-{hashlib.sha256(malformed).hexdigest()}"
+    )
+    assert archive.read_bytes() == malformed
+    assert backup_path.read_bytes() == before_shrink
+    assert len(json.loads(session.path.read_text(encoding="utf-8"))["messages"]) == 1
+
+
+def test_non_object_backup_is_archived_before_live_snapshot_promotion(
+    tmp_path, monkeypatch
+):
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    sid = "non-object-backup-recovery"
+    session = models.Session(
+        session_id=sid,
+        workspace=str(tmp_path),
+        messages=[
+            {"role": "user", "content": "one"},
+            {"role": "assistant", "content": "two"},
+        ],
+    )
+    session.save(skip_index=True)
+    before_shrink = session.path.read_bytes()
+    unusable = b"[]"
+    backup_path = session.path.with_suffix(".json.bak")
+    backup_path.write_bytes(unusable)
+    session.messages = session.messages[:1]
+
+    session.save(skip_index=True)
+
+    archive = backup_path.with_name(
+        f"{backup_path.name}.archive-{hashlib.sha256(unusable).hexdigest()}"
+    )
+    assert archive.read_bytes() == unusable
+    assert backup_path.read_bytes() == before_shrink
+
+
+def test_foreign_sid_backup_is_archived_and_replaced_before_shrink(
+    tmp_path, monkeypatch
+):
+    from api import models, session_recovery
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    sid = "foreign-backup-owner"
+    messages = [
+        {"role": "user", "content": "one"},
+        {"role": "assistant", "content": "two"},
+        {"role": "user", "content": "three"},
+    ]
+    session = models.Session(
+        session_id=sid,
+        workspace=str(tmp_path),
+        messages=messages,
+    )
+    session.save(skip_index=True)
+    foreign_bytes = json.dumps(
+        {"session_id": "foreign-owner", "messages": messages},
+        ensure_ascii=False,
+    ).encode("utf-8")
+    backup_path = session.path.with_suffix(".json.bak")
+    backup_path.write_bytes(foreign_bytes)
+    session.messages = messages[:1]
+
+    session.save(skip_index=True)
+
+    archive = backup_path.with_name(
+        f"{backup_path.name}.archive-{hashlib.sha256(foreign_bytes).hexdigest()}"
+    )
+    assert archive.read_bytes() == foreign_bytes
+    primary_backup = json.loads(backup_path.read_text(encoding="utf-8"))
+    assert primary_backup["session_id"] == sid
+    result = session_recovery.recover_session(session.path)
+    assert result["restored"] is True
+    restored = json.loads(session.path.read_text(encoding="utf-8"))
+    assert restored["messages"] == messages
+
+
 def test_workspace_patch_does_not_grant_stale_alias_new_revision(
     tmp_path, monkeypatch
 ):
@@ -568,27 +731,35 @@ def test_recovery_rejects_backup_with_foreign_embedded_sid(tmp_path, monkeypatch
     assert json.loads(session_path.read_text(encoding="utf-8")) == live
 
 
-def test_expected_absent_save_falls_back_when_hardlinks_are_unsupported(
+def test_create_only_publish_uses_native_windows_rename_without_hardlinks(
     tmp_path, monkeypatch
 ):
     from api import models
 
-    session_dir = tmp_path / "sessions"
-    _patch_store(monkeypatch, models, session_dir)
+    source = tmp_path / "source.tmp"
+    destination = tmp_path / "destination.json"
+    source.write_bytes(b'{"complete": true}')
 
     def unsupported_link(_source, _destination):
         raise OSError(errno.EOPNOTSUPP, "hard links unsupported")
 
+    real_rename = models.os.rename
+    rename_calls = []
+
+    def create_only_rename(rename_source, rename_destination):
+        rename_calls.append((rename_source, rename_destination))
+        assert not destination.exists()
+        real_rename(rename_source, rename_destination)
+
     monkeypatch.setattr(models.os, "link", unsupported_link)
-    session = models.Session(
-        session_id="no-hardlinks",
-        workspace=str(tmp_path),
-        messages=[{"role": "user", "content": "safe first save"}],
-    )
+    monkeypatch.setattr(models.os, "rename", create_only_rename)
+    monkeypatch.setattr(models.os, "name", "nt")
 
-    session.save(skip_index=True)
+    models._publish_sidecar_no_replace(source, destination)
 
-    assert json.loads(session.path.read_text(encoding="utf-8"))["messages"] == session.messages
+    assert rename_calls == [(source, destination)]
+    assert destination.read_bytes() == b'{"complete": true}'
+    assert not source.exists()
 
 
 def test_orphan_recovery_rechecks_delete_tombstone_under_authority(

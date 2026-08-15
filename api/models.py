@@ -2,7 +2,6 @@
 import collections
 import copy
 import datetime
-import errno
 import hashlib
 import inspect
 import json
@@ -292,49 +291,20 @@ def _read_sidecar_revision(path: Path, sid: str | None = None) -> SidecarRevisio
 def _publish_sidecar_no_replace(source: Path, destination: Path) -> None:
     """Publish *source* only when *destination* is still absent.
 
-    Hard links provide the strongest atomic create-only primitive and remain the
-    fast path. Some Windows, removable, and network filesystems reject hard
-    links, so fall back to an exclusive destination create while the SID
-    authority is held. The fallback removes a partial destination on failure
-    and never replaces an existing sidecar.
+    Hard links provide an atomic create-only primitive on POSIX. Native Windows
+    rename is also create-only. If neither primitive is available, fail closed:
+    opening the destination with ``O_EXCL`` before copying would expose a
+    partial sidecar to lock-free readers.
     """
     try:
         os.link(str(source), str(destination))
         return
     except FileExistsError:
         raise
-    except OSError as exc:
-        fallback_errnos = {
-            errno.EACCES,
-            errno.EPERM,
-            errno.EXDEV,
-            getattr(errno, "ENOTSUP", errno.EOPNOTSUPP),
-            errno.EOPNOTSUPP,
-        }
-        if exc.errno not in fallback_errnos:
+    except OSError:
+        if os.name != "nt":
             raise
-
-    fd = None
-    destination_created = False
-    try:
-        fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        destination_created = True
-        with os.fdopen(fd, "wb") as destination_handle:
-            fd = None
-            with open(source, "rb") as source_handle:
-                while True:
-                    chunk = source_handle.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    destination_handle.write(chunk)
-            destination_handle.flush()
-            os.fsync(destination_handle.fileno())
-    except Exception:
-        if fd is not None:
-            os.close(fd)
-        if destination_created:
-            destination.unlink(missing_ok=True)
-        raise
+        os.rename(source, destination)
 
 
 def _message_rows_cover(candidate, baseline) -> bool:
@@ -1832,41 +1802,55 @@ class Session:
                     bak_path = self.path.with_suffix('.json.bak')
                     replace_backup = not bak_path.exists()
                     if bak_path.exists():
-                        try:
-                            backup = json.loads(bak_path.read_text(encoding='utf-8'))
-                            backup_messages = backup.get('messages')
-                            existing_messages = existing.get('messages')
-                            if not isinstance(backup, dict) or not isinstance(backup_messages, list):
-                                raise ValueError("backup payload is not a session snapshot")
-                            if not isinstance(existing_messages, list):
-                                raise ValueError("live payload is not a session snapshot")
-                        except (OSError, json.JSONDecodeError, ValueError) as exc:
-                            raise RuntimeError(
-                                f"Refusing to replace unreadable recoverable backup for {self.session_id!r}"
-                            ) from exc
                         current_backup_receipt = _read_sidecar_revision(
                             bak_path,
                             self.session_id,
                         )
-                        existing_covers_backup = _message_rows_cover(
-                            existing_messages,
-                            backup_messages,
-                        )
-                        backup_covers_existing = _message_rows_cover(
-                            backup_messages,
-                            existing_messages,
-                        )
-                        if backup_covers_existing:
-                            backup_receipt = current_backup_receipt
-                        elif existing_covers_backup:
-                            replace_backup = True
-                        else:
+                        try:
+                            backup = json.loads(bak_path.read_text(encoding='utf-8'))
+                            if not isinstance(backup, dict):
+                                raise ValueError("backup payload is not a session snapshot")
+                            backup_messages = backup.get('messages')
+                            existing_messages = existing.get('messages')
+                            if not isinstance(backup_messages, list):
+                                raise ValueError("backup payload is not a session snapshot")
+                            if not isinstance(existing_messages, list):
+                                raise ValueError("live payload is not a session snapshot")
+                        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
                             _archive_incomparable_backup(
                                 self.session_id,
                                 bak_path,
                                 current_backup_receipt,
                             )
                             replace_backup = True
+                        else:
+                            if backup.get('session_id') != self.session_id:
+                                _archive_incomparable_backup(
+                                    self.session_id,
+                                    bak_path,
+                                    current_backup_receipt,
+                                )
+                                replace_backup = True
+                            else:
+                                existing_covers_backup = _message_rows_cover(
+                                    existing_messages,
+                                    backup_messages,
+                                )
+                                backup_covers_existing = _message_rows_cover(
+                                    backup_messages,
+                                    existing_messages,
+                                )
+                                if backup_covers_existing:
+                                    backup_receipt = current_backup_receipt
+                                elif existing_covers_backup:
+                                    replace_backup = True
+                                else:
+                                    _archive_incomparable_backup(
+                                        self.session_id,
+                                        bak_path,
+                                        current_backup_receipt,
+                                    )
+                                    replace_backup = True
                     bak_tmp = None
                     try:
                         if replace_backup:
@@ -1898,7 +1882,7 @@ class Session:
 
         tmp = self.path.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
         try:
-            with open(tmp, 'w', encoding='utf-8') as f:
+            with open(tmp, 'w', encoding='utf-8', newline='\n') as f:
                 f.write(payload)
                 f.flush()
                 os.fsync(f.fileno())
@@ -6135,7 +6119,7 @@ def persist_recovered_workspace_binding(
                     f".tmp.{os.getpid()}.{threading.current_thread().ident}"
                 )
                 try:
-                    with open(tmp, "w", encoding="utf-8") as handle:
+                    with open(tmp, "w", encoding="utf-8", newline="\n") as handle:
                         handle.write(serialized)
                         handle.flush()
                         os.fsync(handle.fileno())
