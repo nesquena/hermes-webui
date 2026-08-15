@@ -23118,14 +23118,11 @@ def _handle_chat_sync(handler, body):
             )
             from api.streaming import (
                 _WEBUI_PROGRESS_PROMPT,
-                _assign_stable_message_ids,
-                _dedupe_replayed_context_messages,
-                _merge_display_messages_after_agent_result,
-                _restore_display_reasoning_metadata,
-                _restore_reasoning_metadata,
+                _resolve_active_turn_authority,
                 _sanitize_messages_for_agent,
                 _compact_session_image_parts_for_persistence,
                 _context_messages_for_new_turn,
+                _settle_result_messages,
                 _workspace_context_prefix,
             )
             workspace_ctx = _workspace_context_prefix(str(s.workspace))
@@ -23150,6 +23147,22 @@ def _handle_chat_sync(handler, body):
 
             _previous_messages = list(s.messages or [])
             _previous_context_messages = list(_context_messages_for_new_turn(s, msg))
+            _sync_turn_source = getattr(s, "pending_user_source", None) or "webui"
+            # Synchronous requests have no SSE stream token, but they still
+            # need an explicit request-local turn identity.  The Agent's
+            # persisted user index + turn id complete this provenance after
+            # run_conversation returns; strict settlement then uses the same
+            # authority as the asynchronous path instead of visible-text
+            # prefix inference.
+            _sync_active_turn_identity = {
+                "token": f"sync:{uuid.uuid4().hex}",
+                "text": msg,
+                "timestamp": time.time(),
+                "source": _sync_turn_source,
+                "attachments": [],
+                "current_turn_user_idx": None,
+                "turn_id": "",
+            }
 
             result = agent.run_conversation(
                 user_message=workspace_ctx + msg,
@@ -23180,27 +23193,19 @@ def _handle_chat_sync(handler, body):
                 os.environ["HERMES_SESSION_KEY"] = old_session_key
     with _get_session_agent_lock(s.session_id):
         _result_messages = result.get("messages") or _previous_context_messages
-        _next_context_messages = _restore_reasoning_metadata(
-            _previous_context_messages,
-            _result_messages,
+        _sync_active_turn_identity = _resolve_active_turn_authority(
+            _sync_active_turn_identity,
+            result=result,
+            agent=agent,
         )
-        # Mint ids on the shared result rows BEFORE dedupe deep-copies any
-        # stale-user boundary row, so both arrays share the id (#5564).
-        _assign_stable_message_ids(
-            _result_messages, _previous_messages, _previous_context_messages
-        )
-        _next_context_messages = _dedupe_replayed_context_messages(
-            _previous_context_messages,
-            _next_context_messages,
-            msg,
-        )
-        s.context_messages = _next_context_messages
-        s.messages = _merge_display_messages_after_agent_result(
+        _settle_result_messages(
+            s,
             _previous_messages,
             _previous_context_messages,
-            _restore_display_reasoning_metadata(_previous_messages, _result_messages),
+            _result_messages,
             msg,
-            source=getattr(s, "pending_user_source", None) or "webui",
+            _sync_turn_source,
+            _sync_active_turn_identity,
         )
         _compact_session_image_parts_for_persistence(s)
         # Only auto-generate title when still default; preserves user renames

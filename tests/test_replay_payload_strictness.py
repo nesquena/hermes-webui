@@ -1,4 +1,5 @@
 import copy
+import contextlib
 import json
 from types import SimpleNamespace
 
@@ -454,7 +455,142 @@ def test_settle_preserves_payload_distinct_rejected_history_prefix():
         assert projection[2]["_active_turn_token"] == (
             "stream:strict-structured-prefix"
         )
+        assert type(projection[2].get("id")) is int
         assert projection[3] == distinct_history
+    assert session.messages[2]["id"] == session.context_messages[2]["id"]
+
+
+def test_sync_chat_uses_strict_turn_provenance_for_rejected_history_prefix(
+    monkeypatch,
+    tmp_path,
+):
+    """The synchronous route must not re-enable visible-only prefix deletion."""
+    from api import config, routes
+
+    previous = [
+        {"role": "user", "content": "old prompt", "id": "old-user"},
+        {
+            "role": "assistant",
+            "content": "same answer",
+            "id": "old-assistant",
+            "reasoning": "old reasoning",
+            "model": "old-model",
+            "request_id": "old-request",
+        },
+    ]
+    distinct_history = {
+        "role": "assistant",
+        "content": "same answer",
+        "id": "distinct-assistant",
+        "reasoning": "distinct reasoning",
+        "model": "distinct-model",
+        "request_id": "distinct-request",
+    }
+    prompt = "continue the active turn"
+    final = {
+        "role": "assistant",
+        "content": "final answer",
+        "id": "final-assistant",
+    }
+    result = {
+        "messages": [
+            copy.deepcopy(previous[0]),
+            copy.deepcopy(distinct_history),
+            {"role": "user", "content": prompt},
+            copy.deepcopy(final),
+        ],
+        "current_turn_user_idx": len(previous),
+        "turn_id": "turn:sync-strict-prefix",
+        "final_response": "final answer",
+        "completed": True,
+    }
+
+    class _Session:
+        session_id = "sync-strict-prefix"
+        workspace = str(tmp_path)
+        model = "test-model"
+        model_provider = "test-provider"
+        profile = "default"
+        pending_user_source = "webui"
+        title = "Already titled"
+        input_tokens = 0
+        output_tokens = 0
+        estimated_cost = 0.0
+        cache_read_tokens = 0
+        cache_write_tokens = 0
+        truncation_watermark = None
+        messages = copy.deepcopy(previous)
+        context_messages = copy.deepcopy(previous)
+
+        def save(self):
+            return None
+
+        def compact(self):
+            return {
+                "session_id": self.session_id,
+                "title": self.title,
+                "message_count": len(self.messages),
+            }
+
+    class _Agent:
+        def __init__(self, **_kwargs):
+            self._persist_user_message_idx = len(previous)
+            self._current_turn_id = "turn:sync-strict-prefix"
+
+        def run_conversation(self, **_kwargs):
+            return copy.deepcopy(result)
+
+    session = _Session()
+    monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda **_kwargs: None)
+    monkeypatch.setattr(routes, "_session_is_subagent_view_only", lambda _sid: False)
+    monkeypatch.setattr(routes, "get_session", lambda _sid: session)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda value: value)
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda _sid: contextlib.nullcontext())
+    monkeypatch.setattr(routes, "_read_profile_model_config", lambda *_args: (None, None, {}))
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda *_args, **_kwargs: ("test-model", "test-provider"),
+    )
+    monkeypatch.setattr(routes, "require_ai_agent_class", lambda: _Agent)
+    monkeypatch.setattr(routes, "_resolve_cli_toolsets", lambda: [])
+    monkeypatch.setattr(routes, "get_config", lambda: {})
+    monkeypatch.setattr(routes, "load_settings", lambda: {})
+    monkeypatch.setattr(routes, "title_from", lambda _messages, fallback: fallback)
+    monkeypatch.setattr(routes, "public_session_projection", lambda payload: payload)
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200: payload)
+    monkeypatch.setattr(
+        config,
+        "resolve_model_provider",
+        lambda _model: ("test-model", "test-provider", None),
+    )
+
+    routes._handle_chat_sync(
+        object(),
+        {
+            "session_id": session.session_id,
+            "message": prompt,
+            "workspace": str(tmp_path),
+        },
+    )
+
+    for projection in (session.messages, session.context_messages):
+        assert [row.get("role") for row in projection] == [
+            "user",
+            "assistant",
+            "user",
+            "assistant",
+            "assistant",
+        ]
+        assert [
+            row.get("id")
+            for row in projection
+            if row.get("role") == "assistant"
+        ] == ["old-assistant", "distinct-assistant", "final-assistant"]
+        assert projection[2]["content"] == prompt
+        assert type(projection[2].get("id")) is int
+        assert projection[3] == distinct_history
+    assert session.messages[2]["id"] == session.context_messages[2]["id"]
 
 
 def test_display_backfill_preserves_payload_distinct_same_visible_assistant():

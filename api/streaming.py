@@ -22,6 +22,8 @@ import time
 import traceback
 import copy
 import inspect
+from bisect import bisect_left
+from collections import Counter
 from pathlib import Path
 from typing import Optional
 
@@ -65,6 +67,7 @@ from api.todo_state import attach_todo_state, emit_todo_state
 from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
 from api.models import (
+    _SESSION_MESSAGE_DISPLAY_METADATA_KEYS,
     _STRUCTURED_REPLAY_FIELDS,
     _canonical_message_digest,
     _collapse_replayed_assistant_rows,
@@ -74,6 +77,7 @@ from api.models import (
     _is_empty_partial_activity_message,
     _message_has_structured_replay_fields,
     _partial_message_signature as _durable_partial_message_signature,
+    _strict_incomplete_message_id_key,
     _evict_sessions_over_cap,
     clear_process_wakeup_pause,
     get_state_db_session_messages,
@@ -1843,6 +1847,57 @@ def _settle_current_turn_boundary(
     )
 
 
+def _share_active_turn_checkpoint_id(result_messages, context_messages, identity):
+    """Keep the token-owned user row on one stable id across projections.
+
+    Payload-distinct prefix reconciliation intentionally deep-copies provider
+    rows before stable ids are minted.  The request-local active-turn token is
+    the explicit authority that lets us reconnect only the current user row;
+    no visible-text or timestamp inference is involved.
+    """
+    if not isinstance(identity, dict) or not identity.get('token'):
+        return
+    result_row = next(
+        (
+            message
+            for message in result_messages or []
+            if _active_turn_token_matches(message, identity)
+        ),
+        None,
+    )
+    context_row = next(
+        (
+            message
+            for message in context_messages or []
+            if _active_turn_token_matches(message, identity)
+        ),
+        None,
+    )
+    if context_row is None:
+        return
+
+    result_id_key = (
+        _strict_incomplete_message_id_key(result_row.get('id'))
+        if isinstance(result_row, dict)
+        else None
+    )
+    context_id_key = _strict_incomplete_message_id_key(context_row.get('id'))
+    if result_id_key is not None and context_row.get('id') is None:
+        context_row['id'] = result_row['id']
+        return
+    if context_id_key is not None and isinstance(result_row, dict) and result_row.get('id') is None:
+        result_row['id'] = context_row['id']
+        return
+    if result_id_key is None and context_id_key is None and context_row.get('id') is None:
+        _assign_stable_message_ids(
+            [context_row],
+            result_messages,
+            context_messages,
+        )
+        if isinstance(result_row, dict) and result_row.get('id') is None:
+            result_row['id'] = context_row['id']
+
+
 def _align_current_turn_display(previous_display, previous_context, identity):
     """Make a context-only exact checkpoint visible before shared settlement."""
     display = list(previous_display or [])
@@ -2170,6 +2225,11 @@ def _settle_result_messages(
             source,
             allow_exact_prefix=True,
         )
+    _share_active_turn_checkpoint_id(
+        result_messages,
+        session.context_messages,
+        active_turn_identity,
+    )
     previous_display_for_writeback, session.context_messages = _align_current_turn_display(
         previous_messages,
         session.context_messages,
@@ -6132,16 +6192,112 @@ def _comparison_keys_equal(left, right):
 
 
 def _display_backfill_key(message):
-    """Use payload-strict assistant identity for context-to-display backfill."""
-    if type(message) is dict and message.get('role') == 'assistant':
-        digest = _canonical_message_digest(message)
-        if digest is None:
-            # Unsupported containers are incomparable: fail closed by treating
-            # projection copies as distinct rather than silently suppressing one.
-            return ('incomparable_assistant', id(message))
-        return ('assistant_payload', digest)
-    identity = _message_identity(message)
-    return ('visible_identity', identity) if identity is not None else None
+    """Return one strict unary backfill identity.
+
+    The actual display/context join is prepared by
+    :func:`_display_backfill_projection_keys`, which can safely resolve the
+    one-sided-id case without making equality non-transitive. This unary form is
+    exact when both rows carry a compatible stable id or both lack one.
+    """
+    details = _display_backfill_identity_details(message)
+    if details is None:
+        return None
+    stable_id, visible_digest, common_digest = details
+    if stable_id is not None:
+        return ('stable_row', stable_id, visible_digest)
+    return ('common_projection', common_digest)
+
+
+def _display_backfill_identity_details(message):
+    """Return typed stable id plus visible/common strict digests.
+
+    Display-only settlement enrichment is excluded from the common projection;
+    every unknown field remains durable and therefore identity-bearing. Stable
+    id aliases are type-faithful and contradictory or non-JSON scalar aliases
+    are incomparable rather than coerced.
+    """
+    if type(message) is not dict:
+        return None
+
+    typed_ids = set()
+    for key in ('id', 'message_id'):
+        if key not in message or message.get(key) in (None, ''):
+            continue
+        typed_id = _strict_incomplete_message_id_key(message.get(key))
+        if typed_id is None:
+            return None
+        typed_ids.add(typed_id)
+    if len(typed_ids) > 1:
+        return None
+    stable_id = next(iter(typed_ids)) if typed_ids else None
+
+    visible_digest = _canonical_message_digest(
+        {
+            'role': message.get('role'),
+            'content': message.get('content'),
+        }
+    )
+    common_digest = _canonical_message_digest(
+        {
+            key: value
+            for key, value in message.items()
+            if key not in _SESSION_MESSAGE_DISPLAY_METADATA_KEYS
+            and key not in {'id', 'message_id'}
+        }
+    )
+    if visible_digest is None or common_digest is None:
+        return None
+    return stable_id, visible_digest, common_digest
+
+
+def _display_backfill_projection_keys(previous_display, previous_context):
+    """Build transitive cross-projection keys without payload-weak guesses.
+
+    A compatible typed stable id is authoritative when both rows carry it. If
+    one projection lacks the id, a strict common payload may bridge it only when
+    that payload maps to one stable id across both projections. Ambiguous or
+    malformed rows receive projection-local keys, so they are preserved instead
+    of arbitrarily paired.
+    """
+    display_details = [
+        _display_backfill_identity_details(message)
+        for message in previous_display
+    ]
+    context_details = [
+        _display_backfill_identity_details(message)
+        for message in previous_context
+    ]
+    stable_ids_by_common = {}
+    for details in (*display_details, *context_details):
+        if details is None:
+            continue
+        stable_id, _visible_digest, common_digest = details
+        if stable_id is not None:
+            stable_ids_by_common.setdefault(common_digest, set()).add(stable_id)
+
+    def _projection_key(details, projection, index):
+        if details is None:
+            return ('incomparable', projection, index)
+        stable_id, visible_digest, common_digest = details
+        if stable_id is not None:
+            return ('stable_row', stable_id, visible_digest)
+        candidate_ids = stable_ids_by_common.get(common_digest, set())
+        if len(candidate_ids) == 1:
+            return ('stable_row', next(iter(candidate_ids)), visible_digest)
+        if candidate_ids:
+            return ('incomparable', projection, index)
+        return ('common_projection', common_digest)
+
+    return (
+        [
+            _projection_key(details, 'display', index)
+            for index, details in enumerate(display_details)
+        ],
+        [
+            _projection_key(details, 'context', index)
+            for index, details in enumerate(context_details)
+        ],
+    )
 
 
 def _message_content_has_nontext_parts(content) -> bool:
@@ -7055,104 +7211,89 @@ def _merge_display_messages_after_agent_result(
     # at/after a cursor. Any context messages between the cursor and that
     # match are context-only gaps that get spliced in before the display msg.
     if previous_display and previous_context:
-        _display_id_set = {_display_backfill_key(m) for m in previous_display}
-        _context_id_set = {
-            _display_backfill_key(m)
-            for m in previous_context
-            if not _is_context_compression_marker(m)
-            and not _is_compressed_context_tool_result_summary_message(m)
+        _display_keys, context_keys = _display_backfill_projection_keys(
+            previous_display,
+            previous_context,
+        )
+        _display_counts = Counter(_display_keys)
+        _context_counts = Counter(context_keys)
+        # A count budget preserves duplicate multiplicity. Sets would hide a
+        # second context occurrence merely because one display occurrence has
+        # the same projection identity.
+        _insert_budget = {
+            key: count - _display_counts.get(key, 0)
+            for key, count in _context_counts.items()
+            if count > _display_counts.get(key, 0)
         }
-        _has_context_only_turns = bool(_context_id_set - _display_id_set)
+        _has_context_only_turns = bool(_insert_budget)
         if _has_context_only_turns:
-            context_keys = [_display_backfill_key(m) for m in previous_context]
-            # Precompute display keys once; avoids repeated json.dumps calls inside
-            # the inner any() loop (was O(D²·C) — see perf fix below).
-            _display_keys = [_display_backfill_key(m) for m in previous_display]
-            # Multiset mirror of context_keys[_cursor:] kept in sync as _cursor
-            # advances. Enables O(1) membership tests in the any() check instead
-            # of an O(N) list scan, while preserving EXACT list-slice semantics:
-            # Backfill keys intentionally repeat for exact rows (and visible-
-            # identical non-assistant turns), so a plain set would drop a key
-            # still present later in the slice. A count-keyed dict (including
-            # None) matches `in context_keys[_cursor:]` exactly.
-            _remaining_ck_counts = {}
-            for _ck in context_keys:
-                _remaining_ck_counts[_ck] = _remaining_ck_counts.get(_ck, 0) + 1
+            _positions_by_key = {}
+            for _index, _key in enumerate(context_keys):
+                _positions_by_key.setdefault(_key, []).append(_index)
+            _remaining_ck_counts = dict(_context_counts)
+            _future_display_counts = dict(_display_counts)
+            _shared_remaining_keys = {
+                key
+                for key in _remaining_ck_counts
+                if _future_display_counts.get(key, 0) > 0
+            }
             _backfilled = []
-            # #3300 fix: track ONLY context rows we splice in, so the
-            # visible-display backbone is never suppressed. Sharing one set
-            # between context inserts and display rows (and _message_identity
-            # ignoring timestamps) dropped a legitimate second identical visible
-            # user turn. Display rows are always appended in order; a context
-            # row is backfilled only if it isn't already a display row and
-            # hasn't already been inserted.
-            _context_inserted = set()
             _cursor = 0
+
+            def _backfill_context_range(start, stop):
+                for _context_idx in range(start, stop):
+                    _ckey = context_keys[_context_idx]
+                    _cmsg = previous_context[_context_idx]
+                    if (
+                        _insert_budget.get(_ckey, 0) > 0
+                        and not _is_context_compression_marker(_cmsg)
+                        and not _is_compressed_context_tool_result_summary_message(_cmsg)
+                    ):
+                        _backfilled.append(copy.deepcopy(_cmsg))
+                        _insert_budget[_ckey] -= 1
+
+            def _consume_context_range(start, stop):
+                for _context_idx in range(start, stop):
+                    _consumed_key = context_keys[_context_idx]
+                    _remaining = _remaining_ck_counts.get(_consumed_key, 0) - 1
+                    if _remaining <= 0:
+                        _remaining_ck_counts.pop(_consumed_key, None)
+                        _shared_remaining_keys.discard(_consumed_key)
+                    else:
+                        _remaining_ck_counts[_consumed_key] = _remaining
+
             for _display_idx, _dmsg in enumerate(previous_display):
                 _dkey = _display_keys[_display_idx]
-                if _dkey is not None:
-                    _j = _cursor
-                    while _j < len(context_keys) and context_keys[_j] != _dkey:
-                        _j += 1
-                    if _j < len(context_keys):
-                        for _k in range(_cursor, _j):
-                            _ckey = context_keys[_k]
-                            _cmsg = previous_context[_k]
-                            if (
-                                _ckey is not None
-                                and _ckey not in _context_inserted
-                                and _ckey not in _display_id_set
-                                and not _is_context_compression_marker(_cmsg)
-                                and not _is_compressed_context_tool_result_summary_message(_cmsg)
-                            ):
-                                _backfilled.append(copy.deepcopy(_cmsg))
-                                _context_inserted.add(_ckey)
-                        # Sync multiset: decrement keys consumed by advancing
-                        # the cursor to _j+1 (delete at zero so membership matches
-                        # the list slice exactly).
-                        for _k in range(_cursor, _j + 1):
-                            _consumed_ck = context_keys[_k]
-                            _ck_n = _remaining_ck_counts.get(_consumed_ck, 0) - 1
-                            if _ck_n <= 0:
-                                _remaining_ck_counts.pop(_consumed_ck, None)
-                            else:
-                                _remaining_ck_counts[_consumed_ck] = _ck_n
-                        _cursor = _j + 1
-                    elif not any(
-                        _display_keys[_fi] in _remaining_ck_counts
-                        for _fi in range(_display_idx + 1, len(_display_keys))
-                    ):
-                        for _k in range(_cursor, len(context_keys)):
-                            _ckey = context_keys[_k]
-                            _cmsg = previous_context[_k]
-                            if (
-                                _ckey is not None
-                                and _ckey not in _context_inserted
-                                and _ckey not in _display_id_set
-                                and not _is_context_compression_marker(_cmsg)
-                                and not _is_compressed_context_tool_result_summary_message(_cmsg)
-                            ):
-                                _backfilled.append(copy.deepcopy(_cmsg))
-                                _context_inserted.add(_ckey)
-                        _cursor = len(context_keys)
-                        _remaining_ck_counts.clear()
+                _future_count = _future_display_counts.get(_dkey, 0) - 1
+                if _future_count <= 0:
+                    _future_display_counts.pop(_dkey, None)
+                    _shared_remaining_keys.discard(_dkey)
+                else:
+                    _future_display_counts[_dkey] = _future_count
+
+                _positions = _positions_by_key.get(_dkey, ())
+                _position_idx = bisect_left(_positions, _cursor)
+                _j = (
+                    _positions[_position_idx]
+                    if _position_idx < len(_positions)
+                    else len(context_keys)
+                )
+                if _j < len(context_keys):
+                    _backfill_context_range(_cursor, _j)
+                    _consume_context_range(_cursor, _j + 1)
+                    _cursor = _j + 1
+                elif not _shared_remaining_keys:
+                    # No later display row can anchor the remaining context.
+                    # Preserve the historical ordering by splicing the tail
+                    # before this unmatched visible row.
+                    _backfill_context_range(_cursor, len(context_keys))
+                    _consume_context_range(_cursor, len(context_keys))
+                    _cursor = len(context_keys)
                 # The display row is the visible backbone — always preserve it,
                 # in order, even when an earlier (identical-content) turn or a
                 # backfilled context row shares its timestamp-less identity.
                 _backfilled.append(_dmsg)
-            while _cursor < len(context_keys):
-                _ckey = context_keys[_cursor]
-                _cmsg = previous_context[_cursor]
-                _cursor += 1
-                if (
-                    _ckey is not None
-                    and _ckey not in _context_inserted
-                    and _ckey not in _display_id_set
-                    and not _is_context_compression_marker(_cmsg)
-                    and not _is_compressed_context_tool_result_summary_message(_cmsg)
-                ):
-                    _backfilled.append(copy.deepcopy(_cmsg))
-                    _context_inserted.add(_ckey)
+            _backfill_context_range(_cursor, len(context_keys))
             if len(_backfilled) > len(previous_display):
                 logger.debug(
                     "Backfilled %d context-only turns into previous_display (was %d, now %d)",

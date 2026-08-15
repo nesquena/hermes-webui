@@ -132,6 +132,58 @@ def _large_timestamped_sidecar_messages(count=500):
     ]
 
 
+def test_missing_sidecar_recovery_preserves_identical_state_rows_by_row_identity(
+    monkeypatch,
+    tmp_path,
+):
+    """Materialized state.db rows remain distinct through load/save repair."""
+    import api.config as config
+    import api.models as models
+    from api.helpers import public_session_projection
+    from api.session_recovery import recover_missing_sidecars_from_state_db
+
+    sid = "missing_sidecar_identical_state_rows"
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    state_db = tmp_path / "state.db"
+    _make_state_db(
+        state_db,
+        sid,
+        [
+            {"role": "assistant", "content": "same", "timestamp": 1000.0},
+            {"role": "assistant", "content": "same", "timestamp": 1000.0},
+        ],
+    )
+    monkeypatch.setattr(config, "SESSION_DIR", session_dir, raising=False)
+    monkeypatch.setattr(config, "SESSION_INDEX_FILE", session_dir / "_index.json", raising=False)
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir, raising=False)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json", raising=False)
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict(), raising=False)
+
+    recovered = recover_missing_sidecars_from_state_db(
+        session_dir=session_dir,
+        state_db_path=state_db,
+    )
+    assert recovered["materialized"] == 1
+    assert recovered["details"] == [
+        {"session_id": sid, "materialized": True, "messages": 2}
+    ]
+
+    materialized = json.loads((session_dir / f"{sid}.json").read_text(encoding="utf-8"))
+    assert [message["_state_db_row_id"] for message in materialized["messages"]] == [1, 2]
+
+    loaded = models.Session.load(sid)
+    assert loaded is not None
+    assert len(loaded.messages) == 2
+    loaded.save(skip_index=True)
+    reloaded = models.Session.load(sid)
+    assert reloaded is not None
+    assert [message["_state_db_row_id"] for message in reloaded.messages] == [1, 2]
+
+    public = public_session_projection({"messages": reloaded.messages})
+    assert all("_state_db_row_id" not in message for message in public["messages"])
+
+
 def test_sidebar_state_db_overlay_preserves_numeric_actual_count():
     import api.models as models
 

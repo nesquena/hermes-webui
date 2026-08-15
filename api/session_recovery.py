@@ -579,13 +579,24 @@ def _read_state_db_missing_sidecar_rows(
                 if {'session_id', 'role', 'content'}.issubset(message_cols):
                     order = "timestamp, id" if 'timestamp' in message_cols and 'id' in message_cols else "rowid"
                     ts_expr = 'timestamp' if 'timestamp' in message_cols else 'NULL AS timestamp'
+                    # A recovered sidecar needs durable per-row provenance before
+                    # the normal Session.load/save replay reducers run. Without
+                    # it, two legitimate state.db rows with identical role,
+                    # content, and timestamp collapse irreversibly on first load.
+                    row_id_expr = (
+                        'id AS _state_db_row_id'
+                        if 'id' in message_cols
+                        else 'rowid AS _state_db_row_id'
+                    )
                     for msg in conn.execute(
-                        f"SELECT role, content, {ts_expr} FROM messages WHERE session_id = ? ORDER BY {order}",
+                        f"SELECT role, content, {ts_expr}, {row_id_expr} "
+                        f"FROM messages WHERE session_id = ? ORDER BY {order}",
                         (sid,),
                     ).fetchall():
                         message = {
                             'role': msg['role'],
                             'content': msg['content'] or '',
+                            '_state_db_row_id': msg['_state_db_row_id'],
                         }
                         if msg['timestamp'] is not None:
                             message['timestamp'] = msg['timestamp']
