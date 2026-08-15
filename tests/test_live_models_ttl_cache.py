@@ -18,6 +18,8 @@ def _patch_live_models_basics(monkeypatch, routes, profile="default"):
     import api.config as config
     import api.profiles as profiles
 
+    for key in ("OPENAI_API_KEY", "OPENAI_BASE_URL"):
+        monkeypatch.delenv(key, raising=False)
     routes._clear_live_models_cache()
     monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload)
     monkeypatch.setattr(config, "get_config", lambda: {"model": {"provider": "openai"}})

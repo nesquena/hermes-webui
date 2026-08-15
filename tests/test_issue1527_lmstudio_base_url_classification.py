@@ -79,6 +79,14 @@ def _write_config(tmp_path, monkeypatch, text: str) -> None:
 
 
 def _mock_model_discovery(monkeypatch, model_ids: list[str], resolved_ip: str) -> None:
+    def _fake_credentialed_json_get_no_redirect(*_args, **_kwargs):
+        return {"data": [{"id": mid} for mid in model_ids]}
+
+    monkeypatch.setattr(
+        config,
+        "_credentialed_json_get_no_redirect",
+        _fake_credentialed_json_get_no_redirect,
+    )
     monkeypatch.setattr(
         urllib.request,
         "urlopen",
