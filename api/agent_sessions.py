@@ -536,6 +536,7 @@ def read_importable_agent_session_rows(
     exclude_sources: tuple[str, ...] | None = ("cron", "webui"),
     include_sources: tuple[str, ...] | None = None,
     project_assignment: str | None = None,
+    project_ids: tuple[str, ...] | None = None,
 ) -> list[dict]:
     """Return agent sessions projected as importable conversations.
 
@@ -559,6 +560,15 @@ def read_importable_agent_session_rows(
     caller can budget assigned and unassigned conversations independently
     without either filter double-counting a lineage (#6659).
 
+    ``project_ids`` narrows the assigned set further, to conversations whose
+    LINEAGE is assigned to one of the given projects. It exists so a caller can
+    give each project its own ``limit`` instead of sharing one global window: a
+    single ``project_assignment='assigned'`` query orders by recency, so one busy
+    project can consume the whole window and leave quieter projects unreachable
+    (greptile P1 on #6659). Only meaningful together with
+    ``project_assignment='assigned'``; any other combination raises ValueError
+    rather than silently returning an unnarrowed (and therefore starvable) set.
+
     ``limit`` bounds LOGICAL conversations, not raw rows: the slice is applied
     after lineage projection, and the raw candidate window is re-widened once
     if compression segments consumed it before the projection could fill the
@@ -578,6 +588,19 @@ def read_importable_agent_session_rows(
     children render top-level, exactly as they did before. Widening that window
     is a ``CANDIDATE_WINDOW_MULTIPLIERS`` change, not a change to this walk.
     """
+    wanted_project_ids: tuple[str, ...] = ()
+    if project_ids is not None:
+        if str(project_assignment or '').strip().lower() != 'assigned':
+            raise ValueError(
+                "project_ids requires project_assignment='assigned'"
+            )
+        wanted_project_ids = tuple(
+            cleaned for value in project_ids if (cleaned := str(value or '').strip())
+        )
+        if not wanted_project_ids:
+            # An empty narrowing selects nothing. Returning [] keeps that exact
+            # instead of degrading to "every assigned conversation".
+            return []
     db_path = Path(db_path)
     if not db_path.exists():
         return []
@@ -743,6 +766,16 @@ def read_importable_agent_session_rows(
                 # lineage, not the individual row: 'unassigned' is the exact
                 # complement of 'assigned' (#6659).
                 membership = "IN" if wanted == 'assigned' else "NOT IN"
+                # ``project_ids`` narrows only the SEED: the lineage walk still
+                # pulls in the whole compression chain around a seeded row, so a
+                # per-project query returns the same logical conversations the
+                # global one would have, minus the other projects'.
+                seed_project_filter = ""
+                if wanted_project_ids:
+                    placeholders = ", ".join("?" for _ in wanted_project_ids)
+                    seed_project_filter = (
+                        f"\n                              AND TRIM(seed.project_id) IN ({placeholders})"
+                    )
                 where_clauses.append(
                     f"""
                     s.id {membership} (
@@ -750,7 +783,7 @@ def read_importable_agent_session_rows(
                             SELECT seed.id
                             FROM sessions seed
                             WHERE seed.project_id IS NOT NULL
-                              AND TRIM(seed.project_id) != ''
+                              AND TRIM(seed.project_id) != ''{seed_project_filter}
                             UNION
                             SELECT child.id
                             FROM sessions child
@@ -768,10 +801,18 @@ def read_importable_agent_session_rows(
                     )
                     """
                 )
+                params.extend(wanted_project_ids)
             elif wanted == 'assigned':
-                where_clauses.append(
-                    "s.project_id IS NOT NULL AND TRIM(s.project_id) != ''"
-                )
+                if wanted_project_ids:
+                    placeholders = ", ".join("?" for _ in wanted_project_ids)
+                    where_clauses.append(
+                        f"TRIM(COALESCE(s.project_id, '')) IN ({placeholders})"
+                    )
+                    params.extend(wanted_project_ids)
+                else:
+                    where_clauses.append(
+                        "s.project_id IS NOT NULL AND TRIM(s.project_id) != ''"
+                    )
             else:
                 where_clauses.append(
                     "(s.project_id IS NULL OR TRIM(s.project_id) = '')"
@@ -948,6 +989,66 @@ def read_importable_agent_session_rows(
         )
         return _project([dict(row) for row in cur.fetchall()])
 
+
+def read_assigned_project_row_counts(
+    db_path: Path,
+    log=None,
+    exclude_sources: tuple[str, ...] | None = None,
+) -> dict[str, int]:
+    """Return ``{project_id: assigned raw row count}`` from ``state.db``.
+
+    A single GROUP BY over ``sessions.project_id``: no messages join, no lineage
+    recursion, and an answer bounded by the number of distinct project ids. It
+    exists so the assigned-recovery pass can tell WHICH projects still have rows
+    it has not delivered, and pay a per-project follow-up query only for those,
+    instead of one query per registered project (greptile P1 on #6659).
+
+    The counts are RAW rows, so a compression lineage counts once per segment.
+    That makes the signal deliberately conservative — it can overestimate what a
+    project still owes, never underestimate it, so a starved project is always
+    detected while at worst one follow-up query comes back empty.
+    """
+    db_path = Path(db_path)
+    log = log or logger
+    if not db_path.exists():
+        return {}
+    try:
+        with closing(open_state_db_readonly(db_path, log)) as conn:
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(sessions)")
+            session_cols = {row[1] for row in cur.fetchall()}
+            if not {'project_id', 'source'} <= session_cols:
+                return {}
+            where_clauses = [
+                "s.source IS NOT NULL",
+                "s.project_id IS NOT NULL",
+                "TRIM(s.project_id) != ''",
+            ]
+            params: list[object] = []
+            excluded = tuple(
+                str(source) for source in (exclude_sources or ()) if source
+            )
+            if excluded:
+                placeholders = ", ".join("?" for _ in excluded)
+                where_clauses.append(f"s.source NOT IN ({placeholders})")
+                params.extend(excluded)
+            cur.execute(
+                f"""
+                SELECT TRIM(s.project_id) AS project_id, COUNT(*) AS row_count
+                FROM sessions s
+                WHERE {' AND '.join(where_clauses)}
+                GROUP BY TRIM(s.project_id)
+                """,
+                params,
+            )
+            return {
+                str(row[0]): int(row[1] or 0)
+                for row in cur.fetchall()
+                if str(row[0] or '').strip()
+            }
+    except Exception:
+        log.debug("assigned project row-count probe failed", exc_info=True)
+        return {}
 
 
 def _lineage_report_row(row: dict, role: str) -> dict:

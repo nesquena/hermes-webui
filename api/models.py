@@ -41,6 +41,7 @@ from api.agent_sessions import (
     is_cli_session_row,
     normalize_agent_session_source,
     open_state_db_readonly,
+    read_assigned_project_row_counts,
     read_importable_agent_session_rows,
     read_session_lineage_metadata,
 )
@@ -59,9 +60,17 @@ CLI_VISIBLE_SESSION_LIMIT = 20
 PROJECT_ASSIGNED_CLI_LIMIT = 200
 # Hard ceiling on the assigned-recovery QUERY so the per-project budget cannot
 # multiply into an unbounded scan on a profile with dozens of projects. Past
-# this, the recovery pass degrades to "newest N assigned conversations overall";
-# project-filtered server pagination is the fix for profiles that large.
+# this, every project's share of the recovery pass shrinks to
+# PROJECT_ASSIGNED_CLI_SCAN_CEILING // len(projects) instead of any one project
+# eating the whole window; project-filtered server pagination is still the real
+# fix for profiles that large.
 PROJECT_ASSIGNED_CLI_SCAN_CEILING = 2000
+# How many project-scoped follow-up queries one sidebar build may pay after the
+# global assigned window came back saturated. The follow-up is what keeps a busy
+# project from starving quieter ones (greptile P1 on #6659); the cap is what
+# keeps the worst case bounded at 1 global query + 1 GROUP BY probe + this many
+# project-scoped queries, each itself bounded to one project's remaining budget.
+PROJECT_ASSIGNED_CLI_REFILL_PROJECTS = 32
 # How many messageful cron sessions to surface in the project-chip layer.
 # Needs to exceed CLI_VISIBLE_SESSION_LIMIT so older cron runs stay
 # addressable even when many newer non-cron sessions dominate the default
@@ -7871,20 +7880,42 @@ def _load_cli_sessions_uncached(
         # chip can reveal its project's history without any one project growing
         # the payload without limit. Skipped entirely when the profile has no
         # projects at all — nothing could resolve, so the query would be waste.
+        #
+        # Two tiers, because a per-project BUDGET on top of one global recency
+        # window is not a per-project bound: a project that owns the whole window
+        # leaves every other project unrepresented. So the global query runs
+        # first (the only cost most profiles pay), and only if it came back
+        # saturated does a project-scoped follow-up top up the projects it
+        # starved. Worst case per build: 1 global query + 1 GROUP BY probe +
+        # PROJECT_ASSIGNED_CLI_REFILL_PROJECTS project-scoped queries, each
+        # bounded to one project's remaining budget.
         known_project_ids = _known_project_ids() if project_assigned_limit is not False else frozenset()
         if (
             project_assigned_limit is not False
             and known_project_ids
             and _state_db_supports_project_ids(db_path)
         ):
+            project_count = max(len(known_project_ids), 1)
             per_project_limit = (
                 None if project_assigned_limit is None
                 else max(0, int(project_assigned_limit))
             )
-            query_limit = (
+            # Every project gets an EQUAL share of the global scan ceiling. The
+            # share only bites past PROJECT_ASSIGNED_CLI_SCAN_CEILING /
+            # PROJECT_ASSIGNED_CLI_LIMIT projects, and it is what keeps the
+            # recovered payload bounded (<= the ceiling) while making a project's
+            # allowance independent of how loud its neighbours are.
+            effective_limit = (
                 None if per_project_limit is None
                 else min(
-                    per_project_limit * max(len(known_project_ids), 1),
+                    per_project_limit,
+                    max(1, PROJECT_ASSIGNED_CLI_SCAN_CEILING // project_count),
+                )
+            )
+            query_limit = (
+                None if effective_limit is None
+                else min(
+                    effective_limit * project_count,
                     PROJECT_ASSIGNED_CLI_SCAN_CEILING,
                 )
             )
@@ -7900,32 +7931,82 @@ def _load_cli_sessions_uncached(
                         kept_per_project[seeded_project_id] = (
                             kept_per_project.get(seeded_project_id, 0) + 1
                         )
-                for row in read_importable_agent_session_rows(
+
+                def _spend_assigned_rows(rows: list[dict]) -> None:
+                    """Merge ``rows`` into the window under the per-project budget."""
+                    for row in rows:
+                        project_id = _resolved_project_id(row.get('project_id'))
+                        if project_id is None:
+                            # A deleted/cross-profile id is not an assignment.
+                            # Leave the row to the normal window so it stays
+                            # reachable under "Unassigned" (#6659 finding 3).
+                            continue
+                        if (
+                            effective_limit is not None
+                            and kept_per_project.get(project_id, 0) >= effective_limit
+                        ):
+                            continue
+                        if _merge_state_row(row):
+                            # Spend the budget on LOGICAL conversations only: a
+                            # row that merely upgrades an already-represented
+                            # lineage (a compression segment, or a window row
+                            # learning its assignment) costs its project nothing.
+                            kept_per_project[project_id] = (
+                                kept_per_project.get(project_id, 0) + 1
+                            )
+
+                # One global newest-first query covers every profile whose whole
+                # assigned history fits in the window — the overwhelmingly common
+                # case, and the only query most builds pay.
+                global_rows = read_importable_agent_session_rows(
                     db_path,
                     limit=query_limit,
                     log=logger,
                     exclude_sources=interactive_excluded,
                     project_assignment='assigned',
-                ):
-                    project_id = _resolved_project_id(row.get('project_id'))
-                    if project_id is None:
-                        # A deleted/cross-profile id is not an assignment. Leave
-                        # the row to the normal window so it stays reachable
-                        # under "Unassigned" (#6659 review finding 3).
-                        continue
-                    if (
-                        per_project_limit is not None
-                        and kept_per_project.get(project_id, 0) >= per_project_limit
-                    ):
-                        continue
-                    if _merge_state_row(row):
-                        # Spend the budget on LOGICAL conversations only: a row
-                        # that merely upgrades an already-represented lineage
-                        # (a compression segment, or a window row learning its
-                        # assignment) costs its project nothing.
-                        kept_per_project[project_id] = (
-                            kept_per_project.get(project_id, 0) + 1
-                        )
+                )
+                _spend_assigned_rows(global_rows)
+
+                # When that window came back FULL it truncated by recency, so a
+                # single busy project can have consumed all of it and left
+                # quieter projects with nothing — their chips would show an empty
+                # project even though the rows exist (greptile P1 on #6659). A
+                # short window cannot hide anything: it already saw every
+                # assigned conversation the db has, so no follow-up is paid.
+                if effective_limit and query_limit and len(global_rows) >= query_limit:
+                    # One GROUP BY over sessions.project_id (no join, no lineage
+                    # recursion) says which projects still own rows this pass has
+                    # not delivered, so the follow-up queries below are paid only
+                    # for projects that can actually be starved — not one per
+                    # registered project.
+                    owed_rows = read_assigned_project_row_counts(
+                        db_path,
+                        log=logger,
+                        exclude_sources=interactive_excluded,
+                    )
+                    starved = sorted(
+                        (kept_per_project.get(project_id, 0), project_id)
+                        for project_id, row_count in owed_rows.items()
+                        if project_id in known_project_ids
+                        and kept_per_project.get(project_id, 0) < effective_limit
+                        and row_count > kept_per_project.get(project_id, 0)
+                    )
+                    # Neediest first (fewest conversations delivered, then id for
+                    # a deterministic order), and capped: a profile with hundreds
+                    # of simultaneously starved projects must not turn one sidebar
+                    # build into hundreds of scans.
+                    for _kept, project_id in starved[:PROJECT_ASSIGNED_CLI_REFILL_PROJECTS]:
+                        remaining = effective_limit - kept_per_project.get(project_id, 0)
+                        if remaining <= 0:
+                            continue
+                        _spend_assigned_rows(read_importable_agent_session_rows(
+                            db_path,
+                            limit=remaining,
+                            log=logger,
+                            exclude_sources=interactive_excluded,
+                            project_assignment='assigned',
+                            project_ids=(project_id,),
+                        ))
             except Exception:
                 logger.debug("Project-assigned CLI recovery pass failed", exc_info=True)
 
