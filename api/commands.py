@@ -333,12 +333,19 @@ def _run_reload_mcp_command() -> str:
             # reload rather than run a discovery body concurrently with a
             # registry rebuild (Greptile review round 10).
             #
-            # The owner-creation FENCE is held for the whole teardown
-            # window: while /reload-mcp snapshots/joins live owners and
-            # shuts down the registry, a concurrent stream worker cannot
-            # CREATE a new discovery owner — so the snapshot is COMPLETE
-            # and no new body registers servers into or after the
-            # shutdown (Greptile review round 11).
+            # The owner-creation FENCE is held for the ENTIRE rebuild
+            # window — snapshot, join, shutdown, replacement discovery
+            # and readiness invalidation (Greptile review round 12).
+            # While /reload-mcp runs, a concurrent stream worker cannot
+            # CREATE a new discovery owner: not during teardown (the
+            # snapshot is COMPLETE, round 11), and not during the
+            # replacement build (no body registers servers concurrently
+            # with the reload's own discovery, and nothing gets
+            # invalidated out from under a fresh registration).  The
+            # reload's own retry spawn skips the re-acquire
+            # (`_fence_held=True`) because threading.Lock is not
+            # reentrant; waiting turns are unaffected — they only wait
+            # on readiness events, never the fence.
             with _MCP_RELOAD_FENCE:
                 if not _prepare_global_reload():
                     return (
@@ -348,33 +355,36 @@ def _run_reload_mcp_command() -> str:
                     )
                 shutdown_mcp_servers()
 
-            try:
-                from api.profiles import _resolve_hermes_home_override
-                _reload_override_available = _resolve_hermes_home_override() is not None
-            except Exception:
-                _reload_override_available = False
+                try:
+                    from api.profiles import _resolve_hermes_home_override
+                    _reload_override_available = _resolve_hermes_home_override() is not None
+                except Exception:
+                    _reload_override_available = False
 
-            if _reload_override_available:
-                _readiness = _mcp_retry_discovery(
-                    _canonical_readiness_key(''),
-                    _reload_discover,
-                    "mcp-reload",
-                )
-                _reload_status = _mcp_wait_readiness(_readiness)
-            else:
-                # Older agent: no context-local override — a background
-                # reload would read the process env while other streams
-                # mutate it.  Run inline (pre-PR semantics), mirroring the
-                # stream worker's old-agent path (Greptile P1).
-                _reload_status = (
-                    "completed" if _reload_discover() else "failed"
-                )
+                if _reload_override_available:
+                    _readiness = _mcp_retry_discovery(
+                        _canonical_readiness_key(''),
+                        _reload_discover,
+                        "mcp-reload",
+                        _fence_held=True,
+                    )
+                    _reload_status = _mcp_wait_readiness(_readiness)
+                else:
+                    # Older agent: no context-local override — a background
+                    # reload would read the process env while other streams
+                    # mutate it.  Run inline (pre-PR semantics), mirroring the
+                    # stream worker's old-agent path (Greptile P1).
+                    _reload_status = (
+                        "completed" if _reload_discover() else "failed"
+                    )
 
-            # The global reload rebuilt the registry: every OTHER
-            # profile's readiness is stale.  Remove those entries so each
-            # profile's next turn re-runs discovery instead of trusting a
-            # state whose servers were just shut down.
-            _invalidate_mcp_readiness(except_key=_canonical_readiness_key(''))
+                # The global reload rebuilt the registry: every OTHER
+                # profile's readiness is stale.  Remove those entries so each
+                # profile's next turn re-runs discovery instead of trusting a
+                # state whose servers were just shut down.  Still inside the
+                # fence: a stream cannot spawn a fresh owner that would then
+                # be invalidated as stale (round 12).
+                _invalidate_mcp_readiness(except_key=_canonical_readiness_key(''))
 
             with _lock:
                 connected_servers = set(_servers.keys())

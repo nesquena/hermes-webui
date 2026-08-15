@@ -653,6 +653,107 @@ def test_reload_mcp_legacy_agent_runs_inline(monkeypatch):
     assert "Reloaded MCP servers from configuration." in output
 
 
+def test_reload_mcp_fence_covers_the_whole_rebuild(monkeypatch):
+    """A stream cannot create an owner during the reload's REBUILD window.
+
+    Regression (Greptile review round 12): the fence used to end right
+    after registry shutdown, while the reload's replacement discovery
+    and readiness invalidation ran LATER.  A concurrent stream could
+    spawn a new owner in that interval, register servers concurrently
+    with the reload's own rebuild, and then be invalidated as stale.  The
+    fence now stays held until the entire reload completes (retry
+    spawn, wait, invalidation), so a fresh registration can never
+    overlap the rebuild.
+    """
+    import threading
+    import time
+
+    from api import profiles
+    from api import streaming
+    from api.commands import execute_agent_command
+
+    class _FakeOverride:
+        def set_hermes_home_override(self, home):
+            return "tok"
+
+        def reset_hermes_home_override(self, token):
+            pass
+
+        def get_default_hermes_root(self):
+            return "/default/hermes/home"
+
+    monkeypatch.setattr(
+        profiles, "_resolve_hermes_home_override", lambda: _FakeOverride()
+    )
+
+    gate = threading.Event()
+    discover_entered = threading.Event()
+
+    def shutdown():
+        pass
+
+    def discover():
+        discover_entered.set()
+        gate.wait(5.0)  # reload's replacement discovery is IN FLIGHT
+        return []
+
+    _install_fake_mcp_tool(monkeypatch, shutdown=shutdown, discover=discover, servers={})
+
+    reload_done = threading.Event()
+    reload_holder = {}
+
+    def _do_reload():
+        try:
+            reload_holder["output"] = execute_agent_command("/reload-mcp")
+        except Exception as exc:  # pragma: no cover - failure path
+            reload_holder["error"] = repr(exc)
+        reload_holder["finished_at"] = time.monotonic()
+        reload_done.set()
+
+    rt = threading.Thread(target=_do_reload, daemon=True)
+    rt.start()
+    assert discover_entered.wait(2.0), "reload never entered replacement discovery"
+
+    # A stream worker for ANOTHER profile tries to create an owner while
+    # the reload's rebuild is still in flight.  It must BLOCK on the
+    # fence, not register servers concurrently with the rebuild.
+    ensure_done = threading.Event()
+    ensure_holder = {}
+
+    def _do_ensure():
+        ensure_holder["readiness"] = streaming._ensure_mcp_discovery(
+            "/profiles/other", lambda: True, "t-other"
+        )
+        ensure_holder["returned_at"] = time.monotonic()
+        ensure_done.set()
+
+    et = threading.Thread(target=_do_ensure, daemon=True)
+    et.start()
+    time.sleep(0.3)  # gate still closed → reload mid-rebuild
+    assert not ensure_done.is_set(), (
+        "owner creation must be fenced while the reload's replacement "
+        "discovery is in flight"
+    )
+
+    # Let the reload finish; then the fenced creator may proceed.
+    gate.set()
+    rt.join(timeout=3.0)
+    assert reload_done.is_set(), "reload did not finish"
+    et.join(timeout=3.0)
+    assert ensure_done.is_set(), "fenced owner creation never ran"
+
+    # The new owner must start only AFTER the reload fully completed
+    # (never mid-rebuild), and its readiness must survive (never be
+    # invalidated out from under a fresh registration).
+    assert ensure_holder["returned_at"] >= reload_holder["finished_at"] - 0.01, (
+        "the fenced owner was created while the reload was still rebuilding"
+    )
+    other = streaming._MCP_READINESS.get("/profiles/other")
+    assert other is not None, "the fenced profile's readiness was invalidated"
+    assert streaming._mcp_wait_readiness(other) == "completed"
+    assert "Reloaded MCP servers from configuration." in reload_holder["output"]
+
+
 def test_reload_skills_command_formats_helper_diff(monkeypatch):
     """`/reload-skills` should summarize the shared helper diff in printable text."""
     def reload_skills():

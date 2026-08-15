@@ -484,7 +484,7 @@ def _wait_and_surface_mcp_readiness(readiness, profile_home, session_id):
     return _status
 
 
-def _mcp_retry_discovery(profile_home, discover_fn, thread_name):
+def _mcp_retry_discovery(profile_home, discover_fn, thread_name, _fence_held=False):
     """Force a fresh discovery run, retiring the current generation.
 
     This is the explicit retry path (mirrors /reload-mcp semantics) and
@@ -496,6 +496,14 @@ def _mcp_retry_discovery(profile_home, discover_fn, thread_name):
     rather than running two bodies.  Registering tools mid-turn never
     mutates an in-flight Agent snapshot: hermes-agent only applies
     registered tools in its per-turn prologue refresh.
+
+    `_fence_held=True` is the reload path: the caller (the reload
+    command) already holds `_MCP_RELOAD_FENCE` across the ENTIRE
+    rebuild — replacement discovery and readiness invalidation included,
+    not just teardown (Greptile review round 12).  `threading.Lock` is
+    not reentrant, so the spawn skips the acquire.  Without it, a
+    concurrent stream could spawn an owner in the post-shutdown window
+    and register servers concurrently with the reload's own rebuild.
     """
     profile_home = _canonical_readiness_key(profile_home)
     with _MCP_READINESS_LOCK:
@@ -511,10 +519,14 @@ def _mcp_retry_discovery(profile_home, discover_fn, thread_name):
         # mid-discovery finishes (bounded by its internal timeouts).
         _old_cancel.set()
         _old_thread.join(timeout=_MCP_READINESS_WAIT_CAP_S)
-    with _MCP_RELOAD_FENCE:
+    with (
+        contextlib.nullcontext() if _fence_held else _MCP_RELOAD_FENCE
+    ):
         # Owner creation is fenced behind a global reload's teardown so a
         # new discovery body can never register servers into (or after) a
-        # registry shutdown (Greptile round 11).
+        # registry shutdown (Greptile round 11).  The reload path passes
+        # _fence_held=True because IT already holds the fence across the
+        # whole rebuild (round 12).
         with _MCP_READINESS_LOCK:
             if _old_thread is not None and _old_thread.is_alive():
                 # Physical single-flight: the old body is STILL alive beyond
