@@ -157,7 +157,7 @@ def test_date_group_caret_expanded_down_collapsed_right():
 
 def test_apperror_path_calls_render_session_list():
     """apperror handler must call renderSessionList() to clear the streaming indicator
-    immediately rather than waiting for the 5s streaming poll interval."""
+    immediately rather than waiting for the streaming poll interval."""
     messages_js = (Path(__file__).resolve().parent.parent / "static" / "messages.js").read_text(encoding="utf-8")
     apperror_idx = messages_js.find("source.addEventListener('apperror'")
     assert apperror_idx != -1, "apperror handler not found in messages.js"
@@ -166,7 +166,7 @@ def test_apperror_path_calls_render_session_list():
     apperror_block = messages_js[apperror_idx:warning_idx]
     assert "renderSessionList()" in apperror_block, (
         "apperror handler must call renderSessionList() so the streaming indicator "
-        "clears immediately on server errors, not after a 5s poll delay"
+        "clears immediately on server errors, not after the polling fallback delay"
     )
 
 

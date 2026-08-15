@@ -111,19 +111,43 @@ def _insert(sid_session):
 
 # ─────────────────────────── config knob ────────────────────────────────────
 
+def test_default_sessions_cache_cap_is_100():
+    """The shipped no-override session cache default is 100 (#6351)."""
+    from api import config as _cfg
+
+    assert _cfg.DEFAULT_SESSIONS_CACHE_MAX == 100
+
+
 def test_cache_cap_reads_config_yaml_key():
     """The cap is configurable via config.yaml webui.sessions_cache_max (#4765)."""
     from api import config as _cfg
 
-    assert _cfg.get_sessions_cache_max({"webui": {"sessions_cache_max": 42}}) == 42
-    # Invalid / missing values must fall back, never disable the bound.
-    fallback = _cfg.get_sessions_cache_max({"webui": {"sessions_cache_max": "nope"}})
-    assert isinstance(fallback, int) and fallback >= 1
-    assert _cfg.get_sessions_cache_max({"webui": {}}) >= 1
-    assert _cfg.get_sessions_cache_max({}) >= 1
-    # A zero/negative typo must not disable the cap.
-    assert _cfg.get_sessions_cache_max({"webui": {"sessions_cache_max": 0}}) >= 1
-    assert _cfg.get_sessions_cache_max({"webui": {"sessions_cache_max": -5}}) >= 1
+    old_sessions_max = _cfg.SESSIONS_MAX
+    try:
+        _cfg.SESSIONS_MAX = 222
+        assert _cfg.get_sessions_cache_max({"webui": {"sessions_cache_max": 42}}) == 42
+        # Invalid / missing values must fall back, never disable the bound.
+        assert _cfg.get_sessions_cache_max({"webui": {"sessions_cache_max": "nope"}}) == 222
+        assert _cfg.get_sessions_cache_max({"webui": {"sessions_cache_max": 0}}) == 222
+        assert _cfg.get_sessions_cache_max({"webui": {"sessions_cache_max": -5}}) == 222
+    finally:
+        _cfg.SESSIONS_MAX = old_sessions_max
+
+
+def test_cache_cap_preserves_environment_fallback():
+    """The parsed env fallback still wins when config is absent or invalid (#6351)."""
+    from api import config as _cfg
+
+    old_sessions_max = _cfg.SESSIONS_MAX
+    try:
+        _cfg.SESSIONS_MAX = 222
+        assert _cfg.get_sessions_cache_max({"webui": {}}) == 222
+        assert _cfg.get_sessions_cache_max({}) == 222
+        _cfg.SESSIONS_MAX = _cfg.DEFAULT_SESSIONS_CACHE_MAX
+        assert _cfg.get_sessions_cache_max({"webui": {}}) == _cfg.DEFAULT_SESSIONS_CACHE_MAX
+        assert _cfg.get_sessions_cache_max({}) == _cfg.DEFAULT_SESSIONS_CACHE_MAX
+    finally:
+        _cfg.SESSIONS_MAX = old_sessions_max
 
 
 # ─────────────────────────── invariant 1: eviction ──────────────────────────
@@ -333,3 +357,202 @@ def test_eviction_skips_active_but_still_bounds_clean_entries(isolated_session_e
     # It may briefly sit slightly above cap because actives are non-evictable,
     # but it must NOT grow unbounded with the 40 churned sessions.
     assert len(SESSIONS) <= _cfg.SESSIONS_MAX + len(actives)
+
+
+def test_unsaved_new_session_survives_churn_and_stays_startable(isolated_session_env):
+    """A brand-new, never-persisted session must not be evicted.
+
+    ``new_session()`` keeps a session in RAM only until its first message
+    (#1171), so the cache is its ONLY copy. The original #4765 predicate treated
+    any zero-message session as evictable, reasoning that an empty shell "is
+    recreated on next access" — but ``get_session()`` has no recreate path and
+    raises ``KeyError``, so ``/api/session/draft`` and ``/api/chat/start`` both
+    404 and the session can never be started.
+
+    Real-world trigger: a browser password manager autofilled the sidebar
+    conversation filter, whose content search pulls every hit through
+    ``get_session()``. That churn blew past the cap and dropped the session the
+    user was composing in.
+    """
+    from api import config as _cfg
+    from api.config import SESSIONS
+    from api.models import get_session, new_session
+
+    _cfg.SESSIONS_MAX = 5
+
+    composing = new_session()
+    sid = composing.session_id
+    assert not (_cfg.SESSION_DIR / f"{sid}.json").exists(), (
+        "precondition: new_session() must not persist before the first message"
+    )
+
+    # Content-search-style churn: far more persisted sessions than the cap.
+    for i in range(40):
+        _insert(_make_persisted_session(i))
+
+    assert sid in SESSIONS, "unsaved new session was evicted — its only copy is gone"
+
+    # The chokepoint both failing routes go through.
+    assert get_session(sid, metadata_only=True) is not None
+    assert get_session(sid).session_id == sid
+
+
+def test_stale_draftless_unsaved_shell_is_evictable(isolated_session_env):
+    """An OLD, empty, draftless, never-saved shell must NOT be immortal (#6083 follow-up).
+
+    The #6083 fix protects a fresh unsaved shell so a just-opened "New
+    Conversation" is not evicted mid-compose. But protecting EVERY zero-message
+    never-saved shell forever would let abandoned "New Conversation" tabs
+    accumulate past ``sessions_cache_max`` without bound (a slow leak / OOM).
+    A shell that is empty AND draftless AND older than the grace window is
+    treated as abandoned and becomes evictable again.
+    """
+    from api.models import _session_is_evictable, _UNSAVED_SHELL_GRACE_S, new_session
+
+    shell = new_session()
+    # Freshly created → protected (inside the grace window).
+    assert _session_is_evictable(shell) is False, (
+        "a fresh empty shell must be protected during the compose window"
+    )
+    # Age it past the grace window with no draft and no messages → abandoned.
+    shell.created_at = time.time() - (_UNSAVED_SHELL_GRACE_S + 60)
+    assert _session_is_evictable(shell) is True, (
+        "a stale, empty, draftless, never-saved shell must be evictable so these "
+        "shells cannot accumulate unbounded past the cache cap"
+    )
+
+
+def test_stale_unsaved_shell_with_draft_stays_resident(isolated_session_env):
+    """A stale shell the user is still composing (has a draft) stays protected.
+
+    Even past the grace window, a never-saved shell that carries a composer
+    draft is something the user is actively working on and must not be dropped —
+    its draft lives only in this cache entry until the first send.
+    """
+    from api.models import _session_is_evictable, _UNSAVED_SHELL_GRACE_S, new_session
+
+    shell = new_session()
+    shell.created_at = time.time() - (_UNSAVED_SHELL_GRACE_S + 60)
+    shell.composer_draft = {"text": "half-written thought", "files": []}
+    assert _session_is_evictable(shell) is False, (
+        "a stale shell with an active composer draft must stay resident"
+    )
+def test_content_search_scan_does_not_evict_the_working_set(isolated_session_env):
+    """A content search must not push the user's open sessions out of the cache.
+
+    /api/sessions/search?content=1 walks EVERY session. Routing that through
+    get_session() inserted each one into the LRU and marked it recently-used, so
+    a single search over an install with more sessions than the cap flushed the
+    whole cache — the classic buffer-pool scan-pollution problem. The sessions
+    the user actually had open were the ones evicted.
+
+    get_session_for_scan() reads without promoting or inserting, so a scan is
+    transparent to the LRU.
+    """
+    from api import config as _cfg
+    from api.config import SESSIONS
+    from api.models import get_session, get_session_for_scan
+
+    _cfg.SESSIONS_MAX = 5
+
+    working = []
+    for i in range(4):
+        s = _make_persisted_session(900 + i)
+        get_session(s.session_id)          # the user opens it -> legitimately cached
+        working.append(s.session_id)
+
+    corpus = [_make_persisted_session(i).session_id for i in range(60)]
+
+    for sid in corpus:                     # what the content search does
+        assert get_session_for_scan(sid) is not None
+
+    for sid in working:
+        assert sid in SESSIONS, "a scan evicted the user's working set"
+    assert not any(sid in SESSIONS for sid in corpus), "the scan polluted the LRU"
+    assert len(SESSIONS) <= _cfg.SESSIONS_MAX
+
+
+def test_scan_accessor_reuses_resident_sessions_without_promoting(isolated_session_env):
+    """A scan hit must reuse the cached object but must not refresh its recency."""
+    from api import config as _cfg
+    from api.config import SESSIONS
+    from api.models import get_session, get_session_for_scan
+
+    _cfg.SESSIONS_MAX = 50
+    first = _make_persisted_session(801)
+    second = _make_persisted_session(802)
+    get_session(first.session_id)
+    get_session(second.session_id)         # second is now the most-recent entry
+
+    order_before = list(SESSIONS.keys())
+    scanned = get_session_for_scan(first.session_id)
+
+    assert scanned is SESSIONS[first.session_id], "scan should reuse the resident object"
+    assert list(SESSIONS.keys()) == order_before, "scan must not promote in the LRU"
+
+
+def test_content_search_scan_recovers_newer_state_db_without_lru_churn(
+    isolated_session_env, monkeypatch,
+):
+    """The real search path must find state.db-only recovery text without LRU churn."""
+    from types import SimpleNamespace
+    from urllib.parse import urlparse
+
+    from api import models, routes
+    from api.config import SESSIONS
+
+    working = _make_persisted_session(950)
+    stale = _make_persisted_session(
+        951,
+        messages=[{"role": "user", "content": "old prompt", "timestamp": 100.0}],
+    )
+    stale.active_stream_id = "dead-stream"
+    stale.pending_user_message = "recover me"
+    stale.pending_started_at = 102.0
+    stale.save()
+    _insert(working)
+    _insert(stale)
+    order_before = list(SESSIONS.keys())
+    size_before = len(SESSIONS)
+
+    recovered = [
+        {"role": "user", "content": "old prompt", "timestamp": 100.0},
+        {"role": "user", "content": "recover me", "timestamp": 102.0},
+        {"role": "assistant", "content": "state-db-only needle", "timestamp": 103.0},
+    ]
+    monkeypatch.setattr(
+        models,
+        "get_state_db_session_summary",
+        lambda sid, profile=None: {"message_count": len(recovered), "last_message_at": 103.0},
+    )
+    monkeypatch.setattr(
+        models,
+        "get_state_db_session_messages",
+        lambda sid, **kwargs: list(recovered),
+    )
+    monkeypatch.setattr(
+        routes,
+        "all_sessions",
+        lambda: [{"session_id": stale.session_id, "title": stale.title, "profile": "default"}],
+    )
+    monkeypatch.setattr(routes, "load_settings", lambda: {"api_redact_enabled": False})
+    monkeypatch.setattr("api.profiles.get_active_profile_name", lambda: "default")
+    captured = {}
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda handler, payload, status=200, extra_headers=None: captured.update(
+            payload=payload, status=status,
+        ),
+    )
+
+    routes._handle_sessions_search(
+        SimpleNamespace(),
+        urlparse("/api/sessions/search?q=needle&content=1&depth=0"),
+    )
+
+    assert captured["status"] == 200
+    assert captured["payload"]["count"] == 1
+    assert captured["payload"]["sessions"][0]["session_id"] == stale.session_id
+    assert list(SESSIONS.keys()) == order_before, "scan recovery must not promote the LRU"
+    assert len(SESSIONS) == size_before, "scan recovery must not insert or evict cache entries"

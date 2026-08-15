@@ -260,7 +260,12 @@ def test_delete_cli_session_still_opens_writable_connection():
     read-only downgrade would make the delete silently no-op."""
     import inspect
 
-    src = inspect.getsource(models.delete_cli_session)
+    src = "\n".join(
+        (
+            inspect.getsource(models.delete_cli_session),
+            inspect.getsource(models._delete_cli_session_locked),
+        )
+    )
     assert "sqlite3.connect(str(db_path))" in src, (
         "delete_cli_session must keep its writable connection"
     )

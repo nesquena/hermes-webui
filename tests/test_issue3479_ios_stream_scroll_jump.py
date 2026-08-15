@@ -74,7 +74,7 @@ def test_live_anchor_worklog_rebuild_restores_snapshot_before_follow_settle():
     dedupe_idx = body.index("_dedupeLiveProcessedWorklogAnchors(turn);")
     move_status_idx = body.index("_moveLiveRunStatusToTurnEnd();")
     restore_idx = body.index("_restoreMessageScrollSnapshotSameFrame(scrollSnapshot);")
-    release_idx = body.index("if(scrollRebuildGuard&&scrollRebuildGuard.release)")
+    release_idx = body.index("_restoreLiveAnchorScrollSnapshotAfterRebuild(scrollSnapshot,scrollRebuildGuard);")
     settle_idx = body.index("if(!scrollRebuildGuard.readerAwayFromBottom&&typeof scrollIfPinned==='function') scrollIfPinned();")
 
     assert capture_idx < guard_idx < remove_idx < restore_detail_idx < dedupe_idx < move_status_idx < restore_idx < release_idx < settle_idx

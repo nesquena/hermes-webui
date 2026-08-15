@@ -814,6 +814,7 @@ function _isSessionLocallyStreaming(s) {
 function _isSessionEffectivelyStreaming(s) {
   return Boolean(s && (
     s.is_streaming ||
+    s.cron_running ||
     _hasPendingUserMessageSignal(s) ||
     _isSessionLocallyStreaming(s)
   ));
@@ -1038,6 +1039,7 @@ function _serverLiveSnapshotInflight(snapshot, uploaded){
       role:'assistant',
       content:lastAssistantText,
       reasoning:lastReasoningText||undefined,
+      _ts:snapshot.last_message_ts??snapshot.lastMessageTs??undefined,
       _live:true,
       _journal_snapshot:true,
     });
@@ -1052,6 +1054,7 @@ function _serverLiveSnapshotInflight(snapshot, uploaded){
   const hasAnchorActivityScene=!!(anchorActivityScene&&Array.isArray(anchorActivityScene.activity_rows)&&anchorActivityScene.activity_rows.length);
   if(!messages.length&&!toolCalls.length&&!lastAssistantText&&!lastReasoningText&&!hasAnchorActivityScene) return null;
   return {
+    streamId:String(snapshot.stream_id||snapshot.streamId||''),
     messages,
     uploaded:Array.isArray(uploaded)?[...uploaded]:[],
     toolCalls,
@@ -1062,6 +1065,7 @@ function _serverLiveSnapshotInflight(snapshot, uploaded){
     lastAssistantText,
     lastReasoningText,
     lastRunJournalSeq:Number.isFinite(replayAfterSeq)?Math.max(0,replayAfterSeq):0,
+    lastRunJournalEventId:String(snapshot.last_event_id||snapshot.lastEventId||''),
     anchorActivityScene,
     currentActivityBurstId:Number(snapshot.current_activity_burst_id||snapshot.currentActivityBurstId||0)||0,
     currentLiveSegmentSeq:Number(snapshot.current_live_segment_seq||snapshot.currentLiveSegmentSeq||0)||0,
@@ -1069,19 +1073,58 @@ function _serverLiveSnapshotInflight(snapshot, uploaded){
   };
 }
 
-function _runtimeJournalAnchorActivitySceneForSession(sid){
+function _selectLiveRecoveryInflight(localInflight, serverLiveSnapshot, activeStreamId){
+  if(!serverLiveSnapshot) return localInflight||null;
+  if(!localInflight||!_inflightHasVisibleLiveState(localInflight)) return serverLiveSnapshot;
+
+  // The run journal owns the Worklog projection. A same-stream browser tail
+  // wins only when it advanced after the metadata snapshot was read.
+  const requestedActiveId=String(activeStreamId||'').trim();
+  const localId=String(localInflight.streamId||'').trim();
+  const serverId=String(serverLiveSnapshot.streamId||'').trim();
+  const activeId=requestedActiveId||serverId;
+  const selectDurableSnapshot=()=>{
+    if(activeId&&localId===activeId&&Array.isArray(localInflight.todos)&&localInflight.todoStateMeta){
+      return {...serverLiveSnapshot,todos:localInflight.todos,todoStateMeta:localInflight.todoStateMeta};
+    }
+    return serverLiveSnapshot;
+  };
+  if(requestedActiveId&&serverId&&serverId!==requestedActiveId){
+    return localId===requestedActiveId?localInflight:null;
+  }
+  if(activeId&&localId!==activeId) return selectDurableSnapshot();
+
+  const localSeq=Math.max(0,Number(localInflight.lastRunJournalSeq)||0);
+  const serverSeq=Math.max(0,Number(serverLiveSnapshot.lastRunJournalSeq)||0);
+  return serverSeq>=localSeq?selectDurableSnapshot():localInflight;
+}
+
+function _anchorActivitySceneStreamId(scene){
+  if(!scene||typeof scene!=='object') return '';
+  const identity=scene.identity&&typeof scene.identity==='object'?scene.identity:null;
+  return String(scene.stream_id||scene.streamId||(identity&&(identity.stream_id||identity.streamId))||'').trim();
+}
+
+function _anchorActivitySceneMatchesStream(scene, activeStreamId){
+  const activeId=String(activeStreamId||'').trim();
+  if(!activeId) return true;
+  const sceneId=_anchorActivitySceneStreamId(scene);
+  return !sceneId||sceneId===activeId;
+}
+
+function _runtimeJournalAnchorActivitySceneForSession(sid, activeStreamId){
   const inflight=INFLIGHT&&sid?INFLIGHT[sid]:null;
-  if(inflight&&inflight.anchorActivityScene&&inflight.anchorActivityScene.version==='activity_scene_v1'){
+  if(inflight&&inflight.anchorActivityScene&&inflight.anchorActivityScene.version==='activity_scene_v1'&&_anchorActivitySceneMatchesStream(inflight.anchorActivityScene, activeStreamId)){
     return inflight.anchorActivityScene;
   }
   const snapshot=S.session&&S.session.runtime_journal_snapshot;
   const scene=snapshot&&(snapshot.anchor_activity_scene||snapshot.anchorActivityScene);
-  return scene&&scene.version==='activity_scene_v1'?scene:null;
+  return scene&&scene.version==='activity_scene_v1'&&_anchorActivitySceneMatchesStream(scene, activeStreamId)?scene:null;
 }
 
 function _renderRuntimeJournalAnchorActivityScene(activeStreamId, sid){
   if(!activeStreamId||typeof window==='undefined'||typeof window._renderLiveAnchorActivitySceneSnapshotForStream!=='function') return false;
-  const scene=_runtimeJournalAnchorActivitySceneForSession(sid);
+  const scene=_runtimeJournalAnchorActivitySceneForSession(sid, activeStreamId);
   if(!scene) return false;
   return !!window._renderLiveAnchorActivitySceneSnapshotForStream(activeStreamId, scene, sid);
 }
@@ -1172,8 +1215,12 @@ function _markPollingCompletionUnreadTransitions(sessions) {
     const lastMessageAt = Number(s.last_message_at || 0);
     const hasServerRunSignal=Boolean(s.is_streaming||_hasPendingUserMessageSignal(s));
     const canMarkCompletedStream=Boolean(hasServerRunSignal||previousSnapshot||observedStreaming);
-    const completedObservedStream = canMarkCompletedStream&&wasStreaming === true && !isStreaming;
-    const completedWithNewMessages = Boolean(
+    // #6728: cron liveness is server-side (only /api/crons/status exposes it);
+    // the sidebar must defer its completion/unread transition while the job is
+    // still running, or a mid-run message makes the row look completed.
+    const cronRunning = Boolean(s.cron_running);
+    const completedObservedStream = !cronRunning && canMarkCompletedStream && wasStreaming === true && !isStreaming;
+    const completedWithNewMessages = !cronRunning && Boolean(
       (previousSnapshot || observedStreaming)
       && !isStreaming
       && (
@@ -1181,7 +1228,7 @@ function _markPollingCompletionUnreadTransitions(sessions) {
         || lastMessageAt > Number((previousSnapshot || observedStreaming).last_message_at || 0)
       )
     );
-    const completedPersistedObservedStream = Boolean(observedStreaming && !isStreaming);
+    const completedPersistedObservedStream = !cronRunning && Boolean(observedStreaming && !isStreaming);
     if (completedObservedStream || completedPersistedObservedStream || completedWithNewMessages) {
       if (!_isSessionActivelyViewedForList(sid)) {
         // Tag cron session-list markers with source+profile so profile-switch
@@ -1627,9 +1674,21 @@ async function _switchProfileForSessionLoad(profile){
 
 async function loadSession(sid){
   const opts = arguments[1] || {};
+  // Resolve canonical lineage SID BEFORE both the direct and sidebar preload
+  // notifications so extensions always see the canonical session id, not the
+  // raw sidebar click id (which may differ after lineage folding).
   if(!opts.skipLineageResolve && typeof _resolveSessionIdFromSidebarLineage==='function'){
     const resolvedSid=_resolveSessionIdFromSidebarLineage(sid);
     if(resolvedSid&&resolvedSid!==sid) sid=resolvedSid;
+  }
+  // Extension pre-open hook — fires once per sidebar click, not on every call.
+  // _openSidebarSession passes _preloadNotified:true so the hook isn't re-fired
+  // when loadSession runs the actual navigation inside it.
+  if(!opts.skipExtHooks && !opts._preloadNotified && typeof _hermesNotifySessionOpen==='function'){
+    var _preResult=_hermesNotifySessionOpen(sid, null, {preload:true, opts:opts});
+    if(_preResult&&_preResult.cancel===true){
+      return;
+    }
   }
   const forceReload = !!opts.force;
   const currentSid = S.session ? S.session.session_id : null;
@@ -1644,6 +1703,12 @@ async function loadSession(sid){
   // #2971: idempotent re-arm before the no-op guard revives a stream a prior
   // failed loadSession killed; no-ops on real switches.
   _rearmActiveSessionStream();
+  // #6999: same-session force-reload coordination lives in the refresh paths
+  // (refreshActiveSessionIfExternallyUpdated guard + session-updated SSE
+  // handler in messages.js), NOT here: a second loadSession(sid,{force:true})
+  // for the same sid is a legitimate supersede (generation bump below) that
+  // cross-session ordering tests rely on. Coalescing at the entry point would
+  // drop the superseding fetch and leave a stale first load in charge.
   if(currentSid===sid && !forceReload && (!_loadingSessionId || _loadingSessionId===sid)){
     // Re-selecting the already-open session is a no-op for transcript/scroll, but
     // it is still a *visit*: clear a stale sidebar unread dot (e.g. one a
@@ -1675,6 +1740,13 @@ async function loadSession(sid){
   _yoloEnabled=false;_updateYoloPill();
   if(typeof stopClarifyPolling==='function') stopClarifyPolling();
   if(typeof hideClarifyCard==='function') hideClarifyCard(forceReload, forceReload?'external-refresh':'dismissed');
+  // #6572: clear stale compression state when switching sessions.
+  // The compression UI state is per-session and must not leak across loads.
+  // Without this, a compression card from a prior session can appear as a
+  // phantom "Compressing context" barrier on a fresh session that never
+  // triggered compression.
+  if(typeof clearCompressionUi==='function') clearCompressionUi();
+  else window._compressionUi=null;
   // Show loading indicator immediately for responsiveness.
   // Cleared by renderMessages() once full session data arrives.
   // Persist the current composer draft before switching away so it can be
@@ -1787,7 +1859,7 @@ async function loadSession(sid){
           return;
         }
         if (_isCurrentLoad()) _loadingSessionId = null;
-        return loadSession(sid,{...opts,skipProfileResolve:true,force:true});
+        return loadSession(sid,{...opts,skipProfileResolve:true,force:true,_preloadNotified:true});
       }catch(switchErr){
         e=switchErr;
       }
@@ -1898,8 +1970,8 @@ async function loadSession(sid){
   // cross-profile continuation can't poison restore state with an unusable id.
   const continuationSid=(data.session&&data.session.continuation_session_id)||'';
   if(continuationSid&&continuationSid!==sid&&!opts.skipContinuationResolve){
-    if (_isCurrentLoad()) _loadingSessionId=null;
-    return loadSession(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,force:true});
+    _loadingSessionId=null;
+    return loadSession(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
   }
   S.session=data.session;
   if(typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();
@@ -1980,17 +2052,8 @@ async function loadSession(sid){
   if(typeof startSessionStream==='function') startSessionStream(S.session.session_id);
 
 
-  function _mergePendingSessionMessage(session,messages){
-    if(!Array.isArray(messages)) return false;
-    const pendingMsg=typeof getPendingSessionMessage==='function'?getPendingSessionMessage(session,messages):null;
-    if(!pendingMsg) return false;
-    const liveAssistantIdx=messages.findIndex(m=>m&&m.role==='assistant'&&m._live);
-    const currentTurnMessages=liveAssistantIdx>=0?messages.slice(0,liveAssistantIdx):messages;
-    if(_hasCurrentTailUserDuplicate(currentTurnMessages,pendingMsg)) return false;
-    if(liveAssistantIdx>=0) messages.splice(liveAssistantIdx,0,pendingMsg);
-    else messages.push(pendingMsg);
-    return true;
-  }
+  // _mergePendingSessionMessage is the global identity-aware helper shared by
+  // loadSession and refreshSession; see its definition below.
 
   // Phase 2a: If session is streaming, restore the persisted transcript first,
   // then merge the local INFLIGHT live tail. INFLIGHT is a recovery tail, not a
@@ -2000,6 +2063,7 @@ async function loadSession(sid){
     const stored=loadInflightState(sid, activeStreamId);
     if(stored){
       INFLIGHT[sid]={
+        streamId:String(stored.streamId||''),
         messages:Array.isArray(stored.messages)&&stored.messages.length?stored.messages:[],
         uploaded:Array.isArray(stored.uploaded)?stored.uploaded:[],
         toolCalls:Array.isArray(stored.toolCalls)?stored.toolCalls:[],
@@ -2014,6 +2078,7 @@ async function loadSession(sid){
         lastAssistantText:String(stored.lastAssistantText||''),
         lastReasoningText:String(stored.lastReasoningText||''),
         lastRunJournalSeq:Number(stored.lastRunJournalSeq||0)||0,
+        lastRunJournalEventId:String(stored.lastRunJournalEventId||''),
         journalReplayFromStart:!!stored.journalReplayFromStart,
         anchorActivityScene:(stored.anchorActivityScene&&stored.anchorActivityScene.version==='activity_scene_v1')?stored.anchorActivityScene:null,
         currentActivityBurstId:Number(stored.currentActivityBurstId||0)||0,
@@ -2039,8 +2104,12 @@ async function loadSession(sid){
   const serverLiveSnapshot=activeStreamId
     ? _serverLiveSnapshotInflight(S.session.runtime_journal_snapshot, S.session.pending_attachments||[])
     : null;
-  if(serverLiveSnapshot&&(!INFLIGHT[sid]||!_inflightHasVisibleLiveState(INFLIGHT[sid]))){
-    INFLIGHT[sid]=serverLiveSnapshot;
+  const hadLiveRecoveryInflight=!!INFLIGHT[sid];
+  const liveRecoveryInflight=_selectLiveRecoveryInflight(INFLIGHT[sid], serverLiveSnapshot, activeStreamId);
+  if(liveRecoveryInflight) INFLIGHT[sid]=liveRecoveryInflight;
+  else if(hadLiveRecoveryInflight&&activeStreamId){
+    delete INFLIGHT[sid];
+    if(typeof clearInflightState==='function') clearInflightState(sid);
   }
 
   if(INFLIGHT[sid]){
@@ -2256,6 +2325,7 @@ async function loadSession(sid){
       setComposerStatus('');
       updateQueueBadge(sid);
       syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);
+      startApprovalPolling(sid);
       if(typeof resumeManualCompressionForSession==='function') resumeManualCompressionForSession(sid);
       // Workspace refresh is guarded by session id inside loadDir(); keep it
       // after the transcript's first paint so chat switching is not competing
@@ -2327,6 +2397,10 @@ async function loadSession(sid){
   } else {
     _hideHandoffHint();
   }
+  // Extension post-load hook
+  if(!opts.skipExtHooks && typeof _hermesNotifySessionOpen==='function'){
+    try{ _hermesNotifySessionOpen(sid, S.session, {loaded:true, opts:opts}); }catch(_){}
+  }
 }
 
 // ── Handoff hint logic ──────────────────────────────────────────────────────
@@ -2335,7 +2409,7 @@ const _HANDOFF_THRESHOLD = 10;  // conversation rounds
 const _HANDOFF_STORAGE_PREFIX = 'handoff:';
 const _HANDOFF_SUFFIX_DISMISSED_AT = 'dismissed_at';
 const _HANDOFF_SUFFIX_SUMMARY_HANDLED_AT = 'summary_handled_at';
-const _MESSAGING_RAW_SOURCES = new Set(['weixin', 'telegram', 'discord', 'slack', 'email', 'wecom', 'wecom_callback']);
+const _MESSAGING_RAW_SOURCES = new Set(['weixin', 'telegram', 'discord', 'slack', 'email', 'wecom', 'wecom_callback', 'matrix']);
 const _MESSAGING_SOURCE_LABELS = {
   weixin: 'WeChat',
   telegram: 'Telegram',
@@ -2344,6 +2418,7 @@ const _MESSAGING_SOURCE_LABELS = {
   email: 'Email',
   wecom: 'WeCom',
   wecom_callback: 'WeCom Callback',
+  matrix: 'Matrix',
 };
 
 function _isMessagingSession(session) {
@@ -2409,12 +2484,21 @@ async function _ensureSidebarSessionProfile(session){
 
 async function _openSidebarSession(session, loadOpts={}){
   if(!session||!session.session_id) return;
+  // Extension pre-open hook — before any side-effects (external import, profile switching).
+  // Handler returns {cancel:true} to prevent the open.
+  if(!loadOpts.skipExtHooks && typeof _hermesNotifySessionOpen==='function'){
+    var _preResult=_hermesNotifySessionOpen(session.session_id, null, {preload:true, opts:loadOpts});
+    if(_preResult&&_preResult.cancel===true) return;
+  }
+  // #5409: close mobile sidebar AFTER veto guard passes — only close if open proceeds.
+  if(typeof closeMobileSidebar==='function')closeMobileSidebar();
   if(_isExternalSession(session)){
     try{await api('/api/session/import_cli',{method:'POST',body:JSON.stringify(_externalImportPayload(session))});}
     catch(_e){ /* import failed -- fall through to read-only view */ }
   }
   await _ensureSidebarSessionProfile(session);
-  await loadSession(session.session_id, loadOpts);
+  // Tell loadSession to skip its pre-hook — we already ran it above.
+  await loadSession(session.session_id, Object.assign({}, loadOpts, {_preloadNotified:true}));
   renderSessionListFromCache();
 }
 
@@ -2928,6 +3012,24 @@ let _messagesTruncated = false;
 // server-bounded and do not consume the visible-message budget.
 // Older messages are loaded on-demand via _loadOlderMessages().
 const _INITIAL_MSG_LIMIT = 30;
+// ============================================================================
+// COUPLED CONSTANT — keep in sync with api/routes.py:_MAX_MSG_LIMIT.
+// ============================================================================
+// This is a hand-mirrored copy of the backend's GET /api/session ?msg_limit=
+// ceiling. _loadOlderMessages grows its msg_limit tail window by
+// +_INITIAL_MSG_LIMIT each load; once growth would exceed this ceiling the
+// server clamps and the tail stops growing, so we switch to msg_before paging
+// (a fixed-size backward page keyed off _oldestIdx) instead. This const is the
+// static FALLBACK default only — the live ceiling is read from the /api/session
+// `_msg_limit_max` metadata into _msgLimitMax below (#6177), so the two can no
+// longer drift. Keep this fallback value roughly in sync with the backend
+// _MAX_MSG_LIMIT for the mixed-version case where the server omits the field.
+const _MSG_LIMIT_MAX = 500;
+// Live server-advertised msg_limit ceiling. Declared at module scope with the
+// static fallback so the reload-width paths (_ensureMessagesLoaded /
+// _loadOlderMessages) always read a defined value even before the first
+// /api/session response lands; refreshed from `_msg_limit_max` on each load.
+let _msgLimitMax = _MSG_LIMIT_MAX;
 let _sameSessionForceReloadHint = null;
 
 function _currentLoadedRenderableMessageCount(){
@@ -3032,11 +3134,19 @@ async function _ensureMessagesLoaded(sid, opts) {
   }
   // Fetch session messages with a tail window for fast initial load.
   const reloadLimit = _messageReloadLimitForSession(sid); // defaults to _INITIAL_MSG_LIMIT
-  const reloadLimitParam = reloadLimit ? `&msg_limit=${reloadLimit}` : '';
+  // A reload window above the server's msg_limit ceiling would be clamped by
+  // the backend (returning only the last _MSG_LIMIT_MAX rows), which can
+  // silently SHRINK an already-loaded transcript that had more than the ceiling
+  // of rows visible (rows 400–999 replaced by 500–999). When the requested
+  // window exceeds the ceiling, fall back to the bare full-transcript request
+  // (no msg_limit / no expand_renderable) so a same-session refresh never drops
+  // already-loaded older rows (Codex gate #6154, silent row-loss).
+  const boundedReloadLimit = (reloadLimit && reloadLimit <= _msgLimitMax) ? reloadLimit : null;
+  const reloadLimitParam = boundedReloadLimit ? `&msg_limit=${boundedReloadLimit}` : '';
   // Older frontends used expand_renderable=1 to request visible-row expansion.
   // The server now counts msg_limit by visible transcript rows by default; keep
   // the flag for compatibility with mixed-version deployments.
-  const expandParam = reloadLimit ? '&expand_renderable=1' : '';
+  const expandParam = boundedReloadLimit ? '&expand_renderable=1' : '';
   let data;
   try {
     data = await api(
@@ -3051,6 +3161,7 @@ async function _ensureMessagesLoaded(sid, opts) {
   if (!data || !data.session) return;
   _messagesTruncated = !!data.session._messages_truncated;
   _oldestIdx = data.session._messages_offset || 0;
+  _msgLimitMax = data.session._msg_limit_max || _MSG_LIMIT_MAX;
   // #3162: `msgs` is reassigned below by the #3018 ephemeral-field carry-forward,
   // so it must be `let`, not `const`. The `const` form threw a TypeError inside
   // _ensureMessagesLoaded() that surfaced as a "Failed to load conversation messages"
@@ -3082,7 +3193,20 @@ async function _ensureMessagesLoaded(sid, opts) {
   // Expand render window to cover all loaded messages so the next
   // renderMessages() doesn't hide most of them behind a tiny window.
   if(typeof _messageRenderableMessageCount==='function'&&typeof _currentMessageRenderWindowSize==='function'){
-    _messageRenderWindowSize=Math.max(_currentMessageRenderWindowSize(), _messageRenderableMessageCount());
+    // #6999: bound the auto-expansion. This number gates
+    // _messageHiddenBeforeCount() (load-older / jump-to-start affordances)
+    // and the non-virtualized fallback render width; the virtualized DOM tail
+    // is independently capped at MESSAGE_RENDER_WINDOW_DEFAULT via
+    // _messageVirtualKeepTailCount(). Growing the window to the FULL loaded
+    // transcript on every force reload (tab focus, SSE catch-up) zeroes the
+    // hidden-before count for long sessions and widens the effective render
+    // window for non-virtualized paths. Keep the #3686 intent (don't collapse
+    // back to the 50-row default after a load) but cap the growth to a small
+    // multiple of the default window.
+    _messageRenderWindowSize=Math.max(
+      _currentMessageRenderWindowSize(),
+      Math.min(_messageRenderableMessageCount(), (typeof MESSAGE_RENDER_WINDOW_DEFAULT==='number'?MESSAGE_RENDER_WINDOW_DEFAULT:50)*4)
+    );
   }
   if(S.session&&S.session.session_id===sid){
     S.session.message_count=Number(data.session.message_count || msgs.length);
@@ -3196,6 +3320,32 @@ function _hasCurrentTailUserDuplicate(messages,candidate){
   if(!candidate||String(candidate.role||'')!=='user') return false;
   const existing=_currentTailUserMessage(messages);
   return !!(existing&&_sameTranscriptMessage(existing,candidate));
+}
+
+// Keep pending-user recovery ordering identical across load, reconnect, and
+// explicit refresh paths. The pending prompt owns the live assistant tail and
+// must be projected before it, regardless of which recovery response arrived.
+function _mergePendingSessionMessage(session,messages){
+  if(!Array.isArray(messages)) return false;
+  const liveAssistantIdx=messages.findIndex(m=>m&&m.role==='assistant'&&m._live);
+  const currentTurnMessages=liveAssistantIdx>=0?messages.slice(0,liveAssistantIdx):messages;
+  const pendingMsg=typeof getPendingSessionMessage==='function'?getPendingSessionMessage(session,currentTurnMessages):null;
+  if(!pendingMsg) return false;
+  if(_hasCurrentTailUserDuplicate(currentTurnMessages,pendingMsg)) return false;
+  if(liveAssistantIdx>=0){
+    const misplacedIdx=messages.findIndex((m,idx)=>
+      idx>liveAssistantIdx&&m&&m.role==='user'&&_sameTranscriptMessage(m,pendingMsg)
+    );
+    if(misplacedIdx>=0){
+      const [misplacedUser]=messages.splice(misplacedIdx,1);
+      messages.splice(liveAssistantIdx,0,misplacedUser);
+    }else{
+      messages.splice(liveAssistantIdx,0,pendingMsg);
+    }
+  }else{
+    messages.push(pendingMsg);
+  }
+  return true;
 }
 
 function _currentTurnAssistantText(messages){
@@ -3531,18 +3681,34 @@ async function _loadOlderMessages() {
   // rebuilt transcript (#1937).
   const startGeneration = _messagesGeneration;
   try {
-    // Ask the server for a larger authoritative tail window instead of a
-    // separate msg_before page. The same /api/session contract handles both —
-    // post-#2716 the backend always runs the full append-only merge, so a
-    // larger msg_limit on the same call produces the same merged transcript
-    // we'd get by stitching pages, but without client-side index bookkeeping.
-    // Cumulative growth: each "load more" asks for currentLoaded + 30, and the
-    // newly exposed head is what we expose to the user.
+    // Two strategies, chosen by whether the growing tail window still fits under
+    // the server's msg_limit ceiling (_MSG_LIMIT_MAX, mirroring backend
+    // _MAX_MSG_LIMIT):
+    //
+    //  - Below the ceiling: ask for a larger authoritative tail window
+    //    (currentLoaded + _INITIAL_MSG_LIMIT). Post-#2716 the backend runs the
+    //    full append-only merge, so a larger msg_limit produces the same merged
+    //    transcript we'd get by stitching pages, without client-side index
+    //    bookkeeping. The newly exposed head is what we expose to the user.
+    //
+    //  - At/above the ceiling: the server clamps msg_limit, so the tail window
+    //    stops growing and this strategy would stall (the same clamped tail is
+    //    returned, olderMsgs -> 0). Switch to msg_before paging — a fixed
+    //    _INITIAL_MSG_LIMIT backward page keyed off _oldestIdx — which is
+    //    bounded and never hits the ceiling, so the head stays reachable for
+    //    arbitrarily long transcripts. (This is the same paging request the
+    //    race-fallback below uses, proven correct there.)
     const requestedLimit = Math.max(_INITIAL_MSG_LIMIT, (S.messages || []).length + _INITIAL_MSG_LIMIT);
-    const data = await api(
-      `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=${requestedLimit}`,
-      {timeoutMs:120000}
-    );
+    const useBeforePaging = requestedLimit >= _msgLimitMax;
+    const data = useBeforePaging
+      ? await api(
+          `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${_oldestIdx}&msg_limit=${_INITIAL_MSG_LIMIT}`,
+          {timeoutMs:120000}
+        )
+      : await api(
+          `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=${requestedLimit}`,
+          {timeoutMs:120000}
+        );
     // Guard: api() may have redirected (401) and returned undefined.
     if (!data || !data.session) { _loadingOlder = false; return; }
     //  - response shape sane
@@ -3569,7 +3735,14 @@ async function _loadOlderMessages() {
     // the server appended new messages (or merge filtered something) while we
     // were awaiting, the suffix won't line up — fall back to the legacy
     // msg_before page so we never drop visible older messages on the floor.
-    let tailMatches = expandedMsgs.length >= currentLen;
+    // When useBeforePaging is true, `data` is a bounded msg_before OLDER page,
+    // not a cumulative tail. A raw-row-heavy older page whose visible text
+    // repeats the current tail could otherwise pass the suffix check below and
+    // be wholesale-replaced AS IF it were the full tail — silently discarding
+    // the current (newer) rows and marking history complete. Gate the suffix
+    // heuristic on !useBeforePaging so every msg_before page is always treated
+    // as an older page and prepended (Codex gate #6154, silent row-loss).
+    let tailMatches = !useBeforePaging && expandedMsgs.length >= currentLen;
     if (tailMatches && currentLen > 0) {
       const start = expandedMsgs.length - currentLen;
       for (let i = 0; i < currentLen; i++) {
@@ -3583,18 +3756,22 @@ async function _loadOlderMessages() {
     let olderMsgs = expandedMsgs.slice(0, olderCount);
     let nextMessages = expandedMsgs;
     if (!tailMatches) {
-      // Race fallback: keep the legacy index-page request as the
-      // correctness-preserving alternative. Same guards reapplied because
-      // we just awaited again.
-      const fallback = await api(
-        `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${_oldestIdx}&msg_limit=${_INITIAL_MSG_LIMIT}`,
-        {timeoutMs:120000}
-      );
-      if (!fallback || !fallback.session) { _loadingOlder = false; return; }
-      if (!S.session || S.session.session_id !== sid) return;
-      if (_loadingSessionId !== null && _loadingSessionId !== sid) return;
-      if (_messagesGeneration !== startGeneration) return;
-      responseSession = fallback.session;
+      // Race fallback (or the over-ceiling msg_before primary path): keep the
+      // legacy index-page request as the correctness-preserving alternative.
+      // When useBeforePaging is true we already fetched a msg_before page as
+      // the primary `data`, so reuse it instead of re-fetching. Same guards
+      // reapplied because we just awaited again (skipped for the reuse case).
+      if (!useBeforePaging) {
+        const fallback = await api(
+          `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${_oldestIdx}&msg_limit=${_INITIAL_MSG_LIMIT}`,
+          {timeoutMs:120000}
+        );
+        if (!fallback || !fallback.session) { _loadingOlder = false; return; }
+        if (!S.session || S.session.session_id !== sid) return;
+        if (_loadingSessionId !== null && _loadingSessionId !== sid) return;
+        if (_messagesGeneration !== startGeneration) return;
+        responseSession = fallback.session;
+      }
       olderMsgs = (responseSession.messages || []).filter(m => m && m.role);
       nextMessages = [...olderMsgs, ...S.messages];
     }
@@ -3654,6 +3831,7 @@ async function _loadOlderMessages() {
           ? virtualAddedHeight
           : Math.max(0, newScrollH - prevScrollH);
         _programmaticScroll = true;
+        _programmaticScrollSetAt = performance.now();
         container.scrollTop = oldTop + addedHeight;
         requestAnimationFrame(()=>{ _programmaticScroll = false; });
       }
@@ -4027,7 +4205,11 @@ function _sessionUrlForSid(sid){
     current.searchParams.delete('q');
     current.searchParams.delete('prompt');
     current.searchParams.delete('send');
-    base.search=current.searchParams.toString();
+    const retained=new URLSearchParams();
+    current.searchParams.forEach((value,key)=>{
+      if(key!=='action'||value!=='new-chat') retained.append(key,value);
+    });
+    base.search=retained.toString();
     base.hash=current.hash;
   }catch(_e){}
   return base.pathname+base.search+base.hash;
@@ -4036,7 +4218,13 @@ function _setActiveSessionUrl(sid){
   if(typeof window==='undefined'||!window.history||!sid) return;
   const next=_sessionUrlForSid(sid);
   if(next && next!==(window.location.pathname+window.location.search+window.location.hash)){
-    window.history.pushState({session_id:sid},'',next);
+    let consumeLaunchAction=false;
+    try{
+      const current=new URL(window.location.href);
+      consumeLaunchAction=current.searchParams.getAll('action').includes('new-chat');
+    }catch(_e){}
+    const method=consumeLaunchAction?'replaceState':'pushState';
+    window.history[method]({session_id:sid},'',next);
   }
 }
 
@@ -4142,6 +4330,7 @@ function _renderBatchActionBar(){
         return {response,session:sessionsById.get(sid)||null};
       }));
       const retainedCount=_worktreeResponseCount(results);
+      const cleanupFailedCount=results.filter(result=>result.response&&result.response.state_db_cleanup_failed).length;
       ids.forEach(_clearHandoffStorageForSession);
       if(S.session&&ids.includes(S.session.session_id)){
         S.session=null;S.messages=[];S.entries=[];localStorage.removeItem('hermes-webui-session');
@@ -4150,7 +4339,9 @@ function _renderBatchActionBar(){
         if(remaining.sessions&&remaining.sessions.length){await loadSession(remaining.sessions[0].session_id);}
         else{$('msgInner').innerHTML='';$('emptyState').style.display='';}
       }
-      showToast((retainedCount?t('session_deleted_worktree'):t('session_delete'))+' ('+ids.length+')');exitSessionSelectMode();await renderSessionList();
+      if(cleanupFailedCount) showToast(t('delete_failed')+' ('+cleanupFailedCount+'/'+ids.length+')',0,'error');
+      else showToast((retainedCount?t('session_deleted_worktree'):t('session_delete'))+' ('+ids.length+')');
+      exitSessionSelectMode();await renderSessionList();
     }catch(e){showToast('Delete failed: '+(e.message||e));}
   };bar.appendChild(deleteBtn);
 }
@@ -4776,8 +4967,8 @@ function _openSessionActionMenu(session, anchorEl){
       ICONS.stop,
       async()=>{
         closeSessionActionMenu();
-        await cancelSessionStream(session);
-        showToast(t('stream_stopped'));
+        if(await cancelSessionStream(session)) showToast(t('stream_stopped'));
+        else showToast(t('cancel_failed'),null,'error');
       }
     ));
   }
@@ -5558,6 +5749,12 @@ let _sessionTimeRefreshVisibilityHandler = null;
 let _activeSessionExternalRefreshTimer = null;
 let _activeSessionExternalRefreshInFlight = false;
 let _deferredActiveSessionExternalRefreshReason = '';
+// #6999 re-gate: per-SID latch of the maximum message_count announced by a
+// `session-updated` frame while the external-refresh guard was held. The
+// refresh owner runs ONE guarded follow-up in its finally instead of letting
+// the event die — production does not guarantee a second event, so discarding
+// would leave the transcript stale until the next focus/poll.
+let _pendingSessionUpdatedCounts = null;
 let _sessionEventsSSE = null;
 let _sessionEventsRefreshTimer = 0;
 let _sessionEventsRefreshPendingRequest = null;
@@ -5650,6 +5847,51 @@ function _flushDeferredActiveSessionExternalRefresh(){
   void refreshActiveSessionIfExternallyUpdated(reason);
 }
 
+// #6999 re-gate: coalesce, never discard. Called by the messages.js
+// `session-updated` handler when it finds the external-refresh guard held:
+// instead of dropping the update (production does not guarantee a second
+// event), latch the MAXIMUM announced count per SID. The refresh owner's
+// finally drains it with ONE guarded follow-up.
+function _latchSessionUpdatedPendingCount(sid, count){
+  const n = Number(count);
+  if(!sid || !Number.isFinite(n)) return;
+  if(!_pendingSessionUpdatedCounts) _pendingSessionUpdatedCounts = {};
+  const prev = _pendingSessionUpdatedCounts[sid];
+  if(prev === undefined || n > prev) _pendingSessionUpdatedCounts[sid] = n;
+}
+
+// Single-line entry used by the messages.js `session-updated` handler:
+// returns true when the external-refresh probe owns the guard (the frame was
+// latched for the owner's finally to drain); returns false when the handler
+// should take its normal direct-load path.
+function _coalesceSessionUpdatedWhileRefreshHeld(sid, count){
+  if(typeof _activeSessionExternalRefreshInFlight === 'undefined' || !_activeSessionExternalRefreshInFlight) return false;
+  _latchSessionUpdatedPendingCount(sid, count);
+  return true;
+}
+
+// Drain the per-SID latch after the external-refresh owner releases its
+// guard. Runs ONE guarded follow-up only when local state is still behind
+// the latched count — a same-SID load during the refresh window already
+// caught us up, a switch-away moved the active session elsewhere, and
+// duplicate events coalesce into this single follow-up.
+function _drainSessionUpdatedPendingCount(){
+  const pending = _pendingSessionUpdatedCounts;
+  _pendingSessionUpdatedCounts = null;
+  if(!pending || !S.session || !S.session.session_id) return;
+  const sid = S.session.session_id;
+  const latched = pending[sid];
+  if(latched === undefined) return;
+  const localCount = Number(S.session.message_count || (Array.isArray(S.messages)?S.messages.length:0) || 0);
+  if(Number.isFinite(localCount) && localCount >= latched) return;
+  // The follow-up re-enters refreshActiveSessionIfExternallyUpdated, which
+  // re-probes server metadata and only force-reloads when the count actually
+  // changed — so the OOM guards (busy/stream/loading/document.hidden) all
+  // apply, and a metadata-read-only probe that already ran during the refresh
+  // window gets a second chance to observe the latched growth.
+  void refreshActiveSessionIfExternallyUpdated('session-updated');
+}
+
 // Reconcile the active session against server-side metadata. Returns a status
 // string so callers (notably the post-stream idle reconcile) can decide how to
 // react:
@@ -5674,6 +5916,10 @@ async function refreshActiveSessionIfExternallyUpdated(reason){
   if(_activeSessionExternalRefreshInFlight) return 'skipped';
   if(!S.session || !S.session.session_id) return 'skipped';
   if(S.busy || S.activeStreamId) return 'skipped';
+  // #6999: if a load for this exact session is already in flight, it owns the
+  // refresh — probing now would duplicate the fetch and the O(N) render work
+  // that exhausts the tab's JS heap when the tab comes back into focus.
+  if(_loadingSessionId === S.session.session_id) return 'skipped';
   if(typeof _isMessageReaderUnpinned==='function'&&_isMessageReaderUnpinned()){
     _deferActiveSessionExternalRefresh(reason||'poll');
     return 'skipped';
@@ -5758,6 +6004,10 @@ async function refreshActiveSessionIfExternallyUpdated(reason){
     return 'failed';
   }finally{
     _activeSessionExternalRefreshInFlight = false;
+    // #6999 re-gate: any `session-updated` frames that arrived while we owned
+    // the guard were latched (coalesced), not dropped — run ONE guarded
+    // follow-up when local state is still behind the latched count.
+    _drainSessionUpdatedPendingCount();
   }
 }
 
@@ -7373,6 +7623,12 @@ function _attachProjectQuickCreateButton(chip, project){
       // project-assigned session appears deterministically.
       try{ if(typeof renderSessionListFromCache==='function') renderSessionListFromCache(); }catch(_){}
       try{ if(typeof renderSessionList==='function') void renderSessionList({deferWhileInteracting:false}); }catch(_){}
+      // Mobile: the sidebar is a full-screen drawer over the main view — close
+      // it after the project conversation is created so the user actually sees
+      // the new session (mirrors $('btnNewChat').onclick in boot.js and the
+      // #5409 close in _openSidebarSession). Failure path keeps the drawer open
+      // so the toast stays visible for retry.
+      if(typeof closeMobileSidebar==='function') closeMobileSidebar();
     }catch(err){
       _setActiveProjectFilter(previousProject);
       if(typeof showToast==='function') showToast('New conversation failed: '+(err&&err.message||err));
@@ -7820,7 +8076,7 @@ function renderSessionListFromCache(){
     const attention=_sessionAttentionState(s)||_sessionAttentionState({_child:true,attention:s._child_session_attention});
     const attentionClass=attention?(attention.kind==='approval'?' attention-approval':(attention.kind==='clarify'?' attention-clarify':' attention-attention')):'';
     const readOnly=_isReadOnlySession(s);
-    el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(isStreaming?' streaming':'')+(hasUnread?' unread':'')+(attention?' needs-attention':'')+attentionClass;
+    el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(ownStreaming?' streaming':'')+(hasUnread?' unread':'')+(attention?' needs-attention':'')+attentionClass;
     const swipeReturnOffset=_sessionSwipeReturnOffsets.get(s.session_id);
     if(swipeReturnOffset!==undefined){
       _sessionSwipeReturnOffsets.delete(s.session_id);
@@ -8026,8 +8282,6 @@ function renderSessionListFromCache(){
         row.title=t('session_lineage_segment_open');
         row.onclick=async(e)=>{
           e.stopPropagation();
-          // #5409: close mobile sidebar synchronously before navigation
-          if(typeof closeMobileSidebar==='function')closeMobileSidebar();
           await _openSidebarSession(seg, {skipLineageResolve:true});
         };
         lineageList.appendChild(row);
@@ -8040,8 +8294,6 @@ function renderSessionListFromCache(){
       ['pointerdown','pointerup','click','touchstart','touchmove','touchend','touchcancel'].forEach(ev=>childList.addEventListener(ev,e=>e.stopPropagation()));
       const sortedChildren=[...s._child_sessions].sort((a,b)=>_sessionTimestampMs(b)-_sessionTimestampMs(a));
       const openChildSession=async(childSession)=>{
-        // #5409: close mobile sidebar synchronously before navigation
-        if(typeof closeMobileSidebar==='function')closeMobileSidebar();
         await _openSidebarSession(childSession, {skipLineageResolve:true});
       };
       const childLabelFor=(child)=>{
@@ -8669,11 +8921,6 @@ function renderSessionListFromCache(){
         if(_renamingSid) return;
         try{
           if(($('sessionSearch').value||'').trim()) _hideSearchPreviewsAfterSelect=true;
-          // #5409: close mobile sidebar synchronously BEFORE awaiting _openSidebarSession
-          // so the user gets instant feedback that navigation is happening, even
-          // for large sessions where loadSession can take 3-15s (metadata fetch +
-          // message load + renderMessages DOM build on slow iOS WKWebView).
-          if(typeof closeMobileSidebar==='function')closeMobileSidebar();
           await _openSidebarSession(s);
         }finally{
           el.classList.remove('loading');
@@ -8887,6 +9134,7 @@ async function deleteSession(sid, beforeDelete=null){
     return false;
   }
   const response=deleteResult&&deleteResult.response;
+  const cleanupFailed=!!(response&&response.state_db_cleanup_failed);
   if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);
   if(!optimisticRendered){
     _pendingSessionReflowPositions=reflowPositions;
@@ -8910,10 +9158,11 @@ async function deleteSession(sid, beforeDelete=null){
       if(typeof syncAppTitlebar==='function') syncAppTitlebar();
     }
   }
-  showToast(_sessionResponseRetainsWorktree(response,session)?t('session_deleted_worktree'):t('session_deleted'));
+  if(cleanupFailed) showToast(t('delete_failed'),0,'error');
+  else showToast(_sessionResponseRetainsWorktree(response,session)?t('session_deleted_worktree'):t('session_deleted'));
   if(optimisticRendered) void renderSessionList().finally(()=>_optimisticallyRemovedSessionIds.delete(sid));
   else await renderSessionList();
-  return true;
+  return !cleanupFailed;
 }
 
 // ── Project helpers ─────────────────────────────────────────────────────

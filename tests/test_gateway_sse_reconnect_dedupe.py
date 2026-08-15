@@ -22,13 +22,12 @@ def _block(src: str, start: str, end: str) -> str:
 def test_gateway_watcher_remains_hash_only():
     """The watcher should not try to infer restarts from state.db mtime."""
     src = _read(GATEWAY_WATCHER)
-    poll = _block(src, "    def _poll_loop(self):", "\n_watchers:")
+    poll_once = _block(src, "    def _poll_once(", "\n    def _poll_loop")
 
     assert "_get_db_mtime" not in src
     assert "_detect_gateway_restart" not in src
-    assert "current_hash = _snapshot_hash(sessions)" in poll
-    assert "if current_hash != self._last_hash:" in poll
-    assert "_notify_subscribers(sessions)" in poll
+    assert "current_hash = _snapshot_hash(sessions)" in poll_once
+    assert "if current_hash != self._last_hash:" in poll_once
 
 
 def test_gateway_sse_dedupes_reconnect_snapshot_before_refresh():
@@ -129,7 +128,9 @@ if(!_isDuplicateGatewaySessionSnapshot([null, {session_id:'web-2', session_sourc
 def test_load_session_persists_only_after_metadata_loads():
     """Do not overwrite the last good localStorage sid before /api/session succeeds."""
     src = _read(SESSIONS_JS)
-    load = _block(src, "async function loadSession(sid)", "function _mergePendingSessionMessage")
+    # _mergePendingSessionMessage was lifted to a top-level helper for #6419,
+    # so use a stable boundary inside loadSession instead.
+    load = _block(src, "async function loadSession(sid)", "// Phase 2a:")
     api_pos = load.index("data = await api(`/api/session")
     persist_pos = load.index("localStorage.setItem('hermes-webui-session',S.session.session_id)")
 

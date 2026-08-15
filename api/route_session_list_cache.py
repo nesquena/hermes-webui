@@ -2,6 +2,7 @@
 
 import os
 import copy
+import re
 import threading
 import time
 from collections import OrderedDict
@@ -12,17 +13,26 @@ from api.models import _active_state_db_path, _active_stream_ids
 from api.profiles import _profiles_match
 
 
+# Cron session ids are ``cron_{job_id}_{run_timestamp}`` where the run
+# timestamp is ``YYYYMMDD_HHMMSS`` (e.g. cron_job6728_20260803_100000). Used to
+# validate that the text after a matched ``cron_{jid}_`` prefix is EXACTLY a run
+# timestamp, so a shorter job id (backup) cannot claim a longer job id's session
+# (backup_full) when the longer job is not itself running (#6728 gate fix).
+_CRON_RUN_TS_RE = re.compile(r"\d{8}_\d{6}")
+
+
 _SESSIONS_CACHE_TTL_SECONDS = 2.5
 # #4808: while a turn is actively streaming the frontend polls /api/sessions on a
-# fixed cadence (static/sessions.js `_streamingPollMs` = 5000ms). With the idle TTL
-# of 2.5s, every streaming poll lands in a fresh window and forces a full
-# all_sessions() rebuild on the hot path under the global store LOCK — pinning CPU
-# and starving token rendering on large stores (recurrence of #4672). Hold the
-# sidebar cache steady for longer than one poll interval while streaming; live
-# runtime state (active stream, sort order, pending flags) is overlaid on every
-# response regardless of cache, and structural/settings changes still evict
-# immediately via the source stamp.
-_SESSIONS_CACHE_STREAMING_TTL_SECONDS = 10.0
+# fixed cadence (static/sessions.js `_streamingPollMs`). With the idle TTL of
+# 2.5s, the entry expires between streaming polls, so each poll can find it stale
+# and force a full all_sessions() rebuild on the hot path under the global store
+# LOCK — pinning CPU and starving token rendering on large stores (recurrence of
+# #4672). Hold the sidebar cache steady for longer than one poll interval while
+# streaming; live runtime state (active stream, sort order, pending flags) is
+# overlaid on every response regardless of cache, and structural/settings changes
+# still invalidate immediately. Keep this strictly greater than
+# `_streamingPollMs`/1000 (see tests/test_streaming_cache_ttl_vs_poll.py).
+_SESSIONS_CACHE_STREAMING_TTL_SECONDS = 45.0
 _SESSIONS_CACHE_MAX_ENTRIES = 64
 _SESSIONS_CACHE_WAIT_SECONDS = 0.25
 _SESSIONS_CACHE_STALE_WAIT_SECONDS = 0.10
@@ -32,6 +42,41 @@ _SESSIONS_CACHE_INFLIGHT: dict[tuple, threading.Event] = {}
 _SESSIONS_CACHE_GLOBAL_INVALIDATION_VERSION = 0
 _SESSIONS_CACHE_ALL_PROFILES_INVALIDATION_VERSION = 0
 _SESSIONS_CACHE_PROFILE_INVALIDATION_VERSION: dict[str, int] = {}
+
+
+def get_session_list_cache_snapshot() -> dict[str, object]:
+    """Return scalar cache occupancy without waiting or changing LRU state.
+
+    Held-section discipline: between the nonblocking acquire and the release,
+    only ``len()`` and module-constant reads are permitted. Nothing that can
+    resolve config, resolve a profile, touch the filesystem, import a module, or
+    wait on another lock may be added here. ``_SESSIONS_CACHE_LOCK`` is an
+    ``RLock``, so a nonblocking acquire from a thread already holding it would
+    report available mid-mutation; the health collector is this helper's only
+    caller and never runs nested inside a cache rebuild.
+    """
+    result = {
+        "available": False,
+        "entries": 0,
+        "inflight_rebuilds": 0,
+        "cap": 0,
+    }
+    acquired = False
+    try:
+        acquired = _SESSIONS_CACHE_LOCK.acquire(blocking=False)
+        if not acquired:
+            return result
+        return {
+            "available": True,
+            "entries": max(0, int(len(_SESSIONS_CACHE))),
+            "inflight_rebuilds": max(0, int(len(_SESSIONS_CACHE_INFLIGHT))),
+            "cap": max(0, int(_SESSIONS_CACHE_MAX_ENTRIES)),
+        }
+    except Exception:
+        return result
+    finally:
+        if acquired:
+            _SESSIONS_CACHE_LOCK.release()
 
 
 def _session_list_cache_session_dir() -> Path:
@@ -97,6 +142,27 @@ def _session_list_cache_active_stream_ids():
     return _active_stream_ids()
 
 
+def _session_list_cache_running_cron_jobs() -> dict[str, float]:
+    """Return {job_id: start_epoch} for cron jobs currently tracked as running.
+
+    Cron liveness lives only in the in-memory ``_RUNNING_CRON_JOBS`` dict in
+    api.routes (#6728): the sidebar polls /api/sessions (not /api/crons/status),
+    so without this overlay a still-running cron job's session row looks
+    completed the moment it appends a message. Fail closed to an empty dict.
+    """
+    try:
+        import api.routes as _routes
+
+        jobs = getattr(_routes, "_RUNNING_CRON_JOBS", None)
+        lock = getattr(_routes, "_RUNNING_CRON_LOCK", None)
+        if jobs is None or lock is None:
+            return {}
+        with lock:
+            return dict(jobs)
+    except Exception:
+        return {}
+
+
 def _session_list_cache_resolved_source_stamp(key: tuple):
     try:
         import api.routes as _routes
@@ -126,6 +192,7 @@ def _session_list_cache_key(
     exclude_hidden: bool = False,
     visible_only: bool = False,
     show_webhook_sessions: bool = False,
+    show_kanban_sessions: bool = False,
     source_filter: str | None = None,
     sidebar_source: str | None = None,
     archived_limit: int | None = None,
@@ -151,6 +218,7 @@ def _session_list_cache_key(
         bool(exclude_hidden),
         bool(visible_only),
         bool(show_webhook_sessions),
+        bool(show_kanban_sessions),
         source_filter,
         sidebar_source,
         normalized_archived_limit,
@@ -176,7 +244,7 @@ def _session_list_cache_get(
             _SESSIONS_CACHE.pop(key, None)
             return None, False
         # #4808: widen the freshness window while a turn is streaming so the fixed
-        # 5s streaming poll cadence doesn't force a full rebuild on every poll.
+        # streaming poll cadence doesn't force a full rebuild on every poll.
         ttl = _SESSIONS_CACHE_TTL_SECONDS
         if _session_list_cache_streaming_freeze_marker() is not None:
             ttl = _SESSIONS_CACHE_STREAMING_TTL_SECONDS
@@ -423,6 +491,11 @@ def _session_list_cache_overlay_runtime_rows(rows: list[dict]) -> list[dict]:
         active_stream_ids = _session_list_cache_active_stream_ids()
     except Exception:
         active_stream_ids = set()
+    try:
+        running_cron_jobs = _session_list_cache_running_cron_jobs()
+    except Exception:
+        running_cron_jobs = {}
+    cron_job_prefixes = [(jid, f"cron_{jid}_", started_at) for jid, started_at in running_cron_jobs.items()]
     session_ids = [
         str(row.get("session_id") or "").strip()
         for row in rows
@@ -454,9 +527,48 @@ def _session_list_cache_overlay_runtime_rows(rows: list[dict]) -> list[dict]:
                     item[key] = raw_live_value
         stream_id = item.get("active_stream_id")
         item["is_streaming"] = bool(stream_id and stream_id in active_stream_ids)
+        # #6728: a still-running cron job's session row must not look completed
+        # in the sidebar. Cron liveness is only exposed via /api/crons/status,
+        # which the sidebar never polls — stamp the flag here so the client can
+        # defer its completion/unread transition until the job actually ends.
+        # Session ids are cron_{job_id}_{run_timestamp}: only the run started at
+        # (or after) the tracked start belongs to the live execution — older runs
+        # of the same job stay completed.
+        item["cron_running"] = _session_list_row_cron_running(
+            sid, item, cron_job_prefixes
+        )
         overlaid.append(item)
     overlaid.sort(key=_session_list_runtime_sort_key, reverse=True)
     return overlaid
+
+
+def _session_list_row_cron_running(
+    sid: str, row: dict, cron_job_prefixes: list[tuple[str, str, float]]
+) -> bool:
+    if not cron_job_prefixes or not sid:
+        return False
+    created_at = _session_list_row_numeric_value(row.get("created_at"))
+    # Longest prefix first, no fall-through: job ids may nest (backup vs
+    # backup_full), and the shorter prefix is a valid prefix of the longer one.
+    # A session belongs to the longest matching job id — first-match in
+    # insertion order, or falling through to a shorter prefix after a time-miss,
+    # would let a running shorter-prefix job claim a completed longer-prefix
+    # session. Mirrors the max(matches, key=len) convention in
+    # api.routes._latest_cron_session_info_for_jobs.
+    #
+    # #6728 (gate fix): prefixes are built ONLY from RUNNING jobs, so if the
+    # true longer owner (backup_full) is not running, longest-prefix sorting
+    # never sees it and a running `backup` would otherwise swallow a
+    # `cron_backup_full_YYYYMMDD_HHMMSS` session (the leftover `full_...` still
+    # starts with nothing it should match). Require the text AFTER the prefix to
+    # be exactly a run-timestamp (YYYYMMDD_HHMMSS) so a shorter job id cannot
+    # claim a longer job id's session regardless of which jobs are running.
+    for _jid, prefix, started_at in sorted(
+        cron_job_prefixes, key=lambda item: len(item[1]), reverse=True
+    ):
+        if sid.startswith(prefix) and _CRON_RUN_TS_RE.fullmatch(sid[len(prefix):]):
+            return created_at >= started_at
+    return False
 
 
 def _session_list_row_numeric_value(value) -> float:

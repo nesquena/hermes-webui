@@ -197,7 +197,11 @@ function _renderOnboardingApiKeyField(){
   const labelKey=keyOptional?'onboarding_api_key_label_optional':'onboarding_api_key_label';
   const placeholderKey=keyOptional?'onboarding_api_key_placeholder_optional':'onboarding_api_key_placeholder';
   const helpHtml=keyOptional?`<p class="onboarding-copy onboarding-api-key-help">${esc(t('onboarding_api_key_help_keyless')||'')}</p>`:'';
-  return `<label class="onboarding-field" id="onboardingApiKeyField"><span>${t(labelKey)}</span><input id="onboardingApiKeyInput" type="password" value="${esc(ONBOARDING.form.apiKey||'')}" placeholder="${t(placeholderKey)}" oninput="ONBOARDING.form.apiKey=this.value" onblur="_runOnboardingProbe()"></label>${helpHtml}`;
+  // The <form> owner is load-bearing, not decoration: an unowned password input
+  // makes Chromium treat the whole document as one synthetic password form and
+  // autofill the saved account name into the first text input it finds (the
+  // sidebar conversation filter). display:contents keeps the layout unchanged.
+  return `<form style="display:contents" autocomplete="off" onsubmit="return false"><label class="onboarding-field" id="onboardingApiKeyField"><span>${t(labelKey)}</span><input id="onboardingApiKeyInput" type="password" autocomplete="off" value="${esc(ONBOARDING.form.apiKey||'')}" placeholder="${t(placeholderKey)}" oninput="ONBOARDING.form.apiKey=this.value" onblur="_runOnboardingProbe()"></label></form>${helpHtml}`;
 }
 
 function _getOnboardingSelectedModel(){
@@ -392,11 +396,15 @@ function _renderOnboardingBody(){
 
   if(key==='password'){
     _setOnboardingNotice(settings.password_enabled?t('onboarding_notice_password_enabled'):t('onboarding_notice_password_recommended'), settings.password_enabled?'success':'info');
+    // See the api-key field above: the <form> owner keeps this password input from
+    // turning the whole document into one synthetic credential form.
     body.innerHTML=`
+      <form style="display:contents" autocomplete="off" onsubmit="return false">
       <label class="onboarding-field">
         <span>${t('onboarding_password_label')}</span>
-        <input id="onboardingPasswordInput" type="password" value="${esc(ONBOARDING.form.password||'')}" placeholder="${t('onboarding_password_placeholder')}" oninput="ONBOARDING.form.password=this.value">
+        <input id="onboardingPasswordInput" type="password" autocomplete="new-password" value="${esc(ONBOARDING.form.password||'')}" placeholder="${t('onboarding_password_placeholder')}" oninput="ONBOARDING.form.password=this.value">
       </label>
+      </form>
       <p class="onboarding-copy">${t('onboarding_password_help')}</p>`;
     return;
   }

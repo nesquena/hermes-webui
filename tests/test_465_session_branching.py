@@ -446,6 +446,144 @@ def test_branch_route_keeps_404_for_truly_missing_sessions(monkeypatch):
     assert cap["bad"] == ("Session not found", 404)
 
 
+def test_branch_route_slices_merged_display_view_not_raw_sidecar(monkeypatch):
+    """keep_count is an index into GET /api/session's merged display view.
+
+    Compression-lineage stitching and the state.db append-only merge can make
+    the display view diverge from the raw sidecar in BOTH length and content.
+    The branch handler must slice the same merged view the frontend indexed
+    into; slicing the raw sidecar landed the cut rows too early, so forks from
+    the final conclusion stopped mid tool-run and dropped that conclusion.
+    """
+    handler = _FakeHandler()
+    conclusion = {
+        "role": "assistant",
+        "content": "# CONCLUSION\n---\n> 🟢 final answer",
+        "timestamp": 6.0,
+    }
+    # Raw sidecar: 6 rows (a replayed/duplicated tool-run segment survived a
+    # compression continuation). The merged display view deduplicates one of
+    # those rows, so the frontend sees 5 rows ending on the conclusion.
+    raw_sidecar = [
+        {"role": "user", "content": "question", "timestamp": 1.0},
+        {"role": "assistant", "content": "checking", "tool_calls": [{"id": "t1", "name": "terminal", "arguments": {}}], "timestamp": 2.0},
+        {"role": "tool", "tool_call_id": "t1", "content": '{"output":"ok"}', "timestamp": 3.0},
+        {"role": "assistant", "content": "still checking", "tool_calls": [{"id": "t2", "name": "terminal", "arguments": {}}], "timestamp": 4.0},
+        {"role": "tool", "tool_call_id": "t2", "content": '{"output":"ok2"}', "timestamp": 5.0},
+        conclusion,
+    ]
+    merged_view = [
+        raw_sidecar[0],
+        raw_sidecar[1],
+        raw_sidecar[2],
+        raw_sidecar[3],
+        conclusion,
+    ]
+    # Frontend clicked fork on the conclusion: index 4 in the merged view.
+    keep_count = len(merged_view)
+
+    source = routes.Session(
+        session_id="src-merged-1",
+        title="Merged source",
+        workspace=".",
+        model="claude-sonnet",
+        messages=list(raw_sidecar),
+        context_messages=[],
+    )
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(
+        routes,
+        "read_body",
+        lambda _handler: {"session_id": "src-merged-1", "keep_count": keep_count},
+    )
+    monkeypatch.setattr(routes, "get_session", lambda _sid, metadata_only=False: source)
+    monkeypatch.setattr(routes, "_session_requires_cli_metadata_lookup", lambda _s: False)
+    monkeypatch.setattr(routes, "_is_messaging_session_record", lambda _s: False)
+    monkeypatch.setattr(
+        routes,
+        "_webui_sidecar_lineage_messages_for_display",
+        lambda _s: list(raw_sidecar),
+    )
+    monkeypatch.setattr(routes, "get_state_db_session_messages", lambda *a, **k: [])
+    monkeypatch.setattr(
+        routes,
+        "merge_session_messages_append_only",
+        lambda side, state, **k: list(merged_view),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_merged_webui_lineage_messages_for_display",
+        lambda _s, messages=None: list(messages if messages is not None else []),
+    )
+    monkeypatch.setattr(routes, "_evict_sessions_over_cap", lambda: None)
+    monkeypatch.setattr(routes, "publish_session_list_changed", lambda *a, **k: None)
+    monkeypatch.setattr(routes.Session, "save", lambda self: None)
+    cap = _capture_route(monkeypatch)
+    routes.handle_post(handler, urlparse("/api/session/branch"))
+    assert "bad" not in cap
+    assert cap["status"] == 200
+    forked = routes.SESSIONS[cap["ok"]["session_id"]]
+    assert len(forked.messages) == keep_count
+    assert forked.messages[-1]["role"] == "assistant"
+    assert forked.messages[-1]["content"].startswith("# CONCLUSION"), (
+        "Fork sliced the raw sidecar instead of the merged display view: "
+        "the final conclusion is missing and the transcript ends mid tool-run"
+    )
+    routes.SESSIONS.pop(cap["ok"]["session_id"], None)
+
+
+def test_branch_route_uses_get_display_backstop_for_large_state_db(monkeypatch):
+    """Branch coordinates must use GET's bounded state.db display reader."""
+    source = routes.Session(session_id="src-large", workspace=".", messages=[])
+    seen = {}
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"session_id": source.session_id})
+    monkeypatch.setattr(routes, "get_session", lambda *_a, **_k: source)
+    monkeypatch.setattr(routes, "_session_requires_cli_metadata_lookup", lambda _s: False)
+    monkeypatch.setattr(routes, "_is_messaging_session_record", lambda _s: False)
+    monkeypatch.setattr(routes, "_webui_sidecar_lineage_messages_for_display", lambda _s: [])
+    monkeypatch.setattr(routes, "_state_db_backstop_limit_for_display", lambda _s, before: 50000)
+    def _state_rows(*_a, **kwargs):
+        seen.update(kwargs)
+        return [{"role": "assistant", "content": "displayed conclusion"}]
+    monkeypatch.setattr(routes, "get_state_db_session_messages", _state_rows)
+    monkeypatch.setattr(routes, "merge_session_messages_append_only", lambda _side, state, **_k: state)
+    monkeypatch.setattr(routes, "_merged_webui_lineage_messages_for_display", lambda _s, messages: messages)
+    monkeypatch.setattr(routes, "_evict_sessions_over_cap", lambda: None)
+    monkeypatch.setattr(routes, "publish_session_list_changed", lambda *_a, **_k: None)
+    monkeypatch.setattr(routes.Session, "save", lambda self: None)
+    cap = _capture_route(monkeypatch)
+    routes.handle_post(_FakeHandler(), urlparse("/api/session/branch"))
+    assert cap["status"] == 200
+    assert seen["limit"] == 50000
+    routes.SESSIONS.pop(cap["ok"]["session_id"], None)
+
+
+def test_branch_route_messaging_empty_cli_does_not_copy_hidden_state_db(monkeypatch):
+    """Messaging-empty forks must not include state.db rows GET never displayed."""
+    conclusion = {"role": "assistant", "content": "displayed conclusion"}
+    source = routes.Session(session_id="src-msg-empty", workspace=".", messages=[conclusion])
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"session_id": source.session_id, "keep_count": 1})
+    monkeypatch.setattr(routes, "get_session", lambda *_a, **_k: source)
+    monkeypatch.setattr(routes, "_session_requires_cli_metadata_lookup", lambda _s: False)
+    monkeypatch.setattr(routes, "_is_messaging_session_record", lambda _s: True)
+    monkeypatch.setattr(routes, "get_cli_session_messages", lambda _sid: [])
+    monkeypatch.setattr(routes, "_webui_sidecar_lineage_messages_for_display", lambda _s: [conclusion])
+    monkeypatch.setattr(routes, "get_state_db_session_messages", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("hidden state.db read")))
+    monkeypatch.setattr(routes, "merge_session_messages_append_only", lambda side, state, **_k: side + state)
+    monkeypatch.setattr(routes, "_merged_webui_lineage_messages_for_display", lambda _s, messages: messages)
+    monkeypatch.setattr(routes, "_evict_sessions_over_cap", lambda: None)
+    monkeypatch.setattr(routes, "publish_session_list_changed", lambda *_a, **_k: None)
+    monkeypatch.setattr(routes.Session, "save", lambda self: None)
+    cap = _capture_route(monkeypatch)
+    routes.handle_post(_FakeHandler(), urlparse("/api/session/branch"))
+    assert cap["status"] == 200
+    forked = routes.SESSIONS[cap["ok"]["session_id"]]
+    assert forked.messages == [conclusion]
+    routes.SESSIONS.pop(cap["ok"]["session_id"], None)
+
+
 # ── Session model ──────────────────────────────────────────────────────────────
 
 def test_session_model_parent_session_id():

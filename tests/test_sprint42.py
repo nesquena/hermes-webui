@@ -71,6 +71,15 @@ class TestSessionDBInjection(unittest.TestCase):
             "SessionDB init helper must use try/except for non-fatal error handling",
         )
 
+    def test_sessiondb_retry_only_targets_transient_sqlite_errors(self):
+        """Permanent constructor errors must leave the retry loop immediately."""
+        helper_start = STREAMING_PY.find("def _build_session_db_for_stream")
+        helper_end = STREAMING_PY.find("\n\ndef _attempt_credential_self_heal", helper_start)
+        helper_src = STREAMING_PY[helper_start:helper_end]
+        self.assertIn("except sqlite3.OperationalError as _db_err", helper_src)
+        self.assertIn('"locked" in _db_err_text or "busy" in _db_err_text', helper_src)
+        self.assertIn("raise _last_error or RuntimeError", helper_src)
+
     def test_sessiondb_failure_logs_warning(self):
         """A failure initializing SessionDB must print a WARNING (not silently drop the error)."""
         self.assertIn(
@@ -804,9 +813,9 @@ def test_streaming_restores_prior_reasoning_metadata_after_followup():
     src = (REPO / 'api' / 'streaming.py').read_text(encoding="utf-8")
     assert "def _restore_reasoning_metadata(" in src, \
         "streaming.py must define a helper to restore prior reasoning metadata"
-    assert "_next_context_messages" in src and "s.context_messages" in src, \
+    assert "next_context_messages" in src and "_deduplicate_context_messages(next_context_messages)" in src, \
         "streaming.py must restore prior reasoning metadata into model context"
-    assert "s.messages = _merge_display_messages_after_agent_result(" in src, \
+    assert "session.messages = _merge_display_messages_after_agent_result(" in src, \
         "streaming.py must merge restored result messages into the visible transcript"
     assert "updated_messages.insert(safe_pos, copy.deepcopy(prev_msg))" in src, \
         "streaming.py must reinsert dropped reasoning-only assistant messages"
