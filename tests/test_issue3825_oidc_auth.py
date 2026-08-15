@@ -254,6 +254,28 @@ def test_login_page_renders_absolute_oidc_href_when_enabled(monkeypatch):
     assert 'href="/api/auth/oidc/start?next=/workspace/demo"' in captured["body"]
 
 
+def test_login_page_hides_password_controls_when_only_oidc_is_enabled(monkeypatch):
+    import api.routes as routes
+
+    captured = {}
+    monkeypatch.setattr("api.auth_oidc.is_oidc_enabled", lambda: True)
+    monkeypatch.setattr("api.auth.get_password_hash", lambda: None)
+    monkeypatch.setattr(
+        routes,
+        "t",
+        lambda _handler, body, *, content_type=None, **_kwargs: captured.update(
+            {"body": body, "content_type": content_type}
+        ) or True,
+    )
+
+    handler = RouteFakeHandler()
+    routes.handle_get(handler, SimpleNamespace(path="/login", query=""))
+
+    assert 'id="oidc-login"' in captured["body"]
+    assert 'id="pw"' not in captured["body"]
+    assert 'Enter your password to continue' not in captured["body"]
+
+
 def test_oidc_enablement_requires_explicit_allowlist(monkeypatch):
     import api.auth_oidc as auth_oidc
 
