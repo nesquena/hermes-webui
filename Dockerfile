@@ -52,7 +52,7 @@ RUN apt-get update \
     && echo "${SQLITE_SHA256}  sqlite.tar.gz" | sha256sum -c - \
     && tar xzf sqlite.tar.gz \
     && cd "sqlite-autoconf-${SQLITE_VERSION}" \
-    && ./configure --prefix=/usr/local --disable-static --disable-readline \
+    && CPPFLAGS="-DSQLITE_SECURE_DELETE" ./configure --prefix=/usr/local --disable-static --disable-readline \
        --enable-fts5 --enable-fts4 --enable-rtree \
     && make -j"$(nproc)" \
     && make install \
@@ -67,6 +67,8 @@ v = sqlite3.sqlite_version; \
 assert tuple(int(x) for x in v.split('.')) >= (3, 51, 3), \
     f'SQLite {v} still vulnerable'; \
 c = sqlite3.connect(':memory:'); \
+assert c.execute('PRAGMA secure_delete').fetchone()[0] == 1, \
+    'SQLITE_SECURE_DELETE not compiled in (deleted rows would remain recoverable)'; \
 c.execute('CREATE VIRTUAL TABLE _fts5_build_check USING fts5(x)'); \
 c.execute('DROP TABLE _fts5_build_check'); \
 c.close()"
