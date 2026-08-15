@@ -14411,6 +14411,12 @@ def handle_get(handler, parsed) -> bool:
         else:
             _password_form_html = ""
         version_token = quote(WEBUI_VERSION, safe="")
+        password_login_html = _password_login_html(_login_strings)
+        login_subtitle_html = (
+            f'<p class="sub">{_html.escape(_login_strings["subtitle"])}</p>'
+            if password_login_html
+            else ""
+        )
         _page = (
             _LOGIN_PAGE_HTML.replace("{{BOT_NAME}}", _bn)
             .replace("{{BOT_NAME_INITIAL}}", _bn[0].upper())
@@ -14419,11 +14425,7 @@ def handle_get(handler, parsed) -> bool:
             .replace("{{LOGIN_TITLE}}", _html.escape(_login_strings["title"]))
             .replace(
                 "{{LOGIN_SUBTITLE_HTML}}",
-                (
-                    f'<p class="sub">{_html.escape(_login_strings["subtitle"])}</p>'
-                    if is_password_auth_enabled()
-                    else ""
-                ),
+                login_subtitle_html,
             )
             .replace("{{PASSWORD_FORM_HTML}}", _password_form_html)
             .replace("{{LOGIN_INVALID_PW}}", _html.escape(_login_strings["invalid_pw"]))
