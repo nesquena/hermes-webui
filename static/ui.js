@@ -9239,8 +9239,10 @@ function _chatTodosReadPref(){
 }
 function _chatTodosWritePref(v){
   try{
-    if(v)localStorage.setItem(CHAT_TODOS_LS_KEY,'1');
-    else localStorage.removeItem(CHAT_TODOS_LS_KEY);
+    // Persist both states explicitly ('1' enabled / '0' disabled). Removing the
+    // key on false would collide with first-use default (null => enabled) and
+    // make a user's choice to disable the tray vanish on reload.
+    localStorage.setItem(CHAT_TODOS_LS_KEY,v?'1':'0');
   }catch(_){}
 }
 function chatTodosEnabled(){

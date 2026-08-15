@@ -102,3 +102,17 @@ def test_chat_todos_pref_defaults_to_enabled():
 
     assert "if(v===null) return true;" in pref  # default: enabled
     assert "v==='1'" in pref
+
+
+def test_chat_todos_pref_persists_explicit_disabled():
+    # Review blocker: toggling OFF then reloading must stay OFF. The writer must
+    # store an explicit '0' instead of removing the key (which would collide
+    # with the null => enabled first-use default).
+    ui = _read_static("static/ui.js")
+    start = ui.find("function _chatTodosWritePref")
+    end = ui.find("function chatTodosEnabled()", start)
+    assert start != -1 and end != -1
+    writer = ui[start:end]
+
+    assert "localStorage.setItem(CHAT_TODOS_LS_KEY,v?'1':'0')" in writer
+    assert "removeItem(CHAT_TODOS_LS_KEY)" not in writer
