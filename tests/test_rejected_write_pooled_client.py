@@ -256,15 +256,89 @@ def test_blank_framing_upload_closes_and_cannot_poison_the_socket(path, framing,
     _assert_single_closed_response(answered, status, _MULTIPART_PAYLOAD)
 
 
+# ── Framing only `int()` reads as zero ────────────────────────────────────────
+#
+# RFC 9110 is `Content-Length = 1*DIGIT`; `int()` also takes a sign, PEP 515
+# underscores and non-ASCII whitespace padding, so each value below parsed to an
+# honest `0`, took the "every declared length agrees on zero" keep-alive branch
+# and left the payload queued. Reproduced live on the otherwise-fixed head:
+#   sidecar GET -> 403 (no Connection: close), then
+#                  400 Bad request syntax ('{"stale": true}GET /api/health/agent HTTP/1.1')
+#   /api/upload -> 400, then 400 Bad request syntax ('--x')
+# `Transfer-Encoding: \xa0identity` is the same mistake one header over: strip()
+# erased the U+00A0 and it read back as the `identity` token. Everything here is
+# wire-reachable -- a request line decodes as latin-1, so U+00A0 and U+0085 pass
+# through untouched (a non-ASCII DIGIT such as U+0660 cannot, which is why that
+# family is pinned at the helper level in test_rejected_write_connection_close.py).
+
+_MALFORMED_ZERO_FRAMING_LINES = [
+    b"Content-Length: +0\r\n",
+    b"Content-Length: -0\r\n",
+    b"Content-Length: 0_0\r\n",
+    b"Content-Length: +00\r\n",
+    b"Content-Length: 0_0_0\r\n",
+    b"Content-Length: \xa00\r\n",
+    b"Content-Length: 0\x85\r\n",
+    b"Content-Length: 0\r\nContent-Length: +0\r\n",
+    b"Transfer-Encoding: \xa0identity\r\n",
+]
+
+
+@pytest.mark.parametrize("framing", _MALFORMED_ZERO_FRAMING_LINES)
+def test_malformed_zero_framing_sidecar_get_closes_and_cannot_poison_the_socket(framing):
+    answered = _pipelined_after(
+        b"GET /api/extensions/probe/sidecar/ping HTTP/1.1\r\n"
+        b"Host: 127.0.0.1\r\n"
+        b"Content-Type: application/json\r\n" + framing + b"\r\n" + _BODY
+    )
+
+    _assert_single_closed_response(answered, b"403", _BODY)
+
+
+@pytest.mark.parametrize("path", _MULTIPART_UPLOAD_PATHS)
+@pytest.mark.parametrize(
+    ("framing", "status"),
+    [
+        (b"Content-Length: +0\r\n", b"400"),
+        (b"Content-Length: 0_0\r\n", b"400"),
+        (b"Content-Length: \xa00\r\n", b"400"),
+        (b"Transfer-Encoding: \xa0identity\r\n", b"411"),
+    ],
+    ids=["sign", "underscore", "nbsp-padded", "nbsp-padded-identity"],
+)
+def test_malformed_zero_framing_upload_closes_and_cannot_poison_the_socket(path, framing, status):
+    answered = _pipelined_after(
+        f"POST {path} HTTP/1.1\r\n"
+        "Host: 127.0.0.1\r\n"
+        "Content-Type: multipart/form-data; boundary=x\r\n".encode()
+        + framing
+        + b"\r\n"
+        + _MULTIPART_PAYLOAD
+    )
+
+    _assert_single_closed_response(answered, status, _MULTIPART_PAYLOAD)
+
+
 @pytest.mark.parametrize(
     "framing",
     [
         b"",
         b"Content-Length: 0\r\n",
+        b"Content-Length: 00\r\n",
+        b"Content-Length:  0 \r\n",
         b"Content-Length: 0\r\nContent-Length: 0\r\n",
         b"Transfer-Encoding: identity\r\n",
+        b"Transfer-Encoding: IDENTITY \r\n",
     ],
-    ids=["no-length", "zero-length", "two-agreeing-zeroes", "identity"],
+    ids=[
+        "no-length",
+        "zero-length",
+        "double-zero-length",
+        "ows-padded-zero",
+        "two-agreeing-zeroes",
+        "identity",
+        "identity-cased-and-padded",
+    ],
 )
 def test_bodyless_framing_keeps_the_pooled_socket_alive(framing):
     """The over-close half of the contract, on the wire.
