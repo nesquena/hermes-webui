@@ -12284,6 +12284,12 @@ def handle_get(handler, parsed) -> bool:
         from urllib.parse import quote
         from api.updates import WEBUI_VERSION
         version_token = quote(WEBUI_VERSION, safe="")
+        password_login_html = _password_login_html(_login_strings)
+        login_subtitle_html = (
+            f'<p class="sub">{_html.escape(_login_strings["subtitle"])}</p>'
+            if password_login_html
+            else ""
+        )
         _page = (
             _LOGIN_PAGE_HTML.replace("{{BOT_NAME}}", _bn)
             .replace("{{BOT_NAME_INITIAL}}", _bn[0].upper())
@@ -12292,13 +12298,9 @@ def handle_get(handler, parsed) -> bool:
             .replace("{{LOGIN_TITLE}}", _html.escape(_login_strings["title"]))
             .replace(
                 "{{LOGIN_SUBTITLE_HTML}}",
-                (
-                    f'<p class="sub">{_html.escape(_login_strings["subtitle"])}</p>'
-                    if _password_login_html(_login_strings)
-                    else ""
-                ),
+                login_subtitle_html,
             )
-            .replace("{{PASSWORD_LOGIN_HTML}}", _password_login_html(_login_strings))
+            .replace("{{PASSWORD_LOGIN_HTML}}", password_login_html)
             .replace("{{LOGIN_INVALID_PW}}", _html.escape(_login_strings["invalid_pw"]))
             .replace(
                 "{{LOGIN_CONN_FAILED}}", _html.escape(_login_strings["conn_failed"])
