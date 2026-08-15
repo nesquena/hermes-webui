@@ -1882,6 +1882,7 @@ class Session:
             else uuid.uuid4().hex
         )
         self._sidecar_revision_v1 = None
+        self._sidecar_revision_session_id_v1 = None
 
     @property
     def path(self):
@@ -1939,11 +1940,25 @@ class Session:
                 return
         durable_revision = _read_sidecar_revision(self.path)
         expected_revision = getattr(self, '_sidecar_revision_v1', None)
-        if durable_revision != expected_revision:
+        expected_revision_sid = getattr(
+            self,
+            '_sidecar_revision_session_id_v1',
+            None,
+        )
+        if (
+            expected_revision_sid == self.session_id
+            and durable_revision != expected_revision
+        ):
             raise RuntimeError(
                 f'stale sidecar revision for session {self.session_id!r}; '
                 'reload before saving'
             )
+        if expected_revision_sid != self.session_id:
+            durable_epoch = durable_revision[1] if durable_revision else None
+            if durable_epoch is not None:
+                self._sidecar_epoch_v1 = durable_epoch
+            elif expected_revision_sid is not None:
+                self._sidecar_epoch_v1 = uuid.uuid4().hex
         persisted_generation = durable_revision[0] if durable_revision else 0
         output_generation = persisted_generation + 1
         source_mode = (
@@ -2076,6 +2091,7 @@ class Session:
             self._sidecar_epoch_v1,
             _sidecar_content_digest(self.path),
         )
+        self._sidecar_revision_session_id_v1 = self.session_id
         if not skip_index:
             _write_session_index(updates=[self])
 
@@ -2138,6 +2154,7 @@ class Session:
             loaded_epoch,
             hashlib.sha256(source_bytes).hexdigest(),
         )
+        session._sidecar_revision_session_id_v1 = session.session_id
         session._replay_repair_deferred = bool(
             not inline_repair
             and (
@@ -4527,6 +4544,16 @@ def _sync_sidecar_from_state_db_if_newer(session) -> bool:
 
         # Durable write succeeded — reflect the reconciled state on the caller's
         # shared/cached object so the in-flight read returns the recovered data.
+        # This is an authoritative in-place refresh, so transfer the exact CAS
+        # observation made by the locked writer as well as its public fields.
+        # Otherwise the caller would carry the new transcript with the old byte
+        # revision and its next legitimate save would be rejected as stale.
+        session._sidecar_generation_v1 = locked._sidecar_generation_v1
+        session._sidecar_epoch_v1 = locked._sidecar_epoch_v1
+        session._sidecar_revision_v1 = locked._sidecar_revision_v1
+        session._sidecar_revision_session_id_v1 = (
+            locked._sidecar_revision_session_id_v1
+        )
         session.messages = merged_messages
         session.context_messages = merged_context
         session.active_stream_id = None

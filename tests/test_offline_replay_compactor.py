@@ -618,6 +618,54 @@ def test_runtime_save_preserves_and_advances_sidecar_generation(tmp_path, monkey
     assert persisted["_sidecar_generation_v1"] == 8
 
 
+def test_fresh_runtime_writer_adopts_existing_sidecar_revision(tmp_path, monkeypatch):
+    from api import models
+
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    original = models.Session(session_id="fresh-writer")
+    original.messages = [{"role": "user", "content": "original"}]
+    original.save(skip_index=True)
+    original_payload = json.loads(original.path.read_text(encoding="utf-8"))
+
+    replacement = models.Session(
+        session_id="fresh-writer",
+        title="replacement",
+        messages=[{"role": "user", "content": "replacement"}],
+    )
+    assert replacement._sidecar_revision_v1 is None
+
+    replacement.save(skip_index=True)
+
+    persisted = json.loads(replacement.path.read_text(encoding="utf-8"))
+    assert persisted["title"] == "replacement"
+    assert persisted["messages"] == replacement.messages
+    assert persisted["_sidecar_generation_v1"] == 2
+    assert persisted["_sidecar_epoch_v1"] == original_payload["_sidecar_epoch_v1"]
+
+
+def test_sidecar_revision_is_scoped_to_the_observed_session_id(tmp_path, monkeypatch):
+    from api import models
+
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    session = models.Session(session_id="rotation-source")
+    session.messages = [{"role": "user", "content": "keep"}]
+    session.save(skip_index=True)
+    source_epoch = json.loads(session.path.read_text(encoding="utf-8"))[
+        "_sidecar_epoch_v1"
+    ]
+
+    session.session_id = "rotation-continuation"
+    session.save(skip_index=True)
+
+    continuation = json.loads(session.path.read_text(encoding="utf-8"))
+    assert continuation["session_id"] == "rotation-continuation"
+    assert continuation["messages"] == session.messages
+    assert continuation["_sidecar_generation_v1"] == 1
+    assert continuation["_sidecar_epoch_v1"] != source_epoch
+
+
 def test_runtime_save_rejects_owner_loaded_before_offline_compaction(
     tmp_path,
     monkeypatch,

@@ -252,11 +252,16 @@ Every normal save, compact, and restore advances `_sidecar_generation_v1` from
 the durable value observed under that lock. New sidecars receive a durable
 `_sidecar_epoch_v1`, and the first mutating compaction bootstraps one for a
 legacy sidecar; restore retains that epoch. A loaded mutable `Session` records
-epoch, generation, and the digest of the exact bytes read; save compares that
-complete revision under the lock and records the digest of the bytes actually
-published, including platform newline behavior. It fails stale instead of
-republishing history loaded before maintenance. The epoch changes on
-delete/recreate, preventing generation-counter ABA.
+epoch, generation, the digest of the exact bytes read, and the session ID that
+owns that observation; save compares that complete revision under the lock and
+records the digest of the bytes actually published, including platform newline
+behavior. It fails stale instead of republishing history loaded before
+maintenance. A freshly constructed replacement has no prior observation: its
+first save adopts an existing target epoch under the lock, while a session-ID
+rotation with no target sidecar starts a new epoch. Any authoritative in-place
+refresh that copies newer durable state also transfers the matching revision.
+After that first save or refresh, the object is revision-bound again. The epoch
+changes on delete/recreate, preventing generation-counter ABA.
 
 The command remains strictly offline: always drain and stop every WebUI process
 before running it, then restart from fresh durable state after maintenance,
