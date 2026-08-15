@@ -238,6 +238,136 @@ def test_existing_deleted_session_tombstone_retries_directory_fsync(
     assert fsynced == [session_dir]
 
 
+def test_sidecar_delete_fails_closed_when_current_tombstone_cannot_be_verified(
+    tmp_path,
+    monkeypatch,
+):
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    sid = "unverifiable-current-tombstone"
+    session = models.Session(
+        session_id=sid,
+        messages=[{"role": "user", "content": "must remain durable"}],
+    )
+    session.save(skip_index=True)
+    artifacts, _unrelated = _seed_sidecar_delete_artifacts(session.path)
+    real_load = models._load_webui_deleted_session_tombstone
+    load_count = 0
+
+    def hide_current_sid_on_verification():
+        nonlocal load_count
+        load_count += 1
+        retained = real_load()
+        if load_count > 1:
+            return frozenset(candidate for candidate in retained if candidate != sid)
+        return retained
+
+    monkeypatch.setattr(
+        models,
+        "_load_webui_deleted_session_tombstone",
+        hide_current_sid_on_verification,
+    )
+
+    with models._session_sidecar_authority(sid):
+        with pytest.raises(models.SessionDeleteTombstoneError):
+            models._delete_session_sidecar_artifacts_locked(sid)
+
+    assert load_count == 2
+    assert all(artifact.exists() for artifact in artifacts)
+
+
+def test_import_clear_cannot_race_tombstone_verification_and_delete(
+    tmp_path,
+    monkeypatch,
+):
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    sid = "import-delete-race"
+    seed = models.Session(
+        session_id=sid,
+        messages=[{"role": "user", "content": "before delete"}],
+    )
+    seed.save(skip_index=True)
+
+    recorded = threading.Event()
+    allow_delete = threading.Event()
+    import_ready_to_save = threading.Event()
+    allow_import_save = threading.Event()
+    errors: queue.Queue[BaseException] = queue.Queue()
+    delete_result: list[bool] = []
+    imported: list[models.Session] = []
+
+    real_record = models._record_webui_deleted_session_tombstone
+    real_save = models.Session.save
+
+    def record_then_pause(target_sid):
+        real_record(target_sid)
+        recorded.set()
+        assert allow_delete.wait(timeout=5)
+
+    def save_after_delete(self, *args, **kwargs):
+        import_ready_to_save.set()
+        assert allow_import_save.wait(timeout=5)
+        return real_save(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        models,
+        "_record_webui_deleted_session_tombstone",
+        record_then_pause,
+    )
+    monkeypatch.setattr(models.Session, "save", save_after_delete)
+
+    def delete_worker():
+        try:
+            with models._session_sidecar_authority(sid):
+                delete_result.append(
+                    models._delete_session_sidecar_artifacts_locked(sid)
+                )
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.put(exc)
+
+    def import_worker():
+        try:
+            imported.append(
+                models.import_cli_session(
+                    sid,
+                    "Imported",
+                    [{"role": "user", "content": "after delete"}],
+                )
+            )
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.put(exc)
+
+    delete_thread = threading.Thread(target=delete_worker, name="delete-worker")
+    import_thread = threading.Thread(target=import_worker, name="import-worker")
+    delete_thread.start()
+    assert recorded.wait(timeout=5)
+    import_thread.start()
+    assert import_ready_to_save.wait(timeout=5)
+
+    allow_delete.set()
+    delete_thread.join(timeout=5)
+    try:
+        assert not delete_thread.is_alive()
+        assert errors.empty(), list(errors.queue)
+        assert delete_result == [True]
+        assert sid in models._load_webui_deleted_session_tombstone()
+        assert not (session_dir / f"{sid}.json").exists()
+    finally:
+        allow_import_save.set()
+        import_thread.join(timeout=5)
+
+    assert not import_thread.is_alive()
+    assert errors.empty(), list(errors.queue)
+    assert len(imported) == 1
+    assert (session_dir / f"{sid}.json").exists()
+    assert sid not in models._load_webui_deleted_session_tombstone()
+
+
 def test_hidden_background_cleanup_uses_agent_and_sidecar_authorities(
     tmp_path,
     monkeypatch,

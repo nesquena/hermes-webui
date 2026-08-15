@@ -1324,12 +1324,32 @@ def _load_webui_deleted_session_tombstone() -> frozenset[str]:
     )
 
 
-def _save_webui_deleted_session_tombstone(ids) -> None:
+def _save_webui_deleted_session_tombstone(
+    ids,
+    *,
+    required_sid: str | None = None,
+) -> None:
     sorted_ids = sorted(set(
         str(sid).strip() for sid in (ids or []) if str(sid or "").strip()
     ))
+    required_sid = str(required_sid or "").strip()
+    if required_sid and required_sid not in sorted_ids:
+        raise ValueError("required deleted-session tombstone SID is missing")
     if len(sorted_ids) > WEBUI_DELETED_SESSION_TOMBSTONE_CAP:
-        sorted_ids = sorted_ids[-WEBUI_DELETED_SESSION_TOMBSTONE_CAP:]
+        if required_sid:
+            if WEBUI_DELETED_SESSION_TOMBSTONE_CAP < 1:
+                raise RuntimeError("deleted-session tombstone cannot retain required SID")
+            other_ids = [candidate for candidate in sorted_ids if candidate != required_sid]
+            retained_other_count = WEBUI_DELETED_SESSION_TOMBSTONE_CAP - 1
+            sorted_ids = (
+                other_ids[-retained_other_count:]
+                if retained_other_count
+                else []
+            )
+            sorted_ids.append(required_sid)
+            sorted_ids.sort()
+        else:
+            sorted_ids = sorted_ids[-WEBUI_DELETED_SESSION_TOMBSTONE_CAP:]
     payload = {
         "version": WEBUI_DELETED_SESSION_TOMBSTONE_VERSION,
         "ids": sorted_ids,
@@ -1365,9 +1385,13 @@ def _record_webui_deleted_session_tombstone(sid: str) -> None:
         current = set(_load_webui_deleted_session_tombstone())
         if sid in current:
             _fsync_sidecar_directory(SESSION_DIR)
-            return
-        current.add(sid)
-        _save_webui_deleted_session_tombstone(current)
+        else:
+            current.add(sid)
+            _save_webui_deleted_session_tombstone(current, required_sid=sid)
+        if sid not in _load_webui_deleted_session_tombstone():
+            raise RuntimeError(
+                f"Deleted-session tombstone did not retain current SID {sid!r}"
+            )
 
 
 def _clear_webui_deleted_session_tombstone(sid: str) -> None:
@@ -5986,14 +6010,11 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
         worktree_created_at=wt.get('created_at') if wt else None,
         enabled_toolsets=enabled_toolsets,
     )
-    # #4985: defensive — auto-generated uuids don't collide with the
-    # tombstone, but if a future caller ever passes an explicit id that
-    # was previously pruned, clear the entry so the new session isn't
-    # shadowed on the next poll. Wrapped because a tombstone failure
-    # must never block new-session creation.
+    # #4985: clear the zero-message orphan tombstone defensively. The deleted-
+    # session tombstone is cleared only by a successful ``Session.save`` while
+    # the per-SID authority is held, so it cannot race a verified delete.
     try:
         _clear_webui_zero_message_orphan_tombstone(s.session_id)
-        _clear_webui_deleted_session_tombstone(s.session_id)
     except Exception:
         logger.debug(
             "Failed to clear webui tombstone for %s",
@@ -7690,13 +7711,11 @@ def import_cli_session(
         parent_session_id=parent_session_id,
     )
     # #4985: import_cli_session uses an explicit sid (the CLI sidecar's id).
-    # If that sid was previously tombstoned as a webui zero-message orphan,
-    # clear the tombstone entry so the freshly-imported session is visible
-    # on the next poll. Wrapped because a tombstone failure must never block
-    # an import.
+    # Clear only the zero-message orphan tombstone here. The deleted-session
+    # tombstone is cleared by ``Session.save`` after durable publication while
+    # the per-SID authority is held, so it cannot race a verified delete.
     try:
         _clear_webui_zero_message_orphan_tombstone(s.session_id)
-        _clear_webui_deleted_session_tombstone(s.session_id)
     except Exception:
         logger.debug(
             "Failed to clear webui tombstone for %s",

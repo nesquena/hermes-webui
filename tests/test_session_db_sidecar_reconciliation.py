@@ -227,6 +227,47 @@ def test_hidden_background_cleanup_cannot_be_recreated_from_state_db(
     assert sid in models._load_webui_deleted_session_tombstone()
 
 
+def test_delete_at_tombstone_cap_retains_current_sid_and_blocks_state_db_recovery(
+    tmp_path,
+    monkeypatch,
+):
+    from api import models
+
+    state_db = tmp_path / "state.db"
+    sid = _make_state_db(
+        state_db,
+        sid="a-target-deleted-session",
+        messages=1,
+    )
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    models._save_webui_deleted_session_tombstone(
+        {f"z-{index:04d}" for index in range(models.WEBUI_DELETED_SESSION_TOMBSTONE_CAP)}
+    )
+    session = models.Session(
+        session_id=sid,
+        messages=[{"role": "user", "content": "deleted but retained in state.db"}],
+    )
+    session.save(skip_index=True)
+
+    with models._session_sidecar_authority(sid):
+        deleted = models._delete_session_sidecar_artifacts_locked(sid)
+
+    retained = models._load_webui_deleted_session_tombstone()
+    expected_retained = {
+        sid,
+        *(f"z-{index:04d}" for index in range(1, models.WEBUI_DELETED_SESSION_TOMBSTONE_CAP)),
+    }
+    assert deleted is True
+    assert retained == frozenset(expected_retained)
+    assert not (tmp_path / f"{sid}.json").exists()
+
+    result = recover_missing_sidecars_from_state_db(tmp_path, state_db)
+
+    assert result["materialized"] == 0
+    assert not (tmp_path / f"{sid}.json").exists()
+
+
 def test_recover_missing_sidecars_from_state_db_skips_deleted_webui_tombstone(tmp_path, monkeypatch):
     import api.models as _m
     monkeypatch.setattr(_m, "SESSION_DIR", tmp_path)
