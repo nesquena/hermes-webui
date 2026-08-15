@@ -72,6 +72,24 @@ def _process_record_deleted_tombstone(
         result_queue.put((sid, "ok", ""))
 
 
+def _process_save_session_for_lock_namespace(session_dir, sid, result_queue):
+    from api import models
+
+    models.SESSION_DIR = Path(session_dir)
+    models.SESSION_INDEX_FILE = Path(session_dir) / "_index.json"
+    try:
+        session = models.Session(
+            session_id=sid,
+            workspace=str(session_dir),
+            messages=[{"role": "user", "content": "lock namespace probe"}],
+        )
+        session.save(skip_index=True)
+    except Exception as exc:
+        result_queue.put((sid, type(exc).__name__, str(exc)))
+    else:
+        result_queue.put((sid, "ok", ""))
+
+
 def test_deleted_session_tombstone_rmw_is_cross_process_serialized(
     tmp_path,
     monkeypatch,
@@ -112,6 +130,36 @@ def test_deleted_session_tombstone_rmw_is_cross_process_serialized(
             process.join(timeout=5)
 
 
+def test_global_tombstone_lock_namespace_cannot_alias_session_sid(
+    tmp_path,
+    monkeypatch,
+):
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    context = multiprocessing.get_context("spawn" if os.name == "nt" else "fork")
+    for sid in (
+        "ordinary-lock-namespace",
+        models._WEBUI_DELETED_SESSION_TOMBSTONE_LOCK_SID,
+    ):
+        result_queue = context.Queue()
+        process = context.Process(
+            target=_process_save_session_for_lock_namespace,
+            args=(session_dir, sid, result_queue),
+        )
+        try:
+            process.start()
+            process.join(timeout=5)
+            assert not process.is_alive(), f"save deadlocked for accepted SID {sid!r}"
+            assert process.exitcode == 0
+            assert result_queue.get(timeout=2)[:2] == (sid, "ok")
+        finally:
+            if process.is_alive():
+                process.terminate()
+            process.join(timeout=2)
+
+
 def test_existing_deleted_session_tombstone_retries_directory_fsync(
     tmp_path,
     monkeypatch,
@@ -143,6 +191,7 @@ def test_hidden_background_cleanup_uses_agent_and_sidecar_authorities(
     session_dir = tmp_path / "sessions"
     _patch_store(monkeypatch, models, session_dir)
     monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "delete_cli_session", lambda _sid: True)
     sid = "hidden-background-cleanup"
     seed = models.Session(
         session_id=sid,
@@ -202,7 +251,7 @@ def test_hidden_background_cleanup_uses_agent_and_sidecar_authorities(
     assert not (session_dir / f"{sid}.json").exists()
     assert not backup.exists()
     assert not archive.exists()
-    assert fsynced == [session_dir]
+    assert fsynced == [session_dir, session_dir]
     with models.LOCK:
         assert sid not in models.SESSIONS
     with pytest.raises(models.StaleSessionGenerationError):

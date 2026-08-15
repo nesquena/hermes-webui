@@ -253,16 +253,20 @@ it never grants a stale alias authority over unrelated unsaved fields.
 
 State DB sidecar materialization treats its initial scan only as candidate
 discovery and re-reads the complete authoritative row after acquiring the SID
-authority. Hidden background-session cleanup follows agent lock then SID
-authority, invalidates cached aliases, removes recoverable backups, and fsyncs
-the session directory.
+authority. That targeted reread uses one explicit SQLite read transaction for
+session metadata and ordered messages. Its private temporary file is flushed
+before create-only publication. Hidden background-session cleanup follows agent
+lock then SID authority, records a durable delete tombstone before unlinking,
+invalidates cached aliases, removes recoverable backups, attempts State DB
+cleanup, and fsyncs the session directory.
 
-Deleted-WebUI-session tombstone updates are serialized by a separate global
-cross-process authority acquired only after any SID authority. Tombstone
-publication flushes the file and parent directory before sidecar deletion can
-start; a failure is returned to the delete caller with the sidecar intact. A
-successful delete fsyncs the session directory again after sidecar and backup
-unlinks.
+Deleted-WebUI-session tombstone updates are serialized by a global cross-process
+authority in a lock-path namespace that no accepted session SID can alias. It is
+acquired only after any SID authority. Tombstone publication flushes the file
+and parent directory before sidecar deletion can start; a failure is returned to
+the delete caller with the sidecar intact. Primary, backup, or archive unlink
+failure also fails closed before State DB cleanup or success. A successful
+delete verifies those files are absent and fsyncs the session directory again.
 
 Sidecar, primary-backup, and incomparable-backup archive publications flush the
 file before atomic publication and fsync the parent directory on POSIX. Native

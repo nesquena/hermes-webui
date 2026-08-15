@@ -388,8 +388,11 @@ def test_server_delete_removes_session_bak_snapshot(cleanup_test_sessions):
     ]
     delete_end = min(clear_indices) if clear_indices else len(routes_src)
     delete_block = routes_src[delete_idx:delete_end]
-    assert "with_suffix('.json.bak').unlink" in delete_block or 'with_suffix(".json.bak").unlink' in delete_block, \
+    assert "backup_path = p.with_suffix('.json.bak')" in delete_block
+    assert "for session_file in (p, backup_path" in delete_block
+    assert "session_file.unlink(missing_ok=True)" in delete_block, (
         "session/delete must unlink <sid>.json.bak to avoid later orphan-backup recovery"
+    )
     assert "bak.archive-*" in delete_block, \
         "session/delete must unlink versioned backup archives"
 

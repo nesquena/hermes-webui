@@ -448,13 +448,28 @@ def _cross_process_sidecar_file_authority(
     lock_id: str,
     *,
     session_dir: Path | None = None,
+    lock_domain: str = "session",
 ):
     """Serialize one sidecar-store mutation key across threads/processes."""
     if not is_safe_session_id(lock_id):
         raise ValueError(f"Unsafe sidecar lock id {lock_id!r}")
-    thread_authority = _session_save_authority(lock_id)
-    with thread_authority:
+    if lock_domain == "session":
+        thread_lock_id = lock_id
         lock_dir = (session_dir or SESSION_DIR) / ".sidecar-locks"
+    elif lock_domain == "deleted-session-tombstone":
+        # Domain separation is mandatory: ``lock_id`` is also a valid session
+        # SID, so sharing the session lock path would self-deadlock when that
+        # SID saves while clearing the global tombstone set.
+        thread_lock_id = f"deleted-session-tombstone:{lock_id}"
+        lock_dir = (
+            (session_dir or SESSION_DIR)
+            / ".sidecar-locks"
+            / ".deleted-session-tombstone"
+        )
+    else:
+        raise ValueError(f"Unknown sidecar lock domain {lock_domain!r}")
+    thread_authority = _session_save_authority(thread_lock_id)
+    with thread_authority:
         lock_dir.mkdir(parents=True, exist_ok=True)
         lock_path = lock_dir / f"{lock_id}.lock"
         fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
@@ -521,7 +536,8 @@ def _webui_deleted_session_tombstone_authority():
     global authority is held.
     """
     with _cross_process_sidecar_file_authority(
-        _WEBUI_DELETED_SESSION_TOMBSTONE_LOCK_SID
+        _WEBUI_DELETED_SESSION_TOMBSTONE_LOCK_SID,
+        lock_domain="deleted-session-tombstone",
     ):
         yield
 

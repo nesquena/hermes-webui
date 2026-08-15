@@ -32,6 +32,7 @@ import os
 import re
 import sqlite3
 import threading
+import uuid
 from contextlib import closing
 from pathlib import Path
 
@@ -579,6 +580,7 @@ def _read_state_db_missing_sidecar_rows(
     state_db_path: Path | None,
     *,
     include_empty: bool = False,
+    session_id: str | None = None,
 ) -> list[dict]:
     """Return WebUI-origin state.db rows whose JSON sidecar is missing."""
     if state_db_path is None or not state_db_path.exists():
@@ -586,6 +588,9 @@ def _read_state_db_missing_sidecar_rows(
     try:
         with closing(sqlite3.connect(f"file:{state_db_path}?mode=ro", uri=True)) as conn:
             conn.row_factory = sqlite3.Row
+            # A read-only connection does not begin a transaction for SELECTs
+            # automatically. Pin metadata and messages to one SQLite snapshot.
+            conn.execute("BEGIN")
             session_cols = {row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
             message_cols = {row[1] for row in conn.execute("PRAGMA table_info(messages)").fetchall()}
             if not {'id', 'source'}.issubset(session_cols):
@@ -601,6 +606,11 @@ def _read_state_db_missing_sidecar_rows(
             worktree_repo_root_expr = _sql_optional_col('worktree_repo_root', session_cols)
             worktree_created_at_expr = _sql_optional_col('worktree_created_at', session_cols)
             rows = []
+            where_clause = "source = 'webui'"
+            query_params: tuple[str, ...] = ()
+            if session_id is not None:
+                where_clause += " AND id = ?"
+                query_params = (session_id,)
             for row in conn.execute(
                 f"""
                 SELECT id, source, {title_expr}, {model_expr}, {started_expr},
@@ -608,9 +618,10 @@ def _read_state_db_missing_sidecar_rows(
                        {worktree_path_expr}, {worktree_branch_expr},
                        {worktree_repo_root_expr}, {worktree_created_at_expr}
                 FROM sessions
-                WHERE source = 'webui'
+                WHERE {where_clause}
                 ORDER BY COALESCE(started_at, 0) DESC
-                """
+                """,
+                query_params,
             ).fetchall():
                 data = dict(row)
                 sid = str(data.get('id') or '').strip()
@@ -745,7 +756,10 @@ def recover_missing_sidecars_from_state_db(session_dir: Path, state_db_path: Pat
         # Per-process/per-thread tmp suffix to avoid corruption under
         # concurrent reconciliation calls (matches api/models.py:484
         # Session.save() convention).
-        tmp_suffix = f".json.reconcile.tmp.{os.getpid()}.{threading.current_thread().ident}"
+        tmp_suffix = (
+            f".json.reconcile.tmp.{os.getpid()}."
+            f"{threading.current_thread().ident}.{uuid.uuid4().hex}"
+        )
         tmp = target.with_suffix(tmp_suffix)
         detail_recorded = False
         payload = None
@@ -766,6 +780,7 @@ def recover_missing_sidecars_from_state_db(session_dir: Path, state_db_path: Pat
                             for candidate in _read_state_db_missing_sidecar_rows(
                                 session_dir,
                                 state_db_path,
+                                session_id=sid,
                             )
                             if str(candidate.get('id') or '').strip() == sid
                         ),
@@ -776,10 +791,22 @@ def recover_missing_sidecars_from_state_db(session_dir: Path, state_db_path: Pat
                     else:
                         payload = _state_db_row_to_sidecar(current_row)
                         payload['_sidecar_generation_v1'] = 1
-                        tmp.write_text(
-                            json.dumps(payload, ensure_ascii=False, indent=2),
-                            encoding='utf-8',
+                        fd = os.open(
+                            tmp,
+                            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                            0o600,
                         )
+                        with os.fdopen(
+                            fd,
+                            'w',
+                            encoding='utf-8',
+                            newline='\n',
+                        ) as handle:
+                            handle.write(
+                                json.dumps(payload, ensure_ascii=False, indent=2)
+                            )
+                            handle.flush()
+                            os.fsync(handle.fileno())
                         _publish_sidecar_no_replace(tmp, target)
                         materialized_now = True
         except FileExistsError:
