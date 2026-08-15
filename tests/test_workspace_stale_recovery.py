@@ -288,16 +288,29 @@ def test_chat_start_recomputes_recovery_after_workspace_owner_adoption(
         recovered_owner,
         lambda _session, **_kwargs: {"error": "busy", "_status": 409},
     )
+    adoptions = {"count": 0}
+
+    def resolve_workspace(_session, _requested):
+        adoptions["count"] += 1
+        return routes._ResolvedChatWorkspace(tmp_path, recovered_owner)
+
+    monkeypatch.setattr(
+        routes,
+        "_resolve_chat_workspace_with_recovery",
+        resolve_workspace,
+    )
 
     response = routes._handle_chat_start(
         object(),
         {
             "session_id": stale_alias.session_id,
-            "message": "continue by checking the repository",
+            "message": "continue",
         },
     )
 
     assert response["_status"] == 409
+    assert response["error"] == "busy"
+    assert adoptions["count"] == 1
     assert recovered_owner.compression_recovery == {}
     assert recovered_owner.recommended_recovery_action is None
     assert saves["count"] == 0

@@ -236,6 +236,22 @@ Session is a plain Python class (not a dataclass, not SQLAlchemy):
 title_from(): takes messages list, finds first user message, returns first 64 chars.
 Called after run_conversation() completes to set the session title retroactively.
 
+#### Session sidecar publication authority
+
+Every compliant writer of `SESSION_DIR/<sid>.json` participates in the same
+per-SID thread and cross-process authority. This includes normal `Session.save()`
+writes, backup recovery, and discoverability repairs. Existing sidecars are
+fenced by their generation plus exact digest; first publication is create-or-fail,
+so a stale alias or repair cannot overwrite a sidecar that appeared concurrently.
+Out-of-band replacements increment `_sidecar_generation_v1` and invalidate cached
+aliases before later saves can proceed.
+
+Sidecar, primary-backup, and incomparable-backup archive publications flush the
+file before atomic publication and fsync the parent directory on POSIX. Native
+Windows keeps atomic publication and file flushing, but Python does not expose an
+equivalent directory-fsync guarantee here; the final directory entry is therefore
+not guaranteed across sudden power loss on native Windows.
+
 #### Imported `state.db` sidebar projection
 
 `api.models.get_cli_sessions()` projects conversations from the active Hermes

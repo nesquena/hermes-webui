@@ -288,6 +288,23 @@ def _read_sidecar_revision(path: Path, sid: str | None = None) -> SidecarRevisio
     return _sidecar_revision_from_bytes(resolved_sid, raw)
 
 
+def _fsync_sidecar_directory(directory: Path) -> None:
+    """Persist a sidecar directory entry where POSIX supports directory fsync.
+
+    Native Windows Python does not expose an equivalent directory handle here;
+    file contents remain flushed and publication remains atomic, but power-loss
+    durability of the directory entry is a POSIX-only guarantee.
+    """
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    fd = os.open(Path(directory), flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def _publish_sidecar_no_replace(source: Path, destination: Path) -> None:
     """Publish *source* only when *destination* is still absent.
 
@@ -298,6 +315,7 @@ def _publish_sidecar_no_replace(source: Path, destination: Path) -> None:
     """
     try:
         os.link(str(source), str(destination))
+        _fsync_sidecar_directory(destination.parent)
         return
     except FileExistsError:
         raise
@@ -305,6 +323,7 @@ def _publish_sidecar_no_replace(source: Path, destination: Path) -> None:
         if os.name != "nt":
             raise
         os.rename(source, destination)
+        _fsync_sidecar_directory(destination.parent)
 
 
 def _message_rows_cover(candidate, baseline) -> bool:
@@ -349,9 +368,8 @@ def _archive_incomparable_backup(
         f"{backup_path.name}.archive-{backup_receipt.digest_sha256}"
     )
     if not archive_path.exists():
-        archive_tmp = archive_path.with_name(
-            f"{archive_path.name}.tmp.{os.getpid()}."
-            f"{threading.current_thread().ident}.{uuid.uuid4().hex}"
+        archive_tmp = backup_path.parent / (
+            f".sidecar-archive-{uuid.uuid4().hex}.tmp"
         )
         try:
             digest = hashlib.sha256()
@@ -366,6 +384,7 @@ def _archive_incomparable_backup(
                     f"Recoverable backup changed while archiving {session_id!r}"
                 )
             _safe_replace(archive_tmp, archive_path)
+            _fsync_sidecar_directory(archive_path.parent)
         finally:
             archive_tmp.unlink(missing_ok=True)
     archived_receipt = _read_sidecar_revision(archive_path, session_id)
@@ -1877,6 +1896,7 @@ class Session:
                                 bf.flush()
                                 os.fsync(bf.fileno())
                             _safe_replace(bak_tmp, bak_path)
+                            _fsync_sidecar_directory(bak_path.parent)
                             backup_receipt = _read_sidecar_revision(
                                 bak_path,
                                 self.session_id,
@@ -1912,6 +1932,7 @@ class Session:
                 tmp.unlink(missing_ok=True)
             else:
                 _safe_replace(tmp, self.path)
+                _fsync_sidecar_directory(self.path.parent)
             self._sidecar_revisions[self.session_id] = _sidecar_revision_record(
                 _sidecar_revision_from_bytes(
                     self.session_id,

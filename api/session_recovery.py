@@ -422,9 +422,11 @@ def _recover_session_owned(
 ) -> dict:
     """Run one recovery while holding the cross-process SID authority."""
     from api.models import (
+        _fsync_sidecar_directory,
         _invalidate_cached_session_generation,
         _publish_sidecar_no_replace,
         _read_sidecar_revision,
+        _safe_replace,
     )
 
     bak_path = session_path.with_suffix('.json.bak')
@@ -489,7 +491,8 @@ def _recover_session_owned(
                 return {**status, "restored": False, "stale_generation": True}
             tmp_path.unlink(missing_ok=True)
         else:
-            tmp_path.replace(session_path)
+            _safe_replace(tmp_path, session_path)
+            _fsync_sidecar_directory(session_path.parent)
         _invalidate_cached_session_generation(session_path.stem)
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         logger.warning("recover_session: copy failed for %s: %s", session_path, exc)

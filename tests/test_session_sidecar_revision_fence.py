@@ -301,9 +301,16 @@ def test_recovery_invalidates_cached_alias_and_publishes_generation(
     assert alias is not None
     with models.LOCK:
         models.SESSIONS[sid] = alias
+    fsynced = []
+    monkeypatch.setattr(
+        models,
+        "_fsync_sidecar_directory",
+        lambda directory: fsynced.append(Path(directory)),
+    )
 
     result = session_recovery.recover_session(session_path)
     assert result["restored"] is True
+    assert fsynced == [session_dir]
     with models.LOCK:
         assert sid not in models.SESSIONS
     restored = json.loads(session_path.read_text(encoding="utf-8"))
@@ -489,6 +496,101 @@ def test_malformed_backup_archive_does_not_require_hard_links(
     assert archive.read_bytes() == malformed
     assert backup_path.read_bytes() == before_shrink
     assert len(json.loads(session.path.read_text(encoding="utf-8"))["messages"]) == 1
+
+
+def test_archive_temporary_name_handles_maximum_valid_session_id(tmp_path):
+    from api import models
+
+    sid = "s" * 150
+    backup_path = tmp_path / f"{sid}.json.bak"
+    backup_path.write_bytes(b'{"broken":')
+    receipt = models._read_sidecar_revision(backup_path, sid)
+
+    archive_path = models._archive_incomparable_backup(
+        sid,
+        backup_path,
+        receipt,
+    )
+
+    assert archive_path.read_bytes() == b'{"broken":'
+    assert len(os.fsencode(archive_path.name)) <= 255
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory fsync contract")
+def test_first_sidecar_publication_fsyncs_parent_directory(tmp_path, monkeypatch):
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    fsynced = []
+    monkeypatch.setattr(
+        models,
+        "_fsync_sidecar_directory",
+        lambda directory: fsynced.append(Path(directory)),
+        raising=False,
+    )
+    session = models.Session(
+        session_id="durable-first-publication",
+        workspace=str(tmp_path),
+        messages=[{"role": "user", "content": "first"}],
+    )
+
+    session.save(skip_index=True)
+
+    assert fsynced == [session_dir]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory fsync contract")
+def test_shrink_publications_fsync_archive_backup_then_live(
+    tmp_path,
+    monkeypatch,
+):
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    session = models.Session(
+        session_id="durable-shrink-publication",
+        workspace=str(tmp_path),
+        messages=[
+            {"role": "user", "content": "one"},
+            {"role": "assistant", "content": "two"},
+            {"role": "user", "content": "three"},
+        ],
+    )
+    session.save(skip_index=True)
+    backup_path = session.path.with_suffix(".json.bak")
+    malformed = b'{"broken":'
+    backup_path.write_bytes(malformed)
+    session.messages = session.messages[:1]
+    events = []
+    real_replace = models._safe_replace
+
+    def record_replace(source, destination):
+        events.append(("replace", Path(destination).name))
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(models, "_safe_replace", record_replace)
+    monkeypatch.setattr(
+        models,
+        "_fsync_sidecar_directory",
+        lambda directory: events.append(("fsync", Path(directory).name)),
+        raising=False,
+    )
+
+    session.save(skip_index=True)
+
+    archive_name = (
+        f"{backup_path.name}.archive-{hashlib.sha256(malformed).hexdigest()}"
+    )
+    assert events == [
+        ("replace", archive_name),
+        ("fsync", session_dir.name),
+        ("replace", backup_path.name),
+        ("fsync", session_dir.name),
+        ("replace", session.path.name),
+        ("fsync", session_dir.name),
+    ]
 
 
 def test_non_object_backup_is_archived_before_live_snapshot_promotion(
