@@ -610,3 +610,308 @@ def test_large_index_rebuild_uses_metadata_prefix(tmp_path, monkeypatch):
     assert len(index) == 1
     assert index[0]["session_id"] == "large-index"
     assert index[0]["message_count"] == 2
+
+
+def test_large_index_rebuild_scans_metadata_beyond_prefix_and_arrays(
+    tmp_path,
+    monkeypatch,
+):
+    from api import models
+
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", type(models.SESSIONS)())
+    monkeypatch.setattr(models, "_INLINE_REPLAY_REPAIR_MAX_BYTES", 1)
+
+    oversized = tmp_path / "oversized-prefix.json"
+    oversized.write_text(
+        json.dumps(
+            {
+                "session_id": "oversized-prefix",
+                "compression_anchor_summary": "x" * 70_000,
+                "title": "Oversized prefix",
+                "messages": [{"role": "user", "content": "keep"}],
+                "message_count": 1,
+                "updated_at": 2,
+            }
+        ),
+        encoding="utf-8",
+    )
+    messages_first = tmp_path / "messages-first.json"
+    messages_first.write_text(
+        json.dumps(
+            {
+                "messages": [{"role": "user", "content": "keep"}],
+                "session_id": "messages-first",
+                "title": "Messages first",
+                "updated_at": 3,
+            }
+        ),
+        encoding="utf-8",
+    )
+    legacy_scenes_first = tmp_path / "legacy-scenes-first.json"
+    legacy_scenes_first.write_text(
+        json.dumps(
+            {
+                "session_id": "legacy-scenes-first",
+                "title": "Legacy scenes first",
+                "anchor_activity_scenes": {
+                    "scene": {"rows": ["x" * 1024 for _ in range(80)]}
+                },
+                "message_count": 2,
+                "messages": [
+                    {"role": "user", "content": "one"},
+                    {"role": "assistant", "content": "two"},
+                ],
+                "updated_at": 4,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    models._write_session_index(updates=None)
+
+    index = json.loads((tmp_path / "_index.json").read_text(encoding="utf-8"))
+    by_id = {row["session_id"]: row for row in index}
+    assert set(by_id) == {
+        "oversized-prefix",
+        "messages-first",
+        "legacy-scenes-first",
+    }
+    assert by_id["oversized-prefix"]["message_count"] == 1
+    assert by_id["messages-first"]["message_count"] == 1
+    assert by_id["legacy-scenes-first"]["message_count"] == 2
+    assert by_id["messages-first"]["title"] == "Messages first"
+
+
+def test_actual_over_128_mib_index_load_streams_messages_first(tmp_path):
+    from api import models
+
+    sidecar = tmp_path / "actual-large.json"
+    payload_bytes = models._INLINE_REPLAY_REPAIR_MAX_BYTES + 1
+    chunk = "x" * (1 << 20)
+    with sidecar.open("w", encoding="utf-8") as handle:
+        handle.write('{"messages":[{"role":"user","content":"')
+        remaining = payload_bytes
+        while remaining:
+            part = chunk[: min(len(chunk), remaining)]
+            handle.write(part)
+            remaining -= len(part)
+        handle.write(
+            '"}],"session_id":"actual-large","title":"Actual large",'
+            '"updated_at":5}'
+        )
+
+    loaded = models._load_session_from_path(sidecar)
+
+    assert loaded is not None
+    assert loaded.session_id == "actual-large"
+    assert loaded.title == "Actual large"
+    assert loaded._metadata_message_count == 1
+
+
+@pytest.mark.parametrize("bad_ws", ["\v", "\f"])
+@pytest.mark.parametrize(
+    "location",
+    ["top-level", "nested", "target-array", "trailing"],
+)
+def test_compactor_rejects_non_json_whitespace_without_publish(
+    tmp_path,
+    bad_ws,
+    location,
+):
+    from scripts import compact_session_replays as compactor
+
+    row = json.dumps(_row(), separators=(",", ":"))
+    if location == "top-level":
+        original = (
+            '{"session_id":"invalid"'
+            + bad_ws
+            + ',"messages":['
+            + row
+            + ','
+            + row
+            + '],"context_messages":[]}'
+        )
+    elif location == "nested":
+        original = (
+            '{"session_id":"invalid","metadata":{"value":1'
+            + bad_ws
+            + '},"messages":['
+            + row
+            + ','
+            + row
+            + '],"context_messages":[]}'
+        )
+    elif location == "target-array":
+        original = (
+            '{"session_id":"invalid","messages":['
+            + row
+            + bad_ws
+            + ','
+            + row
+            + '],"context_messages":[]}'
+        )
+    else:
+        original = (
+            '{"session_id":"invalid","messages":['
+            + row
+            + ','
+            + row
+            + '],"context_messages":[]}'
+            + bad_ws
+        )
+    sidecar = tmp_path / f"invalid-{location}.json"
+    sidecar.write_text(original, encoding="utf-8")
+
+    with pytest.raises(compactor.StreamJSONError):
+        compactor.compact_sidecar(sidecar)
+
+    assert sidecar.read_text(encoding="utf-8") == original
+    assert not list(tmp_path.glob("*.bak"))
+    assert not list(tmp_path.glob("*manifest*.json"))
+
+
+def test_compactor_fsyncs_manifest_name_before_source_install(tmp_path, monkeypatch):
+    from scripts import compact_session_replays as compactor
+
+    sidecar = tmp_path / "ordered.json"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "session_id": "ordered",
+                "messages": [_row(), _row()],
+                "context_messages": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    events = []
+    real_replace = compactor.os.replace
+
+    def _record_replace(source, destination):
+        destination = Path(destination)
+        events.append(("replace", "source" if destination == sidecar else "manifest"))
+        return real_replace(source, destination)
+
+    def _record_fsync_dir(path):
+        events.append(("fsync_dir", Path(path)))
+
+    monkeypatch.setattr(compactor.os, "replace", _record_replace)
+    monkeypatch.setattr(compactor, "_fsync_dir", _record_fsync_dir)
+
+    compactor.compact_sidecar(sidecar)
+
+    manifest_replace = events.index(("replace", "manifest"))
+    source_replace = events.index(("replace", "source"))
+    assert any(
+        event[0] == "fsync_dir"
+        for event in events[manifest_replace + 1 : source_replace]
+    )
+
+
+def test_compactor_removes_published_manifest_when_source_install_fails(
+    tmp_path,
+    monkeypatch,
+):
+    from scripts import compact_session_replays as compactor
+
+    sidecar = tmp_path / "failed-install.json"
+    original = json.dumps(
+        {
+            "session_id": "failed-install",
+            "messages": [_row(), _row()],
+            "context_messages": [],
+        }
+    )
+    sidecar.write_text(original, encoding="utf-8")
+    real_replace = compactor.os.replace
+
+    def _fail_source_install(source, destination):
+        if Path(destination) == sidecar:
+            raise OSError("injected source install failure")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(compactor.os, "replace", _fail_source_install)
+
+    with pytest.raises(OSError, match="injected source install failure"):
+        compactor.compact_sidecar(sidecar)
+
+    assert sidecar.read_text(encoding="utf-8") == original
+    assert not list(tmp_path.glob("*manifest*.json"))
+    assert not list(tmp_path.glob(".*.tmp.*"))
+
+
+def test_cli_rejects_dry_run_restore(tmp_path, monkeypatch):
+    from scripts import compact_session_replays as compactor
+
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["compact_session_replays.py", "--dry-run", "--restore", str(manifest)],
+    )
+    monkeypatch.setattr(
+        compactor,
+        "restore_manifest",
+        lambda _path: pytest.fail("--dry-run must not restore"),
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        compactor.main()
+
+    assert exc_info.value.code == 2
+
+
+def test_state_divergence_ignores_current_hidden_manifests(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    from api import config
+
+    current = tmp_path / "current"
+    current_sessions = current / "sessions"
+    current_sessions.mkdir(parents=True)
+    (current_sessions / "_replay-v10.manifest.json").write_text(
+        "{}",
+        encoding="utf-8",
+    )
+    sibling = tmp_path / "sibling"
+    sibling_sessions = sibling / "sessions"
+    sibling_sessions.mkdir(parents=True)
+    (sibling_sessions / "real-session.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(config, "STATE_DIR", current)
+    monkeypatch.setattr(config, "SESSION_DIR", current_sessions)
+    monkeypatch.setattr(config, "SESSION_INDEX_FILE", current_sessions / "_index.json")
+
+    config._warn_state_dir_divergence("WARN")
+
+    assert str(sibling) in capsys.readouterr().out
+
+
+def test_state_divergence_ignores_sibling_hidden_manifests(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    from api import config
+
+    current = tmp_path / "current"
+    current_sessions = current / "sessions"
+    current_sessions.mkdir(parents=True)
+    sibling = tmp_path / "sibling"
+    sibling_sessions = sibling / "sessions"
+    sibling_sessions.mkdir(parents=True)
+    (sibling_sessions / "_replay-v10.manifest.json").write_text(
+        "{}",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config, "STATE_DIR", current)
+    monkeypatch.setattr(config, "SESSION_DIR", current_sessions)
+    monkeypatch.setattr(config, "SESSION_INDEX_FILE", current_sessions / "_index.json")
+
+    config._warn_state_dir_divergence("WARN")
+
+    assert capsys.readouterr().out == ""

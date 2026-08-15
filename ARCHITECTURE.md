@@ -240,7 +240,9 @@ create several full-size copies inside an HTTP request. `Session.load()` instead
 performs an allocation-free adjacent-partial check: only a large projection that
 actually needs that repair is marked `_replay_repair_deferred` and blocked from
 save. A large valid projection remains writable, and full session-index rebuilds
-use the metadata prefix rather than parsing/copying the transcript.
+use a bounded streaming top-level metadata scanner that skips transcript and
+scene bodies, accepts metadata before or after those arrays, and refuses files
+without a valid persisted session ID rather than constructing a default ID.
 
 `Session.save()` and the tool share an exclusive per-session sidecar lock.
 Every normal save, compact, and restore also advances
@@ -256,16 +258,22 @@ python scripts/compact_session_replays.py --dry-run ~/.hermes/webui/sessions/<se
 python scripts/compact_session_replays.py ~/.hermes/webui/sessions/<session-id>.json
 ```
 
+The maintenance command is POSIX/WSL-only; on Windows, run it inside WSL rather
+than invoking it from native Python.
+
 The tool performs separate analysis and write passes, validates every copied
-JSON value, limits one decoded JSON item to 64 MiB, and transforms only
-top-level `messages` and `context_messages`. Exact replay membership is tracked
+JSON value with RFC 8259's exact whitespace set, limits one decoded JSON item
+to 64 MiB, and transforms only top-level `messages` and `context_messages`.
+Exact replay membership is tracked
 in a temporary SQLite
 index with a bounded page cache, so RAM does not grow with the number of unique
 message identities; operators must provide temporary-disk headroom proportional
 to that unique-key count. It publishes only while the source inode/stat
 signature, SHA-256, and generation still match. Ambiguous or non-JSON-stable
 rows are retained. A content-addressed byte-exact backup and hidden checksum
-manifest are fsynced before the compacted sidecar is atomically installed; the
+manifest are fsynced, including the manifest directory entry, before the
+compacted sidecar is atomically installed. A non-crash source-install failure
+removes and fsyncs the unpublished manifest; the
 source mode is preserved on source, backup, manifest, and restore output. The
 hidden manifest is excluded from session discovery and index rebuilds.
 

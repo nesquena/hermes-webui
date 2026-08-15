@@ -1120,6 +1120,284 @@ def _message_role(message):
     return str(message.get('role', '')).strip().lower()
 
 
+_SESSION_METADATA_FIELDS = (
+    'session_id', 'title', 'workspace', 'created_workspace', 'model',
+    'model_provider', 'model_explicit_pick_signature', 'created_at',
+    'updated_at', 'pinned', 'archived', 'project_id', 'profile',
+    'input_tokens', 'output_tokens', 'estimated_cost', 'cache_read_tokens',
+    'cache_write_tokens', 'personality', 'active_stream_id',
+    'pending_user_message', 'pending_attachments', 'pending_started_at',
+    'pending_user_source', 'compression_anchor_visible_idx',
+    'compression_anchor_message_key', 'compression_anchor_summary',
+    'pre_compression_snapshot', 'context_engine',
+    'compression_anchor_engine', 'compression_anchor_mode',
+    'compression_anchor_details', 'context_engine_state', 'context_length',
+    'threshold_tokens', 'last_prompt_tokens',
+    'post_compression_context_tokens_estimate', 'compression_recovery',
+    'recommended_recovery_action', 'compression_recovery_source_session_id',
+    'compression_recovery_action', 'truncation_watermark',
+    'truncation_boundary', 'clear_generation',
+    'intentional_shrink_generation', 'gateway_routing',
+    'gateway_routing_history', 'llm_title_generated', 'manual_title',
+    'parent_session_id', 'worktree_path', 'worktree_branch',
+    'worktree_repo_root', 'worktree_created_at', 'is_cli_session',
+    'source_tag', 'raw_source', 'session_source', 'source_label', 'read_only',
+    'enabled_toolsets', 'composer_draft', 'process_wakeup_pause',
+    'share_token', 'share_created_at',
+)
+_BOUNDED_SESSION_METADATA_FIELDS = frozenset((
+    *_SESSION_METADATA_FIELDS,
+    'message_count',
+    'anchor_scene_index',
+    '_sidecar_generation_v1',
+))
+_BOUNDED_METADATA_VALUE_CHARS = 65_536
+_JSON_STRING_SPECIAL_RE = re.compile(r'["\\]')
+_JSON_CONTAINER_SPECIAL_RE = re.compile(r'["{}\[\]]')
+_JSON_SCALAR_END_RE = re.compile(r'[ \t\r\n,}\]]')
+
+
+class _StreamingTopLevelJSONReader:
+    """Scan one JSON object with memory independent of skipped value size."""
+
+    def __init__(self, handle, chunk_chars=65_536):
+        self.handle = handle
+        self.chunk_chars = chunk_chars
+        self.buffer = ''
+        self.pos = 0
+        self.eof = False
+
+    def _fill(self):
+        if self.pos:
+            self.buffer = self.buffer[self.pos:]
+            self.pos = 0
+        if self.eof:
+            return False
+        chunk = self.handle.read(self.chunk_chars)
+        if chunk:
+            self.buffer += chunk
+            return True
+        self.eof = True
+        return False
+
+    def ensure(self):
+        while self.pos >= len(self.buffer):
+            if not self._fill():
+                return False
+        return True
+
+    def peek(self):
+        return self.buffer[self.pos] if self.ensure() else ''
+
+    def take(self):
+        char = self.peek()
+        if not char:
+            raise ValueError('unexpected end of session JSON')
+        self.pos += 1
+        return char
+
+    def skip_ws(self):
+        while self.peek() and self.peek() in ' \t\r\n':
+            self.pos += 1
+
+    def expect(self, expected):
+        self.skip_ws()
+        actual = self.take()
+        if actual != expected:
+            raise ValueError(f'expected {expected!r}, got {actual!r}')
+
+    def _skip_string_body(self):
+        while True:
+            if not self.ensure():
+                raise ValueError('unexpected end of session JSON string')
+            match = _JSON_STRING_SPECIAL_RE.search(self.buffer, self.pos)
+            if match is None:
+                self.pos = len(self.buffer)
+                continue
+            self.pos = match.end()
+            if match.group() == '"':
+                return
+            if not self.ensure():
+                raise ValueError('unexpected end of escaped session JSON string')
+            self.pos += 1
+
+    def _skip_container_body(self, first):
+        closers = [']' if first == '[' else '}']
+        while closers:
+            if not self.ensure():
+                raise ValueError('unexpected end of session JSON container')
+            match = _JSON_CONTAINER_SPECIAL_RE.search(self.buffer, self.pos)
+            if match is None:
+                self.pos = len(self.buffer)
+                continue
+            char = match.group()
+            self.pos = match.end()
+            if char == '"':
+                self._skip_string_body()
+            elif char in '[{':
+                if len(closers) >= 512:
+                    raise ValueError('session JSON nesting exceeds 512 levels')
+                closers.append(']' if char == '[' else '}')
+            elif char != closers.pop():
+                raise ValueError('mismatched session JSON container')
+
+    def _skip_scalar_body(self):
+        while self.ensure():
+            match = _JSON_SCALAR_END_RE.search(self.buffer, self.pos)
+            if match is not None:
+                self.pos = match.start()
+                return
+            self.pos = len(self.buffer)
+
+    def consume_value(self, max_capture_chars=0):
+        """Consume one JSON-shaped value and optionally retain a bounded copy."""
+        self.skip_ws()
+        captured = []
+        capture_size = 0
+        truncated = False
+
+        def capture(char):
+            nonlocal capture_size, truncated
+            if truncated:
+                return
+            capture_size += len(char)
+            if capture_size > max_capture_chars:
+                captured.clear()
+                truncated = True
+                return
+            captured.append(char)
+
+        first = self.take()
+        if first in ',}]':
+            raise ValueError('missing JSON value')
+        if max_capture_chars <= 0:
+            if first == '"':
+                self._skip_string_body()
+            elif first in '[{':
+                self._skip_container_body(first)
+            else:
+                self._skip_scalar_body()
+            return None
+        capture(first)
+        if first == '"':
+            escaped = False
+            while True:
+                char = self.take()
+                capture(char)
+                if escaped:
+                    escaped = False
+                elif char == '\\':
+                    escaped = True
+                elif char == '"':
+                    break
+        elif first in '[{':
+            closers = [']' if first == '[' else '}']
+            in_string = False
+            escaped = False
+            while closers:
+                char = self.take()
+                capture(char)
+                if in_string:
+                    if escaped:
+                        escaped = False
+                    elif char == '\\':
+                        escaped = True
+                    elif char == '"':
+                        in_string = False
+                    continue
+                if char == '"':
+                    in_string = True
+                elif char in '[{':
+                    if len(closers) >= 512:
+                        raise ValueError('session JSON nesting exceeds 512 levels')
+                    closers.append(']' if char == '[' else '}')
+                elif char in ']}':
+                    if char != closers.pop():
+                        raise ValueError('mismatched session JSON container')
+        else:
+            while True:
+                char = self.peek()
+                if not char or char in ' \t\r\n,}]':
+                    break
+                capture(self.take())
+        return None if truncated else ''.join(captured)
+
+    def consume_array_count(self):
+        """Consume one top-level array and count items without retaining them."""
+        self.expect('[')
+        self.skip_ws()
+        if self.peek() == ']':
+            self.take()
+            return 0
+        count = 0
+        while True:
+            self.consume_value()
+            count += 1
+            self.skip_ws()
+            delimiter = self.take()
+            if delimiter == ']':
+                return count
+            if delimiter != ',':
+                raise ValueError(f'expected array delimiter, got {delimiter!r}')
+
+
+def _reject_bounded_metadata_constant(value):
+    raise ValueError(f'invalid JSON constant: {value}')
+
+
+def _decode_bounded_metadata_value(raw):
+    return json.loads(
+        raw,
+        parse_constant=_reject_bounded_metadata_constant,
+    )
+
+
+def _read_bounded_session_metadata(path):
+    """Extract fixed session/index metadata while streaming past large arrays."""
+    data = {}
+    with open(path, 'r', encoding='utf-8') as handle:
+        reader = _StreamingTopLevelJSONReader(handle)
+        reader.expect('{')
+        reader.skip_ws()
+        if reader.peek() == '}':
+            reader.take()
+            return data
+        while True:
+            if reader.peek() != '"':
+                raise ValueError('session JSON key must be a string')
+            raw_key = reader.consume_value(max_capture_chars=4096)
+            key = _decode_bounded_metadata_value(raw_key) if raw_key else None
+            if key is not None and type(key) is not str:
+                raise ValueError('session JSON key must be a string')
+            reader.expect(':')
+            reader.skip_ws()
+            if key == 'messages' and reader.peek() == '[':
+                data.setdefault('message_count', reader.consume_array_count())
+            else:
+                raw_value = reader.consume_value(
+                    max_capture_chars=(
+                        _BOUNDED_METADATA_VALUE_CHARS
+                        if key in _BOUNDED_SESSION_METADATA_FIELDS
+                        else 0
+                    )
+                )
+                if key in _BOUNDED_SESSION_METADATA_FIELDS and raw_value is not None:
+                    data[key] = _decode_bounded_metadata_value(raw_value)
+            reader.skip_ws()
+            delimiter = reader.take()
+            if delimiter == '}':
+                break
+            if delimiter != ',':
+                raise ValueError(
+                    f'expected top-level delimiter, got {delimiter!r}'
+                )
+            reader.skip_ws()
+        reader.skip_ws()
+        if reader.peek():
+            raise ValueError('trailing data after session object')
+    return data
+
+
 def _find_top_level_json_key(text, key):
     """Return the byte offset of a top-level JSON object key, if present."""
     depth = 0
@@ -1211,10 +1489,10 @@ def _load_session_from_path(path: Path) -> "Session | None":
         return None
     if is_large:
         try:
-            prefix = _read_metadata_json_prefix(path)
-            if not prefix:
+            data = _read_bounded_session_metadata(path)
+            session_id = data.get('session_id') if isinstance(data, dict) else None
+            if type(session_id) is not str or not is_safe_session_id(session_id):
                 return None
-            data = json.loads(prefix)
             data['messages'] = []
             session = Session(**data)
             session._metadata_message_count = _parse_nonnegative_int(
@@ -1540,34 +1818,7 @@ class Session:
         # Write metadata fields first so load_metadata_only() can read them
         # without parsing the full messages array (which may be 400KB+).
         # Fields are listed in the order they should appear in the JSON file.
-        METADATA_FIELDS = [
-            'session_id', 'title', 'workspace', 'created_workspace', 'model', 'model_provider', 'model_explicit_pick_signature', 'created_at', 'updated_at',
-            'pinned', 'archived', 'project_id', 'profile',
-            'input_tokens', 'output_tokens', 'estimated_cost',
-            'cache_read_tokens', 'cache_write_tokens',
-            'personality', 'active_stream_id',
-            'pending_user_message', 'pending_attachments', 'pending_started_at', 'pending_user_source',
-            'compression_anchor_visible_idx', 'compression_anchor_message_key',
-            'compression_anchor_summary', 'pre_compression_snapshot',
-            'context_engine', 'compression_anchor_engine', 'compression_anchor_mode',
-            'compression_anchor_details', 'context_engine_state',
-            'context_length', 'threshold_tokens', 'last_prompt_tokens',
-            'post_compression_context_tokens_estimate',
-            'compression_recovery', 'recommended_recovery_action',
-            'compression_recovery_source_session_id', 'compression_recovery_action',
-            'truncation_watermark',
-            'truncation_boundary',
-            'clear_generation',
-            'intentional_shrink_generation',
-            'gateway_routing', 'gateway_routing_history', 'llm_title_generated', 'manual_title',
-            'parent_session_id',
-            'worktree_path', 'worktree_branch', 'worktree_repo_root', 'worktree_created_at',
-            'is_cli_session', 'source_tag', 'raw_source', 'session_source', 'source_label', 'read_only',
-            'enabled_toolsets', 'composer_draft',
-            'process_wakeup_pause',
-            'share_token', 'share_created_at',
-        ]
-        meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
+        meta = {k: getattr(self, k, None) for k in _SESSION_METADATA_FIELDS}
         # #5854: message_count and a compact anchor-scene fingerprint go in the
         # metadata prefix (BEFORE messages) so load_metadata_only() and the
         # sidebar-poll freshness check never have to parse the full (250-480KB)
@@ -1586,7 +1837,7 @@ class Session:
         meta['messages'] = self.messages
         meta['tool_calls'] = self.tool_calls
         meta['anchor_activity_scenes'] = self.anchor_activity_scenes if isinstance(self.anchor_activity_scenes, dict) else {}
-        # Fields not in METADATA_FIELDS (e.g. last_usage) go at the end. Exclude
+        # Fields not in _SESSION_METADATA_FIELDS (e.g. last_usage) go at the end. Exclude
         # the keys we placed explicitly above so they aren't emitted twice.
         _placed = {
             'message_count',
@@ -1597,7 +1848,7 @@ class Session:
             'anchor_activity_scenes',
         }
         extra = {k: v for k, v in self.__dict__.items()
-                 if k not in METADATA_FIELDS and k not in _placed
+                 if k not in _SESSION_METADATA_FIELDS and k not in _placed
                  and not k.startswith('_')}
         payload = json.dumps({**meta, **extra}, ensure_ascii=False, indent=2)
 

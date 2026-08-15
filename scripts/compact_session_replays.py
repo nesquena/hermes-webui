@@ -181,6 +181,11 @@ def _reject_json_constant(constant: str):
     raise StreamJSONError(f'invalid JSON constant: {constant}')
 
 
+def _is_json_whitespace(char: str) -> bool:
+    """Return whether ``char`` is whitespace permitted by RFC 8259."""
+    return char in ' \t\r\n'
+
+
 class StreamReader:
     def __init__(self, handle: TextIO, chunk_chars: int = _CHUNK_CHARS):
         self.handle = handle
@@ -226,7 +231,10 @@ class StreamReader:
             if not self.ensure():
                 return
             start = self.pos
-            while self.pos < len(self.buffer) and self.buffer[self.pos].isspace():
+            while (
+                self.pos < len(self.buffer)
+                and _is_json_whitespace(self.buffer[self.pos])
+            ):
                 self.pos += 1
             if self.pos == start:
                 return
@@ -275,7 +283,7 @@ class StreamReader:
 
     def _copy_ws(self, output: TextIO | None) -> None:
         pending: list[str] = []
-        while self.peek() and self.peek().isspace():
+        while self.peek() and _is_json_whitespace(self.peek()):
             pending.append(self.take())
             if len(pending) >= 65_536:
                 self._flush(output, pending)
@@ -368,7 +376,7 @@ class StreamReader:
         pending: list[str] = []
         while True:
             char = self.peek()
-            if not char or char.isspace() or char in ',}]':
+            if not char or _is_json_whitespace(char) or char in ',}]':
                 break
             pending.append(self.take())
             if len(pending) > _MAX_ITEM_CHARS:
@@ -762,6 +770,8 @@ def compact_sidecar(path: Path, *, dry_run: bool = False) -> dict:
             f'_replay-v10.{path.name}.{source_sha256[:16]}.manifest.json'
         )
         manifest_tmp = None
+        manifest_published = False
+        source_installed = False
         try:
             with temp.open('x', encoding='utf-8') as output:
                 os.fchmod(output.fileno(), source_mode)
@@ -799,16 +809,30 @@ def compact_sidecar(path: Path, *, dry_run: bool = False) -> dict:
                 'arrays': result['arrays'],
             }
             manifest_tmp = manifest.with_name(f'.{manifest.name}.tmp.{os.getpid()}')
-            manifest_tmp.write_text(
-                json.dumps(manifest_payload, ensure_ascii=False, indent=2) + '\n',
-                encoding='utf-8',
-            )
-            with manifest_tmp.open('rb') as handle:
+            with manifest_tmp.open('x', encoding='utf-8') as handle:
                 os.fchmod(handle.fileno(), source_mode)
+                handle.write(
+                    json.dumps(manifest_payload, ensure_ascii=False, indent=2) + '\n'
+                )
+                handle.flush()
                 os.fsync(handle.fileno())
             os.replace(manifest_tmp, manifest)
-            os.replace(temp, path)
+            manifest_published = True
             _fsync_dir(path.parent)
+            os.replace(temp, path)
+            source_installed = True
+            _fsync_dir(path.parent)
+        except BaseException as exc:
+            if manifest_published and not source_installed:
+                try:
+                    manifest.unlink(missing_ok=True)
+                    _fsync_dir(path.parent)
+                except Exception as cleanup_exc:
+                    exc.add_note(
+                        f'failed to remove unpublished manifest {manifest}: '
+                        f'{cleanup_exc}'
+                    )
+            raise
         finally:
             temp.unlink(missing_ok=True)
             if manifest_tmp is not None:
@@ -881,6 +905,8 @@ def main() -> int:
     args = parser.parse_args()
     if bool(args.restore) == bool(args.path):
         parser.error('provide exactly one session path or --restore MANIFEST')
+    if args.restore and args.dry_run:
+        parser.error('--dry-run cannot be combined with --restore')
     try:
         result = (
             restore_manifest(args.restore)
