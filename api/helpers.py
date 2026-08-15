@@ -219,6 +219,13 @@ def arm_connection_close(handler) -> None:
         pass
 
 
+# Codings that frame nothing, so a rejection may keep the connection alive.
+# Members MUST stay lowercase ASCII tokens: membership is tested through
+# ``str.lower()``, which maps some non-ASCII characters ONTO ASCII ones
+# (``'K'.lower() == 'k'``), so a coding here containing such a letter would
+# be reachable by a spelling no HTTP token grammar allows. ``identity`` has no
+# such letter -- ``test_unframed_transfer_codings_cannot_be_spelled_non_ascii``
+# proves it mechanically and will fail if a foldable coding is ever added.
 _UNFRAMED_TRANSFER_CODINGS = frozenset({'identity'})
 
 # What ``unsupported_transfer_encoding()`` reports for a header that declares no
@@ -226,6 +233,14 @@ _UNFRAMED_TRANSFER_CODINGS = frozenset({'identity'})
 # the return value is never a falsy non-``None`` — callers test ``is not None``,
 # and an empty string would also render as a hole in the rejection message.
 _BLANK_TRANSFER_CODING = '(blank)'
+
+# The only whitespace a field value may be padded with: RFC 9110 OWS is SP/HTAB
+# and nothing else. ``str.strip()`` would also erase U+00A0 and U+0085 -- both
+# reachable over the wire, because request lines decode as latin-1 -- and
+# ``Content-Length: \xa00`` would then read back as a genuine ``0`` while its
+# payload sat unread on the socket. Padding a value with a character the grammar
+# does not allow makes it unreadable, not zero.
+_FIELD_VALUE_OWS = ' \t'
 
 
 def _framing_header_values(handler, name: str) -> list[str]:
@@ -280,11 +295,27 @@ def _declared_content_lengths(handler) -> set[int] | None:
     anything that *is* here and does not parse has to be treated as pending bytes,
     exactly like ``banana`` or two lengths that disagree. Note ``Message`` collapses
     ``Content-Length:`` and ``Content-Length:   `` to the same ``''``.
+
+    "Parses" means RFC 9110's ``Content-Length = 1*DIGIT``: an unsigned run of
+    ASCII digits, nothing else. ``int()`` is far more generous than the grammar --
+    it accepts a leading sign, PEP 515 underscores and non-ASCII digits -- and
+    every such spelling of ZERO used to read back as an honest ``0`` and take the
+    keep-alive branch below with its payload still queued: ``Content-Length: +0``
+    (also ``-0``, ``0_0``, ``+00``, ``\\xa00``) answered 403 with no
+    ``Connection: close``, then ``400 Bad request syntax ('{...}GET /api/...')``
+    -- the same trace as a blank value. A sign is only invisible on a NON-zero
+    value, where the wrong parse happens to close anyway. Anything the grammar
+    rejects is unreadable framing, which means a body may be pending.
+
+    The ``int()`` guard stays even though ``isdigit()`` has already vetted every
+    character: a digit run longer than ``sys.get_int_max_str_digits()`` (4300)
+    raises ``ValueError`` too, and this runs on rejection paths where an
+    exception becomes a spurious 500.
     """
     parsed: set[int] = set()
     for raw in _framing_header_values(handler, 'Content-Length'):
-        stripped = raw.strip()
-        if not stripped:
+        stripped = raw.strip(_FIELD_VALUE_OWS)
+        if not (stripped.isascii() and stripped.isdigit()):
             return None
         try:
             parsed.add(int(stripped))
@@ -351,9 +382,16 @@ def unsupported_transfer_encoding(handler) -> str | None:
     ever reached the unframed set from an explicitly empty header -- an absent one
     yields no values to loop over -- so treating it as a coding we cannot decode
     costs a real client nothing.
+
+    Only SP/HTAB is trimmed, for the same reason the length parse trims only
+    those: ``str.strip()`` erases U+00A0/U+0085 as well, so ``\\xa0identity`` --
+    which no token grammar allows -- read back as plain ``identity`` and its
+    payload poisoned the next pooled request (403 with no ``Connection: close``,
+    then the bad-syntax 400). A coding padded with a character the grammar does
+    not permit is a coding we cannot decode.
     """
     for raw in _framing_header_values(handler, 'Transfer-Encoding'):
-        normalized = raw.strip()
+        normalized = raw.strip(_FIELD_VALUE_OWS)
         if not normalized:
             return _BLANK_TRANSFER_CODING
         if normalized.lower() not in _UNFRAMED_TRANSFER_CODINGS:
