@@ -555,6 +555,7 @@ def test_compactor_manifest_is_excluded_from_session_index(tmp_path, monkeypatch
 
     monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
     monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", type(models.SESSIONS)())
     sidecar = tmp_path / "indexed.json"
     sidecar.write_text(
         json.dumps(
@@ -579,6 +580,7 @@ def test_large_index_rebuild_uses_metadata_prefix(tmp_path, monkeypatch):
 
     monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
     monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", type(models.SESSIONS)())
     monkeypatch.setattr(models, "_INLINE_REPLAY_REPAIR_MAX_BYTES", 1)
     sidecar = tmp_path / "large-index.json"
     sidecar.write_text(
