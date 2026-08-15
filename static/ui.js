@@ -560,6 +560,12 @@ let _messageVirtualMeasurementRetryCount=0;
 let _messageVirtualScrollActive=false;
 let _messageVirtualScrollSettleTimer=0;
 let _messageVirtualDeferredMeasurement=null;
+// #6799-family: while the user is actively scrolling, keep the virtualized
+// total height frozen (absorb measured-vs-estimated deltas into the bottom
+// spacer) so the scrollbar/scrollHeight stays stable and the viewport never
+// jumps mid-scroll. Reset on settle (150ms after the last scroll event) and
+// re-calibrate once to the true height. 0 = not frozen.
+let _messageVirtualFrozenTotalHeight=0;
 let _msgNodeRecycleEnabled=false;
 const _recycleStash=new Map();
 const _recycleResetAttrs=[
@@ -575,16 +581,29 @@ const _recycleResetAttrs=[
 ];
 let _scrollbarDragActive=false;
 function _markMessageVirtualScrollActive(){
+  const wasActive=_messageVirtualScrollActive;
   _messageVirtualScrollActive=true;
+  if(!wasActive){
+    // Scrolling just started: freeze the current total height so every
+    // measured-vs-estimated delta during the scroll is absorbed instead of
+    // lurching the scrollbar/viewport (see _enforceMessageVirtualFrozenHeight).
+    const container=$('messages');
+    _messageVirtualFrozenTotalHeight=container?container.scrollHeight:0;
+  }
   clearTimeout(_messageVirtualScrollSettleTimer);
   _messageVirtualScrollSettleTimer=setTimeout(()=>{
     _messageVirtualScrollActive=false;
+    // Unfreeze and re-calibrate once to the true height now that the user
+    // stopped scrolling (the frozen height may lag the real measured height).
+    _messageVirtualFrozenTotalHeight=0;
     if(_messageVirtualDeferredMeasurement){
       const deferred=_messageVirtualDeferredMeasurement;
       _messageVirtualDeferredMeasurement=null;
       _scheduleMessageVirtualMeasurementRefresh(deferred);
+    }else if(typeof _scheduleMessageVirtualizedRender==='function'){
+      _scheduleMessageVirtualizedRender(true);
     }
-  },150);
+  },400);
 }
 // Cached visWithIdx array — invalidated when S.messages.length changes.
 let _visWithIdxCache=null;
@@ -608,6 +627,7 @@ function _clearMessageVirtualHeightCache(){
   clearTimeout(_messageVirtualScrollSettleTimer);
   _messageVirtualScrollSettleTimer=0;
   _messageVirtualDeferredMeasurement=null;
+  _messageVirtualFrozenTotalHeight=0;
   if(typeof _clearUserRowIntrinsicHeightCache==='function') _clearUserRowIntrinsicHeightCache();
 }
 function _resetMessageRenderWindow(sid){
@@ -1260,6 +1280,23 @@ function _compensateScrollForMeasurementDelta(renderFn){
   _lastScrollTop=container.scrollTop;
   _deferClearProgrammaticScroll();
 }
+// While the user is actively scrolling a virtualized transcript, keep the
+// total height frozen at the value captured when scrolling started. The
+// window re-render swaps estimated-height spacers for measured rows, which
+// would otherwise change scrollHeight every frame and make the scrollbar /
+// viewport lurch (the #6799-family churn). Absorb the measured-vs-estimated
+// delta into the bottom spacer; on settle (_markMessageVirtualScrollActive's
+// timer) the height is unfrozen and re-calibrated once.
+function _enforceMessageVirtualFrozenHeight(container){
+  if(!container||!_messageVirtualScrollActive||_messageVirtualFrozenTotalHeight<=0) return;
+  const current=container.scrollHeight;
+  const delta=_messageVirtualFrozenTotalHeight-current;
+  if(Math.abs(delta)<0.5) return;
+  const spacer=container.querySelector('[data-virtual-spacer="after"]');
+  if(!spacer) return;
+  const h=Math.max(0,(parseFloat(spacer.style.height||'0')||0)+delta);
+  spacer.style.height=Math.round(h)+'px';
+}
 function _messageViewportIntersectsRenderedRow(){
   const container=$('messages');
   if(!container) return true;
@@ -1483,6 +1520,7 @@ function _scheduleMessageVirtualizedRender(force){
       _programmaticScroll=true;
       _programmaticScrollSetAt=performance.now();
       _compensateScrollForMeasurementDelta(()=>{ renderMessages({ preserveScroll:true }); });
+      _enforceMessageVirtualFrozenHeight(container);
       _deferClearProgrammaticScroll();
       _messageVirtualWindowKey=liveKey;
       return;
@@ -1490,6 +1528,7 @@ function _scheduleMessageVirtualizedRender(force){
     _msgNodeRecycleEnabled=true;
     try{
       _compensateScrollForMeasurementDelta(()=>{ renderMessages({ preserveScroll:true }); });
+      _enforceMessageVirtualFrozenHeight(container);
     }
     finally{ _msgNodeRecycleEnabled=false; }
   });
