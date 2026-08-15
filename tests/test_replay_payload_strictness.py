@@ -5,6 +5,14 @@ from types import SimpleNamespace
 import pytest
 
 
+class _IntSubclass(int):
+    pass
+
+
+class _StrSubclass(str):
+    pass
+
+
 def _empty_assistant(
     message_id: object = "assistant-a", *, finish_reason="stop", reasoning="same"
 ):
@@ -369,6 +377,125 @@ def test_display_merge_collapses_only_exact_durable_empty_replay():
         verification_nudge_provenance=provenance,
     )
     assert synthetic_only == previous
+
+
+@pytest.mark.parametrize(
+    ("first", "distinct"),
+    [
+        (
+            {"role": "assistant", "content": "same", "id": "assistant-a"},
+            {"role": "assistant", "content": "same", "id": "assistant-b"},
+        ),
+        (
+            {
+                "role": "assistant",
+                "content": "same",
+                "attachments": [{"name": "A.pdf"}],
+            },
+            {
+                "role": "assistant",
+                "content": "same",
+                "attachments": [{"name": "B.pdf"}],
+            },
+        ),
+        (
+            {"role": "assistant", "content": "same", "reasoning": "alpha"},
+            {"role": "assistant", "content": "same", "reasoning": "beta"},
+        ),
+        (
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "same", "annotations": ["A"]}
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "same", "annotations": ["B"]}
+                ],
+            },
+        ),
+    ],
+)
+def test_display_merge_preserves_distinct_structured_nonempty_assistants(
+    first,
+    distinct,
+):
+    from api.streaming import _merge_display_messages_after_agent_result
+
+    prompt = "Continue the active turn."
+
+    merged = _merge_display_messages_after_agent_result(
+        [],
+        [],
+        [first, distinct],
+        prompt,
+    )
+
+    assistants = [row for row in merged if row.get("role") == "assistant"]
+    assert assistants == [first, distinct]
+
+
+def test_display_merge_collapses_exact_nonempty_assistant_payload():
+    from api.streaming import _merge_display_messages_after_agent_result
+
+    first = {
+        "role": "assistant",
+        "content": "same",
+        "id": "assistant-a",
+        "reasoning": "same reasoning",
+        "attachments": [{"name": "A.pdf"}],
+    }
+
+    merged = _merge_display_messages_after_agent_result(
+        [],
+        [],
+        [first, copy.deepcopy(first)],
+        "Continue the active turn.",
+    )
+
+    assistants = [row for row in merged if row.get("role") == "assistant"]
+    assert assistants == [first]
+
+
+@pytest.mark.parametrize(
+    "bad_idx",
+    [True, 1.0, 1.5, "1", _IntSubclass(1), None, -1],
+)
+def test_active_turn_authority_rejects_lossy_index_types(bad_idx):
+    from api.streaming import (
+        _active_turn_boundary_is_valid,
+        _resolve_active_turn_authority,
+    )
+
+    resolved = _resolve_active_turn_authority(
+        {"current_turn_user_idx": None, "turn_id": ""},
+        result={"current_turn_user_idx": bad_idx, "turn_id": "turn-1"},
+    )
+
+    assert resolved["current_turn_user_idx"] is None
+    assert _active_turn_boundary_is_valid(resolved) is False
+
+
+@pytest.mark.parametrize(
+    "bad_turn_id",
+    [None, "", "   ", 1, ["turn-1"], {"turn": "1"}, _StrSubclass("turn-1")],
+)
+def test_active_turn_authority_rejects_lossy_turn_id_types(bad_turn_id):
+    from api.streaming import (
+        _active_turn_boundary_is_valid,
+        _resolve_active_turn_authority,
+    )
+
+    resolved = _resolve_active_turn_authority(
+        {"current_turn_user_idx": None, "turn_id": ""},
+        result={"current_turn_user_idx": 1, "turn_id": bad_turn_id},
+    )
+
+    assert resolved["current_turn_user_idx"] == 1
+    assert resolved["turn_id"] == ""
+    assert _active_turn_boundary_is_valid(resolved) is False
 
 
 def test_partial_reducer_only_removes_identical_rows():

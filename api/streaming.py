@@ -1551,13 +1551,15 @@ def _active_turn_authority(session, stream_id, msg_text):
 
 
 def _coerce_current_turn_user_idx(value):
-    if isinstance(value, bool) or value is None:
+    if type(value) is not int or value < 0:
         return None
-    try:
-        idx = int(value)
-    except (TypeError, ValueError):
-        return None
-    return idx if idx >= 0 else None
+    return value
+
+
+def _coerce_current_turn_id(value):
+    if type(value) is not str:
+        return ''
+    return value.strip()
 
 
 def _resolve_active_turn_authority(identity, *, result=None, agent=None):
@@ -1568,7 +1570,7 @@ def _resolve_active_turn_authority(identity, *, result=None, agent=None):
         _result_idx = _coerce_current_turn_user_idx(result.get('current_turn_user_idx'))
         if _result_idx is not None:
             resolved['current_turn_user_idx'] = _result_idx
-        _result_turn_id = str(result.get('turn_id') or '').strip()
+        _result_turn_id = _coerce_current_turn_id(result.get('turn_id'))
         if _result_turn_id:
             resolved['turn_id'] = _result_turn_id
     if agent is not None:
@@ -1579,7 +1581,9 @@ def _resolve_active_turn_authority(identity, *, result=None, agent=None):
             if _agent_idx is not None:
                 resolved['current_turn_user_idx'] = _agent_idx
         if not resolved.get('turn_id'):
-            _agent_turn_id = str(getattr(agent, '_current_turn_id', '') or '').strip()
+            _agent_turn_id = _coerce_current_turn_id(
+                getattr(agent, '_current_turn_id', '')
+            )
             if _agent_turn_id:
                 resolved['turn_id'] = _agent_turn_id
     return resolved
@@ -1588,9 +1592,11 @@ def _resolve_active_turn_authority(identity, *, result=None, agent=None):
 def _active_turn_boundary_is_valid(identity):
     if not isinstance(identity, dict):
         return False
-    if not str(identity.get('turn_id') or '').strip():
+    turn_id = identity.get('turn_id')
+    if type(turn_id) is not str or not turn_id.strip():
         return False
-    return isinstance(identity.get('current_turn_user_idx'), int)
+    current_turn_user_idx = identity.get('current_turn_user_idx')
+    return type(current_turn_user_idx) is int and current_turn_user_idx >= 0
 
 
 def _result_has_authoritative_full_history_prefix(
@@ -7059,17 +7065,21 @@ def _merge_display_messages_after_agent_result(
             ):
                 merged[-1]['id'] = msg['id']
             continue
+        adjacent_replay_digest = _canonical_message_digest(msg)
         if (
-            key is not None
+            adjacent_replay_digest is not None
             and isinstance(msg, dict)
             and msg.get('role') == 'assistant'
             and merged
-            and _message_identity(merged[-1]) == key
+            and _comparison_keys_equal(
+                _canonical_message_digest(merged[-1]),
+                adjacent_replay_digest,
+            )
         ):
             # Some provider/result replay paths can include the same assistant
-            # message twice in the current delta. Treat only adjacent identity
-            # matches as replay duplicates so identical answers in separate
-            # user turns remain visible.
+            # payload twice in the current delta. Full canonical equality is
+            # required: visible-text identity can erase distinct ids,
+            # attachments, annotations, or reasoning metadata.
             continue
         if _is_context_compression_marker(msg) and key is not None and key in seen:
             continue
