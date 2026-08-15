@@ -36,10 +36,7 @@ RUN apt-get update -y --fix-missing --no-install-recommends \
 # https://sqlite.org/wal.html#walresetbug
 #
 # Debian has not backported the fix, so we compile from the amalgamation.
-# Installs to /usr/local/lib, which is registered in ld.so.conf.d and given
-# priority via ldconfig so Python's sqlite3 loads it ahead of the base image's
-# /usr/lib multiarch copy (the default ld.so path does NOT include
-# /usr/local/lib on Debian arm64, so the explicit conf entry is required).
+# Installs to /usr/local/lib (registered in ld.so.conf.d for arm64 priority).
 # Build tools are purged after compilation to keep the image lean.
 # Build args are for forward version bumps only (3.54+, etc.).
 # When bumping SQLITE_VERSION, recompute the SHA-256 from the official
