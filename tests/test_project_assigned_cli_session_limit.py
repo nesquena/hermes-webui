@@ -557,6 +557,64 @@ def test_no_followup_queries_when_the_global_window_is_not_saturated(
     assert probes == [], "the GROUP BY probe is only paid on a saturated window"
 
 
+def test_saturated_window_pays_one_query_per_starved_project(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """Pin the cost of the worst case: probe + one query per starved project.
+
+    The ceiling is forced to 20 over 5 projects (a share of 4) so saturation is
+    reachable with a small fixture. Every project ends up represented, the
+    follow-up queries are project-scoped and each carries only that project's
+    remaining budget, and the recovered total stays under the ceiling.
+    """
+    monkeypatch.setattr(models, "CLI_VISIBLE_SESSION_LIMIT", 5)
+    monkeypatch.setattr(models, "PROJECT_ASSIGNED_CLI_SCAN_CEILING", 20)
+    quiet = [f"quiet-{index}" for index in range(4)]
+    _register_projects(tmp_path, "project-busy", *quiet)
+
+    rows = [
+        _session(f"{project}-old", BASE_TS + index, project_id=project)
+        for index, project in enumerate(quiet)
+    ]
+    rows.extend(
+        _session(f"busy-{index:03d}", BASE_TS + 1000 + index, project_id="project-busy")
+        for index in range(25)
+    )
+    rows.extend(_session(f"plain-{index:02d}", BASE_TS + 9000 + index) for index in range(25))
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    scoped_queries = []
+    real_reader = models.read_importable_agent_session_rows
+
+    def _counting_reader(*args, **kwargs):
+        if kwargs.get("project_ids"):
+            scoped_queries.append((kwargs["project_ids"], kwargs.get("limit")))
+        return real_reader(*args, **kwargs)
+
+    probes = []
+    real_probe = models.read_assigned_project_row_counts
+
+    def _counting_probe(*args, **kwargs):
+        probes.append(args)
+        return real_probe(*args, **kwargs)
+
+    monkeypatch.setattr(models, "read_importable_agent_session_rows", _counting_reader)
+    monkeypatch.setattr(models, "read_assigned_project_row_counts", _counting_probe)
+
+    counts = _assigned_counts(models._load_cli_sessions_uncached(
+        fake_hermes_home,
+        fake_hermes_home / "state.db",
+        "default",
+    ))
+
+    assert len(probes) == 1, "exactly one GROUP BY probe per saturated build"
+    assert scoped_queries == [(("quiet-0",), 4), (("quiet-1",), 4),
+                              (("quiet-2",), 4), (("quiet-3",), 4)]
+    assert counts == {"project-busy": 4, "quiet-0": 1, "quiet-1": 1,
+                      "quiet-2": 1, "quiet-3": 1}
+    assert sum(counts.values()) <= models.PROJECT_ASSIGNED_CLI_SCAN_CEILING
+
+
 def test_followup_queries_are_capped_and_serve_the_neediest_first(
     fake_hermes_home, tmp_path, monkeypatch
 ):
