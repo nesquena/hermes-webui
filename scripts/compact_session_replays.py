@@ -893,6 +893,24 @@ def _validate_sidecar_identity(path: Path) -> str:
     return session_id
 
 
+def _refuse_tombstoned_publication(path: Path) -> None:
+    """Fail closed if deletion fenced this SID before a publication."""
+    try:
+        deleted = _models._webui_deleted_session_is_tombstoned(
+            path.stem,
+            session_dir=path.parent,
+            strict=True,
+        )
+    except Exception as exc:
+        raise StreamJSONError(
+            f'cannot verify deleted-session tombstone for {path.stem!r}'
+        ) from exc
+    if deleted:
+        raise StreamJSONError(
+            f'session {path.stem!r} is deleted by durable tombstone'
+        )
+
+
 def compact_sidecar(path: Path, *, dry_run: bool = False) -> dict:
     path = Path(path).expanduser().absolute()
     if path.is_symlink():
@@ -903,6 +921,7 @@ def compact_sidecar(path: Path, *, dry_run: bool = False) -> dict:
     lock_path = _sidecar_lock_path(path)
     with lock_path.open('a+', encoding='utf-8') as lock_handle:
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        _refuse_tombstoned_publication(path)
         _validate_sidecar_identity(path)
         source_mode = stat_module.S_IMODE(path.stat().st_mode)
         source_signature = _signature(path)
@@ -1007,9 +1026,15 @@ def compact_sidecar(path: Path, *, dry_run: bool = False) -> dict:
                 )
                 handle.flush()
                 os.fsync(handle.fileno())
+            _refuse_tombstoned_publication(path)
+            if _signature(path) != source_signature or _sha256(path) != source_sha256:
+                raise StreamJSONError('source generation changed before manifest publication')
             os.replace(manifest_tmp, manifest)
             manifest_published = True
             _fsync_dir(path.parent)
+            _refuse_tombstoned_publication(path)
+            if _signature(path) != source_signature or _sha256(path) != source_sha256:
+                raise StreamJSONError('source generation changed before sidecar publication')
             os.replace(temp, path)
             source_installed = True
             _fsync_dir(path.parent)
@@ -1047,6 +1072,7 @@ def restore_manifest(manifest: Path) -> dict:
     lock_path = _sidecar_lock_path(source)
     with lock_path.open('a+', encoding='utf-8') as lock_handle:
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        _refuse_tombstoned_publication(source)
         source_mode = stat_module.S_IMODE(source.stat().st_mode)
         source_signature = _signature(source)
         if _sha256(source) != payload['output_sha256']:
@@ -1095,6 +1121,12 @@ def restore_manifest(manifest: Path) -> dict:
                 or _sha256(source) != payload['output_sha256']
             ):
                 raise StreamJSONError('sidecar changed during rollback preparation')
+            _refuse_tombstoned_publication(source)
+            if (
+                _signature(source) != source_signature
+                or _sha256(source) != payload['output_sha256']
+            ):
+                raise StreamJSONError('sidecar changed before rollback publication')
             os.replace(temp, source)
             _fsync_dir(source.parent)
         finally:

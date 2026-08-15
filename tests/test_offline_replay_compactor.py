@@ -1080,7 +1080,7 @@ def test_webui_session_delete_routes_replay_v10_cleanup():
     start = routes_source.index('parsed.path == "/api/session/delete"')
     end = routes_source.index('parsed.path == "/api/session/clear"', start)
 
-    assert "_delete_offline_replay_artifacts(p)" in routes_source[start:end]
+    assert "_delete_session_sidecar_artifacts_locked(" in routes_source[start:end]
 
 
 def test_large_index_rebuild_uses_metadata_prefix(tmp_path, monkeypatch):
