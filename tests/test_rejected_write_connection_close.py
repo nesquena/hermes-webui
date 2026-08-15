@@ -212,6 +212,89 @@ def test_request_declares_body_tolerates_a_handler_without_headers():
     assert request_declares_body(cast(Any, SimpleNamespace(headers=object()))) is False
 
 
+# ── A duplicated framing header hides the body from a first-value-only read ────
+#
+# `Message.get()` returns only the FIRST occurrence, so `Content-Length: 0`
+# ahead of the real length reads back as an empty body: nothing is drained and
+# the real bytes are parsed as the next request line. Verified live against the
+# running server before the fix -- 403 then
+# `400 Bad request syntax ('{"stale": true}GET /api/health/agent HTTP/1.1')`,
+# and on /api/upload a 400 then `400 Bad request syntax ('--x')`.
+
+
+def _message_with(raw_headers: str):
+    """Build the email.message.Message a production handler really carries."""
+    from email.parser import Parser
+
+    return SimpleNamespace(headers=Parser().parsestr(raw_headers + "\r\n"))
+
+
+def test_duplicate_conflicting_content_length_declares_a_body():
+    from api.helpers import request_declares_body
+
+    handler = _message_with("Host: x\r\nContent-Length: 0\r\nContent-Length: 15\r\n")
+
+    assert request_declares_body(cast(Any, handler)) is True
+
+
+def test_duplicate_agreeing_zero_content_length_declares_no_body():
+    """Repetition alone is not a conflict -- two honest zeroes still frame nothing."""
+    from api.helpers import request_declares_body
+
+    handler = _message_with("Host: x\r\nContent-Length: 0\r\nContent-Length: 0\r\n")
+
+    assert request_declares_body(cast(Any, handler)) is False
+
+
+def test_repeated_transfer_encoding_is_detected_beyond_the_first_value():
+    """`identity` first must not mask a chunked coding behind it."""
+    from api.helpers import unsupported_transfer_encoding
+
+    handler = _message_with(
+        "Host: x\r\nTransfer-Encoding: identity\r\nTransfer-Encoding: chunked\r\n"
+    )
+
+    assert unsupported_transfer_encoding(cast(Any, handler)) == "chunked"
+
+
+def test_unreadable_content_length_flags_conflict_and_garbage_only():
+    from api.helpers import unreadable_content_length
+
+    assert unreadable_content_length(cast(Any, _message_with("Content-Length: 5\r\n"))) is False
+    assert unreadable_content_length(cast(Any, _message_with("Host: x\r\n"))) is False
+    assert unreadable_content_length(
+        cast(Any, _message_with("Content-Length: 5\r\nContent-Length: 5\r\n"))
+    ) is False
+    assert unreadable_content_length(
+        cast(Any, _message_with("Content-Length: 0\r\nContent-Length: 9\r\n"))
+    ) is True
+    assert unreadable_content_length(cast(Any, _message_with("Content-Length: nope\r\n"))) is True
+
+
+def test_sidecar_get_with_duplicate_content_length_closes_connection(monkeypatch):
+    """The conflicting-framing GET reaches the production provenance rejection."""
+    import api.routes as routes
+
+    from email.parser import Parser
+
+    headers = Parser().parsestr("Host: x\r\nContent-Length: 0\r\nContent-Length: 15\r\n\r\n")
+    handler = SimpleNamespace(
+        path="/api/extensions/ext1/sidecar/proxy",
+        command="GET",
+        headers=headers,
+        close_connection=False,
+    )
+    monkeypatch.setattr(routes, "_match_extension_sidecar_proxy_path", lambda _path: ("ext1", "/proxy"))
+    monkeypatch.setattr(routes, "_check_same_origin_browser_request", lambda _handler, **_: False)
+    monkeypatch.setattr(routes, "j", lambda _handler, _payload, status=200: None)
+
+    routes._handle_extension_sidecar_proxy(
+        cast(Any, handler), SimpleNamespace(path=handler.path, query=""), "GET"
+    )
+
+    assert handler.close_connection is True
+
+
 def test_csp_report_rate_limited_closes_connection(monkeypatch):
     """A rate-limited CSP report is dropped before its body is read."""
     import api.routes as routes
@@ -329,6 +412,28 @@ def test_non_numeric_content_length_still_closes(handler_name, monkeypatch):
         {"Content-Type": "multipart/form-data; boundary=x", "Content-Length": "banana"},
         _NeverRead(),
     )
+
+    assert answered["status"] == 400, answered
+    assert answered["payload"]["error"] == "Invalid Content-Length", answered
+    assert handler.close_connection is True
+
+
+@pytest.mark.parametrize("handler_name", _MULTIPART_HANDLERS)
+def test_duplicate_content_length_multipart_rejects_before_read(handler_name, monkeypatch):
+    """Disagreeing lengths give no honest byte count -- refuse without reading.
+
+    Reading the first value (0) made the body invisible: the handler answered
+    "No file field in request" with keep-alive and left the real multipart bytes
+    on the socket, where the server parsed them as the next request line.
+    """
+    from email.parser import Parser
+
+    headers = Parser().parsestr(
+        "Content-Type: multipart/form-data; boundary=x\r\n"
+        "Content-Length: 0\r\n"
+        "Content-Length: 88\r\n\r\n"
+    )
+    handler, answered = _run_multipart_handler(monkeypatch, handler_name, headers, _NeverRead())
 
     assert answered["status"] == 400, answered
     assert answered["payload"]["error"] == "Invalid Content-Length", answered

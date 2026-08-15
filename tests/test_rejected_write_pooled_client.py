@@ -157,3 +157,40 @@ def test_sidecar_get_with_a_body_closes_and_cannot_poison_the_socket():
     )
 
     _assert_single_closed_response(answered, b"403", _BODY)
+
+
+# ── Framing hidden behind a DUPLICATED header ─────────────────────────────────
+#
+# `Content-Length: 0` sent ahead of the real length: `Message.get()` returns only
+# the first value, so every reader saw an empty body and drained nothing. Both
+# cases below were reproduced live on the otherwise-fixed head, poisoning the
+# socket exactly as the single-header cases used to:
+#   sidecar GET -> 403, then 400 Bad request syntax ('{"stale": true}GET /...')
+#   /api/upload -> 400, then 400 Bad request syntax ('--x')
+
+
+def test_duplicate_content_length_sidecar_get_closes_and_cannot_poison_the_socket():
+    answered = _pipelined_after(
+        "GET /api/extensions/probe/sidecar/ping HTTP/1.1\r\n"
+        "Host: 127.0.0.1\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: 0\r\n"
+        f"Content-Length: {len(_BODY)}\r\n"
+        "\r\n".encode() + _BODY
+    )
+
+    _assert_single_closed_response(answered, b"403", _BODY)
+
+
+@pytest.mark.parametrize("path", _MULTIPART_UPLOAD_PATHS)
+def test_duplicate_content_length_upload_closes_and_cannot_poison_the_socket(path):
+    answered = _pipelined_after(
+        f"POST {path} HTTP/1.1\r\n"
+        "Host: 127.0.0.1\r\n"
+        "Content-Type: multipart/form-data; boundary=x\r\n"
+        "Content-Length: 0\r\n"
+        f"Content-Length: {len(_MULTIPART_PAYLOAD)}\r\n"
+        "\r\n".encode() + _MULTIPART_PAYLOAD
+    )
+
+    _assert_single_closed_response(answered, b"400", _MULTIPART_PAYLOAD)
