@@ -258,6 +258,27 @@ def test_exact_prefix_mode_requires_identical_nonempty_attachments():
     )
 
 
+def test_authoritative_prefix_rejects_different_durable_ids():
+    from api.streaming import _result_has_authoritative_full_history_prefix
+
+    previous = [{"role": "user", "content": "old prompt", "id": "old-user"}]
+    result = [
+        {"role": "user", "content": "old prompt", "id": "different-user"},
+        {"role": "assistant", "content": "new answer"},
+    ]
+
+    assert not _result_has_authoritative_full_history_prefix(
+        result,
+        previous,
+        {
+            "text": "current prompt",
+            "current_turn_user_idx": len(previous),
+            "turn_id": "turn:durable-id-control",
+        },
+        "current prompt",
+    )
+
+
 def _settle_structured_result(previous, result):
     from api.streaming import _settle_result_messages
 
@@ -350,6 +371,38 @@ def test_settle_strips_exact_structured_history_with_out_of_band_current_user():
         ]
         assert projection[2]["content"] == "continue the active turn"
         assert projection[3] == answer
+
+
+def test_settle_preserves_idless_exact_prefix_authority_after_id_assignment():
+    previous = [
+        {"role": "user", "content": "old prompt"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "old answer", "annotations": ["durable"]}
+            ],
+            "reasoning": "durable reasoning",
+        },
+    ]
+    answer = {"role": "assistant", "content": "new answer"}
+
+    session = _settle_structured_result(previous, [*copy.deepcopy(previous), answer])
+
+    for projection in (session.messages, session.context_messages):
+        assert [row.get("role") for row in projection] == [
+            "user",
+            "assistant",
+            "user",
+            "assistant",
+        ]
+        assert [row.get("content") for row in projection].count("old prompt") == 1
+        assert sum(
+            isinstance(row.get("content"), list)
+            and row["content"][0].get("text") == "old answer"
+            for row in projection
+        ) == 1
+        assert projection[-1]["content"] == "new answer"
+        assert type(projection[-1].get("id")) is int
 
 
 def test_display_merge_collapses_only_exact_durable_empty_replay():

@@ -1631,7 +1631,7 @@ def _result_has_authoritative_full_history_prefix(
             return _messages_have_prefix(
                 result_messages,
                 previous_context,
-                allow_exact_payload=True,
+                key_fn=_canonical_message_digest,
             )
     if current_turn_user_idx >= len(result_messages):
         return False
@@ -1656,7 +1656,7 @@ def _result_has_authoritative_full_history_prefix(
     return _messages_have_prefix(
         result_messages,
         previous_context,
-        allow_exact_payload=True,
+        key_fn=_canonical_message_digest,
     )
 
 
@@ -1995,20 +1995,19 @@ def _settle_result_messages(
             next_context_messages,
             previous_context_messages,
         )
-        _assign_stable_message_ids(
-            result_messages,
-            previous_messages,
-            previous_context_messages,
-        )
-        if _has_replay_safe_history_prefix(
+        replay_safe_history_prefix = _has_replay_safe_history_prefix(
             next_context_messages,
             previous_context_messages,
+        )
+        if (
+            result_has_authoritative_full_history_prefix
+            or replay_safe_history_prefix
         ):
-            # Establish the out-of-band user-turn boundary before replay overlap
-            # removal. Otherwise a legitimate repeated assistant answer at the
-            # start of the delta looks like the previous context tail and is
-            # stripped. Inconclusive structured rows deliberately skip this
-            # fast path and retain the existing delta semantics.
+            # Establish the out-of-band user-turn boundary while the exact
+            # source prefix is still intact. Generated stable IDs intentionally
+            # mutate only result/context rows, so any later comparison with the
+            # original idless context would lose this already-proven authority.
+            # Inconclusive structured lookalikes still skip this path.
             next_context_messages = _settle_current_turn_boundary(
                 previous_context_messages,
                 next_context_messages,
@@ -2017,6 +2016,11 @@ def _settle_result_messages(
                 source,
                 allow_exact_prefix=True,
             )
+        _assign_stable_message_ids(
+            result_messages,
+            previous_messages,
+            previous_context_messages,
+        )
         next_context_messages = _dedupe_replayed_context_messages(
             previous_context_messages,
             next_context_messages,
@@ -6998,11 +7002,19 @@ def _merge_display_messages_after_agent_result(
                 )
                 previous_display = _backfilled
 
-    if _messages_have_prefix(
-        result_messages,
-        previous_context,
-        allow_exact_payload=result_has_authoritative_full_history_prefix,
-    ):
+    result_prefix_is_authoritative = (
+        result_has_authoritative_full_history_prefix is True
+    )
+    if not result_prefix_is_authoritative:
+        result_prefix_is_authoritative = _messages_have_prefix(
+            result_messages,
+            previous_context,
+            allow_exact_payload=False,
+        )
+    if result_prefix_is_authoritative:
+        # Exact full-history authority is established before stable IDs are
+        # minted. Trust that frozen decision here instead of re-comparing the
+        # now-stamped result prefix against the original idless context.
         candidates = result_messages[len(previous_context):]
         # Normalize stale merges only in the new-turn slice; never rewrite
         # historical rows in the already-committed previous_context prefix.
