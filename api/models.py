@@ -7795,7 +7795,10 @@ def _load_cli_sessions_uncached(
         # Background sources have independent bounded passes below. Keeping them
         # out of this 20-row interactive window prevents a busy worker source
         # (especially kanban) from evicting every CLI/TUI/ACP conversation.
-        exclude_sources=BACKGROUND_CLI_SOURCES if source_filter is None else None,
+        # Spelled as a literal on purpose: tests/test_issue2841_show_cron_sessions_toggle.py
+        # reads this line as source text. Must stay equal to BACKGROUND_CLI_SOURCES
+        # (pinned by test_background_source_exclusion_literal_matches_the_constant).
+        exclude_sources=("cron", "webhook", "kanban") if source_filter is None else None,
         include_sources=None if source_filter is None else (source_filter,),
     )
     if source_filter is None:
