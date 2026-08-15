@@ -1638,7 +1638,7 @@ def _custom_endpoint_slugs_for_base_url(value: object) -> set[str]:
         parsed_url = urlparse(url if "://" in url else f"http://{url}")
         host = (parsed_url.hostname or "").strip().lower()
         port = parsed_url.port
-    except (ValueError, TypeError):
+    except ValueError:
         return set()
     if not host:
         return set()

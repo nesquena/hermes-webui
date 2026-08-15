@@ -2964,9 +2964,13 @@ let _dynamicModelLabels={};
 // Authoritative provider ids the server reported in /api/models group metadata,
 // lowercased and used as a lookup set. _customModelFromQualifiedId prefers the
 // longest match here over the shape grammar so a `custom:<host>:<port>` endpoint
-// slug and a named `custom:<slug>` provider are never confused (#6657). Only
-// populateModelDropdown() writes it: the live per-provider fetch adds models to
-// an optgroup this pass already registered, so it needs no second writer.
+// slug and a named `custom:<slug>` provider are never confused (#6657).
+// populateModelDropdown() is the only writer, but it is NOT the only source of
+// optgroups: _addLiveModelsToSelect() creates a `(live)` optgroup for a provider
+// it never registers here. That stays consistent only because the same loop
+// writes `_dynamicModelLabels[mid]` for every live option, and getModelLabel()
+// short-circuits on that map before it ever consults the grammar — so a live
+// model never reaches the id-shape fallback that would need this set.
 let _dynamicProviderIds={};
 window._configuredModelBadges=window._configuredModelBadges||{};
 const MODEL_STATE_KEY='hermes-webui-model-state';
