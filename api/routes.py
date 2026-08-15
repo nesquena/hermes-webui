@@ -15320,7 +15320,13 @@ def handle_post(handler, parsed) -> bool:
                 )
             except (OSError, json.JSONDecodeError, ValueError):
                 logger.warning("session clear could not verify persisted empty state for %s", sid, exc_info=True)
-            if persisted_clear:
+            # Clearing an already-empty live session is not a destructive
+            # transition. Keep any older, still-recoverable backup: it may be
+            # the only durable copy after an earlier live-sidecar loss. When
+            # this request actually removed messages, however, the pre-clear
+            # backup must be retired so startup recovery cannot resurrect the
+            # history the user just cleared.
+            if persisted_clear and had_sidecar_messages:
                 live_revision = (
                     s._sidecar_revision_v1
                     if getattr(s, '_sidecar_revision_session_id_v1', None) == sid
