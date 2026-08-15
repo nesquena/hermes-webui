@@ -1924,6 +1924,14 @@ def _settle_result_messages(
         active_turn_identity,
     )
     if result_messages:
+        # Classify exact adjacent replays before generated stable IDs make two
+        # source-identical assistant rows artificially distinct. The shallow
+        # metadata-restoration projection shares the kept row dict, so the one
+        # minted ID remains identical in display and provider context.
+        result_messages, _ = _collapse_replayed_assistant_rows(result_messages)
+        next_context_messages, _ = _collapse_replayed_assistant_rows(
+            next_context_messages
+        )
         _assign_stable_message_ids(
             result_messages,
             previous_messages,

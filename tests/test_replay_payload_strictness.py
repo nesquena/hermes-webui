@@ -505,6 +505,23 @@ def test_settle_collapses_exact_assistant_payload_in_both_projections():
         assert assistants == [first]
 
 
+def test_settle_collapses_idless_exact_assistant_before_stable_id_assignment():
+    first = {
+        "role": "assistant",
+        "content": "same",
+        "reasoning": "same reasoning",
+        "attachments": [{"name": "A.pdf"}],
+    }
+
+    session = _settle_structured_result([], [first, copy.deepcopy(first)])
+
+    for projection in (session.messages, session.context_messages):
+        assistants = [row for row in projection if row.get("role") == "assistant"]
+        assert len(assistants) == 1
+        assert assistants[0]["content"] == "same"
+        assert type(assistants[0].get("id")) is int
+
+
 @pytest.mark.parametrize(
     "bad_idx",
     [True, 1.0, 1.5, "1", _IntSubclass(1), None, -1],
@@ -661,6 +678,49 @@ def test_load_repairs_messages_and_context_with_one_pipeline(tmp_path, monkeypat
     assert loaded is not None
     assert len(loaded.messages) == len(loaded.context_messages) == 1
     assert len(persisted["messages"]) == len(persisted["context_messages"]) == 1
+
+
+def test_load_preserves_distinct_nonempty_payloads_and_repairs_exact_replay(
+    tmp_path,
+    monkeypatch,
+):
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    sid = "strict-nonempty-context-parity"
+    first = {
+        "role": "assistant",
+        "content": "same",
+        "id": "assistant-a",
+        "reasoning": "first",
+    }
+    distinct = {
+        **copy.deepcopy(first),
+        "id": "assistant-b",
+        "reasoning": "second",
+    }
+    payload = _session_payload(
+        tmp_path,
+        sid,
+        messages=[first, distinct, copy.deepcopy(distinct)],
+        context_messages=[
+            copy.deepcopy(first),
+            copy.deepcopy(distinct),
+            copy.deepcopy(distinct),
+        ],
+    )
+    (session_dir / f"{sid}.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = models.Session.load(sid)
+    persisted = json.loads((session_dir / f"{sid}.json").read_text(encoding="utf-8"))
+
+    expected_ids = ["assistant-a", "assistant-b"]
+    assert loaded is not None
+    assert [row["id"] for row in loaded.messages] == expected_ids
+    assert [row["id"] for row in loaded.context_messages] == expected_ids
+    assert [row["id"] for row in persisted["messages"]] == expected_ids
+    assert [row["id"] for row in persisted["context_messages"]] == expected_ids
 
 
 @pytest.mark.parametrize("kind", ["partial", "incomplete"])
