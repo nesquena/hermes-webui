@@ -2,6 +2,7 @@
 import collections
 import copy
 import datetime
+import errno
 import hashlib
 import inspect
 import json
@@ -298,9 +299,16 @@ def _fsync_sidecar_directory(directory: Path) -> None:
     if os.name == "nt":
         return
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    fd = os.open(Path(directory), flags)
     try:
-        os.fsync(fd)
+        fd = os.open(Path(directory), flags)
+    except PermissionError:
+        return
+    try:
+        try:
+            os.fsync(fd)
+        except OSError as exc:
+            if exc.errno not in {errno.EINVAL, errno.ENOTSUP}:
+                raise
     finally:
         os.close(fd)
 

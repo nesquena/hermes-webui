@@ -541,6 +541,27 @@ def test_first_sidecar_publication_fsyncs_parent_directory(tmp_path, monkeypatch
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX directory fsync contract")
+def test_sidecar_directory_fsync_tolerates_only_unsupported_filesystems(
+    tmp_path,
+    monkeypatch,
+):
+    from api import models
+
+    def unsupported(_fd):
+        raise OSError(errno.EINVAL, "directory fsync unsupported")
+
+    monkeypatch.setattr(models.os, "fsync", unsupported)
+    models._fsync_sidecar_directory(tmp_path)
+
+    def real_failure(_fd):
+        raise OSError(errno.EIO, "durability failure")
+
+    monkeypatch.setattr(models.os, "fsync", real_failure)
+    with pytest.raises(OSError, match="durability failure"):
+        models._fsync_sidecar_directory(tmp_path)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory fsync contract")
 def test_shrink_publications_fsync_archive_backup_then_live(
     tmp_path,
     monkeypatch,
