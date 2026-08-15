@@ -235,11 +235,16 @@ def advertise_connection_close(handler) -> None:
 
     Both attribute reads are defensive: partially-built handler stubs in the
     test suite carry neither ``close_connection`` nor ``_headers_buffer``, and
-    header emission must not depend on their presence.
+    header emission must not depend on their presence. The buffer is also
+    type-checked before it is scanned -- a stub whose ``_headers_buffer`` is a
+    truthy non-iterable (a bare ``Mock``) would otherwise raise ``TypeError``
+    from inside ``end_headers()``, which ``_handle_write`` would swallow into a
+    spurious 500.
     """
     if not getattr(handler, 'close_connection', False):
         return
-    for raw in getattr(handler, '_headers_buffer', None) or ():
+    buffered = getattr(handler, '_headers_buffer', None)
+    for raw in buffered if isinstance(buffered, (list, tuple)) else ():
         if raw[:11].lower() == b'connection:':
             return
     handler.send_header('Connection', 'close')
