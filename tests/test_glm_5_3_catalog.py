@@ -1,9 +1,10 @@
 """Regression tests: GLM-5.3 catalog and onboarding integration.
 
 GLM-5.3 is Z.ai's current flagship model (successor to GLM-5.2). These tests
-pin catalog presence, newest-first ordering, fallback entry, onboarding default,
-and the payload builder output — ensuring the model users see matches what's
-declared in api/config.py.
+pin catalog presence (opt-in selection), fallback entry, reasoning ladder,
+and payload propagation — ensuring the model users see matches what's declared
+in api/config.py. The onboarding default deliberately REMAINS glm-5.1 until
+Z.ai's direct API serves GLM-5.3 (Coding-Plan-only today; see #7017 review).
 """
 import unittest.mock as mock
 
@@ -121,14 +122,21 @@ def test_glm_5_3_positioned_first_in_zai_fallback_block():
     )
 
 
-def test_glm_5_3_is_zai_onboarding_default():
-    """GLM-5.3 must be the default_model for the zai onboarding setup."""
+def test_zai_onboarding_default_stays_glm_5_1_until_direct_api_serves_glm_5_3():
+    """Z.AI onboarding default must remain glm-5.1 until the direct endpoint serves GLM-5.3.
+
+    The zai provider calls Z.ai's direct endpoint (api.z.ai/api/paas/v4), where the GLM-5.3
+    API is not live yet. Z.ai's GLM-5.3 guide marks it "coming soon"; GLM-5.3 is
+    Coding-Plan-only today. Defaulting direct-API users onto glm-5.3 would fail their first
+    message with model-not-found, so the default stays glm-5.1 — bump it only after the
+    direct endpoint serves GLM-5.3 (per the #7017 review gate).
+    """
     zai_setup = onboarding._SUPPORTED_PROVIDER_SETUPS.get("zai", {})
     assert zai_setup, "zai setup not found in _SUPPORTED_PROVIDER_SETUPS"
 
     default_model = zai_setup.get("default_model")
-    assert default_model == "glm-5.3", (
-        f'Expected default_model "glm-5.3", got {default_model!r}'
+    assert default_model == "glm-5.1", (
+        f'Expected default_model "glm-5.1" (not glm-5.3), got {default_model!r}'
     )
 
 
