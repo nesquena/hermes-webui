@@ -1454,19 +1454,27 @@ class Session:
         extra = {k: v for k, v in self.__dict__.items()
                  if k not in METADATA_FIELDS and k not in _placed
                  and not k.startswith('_')}
-        # Capture the public state before serialization. The assigned persisted
-        # fingerprint may describe this snapshot only if the resident object is
-        # still identical after the payload has been serialized and installed.
-        # If another request mutates the object anywhere across that window, keep
-        # the fingerprint unknown so byte-only eviction fails closed instead of
-        # mistaking the later in-memory state for the bytes written below.
+        # Capture ONE immutable snapshot of the public state and use it for both
+        # the fingerprint and the serialized bytes. ``payload_data`` itself only
+        # holds top-level references to ``self``'s attributes (e.g.
+        # ``meta['messages'] is self.messages``), so hashing it and then calling
+        # ``json.dumps`` on it in a separate traversal previously left a window
+        # where a nested field could change A->B->A between the two passes
+        # (e.g. across a slow/yielding serialization of a huge transcript): the
+        # fingerprint would describe A, the disk bytes would describe B, and a
+        # revert back to A before the post-write comparison below would make
+        # the mismatch invisible, letting byte-only eviction treat a corrupted
+        # sidecar as clean. Deep-copying breaks that aliasing: the copy is a
+        # fully independent object graph, so no concurrent mutation of ``self``
+        # (during or after this point) can change what gets hashed or written.
         payload_data = {**meta, **extra}
+        snapshot = copy.deepcopy(payload_data)
         persisted_fingerprint = _session_public_state_fingerprint({
             key: value
-            for key, value in payload_data.items()
+            for key, value in snapshot.items()
             if key not in {'message_count', 'anchor_scene_index'}
         })
-        payload = json.dumps(payload_data, ensure_ascii=False, indent=2)
+        payload = json.dumps(snapshot, ensure_ascii=False, indent=2)
 
         # ── #1558 backup safeguard ──────────────────────────────────────
         # Before overwriting the session file, copy the previous version to
@@ -4847,16 +4855,35 @@ def _evict_sessions_over_cap(cap: int | None = None, max_bytes: int | None = Non
     does not cold-reload on every access.
 
     CALLER CONTRACT: the global ``LOCK`` MUST already be held (every call site
-    mutates ``SESSIONS`` under ``LOCK``). This function never acquires ``LOCK``
-    or any stream lock itself, so it cannot introduce a lock-ordering deadlock.
-    Under that same held ``LOCK`` it publishes the cap it enforced into
-    ``api.config._LAST_APPLIED_SESSIONS_CACHE_MAX`` for nonblocking diagnostics
-    (#6351); any future edit that can change ``cap`` after that point must move
-    the publish down with it.
+    mutates ``SESSIONS`` under ``LOCK``). Byte-only removal additionally makes a
+    *nonblocking* attempt at the candidate's per-session agent lock (see below);
+    it never blocks on ``LOCK`` or any other lock itself, so it cannot introduce
+    a lock-ordering deadlock. Under that same held ``LOCK`` it publishes the cap
+    it enforced into ``api.config._LAST_APPLIED_SESSIONS_CACHE_MAX`` for
+    nonblocking diagnostics (#6351); any future edit that can change ``cap``
+    after that point must move the publish down with it.
+
+    Byte-only eviction validates ``_session_matches_persisted_state()`` and then
+    removes the entry. Validating and removing are not atomic with respect to a
+    writer: without ownership, a writer could establish mutation ownership (the
+    per-session agent lock every normal mutation path takes) in the window
+    between validation and removal, and its update would be silently discarded
+    once the stale in-memory copy is dropped. To close that window, the
+    byte-only path takes the candidate's per-session agent lock around the
+    (re-)validate-then-pop pair, so a writer using the standard lock-then-mutate
+    discipline either finishes and releases before we validate, or blocks until
+    we finish and release — either way it cannot observe removal mid-mutation.
+    The acquire is nonblocking: normal code takes session-lock then ``LOCK``, so
+    a *blocking* acquire here (``LOCK`` already held) would invert that order
+    and could deadlock against a writer holding the session lock and waiting on
+    ``LOCK``. A contended lock (including this same thread already holding it
+    via a self-heal path, e.g. ``_sync_sidecar_from_state_db_if_newer``) just
+    leaves the candidate resident this pass — the same fail-safe posture used
+    elsewhere in this function for weight/parity uncertainty.
 
     Returns the number of sessions evicted. If every over-budget candidate is
-    active/unsaved, the cache may temporarily exceed a bound — that is the
-    intended safe behavior (never lose an active/unsaved session).
+    active/unsaved/lock-contended, the cache may temporarily exceed a bound —
+    that is the intended safe behavior (never lose an active/unsaved session).
     """
     config_data = None
     if cap is None or max_bytes is None:
@@ -4922,14 +4949,27 @@ def _evict_sessions_over_cap(cap: int | None = None, max_bytes: int | None = Non
             # is more frequent for large full sessions and must not widen that
             # policy to same-count edits or unsaved metadata. Metadata-only stubs
             # are immutable disk projections and need no full-state digest.
-            if (
+            byte_only_pressure = (
                 over_bytes
                 and not over_count
                 and not getattr(candidate, '_loaded_metadata_only', False)
-                and not _session_matches_persisted_state(candidate)
-            ):
-                continue
-            removed = SESSIONS.pop(sid, None)
+            )
+            if byte_only_pressure:
+                # Tie validation to removal via mutation ownership (see the
+                # CALLER CONTRACT note above): a writer cannot establish
+                # ownership of *candidate* while we hold its lock, so a clean
+                # verdict here cannot be invalidated before the pop below.
+                session_lock = _get_session_agent_lock(sid)
+                if not session_lock.acquire(blocking=False):
+                    continue
+                try:
+                    if not _session_matches_persisted_state(candidate):
+                        continue
+                    removed = SESSIONS.pop(sid, None)
+                finally:
+                    session_lock.release()
+            else:
+                removed = SESSIONS.pop(sid, None)
             if removed is not None:
                 resident_bytes = max(
                     0,

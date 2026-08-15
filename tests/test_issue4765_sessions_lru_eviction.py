@@ -374,6 +374,138 @@ def test_save_fingerprint_describes_serialized_snapshot_not_later_mutation(
     assert SESSIONS[session.session_id] is session
 
 
+def test_save_snapshot_is_not_fooled_by_nested_aba_during_serialization(
+    isolated_session_env, monkeypatch,
+):
+    """The payload and durable fingerprint must describe one immutable snapshot."""
+    from api import models
+    from api.config import LOCK, SESSIONS
+
+    session = _make_persisted_session(
+        87,
+        messages=[{"role": "assistant", "content": "A"}],
+    )
+    _insert(session)
+    real_dumps = models.json.dumps
+    mutated = False
+
+    def dumps_with_nested_aba(value, *args, **kwargs):
+        nonlocal mutated
+        if (
+            not mutated
+            and isinstance(value, dict)
+            and value.get("session_id") == session.session_id
+            and isinstance(value.get("messages"), list)
+        ):
+            mutated = True
+            session.messages[0]["content"] = "B"
+            try:
+                return real_dumps(value, *args, **kwargs)
+            finally:
+                session.messages[0]["content"] = "A"
+        return real_dumps(value, *args, **kwargs)
+
+    monkeypatch.setattr(models.json, "dumps", dumps_with_nested_aba)
+    session.save(touch_updated_at=False)
+
+    assert mutated is True
+    persisted = json.loads(session.path.read_text(encoding="utf-8"))
+    assert persisted["messages"][0]["content"] == "A"
+    assert session.messages[0]["content"] == "A"
+    assert models._session_matches_persisted_state(session) is True
+
+    sibling = _make_persisted_session(86)
+    _insert(sibling)  # make the sibling MRU before reclaiming the clean LRU
+    with LOCK:
+        evicted = models._evict_sessions_over_cap(cap=10, max_bytes=1)
+
+    assert evicted == 1
+    assert session.session_id not in SESSIONS
+    assert models.get_session(session.session_id).messages[0]["content"] == "A"
+
+
+class _ObservedSessions(collections.OrderedDict):
+    """Ordered cache double that exposes the candidate-removal instant."""
+
+    def __init__(self, *args, observed_session_id, removal_started, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._observed_session_id = observed_session_id
+        self._removal_started = removal_started
+
+    def pop(self, key, default=None):
+        if key == self._observed_session_id:
+            self._removal_started.set()
+        return super().pop(key, default)
+
+
+def test_byte_eviction_coordinates_validation_and_removal_with_session_writer(
+    isolated_session_env, monkeypatch,
+):
+    """A writer that begins after validation cannot lose an unsaved mutation."""
+    from api import config as _cfg
+    from api import models
+    from api.config import LOCK
+
+    candidate = _make_persisted_session(85)
+    sibling = _make_persisted_session(84)
+    removal_started = threading.Event()
+    cache = _ObservedSessions(
+        [(candidate.session_id, candidate), (sibling.session_id, sibling)],
+        observed_session_id=candidate.session_id,
+        removal_started=removal_started,
+    )
+    monkeypatch.setattr(_cfg, "SESSIONS", cache)
+    monkeypatch.setattr(models, "SESSIONS", cache)
+
+    real_matches = models._session_matches_persisted_state
+    validation_finished = threading.Event()
+    mutation_attempted = threading.Event()
+    mutation_finished = threading.Event()
+    mutation_before_removal = threading.Event()
+    failures = []
+
+    def matches_then_offer_writer(session):
+        matches = real_matches(session)
+        if session is candidate:
+            validation_finished.set()
+            assert mutation_attempted.wait(timeout=1.0)
+            # The unsafe implementation lets the writer mutate here. A safe
+            # implementation either blocks it until removal, or revalidates and
+            # retains the changed cache entry.
+            mutation_finished.wait(timeout=0.1)
+        return matches
+
+    monkeypatch.setattr(models, "_session_matches_persisted_state", matches_then_offer_writer)
+
+    def mutate_and_save():
+        try:
+            assert validation_finished.wait(timeout=1.0)
+            mutation_attempted.set()
+            with _cfg._get_session_agent_lock(candidate.session_id):
+                if not removal_started.is_set():
+                    mutation_before_removal.set()
+                candidate.title = "Unsaved concurrent title"
+                mutation_finished.set()
+                candidate.save(touch_updated_at=False)
+        except BaseException as exc:
+            failures.append(exc)
+
+    writer = threading.Thread(target=mutate_and_save, daemon=True)
+    writer.start()
+    with LOCK:
+        models._evict_sessions_over_cap(cap=10, max_bytes=1)
+    writer.join(timeout=2.0)
+
+    assert writer.is_alive() is False
+    assert failures == []
+    # If mutation won the race, validation must have been repeated and cache
+    # removal skipped. If removal won under the writer lock, the subsequent save
+    # is durable and it is safe for the old clean object to have been reclaimed.
+    assert not (
+        mutation_before_removal.is_set() and candidate.session_id not in cache
+    ), "byte eviction removed state changed after its durability check"
+
+
 def test_state_db_reconcile_refreshes_cached_weight_and_enforces_budget(
     isolated_session_env, monkeypatch,
 ):
