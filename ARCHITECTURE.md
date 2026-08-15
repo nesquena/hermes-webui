@@ -262,11 +262,15 @@ cleanup, and fsyncs the session directory.
 
 Deleted-WebUI-session tombstone updates are serialized by a global cross-process
 authority in a lock-path namespace that no accepted session SID can alias. It is
-acquired only after any SID authority. Tombstone publication flushes the file
-and parent directory before sidecar deletion can start; a failure is returned to
-the delete caller with the sidecar intact. Primary, backup, or archive unlink
-failure also fails closed before State DB cleanup or success. A successful
-delete verifies those files are absent and fsyncs the session directory again.
+acquired only after any SID authority. Manual delete, hidden-background cleanup,
+and empty-session cleanup share one artifact-removal helper. Empty-session cleanup
+reads and validates the embedded SID, payload, and exact revision while holding
+the SID authority, then rechecks that revision immediately before deletion.
+Tombstone publication flushes the file and parent directory before sidecar
+deletion can start; a failure leaves that candidate uncounted. Primary, backup,
+or archive unlink failure also fails closed before State DB cleanup or cleanup
+success. A successful delete verifies those files are absent and fsyncs the
+session directory again.
 
 Sidecar, primary-backup, and incomparable-backup archive publications flush the
 file before atomic publication and fsync the parent directory on POSIX. Native

@@ -388,13 +388,21 @@ def test_server_delete_removes_session_bak_snapshot(cleanup_test_sessions):
     ]
     delete_end = min(clear_indices) if clear_indices else len(routes_src)
     delete_block = routes_src[delete_idx:delete_end]
-    assert "backup_path = p.with_suffix('.json.bak')" in delete_block
-    assert "for session_file in (p, backup_path" in delete_block
-    assert "session_file.unlink(missing_ok=True)" in delete_block, (
-        "session/delete must unlink <sid>.json.bak to avoid later orphan-backup recovery"
+    assert "_delete_session_sidecar_artifacts_locked(" in delete_block, (
+        "session/delete must route all sidecar removal through the canonical helper"
     )
-    assert "bak.archive-*" in delete_block, \
-        "session/delete must unlink versioned backup archives"
+
+    import inspect
+    from api.models import _delete_session_sidecar_artifacts_locked
+
+    helper_src = inspect.getsource(_delete_session_sidecar_artifacts_locked)
+    assert 'backup = sidecar.with_suffix(".json.bak")' in helper_src
+    assert "artifact.unlink(missing_ok=True)" in helper_src, (
+        "the canonical delete helper must unlink <sid>.json.bak"
+    )
+    assert "bak.archive-*" in helper_src, (
+        "the canonical delete helper must unlink versioned backup archives"
+    )
 
 # ── R9: Token/tool SSE events write to wrong session after switch ─────────────
 

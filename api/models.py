@@ -289,6 +289,17 @@ def _read_sidecar_revision(path: Path, sid: str | None = None) -> SidecarRevisio
     return _sidecar_revision_from_bytes(resolved_sid, raw)
 
 
+def _read_sidecar_snapshot(path: Path, sid: str) -> tuple[SidecarRevision, dict]:
+    """Read one validated payload and its exact durable revision."""
+    raw = path.read_bytes()
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise ValueError(f"Session sidecar for {sid!r} is not an object")
+    if payload.get("session_id") != sid:
+        raise ValueError(f"Session sidecar for {sid!r} has a foreign embedded SID")
+    return _sidecar_revision_from_bytes(sid, raw, parsed=payload), payload
+
+
 def _fsync_sidecar_directory(directory: Path) -> None:
     """Persist a sidecar directory entry where POSIX supports directory fsync.
 
@@ -1150,6 +1161,65 @@ def _clear_webui_deleted_session_tombstone(sid: str) -> None:
             _webui_deleted_session_tombstone_file().unlink(missing_ok=True)
         except Exception:
             logger.debug("Failed to remove empty webui deleted-session tombstone", exc_info=True)
+
+
+class SessionDeleteTombstoneError(RuntimeError):
+    """A sidecar delete could not durably fence stale writers."""
+
+
+def _delete_session_sidecar_artifacts_locked(
+    sid: str,
+    *,
+    session_dir: Path | None = None,
+    expected_revision: SidecarRevision | None = None,
+    record_tombstone: bool = True,
+) -> bool:
+    """Delete one SID's sidecar artifacts while its authority is held.
+
+    Callers must hold ``_session_sidecar_authority(sid)``. When supplied, the
+    expected revision is rechecked immediately before the durable tombstone and
+    unlinks; a mismatch returns False without changing any state.
+    """
+    if not is_safe_session_id(sid):
+        raise ValueError(f"Unsafe session_id {sid!r}")
+    directory = Path(session_dir or SESSION_DIR)
+    sidecar = directory / f"{sid}.json"
+    if expected_revision is not None:
+        if not isinstance(expected_revision, SidecarRevision):
+            return False
+        if _read_sidecar_revision(sidecar, sid) != expected_revision:
+            return False
+    if record_tombstone:
+        try:
+            _record_webui_deleted_session_tombstone(sid)
+        except Exception as exc:
+            raise SessionDeleteTombstoneError(
+                f"Failed to durably tombstone deleted WebUI session {sid!r}"
+            ) from exc
+
+    _invalidate_cached_session_generation(sid)
+    backup = sidecar.with_suffix(".json.bak")
+    archived_backups = list(directory.glob(f"{sidecar.name}.bak.archive-*"))
+    failures = []
+    for artifact in (sidecar, backup, *archived_backups):
+        try:
+            artifact.unlink(missing_ok=True)
+        except Exception as exc:
+            failures.append(exc)
+
+    remaining = [
+        artifact
+        for artifact in (sidecar, backup, *archived_backups)
+        if artifact.exists()
+    ]
+    remaining.extend(directory.glob(f"{sidecar.name}.bak.archive-*"))
+    _fsync_sidecar_directory(directory)
+    if failures or remaining:
+        cause = failures[0] if failures else None
+        raise RuntimeError(
+            f"Failed to delete required sidecar artifacts for {sid!r}"
+        ) from cause
+    return True
 
 
 def _content_has_reasoning_only_parts(content) -> bool:

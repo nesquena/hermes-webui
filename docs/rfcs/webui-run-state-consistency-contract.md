@@ -161,7 +161,10 @@ and 5; it does not mark every run-state boundary implemented.
    archive preservation does not depend on hard-link support; the stricter
    create-only primitive remains mandatory for live sidecars. Backup retirement
    requires matching receipts for both the backup and the committed live
-   generation.
+   generation. Any deletion path must decide and act while holding the same SID
+   authority, revalidate its payload and exact revision at the deletion point,
+   publish a durable tombstone before unlinking, and remove the primary sidecar,
+   backup, and backup archives before reporting success.
 
 ## Review Checklist
 

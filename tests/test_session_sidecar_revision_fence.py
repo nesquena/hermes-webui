@@ -41,6 +41,36 @@ def _process_writer(
         result_queue.put((marker, "saved"))
 
 
+def _process_cleanup_race_writer(
+    session_dir,
+    sid,
+    marker,
+    start_event,
+    ready_event,
+    done_event,
+    result_queue,
+):
+    from api import models
+
+    models.SESSION_DIR = Path(session_dir)
+    models.SESSION_INDEX_FILE = Path(session_dir) / "_index.json"
+    session = models.Session.load(sid)
+    assert session is not None
+    session.messages.append({"role": "assistant", "content": marker})
+    ready_event.set()
+    start_event.wait(timeout=15)
+    try:
+        session.save(skip_index=True)
+    except models.StaleSessionGenerationError:
+        result_queue.put("stale")
+    except Exception as exc:
+        result_queue.put(f"{type(exc).__name__}:{exc}")
+    else:
+        result_queue.put("saved")
+    finally:
+        done_event.set()
+
+
 def _process_record_deleted_tombstone(
     session_dir,
     sid,
@@ -256,6 +286,149 @@ def test_hidden_background_cleanup_uses_agent_and_sidecar_authorities(
         assert sid not in models.SESSIONS
     with pytest.raises(models.StaleSessionGenerationError):
         stale_alias.save(skip_index=True)
+
+
+@pytest.mark.parametrize(
+    ("zero_only", "title"),
+    [(False, "Untitled"), (True, "Named empty session")],
+)
+def test_empty_session_cleanup_fences_writer_between_check_and_delete(
+    tmp_path,
+    monkeypatch,
+    zero_only,
+    title,
+):
+    from api import models, routes
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(routes, "SESSIONS", models.SESSIONS)
+    monkeypatch.setattr(routes, "LOCK", models.LOCK)
+    sid = f"cleanup-race-{'zero' if zero_only else 'normal'}"
+    marker = "UNIQUE DURABLE TURN"
+    models.Session(
+        session_id=sid,
+        title=title,
+        workspace=str(tmp_path),
+        messages=[],
+    ).save(skip_index=True)
+    sidecar = session_dir / f"{sid}.json"
+    backup = sidecar.with_suffix(".json.bak")
+    archive = backup.with_name(f"{backup.name}.archive-review-probe")
+    backup.write_text("offline backup", encoding="utf-8")
+    archive.write_text("offline archive", encoding="utf-8")
+
+    context = multiprocessing.get_context("spawn" if os.name == "nt" else "fork")
+    start_event = context.Event()
+    ready_event = context.Event()
+    done_event = context.Event()
+    result_queue = context.Queue()
+    writer = context.Process(
+        target=_process_cleanup_race_writer,
+        args=(
+            session_dir,
+            sid,
+            marker,
+            start_event,
+            ready_event,
+            done_event,
+            result_queue,
+        ),
+    )
+    writer.start()
+    assert ready_event.wait(timeout=15)
+
+    original_load = models.Session.load.__func__
+
+    def load_then_commit_writer(cls, candidate_sid):
+        loaded = original_load(cls, candidate_sid)
+        if candidate_sid == sid:
+            start_event.set()
+            assert done_event.wait(timeout=15), "writer blocked after cleanup check"
+        return loaded
+
+    monkeypatch.setattr(models.Session, "load", classmethod(load_then_commit_writer))
+    monkeypatch.setattr(routes, "j", lambda _handler, payload: payload)
+    try:
+        result = routes._handle_sessions_cleanup(
+            object(),
+            {},
+            zero_only=zero_only,
+        )
+        # The fixed cleanup reads directly while holding SID authority, so the
+        # legacy Session.load interposition is not reached. Release the writer
+        # after deletion to prove its stale generation remains fenced.
+        start_event.set()
+        writer.join(timeout=20)
+        assert not writer.is_alive()
+        assert writer.exitcode == 0
+        writer_result = result_queue.get(timeout=5)
+    finally:
+        if writer.is_alive():
+            writer.terminate()
+        writer.join(timeout=5)
+
+    assert result == {"ok": True, "cleaned": 1}
+    assert writer_result == "stale"
+    assert not sidecar.exists()
+    assert not backup.exists()
+    assert not archive.exists()
+    assert sid in models._load_webui_deleted_session_tombstone()
+
+
+def test_empty_session_cleanup_does_not_count_partial_delete_as_index_ghost(
+    tmp_path,
+    monkeypatch,
+):
+    from api import models, routes
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    index_path = session_dir / "_index.json"
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index_path)
+    monkeypatch.setattr(routes, "SESSIONS", models.SESSIONS)
+    monkeypatch.setattr(routes, "LOCK", models.LOCK)
+    failed_sid = "cleanup-partial-delete"
+    healthy_sid = "cleanup-best-effort-peer"
+    for sid in (failed_sid, healthy_sid):
+        models.Session(
+            session_id=sid,
+            title="Untitled",
+            workspace=str(tmp_path),
+            messages=[],
+        ).save(skip_index=True)
+    failed_backup = session_dir / f"{failed_sid}.json.bak"
+    failed_backup.write_text("required offline backup", encoding="utf-8")
+    index_path.write_text(
+        json.dumps(
+            [
+                {"session_id": failed_sid, "title": "Untitled", "message_count": 0},
+                {"session_id": healthy_sid, "title": "Untitled", "message_count": 0},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    real_unlink = Path.unlink
+
+    def fail_required_backup_unlink(path, *args, **kwargs):
+        if path == failed_backup:
+            raise PermissionError("required cleanup backup is locked")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_required_backup_unlink)
+    monkeypatch.setattr(routes, "j", lambda _handler, payload: payload)
+
+    result = routes._handle_sessions_cleanup(object(), {})
+
+    assert result == {"ok": True, "cleaned": 1}
+    assert not (session_dir / f"{failed_sid}.json").exists()
+    assert failed_backup.exists()
+    assert not (session_dir / f"{healthy_sid}.json").exists()
+    assert json.loads(index_path.read_text(encoding="utf-8")) == []
+    assert failed_sid in models._load_webui_deleted_session_tombstone()
 
 
 def test_stale_loaded_instance_cannot_overwrite_newer_sidecar(
