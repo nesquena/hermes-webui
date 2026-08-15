@@ -7268,6 +7268,9 @@ async function toggleYoloFromApproval() {
   if (!sid) return false;
   const result = await respondApproval('once', {yolo: true});
   if (!result) return false;
+  // The approval request may outlive a session switch. Do not apply the
+  // original session's authoritative state to the newly active session.
+  if (!S || !S.session || S.session.session_id !== sid) return true;
   _yoloEnabled = !!result.yolo_enabled;
   _updateYoloPill();
   showToast(t(_yoloEnabled ? 'yolo_enabled' : 'yolo_disabled'));
@@ -7650,7 +7653,8 @@ async function respondApproval(choice) {
     if (e && typeof e.body === 'string') {
       try { errorPayload = JSON.parse(e.body); } catch (_) { /* non-JSON HTTP error */ }
     }
-    if (options.yolo && errorPayload && typeof errorPayload.yolo_enabled === 'boolean') {
+    if (options.yolo && errorPayload && typeof errorPayload.yolo_enabled === 'boolean'
+      && S && S.session && S.session.session_id === sid) {
       _yoloEnabled = errorPayload.yolo_enabled;
       _updateYoloPill();
     }

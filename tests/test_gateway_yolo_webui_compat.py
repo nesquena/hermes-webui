@@ -1248,3 +1248,53 @@ def test_card_yolo_first_relay_serializes_next_gateway_approval(monkeypatch, rel
         with routes._lock:
             routes._pending.pop(sid, None)
             routes._gateway_queues.pop(sid, None)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_card_yolo_response_does_not_overwrite_switched_session_state():
+    messages_js = (pathlib.Path(__file__).resolve().parents[1] / "static" / "messages.js").read_text()
+
+    def extract(name, end_marker):
+        start = messages_js.index(f"async function {name}(")
+        return messages_js[start:messages_js.index(end_marker, start)]
+
+    respond_approval = extract("respondApproval", "\nfunction startApprovalPolling")
+    toggle_yolo = extract("toggleYoloFromApproval", "\n// ── Approval polling")
+
+    def run(api_source, expected_ok):
+        script = "\n".join([
+            "const toasts=[]; let pillUpdates=0;",
+            "const S={session:{session_id:'old-session'}};",
+            "let _approvalSessionId='old-session';",
+            "let _approvalCurrentId='approval-1';",
+            "let _approvalResponding=null;",
+            "let _yoloEnabled=false;",
+            "const _approvalPendingBySession=new Map([['old-session',{pending:{approval_id:'approval-1'}}]]);",
+            f"const api={api_source};",
+            "const $=()=>({disabled:false,classList:{add(){},remove(){}}});",
+            "const t=k=>k; const showToast=msg=>toasts.push(msg); const setStatus=()=>{};",
+            "const _unmarkApprovalDismissed=()=>{}; const _approvalResponseMatches=()=>false;",
+            "const _setApprovalControlsDisabled=()=>{}; const _clearApprovalPendingForSession=()=>{};",
+            "const hideApprovalCard=()=>{}; const _updateYoloPill=()=>{pillUpdates+=1;};",
+            "const _restoreFailedApprovalResponse=()=>{};",
+            respond_approval,
+            toggle_yolo,
+            "(async()=>{",
+            " const ok=await toggleYoloFromApproval();",
+            f" if(ok!=={str(expected_ok).lower()}) throw new Error('unexpected result '+ok);",
+            " if(_yoloEnabled!==false) throw new Error('stale response changed new session state');",
+            " if(pillUpdates!==0) throw new Error('stale response updated the new session pill');",
+            " if(toasts.length!==0) throw new Error('stale response emitted a toast');",
+            "})().catch(e=>{console.error(e.stack||e);process.exit(1)});",
+        ])
+        result = subprocess.run([shutil.which("node"), "-e", script], text=True, capture_output=True)
+        assert result.returncode == 0, result.stderr
+
+    run(
+        "async()=>{S.session.session_id='new-session';return {ok:true,yolo_enabled:true};}",
+        True,
+    )
+    run(
+        "async()=>{S.session.session_id='new-session';const e=new Error('relay failed');e.body=JSON.stringify({error:'relay failed',yolo_enabled:true});throw e;}",
+        False,
+    )
