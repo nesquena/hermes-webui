@@ -1769,9 +1769,28 @@ def _find_active_turn_checkpoint_index(
         for idx, message in enumerate(result_messages):
             if _active_turn_token_matches(message, identity):
                 return idx
-    if not _active_turn_boundary_is_valid(identity):
-        return None
     expected_text = identity.get('text') if identity.get('text') is not None else msg_text
+    if not _active_turn_boundary_is_valid(identity):
+        previous_context = list(previous_context or [])
+        legacy_idx = len(previous_context)
+        if (
+            allow_exact_prefix
+            and legacy_idx < len(result_messages)
+            and _messages_have_prefix(
+                result_messages,
+                previous_context,
+                allow_exact_payload=True,
+            )
+        ):
+            message = result_messages[legacy_idx]
+            if (
+                isinstance(message, dict)
+                and message.get('role') == 'user'
+                and _normalize_user_text(message.get('content'))
+                == _normalize_user_text(expected_text)
+            ):
+                return legacy_idx
+        return None
     candidates = []
     current_turn_user_idx = identity['current_turn_user_idx']
     previous_context = list(previous_context or [])
@@ -2158,6 +2177,64 @@ def _collapse_replays_with_history_boundary(
     return _collapse_replayed_assistant_rows(messages)
 
 
+def _collapse_repeated_exact_history_prefixes(
+    previous_context,
+    result_messages,
+    msg_text,
+):
+    """Reduce repeated full-history blocks before strict prefix classification.
+
+    Legacy Agent implementations can prepend the complete context more than
+    once, then append an explicit current-user row.  Only exact canonical block
+    copies are removable here: payload-distinct lookalikes remain incomparable,
+    and an explicit matching user boundary is required so an assistant-only
+    current-turn delta cannot be mistaken for another history replay.
+    """
+    previous_context = list(previous_context or [])
+    result_messages = list(result_messages or [])
+    block_size = len(previous_context)
+    if block_size == 0 or len(result_messages) < (2 * block_size) + 1:
+        return result_messages, False
+
+    history_keys = [
+        _canonical_message_digest(message) for message in previous_context
+    ]
+    if any(key is None for key in history_keys):
+        return result_messages, False
+
+    def _block_matches(start):
+        if start + block_size > len(result_messages):
+            return False
+        return all(
+            _comparison_keys_equal(
+                _canonical_message_digest(actual),
+                expected,
+            )
+            for actual, expected in zip(
+                result_messages[start:start + block_size],
+                history_keys,
+                strict=True,
+            )
+        )
+
+    if not _block_matches(0) or not _block_matches(block_size):
+        return result_messages, False
+
+    cursor = block_size
+    while _block_matches(cursor):
+        cursor += block_size
+    suffix = result_messages[cursor:]
+    if not (
+        suffix
+        and type(suffix[0]) is dict
+        and suffix[0].get('role') == 'user'
+        and _normalize_user_text(suffix[0].get('content'))
+        == _normalize_user_text(msg_text)
+    ):
+        return result_messages, False
+    return copy.deepcopy(previous_context) + copy.deepcopy(suffix), True
+
+
 def _settle_result_messages(
     session,
     previous_messages,
@@ -2167,8 +2244,16 @@ def _settle_result_messages(
     source,
     active_turn_identity,
 ):
+    result_messages, repeated_exact_history_prefix = (
+        _collapse_repeated_exact_history_prefixes(
+            previous_context_messages,
+            result_messages,
+            msg_text,
+        )
+    )
     result_has_authoritative_full_history_prefix = (
-        _result_has_authoritative_full_history_prefix(
+        repeated_exact_history_prefix
+        or _result_has_authoritative_full_history_prefix(
             result_messages,
             previous_context_messages,
             active_turn_identity,
@@ -2272,11 +2357,26 @@ def _settle_result_messages(
             source,
             allow_exact_prefix=True,
         )
-    session.context_messages = (
-        _deduplicate_context_messages(next_context_messages)
-        if result_messages
-        else list(next_context_messages or [])
-    )
+    if (
+        result_messages
+        and result_has_authoritative_full_history_prefix
+        and _messages_have_prefix(
+            next_context_messages,
+            previous_context_messages,
+            key_fn=_canonical_message_digest,
+        )
+    ):
+        history_size = len(previous_context_messages)
+        session.context_messages = (
+            copy.deepcopy(previous_context_messages)
+            + _deduplicate_context_messages(next_context_messages[history_size:])
+        )
+    else:
+        session.context_messages = (
+            _deduplicate_context_messages(next_context_messages)
+            if result_messages
+            else list(next_context_messages or [])
+        )
     if result_messages:
         session.context_messages = _settle_current_turn_boundary(
             previous_context_messages,

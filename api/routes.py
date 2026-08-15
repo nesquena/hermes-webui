@@ -23207,6 +23207,19 @@ def _handle_chat_sync(handler, body):
             _sync_turn_source,
             _sync_active_turn_identity,
         )
+        # The synchronous endpoint has no reconnectable stream. Its request-
+        # local token is useful only while the shared settlement pipeline aligns
+        # display/context ownership; do not persist it as durable transcript
+        # metadata after the request has reached a terminal result.
+        _sync_turn_token = _sync_active_turn_identity.get("token")
+        if _sync_turn_token:
+            for _projection in (s.messages, s.context_messages):
+                for _message in _projection or []:
+                    if (
+                        isinstance(_message, dict)
+                        and _message.get("_active_turn_token") == _sync_turn_token
+                    ):
+                        _message.pop("_active_turn_token", None)
         _compact_session_image_parts_for_persistence(s)
         # Only auto-generate title when still default; preserves user renames
         if s.title == "Untitled":

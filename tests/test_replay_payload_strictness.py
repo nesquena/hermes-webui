@@ -310,6 +310,60 @@ def _settle_structured_result(previous, result):
     return session
 
 
+def test_settle_legacy_double_exact_history_replay_is_idempotent():
+    from api.streaming import _settle_result_messages
+
+    previous = [
+        {"role": "user", "content": "old prompt"},
+        {"role": "assistant", "content": "old answer"},
+    ]
+    prompt = "continue the active turn"
+    result = [
+        *copy.deepcopy(previous),
+        *copy.deepcopy(previous),
+        {"role": "user", "content": prompt},
+        {"role": "assistant", "content": "new answer"},
+    ]
+    session = SimpleNamespace(
+        session_id="strict-legacy-double-replay",
+        messages=copy.deepcopy(previous),
+        context_messages=copy.deepcopy(previous),
+        truncation_watermark=None,
+    )
+
+    _settle_result_messages(
+        session,
+        copy.deepcopy(previous),
+        copy.deepcopy(previous),
+        result,
+        prompt,
+        "webui",
+        {
+            "token": None,
+            "text": prompt,
+            "timestamp": None,
+            "source": "webui",
+            "attachments": [],
+            "current_turn_user_idx": None,
+            "turn_id": "",
+        },
+    )
+
+    for projection in (session.messages, session.context_messages):
+        assert [row.get("role") for row in projection] == [
+            "user",
+            "assistant",
+            "user",
+            "assistant",
+        ]
+        assert [row.get("content") for row in projection] == [
+            "old prompt",
+            "old answer",
+            prompt,
+            "new answer",
+        ]
+
+
 def test_settle_preserves_exact_structured_assistant_delta():
     previous = [_structured_assistant("file:///A.png")]
     previous[0]["id"] = "structured-assistant-a"
