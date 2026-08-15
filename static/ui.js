@@ -6261,12 +6261,18 @@ if(typeof window!=='undefined'){
   },{capture:true,passive:true});
   let _scrollRaf=0;
   el.addEventListener('scroll',()=>{
-    _scheduleMessageVirtualizedRender();
     if(_messageJumpScrollOwner){
       _scheduleMessageJumpScrollReconcile(_messageJumpScrollOwner.generation);
       return;
     }
     if(_freshProgrammaticScrollActive()) return;
+    // #6799-family feedback loop: the virtualized re-render must only fire on
+    // REAL user scrolls. A programmatic scroll (measurement compensation,
+    // viewport anchoring) that reaches this re-render would re-render the
+    // window, adjust scrollTop again, fire another scroll event, and loop —
+    // the scrollHeight churn that makes long transcripts unscrollable
+    // (measured 12898→18203px per wheel tick before the guard move).
+    _scheduleMessageVirtualizedRender();
     _markMessageVirtualScrollActive();
     cancelAnimationFrame(_scrollRaf);
     _scrollRaf=requestAnimationFrame(()=>{
