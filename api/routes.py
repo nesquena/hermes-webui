@@ -9939,6 +9939,7 @@ from api.route_approvals import (  # noqa: F401 — re-exports for backward comp
     _GATEWAY_MIRROR_FLAG,
     _GATEWAY_MIRROR_TOKEN,
     _gateway_mirror_entry_token,
+    _gateway_yolo_handoff_lock,
     begin_session_yolo_transition,
     claim_gateway_approval_relay_owner,
     finish_session_yolo_transition,
@@ -15619,26 +15620,30 @@ def handle_post(handler, parsed) -> bool:
                 )
                 return j(handler, relay_payload, status=relay_status)
 
-            # No remote prompt existed at the first authoritative snapshot, so
-            # reconcile once more under the approval lock before committing YOLO
-            # or clearing local pending state. A run mirror may have arrived
-            # between the first snapshot and this mutation.
-            with _lock:
-                reconcile_gateway_pending_mirror_locked(sid)
-                queue = _pending.get(sid)
-                entries = queue if isinstance(queue, list) else [queue] if queue else []
-                run_mirror = next(
-                    (
-                        dict(entry)
-                        for entry in entries
-                        if isinstance(entry, dict)
-                        and entry.get(_GATEWAY_MIRROR_FLAG)
-                        and str(entry.get("run_id") or "").strip()
-                    ),
-                    None,
-                )
+            # Serialize the final snapshot and flag commit with the Runs stream's
+            # auto-approve-vs-mirror decision. A stream that arrives after this
+            # snapshot cannot publish a parked mirror from a stale disabled-state
+            # read; it re-checks the committed flag and auto-approves instead.
+            with _gateway_yolo_handoff_lock:
+                with _lock:
+                    reconcile_gateway_pending_mirror_locked(sid)
+                    queue = _pending.get(sid)
+                    entries = queue if isinstance(queue, list) else [queue] if queue else []
+                    run_mirror = next(
+                        (
+                            dict(entry)
+                            for entry in entries
+                            if isinstance(entry, dict)
+                            and entry.get(_GATEWAY_MIRROR_FLAG)
+                            and str(entry.get("run_id") or "").strip()
+                        ),
+                        None,
+                    )
+                    if run_mirror is None:
+                        _pending.pop(sid, None)
                 if run_mirror is None:
-                    _pending.pop(sid, None)
+                    finish_session_yolo_transition(sid, yolo_transition, succeeded=True)
+                    yolo_transition = None
             if run_mirror:
                 relay_payload, relay_status = _relay_gateway_run_approval(
                     sid,
@@ -15648,11 +15653,8 @@ def handle_post(handler, parsed) -> bool:
                 )
                 return j(handler, relay_payload, status=relay_status)
 
-            # No run-backed approval was present while the transition was held;
-            # this is now an explicit session enable. Commit only after both
-            # snapshots so an approval observed in the race remains visible.
-            finish_session_yolo_transition(sid, yolo_transition, succeeded=True)
-            yolo_transition = None
+            # No run-backed approval was present at the serialized handoff, so
+            # the explicit session enable is now committed.
             resolve_gateway_approval(sid, "once", resolve_all=True)
             return j(handler, {"ok": True, "yolo_enabled": bool(is_session_yolo_enabled(sid))})
         finally:

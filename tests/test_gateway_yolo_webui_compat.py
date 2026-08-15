@@ -844,3 +844,81 @@ def test_local_approval_success_reports_authoritative_yolo_state(monkeypatch):
         assert response["payload"]["yolo_enabled"] is False
     finally:
         disable_session_yolo(sid)
+
+
+@pytest.mark.skipif(not APPROVAL_AVAILABLE, reason="tools.approval unavailable")
+def test_yolo_post_serializes_post_snapshot_gateway_approval(monkeypatch):
+    from api import route_approvals, routes
+
+    sid = "webui-yolo-post-snapshot-handoff"
+    handler = object()
+    response = {}
+    worker_results = []
+    workers = []
+    approval = {
+        "command": "touch /tmp/webui-yolo-test",
+        "description": "test",
+        "approval_id": "approval-post-snapshot",
+        "run_id": "run-post-snapshot",
+        "_gateway_mirror": True,
+        "_gateway_agent_identity_v1": True,
+    }
+
+    class NotifyingLock:
+        def __init__(self):
+            self._lock = threading.Lock()
+            self.contended = threading.Event()
+
+        def __enter__(self):
+            if not self._lock.acquire(blocking=False):
+                self.contended.set()
+                self._lock.acquire()
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            self._lock.release()
+
+    handoff_lock = NotifyingLock()
+    original_finish = routes.finish_session_yolo_transition
+    disable_session_yolo(sid)
+
+    def fake_j(_handler, data, status=200, extra_headers=None):
+        response.update(payload=data, status=status)
+        return data
+
+    def racing_finish(session_key, token, *, succeeded):
+        worker = threading.Thread(
+            target=lambda: worker_results.append(
+                gateway_chat._prepare_gateway_run_approval(sid, dict(approval))
+            )
+        )
+        worker.start()
+        workers.append(worker)
+        assert handoff_lock.contended.wait(timeout=1)
+        return original_finish(session_key, token, succeeded=succeeded)
+
+    monkeypatch.setattr(route_approvals, "_gateway_yolo_handoff_lock", handoff_lock)
+    monkeypatch.setattr(routes, "_gateway_yolo_handoff_lock", handoff_lock)
+    monkeypatch.setattr(routes, "finish_session_yolo_transition", racing_finish)
+    monkeypatch.setattr(routes, "j", fake_j)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"session_id": sid, "enabled": True})
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "_handle_extension_sidecar_proxy", lambda *_a, **_k: False)
+    monkeypatch.setattr(routes, "gateway_pending_mirror", lambda _sid: None)
+    monkeypatch.setattr(routes, "reconcile_gateway_pending_mirror_locked", lambda _sid: (None, 0, False))
+    monkeypatch.setattr(routes, "resolve_gateway_approval", lambda *_a, **_k: 0)
+
+    try:
+        routes.handle_post(handler, urllib.parse.urlparse("/api/session/yolo"))
+        for worker in workers:
+            worker.join(timeout=1)
+            assert not worker.is_alive()
+        assert response["status"] == 200
+        assert response["payload"] == {"ok": True, "yolo_enabled": True}
+        assert worker_results == [(True, None, 0)]
+        assert route_approvals.gateway_pending_mirror(sid) is None
+    finally:
+        disable_session_yolo(sid)
+        with routes._lock:
+            routes._pending.pop(sid, None)
+            routes._gateway_queues.pop(sid, None)

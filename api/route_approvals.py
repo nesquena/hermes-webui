@@ -52,6 +52,10 @@ _GATEWAY_AGENT_IDENTITY_V1 = "_gateway_agent_identity_v1"
 _gateway_relay_owners: dict[tuple[str, str], str] = {}
 _yolo_transition_lock = threading.Lock()
 _yolo_transitions: dict[str, dict] = {}
+# Serialize the Runs stream's auto-approve-vs-mirror decision with the ordinary
+# session-YOLO route's final mirror snapshot and flag commit. This closes the
+# handoff gap without holding tools.approval._lock across a network request.
+_gateway_yolo_handoff_lock = threading.Lock()
 
 
 def begin_session_yolo_transition(session_key: str) -> object | None:

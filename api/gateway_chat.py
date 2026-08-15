@@ -337,6 +337,17 @@ def _gateway_session_yolo_enabled(session_id: str) -> bool:
         return False
 
 
+def _prepare_gateway_run_approval(session_id: str, approval_data: dict) -> tuple[bool, dict | None, int]:
+    """Atomically choose auto-approval or publish an actionable run mirror."""
+    from api.route_approvals import _gateway_yolo_handoff_lock, submit_gateway_pending_mirror
+
+    with _gateway_yolo_handoff_lock:
+        if _gateway_session_yolo_enabled(session_id):
+            return True, None, 0
+        head, total = submit_gateway_pending_mirror(session_id, approval_data)
+        return False, head, total
+
+
 def _auto_approve_gateway_run(
     base_url: str,
     api_key: str,
@@ -651,7 +662,11 @@ def _run_gateway_runs_api_streaming(
                     from api.config import gateway_supports_approval_identity_v1
                     identity_v1 = bool(approval_data.get("_gateway_raw_approval_id_present")) and gateway_supports_approval_identity_v1(base_url, api_key)
                     approval_data["_gateway_agent_identity_v1"] = identity_v1
-                    if _gateway_session_yolo_enabled(session_id):
+                    should_auto_approve, head, total = _prepare_gateway_run_approval(
+                        session_id,
+                        approval_data,
+                    )
+                    if should_auto_approve:
                         try:
                             _auto_approve_gateway_run(
                                 base_url,
@@ -669,8 +684,12 @@ def _run_gateway_runs_api_streaming(
                                 run_id,
                                 exc_info=True,
                             )
-                    from api.route_approvals import submit_gateway_pending_mirror
-                    head, total = submit_gateway_pending_mirror(session_id, approval_data)
+                            from api.route_approvals import (
+                                _gateway_yolo_handoff_lock,
+                                submit_gateway_pending_mirror,
+                            )
+                            with _gateway_yolo_handoff_lock:
+                                head, total = submit_gateway_pending_mirror(session_id, approval_data)
                     put_gateway_event("approval", {**(head or approval_data), "pending_count": total})
                 sse_event = "message"
                 continue
