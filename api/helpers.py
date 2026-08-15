@@ -219,15 +219,6 @@ def arm_connection_close(handler) -> None:
         pass
 
 
-# Codings that frame nothing, so a rejection may keep the connection alive.
-# Members MUST stay lowercase ASCII tokens: membership is tested through
-# ``str.lower()``, which maps some non-ASCII characters ONTO ASCII ones
-# (``'K'.lower() == 'k'``), so a coding here containing such a letter would
-# be reachable by a spelling no HTTP token grammar allows. ``identity`` has no
-# such letter -- ``test_unframed_transfer_codings_cannot_be_spelled_non_ascii``
-# proves it mechanically and will fail if a foldable coding is ever added.
-_UNFRAMED_TRANSFER_CODINGS = frozenset({'identity'})
-
 # What ``unsupported_transfer_encoding()`` reports for a header that declares no
 # coding at all (``Transfer-Encoding:``). A placeholder rather than the raw '' so
 # the return value is never a falsy non-``None`` — callers test ``is not None``,
@@ -348,11 +339,11 @@ def request_declares_body(handler) -> bool:
     kills healthy keep-alive on body-less writes.
 
     A blank, unparseable or self-contradicting ``Content-Length`` counts as a
-    declared body, as does a blank ``Transfer-Encoding``: a value we cannot
-    interpret does not prove the body's absence, and the safe assumption for
-    connection reuse is that bytes are pending. Only framing that positively says
-    "no body" -- no length header at all, or every declared length agreeing on
-    zero -- keeps the connection alive.
+    declared body, as does ANY ``Transfer-Encoding`` -- ``identity`` and a blank
+    value included: a value we cannot interpret does not prove the body's absence,
+    and the safe assumption for connection reuse is that bytes are pending. Only
+    framing that positively says "no body" -- no framing header at all, or every
+    declared length agreeing on zero -- keeps the connection alive.
     """
     if unsupported_transfer_encoding(handler) is not None:
         return True
@@ -365,38 +356,39 @@ def request_declares_body(handler) -> bool:
 def unsupported_transfer_encoding(handler) -> str | None:
     """Return the transfer coding this server cannot decode, or ``None``.
 
-    ``BaseHTTPRequestHandler`` never decodes ``Transfer-Encoding``: it hands
-    every reader a raw ``rfile``, so a chunked body reads back as its literal
-    chunk framing while a ``Content-Length``-based reader sees length 0 and
-    consumes nothing at all. Such a request can only be rejected -- and only
-    with the connection armed for close, because its chunk bytes are still
-    queued on the socket.
+    EVERY present value counts, with no exemption for any coding.
+    ``BaseHTTPRequestHandler`` decodes none of them: it hands every reader a raw
+    ``rfile``, so a chunked body reads back as its literal chunk framing while a
+    ``Content-Length``-based reader sees length 0 and consumes nothing at all.
+    RFC 9112 section 6.3 says the same thing normatively -- a request whose final
+    transfer coding is not ``chunked`` has a body length the recipient cannot
+    determine, so it must be refused and the connection closed. Such a request
+    can therefore only be rejected, and only with the connection armed for close,
+    because its payload bytes are still queued on the socket.
 
-    Every declared coding is inspected, not just the first: a request may repeat
-    the header, and one undecodable coding anywhere is enough to refuse.
+    ``identity`` used to be exempt as a coding that "frames nothing". It is not:
+    it names no framing either, and RFC 7230 removed it from the transfer codings
+    altogether. A sidecar rejection then answered 403 with keep-alive and the
+    payload was parsed as the next request line
+    (``400 Bad request syntax ('{...}GET /api/health/agent HTTP/1.1')``), and all
+    four upload handlers fell through to a length-0 read, answered 400 "No file
+    field in request" and left the multipart bytes on the socket
+    (``400 Bad request syntax ('--x')``). Nothing legitimate is lost: no client
+    sends a transfer coding this server could have honoured.
 
-    A BLANK ``Transfer-Encoding:`` is undecodable too, and used to read as
-    "unframed" alongside ``identity``: a header that names no coding cannot tell a
-    reader whether a body follows or how it is framed, and payload bytes behind it
-    poisoned the next pooled request exactly as chunked framing did. ``''`` only
-    ever reached the unframed set from an explicitly empty header -- an absent one
-    yields no values to loop over -- so treating it as a coding we cannot decode
-    costs a real client nothing.
+    A header present but EMPTY (``Transfer-Encoding:``) is reported through
+    ``_BLANK_TRANSFER_CODING`` rather than as ``''``, so callers testing
+    ``is not None`` and the 411 message both read right. Only an ABSENT header
+    yields no values at all -- absence is something only the wire can say.
 
-    Only SP/HTAB is trimmed, for the same reason the length parse trims only
-    those: ``str.strip()`` erases U+00A0/U+0085 as well, so ``\\xa0identity`` --
-    which no token grammar allows -- read back as plain ``identity`` and its
-    payload poisoned the next pooled request (403 with no ``Connection: close``,
-    then the bad-syntax 400). A coding padded with a character the grammar does
-    not permit is a coding we cannot decode.
+    The first value is enough precisely because no value is acceptable; it is
+    reported as-is (SP/HTAB trimmed, the one padding RFC 9110 allows) purely so
+    the rejection message names what arrived.
     """
-    for raw in _framing_header_values(handler, 'Transfer-Encoding'):
-        normalized = raw.strip(_FIELD_VALUE_OWS)
-        if not normalized:
-            return _BLANK_TRANSFER_CODING
-        if normalized.lower() not in _UNFRAMED_TRANSFER_CODINGS:
-            return normalized
-    return None
+    values = _framing_header_values(handler, 'Transfer-Encoding')
+    if not values:
+        return None
+    return values[0].strip(_FIELD_VALUE_OWS) or _BLANK_TRANSFER_CODING
 
 
 def arm_connection_close_if_body_pending(handler) -> bool:

@@ -199,11 +199,22 @@ def test_bodyless_write_method_rejection_keeps_connection(method, headers, monke
         ({"content-length": "7"}, True),
         ({"Transfer-Encoding": "chunked"}, True),
         ({"transfer-encoding": "Chunked"}, True),
-        ({"Transfer-Encoding": "identity"}, False),
-        ({"Transfer-Encoding": "IDENTITY "}, False),  # a token is case-insensitive
+        # No coding is exempt: http.server decodes none of them (RFC 9112 6.3).
+        ({"Transfer-Encoding": "identity"}, True),
+        ({"Transfer-Encoding": "IDENTITY "}, True),
+        ({"Transfer-Encoding": "Identity"}, True),
+        ({"Transfer-Encoding": "\tidentity\t"}, True),
+        ({"Transfer-Encoding": "identity, chunked"}, True),
+        ({"Transfer-Encoding": "chunked, identity"}, True),
+        ({"Transfer-Encoding": "identity,identity"}, True),
+        ({"Transfer-Encoding": ","}, True),
+        ({"Transfer-Encoding": "banana"}, True),
         ({"Transfer-Encoding": ""}, True),
         ({"Transfer-Encoding": "  "}, True),
         ({"Transfer-Encoding": "\xa0identity"}, True),  # not the token `identity`
+        # A coding beside a length: the coding decides, whatever the length says.
+        ({"Transfer-Encoding": "identity", "Content-Length": "0"}, True),
+        ({"Transfer-Encoding": "identity", "Content-Length": "15"}, True),
     ],
 )
 def test_request_declares_body_reads_the_framing_headers(headers, expected):
@@ -268,15 +279,31 @@ def test_duplicate_agreeing_zero_content_length_declares_no_body():
     assert request_declares_body(cast(Any, handler)) is False
 
 
-def test_repeated_transfer_encoding_is_detected_beyond_the_first_value():
-    """`identity` first must not mask a chunked coding behind it."""
-    from api.helpers import unsupported_transfer_encoding
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "Transfer-Encoding: identity\r\nTransfer-Encoding: chunked\r\n",
+        "Transfer-Encoding: chunked\r\nTransfer-Encoding: identity\r\n",
+        "Transfer-Encoding: identity\r\nTransfer-Encoding: identity\r\n",
+        "Transfer-Encoding: identity\r\ntransfer-encoding: identity\r\n",
+    ],
+    ids=["identity-then-chunked", "chunked-then-identity", "twice", "twice-mixed-case"],
+)
+def test_repeated_transfer_encoding_refuses_whatever_the_order(raw):
+    """A duplicated header cannot hide an undecodable coding behind an "unframed" one.
 
-    handler = _message_with(
-        "Host: x\r\nTransfer-Encoding: identity\r\nTransfer-Encoding: chunked\r\n"
-    )
+    This used to have to look PAST a leading `identity` to find the chunked coding
+    (`Message.get()` returns only the first value, so it read as unframed and the
+    chunk bytes stayed queued). With no coding exempt the leading value already
+    refuses, so no ordering can mask anything -- which is what is pinned here,
+    rather than the specific coding a first-value read happened to miss.
+    """
+    from api.helpers import request_declares_body, unsupported_transfer_encoding
 
-    assert unsupported_transfer_encoding(cast(Any, handler)) == "chunked"
+    handler = _message_with("Host: x\r\n" + raw)
+
+    assert unsupported_transfer_encoding(cast(Any, handler)) is not None
+    assert request_declares_body(cast(Any, handler)) is True
 
 
 def test_unreadable_content_length_flags_conflict_and_garbage_only():
@@ -334,11 +361,12 @@ def test_sidecar_get_with_duplicate_content_length_closes_connection(monkeypatch
 # `Content-Length:\t` to the same '', so every blank spelling poisoned the socket
 # identically — as did a blank value duplicated, or paired with a real length.
 #
-# A blank `Transfer-Encoding:` was the same hole one header over: '' sat in
-# `_UNFRAMED_TRANSFER_CODINGS` beside `identity`, so a header naming no coding at
-# all read as "no framing to worry about" and its payload poisoned the socket the
-# same way (verified live: 403 then the same bad-syntax 400). Absence is
-# something only the wire can say, and an absent header yields no values at all.
+# A blank `Transfer-Encoding:` was the same hole one header over: '' reached the
+# allowlist of codings that "framed nothing" (since deleted, along with the
+# `identity` entry that was its last member), so a header naming no coding at all
+# read as "no framing to worry about" and its payload poisoned the socket the same
+# way (verified live: 403 then the same bad-syntax 400). Absence is something only
+# the wire can say, and an absent header yields no values at all.
 
 
 _BLANK_FRAMING_HEADERS = [
@@ -390,10 +418,12 @@ def test_blank_transfer_encoding_is_reported_as_an_undecodable_coding():
 
     assert coding is not None
     assert coding, "an empty return value would be a falsy non-None trap for callers"
+    # Only an ABSENT header frames nothing; a present one always names a coding
+    # this server cannot decode, `identity` included.
     assert unsupported_transfer_encoding(cast(Any, _message_with("Host: x\r\n"))) is None
     assert unsupported_transfer_encoding(
         cast(Any, _message_with("Host: x\r\nTransfer-Encoding: identity\r\n"))
-    ) is None
+    ) == "identity"
 
 
 @pytest.mark.parametrize("raw", _BLANK_FRAMING_HEADERS)
@@ -427,14 +457,14 @@ def test_sidecar_get_with_blank_framing_value_closes_connection(raw, monkeypatch
         "Content-Length: 0\r\n",
         "Content-Length:  0 \r\n",
         "Content-Length: 0\r\nContent-Length: 0\r\n",
-        "Transfer-Encoding: identity\r\n",
     ],
 )
 def test_blank_rule_does_not_over_close_a_bodyless_request(raw):
     """The other half of the contract: framing that says "no body" keeps keep-alive.
 
-    Two AGREEING zeroes, a padded zero and `identity` are honest statements that
-    nothing is queued, and none of them may be swept up by the blank rule.
+    No framing header at all, an OWS-padded zero and two AGREEING zeroes are
+    honest statements that nothing is queued, and none of them may be swept up by
+    the blank rule.
     """
     from api.helpers import request_declares_body
 
@@ -550,21 +580,69 @@ def test_absurdly_long_digit_run_is_unreadable_and_never_raises():
     assert unreadable_content_length(cast(Any, handler)) is True
 
 
-# ── The same audit one header over: spelling an undecodable coding ─────────────
+# ── The same audit one header over: NO transfer coding is decodable here ───────
+#
+# `identity` was exempt as a coding that "frames nothing", so `Transfer-Encoding:
+# identity` plus payload bytes read as body-less: the sidecar rejection answered
+# 403 with keep-alive and the payload became the next request line, and all four
+# upload handlers fell through to a length-0 read. RFC 9112 6.3 is explicit --
+# a request whose final transfer coding is not `chunked` has a length the
+# recipient cannot determine, so it must be refused and the connection closed --
+# and http.server decodes no coding at all, `chunked` included. Every spelling in
+# the neighbourhood is swept here because three prior rounds each fixed one value
+# of a framing rule and left an adjacent one poisoning the socket.
+#
+# The over-close half of this contract is pinned by the framing table above and by
+# `test_blank_rule_does_not_over_close_a_bodyless_request` /
+# `test_digit_grammar_does_not_over_close_an_honest_zero`: a request with NO
+# framing header, or one whose declared lengths all agree on zero, keeps its
+# keep-alive. An absent `Transfer-Encoding` is the only one that frames nothing.
 
 
 @pytest.mark.parametrize(
     "value",
-    ["\xa0identity", "identity\xa0", "\xa0identity\xa0", "\x85identity"],
-    ids=["nbsp-ahead", "nbsp-behind", "nbsp-both", "nel-ahead"],
+    [
+        "identity",
+        "IDENTITY",
+        "Identity",
+        "identity ",
+        "\tidentity\t",
+        "\xa0identity",
+        "identity\xa0",
+        "\xa0identity\xa0",
+        "\x85identity",
+        "identity, chunked",
+        "chunked, identity",
+        "identity,identity",
+        ",",
+        "banana",
+    ],
+    ids=[
+        "identity",
+        "upper",
+        "title",
+        "sp-padded",
+        "htab-padded",
+        "nbsp-ahead",
+        "nbsp-behind",
+        "nbsp-both",
+        "nel-ahead",
+        "identity-then-chunked",
+        "chunked-then-identity",
+        "identity-list",
+        "lone-comma",
+        "unknown-coding",
+    ],
 )
-def test_non_ascii_padded_identity_is_not_the_identity_coding(value):
-    """`str.strip()` erased U+00A0/U+0085, so `\\xa0identity` read back as `identity`.
+def test_every_spelling_of_a_transfer_coding_declares_a_body(value):
+    """Case, OWS, non-OWS padding, comma lists, a bare comma, an unknown coding.
 
-    No token grammar allows the padding, so the value names no coding this server
-    can decode -- and it reached the wire: latin-1 request lines carry U+00A0
-    fine. Live on the otherwise-fixed head, sidecar GET + payload: 403 with no
-    `Connection: close`, then `400 Bad request syntax ('{"stale": true}GET ...')`.
+    The ASCII `identity` spellings are the newly-closed hole (they normalized to
+    the exempt token); the U+00A0/U+0085-padded ones were the previous round's
+    (`str.strip()` erased the padding, so `\\xa0identity` read back as `identity`)
+    and they reach the wire because a request line decodes as latin-1. The comma
+    forms never matched the exempt token and already refused -- they are pinned so
+    a future normalizer that splits the list cannot reopen the hole.
     """
     from api.helpers import request_declares_body, unsupported_transfer_encoding
 
@@ -574,44 +652,23 @@ def test_non_ascii_padded_identity_is_not_the_identity_coding(value):
     assert request_declares_body(cast(Any, handler)) is True
 
 
-@pytest.mark.parametrize(
-    "value", ["identity", "IDENTITY", "Identity", "identity ", "\tidentity\t"]
-)
-def test_ascii_case_and_ows_spellings_of_identity_stay_decodable(value):
-    """The over-close half of the coding audit: a real token still frames nothing."""
-    from api.helpers import unsupported_transfer_encoding
+@pytest.mark.parametrize("length", ["0", "15"], ids=["zero-length", "real-length"])
+def test_transfer_encoding_beside_a_content_length_still_declares_a_body(length):
+    """A coding plus a length is unframeable however honest the length looks.
 
-    handler = _message_with(f"Host: x\r\nTransfer-Encoding: {value}\r\n")
-
-    assert unsupported_transfer_encoding(cast(Any, handler)) is None
-
-
-def test_unframed_transfer_codings_cannot_be_spelled_non_ascii():
-    """Pin WHY membership-by-`str.lower()` is safe, so a future coding can't break it.
-
-    `str.lower()` maps some non-ASCII characters onto ASCII ones -- U+212A KELVIN
-    SIGN lowercases to `k`, so `'chunKed'.lower() == 'chunked'` -- which means a
-    coding in the unframed set containing such a letter would be reachable by a
-    spelling no HTTP token allows, and would read as "frames nothing" for a
-    request whose bytes are still queued. `identity` has no such letter. This
-    scans every codepoint rather than trusting the claim.
+    `Transfer-Encoding: identity` with `Content-Length: 0` was the worst of the
+    pair: both halves read as "no body", so the rejection kept the socket and the
+    payload behind them was parsed as the next request line. RFC 9112 6.3 refuses
+    the combination outright (it is the request-smuggling shape), and the coding
+    has to win -- a length cannot describe a body the server cannot decode.
     """
-    from api.helpers import _UNFRAMED_TRANSFER_CODINGS
+    from api.helpers import request_declares_body
 
-    letters = set("".join(_UNFRAMED_TRANSFER_CODINGS))
-    assert all(
-        coding.isascii() and coding.islower() for coding in _UNFRAMED_TRANSFER_CODINGS
-    ), _UNFRAMED_TRANSFER_CODINGS
-    foldable = [
-        (hex(cp), chr(cp).lower())
-        for cp in range(0x110000)
-        if not chr(cp).isascii() and chr(cp).lower() and set(chr(cp).lower()) <= letters
-    ]
-    assert not foldable, (
-        f"a non-ASCII character now lowercases into {sorted(letters)}, so an "
-        f"unframed coding could be spelled outside the token grammar: {foldable}"
+    handler = _message_with(
+        f"Host: x\r\nTransfer-Encoding: identity\r\nContent-Length: {length}\r\n"
     )
-    assert "chunKed".lower() == "chunked", "the fold this test guards against"
+
+    assert request_declares_body(cast(Any, handler)) is True
 
 
 def test_csp_report_rate_limited_closes_connection(monkeypatch):
@@ -808,37 +865,43 @@ def test_malformed_zero_content_length_multipart_rejects_before_read(
 
 
 @pytest.mark.parametrize("handler_name", _MULTIPART_HANDLERS)
-def test_non_ascii_padded_identity_multipart_rejects_before_read(handler_name, monkeypatch):
-    """`Transfer-Encoding: \\xa0identity` is not the `identity` token either.
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "Transfer-Encoding: identity",
+        "Transfer-Encoding: IDENTITY ",
+        "Transfer-Encoding: \xa0identity",
+        "Transfer-Encoding:",
+        "Transfer-Encoding: identity\r\nContent-Length: 0",
+        "Transfer-Encoding: identity\r\nContent-Length: 88",
+        "Transfer-Encoding: banana",
+    ],
+    ids=[
+        "identity",
+        "identity-cased-and-padded",
+        "nbsp-padded-identity",
+        "blank",
+        "identity-plus-zero-length",
+        "identity-plus-real-length",
+        "unknown-coding",
+    ],
+)
+def test_any_transfer_encoding_multipart_rejects_before_read(handler_name, raw, monkeypatch):
+    """No coding is decodable by an upload handler, so none may reach `rfile`.
 
-    `str.strip()` erased the U+00A0, so it read as unframed, fell through to the
-    length-0 read and answered 400 "No file field in request" with the payload
-    still queued (live: 400 then `400 Bad request syntax ('--x')`).
+    `identity` (any case, any OWS padding) was exempt as a coding that "frames
+    nothing", so each handler fell through to the length-0 read, answered 400 "No
+    file field in request" with keep-alive and left the whole multipart payload on
+    the socket (live: 400 then `400 Bad request syntax ('--x')`). The `\\xa0`-padded
+    spelling and the blank value are the previous round's holes, and the two
+    Content-Length pairings are the RFC 9112 6.3 smuggling shape -- the coding has
+    to win over any length beside it. `_NeverRead` proves the preflight answers
+    before a byte is consumed.
     """
     from email.parser import Parser
 
     headers = Parser().parsestr(
-        "Content-Type: multipart/form-data; boundary=x\r\nTransfer-Encoding: \xa0identity\r\n\r\n"
-    )
-    handler, answered = _run_multipart_handler(monkeypatch, handler_name, headers, _NeverRead())
-
-    assert answered["status"] == 411, answered
-    assert "Transfer-Encoding" in answered["payload"]["error"], answered
-    assert handler.close_connection is True
-
-
-@pytest.mark.parametrize("handler_name", _MULTIPART_HANDLERS)
-def test_blank_transfer_encoding_multipart_rejects_before_read(handler_name, monkeypatch):
-    """`Transfer-Encoding:` names no coding, so it cannot frame a body either.
-
-    It used to read as "unframed" beside `identity` and fell through to the
-    length-0 read: 400 "No file field in request", keep-alive, and the payload
-    left on the socket (live: 400 then `400 Bad request syntax ('--x')`).
-    """
-    from email.parser import Parser
-
-    headers = Parser().parsestr(
-        "Content-Type: multipart/form-data; boundary=x\r\nTransfer-Encoding:\r\n\r\n"
+        "Content-Type: multipart/form-data; boundary=x\r\n" + raw + "\r\n\r\n"
     )
     handler, answered = _run_multipart_handler(monkeypatch, handler_name, headers, _NeverRead())
 

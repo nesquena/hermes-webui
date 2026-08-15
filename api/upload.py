@@ -82,12 +82,15 @@ def _read_multipart_or_reject(handler):
 
     Framing is judged from the headers, not from a present ``Content-Length``:
 
-    * ``Transfer-Encoding: chunked`` carries no Content-Length, so the old code
-      read it as length 0, found no parts, and answered "No file field in
-      request" with keep-alive intact -- leaving every chunk byte on the socket
-      to poison the next pooled request. ``http.server`` cannot decode chunked
-      framing at all (``rfile`` is the raw socket), so 411 is the only honest
-      answer.
+    * ANY ``Transfer-Encoding`` is refused, ``identity`` included: ``http.server``
+      decodes none of them (``rfile`` is the raw socket) and RFC 9112 section 6.3
+      says a request whose final coding is not ``chunked`` has a length no
+      recipient can determine. A coded request carries no usable Content-Length,
+      so the old code read it as length 0, found no parts, and answered "No file
+      field in request" with keep-alive intact -- leaving every payload byte on
+      the socket to poison the next pooled request. A Content-Length sent BESIDE a
+      coding does not rescue it: that pairing is the smuggling shape 6.3 rejects,
+      and the coding still hides how the body is framed.
     * a non-numeric or oversized Content-Length cannot be read either, and
       ``parse_multipart()`` validates the boundary and the length before its
       first ``rfile.read()`` — so every raise below is still pre-read.
@@ -100,7 +103,8 @@ def _read_multipart_or_reject(handler):
     coding = unsupported_transfer_encoding(handler)
     if coding is not None:
         raise _RejectBeforeRead(
-            f'Unsupported Transfer-Encoding: {coding} (uploads require a Content-Length)',
+            f'Unsupported Transfer-Encoding: {coding} '
+            '(uploads must send an undecoded body with a Content-Length)',
             411,
         )
     if unreadable_content_length(handler):
