@@ -349,10 +349,25 @@ def _archive_incomparable_backup(
         f"{backup_path.name}.archive-{backup_receipt.digest_sha256}"
     )
     if not archive_path.exists():
+        archive_tmp = archive_path.with_name(
+            f"{archive_path.name}.tmp.{os.getpid()}."
+            f"{threading.current_thread().ident}.{uuid.uuid4().hex}"
+        )
         try:
-            _publish_sidecar_no_replace(backup_path, archive_path)
-        except FileExistsError:
-            pass
+            digest = hashlib.sha256()
+            with open(backup_path, "rb") as source, open(archive_tmp, "xb") as target:
+                while chunk := source.read(1024 * 1024):
+                    digest.update(chunk)
+                    target.write(chunk)
+                target.flush()
+                os.fsync(target.fileno())
+            if digest.hexdigest() != backup_receipt.digest_sha256:
+                raise RuntimeError(
+                    f"Recoverable backup changed while archiving {session_id!r}"
+                )
+            _safe_replace(archive_tmp, archive_path)
+        finally:
+            archive_tmp.unlink(missing_ok=True)
     archived_receipt = _read_sidecar_revision(archive_path, session_id)
     if archived_receipt != backup_receipt:
         raise RuntimeError(

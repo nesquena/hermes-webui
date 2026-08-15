@@ -23056,13 +23056,15 @@ def _handle_chat_start(handler, body, diag=None):
                     return bad(handler, "invalid profile", 400)
             except ImportError:
                 requested_profile = ""
-        session_profile = getattr(s, "profile", None)
-        has_persisted_turns = bool(
-            getattr(s, "messages", None)
-            or getattr(s, "context_messages", None)
-            or getattr(s, "pending_user_message", None)
-        )
-        if not _session_visible_to_active_profile(session_profile, handler):
+        def _authorize_chat_start_session(candidate):
+            session_profile = getattr(candidate, "profile", None)
+            has_persisted_turns = bool(
+                getattr(candidate, "messages", None)
+                or getattr(candidate, "context_messages", None)
+                or getattr(candidate, "pending_user_message", None)
+            )
+            if _session_visible_to_active_profile(session_profile, handler):
+                return True
             if (
                 requested_profile
                 and _profiles_match(requested_profile, active_profile)
@@ -23070,28 +23072,37 @@ def _handle_chat_start(handler, body, diag=None):
             ):
                 # Empty placeholders can still be retagged when the
                 # requested profile matches the active request profile.
-                s.profile = requested_profile
-            else:
-                return bad(handler, "Session not found", 404)
+                candidate.profile = requested_profile
+                return True
+            return False
+
+        if not _authorize_chat_start_session(s):
+            return bad(handler, "Session not found", 404)
         diag.stage("normalize_message") if diag else None
         msg = str(body.get("message", "")).strip()
         if not msg:
             return bad(handler, "message is required")
         diag.stage("normalize_attachments") if diag else None
         attachments = _normalize_chat_attachments(body.get("attachments") or [])[:20]
-        recovery = compression_recovery_payload_for_session(s)
-        if recovery and not attachments and is_generic_continuation_intent(msg):
+
+        def _compression_recovery_required_response(candidate_recovery):
             return j(
                 handler,
                 {
                     "error": "This session exhausted context compression. Start a focused continuation, then describe the next narrow task.",
                     "type": "compression_recovery_required",
-                    "recommended_recovery_action": recovery.get("recommended_action"),
-                    "compression_recovery": recovery,
+                    "recommended_recovery_action": candidate_recovery.get(
+                        "recommended_action"
+                    ),
+                    "compression_recovery": candidate_recovery,
                     "session_id": getattr(s, "session_id", body["session_id"]),
                 },
                 status=409,
             )
+
+        recovery = compression_recovery_payload_for_session(s)
+        if recovery and not attachments and is_generic_continuation_intent(msg):
+            return _compression_recovery_required_response(recovery)
         diag.stage("resolve_workspace") if diag else None
         try:
             workspace = _resolve_chat_workspace_with_recovery(s, body.get("workspace"))
@@ -23101,6 +23112,11 @@ def _handle_chat_start(handler, body, diag=None):
             return bad(handler, str(e), 500)
         except ValueError as e:
             return bad(handler, str(e))
+        if not _authorize_chat_start_session(s):
+            return bad(handler, "Session not found", 404)
+        recovery = compression_recovery_payload_for_session(s)
+        if recovery and not attachments and is_generic_continuation_intent(msg):
+            return _compression_recovery_required_response(recovery)
         requested_model = body.get("model") or s.model
         requested_provider = (
             body.get("model_provider")

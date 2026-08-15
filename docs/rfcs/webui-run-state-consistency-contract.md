@@ -156,8 +156,12 @@ and 5; it does not mark every run-state boundary implemented.
    not proceed unless its recoverable history is durable: row count alone does
    not prove dominance; malformed, non-object, foreign-SID, and incomparable
    primary backups are archived byte-for-byte and content-addressedly before the
-   valid live snapshot is promoted; and backup retirement requires matching
-   receipts for both the backup and the committed live generation.
+   valid live snapshot is promoted. Archive publication streams into a complete
+   temporary file, verifies the expected digest, and atomically renames it, so
+   archive preservation does not depend on hard-link support; the stricter
+   create-only primitive remains mandatory for live sidecars. Backup retirement
+   requires matching receipts for both the backup and the committed live
+   generation.
 
 ## Review Checklist
 

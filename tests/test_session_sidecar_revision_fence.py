@@ -452,6 +452,45 @@ def test_malformed_backup_is_archived_before_live_snapshot_promotion(
     assert len(json.loads(session.path.read_text(encoding="utf-8"))["messages"]) == 1
 
 
+def test_malformed_backup_archive_does_not_require_hard_links(
+    tmp_path, monkeypatch
+):
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    sid = "malformed-backup-no-hardlinks"
+    session = models.Session(
+        session_id=sid,
+        workspace=str(tmp_path),
+        messages=[
+            {"role": "user", "content": "one"},
+            {"role": "assistant", "content": "two"},
+            {"role": "user", "content": "three"},
+        ],
+    )
+    session.save(skip_index=True)
+    before_shrink = session.path.read_bytes()
+    malformed = b'{"broken":'
+    backup_path = session.path.with_suffix(".json.bak")
+    backup_path.write_bytes(malformed)
+    session.messages = session.messages[:1]
+
+    def unsupported_link(*_args, **_kwargs):
+        raise OSError(errno.EOPNOTSUPP, "hard links unsupported")
+
+    monkeypatch.setattr(models.os, "link", unsupported_link)
+
+    session.save(skip_index=True)
+
+    archive = backup_path.with_name(
+        f"{backup_path.name}.archive-{hashlib.sha256(malformed).hexdigest()}"
+    )
+    assert archive.read_bytes() == malformed
+    assert backup_path.read_bytes() == before_shrink
+    assert len(json.loads(session.path.read_text(encoding="utf-8"))["messages"]) == 1
+
+
 def test_non_object_backup_is_archived_before_live_snapshot_promotion(
     tmp_path, monkeypatch
 ):
