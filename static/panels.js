@@ -9740,6 +9740,7 @@ async function loadSettingsPanel(){
     try{
       const authStatus=await api('/api/auth/status');
       _settingsPasswordAuthEnabled=!!authStatus.password_auth_enabled;
+      _settingsOidcEnabled=!!authStatus.oidc_enabled;
       _setSettingsAuthButtonsVisible(!!authStatus.auth_enabled);
       _syncPasswordlessButton(authStatus);
       _renderSettingsAuthStatus(authStatus);
@@ -11852,11 +11853,12 @@ async function _refreshProviderModels(providerId, btn){
 
 let _settingsPasswordEnvLocked=false;
 let _settingsPasswordAuthEnabled=false;
+let _settingsOidcEnabled=false;
 function _setSettingsAuthButtonsVisible(active){
   const signOutBtn=$('btnSignOut');
   if(signOutBtn) signOutBtn.style.display=active?'':'none';
   const disableBtn=$('btnDisableAuth');
-  if(disableBtn) disableBtn.style.display=active?'':'none';
+  if(disableBtn) disableBtn.style.display=active&&!_settingsOidcEnabled?'':'none';
   const passkeyBtn=$('btnRegisterPasskey');
   if(passkeyBtn) passkeyBtn.disabled=!active||!window.PublicKeyCredential||!navigator.credentials;
 }
