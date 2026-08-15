@@ -747,6 +747,45 @@ def test_target_scalar_split_at_reader_boundary_is_not_truncated():
     assert reader.take() == "]"
 
 
+def test_bounded_metadata_rejects_oversized_non_target_scalar(tmp_path):
+    from api import models
+
+    sidecar = tmp_path / "oversized-scalar.json"
+    sidecar.write_text(
+        '{"session_id":"oversized-scalar","metadata":0.'
+        + ("0" * 70_000)
+        + '1,"messages":[]}',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="scalar exceeds bounded limit"):
+        models._read_bounded_session_metadata(sidecar)
+
+
+def test_runtime_save_tracks_actual_published_bytes(tmp_path, monkeypatch):
+    from api import models
+
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    sidecar = tmp_path / "translated-newlines.json"
+    real_replace = models._safe_replace
+
+    def replace_with_translated_newlines(source, destination):
+        real_replace(source, destination)
+        if Path(destination) == sidecar:
+            sidecar.write_bytes(sidecar.read_bytes().replace(b"\n", b"\r\n"))
+
+    monkeypatch.setattr(models, "_safe_replace", replace_with_translated_newlines)
+    session = models.Session(session_id="translated-newlines")
+    session.messages = [{"role": "user", "content": "keep"}]
+    session.save(skip_index=True)
+    session.title = "second save"
+
+    session.save(skip_index=True)
+
+    assert json.loads(sidecar.read_text(encoding="utf-8"))["title"] == "second save"
+
+
 def test_large_valid_session_can_save_after_no_change_analysis(tmp_path, monkeypatch):
     from api import models
     from scripts.compact_session_replays import compact_sidecar
@@ -1075,6 +1114,32 @@ def test_large_index_rebuild_rejects_malformed_and_foreign_session_ids(
     index = json.loads((tmp_path / "_index.json").read_text(encoding="utf-8"))
     assert index == []
     assert models.Session.load("foreign-id") is None
+
+
+def test_large_index_rebuild_uses_last_duplicate_messages_array(
+    tmp_path,
+    monkeypatch,
+):
+    from api import models
+
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", type(models.SESSIONS)())
+    monkeypatch.setattr(models, "_INLINE_REPLAY_REPAIR_MAX_BYTES", 1)
+    sidecar = tmp_path / "duplicate-messages.json"
+    sidecar.write_text(
+        '{"session_id":"duplicate-messages",'
+        '"messages":[{"role":"user"},{"role":"assistant"}],'
+        '"messages":[{"role":"user"}]}',
+        encoding="utf-8",
+    )
+
+    models._write_session_index(updates=None)
+
+    index = json.loads((tmp_path / "_index.json").read_text(encoding="utf-8"))
+    assert len(index) == 1
+    assert index[0]["session_id"] == "duplicate-messages"
+    assert index[0]["message_count"] == 1
 
 
 def test_actual_over_128_mib_index_load_streams_messages_first(tmp_path):

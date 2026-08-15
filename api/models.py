@@ -1317,6 +1317,7 @@ class _StreamingTopLevelJSONReader:
 
     def _skip_scalar_body(self, first):
         token = [first]
+        token_size = len(first)
         if self._capture is not None:
             while True:
                 char = self.peek()
@@ -1339,11 +1340,17 @@ class _StreamingTopLevelJSONReader:
         while self.ensure():
             match = _JSON_SCALAR_END_RE.search(self.buffer, self.pos)
             if match is not None:
-                token.append(self.buffer[self.pos:match.start()])
+                piece = self.buffer[self.pos:match.start()]
+                token.append(piece)
+                token_size += len(piece)
+                if token_size > _BOUNDED_METADATA_VALUE_CHARS:
+                    raise ValueError('session JSON scalar exceeds bounded limit')
                 self.pos = match.start()
                 break
-            token.append(self.buffer[self.pos:])
-            if sum(map(len, token)) > _BOUNDED_METADATA_VALUE_CHARS:
+            piece = self.buffer[self.pos:]
+            token.append(piece)
+            token_size += len(piece)
+            if token_size > _BOUNDED_METADATA_VALUE_CHARS:
                 raise ValueError('session JSON scalar exceeds bounded limit')
             self.pos = len(self.buffer)
         raw = ''.join(token)
@@ -1425,6 +1432,7 @@ def _decode_bounded_metadata_value(raw):
 def _read_bounded_session_metadata(path):
     """Extract fixed session/index metadata while streaming past large arrays."""
     data = {}
+    inferred_message_count = None
     with open(path, 'r', encoding='utf-8') as handle:
         reader = _StreamingTopLevelJSONReader()
         reader.initialize(handle)
@@ -1443,7 +1451,7 @@ def _read_bounded_session_metadata(path):
             reader.expect(':')
             reader.skip_ws()
             if key == 'messages' and reader.peek() == '[':
-                data.setdefault('message_count', reader.consume_array_count())
+                inferred_message_count = reader.consume_array_count()
             else:
                 raw_value = reader.consume_value(
                     max_capture_chars=(
@@ -1466,6 +1474,8 @@ def _read_bounded_session_metadata(path):
         reader.skip_ws()
         if reader.peek():
             raise ValueError('trailing data after session object')
+    if 'message_count' not in data and inferred_message_count is not None:
+        data['message_count'] = inferred_message_count
     return data
 
 
@@ -2064,7 +2074,7 @@ class Session:
         self._sidecar_revision_v1 = (
             output_generation,
             self._sidecar_epoch_v1,
-            hashlib.sha256(payload.encode('utf-8')).hexdigest(),
+            _sidecar_content_digest(self.path),
         )
         if not skip_index:
             _write_session_index(updates=[self])

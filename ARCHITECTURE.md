@@ -244,17 +244,19 @@ use a bounded streaming top-level metadata scanner that skips transcript and
 scene bodies, accepts metadata before or after those arrays, and refuses files
 without a valid persisted session ID matching the sidecar filename rather than
 constructing a default or phantom ID. Skipped values are still fully checked
-against JSON grammar.
+against JSON grammar; if legacy JSON repeats `messages` and omits an explicit
+`message_count`, the last array supplies the count, matching `json.loads`.
 
 `Session.save()` and the tool share an exclusive per-session sidecar lock.
 Every normal save, compact, and restore advances `_sidecar_generation_v1` from
 the durable value observed under that lock. New sidecars receive a durable
 `_sidecar_epoch_v1`, and the first mutating compaction bootstraps one for a
 legacy sidecar; restore retains that epoch. A loaded mutable `Session` records
-epoch, generation, and exact content digest; save compares that complete
-revision under the lock and fails stale instead of republishing history loaded
-before maintenance. The epoch changes on delete/recreate, preventing
-generation-counter ABA.
+epoch, generation, and the digest of the exact bytes read; save compares that
+complete revision under the lock and records the digest of the bytes actually
+published, including platform newline behavior. It fails stale instead of
+republishing history loaded before maintenance. The epoch changes on
+delete/recreate, preventing generation-counter ABA.
 
 The command remains strictly offline: always drain and stop every WebUI process
 before running it, then restart from fresh durable state after maintenance,
