@@ -342,28 +342,126 @@ def _publish_sidecar_no_replace(source: Path, destination: Path) -> None:
         _fsync_sidecar_directory(destination.parent)
 
 
-def _message_rows_cover(candidate, baseline) -> bool:
-    """Return whether baseline is an ordered exact-row subsequence of candidate."""
+_BACKUP_SNAPSHOT_DOMINANCE_MAX_FIELDS = 512
+_BACKUP_SNAPSHOT_DOMINANCE_MAX_LIST_ROWS = 200_000
+_BACKUP_SNAPSHOT_DOMINANCE_MAX_CANONICAL_BYTES = 64 * 1024 * 1024
+
+
+class _SnapshotDominanceBudgetExceeded(ValueError):
+    """Canonical snapshot comparison exceeded its fail-closed work budget."""
+
+
+class _SnapshotDominanceBudget:
+    def __init__(self, max_canonical_bytes: int):
+        self.remaining_bytes = max_canonical_bytes
+        self.remaining_rows = _BACKUP_SNAPSHOT_DOMINANCE_MAX_LIST_ROWS
+
+    def consume_rows(self, count: int) -> None:
+        if count > self.remaining_rows:
+            raise _SnapshotDominanceBudgetExceeded
+        self.remaining_rows -= count
+
+    def consume_json(self, value) -> str:
+        canonical = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        encoded_size = len(canonical.encode("utf-8"))
+        if encoded_size > self.remaining_bytes:
+            raise _SnapshotDominanceBudgetExceeded
+        self.remaining_bytes -= encoded_size
+        return canonical
+
+
+def _ordered_json_rows_cover(candidate, baseline, *, _budget=None) -> bool:
+    """Return whether baseline is an ordered canonical-row subsequence."""
     if not isinstance(candidate, list) or not isinstance(baseline, list):
         return False
+    budget = _budget or _SnapshotDominanceBudget(
+        _BACKUP_SNAPSHOT_DOMINANCE_MAX_CANONICAL_BYTES
+    )
     try:
-        candidate_rows = iter(
-            json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-            for row in candidate
-        )
-        baseline_rows = (
-            json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-            for row in baseline
-        )
-    except (TypeError, ValueError):
-        return False
-    try:
+        budget.consume_rows(len(candidate) + len(baseline))
+        candidate_rows = iter(budget.consume_json(row) for row in candidate)
+        baseline_rows = (budget.consume_json(row) for row in baseline)
         return all(
             any(candidate_row == baseline_row for candidate_row in candidate_rows)
             for baseline_row in baseline_rows
         )
-    except (TypeError, ValueError):
+    except (
+        OverflowError,
+        RecursionError,
+        TypeError,
+        UnicodeEncodeError,
+        ValueError,
+    ):
         return False
+
+
+_BACKUP_SNAPSHOT_BOOKKEEPING_FIELDS = frozenset({
+    "_sidecar_generation_v1",
+    "message_count",
+    "updated_at",
+})
+
+
+def _session_snapshot_covers(
+    candidate,
+    baseline,
+    *,
+    max_canonical_bytes=_BACKUP_SNAPSHOT_DOMINANCE_MAX_CANONICAL_BYTES,
+) -> bool:
+    """Return whether candidate covers the complete recoverable baseline.
+
+    Top-level lists use ordered canonical-row coverage; every other durable
+    field must remain canonically equal.  Storage generation, derived count,
+    and the superseded activity timestamp are bookkeeping rather than recovery
+    content.  Missing fields in legacy baselines are therefore compatible,
+    while an unknown baseline field can never be silently discarded.
+
+    Comparison work is capped.  Oversized, deeply nested, or non-canonical
+    payloads are incomparable and therefore take the archive/keep path.
+    """
+    if not isinstance(candidate, dict) or not isinstance(baseline, dict):
+        return False
+    if (
+        type(max_canonical_bytes) is not int
+        or max_canonical_bytes <= 0
+        or len(candidate) > _BACKUP_SNAPSHOT_DOMINANCE_MAX_FIELDS
+        or len(baseline) > _BACKUP_SNAPSHOT_DOMINANCE_MAX_FIELDS
+    ):
+        return False
+    budget = _SnapshotDominanceBudget(max_canonical_bytes)
+    try:
+        for key, baseline_value in baseline.items():
+            if key in _BACKUP_SNAPSHOT_BOOKKEEPING_FIELDS:
+                continue
+            if key not in candidate:
+                return False
+            candidate_value = candidate[key]
+            if isinstance(baseline_value, list):
+                if not _ordered_json_rows_cover(
+                    candidate_value,
+                    baseline_value,
+                    _budget=budget,
+                ):
+                    return False
+                continue
+            if budget.consume_json(candidate_value) != budget.consume_json(
+                baseline_value
+            ):
+                return False
+    except (
+        OverflowError,
+        RecursionError,
+        TypeError,
+        UnicodeEncodeError,
+        ValueError,
+    ):
+        return False
+    return True
 
 
 def _archive_incomparable_backup(
@@ -1993,11 +2091,9 @@ class Session:
                             backup = json.loads(bak_path.read_text(encoding='utf-8'))
                             if not isinstance(backup, dict):
                                 raise ValueError("backup payload is not a session snapshot")
-                            backup_messages = backup.get('messages')
-                            existing_messages = existing.get('messages')
-                            if not isinstance(backup_messages, list):
+                            if not isinstance(backup.get('messages'), list):
                                 raise ValueError("backup payload is not a session snapshot")
-                            if not isinstance(existing_messages, list):
+                            if not isinstance(existing.get('messages'), list):
                                 raise ValueError("live payload is not a session snapshot")
                         except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
                             _archive_incomparable_backup(
@@ -2015,13 +2111,13 @@ class Session:
                                 )
                                 replace_backup = True
                             else:
-                                existing_covers_backup = _message_rows_cover(
-                                    existing_messages,
-                                    backup_messages,
+                                existing_covers_backup = _session_snapshot_covers(
+                                    existing,
+                                    backup,
                                 )
-                                backup_covers_existing = _message_rows_cover(
-                                    backup_messages,
-                                    existing_messages,
+                                backup_covers_existing = _session_snapshot_covers(
+                                    backup,
+                                    existing,
                                 )
                                 if backup_covers_existing:
                                     backup_receipt = current_backup_receipt

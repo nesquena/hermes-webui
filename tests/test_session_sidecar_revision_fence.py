@@ -1414,14 +1414,107 @@ def test_incomparable_backup_is_archived_before_latest_snapshot_promotion(
     assert [row["content"] for row in archived["messages"]] == ["A", "UNIQUE-U"]
 
 
+def test_backup_dominance_preserves_complete_legacy_snapshot_payload(
+    tmp_path, monkeypatch
+):
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    sid = "backup-complete-snapshot"
+    first = {"role": "user", "content": "first"}
+    second = {"role": "assistant", "content": "second"}
+    third = {"role": "user", "content": "third"}
+    unique_tool_call = {"id": "unique-old-tool-call", "name": "must-survive"}
+    unique_context = {"role": "system", "content": "unique old model context"}
+    unique_draft = {"text": "unique old draft", "attachments": ["draft.txt"]}
+    unique_future_metadata = {"opaque": ["future", "must-survive"]}
+    session = models.Session(
+        session_id=sid,
+        workspace=str(tmp_path),
+        messages=[first, second],
+        context_messages=[first, unique_context],
+        tool_calls=[unique_tool_call],
+        composer_draft=unique_draft,
+    )
+    session.save(touch_updated_at=False, skip_index=True)
+
+    session.messages = [first]
+    session.context_messages = [first]
+    session.tool_calls = []
+    session.composer_draft = {}
+    session.save(touch_updated_at=False, skip_index=True)
+    backup_path = session.path.with_suffix(".json.bak")
+
+    # Legacy backups predate the generation/count/fingerprint metadata. Their
+    # remaining durable payload must participate in exactly the same dominance
+    # decision as a current sidecar.
+    legacy_backup = json.loads(backup_path.read_text(encoding="utf-8"))
+    for derived_key in (
+        "_sidecar_generation_v1",
+        "message_count",
+        "anchor_scene_index",
+    ):
+        legacy_backup.pop(derived_key, None)
+    legacy_backup["future_recovery_metadata"] = unique_future_metadata
+    backup_path.write_text(
+        json.dumps(legacy_backup, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    # Message-only dominance considers this live snapshot richer, although it
+    # lacks all three uniquely recoverable non-transcript artifacts.
+    session.messages = [first, second, third]
+    session.context_messages = [first, third]
+    session.save(touch_updated_at=False, skip_index=True)
+    session.messages = [first]
+    session.context_messages = [first]
+    session.save(touch_updated_at=False, skip_index=True)
+
+    recoverable_payloads = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in [backup_path, *session_dir.glob(f"{backup_path.name}.archive-*")]
+    ]
+    assert any(
+        unique_tool_call in (payload.get("tool_calls") or [])
+        and unique_context in (payload.get("context_messages") or [])
+        and payload.get("composer_draft") == unique_draft
+        and payload.get("future_recovery_metadata") == unique_future_metadata
+        for payload in recoverable_payloads
+    )
+
+
 def test_backup_dominance_preserves_message_order():
-    from api.models import _message_rows_cover
+    from api.models import _ordered_json_rows_cover
 
     first = {"role": "user", "content": "first"}
     second = {"role": "assistant", "content": "second"}
 
-    assert _message_rows_cover([first, second], [first]) is True
-    assert _message_rows_cover([second, first], [first, second]) is False
+    assert _ordered_json_rows_cover([first, second], [first]) is True
+    assert _ordered_json_rows_cover([second, first], [first, second]) is False
+
+
+def test_backup_snapshot_dominance_budget_exhaustion_fails_closed():
+    from api.models import _session_snapshot_covers
+
+    baseline = {
+        "session_id": "bounded-backup",
+        "messages": [{"role": "user", "content": "x" * 128}],
+        "future_metadata": {"opaque": "y" * 128},
+    }
+    candidate = {
+        **baseline,
+        "messages": [
+            *baseline["messages"],
+            {"role": "assistant", "content": "new"},
+        ],
+    }
+
+    assert _session_snapshot_covers(
+        candidate,
+        baseline,
+        max_canonical_bytes=64,
+    ) is False
 
 
 def test_backup_retirement_requires_live_revision_to_still_match(

@@ -153,10 +153,16 @@ and 5; it does not mark every run-state boundary implemented.
    adopt the returned revision owner before model resolution or turn start.
    Recovery must recheck durable deletes under the SID authority, validate the
    embedded SID, and invalidate stale in-memory aliases. A shrinking write must
-   not proceed unless its recoverable history is durable: row count alone does
-   not prove dominance; malformed, non-object, foreign-SID, and incomparable
-   primary backups are archived byte-for-byte and content-addressedly before the
-   valid live snapshot is promoted. Archive publication streams into a complete
+   not proceed unless its recoverable history is durable: row count or message
+   coverage alone does not prove dominance. Dominance covers the complete
+   canonical recovery snapshot, including ordered context/tool sequences and
+   all unknown metadata; only derived generation/count and superseded activity
+   time are excluded. The comparison accepts legacy snapshots that omit newer
+   bookkeeping fields, has a fixed work budget, and treats any overflow or
+   unverifiable field as incomparable. Malformed, non-object, foreign-SID, and
+   incomparable primary backups are archived byte-for-byte and
+   content-addressedly before the valid live snapshot is promoted. Archive
+   publication streams into a complete
    temporary file, verifies the expected digest, and atomically renames it, so
    archive preservation does not depend on hard-link support; the stricter
    create-only primitive remains mandatory for live sidecars. Backup retirement
@@ -196,9 +202,10 @@ context reconstruction, or session metadata:
   Does recovery revalidate delete tombstones and state-db ownership while holding
   the same SID authority used for publication?
 - If the write shrinks history, is backup publication fail-closed and monotone by
-  ordered semantic row coverage rather than count? Are incomparable generations
-  archived before promotion, and does cleanup prove both backup and live receipts
-  still match before unlinking?
+  complete canonical snapshot coverage rather than message rows or count? Does
+  the bounded comparison include every durable top-level field, archive
+  unverifiable/incomparable generations before promotion, and does cleanup prove
+  both backup and live receipts still match before unlinking?
 - What test or manual evidence proves the invariant?
 
 ## Existing Issue Map
