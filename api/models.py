@@ -1120,7 +1120,7 @@ def _message_role(message):
     return str(message.get('role', '')).strip().lower()
 
 
-_SESSION_METADATA_FIELDS = (
+_SESSION_METADATA_FIELDS = [
     'session_id', 'title', 'workspace', 'created_workspace', 'model',
     'model_provider', 'model_explicit_pick_signature', 'created_at',
     'updated_at', 'pinned', 'archived', 'project_id', 'profile',
@@ -1144,7 +1144,7 @@ _SESSION_METADATA_FIELDS = (
     'source_tag', 'raw_source', 'session_source', 'source_label', 'read_only',
     'enabled_toolsets', 'composer_draft', 'process_wakeup_pause',
     'share_token', 'share_created_at',
-)
+]
 _BOUNDED_SESSION_METADATA_FIELDS = frozenset((
     *_SESSION_METADATA_FIELDS,
     'message_count',
@@ -1160,7 +1160,7 @@ _JSON_SCALAR_END_RE = re.compile(r'[ \t\r\n,}\]]')
 class _StreamingTopLevelJSONReader:
     """Scan one JSON object with memory independent of skipped value size."""
 
-    def __init__(self, handle, chunk_chars=65_536):
+    def initialize(self, handle, chunk_chars=65_536):
         self.handle = handle
         self.chunk_chars = chunk_chars
         self.buffer = ''
@@ -1356,7 +1356,8 @@ def _read_bounded_session_metadata(path):
     """Extract fixed session/index metadata while streaming past large arrays."""
     data = {}
     with open(path, 'r', encoding='utf-8') as handle:
-        reader = _StreamingTopLevelJSONReader(handle)
+        reader = _StreamingTopLevelJSONReader()
+        reader.initialize(handle)
         reader.expect('{')
         reader.skip_ws()
         if reader.peek() == '}':
