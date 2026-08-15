@@ -22,6 +22,21 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _run_with_isolated_rss(script: Path, *args, timeout: int):
+    """Fork the measured CLI from a small launcher, not the full pytest RSS."""
+    launcher = (
+        "import subprocess,sys; "
+        "raise SystemExit(subprocess.call(sys.argv[1:]))"
+    )
+    return subprocess.run(
+        [sys.executable, "-c", launcher, sys.executable, str(script), *map(str, args)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
 def test_large_session_load_defers_inline_repair_and_blocks_save(tmp_path, monkeypatch):
     from api import models
 
@@ -131,11 +146,9 @@ def test_offline_compactor_memory_is_bounded_for_many_replays(tmp_path):
         handle.write('],"context_messages":[]}')
 
     script = Path(__file__).resolve().parents[1] / "scripts" / "compact_session_replays.py"
-    completed = subprocess.run(
-        [sys.executable, str(script), str(sidecar)],
-        check=False,
-        capture_output=True,
-        text=True,
+    completed = _run_with_isolated_rss(
+        script,
+        sidecar,
         timeout=120,
     )
 
@@ -176,11 +189,10 @@ def test_offline_compactor_memory_is_bounded_for_many_unique_ids(tmp_path):
         handle.write('],"context_messages":[]}')
 
     script = Path(__file__).resolve().parents[1] / "scripts" / "compact_session_replays.py"
-    completed = subprocess.run(
-        [sys.executable, str(script), "--dry-run", str(sidecar)],
-        check=False,
-        capture_output=True,
-        text=True,
+    completed = _run_with_isolated_rss(
+        script,
+        "--dry-run",
+        sidecar,
         timeout=180,
     )
 
