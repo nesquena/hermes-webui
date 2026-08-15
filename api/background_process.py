@@ -1210,10 +1210,19 @@ def _canonical_wakeup_session_id(session_id: str) -> str:
 
         session = _get_or_materialize_session(target, refresh_cli_messages=False)
     except Exception:
-        # If WebUI cannot prove that this is an archived snapshot, preserve the
-        # historical exact-origin behavior.  start_session_turn owns the normal
-        # not-found/read-only response contract.
+        # Without a snapshot there is no profile fallback to authorize: retain
+        # the historical exact-ID path for ordinary live/legacy sessions.
         return target
+
+    resolved_session_id = str(getattr(session, "session_id", "") or "")
+    if resolved_session_id != target:
+        logger.error(
+            "cross-session compression route BLOCKED: expected origin %r but "
+            "snapshot reader returned %r",
+            target,
+            resolved_session_id,
+        )
+        return ""
 
     if not getattr(session, "pre_compression_snapshot", False):
         return target
