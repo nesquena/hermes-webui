@@ -1437,14 +1437,14 @@ class Session:
         # scene bodies. message_count is placed BEFORE anchor_scene_index so a
         # legacy-format reader that stops at a scene key still finds the count.
         # The full anchor_activity_scenes bodies serialize AFTER messages.
-        meta['message_count'] = len(self.messages or [])
-        meta['anchor_scene_index'] = _anchor_scene_index_from_records(self.anchor_activity_scenes)
-        # Keep the in-memory fingerprint aligned with what we just persisted, so a
-        # later metadata-only reload of THIS object (or any fingerprint reader)
-        # sees the current value rather than a stale load-time snapshot (#5854
-        # defense-in-depth; the cached-side freshness check reads real records,
-        # not this, so this is belt-and-suspenders).
-        self._anchor_scene_index = dict(meta['anchor_scene_index'])
+        # Placeholders only — reserves their position ahead of 'messages' in
+        # dict/JSON key order. The real values are derived from ``snapshot``
+        # below (after the deep copy), not from live ``self``, so a concurrent
+        # mutation of self.messages/self.anchor_activity_scenes during the
+        # deep copy can't leave stale counts describing a payload that no
+        # longer matches what was actually captured.
+        meta['message_count'] = None
+        meta['anchor_scene_index'] = None
         meta['messages'] = self.messages
         meta['tool_calls'] = self.tool_calls
         meta['anchor_activity_scenes'] = self.anchor_activity_scenes if isinstance(self.anchor_activity_scenes, dict) else {}
@@ -1469,6 +1469,22 @@ class Session:
         # (during or after this point) can change what gets hashed or written.
         payload_data = {**meta, **extra}
         snapshot = copy.deepcopy(payload_data)
+        # Derive the prefix metadata from the snapshot itself (not live self)
+        # now that the copy is complete, so message_count/anchor_scene_index
+        # always describe the exact messages/anchor_activity_scenes that got
+        # captured into ``snapshot`` — even if ``self`` was mutated during the
+        # deepcopy above. Assigning into the existing keys does not change
+        # their position, so they still precede 'messages' in JSON output.
+        snapshot['message_count'] = len(snapshot.get('messages') or [])
+        snapshot['anchor_scene_index'] = _anchor_scene_index_from_records(
+            snapshot.get('anchor_activity_scenes')
+        )
+        # Keep the in-memory fingerprint aligned with what we just persisted, so a
+        # later metadata-only reload of THIS object (or any fingerprint reader)
+        # sees the current value rather than a stale load-time snapshot (#5854
+        # defense-in-depth; the cached-side freshness check reads real records,
+        # not this, so this is belt-and-suspenders).
+        self._anchor_scene_index = dict(snapshot['anchor_scene_index'])
         persisted_fingerprint = _session_public_state_fingerprint({
             key: value
             for key, value in snapshot.items()
@@ -1496,11 +1512,11 @@ class Session:
                     existing_msg_count = len(existing.get('messages') or [])
                 except (json.JSONDecodeError, ValueError):
                     existing_msg_count = -1  # corrupt → always back up
-                incoming_msg_count = len(self.messages or [])
+                incoming_msg_count = len(snapshot.get('messages') or [])
                 if (
                     existing_msg_count > 0
                     and incoming_msg_count == 0
-                    and (self.active_stream_id or self.pending_user_message)
+                    and (snapshot.get('active_stream_id') or snapshot.get('pending_user_message'))
                 ):
                     logger.warning(
                         "refusing to overwrite session %s messages with empty active/pending snapshot "

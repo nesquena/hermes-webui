@@ -424,6 +424,54 @@ def test_save_snapshot_is_not_fooled_by_nested_aba_during_serialization(
     assert models.get_session(session.session_id).messages[0]["content"] == "A"
 
 
+def test_save_snapshot_drives_prefix_metadata_and_backup_decisions(
+    isolated_session_env, monkeypatch,
+):
+    """Derived prefix fields and shrink recovery must use the copied snapshot."""
+    from api import models
+
+    previous_messages = [
+        {"role": "user", "content": f"previous {i}"}
+        for i in range(5)
+    ]
+    session = _make_persisted_session(83, messages=previous_messages)
+    current_messages = [
+        {"role": "user", "content": f"current {i}"}
+        for i in range(10)
+    ]
+    session.messages = list(current_messages)
+    real_deepcopy = models.copy.deepcopy
+    mutated = False
+
+    def deepcopy_with_nested_mutation(value, *args, **kwargs):
+        nonlocal mutated
+        if (
+            not mutated
+            and isinstance(value, dict)
+            and value.get("session_id") == session.session_id
+            and value.get("messages") is session.messages
+        ):
+            mutated = True
+            session.messages.clear()
+            try:
+                return real_deepcopy(value, *args, **kwargs)
+            finally:
+                session.messages.extend(current_messages)
+        return real_deepcopy(value, *args, **kwargs)
+
+    monkeypatch.setattr(models.copy, "deepcopy", deepcopy_with_nested_mutation)
+    session.save(touch_updated_at=False)
+
+    assert mutated is True
+    persisted = json.loads(session.path.read_text(encoding="utf-8"))
+    backup = json.loads(session.path.with_suffix(".json.bak").read_text(encoding="utf-8"))
+    assert persisted["message_count"] == 0
+    assert persisted["messages"] == []
+    assert len(backup["messages"]) == len(previous_messages)
+    assert len(session.messages) == len(current_messages)
+    assert session._cache_persisted_fingerprint is None
+
+
 class _ObservedSessions(collections.OrderedDict):
     """Ordered cache double that exposes the candidate-removal instant."""
 
