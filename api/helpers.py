@@ -222,29 +222,70 @@ def arm_connection_close(handler) -> None:
 _UNFRAMED_TRANSFER_CODINGS = frozenset({'', 'identity'})
 
 
-def _framing_header(handler, name: str) -> str | None:
-    """Read one framing header, tolerating handler stubs and plain dicts.
+def _framing_header_values(handler, name: str) -> list[str]:
+    """Every value the wire carried for one framing header, tolerating stubs.
 
-    A real handler carries an ``email.message.Message``, whose ``get()`` is
-    case-insensitive like the wire; the suite's ``SimpleNamespace(headers={...})``
+    ALL values, not just the first: ``Message.get()`` returns only the first
+    occurrence, so a request carrying ``Content-Length: 0`` followed by
+    ``Content-Length: 42`` reads back as length zero. Its 42 body bytes are then
+    never consumed and get parsed as the next request line -- the same poisoning
+    this module exists to prevent, reached by duplicating a header rather than by
+    omitting one. Conflicting framing is only visible if every value is.
+
+    A real handler carries an ``email.message.Message`` (case-insensitive
+    ``get_all()``, like the wire); the suite's ``SimpleNamespace(headers={...})``
     doubles are plain dicts, which are not, so fall back to a case-insensitive
     scan for those. A missing or odd ``headers`` must never raise: every caller
     is on a rejection path where an exception becomes a spurious 500.
     """
     headers = getattr(handler, 'headers', None)
     if headers is None:
-        return None
+        return []
     try:
-        value = headers.get(name)
-        if value is None and isinstance(headers, dict):
+        get_all = getattr(headers, 'get_all', None)
+        if callable(get_all):
+            values = get_all(name)
+            return [] if values is None else [str(v) for v in values if v is not None]
+        if isinstance(headers, dict):
             lowered = name.lower()
-            for key, candidate in headers.items():
-                if str(key).lower() == lowered:
-                    value = candidate
-                    break
+            return [
+                str(v) for k, v in headers.items()
+                if str(k).lower() == lowered and v is not None
+            ]
+        value = headers.get(name)
+        return [] if value is None else [str(value)]
     except Exception:
-        return None
-    return None if value is None else str(value)
+        return []
+
+
+def _declared_content_lengths(handler) -> set[int] | None:
+    """Distinct declared ``Content-Length`` values, or ``None`` if any is unreadable.
+
+    ``None`` means the framing cannot be trusted at all (a non-numeric value);
+    an empty set means no length was declared.
+    """
+    parsed: set[int] = set()
+    for raw in _framing_header_values(handler, 'Content-Length'):
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        try:
+            parsed.add(int(stripped))
+        except ValueError:
+            return None
+    return parsed
+
+
+def unreadable_content_length(handler) -> bool:
+    """True when ``Content-Length`` cannot be trusted to frame the body.
+
+    Either a value that will not parse, or two or more values that disagree.
+    Neither can tell a reader how many bytes to drain, so such a request can
+    only be rejected -- with the connection armed for close, since bytes may
+    still be queued behind it.
+    """
+    parsed = _declared_content_lengths(handler)
+    return parsed is None or len(parsed) > 1
 
 
 def request_declares_body(handler) -> bool:
@@ -258,20 +299,16 @@ def request_declares_body(handler) -> bool:
     "read" requests (whose unread bytes poison the next pooled request) and
     kills healthy keep-alive on body-less writes.
 
-    An unparseable ``Content-Length`` counts as a declared body: a value we
-    cannot interpret does not prove the body's absence, and the safe assumption
-    for connection reuse is that bytes are pending.
+    An unparseable or self-contradicting ``Content-Length`` counts as a declared
+    body: a value we cannot interpret does not prove the body's absence, and the
+    safe assumption for connection reuse is that bytes are pending.
     """
-    coding = _framing_header(handler, 'Transfer-Encoding')
-    if coding is not None and coding.strip().lower() not in _UNFRAMED_TRANSFER_CODINGS:
+    if unsupported_transfer_encoding(handler) is not None:
         return True
-    raw_length = _framing_header(handler, 'Content-Length')
-    if raw_length is None or not raw_length.strip():
-        return False
-    try:
-        return int(raw_length.strip()) != 0
-    except ValueError:
+    parsed = _declared_content_lengths(handler)
+    if parsed is None:
         return True
+    return any(length != 0 for length in parsed)
 
 
 def unsupported_transfer_encoding(handler) -> str | None:
@@ -283,14 +320,15 @@ def unsupported_transfer_encoding(handler) -> str | None:
     consumes nothing at all. Such a request can only be rejected -- and only
     with the connection armed for close, because its chunk bytes are still
     queued on the socket.
+
+    Every declared coding is inspected, not just the first: a request may repeat
+    the header, and one undecodable coding anywhere is enough to refuse.
     """
-    coding = _framing_header(handler, 'Transfer-Encoding')
-    if coding is None:
-        return None
-    normalized = coding.strip()
-    if normalized.lower() in _UNFRAMED_TRANSFER_CODINGS:
-        return None
-    return normalized
+    for raw in _framing_header_values(handler, 'Transfer-Encoding'):
+        normalized = raw.strip()
+        if normalized.lower() not in _UNFRAMED_TRANSFER_CODINGS:
+            return normalized
+    return None
 
 
 def arm_connection_close_if_body_pending(handler) -> bool:

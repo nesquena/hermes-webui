@@ -8,7 +8,12 @@ import tempfile
 from pathlib import Path
 
 from api.config import MAX_UPLOAD_BYTES, STATE_DIR
-from api.helpers import arm_connection_close, j, unsupported_transfer_encoding
+from api.helpers import (
+    arm_connection_close,
+    j,
+    unreadable_content_length,
+    unsupported_transfer_encoding,
+)
 from api.models import get_session
 from api.profiles import _profiles_match, get_active_profile_name as _get_active_profile_name
 from api.workspace import (
@@ -86,6 +91,10 @@ def _read_multipart_or_reject(handler):
     * a non-numeric or oversized Content-Length cannot be read either, and
       ``parse_multipart()`` validates the boundary and the length before its
       first ``rfile.read()`` — so every raise below is still pre-read.
+    * two DISAGREEING Content-Length headers read back as whichever came first,
+      so ``Content-Length: 0`` ahead of the real length made the body invisible
+      and left every byte of it on the socket. There is no honest length to
+      drain, so the request is refused before ``rfile`` is touched.
     """
     content_type = handler.headers.get('Content-Type', '')
     coding = unsupported_transfer_encoding(handler)
@@ -94,6 +103,8 @@ def _read_multipart_or_reject(handler):
             f'Unsupported Transfer-Encoding: {coding} (uploads require a Content-Length)',
             411,
         )
+    if unreadable_content_length(handler):
+        raise _RejectBeforeRead('Invalid Content-Length', 400)
     try:
         content_length = int(handler.headers.get('Content-Length', 0) or 0)
     except (TypeError, ValueError):
