@@ -1927,12 +1927,96 @@ def _has_replay_safe_history_prefix(messages, previous_context) -> bool:
         and _messages_have_prefix(
             messages,
             previous_context,
-            key_fn=_message_replay_key,
+            key_fn=_canonical_message_digest,
         )
     )
 
 
-def _collapse_replays_with_history_boundary(messages, previous_context):
+def _reconcile_payload_distinct_history_prefix(
+    previous_context,
+    result_messages,
+    identity,
+    msg_text,
+    source,
+):
+    """Preserve a positionally historical prefix rejected by strict equality.
+
+    The Agent's current-turn index can prove that the first ``len(previous)``
+    rows precede an out-of-band user turn without proving those rows are replay
+    duplicates.  Keep the durable previous projection, materialize the current
+    user boundary, then carry every payload-distinct returned prefix row as
+    current-turn delta.  The rebuilt list has an exact previous prefix, so
+    downstream reconciliation never needs a weaker visible-text fallback.
+    """
+    previous_context = list(previous_context or [])
+    result_messages = list(result_messages or [])
+    if (
+        not previous_context
+        or not _active_turn_boundary_is_valid(identity)
+        or identity['current_turn_user_idx'] != len(previous_context)
+        or len(result_messages) < len(previous_context)
+        or not any(
+            type(message) is dict and message.get('role') == 'user'
+            for message in previous_context
+        )
+    ):
+        return result_messages, False
+
+    expected_text = identity.get('text') if identity.get('text') is not None else msg_text
+    suffix = list(result_messages[len(previous_context):])
+    current_user_echoed = bool(
+        suffix
+        and type(suffix[0]) is dict
+        and suffix[0].get('role') == 'user'
+        and _normalize_user_text(suffix[0].get('content'))
+        == _normalize_user_text(expected_text)
+    )
+    out_of_band_suffix = bool(suffix) and all(
+        _is_context_compression_marker(message)
+        or (
+            type(message) is dict
+            and message.get('role') in ('assistant', 'tool')
+        )
+        for message in suffix
+    )
+    if not current_user_echoed and not out_of_band_suffix:
+        return result_messages, False
+
+    payload_distinct_prefix_rows = []
+    for actual, durable in zip(
+        result_messages[:len(previous_context)],
+        previous_context,
+        strict=True,
+    ):
+        if _comparison_keys_equal(
+            _canonical_message_digest(actual),
+            _canonical_message_digest(durable),
+        ):
+            continue
+        payload_distinct_prefix_rows.append(copy.deepcopy(actual))
+
+    if current_user_echoed:
+        suffix = copy.deepcopy(suffix)
+        current_user = suffix.pop(0)
+        _mark_active_turn_checkpoint(current_user, identity)
+    else:
+        current_user = _materialize_active_turn_user(identity, msg_text, source)
+        suffix = copy.deepcopy(suffix)
+    return (
+        copy.deepcopy(previous_context)
+        + [current_user]
+        + payload_distinct_prefix_rows
+        + suffix,
+        True,
+    )
+
+
+def _collapse_replays_with_history_boundary(
+    messages,
+    previous_context,
+    *,
+    history_prefix_is_authoritative=False,
+):
     """Reduce exact replays without crossing a proven history/delta boundary.
 
     The Agent can return a full history without echoing the separately supplied
@@ -1945,7 +2029,10 @@ def _collapse_replays_with_history_boundary(messages, previous_context):
     """
     messages = list(messages or [])
     previous_context = list(previous_context or [])
-    if _has_replay_safe_history_prefix(messages, previous_context):
+    if (
+        history_prefix_is_authoritative is True
+        and _has_replay_safe_history_prefix(messages, previous_context)
+    ):
         boundary = len(previous_context)
         history, history_changed = _collapse_replayed_assistant_rows(
             messages[:boundary]
@@ -1982,6 +2069,29 @@ def _settle_result_messages(
         active_turn_identity,
     )
     if result_messages:
+        if not result_has_authoritative_full_history_prefix:
+            reconciled_result, result_reconciled = (
+                _reconcile_payload_distinct_history_prefix(
+                    previous_context_messages,
+                    result_messages,
+                    active_turn_identity,
+                    msg_text,
+                    source,
+                )
+            )
+            reconciled_context, context_reconciled = (
+                _reconcile_payload_distinct_history_prefix(
+                    previous_context_messages,
+                    next_context_messages,
+                    active_turn_identity,
+                    msg_text,
+                    source,
+                )
+            )
+            if result_reconciled and context_reconciled:
+                result_messages = reconciled_result
+                next_context_messages = reconciled_context
+                result_has_authoritative_full_history_prefix = True
         # Classify exact adjacent replays before generated stable IDs make two
         # source-identical assistant rows artificially distinct. Keep a proven
         # prior-history prefix separate from its delta: the current user message
@@ -1990,14 +2100,23 @@ def _settle_result_messages(
         result_messages, _ = _collapse_replays_with_history_boundary(
             result_messages,
             previous_context_messages,
+            history_prefix_is_authoritative=(
+                result_has_authoritative_full_history_prefix
+            ),
         )
         next_context_messages, _ = _collapse_replays_with_history_boundary(
             next_context_messages,
             previous_context_messages,
+            history_prefix_is_authoritative=(
+                result_has_authoritative_full_history_prefix
+            ),
         )
-        replay_safe_history_prefix = _has_replay_safe_history_prefix(
-            next_context_messages,
-            previous_context_messages,
+        replay_safe_history_prefix = bool(
+            result_has_authoritative_full_history_prefix
+            and _has_replay_safe_history_prefix(
+                next_context_messages,
+                previous_context_messages,
+            )
         )
         if (
             result_has_authoritative_full_history_prefix
@@ -2025,6 +2144,9 @@ def _settle_result_messages(
             previous_context_messages,
             next_context_messages,
             msg_text,
+            result_prefix_is_authoritative=(
+                result_has_authoritative_full_history_prefix
+            ),
         )
         next_context_messages = _settle_current_turn_boundary(
             previous_context_messages,
@@ -6009,6 +6131,19 @@ def _comparison_keys_equal(left, right):
     return left is not None and right is not None and left == right
 
 
+def _display_backfill_key(message):
+    """Use payload-strict assistant identity for context-to-display backfill."""
+    if type(message) is dict and message.get('role') == 'assistant':
+        digest = _canonical_message_digest(message)
+        if digest is None:
+            # Unsupported containers are incomparable: fail closed by treating
+            # projection copies as distinct rather than silently suppressing one.
+            return ('incomparable_assistant', id(message))
+        return ('assistant_payload', digest)
+    identity = _message_identity(message)
+    return ('visible_identity', identity) if identity is not None else None
+
+
 def _message_content_has_nontext_parts(content) -> bool:
     """Return True when visible-text identity would discard content structure."""
     if type(content) is not list:
@@ -6132,7 +6267,12 @@ def _message_replay_key(msg):
     return (*key, sidecar) if sidecar is not None else key
 
 
-def _strip_replayed_prefix(existing_messages, candidates):
+def _strip_replayed_prefix(
+    existing_messages,
+    candidates,
+    *,
+    key_fn=_message_replay_key,
+):
     """Drop a candidate prefix that is already the suffix of existing_messages.
 
     Compression/continuation can replay the active tail from state.db after the
@@ -6144,8 +6284,8 @@ def _strip_replayed_prefix(existing_messages, candidates):
     candidates = list(candidates or [])
     max_overlap = min(len(existing_messages), len(candidates))
     for overlap in range(max_overlap, 0, -1):
-        left = [_message_replay_key(m) for m in existing_messages[-overlap:]]
-        right = [_message_replay_key(m) for m in candidates[:overlap]]
+        left = [key_fn(m) for m in existing_messages[-overlap:]]
+        right = [key_fn(m) for m in candidates[:overlap]]
         if all(
             _comparison_keys_equal(left_key, right_key)
             for left_key, right_key in zip(left, right, strict=True)
@@ -6231,24 +6371,34 @@ def _strip_replayed_context_items(existing_messages, candidates):
     return cleaned
 
 
-def _dedupe_replayed_context_messages(previous_context, result_messages, msg_text=None):
+def _dedupe_replayed_context_messages(
+    previous_context,
+    result_messages,
+    msg_text=None,
+    *,
+    result_prefix_is_authoritative=None,
+):
     """Keep model context append-only without replayed blocks/summaries."""
     previous_context = list(previous_context or [])
     result_messages = list(result_messages or [])
     if not previous_context or not result_messages:
         return result_messages
     previous_user_tail = _stale_user_tail_candidate(_last_user_row(previous_context))
-    if not _messages_have_prefix(
-        result_messages,
-        previous_context,
-        key_fn=_message_replay_key,
-    ):
+    has_authoritative_prefix = result_prefix_is_authoritative is True
+    if result_prefix_is_authoritative is None:
+        has_authoritative_prefix = _messages_have_prefix(
+            result_messages,
+            previous_context,
+            key_fn=_message_replay_key,
+        )
+    if not has_authoritative_prefix:
         # Agent-side role-sequence repair can replace the last prior user row
         # with a repaired current-user row. In that shape the result no longer
         # has `previous_context` as an exact prefix, but it should still be
         # merged as: previous context + clean current turn + assistant/tool delta.
         if (
-            msg_text
+            result_prefix_is_authoritative is not False
+            and msg_text
             and len(previous_context) >= 1
             and len(result_messages) >= len(previous_context)
             and _messages_have_prefix(
@@ -6881,6 +7031,16 @@ def _merge_display_messages_after_agent_result(
                 msg_text,
             )
         )
+    if not result_has_authoritative_full_history_prefix:
+        result_messages, result_has_authoritative_full_history_prefix = (
+            _reconcile_payload_distinct_history_prefix(
+                previous_context,
+                result_messages,
+                _active_turn_identity,
+                msg_text,
+                source,
+            )
+        )
     previous_user_tail = _stale_user_tail_candidate(_last_user_row(previous_context))
 
     # ── Backfill normal turns from previous_context that are missing from
@@ -6895,26 +7055,26 @@ def _merge_display_messages_after_agent_result(
     # at/after a cursor. Any context messages between the cursor and that
     # match are context-only gaps that get spliced in before the display msg.
     if previous_display and previous_context:
-        _display_id_set = {_message_identity(m) for m in previous_display}
+        _display_id_set = {_display_backfill_key(m) for m in previous_display}
         _context_id_set = {
-            _message_identity(m)
+            _display_backfill_key(m)
             for m in previous_context
             if not _is_context_compression_marker(m)
             and not _is_compressed_context_tool_result_summary_message(m)
         }
         _has_context_only_turns = bool(_context_id_set - _display_id_set)
         if _has_context_only_turns:
-            context_keys = [_message_identity(m) for m in previous_context]
+            context_keys = [_display_backfill_key(m) for m in previous_context]
             # Precompute display keys once; avoids repeated json.dumps calls inside
             # the inner any() loop (was O(D²·C) — see perf fix below).
-            _display_keys = [_message_identity(m) for m in previous_display]
+            _display_keys = [_display_backfill_key(m) for m in previous_display]
             # Multiset mirror of context_keys[_cursor:] kept in sync as _cursor
             # advances. Enables O(1) membership tests in the any() check instead
             # of an O(N) list scan, while preserving EXACT list-slice semantics:
-            # _message_identity intentionally returns duplicate keys for
-            # identical-content turns (and None for empty rows), so a plain set
-            # would drop a key still present later in the slice. A count-keyed
-            # dict (including None) matches `in context_keys[_cursor:]` exactly.
+            # Backfill keys intentionally repeat for exact rows (and visible-
+            # identical non-assistant turns), so a plain set would drop a key
+            # still present later in the slice. A count-keyed dict (including
+            # None) matches `in context_keys[_cursor:]` exactly.
             _remaining_ck_counts = {}
             for _ck in context_keys:
                 _remaining_ck_counts[_ck] = _remaining_ck_counts.get(_ck, 0) + 1
@@ -7005,7 +7165,10 @@ def _merge_display_messages_after_agent_result(
     result_prefix_is_authoritative = (
         result_has_authoritative_full_history_prefix is True
     )
-    if not result_prefix_is_authoritative:
+    if not result_prefix_is_authoritative and not _active_turn_identity:
+        # Legacy direct callers without provenance retain visible-prefix
+        # compatibility. Once strict turn provenance rejects a prefix, never
+        # let this weaker comparator reclassify and delete the same rows.
         result_prefix_is_authoritative = _messages_have_prefix(
             result_messages,
             previous_context,
@@ -7039,8 +7202,16 @@ def _merge_display_messages_after_agent_result(
             for m in candidates
         )
         if not (assistant_or_tool_only_candidates and not current_user_in_candidates):
-            candidates = _strip_replayed_prefix(previous_display, candidates)
-            candidates = _strip_replayed_prefix(previous_context, candidates)
+            candidates = _strip_replayed_prefix(
+                previous_display,
+                candidates,
+                key_fn=_canonical_message_digest,
+            )
+            candidates = _strip_replayed_prefix(
+                previous_context,
+                candidates,
+                key_fn=_canonical_message_digest,
+            )
     else:
         current_user_idx = _find_current_user_turn(result_messages, msg_text)
         assistant_or_tool_only_result = bool(result_messages) and all(

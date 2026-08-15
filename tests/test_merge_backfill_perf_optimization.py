@@ -3,9 +3,9 @@ _merge_display_messages_after_agent_result (salvaged from #4314).
 
 The optimization replaces an `in context_keys[_cursor:]` list-slice membership
 test with an O(1) count-keyed dict mirror. The subtle correctness requirement:
-_message_identity intentionally returns DUPLICATE keys for identical-content
-turns (and None for empty rows). A plain set would diverge from the original
-list-slice semantics; a multiset (count dict, including None) is exact.
+The projection-aware backfill key intentionally returns DUPLICATE keys for
+exact rows and visible-identical non-assistant turns. A plain set would diverge
+from the original list-slice semantics; a multiset count is exact.
 
 This test asserts the optimized merge produces byte-identical output to a
 reference implementation of the ORIGINAL list-slice semantics, over adversarial
@@ -28,7 +28,7 @@ def _msg(role, text, **extra):
 def test_backfill_optimization_preserves_duplicate_identity_turns():
     """Two identical-content user turns both survive the backfill merge.
 
-    _message_identity collapses identical user text to the same key. The
+    The backfill key collapses identical user text to the same key. The
     optimization must not drop the second identical turn (a plain-set mirror
     would). previous_display is the visible backbone; both 'Ok' user bubbles
     plus the interleaved assistant rows must be preserved in order.
@@ -91,19 +91,19 @@ def test_backfill_optimization_matches_reference_listslice_semantics():
         if not result_messages:
             return previous_display
         if previous_display and previous_context:
-            _display_id_set = {streaming._message_identity(m) for m in previous_display}
+            _display_id_set = {streaming._display_backfill_key(m) for m in previous_display}
             _context_id_set = {
-                streaming._message_identity(m)
+                streaming._display_backfill_key(m)
                 for m in previous_context
                 if not streaming._is_context_compression_marker(m)
             }
             if bool(_context_id_set - _display_id_set):
-                context_keys = [streaming._message_identity(m) for m in previous_context]
+                context_keys = [streaming._display_backfill_key(m) for m in previous_context]
                 _backfilled = []
                 _context_inserted = set()
                 _cursor = 0
                 for _di, _dmsg in enumerate(previous_display):
-                    _dkey = streaming._message_identity(_dmsg)
+                    _dkey = streaming._display_backfill_key(_dmsg)
                     if _dkey is not None:
                         _j = _cursor
                         while _j < len(context_keys) and context_keys[_j] != _dkey:
@@ -117,7 +117,7 @@ def test_backfill_optimization_matches_reference_listslice_semantics():
                                     _context_inserted.add(_ckey)
                             _cursor = _j + 1
                         elif not any(
-                            streaming._message_identity(_f) in context_keys[_cursor:]
+                            streaming._display_backfill_key(_f) in context_keys[_cursor:]
                             for _f in previous_display[_di + 1:]
                         ):
                             for _k in range(_cursor, len(context_keys)):

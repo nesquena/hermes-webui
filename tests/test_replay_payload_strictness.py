@@ -405,6 +405,105 @@ def test_settle_preserves_idless_exact_prefix_authority_after_id_assignment():
         assert type(projection[-1].get("id")) is int
 
 
+def test_settle_preserves_payload_distinct_rejected_history_prefix():
+    previous = [
+        {"role": "user", "content": "old prompt", "id": "old-user"},
+        {
+            "role": "assistant",
+            "content": "same answer",
+            "id": "old-assistant",
+            "reasoning": "old reasoning",
+            "model": "old-model",
+            "request_id": "old-request",
+        },
+    ]
+    distinct_history = {
+        "role": "assistant",
+        "content": "same answer",
+        "id": "distinct-assistant",
+        "reasoning": "distinct reasoning",
+        "model": "distinct-model",
+        "request_id": "distinct-request",
+    }
+    final = {
+        "role": "assistant",
+        "content": "final answer",
+        "id": "final-assistant",
+    }
+
+    session = _settle_structured_result(
+        previous,
+        [copy.deepcopy(previous[0]), distinct_history, final],
+    )
+
+    for projection in (session.messages, session.context_messages):
+        assert [row.get("role") for row in projection] == [
+            "user",
+            "assistant",
+            "user",
+            "assistant",
+            "assistant",
+        ]
+        assert [
+            row.get("id")
+            for row in projection
+            if row.get("role") == "assistant"
+        ] == ["old-assistant", "distinct-assistant", "final-assistant"]
+        assert projection[1] == previous[1]
+        assert projection[2]["content"] == "continue the active turn"
+        assert projection[2]["_active_turn_token"] == (
+            "stream:strict-structured-prefix"
+        )
+        assert projection[3] == distinct_history
+
+
+def test_display_backfill_preserves_payload_distinct_same_visible_assistant():
+    from api.streaming import _merge_display_messages_after_agent_result
+
+    user = {"role": "user", "content": "old prompt", "id": "old-user"}
+    visible = {
+        "role": "assistant",
+        "content": "same answer",
+        "id": "assistant-a",
+        "reasoning": "first reasoning",
+    }
+    context_only = {
+        "role": "assistant",
+        "content": "same answer",
+        "id": "assistant-b",
+        "reasoning": "second reasoning",
+    }
+    current = {"role": "user", "content": "next prompt", "id": "current-user"}
+    final = {"role": "assistant", "content": "done", "id": "assistant-final"}
+    previous_display = [user, visible]
+    previous_context = [user, visible, context_only]
+
+    merged = _merge_display_messages_after_agent_result(
+        copy.deepcopy(previous_display),
+        copy.deepcopy(previous_context),
+        copy.deepcopy(previous_context + [current, final]),
+        "next prompt",
+        verification_nudge_provenance={
+            "active_turn_identity": {
+                "token": "stream:backfill",
+                "text": "next prompt",
+                "current_turn_user_idx": len(previous_context),
+                "turn_id": "turn:backfill",
+            }
+        },
+    )
+
+    assert [row.get("id") for row in merged] == [
+        "old-user",
+        "assistant-a",
+        "assistant-b",
+        "current-user",
+        "assistant-final",
+    ]
+    assert merged[1] == visible
+    assert merged[2] == context_only
+
+
 def test_display_merge_collapses_only_exact_durable_empty_replay():
     from api.streaming import _merge_display_messages_after_agent_result
 
