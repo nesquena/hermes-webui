@@ -68,7 +68,7 @@ def test_resolve_chat_workspace_with_recovery_repairs_missing_implicit_workspace
     resolved = routes._resolve_chat_workspace_with_recovery(session, None)
 
     assert resolved == str(fallback.resolve())
-    assert session.workspace == str(fallback.resolve())
+    assert session.workspace == str(stale)
     assert str(fallback.resolve()) in sidecar.read_text(encoding="utf-8")
 
 
@@ -221,7 +221,7 @@ def test_list_dir_recovers_missing_implicit_session_workspace(monkeypatch, tmp_p
     )
 
     assert captured == {"workspace": fallback.resolve(), "rel_path": "."}
-    assert session.workspace == str(fallback.resolve())
+    assert session.workspace == str(stale)
     assert str(fallback.resolve()) in sidecar.read_text(encoding="utf-8")
     assert payload == {
         "entries": [],
@@ -270,7 +270,7 @@ def test_list_recovery_stays_bound_when_global_fallback_changes(
     selected["workspace"] = str(fallback_b)
 
     assert payload["workspace"] == str(fallback_a.resolve())
-    assert session.workspace == str(fallback_a.resolve())
+    assert session.workspace == str(stale)
     assert captured["listed"] == fallback_a.resolve()
     assert str(fallback_a.resolve()) in sidecar.read_text(encoding="utf-8")
 

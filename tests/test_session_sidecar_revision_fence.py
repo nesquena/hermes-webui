@@ -312,6 +312,8 @@ def test_backup_retirement_requires_matching_receipt(tmp_path, monkeypatch):
     assert backup_path.read_text(encoding="utf-8") == "newer foreign backup"
 
     current_receipt = models._read_sidecar_revision(backup_path, sid)
+    archive_path = backup_path.with_name(f"{backup_path.name}.archive-test")
+    archive_path.write_text('{"archived": true}', encoding="utf-8")
     assert (
         models._retire_backup_if_owned(
             sid, backup_path, current_receipt, live_receipt
@@ -319,6 +321,7 @@ def test_backup_retirement_requires_matching_receipt(tmp_path, monkeypatch):
         is True
     )
     assert not backup_path.exists()
+    assert not archive_path.exists()
 
 
 def test_shrinking_save_fails_closed_when_backup_publish_fails(
@@ -399,7 +402,7 @@ def test_workspace_patch_does_not_grant_stale_alias_new_revision(
     assert persisted["messages"][-1]["content"] == "newer"
 
 
-def test_incomparable_backup_fails_closed_without_losing_either_snapshot(
+def test_incomparable_backup_is_archived_before_latest_snapshot_promotion(
     tmp_path, monkeypatch
 ):
     from api import models
@@ -425,15 +428,17 @@ def test_incomparable_backup_fails_closed_without_losing_either_snapshot(
     session.save(skip_index=True)
 
     session.messages = [a]
-    with pytest.raises(RuntimeError, match="incomparable"):
-        session.save(skip_index=True)
+    session.save(skip_index=True)
 
     live = json.loads(session.path.read_text(encoding="utf-8"))
-    backup = json.loads(
-        session.path.with_suffix(".json.bak").read_text(encoding="utf-8")
-    )
-    assert [row["content"] for row in live["messages"]] == ["A", "D1", "D2"]
-    assert [row["content"] for row in backup["messages"]] == ["A", "UNIQUE-U"]
+    backup_path = session.path.with_suffix(".json.bak")
+    backup = json.loads(backup_path.read_text(encoding="utf-8"))
+    archives = list(session_dir.glob(f"{backup_path.name}.archive-*"))
+    assert [row["content"] for row in live["messages"]] == ["A"]
+    assert [row["content"] for row in backup["messages"]] == ["A", "D1", "D2"]
+    assert len(archives) == 1
+    archived = json.loads(archives[0].read_text(encoding="utf-8"))
+    assert [row["content"] for row in archived["messages"]] == ["A", "UNIQUE-U"]
 
 
 def test_backup_dominance_preserves_message_order():

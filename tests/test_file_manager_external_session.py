@@ -194,9 +194,10 @@ def test_get_session_for_file_ops_recovers_missing_implicit_workspace(
 
     recovered = models_module.get_session_for_file_ops(metadata_session.session_id)
 
-    assert recovered is metadata_session
+    assert recovered is not metadata_session
     assert recovered.session_id == metadata_session.session_id
     assert Path(recovered.workspace) == fallback.resolve()
+    assert metadata_session.workspace == str(stale)
     persisted = json.loads(sidecar.read_text(encoding="utf-8"))
     assert persisted["workspace"] == str(fallback.resolve())
     assert persisted["messages"] == [{"role": "user", "content": "preserve me"}]

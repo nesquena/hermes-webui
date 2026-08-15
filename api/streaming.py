@@ -4700,46 +4700,39 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
             # In-memory messages are newer than the file; save the full old
             # snapshot from the current session object while preserving its
             # pre-existing parent_session_id lineage.
-            saved_sid = s.session_id
-            saved_snapshot = bool(getattr(s, 'pre_compression_snapshot', False))
-            saved_pinned = bool(getattr(s, 'pinned', False))
-            s.session_id = old_sid
-            s.pre_compression_snapshot = True
-            s.pinned = False
+            from api.models import Session
+
+            owned_old = Session.load(old_sid)
+            if owned_old is None:
+                return
+            snapshot = copy.copy(s)
+            snapshot._sidecar_revisions = dict(owned_old._sidecar_revisions)
+            snapshot.session_id = old_sid
+            snapshot.parent_session_id = existing.get(
+                'parent_session_id',
+                getattr(s, 'parent_session_id', None),
+            )
+            snapshot.pre_compression_snapshot = True
+            snapshot.pinned = False
             # Stage-359 / PR #2295: clear runtime stream-state fields on the
             # archived snapshot so the sidebar does not reopen the parent as
             # a permanently-running session while the child already holds the
-            # completed answer. The continuation session's live state is
-            # restored from saved_* locals in the finally block.
-            saved_active_stream_id = getattr(s, 'active_stream_id', None)
-            saved_pending_user_message = getattr(s, 'pending_user_message', None)
-            saved_pending_attachments = list(getattr(s, 'pending_attachments', []) or [])
-            saved_pending_started_at = getattr(s, 'pending_started_at', None)
-            saved_pending_user_source = getattr(s, 'pending_user_source', None)
-            s.active_stream_id = None
-            s.pending_user_message = None
-            s.pending_attachments = []
-            s.pending_started_at = None
-            s.pending_user_source = None
-            try:
-                # skip_index=False so the snapshot appears in _index.json with
-                # the pre_compression_snapshot marker. The sidebar projection
-                # (#2285) reads that marker to hide the snapshot from active
-                # rows while keeping the JSON discoverable for lineage traversal.
-                s.save(touch_updated_at=False, skip_index=False)
-                logger.info(
-                    "Preserved pre-compression session %s (%d messages) to disk",
-                    old_sid, len(s.messages),
-                )
-            finally:
-                s.session_id = saved_sid
-                s.pre_compression_snapshot = saved_snapshot
-                s.pinned = saved_pinned
-                s.active_stream_id = saved_active_stream_id
-                s.pending_user_message = saved_pending_user_message
-                s.pending_attachments = saved_pending_attachments
-                s.pending_started_at = saved_pending_started_at
-                s.pending_user_source = saved_pending_user_source
+            # completed answer. The continuation object remains untouched;
+            # only the revision-owning snapshot copy is persisted.
+            snapshot.active_stream_id = None
+            snapshot.pending_user_message = None
+            snapshot.pending_attachments = []
+            snapshot.pending_started_at = None
+            snapshot.pending_user_source = None
+            # skip_index=False so the snapshot appears in _index.json with the
+            # pre_compression_snapshot marker. The sidebar projection (#2285)
+            # reads that marker to hide the snapshot from active rows while
+            # keeping the JSON discoverable for lineage traversal.
+            snapshot.save(touch_updated_at=False, skip_index=False)
+            logger.info(
+                "Preserved pre-compression session %s (%d messages) to disk",
+                old_sid, len(snapshot.messages),
+            )
             return
         # Existing file is already at least as complete as memory; stamp only
         # the snapshot marker so index/sidebar projection can hide it without

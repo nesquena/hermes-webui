@@ -150,8 +150,9 @@ and 5; it does not mark every run-state boundary implemented.
    revision; stale aliases are invalidated and reloaded instead. Recovery must
    recheck durable deletes under the SID authority, validate the embedded SID,
    and invalidate stale in-memory aliases. A shrinking write must not proceed
-   unless its richest backup is durable: row count alone does not prove
-   dominance, incomparable snapshots fail closed, and backup retirement requires
+   unless its recoverable history is durable: row count alone does not prove
+   dominance, an incomparable primary backup is archived content-addressedly
+   before the latest snapshot is promoted, and backup retirement requires
    matching receipts for both the backup and the committed live generation.
 
 ## Review Checklist
@@ -180,8 +181,9 @@ context reconstruction, or session metadata:
   Does recovery revalidate delete tombstones and state-db ownership while holding
   the same SID authority used for publication?
 - If the write shrinks history, is backup publication fail-closed and monotone by
-  semantic row coverage rather than count? Does cleanup prove both backup and
-  live-generation ownership before unlinking?
+  ordered semantic row coverage rather than count? Are incomparable generations
+  archived before promotion, and does cleanup prove both backup and live receipts
+  still match before unlinking?
 - What test or manual evidence proves the invariant?
 
 ## Existing Issue Map

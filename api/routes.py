@@ -15180,6 +15180,11 @@ def handle_post(handler, parsed) -> bool:
                 p.with_suffix('.json.bak').unlink(missing_ok=True)
             except Exception:
                 logger.debug("Failed to unlink session backup file %s", p.with_suffix('.json.bak'))
+            try:
+                for archived_backup in p.parent.glob(f'{p.name}.bak.archive-*'):
+                    archived_backup.unlink(missing_ok=True)
+            except Exception:
+                logger.debug("Failed to unlink archived session backups for %s", p)
             if sidecar_deleted and not is_messaging_session:
                 try:
                     _record_webui_deleted_session_tombstone(sid)

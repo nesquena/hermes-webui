@@ -361,6 +361,36 @@ def _message_rows_cover(candidate, baseline) -> bool:
         return False
 
 
+def _archive_incomparable_backup(
+    session_id: str,
+    backup_path: Path,
+    backup_receipt: SidecarRevision,
+) -> Path:
+    """Preserve an incomparable primary backup before promoting a newer one."""
+    if (
+        not isinstance(backup_receipt, SidecarRevision)
+        or backup_receipt.state != "PRESENT"
+        or not backup_receipt.digest_sha256
+    ):
+        raise RuntimeError(
+            f"Cannot archive unverified recoverable backup for {session_id!r}"
+        )
+    archive_path = backup_path.with_name(
+        f"{backup_path.name}.archive-{backup_receipt.digest_sha256}"
+    )
+    if not archive_path.exists():
+        try:
+            _publish_sidecar_no_replace(backup_path, archive_path)
+        except FileExistsError:
+            pass
+    archived_receipt = _read_sidecar_revision(archive_path, session_id)
+    if archived_receipt != backup_receipt:
+        raise RuntimeError(
+            f"Archived recoverable backup failed verification for {session_id!r}"
+        )
+    return archive_path
+
+
 def _retire_backup_if_owned(
     session_id: str,
     backup_path: Path,
@@ -382,6 +412,10 @@ def _retire_backup_if_owned(
         if _read_sidecar_revision(backup_path, session_id) != backup_receipt:
             return False
         backup_path.unlink(missing_ok=True)
+        for archive_path in backup_path.parent.glob(
+            f"{backup_path.name}.archive-*"
+        ):
+            archive_path.unlink(missing_ok=True)
         return not backup_path.exists()
 
 
@@ -1810,6 +1844,10 @@ class Session:
                             raise RuntimeError(
                                 f"Refusing to replace unreadable recoverable backup for {self.session_id!r}"
                             ) from exc
+                        current_backup_receipt = _read_sidecar_revision(
+                            bak_path,
+                            self.session_id,
+                        )
                         existing_covers_backup = _message_rows_cover(
                             existing_messages,
                             backup_messages,
@@ -1819,16 +1857,16 @@ class Session:
                             existing_messages,
                         )
                         if backup_covers_existing:
-                            backup_receipt = _read_sidecar_revision(
-                                bak_path,
-                                self.session_id,
-                            )
+                            backup_receipt = current_backup_receipt
                         elif existing_covers_backup:
                             replace_backup = True
                         else:
-                            raise RuntimeError(
-                                f"Refusing to discard incomparable recoverable backup for {self.session_id!r}"
+                            _archive_incomparable_backup(
+                                self.session_id,
+                                bak_path,
+                                current_backup_receipt,
                             )
+                            replace_backup = True
                     bak_tmp = None
                     try:
                         if replace_backup:
@@ -4672,28 +4710,34 @@ def _cached_session_lags_disk(cached) -> bool:
     if expected_revision is not None:
         path = SESSION_DIR / f'{sid}.json'
         if expected_revision.state == "ABSENT":
-            return path.exists()
-        if expected_revision.state != "PRESENT":
-            return True
-        disk_prefix = _persisted_session_meta_prefix(sid)
-        if disk_prefix is None:
             if not path.exists():
-                return True
-        else:
-            raw_generation = disk_prefix.get('_sidecar_generation_v1')
-            disk_generation = (
-                raw_generation
-                if type(raw_generation) is int and raw_generation >= 0
-                else 0
-            )
-            if disk_generation != expected_revision.generation:
-                return True
-            if expected_revision.generation > 0:
-                # Modern compliant writers advance the prefix generation for
-                # metadata and transcript changes alike. Parity therefore
-                # avoids hashing/parsing the potentially huge sidecar on every
-                # cache hit and preserves any newer unsaved in-memory tail.
                 return False
+            # A generation-less legacy/cache alias cannot prove ownership of a
+            # sidecar that appeared later. Preserve the historical directional
+            # freshness checks below: reload only when disk is demonstrably
+            # ahead, and let save() enforce the strict ABSENT-vs-PRESENT CAS.
+        elif expected_revision.state != "PRESENT":
+            return True
+        if expected_revision.state == "PRESENT":
+            disk_prefix = _persisted_session_meta_prefix(sid)
+            if disk_prefix is None:
+                if not path.exists():
+                    return True
+            else:
+                raw_generation = disk_prefix.get('_sidecar_generation_v1')
+                disk_generation = (
+                    raw_generation
+                    if type(raw_generation) is int and raw_generation >= 0
+                    else 0
+                )
+                if disk_generation != expected_revision.generation:
+                    return True
+                if expected_revision.generation > 0:
+                    # Modern compliant writers advance the prefix generation for
+                    # metadata and transcript changes alike. Parity therefore
+                    # avoids hashing/parsing the potentially huge sidecar on every
+                    # cache hit and preserves any newer unsaved in-memory tail.
+                    return False
         # Generation-zero legacy files can still be changed by older writers
         # without a revision bump. Fall through to the directional count/scene
         # checks below for compatibility.

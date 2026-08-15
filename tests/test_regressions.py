@@ -46,17 +46,17 @@ def _make_session_visible(sid):
     from api.models import Session
     from tests.conftest import TEST_WORKSPACE
 
-    session = Session(
-        session_id=sid,
-        title="regression-test-delete-R8",
-        workspace=str(TEST_WORKSPACE),
-        model="test",
-        created_at=time.time(),
-        updated_at=time.time(),
-        profile="default",
-        messages=[{"role": "user", "content": "visible row", "timestamp": time.time()}],
-        tool_calls=[],
-    )
+    session = Session.load(sid)
+    if session is None:
+        session = Session(session_id=sid)
+    session.title = "regression-test-delete-R8"
+    session.workspace = str(TEST_WORKSPACE)
+    session.model = "test"
+    session.profile = "default"
+    session.messages = [
+        {"role": "user", "content": "visible row", "timestamp": time.time()}
+    ]
+    session.tool_calls = []
     session.save(touch_updated_at=False)
 
 
@@ -369,9 +369,11 @@ def test_server_delete_removes_session_bak_snapshot(cleanup_test_sessions):
         routes_src.find('if parsed.path == "/api/session/delete":'),
     )
     assert delete_idx >= 0, "session/delete handler not found in api/routes.py"
-    delete_block = routes_src[delete_idx:delete_idx+2400]
+    delete_block = routes_src[delete_idx:delete_idx+5000]
     assert "with_suffix('.json.bak').unlink" in delete_block or 'with_suffix(".json.bak").unlink' in delete_block, \
         "session/delete must unlink <sid>.json.bak to avoid later orphan-backup recovery"
+    assert "bak.archive-*" in delete_block, \
+        "session/delete must unlink versioned backup archives"
 
 # ── R9: Token/tool SSE events write to wrong session after switch ─────────────
 
