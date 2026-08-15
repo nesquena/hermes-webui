@@ -370,8 +370,14 @@ def _gateway_pending_mirror_locked(session_key: str, approval_id: str = "", run_
     for entry in entries:
         if not _is_gateway_mirror_entry(entry) or not str(entry.get("run_id") or "").strip():
             continue
-        if run_id and entry.get("run_id") == run_id:
-            return entry
+        if run_id:
+            if entry.get("run_id") == run_id:
+                return entry
+            continue
+        # With no caller-supplied identity, the queue order is authoritative:
+        # return the current run-backed projection and let its embedded
+        # `(approval_id, run_id)` identify the exact relay owner.
+        return entry
     return None
 
 

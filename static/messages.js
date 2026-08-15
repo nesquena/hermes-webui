@@ -7646,7 +7646,17 @@ async function respondApproval(choice) {
     _restoreFailedApprovalResponse(sid, errMsg);
     return false;
   } catch(e) {
-    const errMsg = (e && e.message) || (t("approval_responding") + " failed");
+    let errorPayload = null;
+    if (e && typeof e.body === 'string') {
+      try { errorPayload = JSON.parse(e.body); } catch (_) { /* non-JSON HTTP error */ }
+    }
+    if (options.yolo && errorPayload && typeof errorPayload.yolo_enabled === 'boolean') {
+      _yoloEnabled = errorPayload.yolo_enabled;
+      _updateYoloPill();
+    }
+    const errMsg = (errorPayload && (errorPayload.error || errorPayload.message))
+      || (e && e.message)
+      || (t("approval_responding") + " failed");
     _restoreFailedApprovalResponse(sid, errMsg);
     return false;
   }

@@ -10,6 +10,7 @@ import pathlib
 import shutil
 import subprocess
 import threading
+import urllib.parse
 from types import SimpleNamespace
 
 import pytest
@@ -101,6 +102,46 @@ def test_approval_card_yolo_uses_authoritative_disabled_response():
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_failed_approval_relay_applies_authoritative_yolo_and_restores_card():
+    messages_js = (pathlib.Path(__file__).resolve().parents[1] / "static" / "messages.js").read_text()
+
+    def extract(start_marker, end_marker):
+        start = messages_js.index(start_marker)
+        return messages_js[start:messages_js.index(end_marker, start)]
+
+    script = "\n".join([
+        "const toasts=[]; let pillUpdates=0; let cardRenders=0; let statuses=[];",
+        "const S={session:{session_id:'browser-session'}};",
+        "let _approvalSessionId='browser-session';",
+        "let _approvalCurrentId='approval-1';",
+        "let _approvalResponding=null;",
+        "let _yoloEnabled=false;",
+        "const _approvalPendingBySession=new Map([['browser-session',{pending:{approval_id:'approval-1'}}]]);",
+        "const api=async()=>{const e=new Error('relay failed');e.status=502;e.body=JSON.stringify({ok:false,error:'relay failed',yolo_enabled:true});throw e;};",
+        "const t=k=>k; const showToast=msg=>toasts.push(msg); const setStatus=msg=>statuses.push(msg);",
+        "const _unmarkApprovalDismissed=()=>{}; const _approvalResponseMatches=()=>false;",
+        "const _setApprovalControlsDisabled=()=>{}; const _clearApprovalPendingForSession=()=>{};",
+        "const hideApprovalCard=()=>{}; const _updateYoloPill=()=>{pillUpdates+=1;};",
+        "const _approvalPromptBelongsToActiveSession=()=>true;",
+        "const _renderPendingApprovalForActiveSession=()=>{cardRenders+=1;};",
+        extract("function _restoreFailedApprovalResponse(", "\nfunction toggleApprovalCardCollapsed"),
+        extract("async function respondApproval(", "\nfunction startApprovalPolling"),
+        extract("async function toggleYoloFromApproval(", "\n// ── Approval polling"),
+        "(async()=>{",
+        " const ok=await toggleYoloFromApproval();",
+        " if(ok) throw new Error('failed relay reported success');",
+        " if(_yoloEnabled!==true) throw new Error('authoritative enabled state was ignored');",
+        " if(pillUpdates!==1) throw new Error('pill was not updated exactly once');",
+        " if(cardRenders!==1) throw new Error('approval card was not restored');",
+        " if(JSON.stringify(toasts)!==JSON.stringify(['relay failed'])) throw new Error('wrong toast '+JSON.stringify(toasts));",
+        " if(JSON.stringify(statuses)!==JSON.stringify(['relay failed'])) throw new Error('wrong status '+JSON.stringify(statuses));",
+        "})().catch(e=>{console.error(e.stack||e);process.exit(1)});",
+    ])
+    result = subprocess.run([shutil.which("node"), "-e", script], text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
 def test_yolo_command_resumes_visible_approval_through_same_atomic_action():
     commands_js = (pathlib.Path(__file__).resolve().parents[1] / "static" / "commands.js").read_text()
     start = commands_js.index("async function cmdYolo(")
@@ -120,6 +161,58 @@ def test_yolo_command_resumes_visible_approval_through_same_atomic_action():
         " await cmdYolo();",
         " if(atomicCalls!==1) throw new Error('atomic action not used');",
         " if(calls.length!==1||!calls[0][0].startsWith('/api/session/yolo?')) throw new Error('unexpected requests '+JSON.stringify(calls));",
+        "})().catch(e=>{console.error(e.stack||e);process.exit(1)});",
+    ])
+    result = subprocess.run([shutil.which("node"), "-e", script], text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_yolo_command_uses_authoritative_post_response_state():
+    commands_js = (pathlib.Path(__file__).resolve().parents[1] / "static" / "commands.js").read_text()
+    start = commands_js.index("async function cmdYolo(")
+    body = commands_js[start:commands_js.index("\n// ── Branch / fork command", start)]
+    script = "\n".join([
+        "const calls=[]; const toasts=[]; let pillUpdates=0; let cardHides=0;",
+        "const S={session:{session_id:'browser-session'}};",
+        "let _approvalSessionId=null; let _approvalCurrentId=null; let _yoloEnabled=false;",
+        "const api=async(path,opts={})=>{calls.push(path);return path.includes('?')?{yolo_enabled:false}:{ok:true,yolo_enabled:false};};",
+        "const toggleYoloFromApproval=async()=>{throw new Error('card path must not run');};",
+        "const t=k=>k; const showToast=msg=>toasts.push(msg);",
+        "const _updateYoloPill=()=>{pillUpdates+=1;}; const hideApprovalCard=()=>{cardHides+=1;};",
+        body,
+        "(async()=>{",
+        " await cmdYolo();",
+        " if(_yoloEnabled!==false) throw new Error('authoritative disabled state was ignored');",
+        " if(pillUpdates!==1) throw new Error('pill was not updated exactly once');",
+        " if(cardHides!==0) throw new Error('card hidden despite settled disabled state');",
+        " if(JSON.stringify(toasts)!==JSON.stringify(['yolo_disabled'])) throw new Error('wrong toast '+JSON.stringify(toasts));",
+        "})().catch(e=>{console.error(e.stack||e);process.exit(1)});",
+    ])
+    result = subprocess.run([shutil.which("node"), "-e", script], text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_yolo_command_applies_authoritative_state_from_failed_post():
+    commands_js = (pathlib.Path(__file__).resolve().parents[1] / "static" / "commands.js").read_text()
+    start = commands_js.index("async function cmdYolo(")
+    body = commands_js[start:commands_js.index("\n// ── Branch / fork command", start)]
+    script = "\n".join([
+        "const toasts=[]; let pillUpdates=0; let cardHides=0;",
+        "const S={session:{session_id:'browser-session'}};",
+        "let _approvalSessionId=null; let _approvalCurrentId=null; let _yoloEnabled=false;",
+        "const api=async(path)=>{if(path.includes('?'))return {yolo_enabled:false};const e=new Error('relay busy');e.body=JSON.stringify({error:'relay busy',yolo_enabled:true});throw e;};",
+        "const toggleYoloFromApproval=async()=>{throw new Error('card path must not run');};",
+        "const t=k=>k; const showToast=msg=>toasts.push(msg);",
+        "const _updateYoloPill=()=>{pillUpdates+=1;}; const hideApprovalCard=()=>{cardHides+=1;};",
+        body,
+        "(async()=>{",
+        " await cmdYolo();",
+        " if(_yoloEnabled!==true) throw new Error('authoritative enabled error state was ignored');",
+        " if(pillUpdates!==1) throw new Error('pill was not updated exactly once');",
+        " if(cardHides!==0) throw new Error('failed request hid the card');",
+        " if(JSON.stringify(toasts)!==JSON.stringify(['YOLO: relay busy'])) throw new Error('wrong toast '+JSON.stringify(toasts));",
         "})().catch(e=>{console.error(e.stack||e);process.exit(1)});",
     ])
     result = subprocess.run([shutil.which("node"), "-e", script], text=True, capture_output=True)
@@ -407,6 +500,7 @@ def test_failed_relay_does_not_undo_concurrent_explicit_yolo_enable(monkeypatch)
         assert not worker.is_alive()
         assert response["status"] == 502
         assert response["payload"]["ok"] is False
+        assert response["payload"]["yolo_enabled"] is True
         assert is_session_yolo_enabled(sid) is True
     finally:
         release_relay.set()
@@ -479,6 +573,137 @@ def test_successful_relay_reports_concurrent_explicit_yolo_disable(monkeypatch):
         worker.join(timeout=5)
         disable_session_yolo(sid)
         gateway_chat._STREAM_RUN_IDS.pop(stream_id, None)
+        route_approvals.retire_gateway_pending_mirror(sid, run_id=run_id)
+        with routes._lock:
+            routes._pending.pop(sid, None)
+            routes._gateway_queues.pop(sid, None)
+
+
+@pytest.mark.skipif(not APPROVAL_AVAILABLE, reason="tools.approval unavailable")
+def test_yolo_post_without_local_card_relays_run_backed_approval(monkeypatch):
+    from api import route_approvals, routes
+
+    sid = "webui-yolo-post-poll-lag"
+    run_id = "run-yolo-post-poll-lag"
+    handler = object()
+    response = {}
+    calls = []
+    disable_session_yolo(sid)
+
+    def fake_respond(_self, got_run_id, approval_id, choice):
+        calls.append((got_run_id, approval_id, choice))
+        return {"resolved": 1}
+
+    def fake_j(got_handler, data, status=200, extra_headers=None):
+        assert got_handler is handler
+        response.update(payload=data, status=status)
+        return data
+
+    monkeypatch.setattr(routes, "j", fake_j)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"session_id": sid, "enabled": True})
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "_handle_extension_sidecar_proxy", lambda *_a, **_k: False)
+    monkeypatch.setattr("api.runner_client.HttpRunnerClient.respond_approval", fake_respond)
+    monkeypatch.setattr(config, "gateway_supports_approval_identity_v1", lambda *_a, **_k: True)
+    monkeypatch.setenv("HERMES_WEBUI_CHAT_BACKEND", "gateway")
+    route_approvals.submit_gateway_pending_mirror(sid, {
+        "command": "touch /tmp/webui-yolo-test",
+        "description": "test",
+        "approval_id": "approval-yolo-post",
+        "run_id": run_id,
+        "_gateway_agent_identity_v1": True,
+    })
+
+    try:
+        routes.handle_post(handler, urllib.parse.urlparse("/api/session/yolo"))
+
+        assert response["status"] == 200
+        assert response["payload"]["ok"] is True
+        assert response["payload"]["yolo_enabled"] is True
+        assert calls == [(run_id, "approval-yolo-post", "once")]
+        assert is_session_yolo_enabled(sid) is True
+        assert route_approvals.gateway_pending_mirror(sid, run_id=run_id) is None
+    finally:
+        disable_session_yolo(sid)
+        route_approvals.retire_gateway_pending_mirror(sid, run_id=run_id)
+        with routes._lock:
+            routes._pending.pop(sid, None)
+            routes._gateway_queues.pop(sid, None)
+
+
+@pytest.mark.skipif(not APPROVAL_AVAILABLE, reason="tools.approval unavailable")
+def test_yolo_post_preserves_mirror_while_owned_relay_fails(monkeypatch):
+    from api import route_approvals, routes
+
+    sid = "webui-yolo-post-owned-failure"
+    run_id = "run-yolo-post-owned-failure"
+    approval_id = "approval-yolo-post-owned-failure"
+    card_handler = object()
+    toggle_handler = object()
+    relay_started = threading.Event()
+    release_relay = threading.Event()
+    responses = {}
+    disable_session_yolo(sid)
+
+    def fake_respond(_self, _run_id, _approval_id, _choice):
+        relay_started.set()
+        assert release_relay.wait(timeout=5)
+        raise RunnerClientError("relay failed")
+
+    def fake_j(handler, data, status=200, extra_headers=None):
+        responses[handler] = {"payload": data, "status": status}
+        return data
+
+    monkeypatch.setattr(routes, "j", fake_j)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"session_id": sid, "enabled": True})
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "_handle_extension_sidecar_proxy", lambda *_a, **_k: False)
+    monkeypatch.setattr(
+        routes,
+        "get_session",
+        lambda _sid, **_kwargs: SimpleNamespace(active_stream_id=None, profile=None),
+    )
+    monkeypatch.setattr("api.runner_client.HttpRunnerClient.respond_approval", fake_respond)
+    monkeypatch.setattr(config, "gateway_supports_approval_identity_v1", lambda *_a, **_k: True)
+    monkeypatch.setenv("HERMES_WEBUI_CHAT_BACKEND", "gateway")
+    route_approvals.submit_gateway_pending_mirror(sid, {
+        "command": "touch /tmp/webui-yolo-test",
+        "description": "test",
+        "approval_id": approval_id,
+        "run_id": run_id,
+        "_gateway_agent_identity_v1": True,
+    })
+    worker = threading.Thread(target=routes._handle_approval_respond, args=(
+        card_handler,
+        {"session_id": sid, "choice": "once", "approval_id": approval_id, "yolo": True},
+    ))
+
+    try:
+        worker.start()
+        assert relay_started.wait(timeout=5)
+        routes.handle_post(toggle_handler, urllib.parse.urlparse("/api/session/yolo"))
+
+        assert responses[toggle_handler]["status"] == 409
+        assert responses[toggle_handler]["payload"]["code"] == "gateway_approval_in_progress"
+        assert responses[toggle_handler]["payload"]["yolo_enabled"] is False
+        assert is_session_yolo_enabled(sid) is False
+        assert route_approvals.gateway_pending_mirror(
+            sid, approval_id=approval_id, run_id=run_id
+        ) is not None
+
+        release_relay.set()
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+        assert responses[card_handler]["status"] == 502
+        assert responses[card_handler]["payload"]["yolo_enabled"] is False
+        assert is_session_yolo_enabled(sid) is False
+        assert route_approvals.gateway_pending_mirror(
+            sid, approval_id=approval_id, run_id=run_id
+        ) is not None
+    finally:
+        release_relay.set()
+        worker.join(timeout=5)
+        disable_session_yolo(sid)
         route_approvals.retire_gateway_pending_mirror(sid, run_id=run_id)
         with routes._lock:
             routes._pending.pop(sid, None)

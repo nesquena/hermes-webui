@@ -1909,18 +1909,29 @@ async function cmdYolo(){
       await toggleYoloFromApproval();
       return;
     }
-    await api('/api/session/yolo',{
+    const result=await api('/api/session/yolo',{
       method:'POST',
       body:JSON.stringify({session_id:sid,enabled:enable}),
     });
-    _yoloEnabled=enable;
+    const settled=(result&&typeof result.yolo_enabled==='boolean')?result.yolo_enabled:enable;
+    _yoloEnabled=settled;
     _updateYoloPill();
-    showToast(enable?t('yolo_enabled'):t('yolo_disabled'));
-    if(enable){
-      // Dismiss any visible approval card
+    showToast(settled?t('yolo_enabled'):t('yolo_disabled'));
+    if(settled){
+      // Dismiss any visible approval card only after the server confirms YOLO.
       hideApprovalCard(true);
     }
-  }catch(e){showToast('YOLO: '+e.message);}
+  }catch(e){
+    let errorPayload=null;
+    if(e&&typeof e.body==='string'){
+      try{errorPayload=JSON.parse(e.body);}catch(_){}
+    }
+    if(errorPayload&&typeof errorPayload.yolo_enabled==='boolean'){
+      _yoloEnabled=errorPayload.yolo_enabled;
+      _updateYoloPill();
+    }
+    showToast('YOLO: '+((errorPayload&&(errorPayload.error||errorPayload.message))||e.message));
+  }
 }
 
 // ── Branch / fork command ──
