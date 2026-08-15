@@ -172,7 +172,9 @@ def test_bodyless_write_method_rejection_keeps_connection(method, headers, monke
     [
         ({}, False),
         ({"Content-Length": "0"}, False),
+        ({"Content-Length": "00"}, False),  # 1*DIGIT, so an honest zero
         ({"Content-Length": " 0 "}, False),
+        ({"Content-Length": "0\t"}, False),
         ({"Content-Length": ""}, True),
         ({"Content-Length": "   "}, True),
         ({"Content-Length": "\t"}, True),
@@ -181,12 +183,27 @@ def test_bodyless_write_method_rejection_keeps_connection(method, headers, monke
         ({"Content-Length": "banana"}, True),
         ({"Content-Length": "0x5"}, True),
         ({"Content-Length": "+5"}, True),
+        # int() is looser than 1*DIGIT, and every one of these reads as ZERO --
+        # where the wrong parse is not merely wrong but silently keep-alive.
+        ({"Content-Length": "+0"}, True),
+        ({"Content-Length": "-0"}, True),
+        ({"Content-Length": "0_0"}, True),
+        ({"Content-Length": "+00"}, True),
+        ({"Content-Length": "0_0_0"}, True),
+        ({"Content-Length": "٠0"}, True),  # ARABIC-INDIC ZERO ahead of an ASCII one
+        ({"Content-Length": "٠"}, True),  # ARABIC-INDIC DIGIT ZERO: int() -> 0
+        ({"Content-Length": "０"}, True),  # FULLWIDTH DIGIT ZERO: int() -> 0
+        ({"Content-Length": "٥"}, True),  # ARABIC-INDIC DIGIT FIVE: int() -> 5
+        ({"Content-Length": "\xa00"}, True),  # NBSP-padded zero: int() strips it
+        ({"Content-Length": "0\x85"}, True),  # NEL-padded zero: likewise
         ({"content-length": "7"}, True),
         ({"Transfer-Encoding": "chunked"}, True),
         ({"transfer-encoding": "Chunked"}, True),
         ({"Transfer-Encoding": "identity"}, False),
+        ({"Transfer-Encoding": "IDENTITY "}, False),  # a token is case-insensitive
         ({"Transfer-Encoding": ""}, True),
         ({"Transfer-Encoding": "  "}, True),
+        ({"Transfer-Encoding": "\xa0identity"}, True),  # not the token `identity`
     ],
 )
 def test_request_declares_body_reads_the_framing_headers(headers, expected):
@@ -424,6 +441,179 @@ def test_blank_rule_does_not_over_close_a_bodyless_request(raw):
     assert request_declares_body(cast(Any, _message_with("Host: x\r\n" + raw))) is False
 
 
+# ── A length that only `int()` calls zero is unreadable, not zero ──────────────
+#
+# The blank rule above closed the "no value" hole; this one closes the "value
+# `int()` is too generous about" hole beside it. RFC 9110 is
+# `Content-Length = 1*DIGIT` -- an unsigned run of ASCII digits -- but `int()`
+# also accepts a leading sign, PEP 515 underscores and non-ASCII digits, and
+# strips non-ASCII whitespace. Every spelling of ZERO below therefore parsed to
+# an honest `0`, took the "every declared length agrees on zero" keep-alive
+# branch, and left the payload queued. Reproduced live on the otherwise-fixed
+# head, pipelined down one socket:
+#
+#   GET /api/extensions/probe/sidecar/ping  `Content-Length: +0`  {"stale": true}
+#     -> HTTP/1.1 403 Forbidden        (no Connection: close)
+#     -> HTTP/1.1 400 Bad request syntax
+#            ('{"stale": true}GET /api/health/agent HTTP/1.1')
+#
+# byte-for-byte the trace the blank value produced, and on /api/upload a 400
+# then `400 Bad request syntax ('--x')`.
+#
+# A sign is only harmless on a NON-zero value (`+5` parses to 5, declares a body
+# and closes anyway), which is exactly why the family looked safe: the mistake is
+# invisible until the value is zero.
+#
+# Non-ASCII digits are unreadable by the same rule. An HTTP/1.1 request line
+# decodes as latin-1, so U+0660 cannot cross the wire in a header value (only
+# U+00B2/U+00B3/U+00B9 -- superscripts, which `int()` already rejects -- and the
+# U+0085/U+00A0 whitespace `int()` strips can); these helpers take any headers
+# mapping, though, so the grammar is enforced here rather than relying on the
+# transport to filter.
+
+_MALFORMED_ZERO_LENGTHS = [
+    "+0",
+    "-0",
+    "0_0",
+    "+00",
+    "0_0_0",
+    "\xa00",  # NBSP-padded zero: str.strip()/int() erase U+00A0
+    "0\x85",  # NEL-padded zero: likewise U+0085
+    "٠",  # ARABIC-INDIC DIGIT ZERO -- isdigit() and int() both accept it
+    "０",  # FULLWIDTH DIGIT ZERO
+    "𝟢",  # MATHEMATICAL MONOSPACE DIGIT ZERO
+]
+
+
+@pytest.mark.parametrize("value", _MALFORMED_ZERO_LENGTHS)
+def test_malformed_zero_content_length_declares_a_body(value):
+    """On a real email.message.Message, as the production handler carries."""
+    from api.helpers import request_declares_body
+
+    handler = _message_with(f"Host: x\r\nContent-Length: {value}\r\n")
+
+    assert request_declares_body(cast(Any, handler)) is True
+
+
+@pytest.mark.parametrize("value", _MALFORMED_ZERO_LENGTHS)
+def test_malformed_zero_content_length_is_unreadable(value):
+    """The upload preflight gate must refuse it too -- it is not a length."""
+    from api.helpers import unreadable_content_length
+
+    handler = _message_with(f"Host: x\r\nContent-Length: {value}\r\n")
+
+    assert unreadable_content_length(cast(Any, handler)) is True
+
+
+@pytest.mark.parametrize("value", _MALFORMED_ZERO_LENGTHS)
+def test_sidecar_get_with_a_malformed_zero_length_closes_connection(value, monkeypatch):
+    """Through the production provenance rejection, not just the helper."""
+    handler = _rejected_sidecar_call(
+        monkeypatch, "GET", _message_with(f"Host: x\r\nContent-Length: {value}\r\n").headers
+    )
+
+    assert handler.close_connection is True
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["0", "00", "000", " 0 ", "0\t", "\t0", "0\r\nContent-Length: 0"],
+    ids=["zero", "double-zero", "triple-zero", "padded", "tab-behind", "tab-ahead", "two-agreeing"],
+)
+def test_digit_grammar_does_not_over_close_an_honest_zero(value):
+    """The over-close half: `1*DIGIT` zeroes, SP/HTAB padding and all, stay alive.
+
+    `00` is as valid as `0` (`1*DIGIT` sets no leading-zero rule), and RFC 9110
+    OWS around a field value is SP/HTAB -- so trimming those must not become
+    trimming everything `str.strip()` would.
+    """
+    from api.helpers import request_declares_body, unreadable_content_length
+
+    handler = _message_with(f"Host: x\r\nContent-Length: {value}\r\n")
+
+    assert request_declares_body(cast(Any, handler)) is False
+    assert unreadable_content_length(cast(Any, handler)) is False
+
+
+def test_absurdly_long_digit_run_is_unreadable_and_never_raises():
+    """`1*DIGIT` is necessary but not sufficient: `int()` caps the digit count.
+
+    A run longer than `sys.get_int_max_str_digits()` (4300) raises ValueError, and
+    this runs on rejection paths where an exception becomes a spurious 500 -- so
+    the parse stays guarded even though every character is now vetted first.
+    """
+    from api.helpers import request_declares_body, unreadable_content_length
+
+    handler = _message_with("Host: x\r\nContent-Length: " + "0" * 5000 + "\r\n")
+
+    assert request_declares_body(cast(Any, handler)) is True
+    assert unreadable_content_length(cast(Any, handler)) is True
+
+
+# ── The same audit one header over: spelling an undecodable coding ─────────────
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["\xa0identity", "identity\xa0", "\xa0identity\xa0", "\x85identity"],
+    ids=["nbsp-ahead", "nbsp-behind", "nbsp-both", "nel-ahead"],
+)
+def test_non_ascii_padded_identity_is_not_the_identity_coding(value):
+    """`str.strip()` erased U+00A0/U+0085, so `\\xa0identity` read back as `identity`.
+
+    No token grammar allows the padding, so the value names no coding this server
+    can decode -- and it reached the wire: latin-1 request lines carry U+00A0
+    fine. Live on the otherwise-fixed head, sidecar GET + payload: 403 with no
+    `Connection: close`, then `400 Bad request syntax ('{"stale": true}GET ...')`.
+    """
+    from api.helpers import request_declares_body, unsupported_transfer_encoding
+
+    handler = _message_with(f"Host: x\r\nTransfer-Encoding: {value}\r\n")
+
+    assert unsupported_transfer_encoding(cast(Any, handler)) is not None
+    assert request_declares_body(cast(Any, handler)) is True
+
+
+@pytest.mark.parametrize(
+    "value", ["identity", "IDENTITY", "Identity", "identity ", "\tidentity\t"]
+)
+def test_ascii_case_and_ows_spellings_of_identity_stay_decodable(value):
+    """The over-close half of the coding audit: a real token still frames nothing."""
+    from api.helpers import unsupported_transfer_encoding
+
+    handler = _message_with(f"Host: x\r\nTransfer-Encoding: {value}\r\n")
+
+    assert unsupported_transfer_encoding(cast(Any, handler)) is None
+
+
+def test_unframed_transfer_codings_cannot_be_spelled_non_ascii():
+    """Pin WHY membership-by-`str.lower()` is safe, so a future coding can't break it.
+
+    `str.lower()` maps some non-ASCII characters onto ASCII ones -- U+212A KELVIN
+    SIGN lowercases to `k`, so `'chunKed'.lower() == 'chunked'` -- which means a
+    coding in the unframed set containing such a letter would be reachable by a
+    spelling no HTTP token allows, and would read as "frames nothing" for a
+    request whose bytes are still queued. `identity` has no such letter. This
+    scans every codepoint rather than trusting the claim.
+    """
+    from api.helpers import _UNFRAMED_TRANSFER_CODINGS
+
+    letters = set("".join(_UNFRAMED_TRANSFER_CODINGS))
+    assert all(
+        coding.isascii() and coding.islower() for coding in _UNFRAMED_TRANSFER_CODINGS
+    ), _UNFRAMED_TRANSFER_CODINGS
+    foldable = [
+        (hex(cp), chr(cp).lower())
+        for cp in range(0x110000)
+        if not chr(cp).isascii() and chr(cp).lower() and set(chr(cp).lower()) <= letters
+    ]
+    assert not foldable, (
+        f"a non-ASCII character now lowercases into {sorted(letters)}, so an "
+        f"unframed coding could be spelled outside the token grammar: {foldable}"
+    )
+    assert "chunKed".lower() == "chunked", "the fold this test guards against"
+
+
 def test_csp_report_rate_limited_closes_connection(monkeypatch):
     """A rate-limited CSP report is dropped before its body is read."""
     import api.routes as routes
@@ -591,6 +781,49 @@ def test_blank_content_length_multipart_rejects_before_read(handler_name, raw, m
 
     assert answered["status"] == 400, answered
     assert answered["payload"]["error"] == "Invalid Content-Length", answered
+    assert handler.close_connection is True
+
+
+@pytest.mark.parametrize("handler_name", _MULTIPART_HANDLERS)
+@pytest.mark.parametrize("value", ["+0", "0_0", "\xa00", "٠"], ids=["sign", "underscore", "nbsp", "arabic-indic"])
+def test_malformed_zero_content_length_multipart_rejects_before_read(
+    handler_name, value, monkeypatch
+):
+    """A length only `int()` calls zero slipped the gate into `int(...)` == 0.
+
+    All four handlers then read an empty body, answered 400 "No file field in
+    request" with keep-alive, and left the whole payload on the socket. Live on
+    the otherwise-fixed head: 400 then `400 Bad request syntax ('--x')`.
+    """
+    from email.parser import Parser
+
+    headers = Parser().parsestr(
+        f"Content-Type: multipart/form-data; boundary=x\r\nContent-Length: {value}\r\n\r\n"
+    )
+    handler, answered = _run_multipart_handler(monkeypatch, handler_name, headers, _NeverRead())
+
+    assert answered["status"] == 400, answered
+    assert answered["payload"]["error"] == "Invalid Content-Length", answered
+    assert handler.close_connection is True
+
+
+@pytest.mark.parametrize("handler_name", _MULTIPART_HANDLERS)
+def test_non_ascii_padded_identity_multipart_rejects_before_read(handler_name, monkeypatch):
+    """`Transfer-Encoding: \\xa0identity` is not the `identity` token either.
+
+    `str.strip()` erased the U+00A0, so it read as unframed, fell through to the
+    length-0 read and answered 400 "No file field in request" with the payload
+    still queued (live: 400 then `400 Bad request syntax ('--x')`).
+    """
+    from email.parser import Parser
+
+    headers = Parser().parsestr(
+        "Content-Type: multipart/form-data; boundary=x\r\nTransfer-Encoding: \xa0identity\r\n\r\n"
+    )
+    handler, answered = _run_multipart_handler(monkeypatch, handler_name, headers, _NeverRead())
+
+    assert answered["status"] == 411, answered
+    assert "Transfer-Encoding" in answered["payload"]["error"], answered
     assert handler.close_connection is True
 
 
