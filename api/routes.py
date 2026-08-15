@@ -15155,23 +15155,34 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Session busy, try again", 503)
         sidecar_authority = None
         try:
-            from api.models import _session_sidecar_authority
+            from api.models import (
+                _fsync_sidecar_directory,
+                _session_sidecar_authority,
+            )
 
             sidecar_authority = _session_sidecar_authority(sid)
             sidecar_authority.__enter__()
-            with LOCK:
-                SESSIONS.pop(sid, None)
             try:
                 p = (SESSION_DIR / f"{sid}.json").resolve()
                 p.relative_to(SESSION_DIR.resolve())
             except Exception:
                 return bad(handler, "Invalid session_id", 400)
-            sidecar_deleted = False
+            if not is_messaging_session:
+                try:
+                    _record_webui_deleted_session_tombstone(sid)
+                except Exception:
+                    logger.warning(
+                        "Failed to durably tombstone deleted WebUI session %s",
+                        sid,
+                        exc_info=True,
+                    )
+                    return bad(handler, "Failed to persist session deletion", 500)
+            with LOCK:
+                SESSIONS.pop(sid, None)
             try:
                 p.unlink(missing_ok=True)
             except Exception:
                 logger.debug("Failed to unlink session file %s", p)
-            sidecar_deleted = not p.exists()
             try:
                 prune_session_from_index(sid)
             except Exception:
@@ -15185,11 +15196,15 @@ def handle_post(handler, parsed) -> bool:
                     archived_backup.unlink(missing_ok=True)
             except Exception:
                 logger.debug("Failed to unlink archived session backups for %s", p)
-            if sidecar_deleted and not is_messaging_session:
-                try:
-                    _record_webui_deleted_session_tombstone(sid)
-                except Exception:
-                    logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
+            try:
+                _fsync_sidecar_directory(p.parent)
+            except Exception:
+                logger.warning(
+                    "Failed to persist deleted session directory entries for %s",
+                    sid,
+                    exc_info=True,
+                )
+                return bad(handler, "Failed to durably delete session files", 500)
         finally:
             if sidecar_authority is not None:
                 sidecar_authority.__exit__(None, None, None)
@@ -21630,6 +21645,27 @@ def _handle_btw(handler, body):
     return j(handler, {"stream_id": stream_id, "session_id": ephemeral.session_id, "parent_session_id": body["session_id"]})
 
 
+def _delete_hidden_background_session_sidecar(session_id: str) -> None:
+    """Delete a completed hidden session through the normal SID authorities."""
+    if not is_safe_session_id(session_id):
+        raise ValueError(f"Unsafe hidden background session_id {session_id!r}")
+    with _get_session_agent_lock(session_id):
+        from api.models import (
+            _fsync_sidecar_directory,
+            _invalidate_cached_session_generation,
+            _session_sidecar_authority,
+        )
+
+        with _session_sidecar_authority(session_id):
+            _invalidate_cached_session_generation(session_id)
+            path = SESSION_DIR / f"{session_id}.json"
+            path.unlink(missing_ok=True)
+            path.with_suffix(".json.bak").unlink(missing_ok=True)
+            for archived_backup in path.parent.glob(f"{path.name}.bak.archive-*"):
+                archived_backup.unlink(missing_ok=True)
+            _fsync_sidecar_directory(path.parent)
+
+
 def _handle_background(handler, body):
     """POST /api/background — run prompt in parallel background agent.
 
@@ -21712,7 +21748,7 @@ def _handle_background(handler, body):
             # clutter the sidebar or SESSION_DIR. The index is pruned on the
             # next rebuild via _index_entry_exists().
             try:
-                (SESSION_DIR / f"{bg_sid}.json").unlink(missing_ok=True)
+                _delete_hidden_background_session_sidecar(bg_sid)
             except Exception:
                 pass
         except Exception:

@@ -5,6 +5,8 @@ import json
 import multiprocessing
 import os
 import sqlite3
+import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -37,6 +39,174 @@ def _process_writer(
         result_queue.put((marker, "stale"))
     else:
         result_queue.put((marker, "saved"))
+
+
+def _process_record_deleted_tombstone(
+    session_dir,
+    sid,
+    peer_sid,
+    result_queue,
+):
+    from api import models
+
+    models.SESSION_DIR = Path(session_dir)
+    models.SESSION_INDEX_FILE = Path(session_dir) / "_index.json"
+    real_load = models._load_webui_deleted_session_tombstone
+
+    def load_then_wait_for_peer():
+        current = real_load()
+        marker_dir = Path(session_dir) / "tombstone-read-markers"
+        marker_dir.mkdir(parents=True, exist_ok=True)
+        (marker_dir / sid).write_text("read", encoding="utf-8")
+        deadline = time.monotonic() + 3
+        while not (marker_dir / peer_sid).exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        return current
+
+    models._load_webui_deleted_session_tombstone = load_then_wait_for_peer
+    try:
+        models._record_webui_deleted_session_tombstone(sid)
+    except Exception as exc:
+        result_queue.put((sid, type(exc).__name__, str(exc)))
+    else:
+        result_queue.put((sid, "ok", ""))
+
+
+def test_deleted_session_tombstone_rmw_is_cross_process_serialized(
+    tmp_path,
+    monkeypatch,
+):
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    context = multiprocessing.get_context("spawn" if os.name == "nt" else "fork")
+    result_queue = context.Queue()
+    session_ids = ("deleted-a", "deleted-b")
+    processes = [
+        context.Process(
+            target=_process_record_deleted_tombstone,
+            args=(session_dir, sid, session_ids[1 - index], result_queue),
+        )
+        for index, sid in enumerate(session_ids)
+    ]
+    try:
+        for process in processes:
+            process.start()
+        results = [result_queue.get(timeout=15) for _ in processes]
+        for process in processes:
+            process.join(timeout=15)
+        assert all(not process.is_alive() for process in processes)
+        assert all(process.exitcode == 0 for process in processes)
+        assert {result[:2] for result in results} == {
+            ("deleted-a", "ok"),
+            ("deleted-b", "ok"),
+        }
+        assert models._load_webui_deleted_session_tombstone() == frozenset(
+            session_ids
+        )
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+            process.join(timeout=5)
+
+
+def test_existing_deleted_session_tombstone_retries_directory_fsync(
+    tmp_path,
+    monkeypatch,
+):
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    fsynced = []
+    monkeypatch.setattr(
+        models,
+        "_fsync_sidecar_directory",
+        lambda directory: fsynced.append(Path(directory)),
+    )
+    models._record_webui_deleted_session_tombstone("durable-retry")
+    fsynced.clear()
+
+    models._record_webui_deleted_session_tombstone("durable-retry")
+
+    assert fsynced == [session_dir]
+
+
+def test_hidden_background_cleanup_uses_agent_and_sidecar_authorities(
+    tmp_path,
+    monkeypatch,
+):
+    from api import models, routes
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    sid = "hidden-background-cleanup"
+    seed = models.Session(
+        session_id=sid,
+        workspace=str(tmp_path),
+        messages=[{"role": "assistant", "content": "background result"}],
+    )
+    seed.save(skip_index=True)
+    stale_alias = models.Session.load(sid)
+    assert stale_alias is not None
+    with models.LOCK:
+        models.SESSIONS[sid] = stale_alias
+    backup = session_dir / f"{sid}.json.bak"
+    archive = session_dir / f"{sid}.json.bak.archive-deadbeef"
+    backup.write_text("backup", encoding="utf-8")
+    archive.write_text("archive", encoding="utf-8")
+    real_authority = models._session_sidecar_authority
+    authority_entered = threading.Event()
+
+    @contextmanager
+    def observed_authority(session_id, *, session_dir=None):
+        authority_entered.set()
+        with real_authority(session_id, session_dir=session_dir):
+            yield
+
+    monkeypatch.setattr(models, "_session_sidecar_authority", observed_authority)
+    fsynced = []
+    monkeypatch.setattr(
+        models,
+        "_fsync_sidecar_directory",
+        lambda directory: fsynced.append(Path(directory)),
+    )
+    agent_lock = routes._get_session_agent_lock(sid)
+    assert agent_lock.acquire(timeout=1)
+    started = threading.Event()
+    failures = []
+
+    def cleanup():
+        started.set()
+        try:
+            routes._delete_hidden_background_session_sidecar(sid)
+        except Exception as exc:
+            failures.append(exc)
+
+    thread = threading.Thread(target=cleanup)
+    try:
+        thread.start()
+        assert started.wait(timeout=1)
+        assert not authority_entered.wait(timeout=0.2)
+        assert (session_dir / f"{sid}.json").exists()
+    finally:
+        agent_lock.release()
+    assert authority_entered.wait(timeout=2)
+    thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert failures == []
+    assert not (session_dir / f"{sid}.json").exists()
+    assert not backup.exists()
+    assert not archive.exists()
+    assert fsynced == [session_dir]
+    with models.LOCK:
+        assert sid not in models.SESSIONS
+    with pytest.raises(models.StaleSessionGenerationError):
+        stale_alias.save(skip_index=True)
 
 
 def test_stale_loaded_instance_cannot_overwrite_newer_sidecar(
@@ -558,6 +728,13 @@ def test_sidecar_directory_fsync_tolerates_only_unsupported_filesystems(
 
     monkeypatch.setattr(models.os, "fsync", real_failure)
     with pytest.raises(OSError, match="durability failure"):
+        models._fsync_sidecar_directory(tmp_path)
+
+    def permission_failure(*_args, **_kwargs):
+        raise PermissionError(errno.EACCES, "directory open denied")
+
+    monkeypatch.setattr(models.os, "open", permission_failure)
+    with pytest.raises(PermissionError, match="directory open denied"):
         models._fsync_sidecar_directory(tmp_path)
 
 

@@ -20,6 +20,15 @@ def _capture_post(monkeypatch, body):
         )
         or True,
     )
+    monkeypatch.setattr(
+        routes,
+        "bad",
+        lambda handler, message, status=400: captured.update(
+            payload={"error": message},
+            status=status,
+        )
+        or True,
+    )
     return captured
 
 
@@ -141,6 +150,76 @@ def test_delete_session_records_tombstone_when_state_db_delete_fails(tmp_path, m
     assert captured["status"] == 200
     assert captured["payload"]["ok"] is True
     assert captured["payload"]["state_db_cleanup_failed"] is True
+    assert not (session_dir / f"{sid}.json").exists()
+    assert sid in models._load_webui_deleted_session_tombstone()
+
+
+def test_delete_session_fails_closed_when_tombstone_publication_fails(
+    tmp_path,
+    monkeypatch,
+):
+    session_dir = _isolate_session_store(tmp_path, monkeypatch)
+    sid = "tombstoneeio1"
+    session = Session(
+        session_id=sid,
+        title="Deletion must fail closed",
+        messages=[{"role": "user", "content": "retain on failure"}],
+    )
+    session.save()
+    captured = _capture_post(monkeypatch, {"session_id": sid})
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda value: {})
+    monkeypatch.setattr(routes, "_is_messaging_session_id", lambda value: False)
+    real_replace = models.os.replace
+    tombstone_path = models._webui_deleted_session_tombstone_file()
+
+    def fail_tombstone_replace(source, destination):
+        if Path(destination) == tombstone_path:
+            raise OSError("injected tombstone durability failure")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(models.os, "replace", fail_tombstone_replace)
+
+    assert routes.handle_post(
+        object(),
+        SimpleNamespace(path="/api/session/delete"),
+    ) is True
+
+    assert captured["status"] == 500
+    assert captured["payload"]["error"] == "Failed to persist session deletion"
+    assert (session_dir / f"{sid}.json").exists()
+    assert sid not in models._load_webui_deleted_session_tombstone()
+
+
+def test_delete_session_fsyncs_tombstone_and_file_unlinks(
+    tmp_path,
+    monkeypatch,
+):
+    session_dir = _isolate_session_store(tmp_path, monkeypatch)
+    sid = "durabledelete1"
+    session = Session(
+        session_id=sid,
+        title="Durable deletion",
+        messages=[{"role": "user", "content": "delete durably"}],
+    )
+    session.save()
+    captured = _capture_post(monkeypatch, {"session_id": sid})
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda value: {})
+    monkeypatch.setattr(routes, "_is_messaging_session_id", lambda value: False)
+    monkeypatch.setattr(models, "delete_cli_session", lambda value: True)
+    fsynced = []
+    monkeypatch.setattr(
+        models,
+        "_fsync_sidecar_directory",
+        lambda directory: fsynced.append(Path(directory)),
+    )
+
+    assert routes.handle_post(
+        object(),
+        SimpleNamespace(path="/api/session/delete"),
+    ) is True
+
+    assert captured["status"] == 200
+    assert fsynced == [session_dir, session_dir]
     assert not (session_dir / f"{sid}.json").exists()
     assert sid in models._load_webui_deleted_session_tombstone()
 

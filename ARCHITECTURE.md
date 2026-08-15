@@ -251,11 +251,26 @@ cached alias inherits the new revision only if it owned the exact pre-save
 revision. Otherwise the self-heal returns and installs the freshly saved owner;
 it never grants a stale alias authority over unrelated unsaved fields.
 
+State DB sidecar materialization treats its initial scan only as candidate
+discovery and re-reads the complete authoritative row after acquiring the SID
+authority. Hidden background-session cleanup follows agent lock then SID
+authority, invalidates cached aliases, removes recoverable backups, and fsyncs
+the session directory.
+
+Deleted-WebUI-session tombstone updates are serialized by a separate global
+cross-process authority acquired only after any SID authority. Tombstone
+publication flushes the file and parent directory before sidecar deletion can
+start; a failure is returned to the delete caller with the sidecar intact. A
+successful delete fsyncs the session directory again after sidecar and backup
+unlinks.
+
 Sidecar, primary-backup, and incomparable-backup archive publications flush the
 file before atomic publication and fsync the parent directory on POSIX. Native
 Windows keeps atomic publication and file flushing, but Python does not expose an
 equivalent directory-fsync guarantee here; the final directory entry is therefore
-not guaranteed across sudden power loss on native Windows.
+not guaranteed across sudden power loss on native Windows. POSIX ignores only
+filesystem-declared unsupported directory-fsync errors (`EINVAL`/`ENOTSUP`);
+permission and I/O failures propagate.
 
 #### Imported `state.db` sidebar projection
 

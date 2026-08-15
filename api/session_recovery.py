@@ -742,23 +742,13 @@ def recover_missing_sidecars_from_state_db(session_dir: Path, state_db_path: Pat
         target = session_dir / f"{sid}.json"
         if target.exists():
             continue
-        payload = _state_db_row_to_sidecar(row)
-        payload['_sidecar_generation_v1'] = 1
         # Per-process/per-thread tmp suffix to avoid corruption under
         # concurrent reconciliation calls (matches api/models.py:484
         # Session.save() convention).
         tmp_suffix = f".json.reconcile.tmp.{os.getpid()}.{threading.current_thread().ident}"
         tmp = target.with_suffix(tmp_suffix)
         detail_recorded = False
-        try:
-            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
-        except OSError as exc:
-            try:
-                tmp.unlink(missing_ok=True)
-            except OSError:
-                pass
-            details.append({'session_id': sid, 'materialized': False, 'error': str(exc)})
-            continue
+        payload = None
         # Atomic create-or-fail: os.link() refuses to overwrite an existing
         # target. Closes the TOCTOU window between the target.exists() check
         # above and the rename — a concurrent Session.save() for the same SID
@@ -767,14 +757,31 @@ def recover_missing_sidecars_from_state_db(session_dir: Path, state_db_path: Pat
         skipped_deleted = False
         try:
             with _session_sidecar_authority(sid, session_dir=session_dir):
-                if (
-                    _durable_tombstone_marks_deleted_webui_session(session_dir, sid)
-                    or not _state_db_has_session(sid, state_db_path)
-                ):
+                if _durable_tombstone_marks_deleted_webui_session(session_dir, sid):
                     skipped_deleted = True
                 else:
-                    _publish_sidecar_no_replace(tmp, target)
-                    materialized_now = True
+                    current_row = next(
+                        (
+                            candidate
+                            for candidate in _read_state_db_missing_sidecar_rows(
+                                session_dir,
+                                state_db_path,
+                            )
+                            if str(candidate.get('id') or '').strip() == sid
+                        ),
+                        None,
+                    )
+                    if current_row is None:
+                        skipped_deleted = True
+                    else:
+                        payload = _state_db_row_to_sidecar(current_row)
+                        payload['_sidecar_generation_v1'] = 1
+                        tmp.write_text(
+                            json.dumps(payload, ensure_ascii=False, indent=2),
+                            encoding='utf-8',
+                        )
+                        _publish_sidecar_no_replace(tmp, target)
+                        materialized_now = True
         except FileExistsError:
             # Live sidecar appeared between the check and the link — keep it.
             pass
@@ -788,7 +795,11 @@ def recover_missing_sidecars_from_state_db(session_dir: Path, state_db_path: Pat
                 pass
         if materialized_now:
             materialized += 1
-            details.append({'session_id': sid, 'materialized': True, 'messages': len(payload.get('messages') or [])})
+            details.append({
+                'session_id': sid,
+                'materialized': True,
+                'messages': len((payload or {}).get('messages') or []),
+            })
         elif skipped_deleted:
             details.append({'session_id': sid, 'materialized': False, 'skipped': 'deleted_during_reconcile'})
         elif not detail_recorded:

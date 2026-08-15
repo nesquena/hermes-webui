@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from contextlib import contextmanager
 
 from api.session_recovery import recover_missing_sidecars_from_state_db, audit_session_recovery
 
@@ -46,6 +47,51 @@ def test_recover_missing_sidecars_from_state_db_materializes_webui_row(tmp_path)
     assert data["source_tag"] == "webui"
     assert data["session_source"] == "webui"
     assert [m["content"] for m in data["messages"]] == ["message 1", "message 2"]
+
+
+def test_recover_missing_sidecar_rereads_state_db_under_sid_authority(
+    tmp_path,
+    monkeypatch,
+):
+    import api.models as models
+
+    state_db = tmp_path / "state.db"
+    sid = _make_state_db(state_db, sid="state_changes_before_lock", messages=1)
+    real_authority = models._session_sidecar_authority
+    updated = False
+
+    @contextmanager
+    def update_before_recovery_enters_authority(session_id, *, session_dir=None):
+        nonlocal updated
+        with real_authority(session_id, session_dir=session_dir):
+            if not updated:
+                with sqlite3.connect(state_db) as conn:
+                    conn.execute(
+                        "INSERT INTO messages "
+                        "(session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+                        (sid, "assistant", "committed while recovery waited", 1235.0),
+                    )
+                    conn.execute(
+                        "UPDATE sessions SET message_count = 2 WHERE id = ?",
+                        (sid,),
+                    )
+                updated = True
+            yield
+
+    monkeypatch.setattr(
+        models,
+        "_session_sidecar_authority",
+        update_before_recovery_enters_authority,
+    )
+
+    result = recover_missing_sidecars_from_state_db(tmp_path, state_db)
+
+    assert result["materialized"] == 1
+    data = json.loads((tmp_path / f"{sid}.json").read_text(encoding="utf-8"))
+    assert [message["content"] for message in data["messages"]] == [
+        "message 1",
+        "committed while recovery waited",
+    ]
 
 
 def test_recover_missing_sidecars_from_state_db_skips_deleted_webui_tombstone(tmp_path, monkeypatch):

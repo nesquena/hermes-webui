@@ -299,10 +299,7 @@ def _fsync_sidecar_directory(directory: Path) -> None:
     if os.name == "nt":
         return
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    try:
-        fd = os.open(Path(directory), flags)
-    except PermissionError:
-        return
+    fd = os.open(Path(directory), flags)
     try:
         try:
             os.fsync(fd)
@@ -447,19 +444,19 @@ def _invalidate_cached_session_generation(session_id: str) -> None:
 
 
 @contextmanager
-def _session_sidecar_authority(
-    session_id: str,
+def _cross_process_sidecar_file_authority(
+    lock_id: str,
     *,
     session_dir: Path | None = None,
 ):
-    """Serialize compliant sidecar writers for one SID across processes."""
-    if not is_safe_session_id(session_id):
-        raise ValueError(f"Unsafe session_id {session_id!r}")
-    thread_authority = _session_save_authority(session_id)
+    """Serialize one sidecar-store mutation key across threads/processes."""
+    if not is_safe_session_id(lock_id):
+        raise ValueError(f"Unsafe sidecar lock id {lock_id!r}")
+    thread_authority = _session_save_authority(lock_id)
     with thread_authority:
         lock_dir = (session_dir or SESSION_DIR) / ".sidecar-locks"
         lock_dir.mkdir(parents=True, exist_ok=True)
-        lock_path = lock_dir / f"{session_id}.lock"
+        lock_path = lock_dir / f"{lock_id}.lock"
         fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
         with os.fdopen(fd, "r+b", buffering=0) as lock_file:
             if _fcntl is not None:
@@ -486,6 +483,20 @@ def _session_sidecar_authority(
                 return
             raise RuntimeError("cross-process sidecar locking is unavailable")
 
+
+@contextmanager
+def _session_sidecar_authority(
+    session_id: str,
+    *,
+    session_dir: Path | None = None,
+):
+    """Serialize compliant sidecar writers for one SID across processes."""
+    with _cross_process_sidecar_file_authority(
+        session_id,
+        session_dir=session_dir,
+    ):
+        yield
+
 # Serializes ``_record_webui_zero_message_orphan_tombstone`` /
 # ``_clear_webui_zero_message_orphan_tombstone`` so two concurrent sidebar
 # polls (or a poll racing ``Session.save`` / ``new_session`` /
@@ -498,7 +509,21 @@ def _session_sidecar_authority(
 # WebUI sidebar polling path is single-process) but must wrap the WHOLE
 # load-modify-write/unlink sequence in both helpers.
 _WEBUI_ZERO_MESSAGE_ORPHAN_TOMBSTONE_LOCK = threading.Lock()
-_WEBUI_DELETED_SESSION_TOMBSTONE_LOCK = threading.Lock()
+_WEBUI_DELETED_SESSION_TOMBSTONE_LOCK_SID = "_webui_deleted_sessions_global"
+
+
+@contextmanager
+def _webui_deleted_session_tombstone_authority():
+    """Serialize the deleted-session tombstone RMW across processes.
+
+    Lock order is an optional per-session sidecar authority first, then this
+    global tombstone authority. No path may acquire a SID authority while this
+    global authority is held.
+    """
+    with _cross_process_sidecar_file_authority(
+        _WEBUI_DELETED_SESSION_TOMBSTONE_LOCK_SID
+    ):
+        yield
 
 # Path-safety contract for session IDs.  Accept alphanumerics, underscore, and
 # hyphen so API/gateway-issued ids (``api-*``, ``reachy-voice-*``) round-trip
@@ -1046,12 +1071,9 @@ def _load_webui_deleted_session_tombstone() -> frozenset[str]:
 
 
 def _save_webui_deleted_session_tombstone(ids) -> None:
-    try:
-        sorted_ids = sorted(set(
-            str(sid).strip() for sid in (ids or []) if str(sid or "").strip()
-        ))
-    except TypeError:
-        return
+    sorted_ids = sorted(set(
+        str(sid).strip() for sid in (ids or []) if str(sid or "").strip()
+    ))
     if len(sorted_ids) > WEBUI_DELETED_SESSION_TOMBSTONE_CAP:
         sorted_ids = sorted_ids[-WEBUI_DELETED_SESSION_TOMBSTONE_CAP:]
     payload = {
@@ -1070,6 +1092,7 @@ def _save_webui_deleted_session_tombstone(ids) -> None:
             f.flush()
             os.fsync(f.fileno())
         os.replace(_tmp, p)
+        _fsync_sidecar_directory(p.parent)
     except Exception:
         logger.debug("Failed to save webui deleted-session tombstone", exc_info=True)
         if _tmp is not None:
@@ -1077,15 +1100,17 @@ def _save_webui_deleted_session_tombstone(ids) -> None:
                 _tmp.unlink(missing_ok=True)
             except Exception:
                 pass
+        raise
 
 
 def _record_webui_deleted_session_tombstone(sid: str) -> None:
     sid = str(sid or "").strip()
     if not sid:
         return
-    with _WEBUI_DELETED_SESSION_TOMBSTONE_LOCK:
+    with _webui_deleted_session_tombstone_authority():
         current = set(_load_webui_deleted_session_tombstone())
         if sid in current:
+            _fsync_sidecar_directory(SESSION_DIR)
             return
         current.add(sid)
         _save_webui_deleted_session_tombstone(current)
@@ -1095,7 +1120,7 @@ def _clear_webui_deleted_session_tombstone(sid: str) -> None:
     sid = str(sid or "").strip()
     if not sid:
         return
-    with _WEBUI_DELETED_SESSION_TOMBSTONE_LOCK:
+    with _webui_deleted_session_tombstone_authority():
         current = set(_load_webui_deleted_session_tombstone())
         if sid not in current:
             return
