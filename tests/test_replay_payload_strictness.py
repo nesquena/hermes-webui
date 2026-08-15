@@ -322,6 +322,36 @@ def test_settle_strips_exact_structured_prefix_from_full_history():
         assert projection[-1]["content"] == "new answer"
 
 
+def test_settle_strips_exact_structured_history_with_out_of_band_current_user():
+    previous = [
+        {"role": "user", "content": "old prompt", "id": "old-user"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "old answer", "annotations": ["durable"]}
+            ],
+            "id": "old-assistant",
+            "reasoning": "durable reasoning",
+            "api_content": "durable provider payload",
+        },
+    ]
+    answer = {"role": "assistant", "content": "new answer", "id": "new-assistant"}
+
+    session = _settle_structured_result(previous, [*copy.deepcopy(previous), answer])
+
+    for projection in (session.messages, session.context_messages):
+        assert len(projection) == 4
+        assert projection[:2] == previous
+        assert [row.get("role") for row in projection] == [
+            "user",
+            "assistant",
+            "user",
+            "assistant",
+        ]
+        assert projection[2]["content"] == "continue the active turn"
+        assert projection[3] == answer
+
+
 def test_display_merge_collapses_only_exact_durable_empty_replay():
     from api.streaming import _merge_display_messages_after_agent_result
 

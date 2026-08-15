@@ -1611,6 +1611,28 @@ def _result_has_authoritative_full_history_prefix(
     current_turn_user_idx = identity['current_turn_user_idx']
     if current_turn_user_idx < 0 or current_turn_user_idx > len(previous_context):
         return False
+    if current_turn_user_idx == len(previous_context):
+        # The Agent can omit the separately supplied current user while returning
+        # exact prior history plus assistant/tool output. Require a real historical
+        # user so an assistant-only structured lookalike delta still fails closed.
+        has_historical_user = any(
+            type(message) is dict and message.get('role') == 'user'
+            for message in previous_context
+        )
+        out_of_band_delta = result_messages[current_turn_user_idx:]
+        if has_historical_user and out_of_band_delta and all(
+            _is_context_compression_marker(message)
+            or (
+                type(message) is dict
+                and message.get('role') in ('assistant', 'tool')
+            )
+            for message in out_of_band_delta
+        ):
+            return _messages_have_prefix(
+                result_messages,
+                previous_context,
+                allow_exact_payload=True,
+            )
     if current_turn_user_idx >= len(result_messages):
         return False
     current_turn = result_messages[current_turn_user_idx]
