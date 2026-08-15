@@ -228,6 +228,26 @@ def test_end_headers_on_handler_stub_without_close_connection(monkeypatch):
     assert "Connection" not in dict(sent), "nothing was armed, so nothing to advertise"
 
 
+def test_advertise_close_tolerates_a_non_iterable_header_buffer():
+    """The dedup scan must be as defensive as the two attribute reads.
+
+    A bare ``Mock`` answers every attribute, so ``_headers_buffer`` comes back
+    truthy but non-iterable. Iterating it unguarded raised
+    ``TypeError: 'Mock' object is not iterable`` from inside ``end_headers()``,
+    which ``_handle_write``'s generic ``except`` turns into a spurious 500 —
+    the same crash-inside-end_headers class as the missing
+    ``close_connection`` guard above.
+    """
+    from unittest.mock import Mock
+
+    from api.helpers import advertise_connection_close
+
+    handler = Mock()
+    advertise_connection_close(handler)  # must not raise
+
+    handler.send_header.assert_called_once_with("Connection", "close")
+
+
 def test_check_auth_or_close_on_handler_stub_without_close_connection(monkeypatch):
     """check_auth_or_close must not invent close_connection on a stub.
 
