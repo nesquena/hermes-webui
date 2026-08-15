@@ -525,6 +525,12 @@ def _prepare_global_reload():
     readiness cap) BEFORE `shutdown_mcp_servers()` clears the
     process-global registry, so a body mid-discovery cannot re-register
     old-config servers after the registry is torn down.
+
+    Returns True only if every live owner TERMINATED within the cap —
+    only then is it safe to shut down and rebuild the registry.  Returns
+    False if any owner survived the cap: the caller MUST fail closed
+    (abort the reload) rather than run a discovery body concurrently
+    with a registry rebuild (Greptile review round 10).
     """
     with _MCP_READINESS_LOCK:
         _live = [
@@ -535,6 +541,11 @@ def _prepare_global_reload():
     for _cancel, _thread in _live:
         _cancel.set()
         _thread.join(timeout=_MCP_READINESS_WAIT_CAP_S)
+    with _MCP_READINESS_LOCK:
+        for _cancel, _thread in _live:
+            if _thread.is_alive():
+                return False
+        return True
 
 
 def _invalidate_mcp_readiness(except_key=None):

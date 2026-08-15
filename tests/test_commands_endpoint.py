@@ -539,6 +539,78 @@ def test_reload_mcp_invalidates_other_profile_entries(monkeypatch):
     assert streaming._mcp_wait_readiness(refreshed) == "completed"
 
 
+def test_reload_mcp_aborts_when_owner_survives_join_cap(monkeypatch):
+    """A global reload fails CLOSED if a discovery owner survives the join cap.
+
+    Regression (Greptile review round 10): `_prepare_global_reload` used
+    a bounded join without verifying termination, then the reload
+    unconditionally shut down and rebuilt the registry — letting an old
+    discovery body overlap the rebuild and re-register old-config
+    servers.  The reload now aborts BEFORE shutdown when any owner is
+    still alive after the cap.
+    """
+    from api import streaming
+    from api.commands import execute_agent_command
+
+    _old_cap = streaming._MCP_READINESS_WAIT_CAP_S
+    streaming._MCP_READINESS_WAIT_CAP_S = 0.1
+    try:
+        # A live discovery owner that outlives the (tiny) join cap.
+        readiness = streaming._McpReadiness()
+        release = threading.Event()
+
+        def long_discover():
+            release.wait(5.0)
+            return True
+
+        t = threading.Thread(
+            target=streaming._discovery_runner,
+            args=(
+                long_discover,
+                readiness,
+                readiness.event,
+                readiness.gen,
+                readiness.cancel,
+            ),
+            name="mcp-reload-test-survivor",
+            daemon=True,
+        )
+        readiness.thread = t
+        t.start()
+        streaming._MCP_READINESS["/profiles/zombie"] = readiness
+
+        calls = {"shutdown": 0, "discover": 0}
+
+        def shutdown():
+            calls["shutdown"] += 1
+
+        def discover():
+            calls["discover"] += 1
+            return []
+
+        _install_fake_mcp_tool(
+            monkeypatch, shutdown=shutdown, discover=discover, servers={}
+        )
+
+        output = execute_agent_command("/reload-mcp")
+        assert "aborted" in output.lower(), (
+            "reload must fail closed when a discovery owner survives "
+            "the join cap"
+        )
+        assert calls["shutdown"] == 0, (
+            "reload must not shut down the registry over a live owner"
+        )
+        assert calls["discover"] == 0, (
+            "reload must not re-discover while a live owner is still running"
+        )
+        # The survivor keeps running and resolves on its own.
+        release.set()
+        t.join(timeout=2.0)
+        assert readiness.status == "completed"
+    finally:
+        streaming._MCP_READINESS_WAIT_CAP_S = _old_cap
+
+
 def test_reload_mcp_legacy_agent_runs_inline(monkeypatch):
     """Without the override API, reload discovery runs INLINE, never daemon.
 

@@ -270,8 +270,6 @@ def _run_reload_mcp_command() -> str:
             with _lock:
                 old_servers = set(_servers.keys())
 
-            shutdown_mcp_servers()
-
             # Route the re-discovery through the SAME readiness authority
             # the stream worker uses (api.streaming), so a subsequent turn
             # observes the fresh outcome instead of a stale 'completed' /
@@ -288,6 +286,7 @@ def _run_reload_mcp_command() -> str:
             # process-global while the command runs, which would make the
             # reload capture another profile (Greptile P1).
             from api.streaming import (
+                _MCP_READINESS_WAIT_CAP_S,
                 _canonical_readiness_key,
                 _invalidate_mcp_readiness,
                 _mcp_retry_discovery,
@@ -329,7 +328,15 @@ def _run_reload_mcp_command() -> str:
             # Coordinate the global shutdown with every live discovery
             # owner (cancel + bounded join) so a body mid-discovery cannot
             # re-register old-config servers after the registry is cleared.
-            _prepare_global_reload()
+            # Fail CLOSED: if any owner survived the join cap, abort the
+            # reload rather than run a discovery body concurrently with a
+            # registry rebuild (Greptile review round 10).
+            if not _prepare_global_reload():
+                return (
+                    "MCP reload aborted: a discovery run is still in "
+                    f"progress after waiting {int(_MCP_READINESS_WAIT_CAP_S)}s. "
+                    "Retry once it finishes."
+                )
             shutdown_mcp_servers()
 
             try:
