@@ -12890,7 +12890,33 @@ def handle_get(handler, parsed) -> bool:
                 # state.db rows do not make sidebar polling think the
                 # transcript is always newer. Helper threads profile= to
                 # honor #2827's TLS-vs-thread fix.
-                metadata_summary = _metadata_only_message_summary(sid, profile=_session_profile)
+                if cli_meta and not _session_source_is_webui(cli_meta):
+                    # Foreign (CLI/TUI/Claude Code) sessions: report the same
+                    # MERGED display count as the messages=1 branch. The cheap
+                    # COUNT(*) summary counts raw state.db rows (tool rows that
+                    # the display merge folds into assistant messages), so the
+                    # frontend's external-refresh poll would otherwise compare
+                    # 2543 vs 696 and force-reload the full transcript every
+                    # 30s (#7050). A metadata-only stub carries no messages, so
+                    # the sidecar transcript must be loaded in full to feed the
+                    # same merge pipeline the load branch uses.
+                    from api.models import Session as _Session
+                    _foreign_full = _Session.load(sid) if not getattr(s, "messages", None) else s
+                    _foreign_state_messages = get_state_db_session_messages(
+                        sid, profile=_session_profile
+                    )
+                    _metadata_display_msgs = merge_session_messages_append_only(
+                        _webui_sidecar_lineage_messages_for_display(_foreign_full),
+                        _foreign_state_messages,
+                        truncation_watermark=getattr(_foreign_full, "truncation_watermark", None),
+                        truncation_boundary=getattr(_foreign_full, "truncation_boundary", None),
+                    )
+                    _metadata_display_msgs = _merged_webui_lineage_messages_for_display(
+                        _foreign_full, _metadata_display_msgs
+                    )
+                    metadata_summary = _message_summary(_metadata_display_msgs)
+                else:
+                    metadata_summary = _metadata_only_message_summary(sid, profile=_session_profile)
             _t2 = _time.monotonic()
             if _diag: _diag.stage("t2_after_state_db_load")
             effective_model = (
