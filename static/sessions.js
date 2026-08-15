@@ -3815,6 +3815,10 @@ async function _loadOlderMessages() {
     _messagesTruncated = !!responseSession._messages_truncated;
     _oldestIdx = responseSession._messages_offset || 0;
     renderMessages({ preserveScroll: true });
+    // The titlebar message count reflects S.messages, which just grew by
+    // the older page — keep the badge in sync (it only updates on session
+    // switch / UI-state changes otherwise).
+    if (typeof syncAppTitlebar === 'function') syncAppTitlebar();
     if (container) {
       // Prepending older messages must not teleport the reader. Anchor to the
       // first visible rendered row and restore that row's top offset after the
@@ -3906,6 +3910,8 @@ async function _ensureAllMessagesLoaded() {
     if (S.session && S.session.session_id === sid) {
       S.session.message_count = Number(data.session.message_count || msgs.length);
     }
+    // Keep the titlebar badge in sync after the wholesale replace.
+    if (typeof syncAppTitlebar === 'function') syncAppTitlebar();
   } finally {
     _loadingOlder = false;
   }

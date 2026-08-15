@@ -522,7 +522,16 @@ async function startCompressionRecovery(btn){
 }
 
 const MESSAGE_RENDER_WINDOW_DEFAULT=50;
-const MESSAGE_VIRTUAL_THRESHOLD_ROWS=80;
+// Virtualization only pays off for genuinely long transcripts: below this
+// count the estimated-height scroll math (MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS)
+// is more disruptive than rendering the rows directly — a "Load earlier
+// messages" click on a foreign session jumps the renderable count from 30 to
+// 83+, which used to cross the old 80-row threshold mid-scroll and trigger the
+// scroll->re-render churn (scrollHeight jumping 12898->18203px per wheel
+// tick; see #6799 family). 200 matches the render-window auto-expansion cap
+// (#6999: MESSAGE_RENDER_WINDOW_DEFAULT*4), so any transcript the window
+// logic already considers fully renderable also stays un-virtualized.
+const MESSAGE_VIRTUAL_THRESHOLD_ROWS=200;
 const MESSAGE_VIRTUAL_BUFFER_PX=900;
 const MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS={
   user:120,
