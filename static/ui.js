@@ -11871,13 +11871,15 @@ function _transparentToolDetailHtml(tc, status){
   // duration meta when present. (Trifecta finding V6 — reduce redundancy.)
   const meta=[];
   if(tc&&tc.duration!==undefined&&tc.duration!==null) meta.push(['duration', String(tc.duration)]);
-  const preview=String((tc&&(tc.snippet||tc.preview||tc.result||tc.output))||'').trim();
+  const previewRaw=String((tc&&(tc.snippet||tc.preview||tc.result||tc.output))||'').trim();
+  const preview=_projectTranscriptTextForDisplay(previewRaw,{surface:'tool-detail'});
   const argHtml=[...meta,...argEntries].map(([k,v])=>{
     let sv=typeof v==='string'?v:JSON.stringify(v,null,2);
     // Redact secret-bearing arg values before rendering the transparent Full
     // tab — content args can be long multi-line commands (#4928) whose later
     // lines may carry secrets the short label never showed (#4928 gate).
     if(typeof _redactToolTargetLabel==='function'){ try{ sv=_redactToolTargetLabel(sv); }catch(e){} }
+    sv=_projectTranscriptTextForDisplay(sv,{surface:'tool-detail'});
     return `<div class="tool-arg-pair"><span class="tool-arg-key">${esc(String(k))}</span><span class="tool-arg-val">${esc(sv)}</span></div>`;
   }).join('');
   return `<div class="tool-card-detail" data-transparent-detail-mode="full"><div class="transparent-detail-modes" role="tablist"><span class="transparent-detail-mode active" role="tab" tabindex="0" data-mode="full" onclick="_setTransparentDetailMode(this,'full')">Full</span><span class="transparent-detail-mode" role="tab" tabindex="0" data-mode="output" onclick="_setTransparentDetailMode(this,'output')">Output</span></div><div class="tool-card-args">${argHtml}</div>${preview?`<div class="tool-card-result"><pre>${esc(preview)}</pre></div>`:''}</div>`;
@@ -18599,7 +18601,15 @@ function _toggleToolDiff(btn){
   const isDiff=btn.dataset.isDiff==='1';
   const expanded=btn.textContent===btn.dataset.moreLabel;
   const row=btn.closest('.tool-card-row');
-  const canonicalSnippet=row&&row._tcData&&row._tcData.snippet;
+  // Expando properties are lost when the session HTML cache restores innerHTML.
+  // Recover from the canonical anchor scene in that case rather than falling
+  // back to the already-truncated preview.
+  const canonicalTool=row&&row._tcData
+    ? row._tcData
+    : (row&&typeof _transparentToolCallFromRowDataset==='function'
+      ? _transparentToolCallFromRowDataset(row)
+      : null);
+  const canonicalSnippet=canonicalTool&&canonicalTool.snippet;
   const raw=expanded
     ? (canonicalSnippet==null?btn.dataset.short:String(canonicalSnippet))
     : btn.dataset.short;

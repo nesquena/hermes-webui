@@ -136,11 +136,16 @@ globalThis.document = {
   }),
 };
 eval(extractFunc('buildToolCard'));
+eval(extractFunc('_transparentToolDetailHtml'));
 
 let input = '';
 process.stdin.on('data', chunk => { input += chunk; });
 process.stdin.on('end', () => {
   const payload = JSON.parse(input);
+  if (payload.mode === 'transparent-detail') {
+    process.stdout.write(JSON.stringify({html: _transparentToolDetailHtml(payload.tc, 'Completed')}));
+    return;
+  }
   const row = buildToolCard(payload.tc);
   process.stdout.write(JSON.stringify({
     htmlLength: row.innerHTML.length,
@@ -204,6 +209,20 @@ def _tool_render(tool_driver_path: str, tc: dict) -> dict[str, object]:
     if result.returncode != 0:
         raise RuntimeError(result.stderr)
     return json.loads(result.stdout)
+
+
+def _transparent_detail(tool_driver_path: str, tc: dict) -> str:
+    assert NODE is not None
+    result = subprocess.run(
+        [NODE, tool_driver_path, str(UI_JS_PATH)],
+        input=json.dumps({"tc": tc, "mode": "transparent-detail"}),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr)
+    return json.loads(result.stdout)["html"]
 
 
 def test_opaque_data_payload_is_bounded_without_mutating_source(driver_path: str) -> None:
@@ -270,3 +289,15 @@ def test_tool_card_does_not_embed_full_snippet_in_dom(tool_driver_path: str) -> 
 
     assert result["hasFullPayloadAttribute"] is False
     assert result["htmlLength"] < 10_000
+
+
+def test_transparent_tool_detail_bounds_opaque_args_and_output(tool_driver_path: str) -> None:
+    opaque = "A" * 200_000
+
+    html = _transparent_detail(
+        tool_driver_path,
+        {"args": {"content": opaque}, "snippet": opaque},
+    )
+
+    assert len(html) < 20_000
+    assert html.count("opaque payload abbreviated for display") == 2
