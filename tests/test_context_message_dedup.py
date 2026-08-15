@@ -48,12 +48,9 @@ def test_deduplicate_context_messages_preserves_identical_answers_in_different_t
     ]
 
     result = _deduplicate_context_messages(messages)
-    # _message_identity is identity-based, not turn-aware:
-    # second assistant "4" has the same identity as first → removed.
-    # Second user "what is 3+1?" has different content → kept.
-    # This is intentional: the dedup catches context pollution from
-    # merge_session_messages_append_only, not replayed turns.
-    assert len(result) == 3  # user "2+2", assistant "4", user "3+1"
+    # Assistant replay reduction is adjacent and payload-strict. The distinct
+    # user boundary proves these are separate turns, so both answers remain.
+    assert len(result) == 4
 
 
 def test_deduplicate_context_messages_empty_input():
@@ -78,8 +75,8 @@ def test_deduplicate_context_messages_preserves_tool_call_rows():
     assert len(result) == 3
 
 
-def test_deduplicate_context_messages_different_timestamps_same_content():
-    """Messages with same content but different timestamps should be deduped."""
+def test_deduplicate_context_messages_preserves_timestamp_distinct_assistants():
+    """Provider-facing assistant payloads with distinct timestamps remain."""
     from api.streaming import _deduplicate_context_messages
 
     messages = [
@@ -90,7 +87,12 @@ def test_deduplicate_context_messages_different_timestamps_same_content():
     ]
 
     result = _deduplicate_context_messages(messages)
-    assert len(result) == 2  # duplicates removed despite different timestamps
+    assert len(result) == 3
+    assert [message["role"] for message in result] == [
+        "user",
+        "assistant",
+        "assistant",
+    ]
 
 
 def test_message_identity_strips_workspace_prefix():

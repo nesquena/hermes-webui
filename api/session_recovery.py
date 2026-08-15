@@ -30,7 +30,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import sqlite3
 import threading
 from contextlib import closing

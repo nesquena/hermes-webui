@@ -67,8 +67,7 @@ from api.usage import prompt_cache_hit_percent
 from api.models import (
     _STRUCTURED_REPLAY_FIELDS,
     _canonical_message_digest,
-    _collapse_duplicate_durable_empty_assistant_replays,
-    _collapse_duplicate_incomplete_message_ids,
+    _collapse_replayed_assistant_rows,
     _durable_empty_assistant_replay_key,
     _incomplete_reasoning_message_id,
     _is_admissible_empty_text_content,
@@ -1566,26 +1565,25 @@ def _resolve_active_turn_authority(identity, *, result=None, agent=None):
     if not isinstance(identity, dict):
         return identity
     resolved = dict(identity)
+    resolved['current_turn_user_idx'] = None
+    resolved['turn_id'] = ''
     if isinstance(result, dict):
         _result_idx = _coerce_current_turn_user_idx(result.get('current_turn_user_idx'))
-        if _result_idx is not None:
-            resolved['current_turn_user_idx'] = _result_idx
         _result_turn_id = _coerce_current_turn_id(result.get('turn_id'))
-        if _result_turn_id:
+        if _result_idx is not None and _result_turn_id:
+            resolved['current_turn_user_idx'] = _result_idx
             resolved['turn_id'] = _result_turn_id
+            return resolved
     if agent is not None:
-        if resolved.get('current_turn_user_idx') is None:
-            _agent_idx = _coerce_current_turn_user_idx(
-                getattr(agent, '_persist_user_message_idx', None)
-            )
-            if _agent_idx is not None:
-                resolved['current_turn_user_idx'] = _agent_idx
-        if not resolved.get('turn_id'):
-            _agent_turn_id = _coerce_current_turn_id(
-                getattr(agent, '_current_turn_id', '')
-            )
-            if _agent_turn_id:
-                resolved['turn_id'] = _agent_turn_id
+        _agent_idx = _coerce_current_turn_user_idx(
+            getattr(agent, '_persist_user_message_idx', None)
+        )
+        _agent_turn_id = _coerce_current_turn_id(
+            getattr(agent, '_current_turn_id', '')
+        )
+        if _agent_idx is not None and _agent_turn_id:
+            resolved['current_turn_user_idx'] = _agent_idx
+            resolved['turn_id'] = _agent_turn_id
     return resolved
 
 
@@ -5467,7 +5465,7 @@ def _api_safe_message_positions(messages):
 
 
 def _deduplicate_context_messages(messages):
-    """Remove duplicate messages from context by identity, keeping first occurrence.
+    """Remove only replay-safe duplicates from provider-facing context.
 
     Prevents the agent from seeing the same message twice in conversation_history
     when result_messages contain duplicates that weren't caught by display-merge.
@@ -5495,6 +5493,12 @@ def _deduplicate_context_messages(messages):
             deduped.append(msg)
             continue
         if _is_compressed_context_tool_result_summary_message(msg) and not msg.get('tool_call_id'):
+            deduped.append(msg)
+            continue
+        if type(msg) is dict and msg.get('role') == 'assistant':
+            # Assistant payloads are provider-owned. Preserve them here and run
+            # the same exact replay pipeline used by display and persistence
+            # after user/marker normalization has established adjacency.
             deduped.append(msg)
             continue
         # Context ownership is provider-facing: two rows with identical visible
@@ -5527,6 +5531,7 @@ def _deduplicate_context_messages(messages):
         if key is not None:
             seen.add(key)
         deduped.append(msg)
+    deduped, _ = _collapse_replayed_assistant_rows(deduped)
     return deduped
 
 
@@ -6744,34 +6749,7 @@ def _merge_display_messages_after_agent_result(
     # three inputs consistently so prefix/delta detection below stays aligned.
     # (#5334; same internal-control-message class as #3320/#3821/#4373/#4875)
     previous_display = _drop_synthetic_control_messages(previous_display)
-    previous_display, _ = _collapse_duplicate_incomplete_message_ids(previous_display)
-    previous_display, _ = _collapse_duplicate_durable_empty_assistant_replays(
-        previous_display
-    )
-    # Deduplicate stale _partial messages that accumulated in previous_display.
-    # A bug in cancel_stream() could insert multiple identical _partial messages
-    # when _stripped was empty but _has_reasoning/_has_tools was True. The
-    # merge's _message_identity previously returned None for empty _partial
-    # messages, so the seen-set couldn't catch them — they doubled each turn.
-    # Scan backwards and keep only the LAST occurrence of each unique _partial
-    # identity, then reverse back to original order.
-    _partial_seen = set()
-    _deduped_rev = []
-    for m in reversed(previous_display):
-        if isinstance(m, dict) and m.get('_partial'):
-            key = _message_identity(m)
-            if key is not None:
-                if key in _partial_seen:
-                    continue
-                _partial_seen.add(key)
-        _deduped_rev.append(m)
-    _deduped = list(reversed(_deduped_rev))
-    if len(_deduped) < len(previous_display):
-        logger.debug(
-            "Deduplicated %d stale _partial messages from previous_display (was %d, now %d)",
-            len(previous_display) - len(_deduped), len(previous_display), len(_deduped),
-        )
-    previous_display = _deduped
+    previous_display, _ = _collapse_replayed_assistant_rows(previous_display)
     previous_context = list(previous_context or [])
     result_messages = list(result_messages or [])
     if isinstance(verification_nudge_provenance, dict):
@@ -6798,8 +6776,8 @@ def _merge_display_messages_after_agent_result(
     # would otherwise slip into the merged transcript as a real delta. (#5334)
     previous_context = _drop_synthetic_control_messages(previous_context)
     result_messages = _drop_synthetic_control_messages(result_messages)
-    previous_context, _ = _collapse_duplicate_incomplete_message_ids(previous_context)
-    result_messages, _ = _collapse_duplicate_incomplete_message_ids(result_messages)
+    previous_context, _ = _collapse_replayed_assistant_rows(previous_context)
+    result_messages, _ = _collapse_replayed_assistant_rows(result_messages)
     if not result_messages:
         return previous_display
     if not result_has_authoritative_full_history_prefix:
@@ -7065,22 +7043,6 @@ def _merge_display_messages_after_agent_result(
             ):
                 merged[-1]['id'] = msg['id']
             continue
-        adjacent_replay_digest = _canonical_message_digest(msg)
-        if (
-            adjacent_replay_digest is not None
-            and isinstance(msg, dict)
-            and msg.get('role') == 'assistant'
-            and merged
-            and _comparison_keys_equal(
-                _canonical_message_digest(merged[-1]),
-                adjacent_replay_digest,
-            )
-        ):
-            # Some provider/result replay paths can include the same assistant
-            # payload twice in the current delta. Full canonical equality is
-            # required: visible-text identity can erase distinct ids,
-            # attachments, annotations, or reasoning metadata.
-            continue
         if _is_context_compression_marker(msg) and key is not None and key in seen:
             continue
         display_msg = msg
@@ -7095,7 +7057,7 @@ def _merge_display_messages_after_agent_result(
         merged.append(copy.deepcopy(display_msg))
         if key is not None:
             seen.add(key)
-    merged, _ = _collapse_duplicate_durable_empty_assistant_replays(merged)
+    merged, _ = _collapse_replayed_assistant_rows(merged)
     return merged
 
 

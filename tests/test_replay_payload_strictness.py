@@ -459,6 +459,52 @@ def test_display_merge_collapses_exact_nonempty_assistant_payload():
     assert assistants == [first]
 
 
+def test_settle_keeps_payload_distinct_assistants_in_both_projections():
+    first = {
+        "role": "assistant",
+        "content": "same",
+        "id": "assistant-a",
+        "reasoning": "first reasoning",
+        "annotations": [{"source": "A"}],
+    }
+    distinct = {
+        **copy.deepcopy(first),
+        "id": "assistant-b",
+        "reasoning": "second reasoning",
+        "annotations": [{"source": "B"}],
+    }
+
+    session = _settle_structured_result([], [first, distinct])
+
+    for projection in (session.messages, session.context_messages):
+        assert [row.get("role") for row in projection] == [
+            "user",
+            "assistant",
+            "assistant",
+        ]
+        assert [
+            row.get("id")
+            for row in projection
+            if row.get("role") == "assistant"
+        ] == ["assistant-a", "assistant-b"]
+
+
+def test_settle_collapses_exact_assistant_payload_in_both_projections():
+    first = {
+        "role": "assistant",
+        "content": "same",
+        "id": "assistant-a",
+        "reasoning": "same reasoning",
+        "attachments": [{"name": "A.pdf"}],
+    }
+
+    session = _settle_structured_result([], [first, copy.deepcopy(first)])
+
+    for projection in (session.messages, session.context_messages):
+        assistants = [row for row in projection if row.get("role") == "assistant"]
+        assert assistants == [first]
+
+
 @pytest.mark.parametrize(
     "bad_idx",
     [True, 1.0, 1.5, "1", _IntSubclass(1), None, -1],
@@ -493,9 +539,66 @@ def test_active_turn_authority_rejects_lossy_turn_id_types(bad_turn_id):
         result={"current_turn_user_idx": 1, "turn_id": bad_turn_id},
     )
 
-    assert resolved["current_turn_user_idx"] == 1
+    assert resolved["current_turn_user_idx"] is None
     assert resolved["turn_id"] == ""
     assert _active_turn_boundary_is_valid(resolved) is False
+
+
+def test_active_turn_authority_does_not_mix_fields_across_attempts():
+    from api.streaming import (
+        _active_turn_boundary_is_valid,
+        _resolve_active_turn_authority,
+    )
+
+    resolved = _resolve_active_turn_authority(
+        {
+            "token": "stream:attempt",
+            "text": "prompt",
+            "current_turn_user_idx": 1,
+            "turn_id": "turn:first-attempt",
+        },
+        result={"current_turn_user_idx": 2, "turn_id": []},
+        agent=SimpleNamespace(
+            _persist_user_message_idx=None,
+            _current_turn_id="turn:second-attempt",
+        ),
+    )
+
+    assert resolved["current_turn_user_idx"] is None
+    assert resolved["turn_id"] == ""
+    assert _active_turn_boundary_is_valid(resolved) is False
+
+
+def test_active_turn_authority_accepts_complete_result_pair_atomically():
+    from api.streaming import _resolve_active_turn_authority
+
+    resolved = _resolve_active_turn_authority(
+        {"current_turn_user_idx": 1, "turn_id": "turn:first-attempt"},
+        result={"current_turn_user_idx": 2, "turn_id": "turn:result"},
+        agent=SimpleNamespace(
+            _persist_user_message_idx=3,
+            _current_turn_id="turn:agent",
+        ),
+    )
+
+    assert resolved["current_turn_user_idx"] == 2
+    assert resolved["turn_id"] == "turn:result"
+
+
+def test_active_turn_authority_falls_back_to_complete_agent_pair():
+    from api.streaming import _resolve_active_turn_authority
+
+    resolved = _resolve_active_turn_authority(
+        {"current_turn_user_idx": 1, "turn_id": "turn:first-attempt"},
+        result={"current_turn_user_idx": 2, "turn_id": []},
+        agent=SimpleNamespace(
+            _persist_user_message_idx=3,
+            _current_turn_id="turn:agent",
+        ),
+    )
+
+    assert resolved["current_turn_user_idx"] == 3
+    assert resolved["turn_id"] == "turn:agent"
 
 
 def test_partial_reducer_only_removes_identical_rows():

@@ -2649,6 +2649,32 @@ def _canonical_message_digest(message):
     return hashlib.sha256(canonical_payload).digest()
 
 
+def _collapse_adjacent_exact_assistant_replays(messages) -> tuple[list, bool]:
+    """Collapse only adjacent assistants with identical strict JSON payloads."""
+    if not isinstance(messages, list):
+        return messages, False
+    collapsed = []
+    changed = False
+    for message in messages:
+        message_digest = (
+            _canonical_message_digest(message)
+            if type(message) is dict and message.get('role') == 'assistant'
+            else None
+        )
+        previous_digest = (
+            _canonical_message_digest(collapsed[-1])
+            if collapsed
+            and type(collapsed[-1]) is dict
+            and collapsed[-1].get('role') == 'assistant'
+            else None
+        )
+        if message_digest is not None and message_digest == previous_digest:
+            changed = True
+            continue
+        collapsed.append(message)
+    return collapsed, changed
+
+
 _STRUCTURED_REPLAY_FIELDS = frozenset({
     'tool_call_id',
     'tool_calls',
@@ -2735,12 +2761,15 @@ def _collapse_duplicate_durable_empty_assistant_replays(messages) -> tuple[list,
 
 def _collapse_replayed_assistant_rows(messages) -> tuple[list, bool]:
     """Apply the complete replay-repair contract to one message projection."""
-    repaired, partials_changed = _collapse_adjacent_duplicate_partials(messages)
+    repaired, exact_changed = _collapse_adjacent_exact_assistant_replays(messages)
+    repaired, partials_changed = _collapse_adjacent_duplicate_partials(repaired)
     repaired, incomplete_changed = _collapse_duplicate_incomplete_message_ids(repaired)
     repaired, durable_changed = _collapse_duplicate_durable_empty_assistant_replays(
         repaired
     )
-    return repaired, bool(partials_changed or incomplete_changed or durable_changed)
+    return repaired, bool(
+        exact_changed or partials_changed or incomplete_changed or durable_changed
+    )
 
 
 def _repair_session_message_projections(data: dict) -> tuple[dict, bool, bool]:
