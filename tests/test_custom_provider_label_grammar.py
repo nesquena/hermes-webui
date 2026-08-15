@@ -381,7 +381,11 @@ def _assert_js_matches_python(tmp_path, rests):
     """Assert both implementations answer identically for every rest in `rests`."""
     js_results = _js_authority(tmp_path, rests)
     py_results = [config._custom_slug_rest_is_endpoint_authority(rest) for rest in rests]
-    drift = [(r, j, p) for r, j, p in zip(rests, js_results, py_results) if j is not p]
+    drift = [
+        (r, j, p)
+        for r, j, p in zip(rests, js_results, py_results, strict=True)
+        if j is not p
+    ]
     assert not drift, f"JS/Python grammar drift ({len(drift)} of {len(rests)}): {drift[:20]}"
     return py_results
 
@@ -418,7 +422,8 @@ def _ipv6_cross_check_corpus():
         for parts in itertools.product(atoms, repeat=count):
             for joins in itertools.product((":", "::"), repeat=count - 1):
                 inner = "".join(
-                    part + join for part, join in zip(parts, (*joins, ""))
+                    part + join
+                    for part, join in zip(parts, (*joins, ""), strict=True)
                 )
                 inners.update((inner, f"::{inner}", f"{inner}::"))
     return [f"[{inner}]:80" for inner in sorted(inners)]
