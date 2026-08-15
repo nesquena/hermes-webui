@@ -7,6 +7,7 @@ import multiprocessing
 import os
 import queue
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
@@ -1494,8 +1495,8 @@ def test_backup_dominance_preserves_message_order():
     assert _ordered_json_rows_cover([second, first], [first, second]) is False
 
 
-def test_backup_snapshot_dominance_budget_exhaustion_fails_closed():
-    from api.models import _session_snapshot_covers
+def test_backup_snapshot_dominance_budget_exhaustion_fails_closed(monkeypatch):
+    from api import models
 
     baseline = {
         "session_id": "bounded-backup",
@@ -1510,11 +1511,148 @@ def test_backup_snapshot_dominance_budget_exhaustion_fails_closed():
         ],
     }
 
-    assert _session_snapshot_covers(
+    assert models._session_snapshot_covers(
         candidate,
         baseline,
         max_canonical_bytes=64,
     ) is False
+
+    boundary = {"future_metadata": "x" * 7}
+    assert models._session_snapshot_covers(
+        boundary,
+        boundary,
+        max_canonical_bytes=18,
+    ) is True
+
+    real_dumps = models.json.dumps
+    dumps_calls = []
+
+    def counted_dumps(value, *args, **kwargs):
+        dumps_calls.append(value)
+        return real_dumps(value, *args, **kwargs)
+
+    monkeypatch.setattr(models.json, "dumps", counted_dumps)
+    assert models._session_snapshot_covers(
+        boundary,
+        boundary,
+        max_canonical_bytes=17,
+    ) is False
+    assert len(dumps_calls) == 1
+
+    oversized = "z" * (4 * 1024 * 1024)
+    deeply_nested = None
+    # Top-level list-valued fields compare their rows independently, so one
+    # layer is consumed by the ordered-subsequence traversal before preflight.
+    for _ in range(66):
+        deeply_nested = [deeply_nested]
+    cyclic = []
+    cyclic.append(cyclic)
+    too_many_items = {"one": 1, "two": 2, "three": 3}
+    lone_surrogate = "\ud800"
+
+    def reject_unproven_serialization(value, *args, **kwargs):
+        if (
+            value is oversized
+            or value is deeply_nested
+            or value is cyclic
+            or value is too_many_items
+            or value is lone_surrogate
+            or value == b"opaque"
+        ):
+            pytest.fail("out-of-budget or non-canonical value reached json.dumps")
+        return real_dumps(value, *args, **kwargs)
+
+    monkeypatch.setattr(models.json, "dumps", reject_unproven_serialization)
+    assert models._session_snapshot_covers(
+        {"future_metadata": oversized},
+        {"future_metadata": oversized},
+        max_canonical_bytes=1024 * 1024,
+    ) is False
+    assert models._session_snapshot_covers(
+        {"future_metadata": deeply_nested},
+        {"future_metadata": deeply_nested},
+    ) is False
+    assert models._session_snapshot_covers(
+        {"future_metadata": b"opaque"},
+        {"future_metadata": b"opaque"},
+    ) is False
+    assert models._session_snapshot_covers(
+        {"future_metadata": {"cycle": cyclic}},
+        {"future_metadata": {"cycle": cyclic}},
+    ) is False
+    assert models._session_snapshot_covers(
+        {"future_metadata": lone_surrogate},
+        {"future_metadata": lone_surrogate},
+    ) is False
+
+    monkeypatch.setattr(models, "_BACKUP_SNAPSHOT_DOMINANCE_MAX_ITEMS", 2)
+    assert models._session_snapshot_covers(
+        {"future_metadata": too_many_items},
+        {"future_metadata": too_many_items},
+    ) is False
+
+    def memory_error(*_args, **_kwargs):
+        raise MemoryError
+
+    monkeypatch.setattr(models.json, "dumps", memory_error)
+    assert models._session_snapshot_covers(
+        {"future_metadata": "small"},
+        {"future_metadata": "small"},
+    ) is False
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="requires Linux RSS and RLIMIT_AS")
+def test_backup_snapshot_dominance_oversize_preflight_bounds_memory():
+    repo_root = Path(__file__).resolve().parents[1]
+    probe = r'''import json
+import resource
+
+from api.models import _session_snapshot_covers
+
+payload = "x" * (80 * 1024 * 1024)
+snapshot = {"future_unknown_metadata": payload}
+rss_before_kib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+with open("/proc/self/status", encoding="utf-8") as status_file:
+    vm_size_kib = next(
+        int(line.split()[1])
+        for line in status_file
+        if line.startswith("VmSize:")
+    )
+headroom = 96 * 1024 * 1024
+_, hard_limit = resource.getrlimit(resource.RLIMIT_AS)
+soft_limit = vm_size_kib * 1024 + headroom
+if hard_limit != resource.RLIM_INFINITY:
+    soft_limit = min(soft_limit, hard_limit)
+resource.setrlimit(
+    resource.RLIMIT_AS,
+    (soft_limit, hard_limit),
+)
+try:
+    result = _session_snapshot_covers(snapshot, snapshot)
+except BaseException as exc:
+    outcome = type(exc).__name__
+else:
+    outcome = repr(result)
+rss_after_kib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+print(json.dumps({
+    "outcome": outcome,
+    "rss_peak_delta_mib": (rss_after_kib - rss_before_kib) / 1024,
+}))
+'''
+    completed = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=repo_root,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    report = json.loads(completed.stdout)
+    assert report["outcome"] == "False"
+    assert report["rss_peak_delta_mib"] < 16
 
 
 def test_backup_retirement_requires_live_revision_to_still_match(

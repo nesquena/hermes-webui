@@ -345,6 +345,8 @@ def _publish_sidecar_no_replace(source: Path, destination: Path) -> None:
 _BACKUP_SNAPSHOT_DOMINANCE_MAX_FIELDS = 512
 _BACKUP_SNAPSHOT_DOMINANCE_MAX_LIST_ROWS = 200_000
 _BACKUP_SNAPSHOT_DOMINANCE_MAX_CANONICAL_BYTES = 64 * 1024 * 1024
+_BACKUP_SNAPSHOT_DOMINANCE_MAX_DEPTH = 64
+_BACKUP_SNAPSHOT_DOMINANCE_MAX_ITEMS = 1_000_000
 
 
 class _SnapshotDominanceBudgetExceeded(ValueError):
@@ -355,34 +357,153 @@ class _SnapshotDominanceBudget:
     def __init__(self, max_canonical_bytes: int):
         self.remaining_bytes = max_canonical_bytes
         self.remaining_rows = _BACKUP_SNAPSHOT_DOMINANCE_MAX_LIST_ROWS
+        self.remaining_items = _BACKUP_SNAPSHOT_DOMINANCE_MAX_ITEMS
+        self._active_containers = set()
 
     def consume_rows(self, count: int) -> None:
         if count > self.remaining_rows:
             raise _SnapshotDominanceBudgetExceeded
         self.remaining_rows -= count
 
+    def _consume_items(self, count: int) -> None:
+        if count > self.remaining_items:
+            raise _SnapshotDominanceBudgetExceeded
+        self.remaining_items -= count
+
+    @staticmethod
+    def _add_size(total: int, amount: int, limit: int) -> int:
+        if amount > limit - total:
+            raise _SnapshotDominanceBudgetExceeded
+        return total + amount
+
+    def _measure_string(self, value: str, limit: int) -> int:
+        size = len(value) + 2  # one UTF-8 byte minimum per codepoint, plus quotes
+        if size > limit:
+            raise _SnapshotDominanceBudgetExceeded
+        if value.isascii():
+            for match in re.finditer(r'["\\\x00-\x1f]', value):
+                codepoint = ord(match.group())
+                size = self._add_size(
+                    size,
+                    1 if codepoint in {8, 9, 10, 12, 13, 34, 92} else 5,
+                    limit,
+                )
+            return size
+
+        size = 2
+        for char in value:
+            codepoint = ord(char)
+            if char in {'"', '\\'} or char in {'\b', '\f', '\n', '\r', '\t'}:
+                encoded_size = 2
+            elif codepoint < 0x20:
+                encoded_size = 6
+            elif codepoint < 0x80:
+                encoded_size = 1
+            elif codepoint < 0x800:
+                encoded_size = 2
+            elif 0xD800 <= codepoint <= 0xDFFF:
+                raise UnicodeError("surrogate is not valid UTF-8 JSON")
+            elif codepoint < 0x10000:
+                encoded_size = 3
+            else:
+                encoded_size = 4
+            size = self._add_size(size, encoded_size, limit)
+        return size
+
+    def _measure_json(self, value, *, depth: int, limit: int) -> int:
+        if depth > _BACKUP_SNAPSHOT_DOMINANCE_MAX_DEPTH:
+            raise _SnapshotDominanceBudgetExceeded
+
+        value_type = type(value)
+        if value_type is str:
+            return self._measure_string(value, limit)
+        if value is None:
+            if limit < 4:
+                raise _SnapshotDominanceBudgetExceeded
+            return 4
+        if value_type is bool:
+            size = 4 if value else 5
+            if size > limit:
+                raise _SnapshotDominanceBudgetExceeded
+            return size
+        if value_type is int:
+            bit_count = abs(value).bit_length()
+            digit_upper_bound = max(1, (bit_count * 30103 + 99_999) // 100_000)
+            size = digit_upper_bound + int(value < 0)
+            if size > limit:
+                raise _SnapshotDominanceBudgetExceeded
+            return size
+        if value_type is float:
+            # CPython's JSON float spellings are bounded by the longest finite
+            # repr (24 ASCII bytes); NaN and infinities are shorter.
+            if limit < 24:
+                raise _SnapshotDominanceBudgetExceeded
+            return 24
+        if value_type not in {list, dict}:
+            raise TypeError("snapshot value is not canonical JSON")
+
+        container_id = id(value)
+        if container_id in self._active_containers:
+            raise ValueError("circular snapshot value")
+        self._active_containers.add(container_id)
+        try:
+            self._consume_items(len(value))
+            size = 2  # [] or {}
+            if size > limit:
+                raise _SnapshotDominanceBudgetExceeded
+            if value_type is list:
+                for index, item in enumerate(value):
+                    if index:
+                        size = self._add_size(size, 1, limit)
+                    item_size = self._measure_json(
+                        item,
+                        depth=depth + 1,
+                        limit=limit - size,
+                    )
+                    size = self._add_size(size, item_size, limit)
+                return size
+
+            for index, (key, item) in enumerate(value.items()):
+                if type(key) is not str:
+                    raise TypeError("snapshot object key is not a string")
+                if index:
+                    size = self._add_size(size, 1, limit)
+                key_size = self._measure_string(key, limit - size)
+                size = self._add_size(size, key_size, limit)
+                size = self._add_size(size, 1, limit)  # colon
+                item_size = self._measure_json(
+                    item,
+                    depth=depth + 1,
+                    limit=limit - size,
+                )
+                size = self._add_size(size, item_size, limit)
+            return size
+        finally:
+            self._active_containers.remove(container_id)
+
     def consume_json(self, value) -> str:
-        canonical = json.dumps(
+        encoded_size = self._measure_json(
+            value,
+            depth=0,
+            limit=self.remaining_bytes,
+        )
+        self.remaining_bytes -= encoded_size
+        return json.dumps(
             value,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
         )
-        encoded_size = len(canonical.encode("utf-8"))
-        if encoded_size > self.remaining_bytes:
-            raise _SnapshotDominanceBudgetExceeded
-        self.remaining_bytes -= encoded_size
-        return canonical
 
 
 def _ordered_json_rows_cover(candidate, baseline, *, _budget=None) -> bool:
     """Return whether baseline is an ordered canonical-row subsequence."""
-    if not isinstance(candidate, list) or not isinstance(baseline, list):
+    if type(candidate) is not list or type(baseline) is not list:
         return False
-    budget = _budget or _SnapshotDominanceBudget(
-        _BACKUP_SNAPSHOT_DOMINANCE_MAX_CANONICAL_BYTES
-    )
     try:
+        budget = _budget or _SnapshotDominanceBudget(
+            _BACKUP_SNAPSHOT_DOMINANCE_MAX_CANONICAL_BYTES
+        )
         budget.consume_rows(len(candidate) + len(baseline))
         candidate_rows = iter(budget.consume_json(row) for row in candidate)
         baseline_rows = (budget.consume_json(row) for row in baseline)
@@ -391,10 +512,11 @@ def _ordered_json_rows_cover(candidate, baseline, *, _budget=None) -> bool:
             for baseline_row in baseline_rows
         )
     except (
+        MemoryError,
         OverflowError,
         RecursionError,
         TypeError,
-        UnicodeEncodeError,
+        UnicodeError,
         ValueError,
     ):
         return False
@@ -424,7 +546,7 @@ def _session_snapshot_covers(
     Comparison work is capped.  Oversized, deeply nested, or non-canonical
     payloads are incomparable and therefore take the archive/keep path.
     """
-    if not isinstance(candidate, dict) or not isinstance(baseline, dict):
+    if type(candidate) is not dict or type(baseline) is not dict:
         return False
     if (
         type(max_canonical_bytes) is not int
@@ -433,8 +555,12 @@ def _session_snapshot_covers(
         or len(baseline) > _BACKUP_SNAPSHOT_DOMINANCE_MAX_FIELDS
     ):
         return False
-    budget = _SnapshotDominanceBudget(max_canonical_bytes)
     try:
+        if any(type(key) is not str for key in candidate) or any(
+            type(key) is not str for key in baseline
+        ):
+            return False
+        budget = _SnapshotDominanceBudget(max_canonical_bytes)
         for key, baseline_value in baseline.items():
             if key in _BACKUP_SNAPSHOT_BOOKKEEPING_FIELDS:
                 continue
@@ -454,10 +580,11 @@ def _session_snapshot_covers(
             ):
                 return False
     except (
+        MemoryError,
         OverflowError,
         RecursionError,
         TypeError,
-        UnicodeEncodeError,
+        UnicodeError,
         ValueError,
     ):
         return False
