@@ -1,7 +1,10 @@
 import hashlib
 import json
+import os
+import stat
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -46,10 +49,15 @@ def test_large_session_load_defers_inline_repair_and_blocks_save(tmp_path, monke
     monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
     monkeypatch.setattr(models, "_INLINE_REPLAY_REPAIR_MAX_BYTES", 1)
     sid = "offline-repair-required"
+    duplicate_partial = {
+        "role": "assistant",
+        "content": "streaming",
+        "_partial": True,
+    }
     payload = {
         "session_id": sid,
-        "messages": [_row(), _row()],
-        "context_messages": [_row(), _row()],
+        "messages": [duplicate_partial, duplicate_partial],
+        "context_messages": [],
     }
     sidecar = session_dir / f"{sid}.json"
     sidecar.write_text(json.dumps(payload), encoding="utf-8")
@@ -101,10 +109,14 @@ def test_offline_compactor_is_atomic_idempotent_and_reversible(tmp_path):
     }
 
     result = compact_sidecar(sidecar)
-    repaired = json.loads(sidecar.read_text(encoding="utf-8"))
+    repaired_text = sidecar.read_text(encoding="utf-8")
+    repaired = json.loads(repaired_text)
 
     assert result["status"] == "compacted"
     assert repaired["_sidecar_generation_v1"] == 8
+    assert repaired_text.index('"_sidecar_generation_v1"') < repaired_text.index(
+        '"messages"'
+    )
     assert repaired["message_count"] == 4
     assert repaired["compression_anchor_visible_idx"] is None
     assert repaired["messages"] == [replay, unique, opaque, opaque]
@@ -354,3 +366,245 @@ def test_ambiguous_empty_rows_are_not_removed(tmp_path):
 
     assert result["status"] == "no_change"
     assert result["arrays"]["messages"]["removed"] == 0
+
+
+def test_offline_compactor_serializes_runtime_writer_through_publish(
+    tmp_path,
+    monkeypatch,
+):
+    from api import models
+    from scripts import compact_session_replays as compactor
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    sidecar = session_dir / "race.json"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "session_id": "race",
+                "title": "before",
+                "messages": [_row(), _row()],
+                "context_messages": [],
+                "_sidecar_generation_v1": 3,
+            }
+        ),
+        encoding="utf-8",
+    )
+    writer = models.Session.load("race")
+    assert writer is not None
+    writer.title = "newer writer"
+    writer_done = threading.Event()
+    writer_thread = None
+    writer_finished_before_publish = []
+    real_replace = os.replace
+
+    def _save_newer():
+        writer.save(skip_index=True)
+        writer_done.set()
+
+    def _interleave_writer(source, destination):
+        nonlocal writer_thread
+        source_path = Path(source)
+        destination_path = Path(destination)
+        if (
+            destination_path == sidecar
+            and ".replay-v10.tmp." in source_path.name
+        ):
+            writer_thread = threading.Thread(target=_save_newer)
+            writer_thread.start()
+            writer_finished_before_publish.append(writer_done.wait(0.25))
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(compactor.os, "replace", _interleave_writer)
+
+    compactor.compact_sidecar(sidecar)
+    assert writer_thread is not None
+    writer_thread.join(timeout=3)
+
+    assert writer_finished_before_publish == [False]
+    assert writer_done.is_set()
+    persisted = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert persisted["title"] == "newer writer"
+    assert persisted["_sidecar_generation_v1"] == 5
+
+
+def test_runtime_save_preserves_and_advances_sidecar_generation(tmp_path, monkeypatch):
+    from api import models
+
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    sidecar = tmp_path / "generation.json"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "session_id": "generation",
+                "messages": [{"role": "user", "content": "keep"}],
+                "_sidecar_generation_v1": 7,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = models.Session.load("generation")
+    assert loaded is not None
+    loaded.title = "saved"
+    loaded.save(skip_index=True)
+
+    persisted = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert persisted["_sidecar_generation_v1"] == 8
+
+
+def test_large_valid_session_can_save_after_no_change_analysis(tmp_path, monkeypatch):
+    from api import models
+    from scripts.compact_session_replays import compact_sidecar
+
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    monkeypatch.setattr(models, "_INLINE_REPLAY_REPAIR_MAX_BYTES", 1)
+    sidecar = tmp_path / "large-valid.json"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "session_id": "large-valid",
+                "messages": [{"role": "user", "content": "unique"}],
+                "context_messages": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert compact_sidecar(sidecar, dry_run=True)["status"] == "no_change"
+    loaded = models.Session.load("large-valid")
+    assert loaded is not None
+    assert loaded._replay_repair_deferred is False
+    loaded.title = "still writable"
+    loaded.save(skip_index=True)
+    assert json.loads(sidecar.read_text(encoding="utf-8"))["title"] == "still writable"
+
+
+def test_compactor_preserves_private_source_mode(tmp_path):
+    from scripts.compact_session_replays import compact_sidecar, restore_manifest
+
+    sidecar = tmp_path / "private.json"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "session_id": "private",
+                "messages": [_row(), _row()],
+                "context_messages": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    sidecar.chmod(0o600)
+
+    result = compact_sidecar(sidecar)
+    backup = Path(result["backup"])
+    manifest = Path(result["manifest"])
+    assert stat.S_IMODE(sidecar.stat().st_mode) == 0o600
+    assert stat.S_IMODE(backup.stat().st_mode) == 0o600
+    assert stat.S_IMODE(manifest.stat().st_mode) == 0o600
+
+    restore_manifest(manifest)
+    assert stat.S_IMODE(sidecar.stat().st_mode) == 0o600
+
+
+def test_compactor_rejects_invalid_non_target_json_without_publish(tmp_path):
+    from scripts import compact_session_replays as compactor
+
+    sidecar = tmp_path / "invalid.json"
+    original = (
+        '{"session_id":"invalid","metadata":{"broken":},'
+        '"messages":['
+        + json.dumps(_row(), separators=(",", ":"))
+        + ','
+        + json.dumps(_row(), separators=(",", ":"))
+        + '],"context_messages":[]}'
+    )
+    sidecar.write_text(original, encoding="utf-8")
+
+    with pytest.raises(compactor.StreamJSONError, match="invalid JSON"):
+        compactor.compact_sidecar(sidecar)
+
+    assert sidecar.read_text(encoding="utf-8") == original
+    assert not list(tmp_path.glob("*manifest*.json"))
+
+
+def test_compactor_rejects_nonstandard_target_constant_without_publish(tmp_path):
+    from scripts import compact_session_replays as compactor
+
+    sidecar = tmp_path / "nonstandard.json"
+    original = (
+        '{"session_id":"nonstandard","messages":[NaN],'
+        '"context_messages":[]}'
+    )
+    sidecar.write_text(original, encoding="utf-8")
+
+    with pytest.raises(compactor.StreamJSONError, match="invalid JSON constant"):
+        compactor.compact_sidecar(sidecar)
+
+    assert sidecar.read_text(encoding="utf-8") == original
+    assert not list(tmp_path.glob("*manifest*.json"))
+
+
+def test_compactor_manifest_is_excluded_from_session_index(tmp_path, monkeypatch):
+    from api import models
+    from scripts.compact_session_replays import compact_sidecar
+
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    sidecar = tmp_path / "indexed.json"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "session_id": "indexed",
+                "messages": [_row(), _row()],
+                "context_messages": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = compact_sidecar(sidecar)
+    assert Path(result["manifest"]).name.startswith("_")
+    models._write_session_index(updates=None)
+    index = json.loads((tmp_path / "_index.json").read_text(encoding="utf-8"))
+    assert [row["session_id"] for row in index] == ["indexed"]
+
+
+def test_large_index_rebuild_uses_metadata_prefix(tmp_path, monkeypatch):
+    from api import models
+
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    monkeypatch.setattr(models, "_INLINE_REPLAY_REPAIR_MAX_BYTES", 1)
+    sidecar = tmp_path / "large-index.json"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "session_id": "large-index",
+                "title": "Large",
+                "created_at": 1,
+                "updated_at": 2,
+                "message_count": 2,
+                "messages": [
+                    {"role": "user", "content": "one"},
+                    {"role": "assistant", "content": "two"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _must_not_collapse(_messages):
+        raise AssertionError("large index rebuild full-parsed the transcript")
+
+    monkeypatch.setattr(models, "_collapse_adjacent_duplicate_partials", _must_not_collapse)
+    models._write_session_index(updates=None)
+
+    index = json.loads((tmp_path / "_index.json").read_text(encoding="utf-8"))
+    assert len(index) == 1
+    assert index[0]["session_id"] == "large-index"
+    assert index[0]["message_count"] == 2

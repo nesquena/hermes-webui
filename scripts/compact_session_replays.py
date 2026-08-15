@@ -20,6 +20,7 @@ import pickle
 import resource
 import shutil
 import sqlite3
+import stat as stat_module
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -176,6 +177,10 @@ class StreamJSONError(ValueError):
     """Raised when a sidecar cannot be transformed safely."""
 
 
+def _reject_json_constant(constant: str):
+    raise StreamJSONError(f'invalid JSON constant: {constant}')
+
+
 class StreamReader:
     def __init__(self, handle: TextIO, chunk_chars: int = _CHUNK_CHARS):
         self.handle = handle
@@ -183,7 +188,7 @@ class StreamReader:
         self.buffer = ''
         self.pos = 0
         self.eof = False
-        self.decoder = json.JSONDecoder()
+        self.decoder = json.JSONDecoder(parse_constant=_reject_json_constant)
 
     def _compact_and_fill(self) -> bool:
         if self.pos:
@@ -249,61 +254,141 @@ class StreamReader:
             self.pos = end
             return value
 
-    def copy_raw_value(self, output: TextIO | None) -> None:
-        """Copy one non-target JSON value without materializing containers."""
-        self.skip_ws()
+    def copy_raw_value(self, output: TextIO | None, *, _depth: int = 0) -> None:
+        """Validate and copy one JSON value without materializing containers."""
+        if _depth > 512:
+            raise StreamJSONError('invalid JSON value: nesting exceeds 512 levels')
+        self._copy_ws(output)
         first = self.peek()
         if not first:
-            raise StreamJSONError('missing JSON value')
-        if first not in '[{"':
-            self._copy_scalar(output)
+            raise StreamJSONError('invalid JSON value: missing value')
+        if first == '"':
+            self._copy_string(output)
             return
+        if first == '{':
+            self._copy_object(output, _depth)
+            return
+        if first == '[':
+            self._copy_array(output, _depth)
+            return
+        self._copy_scalar(output)
 
-        depth = 0
-        in_string = False
-        escaped = False
-        started_container = first in '[{'
+    def _copy_ws(self, output: TextIO | None) -> None:
         pending: list[str] = []
+        while self.peek() and self.peek().isspace():
+            pending.append(self.take())
+            if len(pending) >= 65_536:
+                self._flush(output, pending)
+        self._flush(output, pending)
+
+    def _copy_string(self, output: TextIO | None) -> str:
+        pending = [self.take()]
+        escaped = False
         while True:
             char = self.take()
             pending.append(char)
-            if in_string:
-                if escaped:
-                    escaped = False
-                elif char == '\\':
-                    escaped = True
-                elif char == '"':
-                    in_string = False
-                    if not started_container and depth == 0:
-                        self._flush(output, pending)
-                        return
-            else:
-                if char == '"':
-                    in_string = True
-                elif char in '[{':
-                    depth += 1
-                elif char in ']}':
-                    depth -= 1
-                    if started_container and depth == 0:
-                        self._flush(output, pending)
-                        return
-            if len(pending) >= 65_536:
-                self._flush(output, pending)
+            if len(pending) > _MAX_ITEM_CHARS:
+                raise StreamJSONError(
+                    f'invalid JSON string: exceeds {_MAX_ITEM_CHARS} characters'
+                )
+            if escaped:
+                escaped = False
+            elif char == '\\':
+                escaped = True
+            elif char == '"':
+                break
+        text = ''.join(pending)
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise StreamJSONError(f'invalid JSON string: {exc}') from exc
+        if not isinstance(value, str):
+            raise StreamJSONError('invalid JSON string')
+        if output is not None:
+            output.write(text)
+        return value
+
+    def _copy_object(self, output: TextIO | None, depth: int) -> None:
+        opening = self.take()
+        if output is not None:
+            output.write(opening)
+        self._copy_ws(output)
+        if self.peek() == '}':
+            closing = self.take()
+            if output is not None:
+                output.write(closing)
+            return
+        while True:
+            if self.peek() != '"':
+                raise StreamJSONError('invalid JSON object key: expected string')
+            self._copy_string(output)
+            self._copy_ws(output)
+            if self.take() != ':':
+                raise StreamJSONError("invalid JSON object: expected ':'")
+            if output is not None:
+                output.write(':')
+            self.copy_raw_value(output, _depth=depth + 1)
+            self._copy_ws(output)
+            delimiter = self.take()
+            if delimiter not in ',}':
+                raise StreamJSONError(
+                    f'invalid JSON object delimiter: {delimiter!r}'
+                )
+            if output is not None:
+                output.write(delimiter)
+            if delimiter == '}':
+                return
+            self._copy_ws(output)
+
+    def _copy_array(self, output: TextIO | None, depth: int) -> None:
+        opening = self.take()
+        if output is not None:
+            output.write(opening)
+        self._copy_ws(output)
+        if self.peek() == ']':
+            closing = self.take()
+            if output is not None:
+                output.write(closing)
+            return
+        while True:
+            self.copy_raw_value(output, _depth=depth + 1)
+            self._copy_ws(output)
+            delimiter = self.take()
+            if delimiter not in ',]':
+                raise StreamJSONError(
+                    f'invalid JSON array delimiter: {delimiter!r}'
+                )
+            if output is not None:
+                output.write(delimiter)
+            if delimiter == ']':
+                return
+            self._copy_ws(output)
 
     def _copy_scalar(self, output: TextIO | None) -> None:
         pending: list[str] = []
         while True:
             char = self.peek()
-            if not char or char in ',}]':
-                text = ''.join(pending).rstrip()
-                if not text:
-                    raise StreamJSONError('empty scalar value')
-                if output is not None:
-                    output.write(text)
-                return
+            if not char or char.isspace() or char in ',}]':
+                break
             pending.append(self.take())
-            if len(pending) >= 65_536:
-                self._flush(output, pending)
+            if len(pending) > _MAX_ITEM_CHARS:
+                raise StreamJSONError(
+                    f'invalid JSON scalar: exceeds {_MAX_ITEM_CHARS} characters'
+                )
+        text = ''.join(pending)
+        if not text:
+            raise StreamJSONError('invalid JSON scalar: empty value')
+        try:
+            value = json.loads(
+                text,
+                parse_constant=_reject_json_constant,
+            )
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise StreamJSONError(f'invalid JSON scalar: {exc}') from exc
+        if isinstance(value, (dict, list)):
+            raise StreamJSONError('invalid JSON scalar')
+        if output is not None:
+            output.write(text)
 
     @staticmethod
     def _flush(output: TextIO | None, pending: list[str]) -> None:
@@ -505,12 +590,22 @@ def transform_sidecar(
                 output.write('}')
             return stats
         saw_generation = False
+        if output is not None and write_generation is not None:
+            output.write(
+                f'"_sidecar_generation_v1":{write_generation}'
+            )
+            first_field = False
         while True:
             key = reader.decode_value()
             if type(key) is not str:
                 raise StreamJSONError('top-level session keys must be strings')
             reader.expect(':')
-            if output is not None:
+            emit_field = not (
+                output is not None
+                and write_generation is not None
+                and key == '_sidecar_generation_v1'
+            )
+            if output is not None and emit_field:
                 if not first_field:
                     output.write(',')
                 output.write(json.dumps(key, ensure_ascii=False))
@@ -536,7 +631,7 @@ def transform_sidecar(
                 source_generation = _valid_generation(reader.decode_value())
                 if metadata is not None:
                     metadata['generation'] = source_generation
-                if output is not None:
+                if output is not None and emit_field:
                     output.write(
                         str(
                             write_generation
@@ -547,7 +642,8 @@ def transform_sidecar(
                 saw_generation = True
             else:
                 reader.copy_raw_value(output)
-            first_field = False
+            if output is not None and emit_field:
+                first_field = False
             reader.skip_ws()
             delimiter = reader.take()
             if delimiter == '}':
@@ -562,10 +658,6 @@ def transform_sidecar(
         if metadata is not None and not saw_generation:
             metadata['generation'] = 0
         if output is not None:
-            if write_generation is not None and not saw_generation:
-                output.write(
-                    f',"_sidecar_generation_v1":{write_generation}'
-                )
             output.write('}')
     return stats
 
@@ -594,9 +686,18 @@ def _fsync_dir(path: Path) -> None:
         os.close(descriptor)
 
 
-def _copy_exclusive(source: Path, destination: Path) -> None:
+def _copy_exclusive(
+    source: Path,
+    destination: Path,
+    *,
+    mode: int | None = None,
+) -> None:
     try:
         with source.open('rb') as src, destination.open('xb') as dst:
+            os.fchmod(
+                dst.fileno(),
+                mode if mode is not None else stat_module.S_IMODE(source.stat().st_mode),
+            )
             shutil.copyfileobj(src, dst, length=4 << 20)
             dst.flush()
             os.fsync(dst.fileno())
@@ -618,6 +719,7 @@ def compact_sidecar(path: Path, *, dry_run: bool = False) -> dict:
     lock_path = _sidecar_lock_path(path)
     with lock_path.open('a+', encoding='utf-8') as lock_handle:
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        source_mode = stat_module.S_IMODE(path.stat().st_mode)
         source_signature = _signature(path)
         source_sha256 = _sha256(path)
         source_metadata: dict[str, int] = {}
@@ -647,17 +749,22 @@ def compact_sidecar(path: Path, *, dry_run: bool = False) -> dict:
         if backup.exists():
             if _sha256(backup) != source_sha256:
                 raise StreamJSONError(f'existing backup checksum mismatch: {backup}')
+            os.chmod(backup, source_mode)
         else:
-            _copy_exclusive(path, backup)
+            _copy_exclusive(path, backup, mode=source_mode)
             if _sha256(backup) != source_sha256:
                 backup.unlink(missing_ok=True)
                 raise StreamJSONError('source changed while the backup was copied')
             _fsync_dir(path.parent)
 
         temp = path.with_name(f'.{path.name}.replay-v10.tmp.{os.getpid()}')
-        manifest = backup.with_suffix(f'{backup.suffix}.manifest.json')
+        manifest = path.with_name(
+            f'_replay-v10.{path.name}.{source_sha256[:16]}.manifest.json'
+        )
+        manifest_tmp = None
         try:
             with temp.open('x', encoding='utf-8') as output:
+                os.fchmod(output.fileno(), source_mode)
                 written = transform_sidecar(
                     path,
                     output,
@@ -697,12 +804,15 @@ def compact_sidecar(path: Path, *, dry_run: bool = False) -> dict:
                 encoding='utf-8',
             )
             with manifest_tmp.open('rb') as handle:
+                os.fchmod(handle.fileno(), source_mode)
                 os.fsync(handle.fileno())
             os.replace(manifest_tmp, manifest)
             os.replace(temp, path)
             _fsync_dir(path.parent)
         finally:
             temp.unlink(missing_ok=True)
+            if manifest_tmp is not None:
+                manifest_tmp.unlink(missing_ok=True)
         result.update(
             status='compacted',
             backup=str(backup),
@@ -722,6 +832,7 @@ def restore_manifest(manifest: Path) -> dict:
     lock_path = _sidecar_lock_path(source)
     with lock_path.open('a+', encoding='utf-8') as lock_handle:
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        source_mode = stat_module.S_IMODE(source.stat().st_mode)
         source_signature = _signature(source)
         if _sha256(source) != payload['output_sha256']:
             raise StreamJSONError('current sidecar no longer matches compacted output')
@@ -735,6 +846,7 @@ def restore_manifest(manifest: Path) -> dict:
         temp = source.with_name(f'.{source.name}.replay-v10.restore.{os.getpid()}')
         try:
             with temp.open('x', encoding='utf-8') as output:
+                os.fchmod(output.fileno(), source_mode)
                 _copy_with_generation(backup, output, restore_generation)
                 output.flush()
                 os.fsync(output.fileno())

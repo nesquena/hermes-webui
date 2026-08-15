@@ -237,33 +237,42 @@ Session is a plain Python class (not a dataclass, not SQLAlchemy):
 Loading a session normally repairs known replay duplicates before returning the
 mutable `Session`. For a sidecar larger than 128 MiB, that inline path would
 create several full-size copies inside an HTTP request. `Session.load()` instead
-marks the projection as `_replay_repair_deferred`, preserves every row, and
-`Session.save()` refuses to publish it until an operator runs the bounded-memory
-repair tool.
+performs an allocation-free adjacent-partial check: only a large projection that
+actually needs that repair is marked `_replay_repair_deferred` and blocked from
+save. A large valid projection remains writable, and full session-index rebuilds
+use the metadata prefix rather than parsing/copying the transcript.
 
-Drain and stop every WebUI process that can write the session before using the
-tool, especially on releases that predate the shared per-session sidecar lock:
+`Session.save()` and the tool share an exclusive per-session sidecar lock.
+Every normal save, compact, and restore also advances
+`_sidecar_generation_v1` from the durable value observed under that lock, so a
+normal save interleaved with publication is serialized and receives the next
+generation instead of being silently overwritten. The command nevertheless
+remains strictly offline: always drain and stop every WebUI process
+before running it, because direct delete/recovery paths and older or non-WebUI
+writers may not acquire this maintenance lock:
 
 ```bash
 python scripts/compact_session_replays.py --dry-run ~/.hermes/webui/sessions/<session-id>.json
 python scripts/compact_session_replays.py ~/.hermes/webui/sessions/<session-id>.json
 ```
 
-The tool performs separate analysis and write passes, limits one decoded JSON
-item to 64 MiB, and transforms only top-level `messages` and
-`context_messages`. Exact replay membership is tracked in a temporary SQLite
+The tool performs separate analysis and write passes, validates every copied
+JSON value, limits one decoded JSON item to 64 MiB, and transforms only
+top-level `messages` and `context_messages`. Exact replay membership is tracked
+in a temporary SQLite
 index with a bounded page cache, so RAM does not grow with the number of unique
 message identities; operators must provide temporary-disk headroom proportional
 to that unique-key count. It publishes only while the source inode/stat
 signature, SHA-256, and generation still match. Ambiguous or non-JSON-stable
-rows are retained. A content-addressed byte-exact backup and checksum manifest
-are fsynced before the compacted sidecar is atomically installed; both compact
-and restore advance `_sidecar_generation_v1`.
+rows are retained. A content-addressed byte-exact backup and hidden checksum
+manifest are fsynced before the compacted sidecar is atomically installed; the
+source mode is preserved on source, backup, manifest, and restore output. The
+hidden manifest is excluded from session discovery and index rebuilds.
 
 Rollback is explicit and also fail-closed:
 
 ```bash
-python scripts/compact_session_replays.py --restore <backup>.manifest.json
+python scripts/compact_session_replays.py --restore <manifest-path>
 ```
 
 Restore refuses if either the current compacted sidecar or immutable backup no
