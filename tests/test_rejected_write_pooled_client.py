@@ -210,8 +210,9 @@ def test_duplicate_content_length_upload_closes_and_cannot_poison_the_socket(pat
 #   sidecar GET   -> 403, then 400 Bad request syntax ('{"stale": true}GET /...')
 #   /api/upload   -> 400, then 400 Bad request syntax ('--x')
 # `Message` collapses `Content-Length:` and `Content-Length:   ` to the same '',
-# and a blank `Transfer-Encoding:` sat in the unframed set beside `identity`, so
-# each spelling below poisoned the socket the same way.
+# and a blank `Transfer-Encoding:` reached the allowlist of codings that "framed
+# nothing" (since deleted — see the identity section below), so each spelling
+# below poisoned the socket the same way.
 
 _BLANK_FRAMING_HEADER_LINES = (
     b"Content-Length:\r\n",
@@ -319,6 +320,89 @@ def test_malformed_zero_framing_upload_closes_and_cannot_poison_the_socket(path,
     _assert_single_closed_response(answered, status, _MULTIPART_PAYLOAD)
 
 
+# ── `Transfer-Encoding: identity` frames nothing a reader can trust ───────────
+#
+# `identity` sat in an allowlist of codings that "frame nothing", so a request
+# carrying it read back as body-less however many payload bytes followed. RFC
+# 9112 §6.3 leaves no room for that: a request whose final transfer coding is not
+# `chunked` cannot be framed by a recipient, so it must be refused and the
+# connection closed — and `http.server` decodes no transfer coding at all, so
+# `identity` is no more readable here than `chunked` is. Reproduced live on the
+# otherwise-fixed head, pipelined down one socket:
+#
+#   GET /api/extensions/probe/sidecar/ping  `Transfer-Encoding: identity`
+#                                           {"stale": true}
+#     -> HTTP/1.1 403 Forbidden        (no Connection: close)
+#     -> HTTP/1.1 400 Bad request syntax
+#            ('{"stale": true}GET /api/health/agent HTTP/1.1')
+#   POST /api/upload  `Transfer-Encoding: identity`  --x...
+#     -> HTTP/1.1 400 Bad Request      (no Connection: close, "No file field")
+#     -> HTTP/1.1 400 Bad request syntax ('--x')
+#
+# Only the spellings that normalize to the bare token were poisoned — every
+# neighbouring value (`identity, chunked`, `identity,identity`, a lone comma, an
+# unknown coding, a non-OWS-padded token, a blank value) already missed the
+# allowlist and already closed. Those rows are in the sweep below anyway: this is
+# the fourth round in which an adjacent spelling of one framing rule survived a
+# fix, so the whole neighbourhood gets pinned rather than just the reported case.
+
+_IDENTITY_FRAMING_LINES = [
+    b"Transfer-Encoding: identity\r\n",
+    b"Transfer-Encoding: IDENTITY\r\n",
+    b"Transfer-Encoding: Identity\r\n",
+    b"Transfer-Encoding:  identity \r\n",
+    b"Transfer-Encoding: \tidentity\t\r\n",
+    b"Transfer-Encoding: identity\r\nTransfer-Encoding: identity\r\n",
+    b"Transfer-Encoding: identity\r\nContent-Length: 0\r\n",
+    b"Transfer-Encoding: identity\r\nContent-Length: " + str(len(_BODY)).encode() + b"\r\n",
+    b"Transfer-Encoding: identity, chunked\r\n",
+    b"Transfer-Encoding: chunked, identity\r\n",
+    b"Transfer-Encoding: identity,identity\r\n",
+    b"Transfer-Encoding: ,\r\n",
+    b"Transfer-Encoding: banana\r\n",
+]
+
+
+@pytest.mark.parametrize("framing", _IDENTITY_FRAMING_LINES)
+def test_identity_framing_sidecar_get_closes_and_cannot_poison_the_socket(framing):
+    answered = _pipelined_after(
+        b"GET /api/extensions/probe/sidecar/ping HTTP/1.1\r\n"
+        b"Host: 127.0.0.1\r\n"
+        b"Content-Type: application/json\r\n" + framing + b"\r\n" + _BODY
+    )
+
+    _assert_single_closed_response(answered, b"403", _BODY)
+
+
+@pytest.mark.parametrize("path", _MULTIPART_UPLOAD_PATHS)
+@pytest.mark.parametrize(
+    "framing",
+    [
+        b"Transfer-Encoding: identity\r\n",
+        b"Transfer-Encoding: IDENTITY \r\n",
+        b"Transfer-Encoding: identity\r\nContent-Length: 0\r\n",
+    ],
+    ids=["identity", "identity-cased-and-padded", "identity-plus-zero-length"],
+)
+def test_identity_framing_upload_closes_and_cannot_poison_the_socket(path, framing):
+    """All four multipart handlers, mirroring the chunked cases above.
+
+    `identity` carries no Content-Length either, so the length-0 read found no
+    parts and each handler answered 400 "No file field in request" with the whole
+    multipart payload still queued on an open socket.
+    """
+    answered = _pipelined_after(
+        f"POST {path} HTTP/1.1\r\n"
+        "Host: 127.0.0.1\r\n"
+        "Content-Type: multipart/form-data; boundary=x\r\n".encode()
+        + framing
+        + b"\r\n"
+        + _MULTIPART_PAYLOAD
+    )
+
+    _assert_single_closed_response(answered, b"411", _MULTIPART_PAYLOAD)
+
+
 @pytest.mark.parametrize(
     "framing",
     [
@@ -327,8 +411,6 @@ def test_malformed_zero_framing_upload_closes_and_cannot_poison_the_socket(path,
         b"Content-Length: 00\r\n",
         b"Content-Length:  0 \r\n",
         b"Content-Length: 0\r\nContent-Length: 0\r\n",
-        b"Transfer-Encoding: identity\r\n",
-        b"Transfer-Encoding: IDENTITY \r\n",
     ],
     ids=[
         "no-length",
@@ -336,8 +418,6 @@ def test_malformed_zero_framing_upload_closes_and_cannot_poison_the_socket(path,
         "double-zero-length",
         "ows-padded-zero",
         "two-agreeing-zeroes",
-        "identity",
-        "identity-cased-and-padded",
     ],
 )
 def test_bodyless_framing_keeps_the_pooled_socket_alive(framing):
