@@ -36,12 +36,17 @@ class FakeSession:
 
 def test_preserve_pre_compression_snapshot_clears_runtime_fields_while_restoring_continuation_state(tmp_path, monkeypatch):
     monkeypatch.setattr(streaming, "SESSION_DIR", tmp_path)
-    (tmp_path / "old_session.json").write_text(json.dumps({"messages": []}), encoding="utf-8")
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    (tmp_path / "old_session.json").write_text(
+        json.dumps({"session_id": "old_session", "messages": []}),
+        encoding="utf-8",
+    )
     session = FakeSession()
 
     streaming._preserve_pre_compression_snapshot(session, "old_session")
 
-    assert session.saved_payload == {
+    saved = json.loads((tmp_path / "old_session.json").read_text(encoding="utf-8"))
+    assert saved == {
         "session_id": "old_session",
         "parent_session_id": "original_parent",
         "pre_compression_snapshot": True,
@@ -61,7 +66,6 @@ def test_preserve_pre_compression_snapshot_clears_runtime_fields_while_restoring
     assert session.pending_attachments == [{"name": "file.txt"}]
     assert session.pending_started_at == 123.0
 
-    saved = json.loads((tmp_path / "old_session.json").read_text(encoding="utf-8"))
     assert saved["pre_compression_snapshot"] is True
     assert saved["pinned"] is False
     assert saved["active_stream_id"] is None
@@ -107,7 +111,11 @@ def test_preserve_pre_compression_snapshot_load_and_mark_branch_clears_runtime_f
 def test_preserve_pre_compression_snapshot_does_not_leave_continuation_marked_as_snapshot(tmp_path, monkeypatch):
     """A continuation loaded from an old snapshot must not remain hidden."""
     monkeypatch.setattr(streaming, "SESSION_DIR", tmp_path)
-    (tmp_path / "old_session.json").write_text(json.dumps({"messages": []}), encoding="utf-8")
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    (tmp_path / "old_session.json").write_text(
+        json.dumps({"session_id": "old_session", "messages": []}),
+        encoding="utf-8",
+    )
     session = FakeSession()
     session.pre_compression_snapshot = True
 
