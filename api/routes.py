@@ -24994,12 +24994,40 @@ def _handle_approval_respond(handler, body):
                 )
                 return j(handler, relay_payload, status=relay_status)
         if _run_id:
-            relay_payload, relay_status = _relay_gateway_run_approval(
-                sid,
-                matched_mirror or {},
-                choice,
-                enable_yolo=enable_yolo,
-            )
+            if enable_yolo:
+                # The visible card path must serialize the same session-wide
+                # handoff as the ordinary /api/session/yolo route and the Runs
+                # stream. Revalidate the exact mirror after acquiring it so a
+                # later approval cannot be parked while this relay commits YOLO.
+                with gateway_yolo_handoff(sid):
+                    current_mirror = gateway_pending_mirror(
+                        sid,
+                        approval_id=approval_id,
+                        run_id=_run_id,
+                    )
+                    if current_mirror is None:
+                        relay_payload, relay_status = _gateway_approval_failure(
+                            sid,
+                            choice,
+                            code="gateway_run_unavailable",
+                            error=_GATEWAY_APPROVAL_RELAY_UNAVAILABLE,
+                            status=409,
+                            enable_yolo=True,
+                        )
+                    else:
+                        relay_payload, relay_status = _relay_gateway_run_approval(
+                            sid,
+                            current_mirror,
+                            choice,
+                            enable_yolo=True,
+                        )
+            else:
+                relay_payload, relay_status = _relay_gateway_run_approval(
+                    sid,
+                    matched_mirror or {},
+                    choice,
+                    enable_yolo=False,
+                )
             return j(handler, relay_payload, status=relay_status)
         if _candidate_run_id:
             relay_payload, relay_status = _gateway_approval_failure(

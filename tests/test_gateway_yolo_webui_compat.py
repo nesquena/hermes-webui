@@ -643,20 +643,27 @@ def test_yolo_post_preserves_mirror_while_owned_relay_fails(monkeypatch):
     toggle_handler = object()
     relay_started = threading.Event()
     release_relay = threading.Event()
+    toggle_entered = threading.Event()
     responses = {}
+    relay_attempts = []
     disable_session_yolo(sid)
 
     def fake_respond(_self, _run_id, _approval_id, _choice):
+        relay_attempts.append((_run_id, _approval_id, _choice))
         relay_started.set()
         assert release_relay.wait(timeout=5)
         raise RunnerClientError("relay failed")
+
+    def fake_read_body(_handler):
+        toggle_entered.set()
+        return {"session_id": sid, "enabled": True}
 
     def fake_j(handler, data, status=200, extra_headers=None):
         responses[handler] = {"payload": data, "status": status}
         return data
 
     monkeypatch.setattr(routes, "j", fake_j)
-    monkeypatch.setattr(routes, "read_body", lambda _handler: {"session_id": sid, "enabled": True})
+    monkeypatch.setattr(routes, "read_body", fake_read_body)
     monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
     monkeypatch.setattr(routes, "_handle_extension_sidecar_proxy", lambda *_a, **_k: False)
     monkeypatch.setattr(
@@ -678,25 +685,33 @@ def test_yolo_post_preserves_mirror_while_owned_relay_fails(monkeypatch):
         card_handler,
         {"session_id": sid, "choice": "once", "approval_id": approval_id, "yolo": True},
     ))
+    toggle_worker = threading.Thread(
+        target=lambda: routes.handle_post(
+            toggle_handler, urllib.parse.urlparse("/api/session/yolo")
+        )
+    )
 
     try:
         worker.start()
         assert relay_started.wait(timeout=5)
-        routes.handle_post(toggle_handler, urllib.parse.urlparse("/api/session/yolo"))
-
-        assert responses[toggle_handler]["status"] == 409
-        assert responses[toggle_handler]["payload"]["code"] == "gateway_approval_in_progress"
-        assert responses[toggle_handler]["payload"]["yolo_enabled"] is False
-        assert is_session_yolo_enabled(sid) is False
-        assert route_approvals.gateway_pending_mirror(
-            sid, approval_id=approval_id, run_id=run_id
-        ) is not None
+        toggle_worker.start()
+        assert toggle_entered.wait(timeout=5)
+        assert toggle_worker.is_alive()
+        assert toggle_handler not in responses
 
         release_relay.set()
         worker.join(timeout=5)
+        toggle_worker.join(timeout=5)
         assert not worker.is_alive()
+        assert not toggle_worker.is_alive()
+        assert relay_attempts == [
+            (run_id, approval_id, "once"),
+            (run_id, approval_id, "once"),
+        ]
         assert responses[card_handler]["status"] == 502
+        assert responses[toggle_handler]["status"] == 502
         assert responses[card_handler]["payload"]["yolo_enabled"] is False
+        assert responses[toggle_handler]["payload"]["yolo_enabled"] is False
         assert is_session_yolo_enabled(sid) is False
         assert route_approvals.gateway_pending_mirror(
             sid, approval_id=approval_id, run_id=run_id
@@ -704,6 +719,7 @@ def test_yolo_post_preserves_mirror_while_owned_relay_fails(monkeypatch):
     finally:
         release_relay.set()
         worker.join(timeout=5)
+        toggle_worker.join(timeout=5)
         disable_session_yolo(sid)
         route_approvals.retire_gateway_pending_mirror(sid, run_id=run_id)
         with routes._lock:
@@ -1102,6 +1118,131 @@ def test_yolo_post_first_relay_serializes_next_gateway_approval(monkeypatch):
         assert auto_approved == [(run_id, "approval-second")]
         assert route_approvals.gateway_pending_mirror(sid) is None
     finally:
+        disable_session_yolo(sid)
+        route_approvals.retire_gateway_pending_mirror(sid, run_id=run_id)
+        with routes._lock:
+            routes._pending.pop(sid, None)
+            routes._gateway_queues.pop(sid, None)
+
+
+@pytest.mark.skipif(not APPROVAL_AVAILABLE, reason="tools.approval unavailable")
+@pytest.mark.parametrize("relay_fails", [False, True])
+def test_card_yolo_first_relay_serializes_next_gateway_approval(monkeypatch, relay_fails):
+    from api import route_approvals, routes
+
+    sid = (
+        "webui-card-yolo-first-relay-failure"
+        if relay_fails
+        else "webui-card-yolo-first-relay-success"
+    )
+    run_id = "run-card-yolo-first-relay"
+    response = {}
+    stream_results = []
+    stream_workers = []
+    auto_approved = []
+    approval_a = {
+        "command": "touch /tmp/webui-yolo-a",
+        "description": "first",
+        "approval_id": "approval-card-first",
+        "run_id": run_id,
+        "_gateway_mirror": True,
+        "_gateway_agent_identity_v1": True,
+    }
+    approval_b = {
+        "command": "touch /tmp/webui-yolo-b",
+        "description": "second",
+        "approval_id": "approval-card-second",
+        "run_id": run_id,
+        "_gateway_mirror": True,
+        "_gateway_agent_identity_v1": True,
+    }
+
+    class NotifyingLock:
+        def __init__(self):
+            self._lock = threading.Lock()
+            self.contended = threading.Event()
+
+        def __enter__(self):
+            if not self._lock.acquire(blocking=False):
+                self.contended.set()
+                self._lock.acquire()
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            self._lock.release()
+
+    handoff_lock = NotifyingLock()
+    disable_session_yolo(sid)
+    route_approvals.submit_gateway_pending_mirror(sid, dict(approval_a))
+
+    def next_stream_approval():
+        stream_results.append(
+            gateway_chat._settle_gateway_run_approval(
+                sid, dict(approval_b), "http://gateway", ""
+            )
+        )
+
+    def fake_respond(_self, got_run_id, approval_id, choice):
+        assert (got_run_id, approval_id, choice) == (
+            run_id,
+            "approval-card-first",
+            "once",
+        )
+        worker = threading.Thread(target=next_stream_approval)
+        worker.start()
+        stream_workers.append(worker)
+        handoff_lock.contended.wait(timeout=1)
+        if relay_fails:
+            raise RunnerClientError("relay failed")
+        return {"resolved": 1}
+
+    def fake_auto_approve(_base_url, _api_key, got_run_id, approval_id):
+        auto_approved.append((got_run_id, approval_id))
+
+    def fake_j(_handler, data, status=200, extra_headers=None):
+        response.update(payload=data, status=status)
+        return data
+
+    monkeypatch.setattr(route_approvals, "gateway_yolo_handoff", lambda _sid: handoff_lock)
+    monkeypatch.setattr(routes, "gateway_yolo_handoff", lambda _sid: handoff_lock)
+    monkeypatch.setattr(routes, "get_session", lambda _sid: SimpleNamespace(active_stream_id=None))
+    monkeypatch.setattr(gateway_chat, "_auto_approve_gateway_run", fake_auto_approve)
+    monkeypatch.setattr("api.runner_client.HttpRunnerClient.respond_approval", fake_respond)
+    monkeypatch.setattr(config, "gateway_supports_approval_identity_v1", lambda *_a, **_k: True)
+    monkeypatch.setattr(routes, "j", fake_j)
+
+    try:
+        routes._handle_approval_respond(
+            object(),
+            {
+                "session_id": sid,
+                "choice": "once",
+                "approval_id": "approval-card-first",
+                "yolo": True,
+            },
+        )
+        for worker in stream_workers:
+            worker.join(timeout=1)
+            assert not worker.is_alive()
+
+        assert handoff_lock.contended.is_set()
+        assert response["status"] == (502 if relay_fails else 200)
+        assert response["payload"]["ok"] is (not relay_fails)
+        assert response["payload"]["yolo_enabled"] is (not relay_fails)
+        assert stream_results and stream_results[0][0] is (not relay_fails)
+        if relay_fails:
+            assert auto_approved == []
+            assert route_approvals.gateway_pending_mirror(
+                sid, approval_id=approval_b["approval_id"], run_id=run_id
+            ) is not None
+        else:
+            assert auto_approved == [(run_id, approval_b["approval_id"])]
+            assert route_approvals.gateway_pending_mirror(
+                sid, approval_id=approval_b["approval_id"], run_id=run_id
+            ) is None
+    finally:
+        for worker in stream_workers:
+            worker.join(timeout=1)
         disable_session_yolo(sid)
         route_approvals.retire_gateway_pending_mirror(sid, run_id=run_id)
         with routes._lock:
