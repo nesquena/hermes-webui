@@ -46,7 +46,7 @@ def _make_state_db(path: Path, sid: str, rows):
         "CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, title TEXT, model TEXT, started_at REAL, message_count INTEGER)"
     )
     conn.execute(
-        "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, content TEXT, timestamp REAL, tool_call_id TEXT, tool_calls TEXT, tool_name TEXT)"
+        "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, content TEXT, timestamp REAL, tool_call_id TEXT, tool_calls TEXT, tool_name TEXT, api_content TEXT)"
     )
     conn.execute(
         "INSERT INTO sessions (id, source, title, model, started_at, message_count) VALUES (?, ?, ?, ?, ?, ?)",
@@ -54,7 +54,7 @@ def _make_state_db(path: Path, sid: str, rows):
     )
     for row in rows:
         conn.execute(
-            "INSERT INTO messages (session_id, role, content, timestamp, tool_call_id, tool_calls, tool_name) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO messages (session_id, role, content, timestamp, tool_call_id, tool_calls, tool_name, api_content) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 sid,
                 row["role"],
@@ -63,6 +63,7 @@ def _make_state_db(path: Path, sid: str, rows):
                 row.get("tool_call_id"),
                 row.get("tool_calls"),
                 row.get("tool_name"),
+                row.get("api_content"),
             ),
         )
     conn.commit()
@@ -74,7 +75,7 @@ def _append_state_db_rows(path: Path, sid: str, rows):
     try:
         for row in rows:
             conn.execute(
-                "INSERT INTO messages (session_id, role, content, timestamp, tool_call_id, tool_calls, tool_name) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO messages (session_id, role, content, timestamp, tool_call_id, tool_calls, tool_name, api_content) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     sid,
                     row["role"],
@@ -83,6 +84,7 @@ def _append_state_db_rows(path: Path, sid: str, rows):
                     row.get("tool_call_id"),
                     row.get("tool_calls"),
                     row.get("tool_name"),
+                    row.get("api_content"),
                 ),
             )
         conn.execute(
@@ -130,6 +132,141 @@ def _large_timestamped_sidecar_messages(count=500):
         {"role": "user", "content": f"sidecar {idx}", "timestamp": float(idx)}
         for idx in range(count)
     ]
+
+
+def _state_db_reconciliation_session(messages):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        session_id="state-db-row-identity",
+        messages=messages,
+        truncation_watermark=None,
+        truncation_boundary=None,
+    )
+
+
+def _state_db_identity_message(row_id=...):
+    message = {
+        "role": "assistant",
+        "content": "same",
+        "timestamp": 1000.0,
+        "api_content": "same-wire",
+    }
+    if row_id is not ...:
+        message["_state_db_row_id"] = row_id
+    return message
+
+
+def test_normal_state_db_reconciliation_preserves_distinct_sqlite_rows(
+    monkeypatch,
+    tmp_path,
+):
+    """The public normal reader keeps source multiplicity but hides provenance."""
+    import api.models as models
+    from api.helpers import public_session_projection
+
+    sid = "normal_identical_state_rows"
+    _make_state_db(
+        tmp_path / "state.db",
+        sid,
+        [
+            {
+                "role": "assistant",
+                "content": "same",
+                "timestamp": 1000.0,
+                "api_content": "same-wire",
+            },
+            {
+                "role": "assistant",
+                "content": "same",
+                "timestamp": 1000.0,
+                "api_content": "same-wire",
+            },
+        ],
+    )
+    session = _install_test_session(monkeypatch, tmp_path, sid, [])
+
+    source_rows = models.get_state_db_session_messages(sid)
+    reconciled = models.reconciled_state_db_messages_for_session(session)
+
+    assert [message["_state_db_row_id"] for message in source_rows] == [1, 2]
+    assert [message["_state_db_row_id"] for message in reconciled] == [1, 2]
+    public = public_session_projection({"messages": reconciled})
+    assert len(public["messages"]) == 2
+    assert all(
+        not {"api_content", "_state_db_row_id", "_db_row_id", "state_db_row_id"}
+        & set(message)
+        for message in public["messages"]
+    )
+
+
+def test_normal_state_db_reconciliation_deduplicates_same_row_replay():
+    import api.models as models
+
+    replay = _state_db_identity_message(7)
+    reconciled = models.reconciled_state_db_messages_for_session(
+        _state_db_reconciliation_session([]),
+        state_messages=[replay, dict(replay)],
+    )
+
+    assert reconciled == [replay]
+
+
+def test_normal_state_db_reconciliation_keeps_new_row_with_existing_sidecar():
+    import api.models as models
+
+    sidecar_row = _state_db_identity_message(1)
+    state_rows = [dict(sidecar_row), _state_db_identity_message(2)]
+
+    reconciled = models.reconciled_state_db_messages_for_session(
+        _state_db_reconciliation_session([sidecar_row]),
+        state_messages=state_rows,
+    )
+
+    assert [message["_state_db_row_id"] for message in reconciled] == [1, 2]
+
+
+@pytest.mark.parametrize(
+    ("first_row_id", "second_row_id"),
+    [
+        (1, "1"),
+        (True, 1),
+        (True, "True"),
+    ],
+)
+def test_normal_state_db_reconciliation_keeps_typed_row_ids_distinct(
+    first_row_id,
+    second_row_id,
+):
+    import api.models as models
+
+    reconciled = models.reconciled_state_db_messages_for_session(
+        _state_db_reconciliation_session([]),
+        state_messages=[
+            _state_db_identity_message(first_row_id),
+            _state_db_identity_message(second_row_id),
+        ],
+    )
+
+    assert [
+        (type(message["_state_db_row_id"]), message["_state_db_row_id"])
+        for message in reconciled
+    ] == [
+        (type(first_row_id), first_row_id),
+        (type(second_row_id), second_row_id),
+    ]
+
+
+def test_normal_state_db_reconciliation_without_row_id_keeps_legacy_dedup():
+    import api.models as models
+
+    row = _state_db_identity_message()
+    reconciled = models.reconciled_state_db_messages_for_session(
+        _state_db_reconciliation_session([]),
+        state_messages=[row, dict(row)],
+    )
+
+    assert reconciled == [row]
 
 
 def test_missing_sidecar_recovery_preserves_identical_state_rows_by_row_identity(

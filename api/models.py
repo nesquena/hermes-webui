@@ -8920,31 +8920,35 @@ def _merge_session_display_metadata(target: dict | None, source: dict | None) ->
             target[key] = copy.deepcopy(value)
 
 
-def _state_db_row_identity_details(message: dict | None) -> tuple[str | None, bool]:
-    """Return ``(row_id, valid)`` for private state.db provenance aliases.
+def _state_db_row_identity_details(
+    message: dict | None,
+) -> tuple[tuple[str, object] | None, bool]:
+    """Return a strict typed identity for private state.db provenance aliases.
 
-    A message carrying two different aliases is contradictory provenance.  It
-    must not silently fall through to timestamp/sequence matching, because that
-    would turn an identity conflict into a guessed provider-side payload.
+    A message carrying aliases with different scalar types or values is
+    contradictory provenance. Numeric spellings are normalized only within
+    their type bucket, so ``1``, ``1.0`` and ``"1"`` remain distinct durable
+    identities. Malformed provenance must not authorize deletion through a
+    weaker timestamp/sequence fallback.
     """
     if not isinstance(message, dict):
         return None, True
-    values = set()
+    values: set[tuple[str, object]] = set()
     for key in ("_state_db_row_id", "_db_row_id", "state_db_row_id"):
         if key not in message or message.get(key) in (None, ""):
             continue
         value = message.get(key)
-        if isinstance(value, bool):
-            return None, False
-        if isinstance(value, int):
-            normalized = str(value) if value >= 0 else None
-        elif isinstance(value, float):
-            normalized = str(int(value)) if math.isfinite(value) and value >= 0 and value.is_integer() else None
-        elif isinstance(value, str):
+        if type(value) is int:
+            normalized = ("int", value) if value >= 0 else None
+        elif type(value) is float:
+            normalized = (
+                ("float", value)
+                if math.isfinite(value) and value >= 0 and value.is_integer()
+                else None
+            )
+        elif type(value) is str:
             text = value.strip()
-            normalized = text if text.isdigit() else None
-            if normalized is not None:
-                normalized = str(int(normalized))
+            normalized = ("str", str(int(text))) if text.isdigit() else None
         else:
             normalized = None
         if normalized is None:
@@ -9502,32 +9506,42 @@ def _reconcile_api_content_sidecars(sidecar_messages: list, state_messages: list
 def _session_message_dedup_key(msg: dict):
     """Like _session_message_merge_key but preserves full-precision timestamp.
 
-    Two messages are true duplicates only if role, content, AND exact
-    timestamp all match.  Sub-second timestamp differences indicate
-    legitimately distinct messages (e.g. two assistant turns within the
-    same wall-clock second).
+    Two messages are true duplicates only if role, content, exact timestamp,
+    and any durable State DB row identity all match. Sub-second timestamp
+    differences indicate legitimately distinct messages (e.g. two assistant
+    turns within the same wall-clock second).
     """
     if not isinstance(msg, dict):
         return ("non_dict", repr(msg))
+    row_id, row_id_valid = _state_db_row_identity_details(msg)
     message_identity = msg.get("id") or msg.get("message_id")
     if message_identity:
-        return _session_message_key_with_sidecar(
+        key = _session_message_key_with_sidecar(
             ("message_id", str(message_identity)), msg
         )
-    # Include tool_calls in the key so assistant messages that carry
-    # different tool invocations (but identical empty content/timestamp)
-    # are never collapsed into one.  (#3346 regression)
-    _tc = msg.get("tool_calls")
-    _tc_key = json.dumps(_tc, sort_keys=True, default=str) if _tc else ""
-    return _session_message_key_with_sidecar((
-        "legacy",
-        str(msg.get("role") or ""),
-        str(msg.get("content") or ""),
-        str(msg.get("timestamp") or ""),
-        str(msg.get("tool_call_id") or ""),
-        str(msg.get("tool_name") or msg.get("name") or ""),
-        _tc_key,
-    ), msg)
+    else:
+        # Include tool_calls in the key so assistant messages that carry
+        # different tool invocations (but identical empty content/timestamp)
+        # are never collapsed into one.  (#3346 regression)
+        _tc = msg.get("tool_calls")
+        _tc_key = json.dumps(_tc, sort_keys=True, default=str) if _tc else ""
+        key = _session_message_key_with_sidecar((
+            "legacy",
+            str(msg.get("role") or ""),
+            str(msg.get("content") or ""),
+            str(msg.get("timestamp") or ""),
+            str(msg.get("tool_call_id") or ""),
+            str(msg.get("tool_name") or msg.get("name") or ""),
+            _tc_key,
+        ), msg)
+    if not row_id_valid:
+        # Malformed provenance cannot delete another source row. Object identity
+        # is process-local by design and only scopes this fail-closed key to the
+        # current linear merge pass.
+        return (*key, ("invalid_state_db_row_id", id(msg)))
+    if row_id is not None:
+        return (*key, ("state_db_row_id", row_id))
+    return key
 
 
 def _normalized_session_message_content(msg: dict) -> str:
@@ -10197,15 +10211,30 @@ def merge_session_messages_append_only(
         dedup_key = _cached_message_key(msg, "dedup")
         visible_key = _cached_message_key(msg, "visible")
         content_key = _cached_message_key(msg, "content")
+        row_id, row_id_valid = _state_db_row_identity_details(msg)
         replays_sidecar_prefix = False
         replay_target = None
         if state_replay_idx < len(sidecar_visible_sequence):
             expected_visible_key = sidecar_visible_sequence[state_replay_idx]
-            if visible_key == expected_visible_key or _has_visible_duplicate(
-                visible_key, {expected_visible_key}
+            expected_message = sidecar_visible_messages[state_replay_idx]
+            expected_row_id, expected_row_id_valid = _state_db_row_identity_details(
+                expected_message
+            )
+            row_ids_can_replay = (
+                row_id_valid
+                and expected_row_id_valid
+                and (
+                    row_id is None
+                    or expected_row_id is None
+                    or row_id == expected_row_id
+                )
+            )
+            if row_ids_can_replay and (
+                visible_key == expected_visible_key
+                or _has_visible_duplicate(visible_key, {expected_visible_key})
             ):
                 replays_sidecar_prefix = True
-                replay_target = sidecar_visible_messages[state_replay_idx]
+                replay_target = expected_message
                 state_replay_idx += 1
         if replays_sidecar_prefix:
             _merge_session_display_metadata(replay_target, msg)
@@ -10222,7 +10251,6 @@ def merge_session_messages_append_only(
             # are caught by the dedup guard (#3346).
             seen_dedup_keys.add(dedup_key)
             continue
-        row_id, row_id_valid = _state_db_row_identity_details(msg)
         row_id_sidecar_conflict = False
         existing = (
             merged_by_row_id.get(row_id)
@@ -10248,6 +10276,27 @@ def merge_session_messages_append_only(
                     _copy_api_content_sidecar(existing, msg)
                 _merge_session_display_metadata(existing, msg)
                 continue
+        # A unique typed state.db identity proves this is another source row
+        # once the sidecar's corresponding visible-occurrence budget has been
+        # consumed (or when the sidecar already carries different typed row
+        # identities). We only use that proof to bypass weaker duplicate
+        # heuristics below; edit/truncation watermark guards still apply.
+        row_id_preserves_source_multiplicity = (
+            row_id_valid
+            and row_id is not None
+            and state_row_id_counts.get(row_id, 0) == 1
+            and (
+                (
+                    bool(sidecar_row_id_counts)
+                    and sidecar_row_id_counts.get(row_id, 0) == 0
+                )
+                or (
+                    sidecar_visible_counts.get(visible_key, 0) > 0
+                    and skipped_state_visible_counts.get(visible_key, 0)
+                    >= sidecar_visible_counts[visible_key]
+                )
+            )
+        )
         # Skip rows ABOVE the watermark only while the sidecar has NOT advanced
         # past the watermark. Because Session.save() no longer auto-clears the
         # watermark, an unconditional `timestamp > watermark` skip would become
@@ -10340,7 +10389,11 @@ def merge_session_messages_append_only(
             # already seen.  For legacy keys the dedup check above already
             # handled true duplicates; same-second distinct messages must
             # fall through.
-            if key in seen_message_keys and key[0] == "message_id":
+            if (
+                key in seen_message_keys
+                and key[0] == "message_id"
+                and not row_id_preserves_source_multiplicity
+            ):
                 _merge_session_display_metadata(merged_by_message_key.get(key), msg)
                 continue
             if not (isinstance(key, tuple) and key[:1] == ("message_id",)):
@@ -10349,10 +10402,19 @@ def merge_session_messages_append_only(
                 # Different tool_calls produce different merge_keys even with
                 # identical content/timestamp, so an unchecked continue here
                 # would drop legitimately distinct turns.  (#3346 / PR #3665)
-                if key in seen_message_keys:
-                    _merge_session_display_metadata(merged_by_message_key.get(key), msg)
+                if (
+                    key in seen_message_keys
+                    and not row_id_preserves_source_multiplicity
+                ):
+                    _merge_session_display_metadata(
+                        merged_by_message_key.get(key), msg
+                    )
                     continue
-        if key in seen_message_keys and key[0] == "message_id":
+        if (
+            key in seen_message_keys
+            and key[0] == "message_id"
+            and not row_id_preserves_source_multiplicity
+        ):
             _merge_session_display_metadata(merged_by_message_key.get(key), msg)
             continue
         matched_visible_key = _matching_visible_duplicate(
@@ -10363,7 +10425,10 @@ def merge_session_messages_append_only(
         if matched_visible_key is not None:
             skipped_count = skipped_state_visible_counts.get(matched_visible_key, 0)
             sidecar_count = sidecar_visible_counts.get(matched_visible_key, 0)
-            if skipped_count < sidecar_count:
+            if (
+                skipped_count < sidecar_count
+                and not row_id_preserves_source_multiplicity
+            ):
                 skipped_state_visible_counts[matched_visible_key] = skipped_count + 1
                 _merge_session_display_metadata(merged_by_visible_key.get(matched_visible_key), msg)
                 continue
@@ -10383,6 +10448,7 @@ def merge_session_messages_append_only(
             and timestamp is not None
             and timestamp <= max_sidecar_timestamp
             and not row_id_sidecar_conflict
+            and not row_id_preserves_source_multiplicity
         ):
             # When a truncation watermark is active and the sidecar holds only
             # the edited user checkpoint, state.db may contain an assistant/tool
