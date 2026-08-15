@@ -1654,7 +1654,9 @@
   .session-item.streaming .session-title-row{color:var(--text);}
   .session-text{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;overflow:hidden;}
   .session-title-row{display:flex;align-items:center;gap:6px;min-width:0;}
-  .session-title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);user-select:none;}
+  .session-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);user-select:none;border:0;background:transparent;padding:0;margin:0;text-align:left;font:inherit;line-height:inherit;}
+  .session-open-control{cursor:pointer;}
+  .session-open-control:focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px;border-radius:4px;}
   .session-search-hit{border-radius:4px;background:var(--accent-bg);color:var(--accent-text);box-decoration-break:clone;-webkit-box-decoration-break:clone;padding:0 .08em;}
   .session-search-preview{font-size:11px;line-height:1.35;color:var(--muted);overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow-wrap:anywhere;opacity:.9;}
   .session-search-hit-preview{background:var(--accent-bg);color:var(--accent-text);}
@@ -4956,6 +4958,7 @@ main.main > #mainPlugin{display:none;}
 /* Sidebar menu (lives in the left sidebar under the cog panel) */
 .panel-view#panelSettings{gap:0;padding:0;}
 .panel-head{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:41px;padding:8px 12px;border-bottom:1px solid var(--border);font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;flex-shrink:0;}
+.panel-head-title{margin:0;font:inherit;color:inherit;letter-spacing:inherit;text-transform:inherit;}
 .panel-head-actions{display:flex;align-items:center;gap:4px;text-transform:none;letter-spacing:normal;}
 .panel-head-btn{width:24px;height:24px;padding:0;display:inline-flex;align-items:center;justify-content:center;border:none;background:transparent;border-radius:6px;color:var(--muted);cursor:pointer;transition:background .15s,color .15s;flex-shrink:0;}
 .mobile-sidebar-close{display:none;}
