@@ -24,7 +24,7 @@ import stat as stat_module
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TextIO
+from typing import BinaryIO, Literal, TextIO, overload
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -413,48 +413,47 @@ def _valid_generation(value) -> int:
     return value
 
 
-def _copy_with_generation(source: Path, target: TextIO, generation: int) -> None:
+def _copy_with_generation(source: TextIO, target: TextIO, generation: int) -> None:
     generation = _valid_generation(generation)
-    with source.open('r', encoding='utf-8') as raw:
-        reader = StreamReader(raw)
-        reader.expect('{')
-        target.write('{')
+    reader = StreamReader(source)
+    reader.expect('{')
+    target.write('{')
+    reader.skip_ws()
+    if reader.peek() == '}':
+        reader.take()
+        target.write(
+            f'"_sidecar_generation_v1":{generation}' + '}'
+        )
+        return
+    saw_generation = False
+    while True:
+        key_buffer = io.StringIO()
+        reader.copy_raw_value(key_buffer)
+        key_text = key_buffer.getvalue()
+        key = json.loads(key_text)
+        if not isinstance(key, str):
+            raise StreamJSONError('sidecar object key must be a string')
+        target.write(key_text)
+        reader.expect(':')
+        target.write(':')
+        if key == '_sidecar_generation_v1':
+            reader.copy_raw_value(None)
+            target.write(str(generation))
+            saw_generation = True
+        else:
+            reader.copy_raw_value(target)
         reader.skip_ws()
-        if reader.peek() == '}':
-            reader.take()
-            target.write(
-                f'"_sidecar_generation_v1":{generation}' + '}'
-            )
+        delimiter = reader.take()
+        if delimiter == '}':
+            if not saw_generation:
+                target.write(f',"_sidecar_generation_v1":{generation}')
+            target.write('}')
             return
-        saw_generation = False
-        while True:
-            key_buffer = io.StringIO()
-            reader.copy_raw_value(key_buffer)
-            key_text = key_buffer.getvalue()
-            key = json.loads(key_text)
-            if not isinstance(key, str):
-                raise StreamJSONError('sidecar object key must be a string')
-            target.write(key_text)
-            reader.expect(':')
-            target.write(':')
-            if key == '_sidecar_generation_v1':
-                reader.copy_raw_value(None)
-                target.write(str(generation))
-                saw_generation = True
-            else:
-                reader.copy_raw_value(target)
-            reader.skip_ws()
-            delimiter = reader.take()
-            if delimiter == '}':
-                if not saw_generation:
-                    target.write(f',"_sidecar_generation_v1":{generation}')
-                target.write('}')
-                return
-            if delimiter != ',':
-                raise StreamJSONError(
-                    f'expected object delimiter, got {delimiter!r}'
-                )
-            target.write(',')
+        if delimiter != ',':
+            raise StreamJSONError(
+                f'expected object delimiter, got {delimiter!r}'
+            )
+        target.write(',')
 
 
 @dataclass
@@ -678,6 +677,29 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _sha256_open_file(handle) -> str:
+    digest = hashlib.sha256()
+    handle.seek(0)
+    for chunk in iter(lambda: handle.read(4 << 20), b''):
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _open_regular_binary_nofollow(path: Path, *, label: str):
+    flags = os.O_RDONLY | getattr(os, 'O_CLOEXEC', 0) | getattr(os, 'O_NOFOLLOW', 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise StreamJSONError(f'{label} must be a non-symlink regular file: {path}') from exc
+    try:
+        if not stat_module.S_ISREG(os.fstat(descriptor).st_mode):
+            raise StreamJSONError(f'{label} must be a regular file: {path}')
+        return os.fdopen(descriptor, 'rb')
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
 def _signature(path: Path):
     try:
         stat = path.stat()
@@ -694,6 +716,31 @@ def _fsync_dir(path: Path) -> None:
         os.close(descriptor)
 
 
+@overload
+def _open_exclusive_private(path: Path, mode: Literal['wb']) -> BinaryIO: ...
+
+
+@overload
+def _open_exclusive_private(path: Path, mode: Literal['w']) -> TextIO: ...
+
+
+def _open_exclusive_private(path: Path, mode: Literal['w', 'wb']):
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, 'O_CLOEXEC', 0)
+    )
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        if 'b' in mode:
+            return os.fdopen(descriptor, mode)
+        return os.fdopen(descriptor, mode, encoding='utf-8')
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
 def _copy_exclusive(
     source: Path,
     destination: Path,
@@ -701,7 +748,7 @@ def _copy_exclusive(
     mode: int | None = None,
 ) -> None:
     try:
-        with source.open('rb') as src, destination.open('xb') as dst:
+        with source.open('rb') as src, _open_exclusive_private(destination, 'wb') as dst:
             os.fchmod(
                 dst.fileno(),
                 mode if mode is not None else stat_module.S_IMODE(source.stat().st_mode),
@@ -720,13 +767,36 @@ def _sidecar_lock_path(path: Path) -> Path:
     return lock_dir / f'{path.stem}.lock'
 
 
+def _validate_sidecar_identity(path: Path) -> str:
+    try:
+        metadata = _models._read_bounded_session_metadata(path)
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise StreamJSONError(f'cannot validate sidecar session_id: {path}') from exc
+    session_id = metadata.get('session_id')
+    if type(session_id) is str and len(session_id) > 150:
+        raise StreamJSONError('sidecar session_id exceeds the 150-character artifact limit')
+    if (
+        type(session_id) is not str
+        or not _models.is_safe_session_id(session_id)
+        or session_id != path.stem
+    ):
+        raise StreamJSONError(
+            f'sidecar session_id must match filename: {session_id!r} != {path.stem!r}'
+        )
+    return session_id
+
+
 def compact_sidecar(path: Path, *, dry_run: bool = False) -> dict:
+    path = Path(path).expanduser().absolute()
+    if path.is_symlink():
+        raise StreamJSONError(f'source must not be a symlink: {path}')
     path = path.resolve()
     if not path.is_file():
         raise FileNotFoundError(path)
     lock_path = _sidecar_lock_path(path)
     with lock_path.open('a+', encoding='utf-8') as lock_handle:
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        _validate_sidecar_identity(path)
         source_mode = stat_module.S_IMODE(path.stat().st_mode)
         source_signature = _signature(path)
         source_sha256 = _sha256(path)
@@ -773,7 +843,7 @@ def compact_sidecar(path: Path, *, dry_run: bool = False) -> dict:
         manifest_published = False
         source_installed = False
         try:
-            with temp.open('x', encoding='utf-8') as output:
+            with _open_exclusive_private(temp, 'w') as output:
                 os.fchmod(output.fileno(), source_mode)
                 written = transform_sidecar(
                     path,
@@ -809,7 +879,7 @@ def compact_sidecar(path: Path, *, dry_run: bool = False) -> dict:
                 'arrays': result['arrays'],
             }
             manifest_tmp = manifest.with_name(f'.{manifest.name}.tmp.{os.getpid()}')
-            with manifest_tmp.open('x', encoding='utf-8') as handle:
+            with _open_exclusive_private(manifest_tmp, 'w') as handle:
                 os.fchmod(handle.fileno(), source_mode)
                 handle.write(
                     json.dumps(manifest_payload, ensure_ascii=False, indent=2) + '\n'
@@ -860,8 +930,6 @@ def restore_manifest(manifest: Path) -> dict:
         source_signature = _signature(source)
         if _sha256(source) != payload['output_sha256']:
             raise StreamJSONError('current sidecar no longer matches compacted output')
-        if _sha256(backup) != payload['source_sha256']:
-            raise StreamJSONError('backup checksum mismatch')
         expected_generation = payload.get('output_generation')
         current_generation = _valid_generation(
             expected_generation if expected_generation is not None else 0
@@ -869,11 +937,19 @@ def restore_manifest(manifest: Path) -> dict:
         restore_generation = current_generation + 1
         temp = source.with_name(f'.{source.name}.replay-v10.restore.{os.getpid()}')
         try:
-            with temp.open('x', encoding='utf-8') as output:
-                os.fchmod(output.fileno(), source_mode)
-                _copy_with_generation(backup, output, restore_generation)
-                output.flush()
-                os.fsync(output.fileno())
+            with _open_regular_binary_nofollow(backup, label='backup') as backup_raw:
+                if _sha256_open_file(backup_raw) != payload['source_sha256']:
+                    raise StreamJSONError('backup checksum mismatch')
+                backup_raw.seek(0)
+                backup_text = io.TextIOWrapper(backup_raw, encoding='utf-8')
+                try:
+                    with _open_exclusive_private(temp, 'w') as output:
+                        os.fchmod(output.fileno(), source_mode)
+                        _copy_with_generation(backup_text, output, restore_generation)
+                        output.flush()
+                        os.fsync(output.fileno())
+                finally:
+                    backup_text.detach()
             restored_metadata: dict[str, int] = {}
             transform_sidecar(temp, metadata=restored_metadata)
             if restored_metadata['generation'] != restore_generation:

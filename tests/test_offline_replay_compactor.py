@@ -143,6 +143,67 @@ def test_offline_compactor_is_atomic_idempotent_and_reversible(tmp_path):
     assert _sha256(backup) == original_sha
 
 
+@pytest.mark.skipif(os.name == "nt", reason="offline compactor is POSIX/WSL-only")
+def test_compactor_rejects_symlink_source(tmp_path):
+    from scripts.compact_session_replays import StreamJSONError, compact_sidecar
+
+    target = tmp_path / "target.json"
+    target.write_text(
+        json.dumps({
+            "session_id": "source-link",
+            "messages": [_row(), _row()],
+            "context_messages": [],
+        }),
+        encoding="utf-8",
+    )
+    source_link = tmp_path / "source-link.json"
+    source_link.symlink_to(target)
+    original = target.read_bytes()
+
+    with pytest.raises(StreamJSONError, match="source.*symlink"):
+        compact_sidecar(source_link)
+
+    assert target.read_bytes() == original
+    assert not list(tmp_path.glob("*replay-v10*"))
+
+
+def test_compactor_requires_embedded_session_id_to_match_filename(tmp_path):
+    from scripts.compact_session_replays import StreamJSONError, compact_sidecar
+
+    sidecar = tmp_path / "expected-id.json"
+    original = json.dumps({
+        "session_id": "different-id",
+        "messages": [_row(), _row()],
+        "context_messages": [],
+    })
+    sidecar.write_text(original, encoding="utf-8")
+
+    with pytest.raises(StreamJSONError, match="session_id.*filename"):
+        compact_sidecar(sidecar)
+
+    assert sidecar.read_text(encoding="utf-8") == original
+    assert not list(tmp_path.glob("*replay-v10*"))
+
+
+def test_compactor_rejects_session_id_too_long_for_artifact_names(tmp_path):
+    from scripts.compact_session_replays import StreamJSONError, compact_sidecar
+
+    session_id = "s" * 151
+    sidecar = tmp_path / f"{session_id}.json"
+    original = json.dumps({
+        "session_id": session_id,
+        "messages": [_row(), _row()],
+        "context_messages": [],
+    })
+    sidecar.write_text(original, encoding="utf-8")
+
+    with pytest.raises(StreamJSONError, match="session_id.*150"):
+        compact_sidecar(sidecar)
+
+    assert sidecar.read_text(encoding="utf-8") == original
+    assert not list(tmp_path.glob("*replay-v10*"))
+
+
 def test_offline_compactor_uses_shared_partial_identity(tmp_path):
     from api import models
     from scripts import compact_session_replays as compactor
@@ -205,7 +266,7 @@ def test_offline_compactor_memory_is_bounded_for_many_replays(tmp_path):
     replay = json.dumps(_row(), ensure_ascii=False, separators=(",", ":"))
     copies = 60_000
     with sidecar.open("w", encoding="utf-8") as handle:
-        handle.write('{"session_id":"many","message_count":')
+        handle.write('{"session_id":"many-replays","message_count":')
         handle.write(str(copies))
         handle.write(',"messages":[')
         for index in range(copies):
@@ -240,7 +301,7 @@ def test_offline_compactor_memory_is_bounded_for_many_unique_ids(tmp_path):
     sidecar = tmp_path / "many-unique-replays.json"
     copies = 500_000
     with sidecar.open("w", encoding="utf-8") as handle:
-        handle.write('{"session_id":"many-unique","messages":[')
+        handle.write('{"session_id":"many-unique-replays","messages":[')
         for index in range(copies):
             if index:
                 handle.write(',')
@@ -335,6 +396,92 @@ def test_restore_refuses_sidecar_changed_after_compaction(tmp_path):
         restore_manifest(Path(result["manifest"]))
 
     assert _sha256(sidecar) == newer_sha
+
+
+@pytest.mark.skipif(os.name == "nt", reason="offline compactor is POSIX/WSL-only")
+def test_restore_rejects_symlinked_backup(tmp_path):
+    from scripts.compact_session_replays import (
+        StreamJSONError,
+        compact_sidecar,
+        restore_manifest,
+    )
+
+    sidecar = tmp_path / "symlink-restore.json"
+    sidecar.write_text(
+        json.dumps({
+            "session_id": "symlink-restore",
+            "title": "original",
+            "messages": [_row(), _row()],
+            "context_messages": [],
+        }),
+        encoding="utf-8",
+    )
+    result = compact_sidecar(sidecar)
+    backup = Path(result["backup"])
+    copied_backup = tmp_path / "copied-backup.json"
+    copied_backup.write_bytes(backup.read_bytes())
+    backup.unlink()
+    backup.symlink_to(copied_backup)
+
+    with pytest.raises(StreamJSONError, match="backup.*regular file|symlink"):
+        restore_manifest(Path(result["manifest"]))
+
+    assert json.loads(sidecar.read_text(encoding="utf-8"))["messages"] == [_row()]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="offline compactor is POSIX/WSL-only")
+def test_restore_uses_the_same_backup_descriptor_for_hash_and_copy(
+    tmp_path,
+    monkeypatch,
+):
+    from scripts import compact_session_replays as compactor
+
+    sidecar = tmp_path / "descriptor-restore.json"
+    sidecar.write_text(
+        json.dumps({
+            "session_id": "descriptor-restore",
+            "title": "original",
+            "messages": [_row(), _row()],
+            "context_messages": [],
+        }),
+        encoding="utf-8",
+    )
+    result = compactor.compact_sidecar(sidecar)
+    backup = Path(result["backup"])
+    displaced_backup = tmp_path / "displaced-backup.json"
+    real_open = compactor.os.open
+    injected = []
+
+    def interleave_backup_replacement(path, flags, mode=0o777, *, dir_fd=None):
+        kwargs = {} if dir_fd is None else {"dir_fd": dir_fd}
+        fd = real_open(path, flags, mode, **kwargs)
+        if (
+            Path(path) == backup
+            and flags & os.O_ACCMODE == os.O_RDONLY
+            and not injected
+        ):
+            backup.rename(displaced_backup)
+            backup.write_text(
+                json.dumps({
+                    "session_id": "descriptor-restore",
+                    "title": "injected replacement",
+                    "messages": [],
+                    "context_messages": [],
+                }),
+                encoding="utf-8",
+            )
+            injected.append(True)
+        return fd
+
+    monkeypatch.setattr(compactor.os, "open", interleave_backup_replacement)
+
+    restored = compactor.restore_manifest(Path(result["manifest"]))
+
+    assert injected == [True]
+    assert restored["status"] == "restored"
+    payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert payload["title"] == "original"
+    assert payload["messages"] == [_row(), _row()]
 
 
 def test_ambiguous_empty_rows_are_not_removed(tmp_path):
@@ -511,6 +658,42 @@ def test_compactor_preserves_private_source_mode(tmp_path):
     assert stat.S_IMODE(sidecar.stat().st_mode) == 0o600
 
 
+@pytest.mark.skipif(os.name == "nt", reason="offline compactor is POSIX/WSL-only")
+def test_sensitive_artifacts_are_created_private_before_fchmod(
+    tmp_path,
+    monkeypatch,
+):
+    from scripts import compact_session_replays as compactor
+
+    sidecar = tmp_path / "private-at-create.json"
+    sidecar.write_text(
+        json.dumps({
+            "session_id": "private-at-create",
+            "messages": [_row(), _row()],
+            "context_messages": [],
+        }),
+        encoding="utf-8",
+    )
+    sidecar.chmod(0o600)
+    modes_before_fchmod = []
+    real_fchmod = compactor.os.fchmod
+
+    def record_initial_mode(fd, mode):
+        modes_before_fchmod.append(stat.S_IMODE(os.fstat(fd).st_mode))
+        return real_fchmod(fd, mode)
+
+    monkeypatch.setattr(compactor.os, "fchmod", record_initial_mode)
+    previous_umask = os.umask(0)
+    try:
+        result = compactor.compact_sidecar(sidecar)
+        compactor.restore_manifest(Path(result["manifest"]))
+    finally:
+        os.umask(previous_umask)
+
+    assert len(modes_before_fchmod) >= 4
+    assert set(modes_before_fchmod) == {0o600}
+
+
 def test_compactor_rejects_invalid_non_target_json_without_publish(tmp_path):
     from scripts import compact_session_replays as compactor
 
@@ -573,6 +756,38 @@ def test_compactor_manifest_is_excluded_from_session_index(tmp_path, monkeypatch
     models._write_session_index(updates=None)
     index = json.loads((tmp_path / "_index.json").read_text(encoding="utf-8"))
     assert [row["session_id"] for row in index] == ["indexed"]
+
+
+def test_session_delete_cleanup_removes_all_replay_v10_plaintext_artifacts(tmp_path):
+    from api import models
+
+    sidecar = tmp_path / "privacy-delete.json"
+    artifacts = [
+        tmp_path / "privacy-delete.json.replay-v10.abcdef0123456789.bak",
+        tmp_path / "_replay-v10.privacy-delete.json.abcdef0123456789.manifest.json",
+        tmp_path / ".privacy-delete.json.replay-v10.tmp.123",
+        tmp_path / ".privacy-delete.json.replay-v10.restore.123",
+        tmp_path / "._replay-v10.privacy-delete.json.abcdef0123456789.manifest.json.tmp.123",
+    ]
+    unrelated = tmp_path / "other.json.replay-v10.abcdef0123456789.bak"
+    for artifact in [*artifacts, unrelated]:
+        artifact.write_text("plaintext transcript", encoding="utf-8")
+
+    removed = models._delete_offline_replay_artifacts(sidecar)
+
+    assert removed == len(artifacts)
+    assert not any(artifact.exists() for artifact in artifacts)
+    assert unrelated.exists()
+
+
+def test_webui_session_delete_routes_replay_v10_cleanup():
+    routes_source = (
+        Path(__file__).resolve().parents[1] / "api" / "routes.py"
+    ).read_text(encoding="utf-8")
+    start = routes_source.index('parsed.path == "/api/session/delete"')
+    end = routes_source.index('parsed.path == "/api/session/clear"', start)
+
+    assert "_delete_offline_replay_artifacts(p)" in routes_source[start:end]
 
 
 def test_large_index_rebuild_uses_metadata_prefix(tmp_path, monkeypatch):

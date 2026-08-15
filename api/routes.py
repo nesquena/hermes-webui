@@ -9644,6 +9644,7 @@ from api.models import (
     _clear_webui_zero_message_orphan_tombstone,
     _load_webui_deleted_session_tombstone,
     _record_webui_deleted_session_tombstone,
+    _delete_offline_replay_artifacts,
     ensure_cron_project,
     _profile_has_user_projects,
     is_cron_session,
@@ -15169,6 +15170,14 @@ def handle_post(handler, parsed) -> bool:
                 p.with_suffix('.json.bak').unlink(missing_ok=True)
             except Exception:
                 logger.debug("Failed to unlink session backup file %s", p.with_suffix('.json.bak'))
+            try:
+                _delete_offline_replay_artifacts(p)
+            except Exception:
+                logger.debug(
+                    "Failed to unlink offline replay artifacts for %s",
+                    p,
+                    exc_info=True,
+                )
             if sidecar_deleted and not is_messaging_session:
                 try:
                     _record_webui_deleted_session_tombstone(sid)

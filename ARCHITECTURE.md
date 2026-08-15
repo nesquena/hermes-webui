@@ -248,10 +248,13 @@ without a valid persisted session ID rather than constructing a default ID.
 Every normal save, compact, and restore also advances
 `_sidecar_generation_v1` from the durable value observed under that lock, so a
 normal save interleaved with publication is serialized and receives the next
-generation instead of being silently overwritten. The command nevertheless
-remains strictly offline: always drain and stop every WebUI process
-before running it, because direct delete/recovery paths and older or non-WebUI
-writers may not acquire this maintenance lock:
+generation instead of being silently overwritten. This generation is ordering
+evidence, not the stale-object CAS supplied by PR #7036: a `Session` object kept
+alive across maintenance could still republish its old transcript afterward.
+The command therefore remains strictly offline: always drain and stop every
+WebUI process before running it, then restart from fresh durable state after
+maintenance, because direct delete/recovery paths and older or non-WebUI writers
+may not acquire this maintenance lock:
 
 ```bash
 python scripts/compact_session_replays.py --dry-run ~/.hermes/webui/sessions/<session-id>.json
@@ -274,8 +277,12 @@ rows are retained. A content-addressed byte-exact backup and hidden checksum
 manifest are fsynced, including the manifest directory entry, before the
 compacted sidecar is atomically installed. A non-crash source-install failure
 removes and fsyncs the unpublished manifest; the
-source mode is preserved on source, backup, manifest, and restore output. The
-hidden manifest is excluded from session discovery and index rebuilds.
+source mode is preserved on source, backup, manifest, and restore output. Every
+sensitive artifact is created as `0600` before its final mode is applied. The
+source must be a regular non-symlink sidecar whose safe embedded `session_id`
+matches its filename and is at most 150 characters. The hidden manifest is
+excluded from session discovery and index rebuilds, and WebUI session deletion
+removes that session's replay-v10 backups, manifests, and stale temporaries.
 
 Rollback is explicit and also fail-closed:
 
@@ -284,8 +291,10 @@ python scripts/compact_session_replays.py --restore <manifest-path>
 ```
 
 Restore refuses if either the current compacted sidecar or immutable backup no
-longer matches the manifest. The archive remains byte-exact; only the restored
-sidecar receives the newer generation required to fence stale writers.
+longer matches the manifest. It opens the backup without following symlinks and
+hashes/transforms one regular-file descriptor, closing the check/use gap. The
+archive remains byte-exact; only the restored sidecar receives the newer
+generation required to order later writes.
 
 title_from(): takes messages list, finds first user message, returns first 64 chars.
 Called after run_conversation() completes to set the session title retroactively.

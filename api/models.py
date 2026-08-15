@@ -269,6 +269,49 @@ def is_safe_session_id(sid) -> bool:
     return all(c in _SAFE_SID_CHARS for c in sid)
 
 
+def _delete_offline_replay_artifacts(sidecar: Path) -> int:
+    """Remove plaintext backup/manifest/temp artifacts owned by one sidecar."""
+    sidecar = Path(sidecar)
+    if sidecar.suffix != '.json' or not is_safe_session_id(sidecar.stem):
+        raise ValueError(f'Unsafe session sidecar path: {sidecar}')
+    name = sidecar.name
+
+    def is_owned_artifact(candidate_name: str) -> bool:
+        return bool(
+            (
+                candidate_name.startswith(f'{name}.replay-v10.')
+                and candidate_name.endswith('.bak')
+            )
+            or (
+                candidate_name.startswith(f'_replay-v10.{name}.')
+                and candidate_name.endswith('.manifest.json')
+            )
+            or candidate_name.startswith(f'.{name}.replay-v10.tmp.')
+            or candidate_name.startswith(f'.{name}.replay-v10.restore.')
+            or (
+                candidate_name.startswith(f'._replay-v10.{name}.')
+                and '.manifest.json.tmp.' in candidate_name
+            )
+        )
+
+    removed = 0
+    first_error = None
+    for candidate in sidecar.parent.iterdir():
+        if not is_owned_artifact(candidate.name):
+            continue
+        if not (candidate.is_file() or candidate.is_symlink()):
+            continue
+        try:
+            candidate.unlink()
+            removed += 1
+        except OSError as exc:
+            if first_error is None:
+                first_error = exc
+    if first_error is not None:
+        raise first_error
+    return removed
+
+
 def _file_contains_bytes(path: Path, needle: bytes) -> bool:
     """Return whether a byte marker exists using bounded streaming reads."""
     overlap = b''
