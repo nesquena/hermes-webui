@@ -146,13 +146,43 @@ def test_insights_absolute_range_reports_clamped_effective_bounds(monkeypatch, t
     data = _call_insights(monkeypatch, tmp_path, entries,
                           query=f"start={int(far_past)}&end={int(now)}", now=now)
     # The effective END is still the queried ~now; the effective START was
-    # clamped by the 5-year cap, and the reported bounds equal the series.
-    # 5 years before 2026-05-04 is 2021-05-05 (server-local).
-    assert data["effective_start"] == "2021-05-05"
+    # clamped by the 5-CALENDAR-YEAR cap, and the reported bounds equal the
+    # series.  Five calendar years before 2026-05-04 is 2021-05-04
+    # (server-local) - 1826 days, which is NOT a fixed 5*365*86400 seconds
+    # (that would be 1825 days and drop the first day when the span contains
+    # a leap day).
+    assert data["effective_start"] == "2021-05-04"
     assert data["effective_end"] == "2026-05-04"
     assert data["daily_tokens"][0]["date"] == data["effective_start"]
     assert data["daily_tokens"][-1]["date"] == data["effective_end"]
-    assert len(data["daily_tokens"]) == 5 * 365 + 1  # 5 years inclusive
+    assert len(data["daily_tokens"]) == 1827  # 5 calendar years inclusive (2021-05-04..2026-05-04)
+
+
+def test_insights_absolute_range_five_calendar_years_with_leap_day_keeps_first_day(monkeypatch, tmp_path):
+    # A request whose exact span is five calendar years CONTAINING a leap day
+    # (2021-05-04..2026-05-04 = 1826 days) must NOT be clipped: the old
+    # fixed-seconds cap (5*365*86400 = 1825 days) treated it as over-limit
+    # and dropped the first requested day (Greptile P1).  Sessions on the
+    # first day must stay inside the window.
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    first_day = time.mktime((2021, 5, 4, 0, 0, 0, 0, 0, -1))   # 2021-05-04 00:00
+    entries = [
+        {
+            "session_id": "first_day", "updated_at": first_day + 3600, "created_at": first_day,
+            "message_count": 1, "input_tokens": 50, "output_tokens": 5,
+            "estimated_cost": "0.0005", "model": "gpt-x",
+        },
+    ]
+    data = _call_insights(monkeypatch, tmp_path, entries,
+                          query=f"start={int(first_day)}&end={int(now)}", now=now)
+    # The requested first day survives the cap; the session is admitted and
+    # bucketed on 2021-05-04.
+    assert data["effective_start"] == "2021-05-04"
+    assert data["effective_end"] == "2026-05-04"
+    assert data["total_sessions"] == 1
+    assert data["daily_tokens"][0]["date"] == "2021-05-04"
+    assert data["daily_tokens"][0]["input_tokens"] == 50
+    assert data["daily_tokens"][0]["sessions"] == 1
 
 
 def test_insights_absolute_range_reports_swapped_effective_bounds(monkeypatch, tmp_path):
