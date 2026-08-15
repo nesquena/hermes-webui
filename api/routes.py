@@ -15606,58 +15606,56 @@ def handle_post(handler, parsed) -> bool:
                 set_session_yolo_enabled(sid, False)
                 return j(handler, {"ok": True, "yolo_enabled": bool(is_session_yolo_enabled(sid))})
 
-        # Hold a tentative transition across both authoritative mirror snapshots.
-        # While it is pending, the gateway stream must surface any new approval
-        # instead of auto-approving it before this toggle can relay or commit it.
+        # Hold one tentative transition and one per-session gateway handoff from
+        # authoritative mirror discovery through relay/commit. A later approval
+        # therefore either becomes the relayed current prompt or observes the
+        # committed YOLO state after this request finishes.
         yolo_transition = begin_session_yolo_transition(sid)
         try:
-            run_mirror = gateway_pending_mirror(sid)
-            if run_mirror:
-                relay_payload, relay_status = _relay_gateway_run_approval(
-                    sid,
-                    run_mirror,
-                    "once",
-                    enable_yolo=True,
-                )
-                return j(handler, relay_payload, status=relay_status)
-
-            # Serialize the final snapshot and flag commit with the Runs stream's
-            # auto-approve-vs-mirror decision. A stream that arrives after this
-            # snapshot cannot publish a parked mirror from a stale disabled-state
-            # read; it re-checks the committed flag and auto-approves instead.
             with gateway_yolo_handoff(sid):
-                with _lock:
-                    reconcile_gateway_pending_mirror_locked(sid)
-                    queue = _pending.get(sid)
-                    entries = queue if isinstance(queue, list) else [queue] if queue else []
-                    run_mirror = next(
-                        (
-                            dict(entry)
-                            for entry in entries
-                            if isinstance(entry, dict)
-                            and entry.get(_GATEWAY_MIRROR_FLAG)
-                            and str(entry.get("run_id") or "").strip()
-                        ),
-                        None,
-                    )
-                    if run_mirror is None:
-                        _pending.pop(sid, None)
+                run_mirror = gateway_pending_mirror(sid)
                 if run_mirror is None:
-                    finish_session_yolo_transition(sid, yolo_transition, succeeded=True)
-                    yolo_transition = None
-            if run_mirror:
-                relay_payload, relay_status = _relay_gateway_run_approval(
-                    sid,
-                    run_mirror,
-                    "once",
-                    enable_yolo=True,
-                )
-                return j(handler, relay_payload, status=relay_status)
+                    with _lock:
+                        reconcile_gateway_pending_mirror_locked(sid)
+                        queue = _pending.get(sid)
+                        entries = queue if isinstance(queue, list) else [queue] if queue else []
+                        run_mirror = next(
+                            (
+                                dict(entry)
+                                for entry in entries
+                                if isinstance(entry, dict)
+                                and entry.get(_GATEWAY_MIRROR_FLAG)
+                                and str(entry.get("run_id") or "").strip()
+                            ),
+                            None,
+                        )
+                        if run_mirror is None:
+                            _pending.pop(sid, None)
 
-            # No run-backed approval was present at the serialized handoff, so
-            # the explicit session enable is now committed.
-            resolve_gateway_approval(sid, "once", resolve_all=True)
-            return j(handler, {"ok": True, "yolo_enabled": bool(is_session_yolo_enabled(sid))})
+                if run_mirror:
+                    relay_payload, relay_status = _relay_gateway_run_approval(
+                        sid,
+                        run_mirror,
+                        "once",
+                        enable_yolo=True,
+                    )
+                    relay_succeeded = bool(relay_status == 200 and relay_payload.get("ok"))
+                    finish_session_yolo_transition(
+                        sid,
+                        yolo_transition,
+                        succeeded=relay_succeeded,
+                    )
+                    yolo_transition = None
+                    relay_payload = {
+                        **relay_payload,
+                        "yolo_enabled": bool(is_session_yolo_enabled(sid)),
+                    }
+                    return j(handler, relay_payload, status=relay_status)
+
+                finish_session_yolo_transition(sid, yolo_transition, succeeded=True)
+                yolo_transition = None
+                resolve_gateway_approval(sid, "once", resolve_all=True)
+                return j(handler, {"ok": True, "yolo_enabled": bool(is_session_yolo_enabled(sid))})
         finally:
             if yolo_transition is not None:
                 finish_session_yolo_transition(sid, yolo_transition, succeeded=False)

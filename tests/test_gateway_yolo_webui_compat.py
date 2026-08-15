@@ -764,9 +764,10 @@ def test_yolo_post_keeps_transition_unconfirmed_until_second_mirror_check(monkey
         routes.handle_post(handler, urllib.parse.urlparse("/api/session/yolo"))
         assert response["status"] == 200
         assert response["payload"]["ok"] is True
+        assert response["payload"]["yolo_enabled"] is True
         assert observed_transition_states == [True, True]
         assert observed_gateway_states == [False]
-        assert is_session_yolo_enabled(sid) is False
+        assert is_session_yolo_enabled(sid) is True
     finally:
         disable_session_yolo(sid)
         with routes._lock:
@@ -1008,3 +1009,101 @@ def test_yolo_disable_linearizes_after_selected_gateway_autoapproval(monkeypatch
     finally:
         release_approval.set()
         disable_session_yolo(sid)
+
+
+@pytest.mark.skipif(not APPROVAL_AVAILABLE, reason="tools.approval unavailable")
+def test_yolo_post_first_relay_serializes_next_gateway_approval(monkeypatch):
+    from api import route_approvals, routes
+
+    sid = "webui-yolo-first-relay-next-approval"
+    run_id = "run-first-relay-next-approval"
+    response = {}
+    stream_results = []
+    stream_workers = []
+    auto_approved = []
+    approval_a = {
+        "command": "touch /tmp/webui-yolo-a",
+        "description": "first",
+        "approval_id": "approval-first",
+        "run_id": run_id,
+        "_gateway_mirror": True,
+        "_gateway_agent_identity_v1": True,
+    }
+    approval_b = {
+        "command": "touch /tmp/webui-yolo-b",
+        "description": "second",
+        "approval_id": "approval-second",
+        "run_id": run_id,
+        "_gateway_mirror": True,
+        "_gateway_agent_identity_v1": True,
+    }
+
+    class NotifyingLock:
+        def __init__(self):
+            self._lock = threading.Lock()
+            self.contended = threading.Event()
+
+        def __enter__(self):
+            if not self._lock.acquire(blocking=False):
+                self.contended.set()
+                self._lock.acquire()
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            self._lock.release()
+
+    handoff_lock = NotifyingLock()
+    disable_session_yolo(sid)
+    route_approvals.submit_gateway_pending_mirror(sid, dict(approval_a))
+
+    def next_stream_approval():
+        stream_results.append(
+            gateway_chat._settle_gateway_run_approval(sid, dict(approval_b), "http://gateway", "")
+        )
+
+    def fake_respond(_self, got_run_id, approval_id, choice):
+        assert (got_run_id, approval_id, choice) == (run_id, "approval-first", "once")
+        worker = threading.Thread(target=next_stream_approval)
+        worker.start()
+        stream_workers.append(worker)
+        assert handoff_lock.contended.wait(timeout=1)
+        return {"resolved": 1}
+
+    def fake_auto_approve(_base_url, _api_key, got_run_id, approval_id):
+        auto_approved.append((got_run_id, approval_id))
+
+    def fake_j(_handler, data, status=200, extra_headers=None):
+        response.update(payload=data, status=status)
+        return data
+
+    monkeypatch.setattr(route_approvals, "gateway_yolo_handoff", lambda _sid: handoff_lock)
+    monkeypatch.setattr(routes, "gateway_yolo_handoff", lambda _sid: handoff_lock)
+    monkeypatch.setattr(gateway_chat, "_auto_approve_gateway_run", fake_auto_approve)
+    monkeypatch.setattr("api.runner_client.HttpRunnerClient.respond_approval", fake_respond)
+    monkeypatch.setattr(config, "gateway_supports_approval_identity_v1", lambda *_a, **_k: True)
+    monkeypatch.setattr(routes, "j", fake_j)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"session_id": sid, "enabled": True})
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "_handle_extension_sidecar_proxy", lambda *_a, **_k: False)
+
+    try:
+        routes.handle_post(object(), urllib.parse.urlparse("/api/session/yolo"))
+        for worker in stream_workers:
+            worker.join(timeout=1)
+            assert not worker.is_alive()
+        assert response["status"] == 200
+        assert response["payload"] == {
+            "ok": True,
+            "choice": "once",
+            "relayed": True,
+            "yolo_enabled": True,
+        }
+        assert stream_results == [(True, None, 0)]
+        assert auto_approved == [(run_id, "approval-second")]
+        assert route_approvals.gateway_pending_mirror(sid) is None
+    finally:
+        disable_session_yolo(sid)
+        route_approvals.retire_gateway_pending_mirror(sid, run_id=run_id)
+        with routes._lock:
+            routes._pending.pop(sid, None)
+            routes._gateway_queues.pop(sid, None)
