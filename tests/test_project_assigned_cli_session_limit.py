@@ -753,6 +753,53 @@ def test_unassigned_refill_runs_when_the_mixed_window_under_delivers(
     assert sum(1 for s in sessions if s["project_id"] == "project-live") == 3
 
 
+def test_unassigned_refill_cannot_clobber_a_resolved_assignment(
+    fake_hermes_home, tmp_path
+):
+    """Recovery pass 2 must never un-fix this PR's own headline bug.
+
+    Pass 2 merges its rows into the same lineage-keyed table pass 1 fills, and
+    it used to overwrite an existing entry unconditionally. When the SQL
+    ``project_assignment='unassigned'`` filter and the Python lineage projection
+    disagree about where a compression lineage starts, pass 2 hands back the
+    lineage ROOT as its own "unassigned" conversation — and the unconditional
+    overwrite then replaced the assigned row with it, deleting the project chip
+    and swapping the session identity from the lineage tip back to the root.
+
+    They disagree here on a blank ``source``: ``_is_continuation_session``
+    treats an empty/whitespace source as "unknown, same conversation", while the
+    SQL lineage CTE compares ``LOWER(TRIM(parent.source)) = LOWER(TRIM(...))``
+    and so refuses to walk from the assigned tip up to the blank-source root.
+    The merge has to be safe whether or not the two ever line up exactly.
+    """
+    _register_projects(tmp_path, "project-live")
+
+    rows = [
+        # Blank source: SQL will not join this root to its assigned tip, but the
+        # Python projection collapses the pair into one row keyed on both ids.
+        _session(
+            "chain-root",
+            BASE_TS + 500,
+            source="",
+            ended_at=BASE_TS + 505,
+            end_reason="compression",
+        ),
+        _session(
+            "chain-tip", BASE_TS + 510, parent="chain-root", project_id="project-live"
+        ),
+    ]
+    # Two spare unassigned rows so the window is short and pass 2 actually runs.
+    rows.extend(_session(f"plain-{index}", BASE_TS + index) for index in range(2))
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    by_id = {s["session_id"]: s for s in models.get_cli_sessions()}
+
+    # Was: "chain-tip" gone, "chain-root" present with project_id None.
+    assert "chain-tip" in by_id, "pass 2 replaced the assigned row with its root"
+    assert by_id["chain-tip"]["project_id"] == "project-live"
+    assert "chain-root" not in by_id, "the lineage must stay one conversation"
+
+
 # ── Rebase guard: upstream's kanban pass shares the system-chip helper ────────
 
 
