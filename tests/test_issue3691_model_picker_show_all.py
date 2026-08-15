@@ -1682,3 +1682,115 @@ def test_runtime_inplace_expand_with_preexisting_options_reveals_them(_driver_pa
     assert out["showAllGone"], (
         "After expansion, the 'Show all' row should be gone even when some overflow options pre-existed"
     )
+
+
+def _install_openrouter_mocks(monkeypatch, curated_count: int, free_payload=None, free_fetch_fails: bool = False):
+    """Shared harness: fake hermes_cli curated fetch + optional free-tier payload."""
+    monkeypatch.setattr(
+        config,
+        "cfg",
+        {
+            "model": {"provider": "openrouter", "default": "anthropic/claude-sonnet-4.6"},
+            "providers": {"openrouter": {"api_key": "sk-test"}},
+        },
+        raising=False,
+    )
+    fake_pkg = types.ModuleType("hermes_cli")
+    fake_pkg.__path__ = []
+    fake_models = types.ModuleType("hermes_cli.models")
+    curated = [("anthropic/claude-sonnet-4.6", "")] + [
+        (f"vendor{i}/curated-{i}", "") for i in range(1, curated_count)
+    ]
+    fake_models.fetch_openrouter_models = lambda: curated
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_pkg)
+    monkeypatch.setitem(sys.modules, "hermes_cli.models", fake_models)
+
+    if free_fetch_fails:
+        def _boom(*_a, **_k):
+            raise ConnectionError("simulated free-tier fetch failure")
+        monkeypatch.setattr(urllib.request, "urlopen", _boom)
+    else:
+        payload = free_payload or {
+            "data": [
+                {
+                    "id": f"vendor{i}/overflow-{i}:free",
+                    "name": f"Overflow {i}",
+                    "supported_parameters": [],
+                    "pricing": {"prompt": "0", "completion": "0"},
+                }
+                for i in range(40)
+            ]
+        }
+        monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: _FakeResponse(payload))
+
+
+def test_openrouter_integrated_partial_augmentation_uses_dynamic_threshold(monkeypatch):
+    """100 curated + 5 actually-appended free rows through the REAL group
+    builder: threshold = 100 + 5 = 105, combined 105 → renders in full."""
+    _install_openrouter_mocks(monkeypatch, curated_count=100, free_payload={
+        "data": [
+            {
+                "id": f"vendor{i}/overflow-{i}:free",
+                "name": f"Overflow {i}",
+                "supported_parameters": [],
+                "pricing": {"prompt": "0", "completion": "0"},
+            }
+            for i in range(5)
+        ]
+    })
+    group = _openrouter_group()
+    assert len(group["models"]) == 105, "100 curated + 5 free must render in full"
+    assert "extra_models" not in group
+
+
+def test_openrouter_integrated_free_fetch_failure_keeps_curated_limit(monkeypatch):
+    """Free-tier fetch fails (count=0) with 101 curated: threshold stays 100,
+    so the group MUST sample to the curated target — the fixed-130 over-expansion
+    would have rendered all 101."""
+    _install_openrouter_mocks(monkeypatch, curated_count=101, free_fetch_fails=True)
+    group = _openrouter_group()
+    assert len(group["models"]) == config._OPENROUTER_CURATED_TARGET
+    assert len(group["extra_models"]) == 101 - config._OPENROUTER_CURATED_TARGET
+
+
+def test_openrouter_integrated_deduplicated_free_rows_do_not_raise_threshold(monkeypatch):
+    """Free payload whose ids all duplicate curated ids: zero unique free rows
+    appended → count=0 → threshold stays 100; 100 curated renders in full and
+    NO free rows leak into the group."""
+    curated = [("anthropic/claude-sonnet-4.6", "")] + [
+        (f"vendor{i}/curated-{i}", "") for i in range(1, 100)
+    ]
+    curated_ids = [mid for mid, _ in curated]
+    payload = {
+        "data": [
+            {
+                "id": mid,
+                "name": "Dup",
+                "supported_parameters": [],
+                "pricing": {"prompt": "0", "completion": "0"},
+            }
+            for mid in curated_ids
+        ]
+    }
+    monkeypatch.setattr(
+        config,
+        "cfg",
+        {
+            "model": {"provider": "openrouter", "default": "anthropic/claude-sonnet-4.6"},
+            "providers": {"openrouter": {"api_key": "sk-test"}},
+        },
+        raising=False,
+    )
+    fake_pkg = types.ModuleType("hermes_cli")
+    fake_pkg.__path__ = []
+    fake_models = types.ModuleType("hermes_cli.models")
+    fake_models.fetch_openrouter_models = lambda: curated
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_pkg)
+    monkeypatch.setitem(sys.modules, "hermes_cli.models", fake_models)
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: _FakeResponse(payload))
+
+    group = _openrouter_group()
+    assert len(group["models"]) == 100, "100 curated + 0 unique free renders in full"
+    assert "extra_models" not in group
+    free_ids = [m["id"] for m in group["models"] if ":free" in m["id"]]
+    assert not free_ids, "duplicate free payload rows must not be appended or counted"
