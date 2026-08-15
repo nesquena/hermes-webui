@@ -19,7 +19,10 @@ stale tab gets 410, not 403).
 """
 
 import http.client
+import socket
 import urllib.parse
+
+import pytest
 
 from tests._pytest_port import BASE
 
@@ -61,3 +64,96 @@ def test_rejected_write_advertises_close_and_pooled_followup_succeeds():
     assert follow_status == 200, (
         f"pooled follow-up after a reject-before-read must succeed; got {follow_status}"
     )
+
+
+# ── Framing the Content-Length gate could not see ─────────────────────────────
+#
+# Both cases below are pipelined down ONE socket against the real server: the
+# reject-before-read request first, an ordinary GET immediately after it in the
+# same write. If the rejection closes, the server answers once and EOFs and the
+# GET is never seen. If it does not, the leftover body/chunk bytes are parsed as
+# the next request line and a second response comes back — a 400 bad-syntax or
+# `501 Unsupported method` naming bytes the client never sent as a request.
+
+_FOLLOWING_GET = b"GET /api/health/agent HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: */*\r\n\r\n"
+_MULTIPART_UPLOAD_PATHS = (
+    "/api/upload",
+    "/api/upload/extract",
+    "/api/workspace/upload",
+    "/api/transcribe",
+)
+_MULTIPART_PAYLOAD = (
+    b'--x\r\nContent-Disposition: form-data; name="file"; filename="a.txt"\r\n'
+    b"\r\nhello\r\n--x--\r\n"
+)
+_CHUNKED_MULTIPART_BODY = (
+    f"{len(_MULTIPART_PAYLOAD):X}\r\n".encode() + _MULTIPART_PAYLOAD + b"\r\n0\r\n\r\n"
+)
+
+
+def _pipelined_after(request: bytes) -> bytes:
+    """Send *request* and a plain GET in one write; return every byte answered."""
+    sock = socket.create_connection(("127.0.0.1", _PORT), timeout=10)
+    try:
+        sock.sendall(request + _FOLLOWING_GET)
+        received = b""
+        while True:
+            try:
+                chunk = sock.recv(65536)
+            except (TimeoutError, socket.timeout, ConnectionError):
+                break
+            if not chunk:
+                break
+            received += chunk
+        return received
+    finally:
+        sock.close()
+
+
+def _assert_single_closed_response(answered: bytes, status: bytes, leftover: bytes) -> None:
+    text = answered.decode("latin-1", errors="replace")
+    assert answered.startswith(b"HTTP/1.1 " + status), text
+    assert b"Connection: close" in answered, text
+    assert answered.count(b"HTTP/1.1 ") == 1, (
+        f"the pipelined GET was answered, so the socket stayed open: {text}"
+    )
+    assert leftover not in answered, f"the unread body reached the request parser: {text}"
+    assert b"Bad request syntax" not in answered, text
+    assert b"Unsupported method" not in answered, text
+
+
+@pytest.mark.parametrize("path", _MULTIPART_UPLOAD_PATHS)
+def test_chunked_upload_rejection_closes_and_cannot_poison_the_socket(path):
+    """A chunked upload has no Content-Length — the old gate read it as empty.
+
+    All four multipart handlers then answered 400 "No file field in request"
+    with keep-alive intact, leaving the chunk bytes on the socket.
+    """
+    answered = _pipelined_after(
+        f"POST {path} HTTP/1.1\r\n"
+        "Host: 127.0.0.1\r\n"
+        "Content-Type: multipart/form-data; boundary=x\r\n"
+        "Transfer-Encoding: chunked\r\n"
+        "\r\n".encode() + _CHUNKED_MULTIPART_BODY
+    )
+
+    _assert_single_closed_response(answered, b"411", _MULTIPART_PAYLOAD)
+
+
+def test_sidecar_get_with_a_body_closes_and_cannot_poison_the_socket():
+    """A provenance-rejected GET that carries a declared body.
+
+    `read_request_body=False` said "no body" and the 403 went out with
+    keep-alive; the gate's repro then got `501 Unsupported method ('{}GET')` on
+    the same socket. No Origin/Referer/Sec-Fetch-Site here, so provenance fails
+    before the body would ever be read.
+    """
+    answered = _pipelined_after(
+        "GET /api/extensions/probe/sidecar/ping HTTP/1.1\r\n"
+        "Host: 127.0.0.1\r\n"
+        "Content-Type: application/json\r\n"
+        f"Content-Length: {len(_BODY)}\r\n"
+        "\r\n".encode() + _BODY
+    )
+
+    _assert_single_closed_response(answered, b"403", _BODY)
