@@ -206,10 +206,11 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Mermaid diagram rendering inline (flowcharts, sequence diagrams, gantt charts)
 - Thinking/reasoning display -- collapsible gold-themed cards for Claude extended thinking and o3 reasoning blocks
 - Provider-aware reasoning effort selector and `/reasoning` command. For GPT-5.6,
-  direct OpenAI/Azure-family routes expose `max` for Sol, Terra, Luna, and their
-  `-pro` model IDs. The ChatGPT-account Codex OAuth route exposes `max` only for
-  the three base model IDs because that route rejects the `-pro` IDs. Unknown
-  GPT-5.6 variants remain capped at `xhigh` until support is explicitly confirmed.
+  direct OpenAI/Azure-family routes expose `max` only for the three documented base
+  model IDs: Sol, Terra, and Luna. The ChatGPT-account Codex OAuth route exposes
+  `max` for those same base IDs; `-pro` model IDs are not a routable provider
+  contract and remain fail-closed at `xhigh` on every lane. Unknown GPT-5.6
+  variants also remain capped at `xhigh` until support is explicitly confirmed.
 - Approval card for dangerous shell commands (allow once / session / always / deny)
 - SSE auto-reconnect on network blips (SSH tunnel resilience)
 - File attachments persist across page reloads and are stored outside the active workspace by default (`~/.hermes/webui/attachments/<session_id>/`, or `HERMES_WEBUI_ATTACHMENT_DIR/<session_id>/` when configured)

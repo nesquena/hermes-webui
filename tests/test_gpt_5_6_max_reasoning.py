@@ -6,24 +6,17 @@ from api import config as cfg
 from api.gateway_chat import _gateway_reasoning_effort_for_request
 
 
-KNOWN_GPT_5_6_MODELS = (
-    "gpt-5.6-sol",
-    "gpt-5.6-sol-pro",
-    "gpt-5.6-terra",
-    "gpt-5.6-terra-pro",
-    "gpt-5.6-luna",
-    "gpt-5.6-luna-pro",
-)
-CODEX_GPT_5_6_MODELS = (
+GPT_5_6_BASE_MODELS = (
     "gpt-5.6-sol",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
 )
-CODEX_REJECTED_GPT_5_6_PRO_MODELS = (
+GPT_5_6_PRO_MODELS = (
     "gpt-5.6-sol-pro",
     "gpt-5.6-terra-pro",
     "gpt-5.6-luna-pro",
 )
+CODEX_GPT_5_6_MODELS = GPT_5_6_BASE_MODELS
 OPENAI_FAMILY_PROVIDERS = (
     "openai",
     "openai-api",
@@ -31,9 +24,10 @@ OPENAI_FAMILY_PROVIDERS = (
     "azure-openai",
     "azure",
 )
+ALL_OPENAI_FAMILY_PROVIDERS = ("openai-codex", *OPENAI_FAMILY_PROVIDERS)
 
 
-@pytest.mark.parametrize("model_id", KNOWN_GPT_5_6_MODELS)
+@pytest.mark.parametrize("model_id", GPT_5_6_BASE_MODELS)
 @pytest.mark.parametrize("provider_id", OPENAI_FAMILY_PROVIDERS)
 def test_known_gpt_5_6_models_advertise_max_on_openai_family(model_id, provider_id):
     assert "max" in cfg.resolve_model_reasoning_efforts(model_id, provider_id=provider_id)
@@ -46,21 +40,24 @@ def test_live_codex_gpt_5_6_models_advertise_max(model_id):
     )
 
 
-@pytest.mark.parametrize("model_id", CODEX_REJECTED_GPT_5_6_PRO_MODELS)
-def test_codex_rejected_gpt_5_6_pro_models_do_not_advertise_max(model_id):
-    efforts = cfg.resolve_model_reasoning_efforts(model_id, provider_id="openai-codex")
+@pytest.mark.parametrize("model_id", GPT_5_6_PRO_MODELS)
+@pytest.mark.parametrize("provider_id", ALL_OPENAI_FAMILY_PROVIDERS)
+def test_gpt_5_6_pro_models_fail_closed_on_every_openai_family_lane(
+    model_id, provider_id
+):
+    efforts = cfg.resolve_model_reasoning_efforts(model_id, provider_id=provider_id)
     assert "max" not in efforts
     assert cfg.coerce_reasoning_effort_for_model(
-        "max", model_id, provider_id="openai-codex"
+        "max", model_id, provider_id=provider_id
     ) == "xhigh"
 
 
 @pytest.mark.parametrize(
     "model_id,provider_id",
     [
-        ("@openai:gpt-5.6-terra-pro", "openai"),
-        ("openai/gpt-5.6-luna", "openai-api"),
-        ("azure/gpt-5.6-luna-pro", "azure-foundry"),
+        ("@openai:gpt-5.6-sol", "openai"),
+        ("openai/gpt-5.6-terra", "openai-api"),
+        ("azure/gpt-5.6-luna", "azure-foundry"),
     ],
 )
 def test_known_gpt_5_6_prefixed_and_provider_hinted_ids_advertise_max(model_id, provider_id):
@@ -122,7 +119,7 @@ def test_status_metadata_advertises_and_preserves_max_for_known_gpt_5_6(monkeypa
 @pytest.mark.parametrize(
     "model_id,provider_id",
     [(model, "openai-codex") for model in CODEX_GPT_5_6_MODELS]
-    + [(model, "openai") for model in KNOWN_GPT_5_6_MODELS],
+    + [(model, "openai") for model in GPT_5_6_BASE_MODELS],
 )
 def test_max_is_preserved_by_coercion_and_gateway_streaming(model_id, provider_id):
     assert cfg.coerce_reasoning_effort_for_model(
