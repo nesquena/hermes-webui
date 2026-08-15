@@ -173,15 +173,20 @@ def test_bodyless_write_method_rejection_keeps_connection(method, headers, monke
         ({}, False),
         ({"Content-Length": "0"}, False),
         ({"Content-Length": " 0 "}, False),
-        ({"Content-Length": ""}, False),
+        ({"Content-Length": ""}, True),
+        ({"Content-Length": "   "}, True),
+        ({"Content-Length": "\t"}, True),
         ({"Content-Length": "12"}, True),
         ({"Content-Length": "-1"}, True),
         ({"Content-Length": "banana"}, True),
+        ({"Content-Length": "0x5"}, True),
+        ({"Content-Length": "+5"}, True),
         ({"content-length": "7"}, True),
         ({"Transfer-Encoding": "chunked"}, True),
         ({"transfer-encoding": "Chunked"}, True),
         ({"Transfer-Encoding": "identity"}, False),
-        ({"Transfer-Encoding": ""}, False),
+        ({"Transfer-Encoding": ""}, True),
+        ({"Transfer-Encoding": "  "}, True),
     ],
 )
 def test_request_declares_body_reads_the_framing_headers(headers, expected):
@@ -293,6 +298,130 @@ def test_sidecar_get_with_duplicate_content_length_closes_connection(monkeypatch
     )
 
     assert handler.close_connection is True
+
+
+# ── A BLANK framing value is unreadable, not absent ───────────────────────────
+#
+# `Content-Length:` with nothing after the colon reads back as '' from
+# `get_all()`, and the empty value was SKIPPED — so `_declared_content_lengths()`
+# reported "no length declared", `request_declares_body()` said no body was
+# pending, and the provenance rejection answered 403 with keep-alive intact.
+# Reproduced live against the running server on the otherwise-fixed head:
+#
+#   GET /api/extensions/probe/sidecar/ping  `Content-Length:`  {"stale": true}
+#     -> HTTP/1.1 403 Forbidden        (no Connection: close)
+#     -> HTTP/1.1 400 Bad request syntax
+#            ('{"stale": true}GET /api/health/agent HTTP/1.1')
+#
+# `Message` collapses `Content-Length:`, `Content-Length:   ` and
+# `Content-Length:\t` to the same '', so every blank spelling poisoned the socket
+# identically — as did a blank value duplicated, or paired with a real length.
+#
+# A blank `Transfer-Encoding:` was the same hole one header over: '' sat in
+# `_UNFRAMED_TRANSFER_CODINGS` beside `identity`, so a header naming no coding at
+# all read as "no framing to worry about" and its payload poisoned the socket the
+# same way (verified live: 403 then the same bad-syntax 400). Absence is
+# something only the wire can say, and an absent header yields no values at all.
+
+
+_BLANK_FRAMING_HEADERS = [
+    "Content-Length:",
+    "Content-Length:   ",
+    "Content-Length:\t",
+    "Content-Length:\r\nContent-Length:",  # duplicated blank
+    "Content-Length:\r\nContent-Length: 15",  # blank ahead of a real length
+    "Content-Length: 15\r\nContent-Length:",  # and behind one
+    "Content-Length: 0\r\nContent-Length:",  # blank behind an honest zero
+    "Transfer-Encoding:",
+    "Transfer-Encoding:   ",
+    "Transfer-Encoding:\r\nTransfer-Encoding: chunked",
+]
+
+
+@pytest.mark.parametrize("raw", _BLANK_FRAMING_HEADERS)
+def test_blank_framing_value_declares_a_body(raw):
+    """On a real email.message.Message, as the production handler carries."""
+    from api.helpers import request_declares_body
+
+    handler = _message_with("Host: x\r\n" + raw + "\r\n")
+
+    assert request_declares_body(cast(Any, handler)) is True
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "Content-Length:",
+        "Content-Length:   ",
+        "Content-Length:\r\nContent-Length:",
+        "Content-Length:\r\nContent-Length: 15",
+        "Content-Length: 0\r\nContent-Length:",
+    ],
+)
+def test_blank_content_length_is_unreadable(raw):
+    """The upload preflight gate must refuse it too — there is no length to drain."""
+    from api.helpers import unreadable_content_length
+
+    assert unreadable_content_length(cast(Any, _message_with("Host: x\r\n" + raw + "\r\n"))) is True
+
+
+def test_blank_transfer_encoding_is_reported_as_an_undecodable_coding():
+    """Named, non-empty and never None, so `is not None` callers and the 411 read right."""
+    from api.helpers import unsupported_transfer_encoding
+
+    coding = unsupported_transfer_encoding(cast(Any, _message_with("Host: x\r\nTransfer-Encoding:\r\n")))
+
+    assert coding is not None
+    assert coding, "an empty return value would be a falsy non-None trap for callers"
+    assert unsupported_transfer_encoding(cast(Any, _message_with("Host: x\r\n"))) is None
+    assert unsupported_transfer_encoding(
+        cast(Any, _message_with("Host: x\r\nTransfer-Encoding: identity\r\n"))
+    ) is None
+
+
+@pytest.mark.parametrize("raw", _BLANK_FRAMING_HEADERS)
+def test_sidecar_get_with_blank_framing_value_closes_connection(raw, monkeypatch):
+    """The reported case, through the production provenance rejection."""
+    import api.routes as routes
+
+    from email.parser import Parser
+
+    handler = SimpleNamespace(
+        path="/api/extensions/ext1/sidecar/proxy",
+        command="GET",
+        headers=Parser().parsestr("Host: x\r\n" + raw + "\r\n\r\n"),
+        close_connection=False,
+    )
+    monkeypatch.setattr(routes, "_match_extension_sidecar_proxy_path", lambda _path: ("ext1", "/proxy"))
+    monkeypatch.setattr(routes, "_check_same_origin_browser_request", lambda _handler, **_: False)
+    monkeypatch.setattr(routes, "j", lambda _handler, _payload, status=200: None)
+
+    routes._handle_extension_sidecar_proxy(
+        cast(Any, handler), SimpleNamespace(path=handler.path, query=""), "GET"
+    )
+
+    assert handler.close_connection is True
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "",
+        "Content-Length: 0\r\n",
+        "Content-Length:  0 \r\n",
+        "Content-Length: 0\r\nContent-Length: 0\r\n",
+        "Transfer-Encoding: identity\r\n",
+    ],
+)
+def test_blank_rule_does_not_over_close_a_bodyless_request(raw):
+    """The other half of the contract: framing that says "no body" keeps keep-alive.
+
+    Two AGREEING zeroes, a padded zero and `identity` are honest statements that
+    nothing is queued, and none of them may be swept up by the blank rule.
+    """
+    from api.helpers import request_declares_body
+
+    assert request_declares_body(cast(Any, _message_with("Host: x\r\n" + raw))) is False
 
 
 def test_csp_report_rate_limited_closes_connection(monkeypatch):
@@ -437,6 +566,51 @@ def test_duplicate_content_length_multipart_rejects_before_read(handler_name, mo
 
     assert answered["status"] == 400, answered
     assert answered["payload"]["error"] == "Invalid Content-Length", answered
+    assert handler.close_connection is True
+
+
+@pytest.mark.parametrize("handler_name", _MULTIPART_HANDLERS)
+@pytest.mark.parametrize(
+    "raw",
+    ["Content-Length:", "Content-Length:   ", "Content-Length:\r\nContent-Length: 63"],
+    ids=["blank", "whitespace-only", "blank-plus-real"],
+)
+def test_blank_content_length_multipart_rejects_before_read(handler_name, raw, monkeypatch):
+    """A blank length reached `int('' or 0)` == 0 and read the body as empty.
+
+    All four handlers then answered 400 "No file field in request" with keep-alive
+    and left the whole multipart payload on the socket. Verified live on the
+    otherwise-fixed head: 400 then `400 Bad request syntax ('--x')`.
+    """
+    from email.parser import Parser
+
+    headers = Parser().parsestr(
+        "Content-Type: multipart/form-data; boundary=x\r\n" + raw + "\r\n\r\n"
+    )
+    handler, answered = _run_multipart_handler(monkeypatch, handler_name, headers, _NeverRead())
+
+    assert answered["status"] == 400, answered
+    assert answered["payload"]["error"] == "Invalid Content-Length", answered
+    assert handler.close_connection is True
+
+
+@pytest.mark.parametrize("handler_name", _MULTIPART_HANDLERS)
+def test_blank_transfer_encoding_multipart_rejects_before_read(handler_name, monkeypatch):
+    """`Transfer-Encoding:` names no coding, so it cannot frame a body either.
+
+    It used to read as "unframed" beside `identity` and fell through to the
+    length-0 read: 400 "No file field in request", keep-alive, and the payload
+    left on the socket (live: 400 then `400 Bad request syntax ('--x')`).
+    """
+    from email.parser import Parser
+
+    headers = Parser().parsestr(
+        "Content-Type: multipart/form-data; boundary=x\r\nTransfer-Encoding:\r\n\r\n"
+    )
+    handler, answered = _run_multipart_handler(monkeypatch, handler_name, headers, _NeverRead())
+
+    assert answered["status"] == 411, answered
+    assert "Transfer-Encoding" in answered["payload"]["error"], answered
     assert handler.close_connection is True
 
 

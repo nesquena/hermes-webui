@@ -219,7 +219,13 @@ def arm_connection_close(handler) -> None:
         pass
 
 
-_UNFRAMED_TRANSFER_CODINGS = frozenset({'', 'identity'})
+_UNFRAMED_TRANSFER_CODINGS = frozenset({'identity'})
+
+# What ``unsupported_transfer_encoding()`` reports for a header that declares no
+# coding at all (``Transfer-Encoding:``). A placeholder rather than the raw '' so
+# the return value is never a falsy non-``None`` — callers test ``is not None``,
+# and an empty string would also render as a hole in the rejection message.
+_BLANK_TRANSFER_CODING = '(blank)'
 
 
 def _framing_header_values(handler, name: str) -> list[str]:
@@ -261,14 +267,25 @@ def _framing_header_values(handler, name: str) -> list[str]:
 def _declared_content_lengths(handler) -> set[int] | None:
     """Distinct declared ``Content-Length`` values, or ``None`` if any is unreadable.
 
-    ``None`` means the framing cannot be trusted at all (a non-numeric value);
-    an empty set means no length was declared.
+    ``None`` means the framing cannot be trusted at all (a value that will not
+    parse); an empty set means no length was declared.
+
+    A BLANK or whitespace-only value is unreadable, NOT absent. ``Content-Length:``
+    with payload bytes behind it declares a body whose size the header refuses to
+    state; skipping the empty value reported "no length declared", so the
+    rejection kept the connection alive and those bytes were parsed as the next
+    request line (403 then ``400 Bad request syntax ('{...}GET /api/... HTTP/1.1')``).
+    Absence is something only the wire can say, and ``_framing_header_values()``
+    already reports a header the request never carried as no value at all -- so
+    anything that *is* here and does not parse has to be treated as pending bytes,
+    exactly like ``banana`` or two lengths that disagree. Note ``Message`` collapses
+    ``Content-Length:`` and ``Content-Length:   `` to the same ``''``.
     """
     parsed: set[int] = set()
     for raw in _framing_header_values(handler, 'Content-Length'):
         stripped = raw.strip()
         if not stripped:
-            continue
+            return None
         try:
             parsed.add(int(stripped))
         except ValueError:
@@ -279,10 +296,10 @@ def _declared_content_lengths(handler) -> set[int] | None:
 def unreadable_content_length(handler) -> bool:
     """True when ``Content-Length`` cannot be trusted to frame the body.
 
-    Either a value that will not parse, or two or more values that disagree.
-    Neither can tell a reader how many bytes to drain, so such a request can
-    only be rejected -- with the connection armed for close, since bytes may
-    still be queued behind it.
+    Either a value that will not parse (``banana``, ``0x5``, or a BLANK one), or
+    two or more values that disagree. None of them can tell a reader how many
+    bytes to drain, so such a request can only be rejected -- with the connection
+    armed for close, since bytes may still be queued behind it.
     """
     parsed = _declared_content_lengths(handler)
     return parsed is None or len(parsed) > 1
@@ -299,9 +316,12 @@ def request_declares_body(handler) -> bool:
     "read" requests (whose unread bytes poison the next pooled request) and
     kills healthy keep-alive on body-less writes.
 
-    An unparseable or self-contradicting ``Content-Length`` counts as a declared
-    body: a value we cannot interpret does not prove the body's absence, and the
-    safe assumption for connection reuse is that bytes are pending.
+    A blank, unparseable or self-contradicting ``Content-Length`` counts as a
+    declared body, as does a blank ``Transfer-Encoding``: a value we cannot
+    interpret does not prove the body's absence, and the safe assumption for
+    connection reuse is that bytes are pending. Only framing that positively says
+    "no body" -- no length header at all, or every declared length agreeing on
+    zero -- keeps the connection alive.
     """
     if unsupported_transfer_encoding(handler) is not None:
         return True
@@ -323,9 +343,19 @@ def unsupported_transfer_encoding(handler) -> str | None:
 
     Every declared coding is inspected, not just the first: a request may repeat
     the header, and one undecodable coding anywhere is enough to refuse.
+
+    A BLANK ``Transfer-Encoding:`` is undecodable too, and used to read as
+    "unframed" alongside ``identity``: a header that names no coding cannot tell a
+    reader whether a body follows or how it is framed, and payload bytes behind it
+    poisoned the next pooled request exactly as chunked framing did. ``''`` only
+    ever reached the unframed set from an explicitly empty header -- an absent one
+    yields no values to loop over -- so treating it as a coding we cannot decode
+    costs a real client nothing.
     """
     for raw in _framing_header_values(handler, 'Transfer-Encoding'):
         normalized = raw.strip()
+        if not normalized:
+            return _BLANK_TRANSFER_CODING
         if normalized.lower() not in _UNFRAMED_TRANSFER_CODINGS:
             return normalized
     return None

@@ -91,13 +91,19 @@ _CHUNKED_MULTIPART_BODY = (
 )
 
 
-def _pipelined_after(request: bytes) -> bytes:
-    """Send *request* and a plain GET in one write; return every byte answered."""
+def _pipelined_after(request: bytes, *, stop_after: int | None = None) -> bytes:
+    """Send *request* and a plain GET in one write; return every byte answered.
+
+    Reads to EOF by default, which is the whole point of the closing cases: the
+    proof is that NOTHING follows the single response. `stop_after` bounds the
+    read for the keep-alive cases, where the socket stays open by design and
+    reading to EOF would only burn the timeout.
+    """
     sock = socket.create_connection(("127.0.0.1", _PORT), timeout=10)
     try:
         sock.sendall(request + _FOLLOWING_GET)
         received = b""
-        while True:
+        while stop_after is None or received.count(b"HTTP/1.1 ") < stop_after:
             try:
                 chunk = sock.recv(65536)
             except (TimeoutError, socket.timeout, ConnectionError):
@@ -194,3 +200,89 @@ def test_duplicate_content_length_upload_closes_and_cannot_poison_the_socket(pat
     )
 
     _assert_single_closed_response(answered, b"400", _MULTIPART_PAYLOAD)
+
+
+# ── Framing hidden behind a BLANK header value ────────────────────────────────
+#
+# `Content-Length:` with nothing after the colon reads back as '' and was skipped
+# as "no length declared", so the rejection kept the connection alive. Both cases
+# below were reproduced live on the otherwise-fixed head:
+#   sidecar GET   -> 403, then 400 Bad request syntax ('{"stale": true}GET /...')
+#   /api/upload   -> 400, then 400 Bad request syntax ('--x')
+# `Message` collapses `Content-Length:` and `Content-Length:   ` to the same '',
+# and a blank `Transfer-Encoding:` sat in the unframed set beside `identity`, so
+# each spelling below poisoned the socket the same way.
+
+_BLANK_FRAMING_HEADER_LINES = (
+    b"Content-Length:\r\n",
+    b"Content-Length:    \r\n",
+    b"Content-Length:\r\nContent-Length:\r\n",
+    b"Content-Length: 0\r\nContent-Length:\r\n",
+    b"Transfer-Encoding:\r\n",
+)
+
+
+@pytest.mark.parametrize("framing", _BLANK_FRAMING_HEADER_LINES)
+def test_blank_framing_sidecar_get_closes_and_cannot_poison_the_socket(framing):
+    answered = _pipelined_after(
+        b"GET /api/extensions/probe/sidecar/ping HTTP/1.1\r\n"
+        b"Host: 127.0.0.1\r\n"
+        b"Content-Type: application/json\r\n" + framing + b"\r\n" + _BODY
+    )
+
+    _assert_single_closed_response(answered, b"403", _BODY)
+
+
+@pytest.mark.parametrize("path", _MULTIPART_UPLOAD_PATHS)
+@pytest.mark.parametrize(
+    ("framing", "status"),
+    [
+        (b"Content-Length:\r\n", b"400"),
+        (b"Content-Length:    \r\n", b"400"),
+        (b"Transfer-Encoding:\r\n", b"411"),
+    ],
+    ids=["blank-length", "whitespace-only-length", "blank-transfer-encoding"],
+)
+def test_blank_framing_upload_closes_and_cannot_poison_the_socket(path, framing, status):
+    answered = _pipelined_after(
+        f"POST {path} HTTP/1.1\r\n"
+        "Host: 127.0.0.1\r\n"
+        "Content-Type: multipart/form-data; boundary=x\r\n".encode()
+        + framing
+        + b"\r\n"
+        + _MULTIPART_PAYLOAD
+    )
+
+    _assert_single_closed_response(answered, status, _MULTIPART_PAYLOAD)
+
+
+@pytest.mark.parametrize(
+    "framing",
+    [
+        b"",
+        b"Content-Length: 0\r\n",
+        b"Content-Length: 0\r\nContent-Length: 0\r\n",
+        b"Transfer-Encoding: identity\r\n",
+    ],
+    ids=["no-length", "zero-length", "two-agreeing-zeroes", "identity"],
+)
+def test_bodyless_framing_keeps_the_pooled_socket_alive(framing):
+    """The over-close half of the contract, on the wire.
+
+    Framing that positively says "no body" must NOT be swept up by the blank
+    rule: the rejection answers without `Connection: close` and the pipelined GET
+    is served on the same socket. Two agreeing zeroes are still no body.
+    """
+    answered = _pipelined_after(
+        b"GET /api/extensions/probe/sidecar/ping HTTP/1.1\r\n"
+        b"Host: 127.0.0.1\r\n" + framing + b"\r\n",
+        stop_after=2,
+    )
+
+    text = answered.decode("latin-1", errors="replace")
+    assert answered.startswith(b"HTTP/1.1 403"), text
+    assert b"HTTP/1.1 200 OK" in answered, (
+        f"the pipelined GET was not served, so a body-less rejection dropped a "
+        f"healthy pooled connection: {text}"
+    )
+    assert b"Connection: close" not in answered, text
