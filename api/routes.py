@@ -11761,7 +11761,7 @@ button:hover{background:rgba(124,185,255,.25)}
 <div class="card">
   <div class="logo">{{BOT_NAME_INITIAL}}</div>
   <h1>{{BOT_NAME}}</h1>
-  <p class="sub">{{LOGIN_SUBTITLE}}</p>
+  {{LOGIN_SUBTITLE_HTML}}
   <form id="login-form" data-invalid-pw="{{LOGIN_INVALID_PW}}" data-conn-failed="{{LOGIN_CONN_FAILED}}">
     {{PASSWORD_FORM_HTML}}
     {{OIDC_LOGIN_HTML}}
@@ -11841,6 +11841,19 @@ def _oidc_login_html(parsed) -> str:
     return (
         '<a id="oidc-login" class="oidc-login" '
         f'href="{_html.escape(href, quote=True)}">Continue with SSO</a>'
+    )
+
+
+def _password_login_html(login_strings: dict[str, str]) -> str:
+    """Render local-password controls only when password auth is enabled."""
+    from api.auth import get_password_hash
+
+    if get_password_hash() is None:
+        return ""
+    return (
+        '<input type="password" id="pw" '
+        f'placeholder="{_html.escape(login_strings["placeholder"], quote=True)}" autofocus>'
+        f'<button type="submit">{_html.escape(login_strings["btn"])}</button>'
     )
 
 
@@ -14404,7 +14417,14 @@ def handle_get(handler, parsed) -> bool:
             .replace("{{WEBUI_VERSION}}", version_token)
             .replace("{{LANG}}", _html.escape(_login_strings["lang"]))
             .replace("{{LOGIN_TITLE}}", _html.escape(_login_strings["title"]))
-            .replace("{{LOGIN_SUBTITLE}}", _html.escape(_login_strings["subtitle"]))
+            .replace(
+                "{{LOGIN_SUBTITLE_HTML}}",
+                (
+                    f'<p class="sub">{_html.escape(_login_strings["subtitle"])}</p>'
+                    if is_password_auth_enabled()
+                    else ""
+                ),
+            )
             .replace("{{PASSWORD_FORM_HTML}}", _password_form_html)
             .replace("{{LOGIN_INVALID_PW}}", _html.escape(_login_strings["invalid_pw"]))
             .replace(
