@@ -506,6 +506,8 @@ def _session_sidecar_authority(
     session_dir: Path | None = None,
 ):
     """Serialize compliant sidecar writers for one SID across processes."""
+    if not is_safe_session_id(session_id):
+        raise ValueError(f"Unsafe session_id {session_id!r}")
     with _cross_process_sidecar_file_authority(
         session_id,
         session_dir=session_dir,
