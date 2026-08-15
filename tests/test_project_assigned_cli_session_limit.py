@@ -7,6 +7,9 @@ swing to the opposite failure, so these tests pin BOTH edges of the contract:
 * an assigned conversation older than the recent window is still reachable
   (the original bug), including past the 200-conversation mark when the
   assignments are spread over several projects;
+* one busy project cannot starve the others: a per-project budget applied to a
+  single global recency window is not a per-project bound, so a saturated window
+  is followed by project-scoped, per-project-budgeted queries (greptile P1);
 * the recovered set is BOUNDED — per project, counting logical conversations —
   including assigned rows that arrive as imported WebUI sidecars and therefore
   never pass through any state.db cap;
@@ -388,6 +391,355 @@ def test_model_bounds_a_skewed_project_inside_a_wider_scan_window(
     assert {s["session_id"] for s in sessions if s["project_id"] == "project-b"} == {
         f"b-{index:04d}" for index in range(5)
     }
+
+
+# ── greptile P1: a busy project must not starve the quieter ones ──────────────
+
+
+def _assigned_counts(sessions):
+    counts: dict[str, int] = {}
+    for session in sessions:
+        if session["project_id"]:
+            counts[session["project_id"]] = counts.get(session["project_id"], 0) + 1
+    return counts
+
+
+def test_busy_project_does_not_starve_quieter_projects(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """The per-project BUDGET is not enough while the QUERY is one global window.
+
+    The recovery pass asked for ``limit * len(projects)`` newest assigned
+    conversations in a single recency-ordered query and only then applied the
+    per-project budget. When one project owns that whole window, every other
+    project's assigned conversations are never even considered: their chips show
+    nothing at all. Reproduced with a scaled budget (3) so the fixture stays
+    small; ``test_busy_project_starvation_at_production_limits`` pins the same
+    behaviour at the real 200.
+    """
+    monkeypatch.setattr(models, "CLI_VISIBLE_SESSION_LIMIT", 5)
+    _register_projects(tmp_path, "project-busy", "project-quiet-a", "project-quiet-b")
+
+    rows = [
+        _session("quiet-a-old", BASE_TS, project_id="project-quiet-a"),
+        _session("quiet-b-old", BASE_TS + 1, project_id="project-quiet-b"),
+    ]
+    # 12 newer assigned conversations in one project fill the 3 * 3 = 9 window.
+    rows.extend(
+        _session(f"busy-{index:03d}", BASE_TS + 100 + index, project_id="project-busy")
+        for index in range(12)
+    )
+    rows.extend(_session(f"plain-{index:02d}", BASE_TS + 500 + index) for index in range(25))
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    sessions = models._load_cli_sessions_uncached(
+        fake_hermes_home,
+        fake_hermes_home / "state.db",
+        "default",
+        project_assigned_limit=3,
+    )
+
+    # Was {'project-busy': 3}: both quiet projects were completely absent.
+    assert _assigned_counts(sessions) == {
+        "project-busy": 3,
+        "project-quiet-a": 1,
+        "project-quiet-b": 1,
+    }
+    # The busy project still gets its newest, and is still bounded.
+    assert {s["session_id"] for s in sessions if s["project_id"] == "project-busy"} == {
+        "busy-011", "busy-010", "busy-009",
+    }
+
+
+def test_busy_project_starvation_at_production_limits(fake_hermes_home, tmp_path):
+    """The same starvation with the real PROJECT_ASSIGNED_CLI_LIMIT (200).
+
+    Two registered projects give the old global query a 400-conversation window;
+    400 newer conversations in one project consumed all of it, so the quiet
+    project's single assigned conversation was unreachable.
+    """
+    _register_projects(tmp_path, "project-busy", "project-quiet")
+
+    rows = [_session("quiet-old", BASE_TS, project_id="project-quiet")]
+    rows.extend(
+        _session(f"busy-{index:04d}", BASE_TS + 100 + index, project_id="project-busy")
+        for index in range(models.PROJECT_ASSIGNED_CLI_LIMIT * 2)
+    )
+    rows.extend(_session(f"plain-{index:02d}", BASE_TS + 5000 + index) for index in range(25))
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    counts = _assigned_counts(models.get_cli_sessions())
+
+    # Was {'project-busy': 200}.
+    assert counts == {
+        "project-busy": models.PROJECT_ASSIGNED_CLI_LIMIT,
+        "project-quiet": 1,
+    }
+
+
+def test_starved_project_recovers_its_whole_compression_lineage(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """The project-scoped follow-up query is still lineage-keyed.
+
+    ``project_ids`` narrows only the recursive CTE's SEED, so a starved project's
+    conversation still arrives as ONE row even when its assignment sits on the
+    root of a compression chain.
+    """
+    monkeypatch.setattr(models, "CLI_VISIBLE_SESSION_LIMIT", 5)
+    _register_projects(tmp_path, "project-busy", "project-quiet")
+
+    rows = _lineage("quiet-chain", BASE_TS, 3, project_id="project-quiet")
+    rows.extend(
+        _session(f"busy-{index:03d}", BASE_TS + 100 + index, project_id="project-busy")
+        for index in range(12)
+    )
+    rows.extend(_session(f"plain-{index:02d}", BASE_TS + 500 + index) for index in range(25))
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    sessions = models._load_cli_sessions_uncached(
+        fake_hermes_home,
+        fake_hermes_home / "state.db",
+        "default",
+        project_assigned_limit=2,
+    )
+
+    quiet = [s for s in sessions if s["project_id"] == "project-quiet"]
+    assert len(quiet) == 1, [s["session_id"] for s in quiet]
+    assert quiet[0]["session_id"] in {f"quiet-chain-seg{index}" for index in range(3)}
+
+
+def test_no_followup_queries_when_the_global_window_is_not_saturated(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """A short global window already saw everything, so it must cost 1 query.
+
+    The starvation follow-up is gated on saturation. Without that gate every
+    sidebar build on every profile with projects would pay a GROUP BY probe plus
+    a query per project.
+    """
+    _register_projects(tmp_path, "project-a", "project-b", "project-c")
+
+    rows = [
+        _session("a-1", BASE_TS, project_id="project-a"),
+        _session("b-1", BASE_TS + 1, project_id="project-b"),
+    ]
+    rows.extend(_session(f"plain-{index:02d}", BASE_TS + 500 + index) for index in range(25))
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    assigned_queries = []
+    real_reader = models.read_importable_agent_session_rows
+
+    def _counting_reader(*args, **kwargs):
+        if kwargs.get("project_assignment") == "assigned":
+            assigned_queries.append(kwargs.get("project_ids"))
+        return real_reader(*args, **kwargs)
+
+    probes = []
+    real_probe = models.read_assigned_project_row_counts
+
+    def _counting_probe(*args, **kwargs):
+        probes.append(args)
+        return real_probe(*args, **kwargs)
+
+    monkeypatch.setattr(models, "read_importable_agent_session_rows", _counting_reader)
+    monkeypatch.setattr(models, "read_assigned_project_row_counts", _counting_probe)
+
+    sessions = models._load_cli_sessions_uncached(
+        fake_hermes_home,
+        fake_hermes_home / "state.db",
+        "default",
+        project_assigned_limit=3,
+    )
+
+    assert _assigned_counts(sessions) == {"project-a": 1, "project-b": 1}
+    assert assigned_queries == [None], "one global assigned query, no per-project ones"
+    assert probes == [], "the GROUP BY probe is only paid on a saturated window"
+
+
+def test_followup_queries_are_capped_and_serve_the_neediest_first(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """The follow-up is bounded: at most PROJECT_ASSIGNED_CLI_REFILL_PROJECTS.
+
+    With the cap forced to 1 and two equally starved projects, the single
+    follow-up goes to the lower-numbered project id (the deterministic
+    neediest-first order) and the other keeps the pre-fix behaviour. This pins
+    the documented residual limitation instead of pretending it is absent.
+    """
+    monkeypatch.setattr(models, "CLI_VISIBLE_SESSION_LIMIT", 5)
+    monkeypatch.setattr(models, "PROJECT_ASSIGNED_CLI_REFILL_PROJECTS", 1)
+    _register_projects(tmp_path, "project-busy", "project-quiet-a", "project-quiet-b")
+
+    rows = [
+        _session("quiet-a-old", BASE_TS, project_id="project-quiet-a"),
+        _session("quiet-b-old", BASE_TS + 1, project_id="project-quiet-b"),
+    ]
+    rows.extend(
+        _session(f"busy-{index:03d}", BASE_TS + 100 + index, project_id="project-busy")
+        for index in range(12)
+    )
+    rows.extend(_session(f"plain-{index:02d}", BASE_TS + 500 + index) for index in range(25))
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    sessions = models._load_cli_sessions_uncached(
+        fake_hermes_home,
+        fake_hermes_home / "state.db",
+        "default",
+        project_assigned_limit=3,
+    )
+
+    assert _assigned_counts(sessions) == {
+        "project-busy": 3,
+        "project-quiet-a": 1,
+    }
+
+
+def test_scan_ceiling_is_shared_equally_between_projects(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """Past the ceiling every project's share shrinks; none is left with zero.
+
+    Ceiling 6 over 3 projects is a share of 2 even though the requested budget is
+    5, so the recovered payload stays under the ceiling AND every project is
+    represented — the old code let the newest project take 5 of the 6.
+    """
+    monkeypatch.setattr(models, "CLI_VISIBLE_SESSION_LIMIT", 5)
+    monkeypatch.setattr(models, "PROJECT_ASSIGNED_CLI_SCAN_CEILING", 6)
+    _register_projects(tmp_path, "project-a", "project-b", "project-c")
+
+    rows = []
+    for offset, project in enumerate(("project-a", "project-b", "project-c")):
+        rows.extend(
+            _session(
+                f"{project}-{index}",
+                BASE_TS + offset * 100 + index,
+                project_id=project,
+            )
+            for index in range(4)
+        )
+    rows.extend(_session(f"plain-{index:02d}", BASE_TS + 900 + index) for index in range(25))
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    sessions = models._load_cli_sessions_uncached(
+        fake_hermes_home,
+        fake_hermes_home / "state.db",
+        "default",
+        project_assigned_limit=5,
+    )
+
+    counts = _assigned_counts(sessions)
+    assert counts == {"project-a": 2, "project-b": 2, "project-c": 2}
+    assert sum(counts.values()) <= models.PROJECT_ASSIGNED_CLI_SCAN_CEILING
+
+
+# ── The reader-level contract the per-project follow-up relies on ─────────────
+
+
+def test_project_ids_narrows_the_assigned_query_to_one_project(tmp_path):
+    """``project_ids`` seeds the lineage CTE with one project's rows only."""
+    db_path = tmp_path / "state.db"
+    rows = [
+        _session("a-1", BASE_TS, project_id="project-a"),
+        _session("b-1", BASE_TS + 1, project_id="project-b"),
+        _session("plain", BASE_TS + 2),
+    ]
+    rows.extend(_lineage("b-chain", BASE_TS + 10, 3, project_id="project-b"))
+    _write_state_db(db_path, rows)
+
+    def _ids(**kwargs):
+        return sorted(
+            row["id"]
+            for row in agent_sessions.read_importable_agent_session_rows(
+                db_path, limit=50, exclude_sources=None, **kwargs
+            )
+        )
+
+    assert _ids(project_assignment="assigned") == ["a-1", "b-1", "b-chain-seg2"]
+    assert _ids(project_assignment="assigned", project_ids=("project-b",)) == [
+        "b-1", "b-chain-seg2",
+    ]
+    assert _ids(project_assignment="assigned", project_ids=("project-a",)) == ["a-1"]
+    # Unknown ids are not an error, they simply select nothing.
+    assert _ids(project_assignment="assigned", project_ids=("nope",)) == []
+
+
+def test_project_ids_requires_the_assigned_filter(tmp_path):
+    """A silently unnarrowed query is exactly the starvable one — refuse it."""
+    db_path = tmp_path / "state.db"
+    _write_state_db(db_path, [_session("a-1", BASE_TS, project_id="project-a")])
+
+    for assignment in (None, "unassigned"):
+        with pytest.raises(ValueError, match="project_ids requires"):
+            agent_sessions.read_importable_agent_session_rows(
+                db_path, project_assignment=assignment, project_ids=("project-a",)
+            )
+
+
+def test_empty_project_ids_selects_nothing(tmp_path):
+    """``project_ids=()`` must not degrade to "every assigned conversation"."""
+    db_path = tmp_path / "state.db"
+    _write_state_db(db_path, [_session("a-1", BASE_TS, project_id="project-a")])
+
+    assert agent_sessions.read_importable_agent_session_rows(
+        db_path, exclude_sources=None, project_assignment="assigned", project_ids=()
+    ) == []
+
+
+def test_project_ids_narrows_on_a_schema_without_lineage_columns(tmp_path):
+    """The no-parent_session_id schema takes the plain ``project_id IN`` path."""
+    db_path = tmp_path / "state.db"
+    _write_state_db(
+        db_path,
+        [
+            _session("a-1", BASE_TS, project_id="project-a"),
+            _session("b-1", BASE_TS + 1, project_id="project-b"),
+        ],
+        lineage_columns=False,
+    )
+
+    rows = agent_sessions.read_importable_agent_session_rows(
+        db_path,
+        limit=50,
+        exclude_sources=None,
+        project_assignment="assigned",
+        project_ids=("project-b",),
+    )
+
+    assert [row["id"] for row in rows] == ["b-1"]
+
+
+def test_assigned_project_row_counts_probe(tmp_path):
+    """The probe counts assigned RAW rows per project and honours exclusions."""
+    db_path = tmp_path / "state.db"
+    rows = [
+        _session("a-1", BASE_TS, project_id="project-a"),
+        _session("a-2", BASE_TS + 1, project_id="project-a"),
+        _session("b-1", BASE_TS + 2, project_id="project-b"),
+        _session("b-cron", BASE_TS + 3, project_id="project-b", source="cron"),
+        _session("plain", BASE_TS + 4),
+        _session("blank", BASE_TS + 5, project_id="   "),
+    ]
+    _write_state_db(db_path, rows)
+
+    assert agent_sessions.read_assigned_project_row_counts(db_path) == {
+        "project-a": 2, "project-b": 2,
+    }
+    assert agent_sessions.read_assigned_project_row_counts(
+        db_path, exclude_sources=("cron", "webhook", "kanban")
+    ) == {"project-a": 2, "project-b": 1}
+    # Missing db and a schema without project_id are answered, not raised.
+    assert agent_sessions.read_assigned_project_row_counts(tmp_path / "nope.db") == {}
+
+
+def test_assigned_project_row_counts_probe_on_schema_without_project_id(tmp_path):
+    db_path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT)")
+    conn.commit()
+    conn.close()
+
+    assert agent_sessions.read_assigned_project_row_counts(db_path) == {}
 
 
 # ── Finding 2: assigned rows must not spend the unassigned quota ──────────────
