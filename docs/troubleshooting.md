@@ -177,6 +177,20 @@ turn in the exhausted session instead of being blocked with recovery guidance.
 
 ---
 
+## "You are offline" / Hermes requires a server connection while the server is up
+
+**Symptom.** The browser shows a dark page with **You are offline** and *Hermes requires a server connection...*, while `/health` returns 200 and the origin is reachable (curl, another device, or a private window without a controlling service worker).
+
+**Why.** The service worker intercepts top-level navigations and re-fetches them. Behind reverse proxies, Cloudflare tunnels, SSH tunnels, or split-horizon DNS, a cloned `mode: 'navigate'` fetch can reject even when the server is healthy. The SW then returned a custom 200 HTML offline document, so the browser treated navigation as successful and reload kept hitting the same catch — trapping the tab until site data was cleared.
+
+**Immediate recovery.** Open `/login` directly (the SW does not intercept login), or hard-refresh / clear site data for the Hermes origin, then reload.
+
+**Fix.** Current WebUI retries the navigation as a plain same-origin URL fetch before the offline HTML, and the offline fallback unregisters service workers and sends the user to `/login` so the tab cannot stay trapped.
+
+**When to file a bug.** File a WebUI bug if a current build still shows this page while `/health` is 200 and a direct `/login` load also fails without a controlling service worker.
+
+---
+
 ## "Hermes Agent was updated while Hermes WebUI was running"
 
 **Symptom.** An action that uses the in-process Agent runtime stops with a message telling you to restart Hermes WebUI. This can happen after `hermes update`, a Git checkout/pull in the Agent source tree, or another tool updates Hermes Agent without restarting the already-running WebUI backend.

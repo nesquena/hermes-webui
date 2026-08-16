@@ -51,6 +51,58 @@ def test_service_worker_uses_network_first_for_page_navigation():
     )
 
 
+def test_service_worker_navigation_retries_plain_url_fetch_before_offline():
+    """Cloned navigate-mode fetches can reject behind proxies while the origin is up.
+
+    The navigate branch must retry with event.request.url + same-origin credentials
+    before serving the synthetic offline HTML (which would otherwise trap the tab).
+    """
+    navigate_idx = SW_SRC.find("event.request.mode === 'navigate'")
+    assert navigate_idx != -1, "service worker must special-case page navigations"
+    # End of navigate respondWith block before the shell-asset path.
+    navigate_end = SW_SRC.find("Shell assets: network-first", navigate_idx)
+    assert navigate_end != -1, "expected shell-assets block after navigate branch"
+    navigate_block = SW_SRC[navigate_idx:navigate_end]
+    first_fetch = navigate_block.find(
+        "fetch(new Request(event.request, { cache: 'no-store' }))"
+    )
+    retry_fetch = navigate_block.find(
+        "fetch(event.request.url, { cache: 'no-store', credentials: 'same-origin'"
+    )
+    offline_html = navigate_block.find("You are offline")
+    assert first_fetch != -1, "navigation branch must keep the cloned Request no-store fetch"
+    assert retry_fetch != -1, (
+        "navigation branch must retry with event.request.url and credentials: 'same-origin' "
+        "after the cloned Request fetch rejects"
+    )
+    assert "redirect: 'follow'" in navigate_block, (
+        "navigation retry must use redirect: 'follow'"
+    )
+    assert offline_html != -1, "navigation branch must still have offline HTML as last resort"
+    assert first_fetch < retry_fetch < offline_html, (
+        "order must be: cloned Request fetch → plain URL retry → offline HTML"
+    )
+
+
+def test_service_worker_navigation_offline_html_self_heals_to_login():
+    """Synthetic offline HTML must not trap the tab behind a controlling SW."""
+    navigate_idx = SW_SRC.find("event.request.mode === 'navigate'")
+    assert navigate_idx != -1
+    navigate_end = SW_SRC.find("Shell assets: network-first", navigate_idx)
+    navigate_block = SW_SRC[navigate_idx:navigate_end]
+    assert "You are offline" in navigate_block
+    assert "Hermes requires a server connection" in navigate_block
+    assert 'href="/login"' in navigate_block, (
+        "offline fallback must expose a visible Retry link to /login"
+    )
+    assert "unregister" in navigate_block, (
+        "offline fallback must unregister service workers so reload is not trapped"
+    )
+    assert 'location.replace("/login")' in navigate_block, (
+        "offline fallback must navigate to /login after unregistering"
+    )
+
+
 def test_service_worker_does_not_precache_page_shell_under_auth():
     """Do not cache './' during install; it may be the authenticated app or login redirect."""
     shell_block = SW_SRC[SW_SRC.find("const SHELL_ASSETS"):SW_SRC.find("];", SW_SRC.find("const SHELL_ASSETS"))]

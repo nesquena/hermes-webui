@@ -130,11 +130,19 @@ self.addEventListener('fetch', (event) => {
           caches.open(CACHE_NAME).then((cache) => cache.put('./', clone));
         }
         return response;
-      }).catch(() => {
+      }).catch(() =>
+        // Cloned navigate-mode fetches can reject behind reverse proxies /
+        // tunnels while the origin is healthy. Retry as a plain same-origin GET.
+        fetch(event.request.url, { cache: 'no-store', credentials: 'same-origin', redirect: 'follow' })
+      ).catch(() => {
         return caches.match('./').then((cached) => cached || new Response(
           '<html><body style="font-family:sans-serif;padding:2rem;background:#1a1a1a;color:#ccc">' +
           '<h2>You are offline</h2>' +
           '<p>Hermes requires a server connection. Please check your network and try again.</p>' +
+          '<p><a href="/login">Retry</a></p>' +
+          '<script>navigator.serviceWorker.getRegistrations().then(function(rs){' +
+          'return Promise.all(rs.map(function(r){return r.unregister();}));' +
+          '}).then(function(){location.replace("/login");});</script>' +
           '</body></html>',
           { headers: { 'Content-Type': 'text/html' } }
         ));
