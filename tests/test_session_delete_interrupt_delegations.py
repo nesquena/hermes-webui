@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import sys
 import types
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -146,9 +145,9 @@ def test_delete_session_interrupt_failure_does_not_block_deletion(tmp_path, monk
     assert not (session_dir / f"{sid}.json").exists()
 
 
-def test_delete_session_interrupt_called_before_sidecar_deletion(tmp_path, monkeypatch):
-    """interrupt_for_session is called while the session record still exists."""
-    session_dir = _isolate_session_store(tmp_path, monkeypatch)
+def test_delete_session_interrupt_before_runtime_teardown(tmp_path, monkeypatch):
+    """interrupt_for_session is called before the session agent is evicted."""
+    _isolate_session_store(tmp_path, monkeypatch)
     sid = "test-session-delete-interrupt-order"
     session = Session(session_id=sid, title="Test Session", messages=[{"role": "user", "content": "hi"}])
     session.save()
@@ -158,17 +157,15 @@ def test_delete_session_interrupt_called_before_sidecar_deletion(tmp_path, monke
     monkeypatch.setattr(routes, "_is_messaging_session_id", lambda sid: False)
     monkeypatch.setattr(models, "delete_cli_session", lambda sid: True)
 
-    # Track call order
+    # Track call order between interrupt_for_session and the agent eviction.
     call_order = []
 
-    # Wrap get_session to track when it's called (imported in routes)
-    original_get_session = routes.get_session
+    import api.config as config_mod
 
-    def tracking_get_session(session_id, metadata_only=False):
-        call_order.append(("get_session", session_id))
-        return original_get_session(session_id, metadata_only)
+    def tracking_evict(session_id):
+        call_order.append(("evict_session_agent", session_id))
 
-    monkeypatch.setattr(routes, "get_session", tracking_get_session)
+    monkeypatch.setattr(config_mod, "_evict_session_agent", tracking_evict)
 
     # Install fake async_delegation that tracks when it's called
     fake_mod = types.ModuleType("tools.async_delegation")
@@ -185,22 +182,18 @@ def test_delete_session_interrupt_called_before_sidecar_deletion(tmp_path, monke
 
     assert routes.handle_post(object(), SimpleNamespace(path="/api/session/delete")) is True
 
-    # interrupt_for_session should be called before SESSIONS.pop (which happens
-    # inside the session_lock block). Since get_session is called to get the
-    # event_profile BEFORE interrupt_for_session, we expect:
-    # 1. get_session (for event_profile)
-    # 2. interrupt_for_session
-    # 3. get_session (inside session_lock for pop)
-    get_session_calls = [c for c in call_order if c[0] == "get_session"]
+    # interrupt_for_session must fire while the session runtime still exists,
+    # i.e. before _evict_session_agent tears it down. The interrupt must NOT
+    # hold the per-session mutation lock (it runs after the lock's finally).
     interrupt_calls = [c for c in call_order if c[0] == "interrupt_for_session"]
+    evict_calls = [c for c in call_order if c[0] == "evict_session_agent"]
 
-    assert len(get_session_calls) >= 2
     assert len(interrupt_calls) == 1
-    # The first get_session (event_profile) happens before interrupt
-    assert call_order.index(("get_session", sid)) < call_order.index(interrupt_calls[0])
-    # The interrupt happens before the second get_session (inside lock)
-    # Note: we can't easily check the exact second get_session, but the order
-    # ensures interrupt happens while session still exists
+    assert len(evict_calls) == 1
+    assert call_order.index(interrupt_calls[0]) < call_order.index(evict_calls[0])
+    # Deletion still succeeds and the interrupted count is reported.
+    assert captured["status"] == 200
+    assert captured["payload"]["interrupted"] == 1
 
 
 if __name__ == "__main__":
