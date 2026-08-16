@@ -616,6 +616,36 @@ def _is_agent_compression_start_status(kind: str, message: str) -> bool:
     )
 
 
+def _is_agent_compression_done_status(kind: str, message: str) -> bool:
+    """Return True for the agent's structured *compaction complete* edge.
+
+    Contract with hermes-agent: ``_emit_compaction_done()`` in
+    ``agent/conversation_compression.py`` calls
+    ``status_callback("compacted", COMPACTION_DONE_STATUS)``. That call sits in
+    ``_release_lock()``, which runs *after* ``agent.session_id`` has rotated to
+    the continuation and after the child session has been committed — so when
+    this fires, the rotation is already durable and the continuation is the
+    live session.
+
+    Matching on ``kind`` is the whole point: the wording of the status text is
+    cosmetic and localisable, while the kind is the structural signal. The
+    message is only used as a weak secondary guard so an unrelated future
+    ``compacted`` kind (e.g. a memory compaction) cannot be mistaken for a
+    context-compression edge.
+    """
+    k = str(kind or '').strip().lower()
+    if k != 'compacted':
+        return False
+    m = str(message or '').strip().lower()
+    if not m:
+        # A bare 'compacted' kind is still the documented structural edge.
+        return True
+    # Reject explicit failure/abort wording; those are surfaced as warnings.
+    if 'abort' in m or 'failed' in m:
+        return False
+    return 'compaction' in m or 'compact' in m or 'context' in m
+
+
 def _prewarm_skill_tool_modules():
     """Import tools.skills_tool and tools.skill_manager_tool outside any lock.
 
@@ -6132,6 +6162,110 @@ def _pre_compression_snapshot_is_durable(snapshot_sid: str) -> bool:
     return bool(getattr(snapshot, "pre_compression_snapshot", False))
 
 
+def _session_transcript_is_durable(session_id: str, minimum_messages: int = 1) -> bool:
+    """Confirm a session's transcript is already persisted on disk.
+
+    Mid-turn counterpart of ``_pre_compression_snapshot_is_durable``. At the
+    moment the agent signals "compaction complete", the parent session file has
+    been written by the periodic checkpoint saver but the *rotation* bookkeeping
+    (which stamps ``pre_compression_snapshot``) only runs at turn finalisation.
+    So the snapshot flag cannot be required yet; what must be proven is that a
+    real transcript for that id exists on disk, so hiding it from the viewport
+    can never be the only copy disappearing.
+
+    Fails closed on any lookup problem: no proof, no pruning.
+    """
+    if not session_id:
+        return False
+    try:
+        from api.models import get_session
+
+        snapshot = get_session(session_id)
+    except Exception:
+        logger.warning(
+            "midturn compaction: could not verify durable transcript for %s",
+            session_id,
+            exc_info=True,
+        )
+        return False
+    if snapshot is None:
+        return False
+    try:
+        return len(getattr(snapshot, "messages", None) or []) >= max(1, minimum_messages)
+    except Exception:
+        return False
+
+
+def _emit_midturn_compaction_event(
+    put,
+    *,
+    origin_session_id,
+    continuation_session_id,
+    settings=None,
+):
+    """Tell the browser to compact the *visible* conversation immediately.
+
+    Called from the agent status bridge the moment compaction completes, which
+    is many minutes before turn finalisation on a long tool-heavy turn. Without
+    this, the promise "compact at each compression so the WebUI stays
+    responsive" is only kept between turns — never during the long turn where
+    it actually matters (observed on session 20260816_210523_091383).
+
+    Deliberately **display-only**. Mid-turn the agent owns the authoritative
+    transcript and hands it back only when the turn returns; truncating
+    ``s.messages`` from this callback thread would race the live turn and could
+    drop in-flight state. The authoritative reduction therefore stays exactly
+    where it is (turn finalisation) and this event only prunes the DOM.
+
+    Returns True when an event was published, False on any no-op/guard.
+    """
+    origin = str(origin_session_id or "").strip()
+    continuation = str(continuation_session_id or "").strip()
+    # A compression that did not rotate the session has no archived parent to
+    # collapse into: there is nothing safe to hide from the viewport.
+    if not origin or not continuation or origin == continuation:
+        return False
+    try:
+        if settings is None:
+            from api.config import load_settings
+
+            settings = load_settings()
+        # Same single user-facing switch as the end-of-turn reduction, so
+        # turning the feature off really turns all of it off.
+        if (settings or {}).get("auto_squash_after_compression") is not True:
+            return False
+    except Exception:
+        logger.debug("midturn compaction: settings lookup failed", exc_info=True)
+        return False
+    # Fail closed: never hide history from the viewport without positive proof
+    # the full pre-compression transcript is already durable on disk.
+    if not _session_transcript_is_durable(origin):
+        logger.info(
+            "midturn compaction: skipped session=%s reason=parent_not_durable",
+            continuation,
+        )
+        return False
+    try:
+        put(
+            "midturn_compacted",
+            {
+                "session_id": origin,
+                "old_session_id": origin,
+                "new_session_id": continuation,
+                "continuation_session_id": continuation,
+            },
+        )
+    except Exception:
+        logger.debug("midturn compaction: failed to publish event", exc_info=True)
+        return False
+    logger.info(
+        "midturn compaction: emitted origin=%s continuation=%s",
+        origin,
+        continuation,
+    )
+    return True
+
+
 def _should_apply_active_session_tail_reduction(
     *,
     continuation_tail,
@@ -8758,6 +8892,26 @@ def _run_agent_streaming(
                 'session_id': session_id,
                 'message': 'Compressing context',
             })
+            return
+        # Compaction just finished, mid-turn. The agent has already rotated
+        # agent.session_id to the continuation and committed the child session
+        # (see _release_lock -> _emit_compaction_done in hermes-agent), but the
+        # WebUI's own rotation bookkeeping and tail reduction do not run until
+        # turn finalisation — many minutes away on a long tool-heavy turn.
+        # Publish a display-only event now so the browser can collapse the
+        # archived history and follow the rotation immediately.
+        if _is_agent_compression_done_status(_kind, _message):
+            try:
+                _live_continuation_sid = getattr(agent, 'session_id', None)
+                _emit_midturn_compaction_event(
+                    put,
+                    origin_session_id=session_id,
+                    continuation_session_id=_live_continuation_sid,
+                )
+            except Exception:
+                logger.debug(
+                    "midturn compaction bridge failed", exc_info=True
+                )
             return
         # Pass through rate-limit and fallback messages so the frontend can
         # show them as warnings via the existing messages.js 'warning' listener.

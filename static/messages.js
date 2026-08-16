@@ -6641,6 +6641,80 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
 
+    // Mid-turn compaction (2026-08-16). The server publishes this the moment
+    // the agent reports "compaction complete" — typically many minutes before
+    // the terminal 'done' event on a long tool-heavy turn, and well before the
+    // end-of-turn 'tail_reduced' path runs at all. Two effects, both cheap and
+    // strictly local:
+    //   1. collapse the archived history above the live compaction card, so a
+    //      long conversation stops costing scroll/render weight immediately;
+    //   2. follow the session rotation in the address bar right away, instead
+    //      of leaving the tab on the frozen pre-compression archive for the
+    //      rest of the turn (that archive is exactly where the user sees the
+    //      "nothing was compacted" full transcript).
+    // S.messages is intentionally NOT sliced here: mid-turn the server has not
+    // yet reconciled the authoritative transcript, so the array must stay as
+    // rendered until 'done'/'tail_reduced' settles it. Only the DOM above the
+    // card is pruned, and the pruned rows are already durable on disk (the
+    // server proved it before emitting).
+    source.addEventListener('midturn_compacted',e=>{
+      if(!S.session) return;
+      let d={};
+      try{ d=JSON.parse(e.data||'{}')||{}; }catch(_){ d={}; }
+      const originSid=d.old_session_id||d.session_id||'';
+      const continuationSid=d.continuation_session_id||d.new_session_id||'';
+      const currentSid=S.session.session_id;
+      // Only act for the conversation this tab is actually showing.
+      if(originSid&&originSid!==currentSid&&continuationSid!==currentSid) return;
+      // ── 1. prune the DOM above the live compaction card ──
+      const container=document.getElementById('msgInner')||document.getElementById('messages');
+      if(container){
+        // The live compaction card is the visual boundary between archived
+        // history and the ongoing turn. Anchor on its top-level row so the
+        // in-flight streaming node is never touched.
+        let cardNode=container.querySelector('.compression-card-row')
+          ||container.querySelector('.live-compression-cards')
+          ||container.querySelector('.compression-card');
+        while(cardNode&&cardNode.parentElement&&cardNode.parentElement!==container){
+          cardNode=cardNode.parentElement;
+        }
+        // Fail-safe: with no resolvable anchor, leave the DOM completely
+        // alone. The transcript still settles at 'done'.
+        if(cardNode&&cardNode.parentElement===container){
+          let removed=0;
+          let node=cardNode.previousElementSibling;
+          while(node){
+            const prev=node.previousElementSibling;
+            // Never remove a node that carries the live turn being streamed.
+            if(node.id==='liveAssistantTurn'){ node=prev; continue; }
+            node.remove();
+            removed++;
+            node=prev;
+          }
+          if(removed>0){
+            const banner=document.createElement('div');
+            banner.className='tail-reduced-banner';
+            banner.setAttribute('data-midturn-compacted-banner','1');
+            banner.textContent=(typeof t==='function')
+              ? t('midturn_compacted_banner')
+              : 'Earlier messages compacted — history archived';
+            cardNode.parentNode.insertBefore(banner,cardNode);
+            if(typeof _clearMessageVirtualHeightCache==='function') _clearMessageVirtualHeightCache();
+            if(typeof _visWithIdxCache!=='undefined') _visWithIdxCache=null;
+          }
+        }
+      }
+      // ── 2. follow the rotation immediately ──
+      if(continuationSid&&continuationSid!==currentSid){
+        try{
+          S.session.session_id=continuationSid;
+          if(typeof _rememberActiveSession==='function') _rememberActiveSession(continuationSid);
+          if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(continuationSid,{replace:true});
+        }catch(_rotateErr){ }
+      }
+    });
+
+
     source.addEventListener('metering',e=>{
       try{
         const d=JSON.parse(e.data||'{}');
