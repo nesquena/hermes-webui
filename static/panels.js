@@ -11890,6 +11890,14 @@ function _buildProviderCard(p){
   return card;
 }
 
+function _invalidateLiveModelCacheForProvider(providerId, canonicalProvider){
+  if(typeof window._invalidateLiveModelCache!=='function') return;
+  const requested=String(providerId||'').trim().toLowerCase();
+  const canonical=String(canonicalProvider||'').trim().toLowerCase();
+  if(requested) window._invalidateLiveModelCache(requested);
+  if(canonical&&canonical!==requested) window._invalidateLiveModelCache(canonical);
+}
+
 async function _saveProviderKey(providerId){
   const els=_providerCardEls.get(providerId);
   if(!els) return;
@@ -11905,6 +11913,7 @@ async function _saveProviderKey(providerId){
     if(res.ok){
       showToast(res.provider+' key '+res.action);
       els.input.value='';
+      _invalidateLiveModelCacheForProvider(providerId,res.provider);
       // Invalidate every dropdown surface that caches /api/models so the
       // newly-configured provider's models show up without a server restart
       // or page reload (#1539). Server-side invalidate_models_cache() is
@@ -11931,6 +11940,7 @@ async function _removeProviderKey(providerId){
     const res=await api('/api/providers/delete',{method:'POST',body:JSON.stringify({provider:providerId})});
     if(res.ok){
       showToast(res.provider+' key '+t('providers_key_removed').toLowerCase());
+      _invalidateLiveModelCacheForProvider(providerId,res.provider);
       // Drop the removed provider from every cached dropdown surface so it
       // disappears immediately — composer picker, /model slash command,
       // Settings → Default Model, configured-model badges (#1539).
@@ -12099,10 +12109,7 @@ async function _refreshProviderModels(providerId, btn){
   try{
      const res=await api('/api/models/refresh',{method:'POST',body:JSON.stringify({provider:providerId})});
      if(res.ok){
-       if(typeof window._invalidateLiveModelCache==='function'){
-         window._invalidateLiveModelCache(providerId);
-         window._invalidateLiveModelCache(res.provider);
-       }
+       _invalidateLiveModelCacheForProvider(providerId,res.provider);
        if(typeof _fetchLiveModels==='function'){
          const fresh=await _fetchLiveModels(res.provider||providerId,null,null,{required:true});
          if(!fresh) throw new Error('Fresh live models were not returned');

@@ -187,9 +187,10 @@ def test_post_refresh_lookup_forces_agent_until_current_generation_publishes(mon
 
 def test_refresh_button_awaits_live_fetch_before_success():
     source = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
+    invalidate = _extract_js_function(source, "function _invalidateLiveModelCacheForProvider(")
     rebuild = _extract_js_function(source, "function _refreshModelDropdownsAfterProviderChange(")
     refresh = _extract_js_function(source, "async function _refreshProviderModels(")
-    bundle = rebuild + "\n" + refresh + "\nglobalThis.runRefresh=_refreshProviderModels;"
+    bundle = invalidate + "\n" + rebuild + "\n" + refresh + "\nglobalThis.runRefresh=_refreshProviderModels;"
     script = f"""
 const events = [];
 globalThis.window = {{
@@ -241,9 +242,10 @@ globalThis.eval({json.dumps(bundle)});
 
 def test_refresh_failure_has_no_success_path():
     source = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
+    invalidate = _extract_js_function(source, "function _invalidateLiveModelCacheForProvider(")
     rebuild = _extract_js_function(source, "function _refreshModelDropdownsAfterProviderChange(")
     refresh = _extract_js_function(source, "async function _refreshProviderModels(")
-    bundle = rebuild + "\n" + refresh + "\nglobalThis.runRefresh=_refreshProviderModels;"
+    bundle = invalidate + "\n" + rebuild + "\n" + refresh + "\nglobalThis.runRefresh=_refreshProviderModels;"
     script = f"""
 const events = [];
 globalThis.window = {{_invalidateLiveModelCache: () => {{}}, _invalidateSlashModelCache: () => {{}}, _ensureModelDropdownReady: async () => {{}}}};
@@ -257,3 +259,37 @@ globalThis.eval({json.dumps(bundle)});
     messages = _run_node(script)
     assert messages
     assert not any(message == "refreshed" for message in messages)
+
+
+def test_provider_key_save_and_remove_invalidate_requested_and_canonical_live_caches():
+    source = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
+    invalidate = _extract_js_function(source, "function _invalidateLiveModelCacheForProvider(")
+    save = _extract_js_function(source, "async function _saveProviderKey(")
+    remove = _extract_js_function(source, "async function _removeProviderKey(")
+    bundle = (
+        invalidate
+        + "\n"
+        + save
+        + "\n"
+        + remove
+        + "\nglobalThis.runSave=_saveProviderKey; globalThis.runRemove=_removeProviderKey;"
+    )
+    script = f"""
+const events = [];
+const card = {{input: {{value: 'long-enough-key'}}, saveBtn: {{disabled:false, textContent:''}}}};
+globalThis._providerCardEls = new Map([['provider-alias', card]]);
+globalThis.window = {{_invalidateLiveModelCache: provider => events.push(provider)}};
+globalThis.api = async path => ({{ok:true, provider:'provider', action:path.includes('delete')?'removed':'updated'}});
+globalThis.showToast = () => {{}};
+globalThis.t = () => 'text';
+globalThis._refreshModelDropdownsAfterProviderChange = () => {{}};
+globalThis.loadProvidersPanel = async () => {{}};
+globalThis.eval({json.dumps(bundle)});
+(async () => {{
+  await globalThis.runSave('provider-alias');
+  await globalThis.runRemove('provider-alias');
+  console.log(JSON.stringify(events));
+}})();
+"""
+    events = _run_node(script)
+    assert events == ["provider-alias", "provider", "provider-alias", "provider"]
