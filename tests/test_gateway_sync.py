@@ -593,6 +593,173 @@ def test_compression_overlap_tolerance_is_bounded_and_keeps_exclusions():
     )
 
 
+def test_compression_overlap_tolerance_rejects_model_config_branch_identity():
+    """Fork/delegate identity in model_config wins over the 1s compression tolerance.
+
+    Production rows carry branch/delegate lineage in model_config
+    (_delegate_from authoritative, _branched_from for manual branches), not in
+    session_source. A child whose parent compressed within the tolerance window
+    must stay a boundary. Malformed model_config fails closed (boundary).
+    """
+    from api.agent_sessions import _is_continuation_session
+
+    parent = {
+        'id': 'mc_parent',
+        'source': 'webui',
+        'ended_at': 200.0,
+        'end_reason': 'compression',
+    }
+    base_child = {'id': 'mc_child', 'source': 'webui', 'started_at': 199.7}
+
+    # Plain continuation inside the tolerance still collapses (containment).
+    assert _is_continuation_session(parent, base_child)
+
+    # Delegate identity (authoritative) — JSON string as stored in state.db.
+    assert not _is_continuation_session(
+        parent,
+        {**base_child, 'model_config': json.dumps({'_delegate_from': 'mc_parent'})},
+    )
+    # Manual branch identity — already-parsed dict shape.
+    assert not _is_continuation_session(
+        parent,
+        {**base_child, 'model_config': {'_branched_from': 'mc_parent'}},
+    )
+    # Malformed model_config: ambiguous identity evidence fails closed.
+    assert not _is_continuation_session(
+        parent,
+        {**base_child, 'model_config': '{not-json'},
+    )
+    # Non-dict model_config is equally ambiguous.
+    assert not _is_continuation_session(
+        parent,
+        {**base_child, 'model_config': json.dumps(['_delegate_from'])},
+    )
+    # A model_config without branch markers does NOT block continuation.
+    assert _is_continuation_session(
+        parent,
+        {**base_child, 'model_config': json.dumps({'model': 'anthropic/claude'})},
+    )
+
+
+def test_model_config_branch_child_stays_separate_lineage_in_sidebar_projection():
+    """A fork/delegate child inside the overlap window keeps its own sidebar row."""
+    from api.agent_sessions import _project_agent_session_rows
+
+    rows = [
+        {
+            'id': 'mc_overlap_root',
+            'title': 'Compression parent',
+            'source': 'webui',
+            'started_at': 100.0,
+            'parent_session_id': None,
+            'ended_at': 200.0,
+            'end_reason': 'compression',
+            'actual_message_count': 3,
+            'actual_user_message_count': 1,
+            'message_count': 3,
+            'last_activity': 199.0,
+        },
+        {
+            'id': 'mc_overlap_continuation',
+            'title': 'Compression parent',
+            'source': 'webui',
+            'started_at': 199.8,
+            'parent_session_id': 'mc_overlap_root',
+            'ended_at': None,
+            'end_reason': None,
+            'actual_message_count': 2,
+            'actual_user_message_count': 1,
+            'message_count': 2,
+            'last_activity': 201.0,
+        },
+        {
+            'id': 'mc_overlap_delegate_child',
+            'title': 'Delegated subagent run',
+            'source': 'webui',
+            'started_at': 199.6,
+            'parent_session_id': 'mc_overlap_root',
+            'model_config': json.dumps({'_delegate_from': 'mc_overlap_root'}),
+            'ended_at': None,
+            'end_reason': None,
+            'actual_message_count': 2,
+            'actual_user_message_count': 1,
+            'message_count': 2,
+            'last_activity': 202.0,
+        },
+    ]
+
+    projected = _project_agent_session_rows(rows)
+    projected_by_id = {row['id']: row for row in projected}
+
+    # The real continuation still collapses into the chain tip...
+    assert 'mc_overlap_continuation' in projected_by_id
+    assert projected_by_id['mc_overlap_continuation']['_lineage_root_id'] == 'mc_overlap_root'
+    # ...while the delegate child remains a separate, visible lineage.
+    assert 'mc_overlap_delegate_child' in projected_by_id
+    assert projected_by_id['mc_overlap_delegate_child']['relationship_type'] == 'child_session'
+    assert '_lineage_root_id' not in projected_by_id['mc_overlap_delegate_child']
+
+
+def test_stitch_continuations_does_not_prefix_model_config_branch_child(tmp_path, monkeypatch):
+    """Transcript stitching must not pull ancestor messages into a delegate child."""
+    import api.models as models
+    from api.models import get_state_db_session_messages
+
+    db = tmp_path / 'state.db'
+    conn = sqlite3.connect(str(db))
+    conn.executescript("""
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            source TEXT,
+            session_source TEXT,
+            model_config TEXT,
+            started_at REAL,
+            parent_session_id TEXT,
+            ended_at REAL,
+            end_reason TEXT
+        );
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            role TEXT,
+            content TEXT,
+            timestamp REAL
+        );
+    """)
+    conn.execute(
+        "INSERT INTO sessions (id, source, started_at, ended_at, end_reason) "
+        "VALUES ('st_parent', 'webui', 100.0, 200.0, 'compression')"
+    )
+    conn.execute(
+        "INSERT INTO sessions (id, source, model_config, started_at, parent_session_id) "
+        "VALUES ('st_delegate', 'webui', ?, 199.7, 'st_parent')",
+        (json.dumps({'_delegate_from': 'st_parent'}),),
+    )
+    conn.execute(
+        "INSERT INTO sessions (id, source, started_at, parent_session_id) "
+        "VALUES ('st_continuation', 'webui', 199.8, 'st_parent')"
+    )
+    conn.executemany(
+        "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+        [
+            ('st_parent', 'user', 'parent msg', 150.0),
+            ('st_delegate', 'user', 'delegate msg', 199.9),
+            ('st_continuation', 'user', 'continuation msg', 199.95),
+        ],
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(models, '_active_state_db_path', lambda: db)
+
+    # Delegate child: only its own messages, no ancestor prefix.
+    delegate_msgs = get_state_db_session_messages('st_delegate', stitch_continuations=True)
+    assert [m['content'] for m in delegate_msgs] == ['delegate msg']
+
+    # Containment: a genuine compression continuation still stitches.
+    stitched = get_state_db_session_messages('st_continuation', stitch_continuations=True)
+    assert [m['content'] for m in stitched] == ['parent msg', 'continuation msg']
+
+
 def test_compression_lineage_prefers_freshest_descendant_over_newer_direct_sibling():
     """A later-started stale sibling must not hide a deeper active branch."""
     conn = _ensure_state_db()

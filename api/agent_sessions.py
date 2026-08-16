@@ -1,4 +1,5 @@
 """Shared helpers for reading Hermes Agent sessions from state.db."""
+import json
 import logging
 import sqlite3
 from contextlib import closing
@@ -306,6 +307,37 @@ def is_cli_session_row_visible(row: dict) -> bool:
     return _count_user_turns(row) >= CLI_MIN_UNTITLED_USER_MESSAGE_COUNT
 
 
+def _has_model_config_branch_identity(row: dict | None) -> bool:
+    """Return True when ``model_config`` marks ``row`` as a fork/delegate child.
+
+    Hermes Agent records branch/delegate lineage inside ``model_config``
+    (``_delegate_from`` is authoritative, ``_branched_from`` marks manual
+    branches); ``session_source == 'fork'`` is only the legacy fallback for
+    rows created before those markers existed. Such children must remain
+    separate lineages even when the parent's compression boundary overlaps
+    their start timestamp.
+
+    Fail closed: a non-empty ``model_config`` that cannot be parsed as a JSON
+    object is ambiguous identity evidence — treat the row as a boundary, not a
+    compression continuation.
+    """
+    if not row:
+        return False
+    raw = row.get('model_config')
+    if raw in (None, ''):
+        return False
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            return True
+    else:
+        parsed = raw
+    if not isinstance(parsed, dict):
+        return True
+    return bool(parsed.get('_delegate_from') or parsed.get('_branched_from'))
+
+
 def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
     """Return True when ``child`` is the next segment of the same conversation.
 
@@ -323,6 +355,12 @@ def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
     if not parent or not child:
         return False
     if str(child.get('session_source') or '').strip().lower() == 'fork':
+        return False
+    # Branch/delegate identity lives in model_config in production
+    # (_delegate_from authoritative, _branched_from for manual branches);
+    # reject that direct boundary before the compression-overlap tolerance
+    # below can reclassify a real fork/delegate child as a continuation.
+    if _has_model_config_branch_identity(child):
         return False
     parent_source = str(parent.get('source') or '').strip().lower()
     child_source = str(child.get('source') or '').strip().lower()
@@ -580,6 +618,7 @@ def read_importable_agent_session_rows(
 
         parent_expr = _optional_col('parent_session_id', session_cols)
         session_source_expr = _optional_col('session_source', session_cols)
+        model_config_expr = _optional_col('model_config', session_cols)
         ended_expr = _optional_col('ended_at', session_cols)
         end_reason_expr = _optional_col('end_reason', session_cols)
         user_id_expr = _optional_col('user_id', session_cols)
@@ -701,6 +740,7 @@ def read_importable_agent_session_rows(
             SELECT s.id, s.title, s.model, s.message_count,
                    s.started_at, s.source,
                    {session_source_expr},
+                   {model_config_expr},
                    {user_id_expr},
                    {chat_id_expr},
                    {chat_type_expr},
@@ -885,6 +925,7 @@ def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops:
 
             source_expr = _optional_col('source', session_cols)
             session_source_expr = _optional_col('session_source', session_cols)
+            model_config_expr = _optional_col('model_config', session_cols)
             title_expr = _optional_col('title', session_cols)
             started_expr = _optional_col('started_at', session_cols, '0')
             ended_expr = _optional_col('ended_at', session_cols)
@@ -899,6 +940,7 @@ def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops:
                     SELECT s.id,
                            {source_expr},
                            {session_source_expr},
+                           {model_config_expr},
                            {title_expr},
                            {started_expr},
                            {parent_expr},
@@ -945,6 +987,7 @@ def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops:
                     SELECT s.id,
                            {source_expr},
                            {session_source_expr},
+                           {model_config_expr},
                            {title_expr},
                            {started_expr},
                            {parent_expr},
@@ -1021,6 +1064,7 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
             if 'parent_session_id' not in session_cols or 'end_reason' not in session_cols:
                 return {}
             session_source_expr = _optional_col('session_source', session_cols)
+            model_config_expr = _optional_col('model_config', session_cols)
             source_expr = _optional_col('source', session_cols)
             message_count_expr = _optional_col('message_count', session_cols, '0')
             # Scoped fetch via PRIMARY KEY + idx_sessions_parent rather than a
@@ -1058,7 +1102,7 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
                     placeholders = ','.join('?' * len(chunk))
                     cur.execute(
                         f"""
-                        SELECT s.id, {source_expr}, {session_source_expr}, s.title, s.started_at, s.parent_session_id, s.ended_at, s.end_reason, {message_count_expr}
+                        SELECT s.id, {source_expr}, {session_source_expr}, {model_config_expr}, s.title, s.started_at, s.parent_session_id, s.ended_at, s.end_reason, {message_count_expr}
                         FROM sessions s
                         WHERE s.id IN ({placeholders})
                         """,
@@ -1087,7 +1131,7 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
                     placeholders = ','.join('?' * len(chunk))
                     cur.execute(
                         f"""
-                        SELECT s.id, {source_expr}, {session_source_expr}, s.title, s.started_at, s.parent_session_id, s.ended_at, s.end_reason, {message_count_expr}
+                        SELECT s.id, {source_expr}, {session_source_expr}, {model_config_expr}, s.title, s.started_at, s.parent_session_id, s.ended_at, s.end_reason, {message_count_expr}
                         FROM sessions s
                         WHERE s.parent_session_id IN ({placeholders})
                         """,
