@@ -6848,7 +6848,7 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
    feels native to the WebUI rather than a one-off bridge UI. */
 .kanban-modal-overlay{
   position:fixed;inset:0;background:rgba(7,12,19,.62);backdrop-filter:blur(6px);
-  display:flex;align-items:safe center;justify-content:center;overflow-y:auto;
+  display:flex;align-items:center;align-items:safe center;justify-content:center;overflow-y:auto;
   z-index:1100;padding:24px;
 }
 .kanban-modal-overlay[hidden]{display:none;}

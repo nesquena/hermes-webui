@@ -80,6 +80,7 @@ def _assert_reachable(page, modal_id, *, should_scroll, max_height_inset):
         (800, 450, True, 48),
         (1920, 1080, False, 48),
         (400, 800, True, 24),
+        (640, 480, True, 24),
     ],
 )
 def test_task_modal_actions_reachable_across_viewports(
