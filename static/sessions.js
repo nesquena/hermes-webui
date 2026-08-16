@@ -31,6 +31,14 @@ let _loadSessionGeneration = 0;
 // _statusCard, _anchor_stream_id) survive the wholesale replace. null when there is nothing
 // to carry forward (initial load, switch-to-different-session, etc.).
 let _pendingCarryForwardSnapshot = null;
+// Session id that the transcript currently sitting in S.messages was loaded
+// for. S.messages alone is NOT proof of ownership: several paths (INFLIGHT
+// restore, cross-tab snapshot merge, a switch whose clear was skipped) can
+// leave another conversation's rows in S. _ensureMessagesLoaded() compares
+// against this marker before taking its "already loaded, skip the fetch"
+// early return, which is what kept showing the previous conversation after
+// clicking a different session.
+let _messagesOwnerSid = null;
 
 // ── Composer draft persistence ────────────────────────────────────────────────
 
@@ -1591,14 +1599,14 @@ async function newSession(flash, options={}){
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
       _clearEmptyComposerModelOverride();
     }
-    S.session=data.session;if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);S.messages=data.session.messages||[];
+    S.session=data.session;if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);S.messages=data.session.messages||[];_messagesOwnerSid=(data.session&&data.session.session_id)||null;
     S._pendingSessionToolsets=null;
     if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
     S.lastUsage={...(data.session.last_usage||{})};
     if(!(options&&options.worktree)) _rememberNewChatDraftSession(S.session);
     if(flash)S.session._flash=true;
-    try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
+    try{_rememberActiveSession(S.session.session_id);}catch(_){}
     _setActiveSessionUrl(S.session.session_id);
     if(typeof startSessionStream==='function') startSessionStream(S.session.session_id);
     _setSessionViewedCount(S.session.session_id, S.session.message_count || 0);
@@ -1697,7 +1705,7 @@ async function newSession(flash, options={}){
  */
 function _clearStuckSessionOnBoot(sid, currentSid){
   if(!currentSid){
-    try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
+    try{ _forgetActiveSession(); }catch(_){ }
     try{ history.replaceState(null,'',_appRootPath()); }catch(_){ }
   }
 }
@@ -1922,6 +1930,7 @@ async function loadSession(sid){
     if (!_keepStaleUntilLoaded) {
       S.messages = [];
       S.toolCalls = [];
+      _messagesOwnerSid = null;
       _messagesTruncated = false;
       _oldestIdx = 0;
     }
@@ -1995,7 +2004,7 @@ async function loadSession(sid){
         // Only the rethrow stays gated on !currentSid: boot rethrows to fall
         // through to empty-state; mid-session there is no boot path to reach.
         if(!currentSid || currentSid===sid){
-          try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
+          try{ _forgetActiveSession(); }catch(_){ }
           try{ history.replaceState(null,'',_appRootPath()); }catch(_){ }
           if (_isCurrentLoad()) _loadingSessionId = null;
           if(!currentSid){
@@ -2152,7 +2161,7 @@ async function loadSession(sid){
     Number(data.session.message_count || 0),
     Number(data.session.last_message_at || data.session.updated_at || 0)
   );
-  try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
+  try{_rememberActiveSession(S.session.session_id);}catch(_){}
   _setActiveSessionUrl(S.session.session_id);
   if(typeof startSessionStream==='function') startSessionStream(S.session.session_id);
 
@@ -2242,6 +2251,7 @@ async function loadSession(sid){
       S.messages=_dropCurrentTurnAssistantMessages(S.messages);
     }
     S.messages=_mergeInflightTailMessages(S.messages,inflightMessages);
+    _messagesOwnerSid = sid;
     S.toolCalls=(INFLIGHT[sid].toolCalls||[]);
     if(_mergePendingSessionMessage(S.session,S.messages)&&inflightMessages===(INFLIGHT[sid].messages||[])){
       INFLIGHT[sid].messages=S.messages;
@@ -3255,7 +3265,18 @@ async function _ensureMessagesLoaded(sid, opts) {
   const _ownsLoad = () => _loadingSessionId === sid && (_loadGeneration === null || _loadSessionGeneration === _loadGeneration);
   if (!_ownsLoad()) return;
   // Already have messages? (e.g. from INFLIGHT restore path, already set)
-  if (!opts.force && S.messages && S.messages.length > 0 && S.messages[0] && S.messages[0].role) {
+  //
+  // CRITICAL: only skip the fetch when the transcript currently in S was
+  // actually loaded FOR THIS sid. The original check looked at S.messages
+  // alone, so any path that left a previous conversation's messages in S
+  // (INFLIGHT restore of another session, a cross-tab snapshot merge, or a
+  // switch that skipped the clear because forceReload was false) made this
+  // early-return fire and left conversation A's transcript rendered under
+  // conversation B's header — the "clicking a session shows the previous
+  // conversation until I refresh" bug. _messagesOwnerSid is stamped right
+  // after every authoritative assignment to S.messages below.
+  const _messagesBelongToSid = (_messagesOwnerSid === sid);
+  if (!opts.force && _messagesBelongToSid && S.messages && S.messages.length > 0 && S.messages[0] && S.messages[0].role) {
     _clearSameSessionForceReloadHint(sid);
     return;
   }
@@ -3317,6 +3338,7 @@ async function _ensureMessagesLoaded(sid, opts) {
   }
   if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();
   S.messages = msgs;
+  _messagesOwnerSid = sid;
   // Expand render window to cover all loaded messages so the next
   // renderMessages() doesn't hide most of them behind a tiny window.
   if(typeof _messageRenderableMessageCount==='function'&&typeof _currentMessageRenderWindowSize==='function'){
@@ -3922,6 +3944,7 @@ async function _loadOlderMessages() {
       nextMessages = window._carryForwardEphemeralTurnFields(S.messages || [], nextMessages);
     }
     S.messages = nextMessages;
+    if(S.session&&S.session.session_id) _messagesOwnerSid = S.session.session_id;
     _syncToolCallsForLoadedMessages(nextMessages, responseSession.tool_calls);
     // renderMessages() windows long transcripts from the end. If we do not
     // expand that window before rendering, the newly prepended page stays
@@ -4028,6 +4051,7 @@ async function _ensureAllMessagesLoaded() {
       _msgsToAssign = window._carryForwardEphemeralTurnFields(S.messages || [], msgs);
     }
     S.messages = _msgsToAssign;
+    if(S.session&&S.session.session_id) _messagesOwnerSid = S.session.session_id;
     _messagesTruncated = false;
     _oldestIdx = 0;
     _syncToolCallsForLoadedMessages(msgs, data.session.tool_calls);
@@ -4466,7 +4490,7 @@ function _renderBatchActionBar(){
       const cleanupFailedCount=results.filter(result=>result.response&&result.response.state_db_cleanup_failed).length;
       ids.forEach(_clearHandoffStorageForSession);
       if(S.session&&ids.includes(S.session.session_id)){
-        S.session=null;S.messages=[];S.entries=[];localStorage.removeItem('hermes-webui-session');
+        S.session=null;S.messages=[];S.entries=[];_messagesOwnerSid=null;_forgetActiveSession();
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
         const remaining=await api('/api/sessions'+_sessionListQueryString());
         if(remaining.sessions&&remaining.sessions.length){await loadSession(remaining.sessions[0].session_id);}
@@ -4971,7 +4995,7 @@ async function _archiveSession(session, archived=true, beforeListRender=null){
     const cached=(_allSessions||[]).find(s=>s&&s.session_id===session.session_id);
     if(cached) cached.archived=archived;
     if(S.session&&S.session.session_id===session.session_id) S.session.archived=archived;
-    try{ if(archived&&session.session_id&&localStorage.getItem('hermes-webui-session')===session.session_id) localStorage.removeItem('hermes-webui-session'); }catch(_){ }
+    try{ if(archived&&session.session_id&&_rememberedActiveSession()===session.session_id) _forgetActiveSession(); }catch(_){ }
     showToast(session.archived?_sessionArchiveToast(response,session):t('session_restored'));
     if(renderHold) await renderHold;
     if(_showArchived&&!_sessionPrefersReducedMotion()) _sessionSwipeReturnOffsets.set(session.session_id,'0px');
@@ -6481,6 +6505,7 @@ function startGatewaySSE(){
                       _nextToAssign = window._carryForwardEphemeralTurnFields(S.messages || [], next);
                     }
                     S.messages = _nextToAssign;
+                    _messagesOwnerSid = activeSid;
                     if(S.session && S.session.session_id === activeSid){
                       S.session.message_count = next.length;
                       const newest = next.length ? next[next.length - 1] : null;
@@ -9199,7 +9224,9 @@ function renderSessionListFromCache(){
 }
 
 async function _handleActiveSessionStorageEvent(e){
-  if(!e || e.key !== 'hermes-webui-session') return;
+  // Match both the legacy global key and any tab-scoped variant
+  // ('hermes-webui-session::<tabId>') written by another tab.
+  if(!e || !e.key || e.key.indexOf('hermes-webui-session')!==0) return;
   // Do not treat localStorage as a global active-session bus. Each tab owns its
   // active conversation via its URL (/session/<id>), so another tab switching
   // sessions must not force this tab to navigate away from an in-flight turn.
@@ -9351,9 +9378,9 @@ async function deleteSession(sid, beforeDelete=null){
     _optimisticallyRemoveSessionFromList(sid);
   }
   if(S.session&&S.session.session_id===sid){
-    S.session=null;S.messages=[];S.entries=[];
+    S.session=null;S.messages=[];S.entries=[];_messagesOwnerSid=null;
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
-    localStorage.removeItem('hermes-webui-session');
+    _forgetActiveSession();
     // load the most recent remaining session, or show blank if none left
     const remaining=await api('/api/sessions'+_sessionListQueryString());
     if(remaining.sessions&&remaining.sessions.length){
