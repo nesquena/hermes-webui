@@ -16,13 +16,32 @@ overwritten AND deleted, while a request WITHOUT a snap keeps serving the live
 from __future__ import annotations
 
 import os
+import shutil
+import tempfile
 import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture
+def allowed_tmp_path():
+    """Provide a temp directory under an allowed root (/tmp on Linux and macOS).
+
+    The /api/media gate only serves files under its allowed roots (hermes home,
+    /tmp, ~/.hermes, the active workspace — see api/routes.py _handle_media).
+    pytest's tmp_path resolves to /tmp on Linux but /private/var/folders/... on
+    macOS, which is outside every allowed root — that made the media-serving
+    tests 403 on darwin. This fixture anchors files at /tmp (== /private/tmp on
+    macOS) regardless of TMPDIR so the gate serves them on every platform.
+    """
+    test_dir = Path(tempfile.mkdtemp(prefix="hermes-webui-media-test-", dir="/tmp"))
+    yield test_dir
+    shutil.rmtree(test_dir, ignore_errors=True)
 
 
 class _FakeHandler:
@@ -57,9 +76,9 @@ def routes():
 
 
 @pytest.fixture
-def snap_dir(tmp_path, monkeypatch):
-    """Isolate the snapshot store per test and point it at tmp_path."""
-    store = tmp_path / "media_snapshots"
+def snap_dir(allowed_tmp_path, monkeypatch):
+    """Isolate the snapshot store per test and point it at allowed_tmp_path."""
+    store = allowed_tmp_path / "media_snapshots"
     monkeypatch.setenv("HERMES_WEBUI_MEDIA_SNAPSHOT_DIR", str(store))
     return store
 
@@ -75,10 +94,10 @@ def _media_get(routes, monkeypatch, target, headers=None, query_extra=""):
 # ── capture_snapshot ───────────────────────────────────────────────────────
 
 
-def test_capture_snapshot_stores_content_addressed_bytes(snap_dir, tmp_path):
+def test_capture_snapshot_stores_content_addressed_bytes(snap_dir, allowed_tmp_path):
     from api.media_snapshots import capture_snapshot, snapshot_path_for_digest
 
-    source = tmp_path / "report.html"
+    source = allowed_tmp_path / "report.html"
     source.write_bytes(b"<html>v1</html>")
 
     digest = capture_snapshot(source)
@@ -89,11 +108,11 @@ def test_capture_snapshot_stores_content_addressed_bytes(snap_dir, tmp_path):
     assert stored.read_bytes() == b"<html>v1</html>"
 
 
-def test_capture_snapshot_dedupes_identical_content(snap_dir, tmp_path):
+def test_capture_snapshot_dedupes_identical_content(snap_dir, allowed_tmp_path):
     from api.media_snapshots import capture_snapshot
 
-    a = tmp_path / "a.png"
-    b = tmp_path / "b.png"
+    a = allowed_tmp_path / "a.png"
+    b = allowed_tmp_path / "b.png"
     a.write_bytes(b"same-bytes")
     b.write_bytes(b"same-bytes")
 
@@ -105,29 +124,29 @@ def test_capture_snapshot_dedupes_identical_content(snap_dir, tmp_path):
     assert len(list(snap_dir.glob("*.snap"))) == 1
 
 
-def test_capture_snapshot_skips_missing_and_over_cap(snap_dir, tmp_path):
+def test_capture_snapshot_skips_missing_and_over_cap(snap_dir, allowed_tmp_path):
     from api.media_snapshots import capture_snapshot
 
-    assert capture_snapshot(tmp_path / "missing.png") is None
+    assert capture_snapshot(allowed_tmp_path / "missing.png") is None
 
-    big = tmp_path / "big.mp4"
+    big = allowed_tmp_path / "big.mp4"
     big.write_bytes(b"x" * 1024)
     assert capture_snapshot(big, max_file_bytes=512) is None
 
 
-def test_capture_snapshot_skips_directories(snap_dir, tmp_path):
+def test_capture_snapshot_skips_directories(snap_dir, allowed_tmp_path):
     from api.media_snapshots import capture_snapshot
 
-    assert capture_snapshot(tmp_path) is None
+    assert capture_snapshot(allowed_tmp_path) is None
 
 
 # ── resolve_media_ref / media_capture_allowed ──────────────────────────────
 
 
-def test_resolve_media_ref_handles_file_url_and_expands_home(tmp_path, monkeypatch):
+def test_resolve_media_ref_handles_file_url_and_expands_home(allowed_tmp_path, monkeypatch):
     from api.media_snapshots import resolve_media_ref
 
-    target = tmp_path / "x.html"
+    target = allowed_tmp_path / "x.html"
     target.write_text("hi")
 
     assert resolve_media_ref(str(target)) == target.resolve()
@@ -137,31 +156,31 @@ def test_resolve_media_ref_handles_file_url_and_expands_home(tmp_path, monkeypat
     assert resolve_media_ref("") is None
 
 
-def test_media_capture_allowed_denies_hermes_state(tmp_path, monkeypatch):
+def test_media_capture_allowed_denies_hermes_state(allowed_tmp_path, monkeypatch):
     from api.media_snapshots import media_capture_allowed
 
     # Files under an allowed root (tmp) are fine...
-    allowed = tmp_path / "ok.html"
+    allowed = allowed_tmp_path / "ok.html"
     allowed.write_text("x")
     assert media_capture_allowed(allowed) is True
 
     # ...but a deny-listed filename under a Hermes root is never snapshotted.
     # Point HOME at the fake tree so <fake-home>/.hermes counts as a root.
-    hermes_home = tmp_path / ".hermes"
+    hermes_home = allowed_tmp_path / ".hermes"
     hermes_home.mkdir()
     secret = hermes_home / "settings.json"
     secret.write_text("{}")
-    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HOME", str(allowed_tmp_path))
     assert media_capture_allowed(secret) is False
 
 
 # ── annotate_media_snapshots ───────────────────────────────────────────────
 
 
-def test_annotate_stamps_assistant_messages_with_snapshots(snap_dir, tmp_path):
+def test_annotate_stamps_assistant_messages_with_snapshots(snap_dir, allowed_tmp_path):
     from api.media_snapshots import annotate_media_snapshots
 
-    target = tmp_path / "report.html"
+    target = allowed_tmp_path / "report.html"
     target.write_text("<html>v1</html>")
 
     messages = [
@@ -177,10 +196,10 @@ def test_annotate_stamps_assistant_messages_with_snapshots(snap_dir, tmp_path):
     assert len(stamped[str(target)]) == 64
 
 
-def test_annotate_is_idempotent_across_settles(snap_dir, tmp_path):
+def test_annotate_is_idempotent_across_settles(snap_dir, allowed_tmp_path):
     from api.media_snapshots import annotate_media_snapshots
 
-    target = tmp_path / "report.html"
+    target = allowed_tmp_path / "report.html"
     target.write_text("<html>v1</html>")
     messages = [{"role": "assistant", "content": f"MEDIA:{target}"}]
 
@@ -189,7 +208,7 @@ def test_annotate_is_idempotent_across_settles(snap_dir, tmp_path):
     assert len(list(snap_dir.glob("*.snap"))) == 1
 
 
-def test_annotate_skips_remote_and_data_refs(snap_dir, tmp_path):
+def test_annotate_skips_remote_and_data_refs(snap_dir, allowed_tmp_path):
     from api.media_snapshots import annotate_media_snapshots
 
     messages = [
@@ -204,12 +223,12 @@ def test_annotate_skips_remote_and_data_refs(snap_dir, tmp_path):
 # ── /api/media?snap= serving ───────────────────────────────────────────────
 
 
-def test_handle_media_serves_snapshot_after_inplace_overwrite(routes, monkeypatch, snap_dir, tmp_path):
+def test_handle_media_serves_snapshot_after_inplace_overwrite(routes, monkeypatch, snap_dir, allowed_tmp_path):
     """THE regression test: same filename overwritten must not rewrite old
     previews when the message pins a snapshot digest."""
     from api.media_snapshots import capture_snapshot
 
-    target = tmp_path / "report.html"
+    target = allowed_tmp_path / "report.html"
     target.write_text("<html>v1</html>")
     digest = capture_snapshot(target)
 
@@ -229,10 +248,10 @@ def test_handle_media_serves_snapshot_after_inplace_overwrite(routes, monkeypatc
     assert pinned.header("Cache-Control") == "private, max-age=31536000, immutable"
 
 
-def test_handle_media_snapshot_survives_file_deletion(routes, monkeypatch, snap_dir, tmp_path):
+def test_handle_media_snapshot_survives_file_deletion(routes, monkeypatch, snap_dir, allowed_tmp_path):
     from api.media_snapshots import capture_snapshot
 
-    target = tmp_path / "pic.png"
+    target = allowed_tmp_path / "pic.png"
     target.write_bytes(b"png-bytes-v1")
     digest = capture_snapshot(target)
 
@@ -243,16 +262,16 @@ def test_handle_media_snapshot_survives_file_deletion(routes, monkeypatch, snap_
     assert bytes(pinned.body) == b"png-bytes-v1"
 
 
-def test_handle_media_invalid_snap_falls_back_to_live(routes, monkeypatch, snap_dir, tmp_path):
-    target = tmp_path / "pic.png"
+def test_handle_media_invalid_snap_falls_back_to_live(routes, monkeypatch, snap_dir, allowed_tmp_path):
+    target = allowed_tmp_path / "pic.png"
     target.write_bytes(b"live-bytes")
     replayed = _media_get(routes, monkeypatch, target, query_extra="&snap=not-a-digest")
     assert replayed.status == 200
     assert bytes(replayed.body) == b"live-bytes"
 
 
-def test_handle_media_missing_snap_falls_back_to_live(routes, monkeypatch, snap_dir, tmp_path):
-    target = tmp_path / "pic.png"
+def test_handle_media_missing_snap_falls_back_to_live(routes, monkeypatch, snap_dir, allowed_tmp_path):
+    target = allowed_tmp_path / "pic.png"
     target.write_bytes(b"live-bytes")
     missing = _media_get(
         routes, monkeypatch, target, query_extra="&snap=" + "0" * 64
@@ -261,16 +280,16 @@ def test_handle_media_missing_snap_falls_back_to_live(routes, monkeypatch, snap_
     assert bytes(missing.body) == b"live-bytes"
 
 
-def test_handle_media_snap_does_not_bypass_deny(routes, monkeypatch, snap_dir, tmp_path):
+def test_handle_media_snap_does_not_bypass_deny(routes, monkeypatch, snap_dir, allowed_tmp_path):
     """snap= must never widen the path allow-list: a denied path stays denied
     even when a valid snapshot digest is supplied."""
     from api.media_snapshots import capture_snapshot
 
-    hermes_home = tmp_path / ".hermes"
+    hermes_home = allowed_tmp_path / ".hermes"
     hermes_home.mkdir()
     secret = hermes_home / "settings.json"
     secret.write_text("{}")
-    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HOME", str(allowed_tmp_path))
     digest = capture_snapshot(secret)  # capture itself may be blocked; if not...
 
     denied = _media_get(routes, monkeypatch, secret, query_extra=f"&snap={digest or '0'*64}")
@@ -278,7 +297,7 @@ def test_handle_media_snap_does_not_bypass_deny(routes, monkeypatch, snap_dir, t
     assert denied.status == 403
 
 
-def test_handle_media_denies_direct_store_path(routes, monkeypatch, tmp_path):
+def test_handle_media_denies_direct_store_path(routes, monkeypatch, allowed_tmp_path):
     """The snapshot STORE directory itself is not a servable media path.
 
     The store lives under STATE_DIR (a Hermes root) in production; the #3234
@@ -288,14 +307,14 @@ def test_handle_media_denies_direct_store_path(routes, monkeypatch, tmp_path):
     from api.media_snapshots import capture_snapshot
 
     # Simulate the production layout: the store lives under a Hermes root, with
-    # HOME pointing at tmp_path so that directory counts as a Hermes root. The
+    # HOME pointing at allowed_tmp_path so that directory counts as a Hermes root. The
     # #3234 deny list denies <hermes_root>/media_snapshots.
-    hermes_home = tmp_path / ".hermes"
+    hermes_home = allowed_tmp_path / ".hermes"
     store = hermes_home / "media_snapshots"
-    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HOME", str(allowed_tmp_path))
     monkeypatch.setenv("HERMES_WEBUI_MEDIA_SNAPSHOT_DIR", str(store))
 
-    target = tmp_path / "a.png"
+    target = allowed_tmp_path / "a.png"
     target.write_bytes(b"bytes")
     digest = capture_snapshot(target)
     store_file = store / f"{digest}.snap"
@@ -305,10 +324,10 @@ def test_handle_media_denies_direct_store_path(routes, monkeypatch, tmp_path):
     assert denied.status == 403
 
 
-def test_handle_media_snapshot_range_request(routes, monkeypatch, snap_dir, tmp_path):
+def test_handle_media_snapshot_range_request(routes, monkeypatch, snap_dir, allowed_tmp_path):
     from api.media_snapshots import capture_snapshot
 
-    target = tmp_path / "clip.mp4"
+    target = allowed_tmp_path / "clip.mp4"
     target.write_bytes(b"0123456789")
     digest = capture_snapshot(target)
 
@@ -324,10 +343,10 @@ def test_handle_media_snapshot_range_request(routes, monkeypatch, snap_dir, tmp_
     assert handler.header("Content-Range") == "bytes 2-4/10"
 
 
-def test_handle_media_snapshot_download_name_uses_original(routes, monkeypatch, snap_dir, tmp_path):
+def test_handle_media_snapshot_download_name_uses_original(routes, monkeypatch, snap_dir, allowed_tmp_path):
     from api.media_snapshots import capture_snapshot
 
-    target = tmp_path / "report.html"
+    target = allowed_tmp_path / "report.html"
     target.write_bytes(b"<html>v1</html>")
     digest = capture_snapshot(target)
     target.unlink()
@@ -341,7 +360,7 @@ def test_handle_media_snapshot_download_name_uses_original(routes, monkeypatch, 
 # ── Round 2: capture/serve deny parity + source-path binding (#6979) ────────
 
 
-def test_media_capture_allowed_denies_default_webui_state_layout(tmp_path, monkeypatch):
+def test_media_capture_allowed_denies_default_webui_state_layout(allowed_tmp_path, monkeypatch):
     """MUST-FIX 1 repro: default-layout <HERMES_HOME>/webui/sessions/victim.json
     (== STATE_DIR/sessions) must NEVER be captured.
 
@@ -350,32 +369,32 @@ def test_media_capture_allowed_denies_default_webui_state_layout(tmp_path, monke
     """
     from api.media_snapshots import media_capture_allowed
 
-    hermes_home = tmp_path / ".hermes"
+    hermes_home = allowed_tmp_path / ".hermes"
     state_dir = hermes_home / "webui"
     (state_dir / "sessions").mkdir(parents=True)
     victim = state_dir / "sessions" / "victim.json"
     victim.write_text("{}")
 
-    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HOME", str(allowed_tmp_path))
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
     monkeypatch.setattr("api.config.STATE_DIR", str(state_dir))
 
     assert media_capture_allowed(victim) is False
 
 
-def test_annotate_never_captures_denied_state_file(snap_dir, tmp_path, monkeypatch):
+def test_annotate_never_captures_denied_state_file(snap_dir, allowed_tmp_path, monkeypatch):
     """MUST-FIX 1 end-to-end: annotating a message whose MEDIA: ref points at a
     denied state file must capture NOTHING (Round 1 captured it and the digest
     then acted as a bearer capability)."""
     from api.media_snapshots import annotate_media_snapshots
 
-    hermes_home = tmp_path / ".hermes"
+    hermes_home = allowed_tmp_path / ".hermes"
     state_dir = hermes_home / "webui"
     (state_dir / "sessions").mkdir(parents=True)
     victim = state_dir / "sessions" / "victim.json"
     victim.write_text('{"secret": 1}')
 
-    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HOME", str(allowed_tmp_path))
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
     monkeypatch.setattr("api.config.STATE_DIR", str(state_dir))
 
@@ -386,7 +405,7 @@ def test_annotate_never_captures_denied_state_file(snap_dir, tmp_path, monkeypat
     assert len(list(snap_dir.glob("*.snap"))) == 0
 
 
-def test_handle_media_snap_requires_source_path_binding(routes, monkeypatch, snap_dir, tmp_path):
+def test_handle_media_snap_requires_source_path_binding(routes, monkeypatch, snap_dir, allowed_tmp_path):
     """MUST-FIX 1 serve-side repro: a digest captured from path A must not be
     servable through path B, even when B is an allowed path.
 
@@ -396,7 +415,7 @@ def test_handle_media_snap_requires_source_path_binding(routes, monkeypatch, sna
     """
     from api.media_snapshots import capture_snapshot
 
-    source = tmp_path / "a.png"
+    source = allowed_tmp_path / "a.png"
     source.write_bytes(b"frozen-bytes-from-a")
     digest = capture_snapshot(source)
 
@@ -406,26 +425,26 @@ def test_handle_media_snap_requires_source_path_binding(routes, monkeypatch, sna
     assert bytes(bound.body) == b"frozen-bytes-from-a"
 
     # Unbound + absent path: NOT the snapshot; live fallback -> 404.
-    other_missing = tmp_path / "b.png"
+    other_missing = allowed_tmp_path / "b.png"
     unbound = _media_get(routes, monkeypatch, other_missing, query_extra=f"&snap={digest}")
     assert unbound.status == 404
 
     # Unbound + present path: live bytes, never the frozen snapshot.
-    other_live = tmp_path / "b.png"
+    other_live = allowed_tmp_path / "b.png"
     other_live.write_bytes(b"live-bytes-of-b")
     unbound_live = _media_get(routes, monkeypatch, other_live, query_extra=f"&snap={digest}")
     assert unbound_live.status == 200
     assert bytes(unbound_live.body) == b"live-bytes-of-b"
 
 
-def test_handle_media_snap_dedup_binds_every_source_path(routes, monkeypatch, snap_dir, tmp_path):
+def test_handle_media_snap_dedup_binds_every_source_path(routes, monkeypatch, snap_dir, allowed_tmp_path):
     """Dedup must not break source binding: identical bytes captured from two
     different paths share one digest, and BOTH paths may serve it (each was a
     legitimate capture source); a third path may not."""
     from api.media_snapshots import capture_snapshot
 
-    a = tmp_path / "a.png"
-    b = tmp_path / "b.png"
+    a = allowed_tmp_path / "a.png"
+    b = allowed_tmp_path / "b.png"
     a.write_bytes(b"same-bytes")
     b.write_bytes(b"same-bytes")
     d1 = capture_snapshot(a)
@@ -437,7 +456,7 @@ def test_handle_media_snap_dedup_binds_every_source_path(routes, monkeypatch, sn
     assert sa.status == 200 and bytes(sa.body) == b"same-bytes"
     assert sb.status == 200 and bytes(sb.body) == b"same-bytes"
 
-    c = tmp_path / "c.png"
+    c = allowed_tmp_path / "c.png"
     c.write_bytes(b"live-different-bytes")
     sc = _media_get(routes, monkeypatch, c, query_extra=f"&snap={d1}")
     assert sc.status == 200
@@ -445,17 +464,17 @@ def test_handle_media_snap_dedup_binds_every_source_path(routes, monkeypatch, sn
     assert bytes(sc.body) == b"live-different-bytes"
 
 
-def test_handle_media_denies_custom_named_store_via_bare_path(routes, monkeypatch, tmp_path):
+def test_handle_media_denies_custom_named_store_via_bare_path(routes, monkeypatch, allowed_tmp_path):
     """MUST-FIX 2 repro: a custom-named snapshot store (HERMES_WEBUI_MEDIA_SNAPSHOT_DIR
     pointing anywhere, e.g. /tmp/custom-store-name) must not be readable through
     a bare path= request. Round 1 only deny-listed the literal name
     'media_snapshots', so the blobs leaked with no snap= needed."""
     from api.media_snapshots import capture_snapshot
 
-    store = tmp_path / "custom-store-name"
+    store = allowed_tmp_path / "custom-store-name"
     monkeypatch.setenv("HERMES_WEBUI_MEDIA_SNAPSHOT_DIR", str(store))
 
-    target = tmp_path / "a.png"
+    target = allowed_tmp_path / "a.png"
     target.write_bytes(b"stored-bytes")
     digest = capture_snapshot(target)
     store_file = store / f"{digest}.snap"
@@ -478,13 +497,13 @@ def test_is_valid_digest_rejects_trailing_newline():
     assert is_valid_digest(None) is False  # type: ignore[arg-type]
 
 
-def test_annotate_evicted_snapshot_is_final(snap_dir, tmp_path):
+def test_annotate_evicted_snapshot_is_final(snap_dir, allowed_tmp_path):
     """SHOULD-FIX: a recorded digest is FINAL — after its blob is evicted, a
     re-settle must not re-capture the CURRENT live bytes and rebind the
     historical message (Round 1 did, silently following overwrites again)."""
     from api.media_snapshots import annotate_media_snapshots
 
-    target = tmp_path / "report.html"
+    target = allowed_tmp_path / "report.html"
     target.write_text("<html>v1</html>")
     messages: list = [{"role": "assistant", "content": f"MEDIA:{target}"}]
 
@@ -505,13 +524,13 @@ def test_annotate_evicted_snapshot_is_final(snap_dir, tmp_path):
     assert not blob.exists()  # no re-capture
 
 
-def test_quota_eviction_drops_source_binding_sidecar(snap_dir, tmp_path, monkeypatch):
+def test_quota_eviction_drops_source_binding_sidecar(snap_dir, allowed_tmp_path, monkeypatch):
     """Evicting a snapshot blob must also drop its source-binding sidecar."""
     from api.media_snapshots import _binding_path_for_digest, capture_snapshot
 
     monkeypatch.setenv("HERMES_WEBUI_MEDIA_SNAPSHOT_CAP_BYTES", "64")
-    old = tmp_path / "old.png"
-    new = tmp_path / "new.png"
+    old = allowed_tmp_path / "old.png"
+    new = allowed_tmp_path / "new.png"
     old.write_bytes(b"x" * 64)
     new.write_bytes(b"y" * 64)
     d_old = capture_snapshot(old)

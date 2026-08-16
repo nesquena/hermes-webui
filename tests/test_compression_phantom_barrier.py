@@ -5,14 +5,23 @@ only the SSE transport, and dispatches events through attachLiveStream's real
 listeners. All HTTP requests are fulfilled in-process; no WebUI server or
 network access is used.
 """
-
 from __future__ import annotations
 
 import re
 from pathlib import Path
 
 import pytest
-from playwright.sync_api import sync_playwright
+
+try:
+    from playwright.sync_api import sync_playwright
+except Exception:
+    sync_playwright = None
+
+
+def _require_playwright():
+    if sync_playwright is None:
+        pytest.skip("playwright is unavailable; run `playwright install chromium`")
+    return sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / "static"
@@ -200,7 +209,8 @@ async ({kind, doneSid}) => {
 
 @pytest.fixture(scope="module")
 def browser():
-    with sync_playwright() as playwright:
+    sp = _require_playwright()
+    with sp() as playwright:
         instance = playwright.chromium.launch(
             headless=True,
             args=["--no-sandbox", "--disable-dev-shm-usage"],
