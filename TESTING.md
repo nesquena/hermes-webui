@@ -117,6 +117,10 @@ desktop/narrow progress evidence. `tests/test_persistent_video_cache_scope.py`
 separately covers the opaque server authority scope, trusted-header first request,
 build-version rotation, logout ordering, and snapshot response attestation.
 
+The authority lifecycle row also injects a Cache Storage deletion failure and
+asserts that `prepareAuthorityChange()` still resolves after tearing down local
+scope/tasks/Blob URLs, so optional cache cleanup cannot block the real mutation.
+
 Both the behavior gate and its mutation gate run in the required
 `browser-smoke` GitHub Actions job after the normal page-load smoke.
 

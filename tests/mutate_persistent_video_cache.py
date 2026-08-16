@@ -38,6 +38,12 @@ MUTATIONS = {
         ),
         ("try{task.controller.abort();}catch(_){}", "try{}catch(_){}"),
     ],
+    "let-prepare-cleanup-failure-escape": [
+        (
+            "async function prepareAuthorityChange(){\n  // Cache cleanup is best-effort plumbing, never the authority mutation itself.\n  // clearAll() invalidates this tab's scope/tasks/Blob URLs before its first\n  // await; if persistent deletion then fails, the new server-issued scope still\n  // makes the old partition unreadable and a later reconciliation can remove it.\n  try{await clearAll();}catch(_){}\n}",
+            "async function prepareAuthorityChange(){\n  await clearAll();\n}",
+        ),
+    ],
     "drop-pagehide-teardown": [
         ("window.addEventListener('pagehide',()=>_teardownActive());", "window.addEventListener('pagehide',()=>{});"),
     ],

@@ -494,6 +494,13 @@ async function clearAll(broadcast=true){
   if(!storage) return;
   await _deleteOldCaches('');
 }
+async function prepareAuthorityChange(){
+  // Cache cleanup is best-effort plumbing, never the authority mutation itself.
+  // clearAll() invalidates this tab's scope/tasks/Blob URLs before its first
+  // await; if persistent deletion then fails, the new server-issued scope still
+  // makes the old partition unreadable and a later reconciliation can remove it.
+  try{await clearAll();}catch(_){}
+}
 async function authorityChanged(){
   await clearAll();
   return Promise.resolve('');
@@ -560,7 +567,7 @@ window.HermesPersistentVideoCache={
   observe:_observe,
   detach:_release,
   clearAll,
-  prepareAuthorityChange:clearAll,
+  prepareAuthorityChange,
   authorityChanged,
   refreshAuthority,
   debugSnapshot,

@@ -322,6 +322,25 @@ def run(base: str, artifact_dir: Path) -> None:
         require(page.evaluate("([v,old]) => v.dataset.cacheBlobUrl && v.dataset.cacheBlobUrl !== old", [bfcache_video, old_bfcache_blob]), "pageshow must install a fresh Blob URL")
         require(counts(page)["requests"].get("bfcache") == 1, "BFCache restore must reuse Cache Storage without another media request")
 
+        # Persistent cleanup is optional plumbing: a Cache Storage/Web Lock
+        # deletion failure must not suppress the profile/workspace mutation that
+        # awaits prepareAuthorityChange(). Local authority state is still torn
+        # down synchronously before the failing persistent delete.
+        page.evaluate("""async () => {
+          const proto=Object.getPrototypeOf(caches);
+          const original=proto.delete;
+          proto.delete=()=>Promise.reject(new DOMException('synthetic cleanup failure','UnknownError'));
+          window.__authorityMutationSent=false;
+          try{
+            await HermesPersistentVideoCache.prepareAuthorityChange();
+            window.__authorityMutationSent=true;
+          }finally{
+            proto.delete=original;
+          }
+        }""")
+        require(page.evaluate("window.__authorityMutationSent") is True, "optional cache cleanup failure must not block authority mutation")
+        require(page.evaluate("() => { const s=HermesPersistentVideoCache.debugSnapshot(); return s.scope===''&&s.tasks===0&&s.consumers===0; }"), "failed persistent cleanup must still invalidate in-memory authority state")
+
         playback_error = page.evaluate_handle(production_video_script(media_url("blob-error", 1800)))
         wait_state(page, playback_error, "ready")
         error_blob = page.evaluate("v => v.dataset.cacheBlobUrl", playback_error)

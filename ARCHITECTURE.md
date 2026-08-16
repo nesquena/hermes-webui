@@ -133,6 +133,12 @@ inside the transition window. Sign-out does the same around server-side session
 invalidation; 401 redirects, authority rotation, build updates, and schema
 changes also clear or retire the previous partition.
 
+Pre-mutation cleanup is deliberately best-effort: in-memory scope, tasks, and
+Blob URLs are invalidated before the first await, but a Cache Storage/Web Lock
+deletion failure cannot suppress the authoritative profile/workspace request.
+The newly issued scope makes any undeleted old partition unreadable, and later
+reconciliation retries persistent cleanup.
+
 The cache is limited to 16 MiB per video, 256 entries, and 96 MiB total including
 video bodies plus LRU index metadata. Cache body and LRU
 metadata changes run under an origin-wide Web Lock; browsers without Web Locks
