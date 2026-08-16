@@ -94,7 +94,7 @@ def test_key_env_provider_appears_in_the_model_picker(monkeypatch, tmp_path):
     assert request.get_header("Authorization") == "Bearer synthetic-secret"
 
 
-def test_provider_credential_contract_and_custom_delegate(monkeypatch):
+def test_provider_credential_contract_and_custom_delegate(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "_thread_local_env_value", lambda name: {"KEY": "env-secret"}.get(name, ""))
     assert config.resolve_provider_credential("literal", "KEY") == "literal"
     assert config.resolve_provider_credential("${KEY}", None) == "env-secret"
@@ -106,6 +106,19 @@ def test_provider_credential_contract_and_custom_delegate(monkeypatch):
     monkeypatch.setattr(providers, "get_config", lambda: {"providers": {"synthetic": {"key_env": "KEY"}}})
     assert providers._provider_has_key("synthetic") is True
     assert providers._get_provider_api_key("synthetic") == "env-secret"
+
+    monkeypatch.setattr(
+        providers,
+        "get_config",
+        lambda: {"custom_providers": [{"name": "demo", "key_env": "KEY"}]},
+    )
+    assert providers._provider_has_key("custom:demo") is True
+    assert providers._get_provider_api_key("custom:demo") == "env-secret"
+    monkeypatch.setattr(providers, "_get_hermes_home", lambda: tmp_path)
+    providers.invalidate_providers_cache()
+    custom_status = providers.get_providers()
+    demo = next(item for item in custom_status["providers"] if item["id"] == "custom:demo")
+    assert demo["has_key"] is True
 
 
 def test_key_env_does_not_cross_profile_boundary(monkeypatch):

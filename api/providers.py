@@ -1274,7 +1274,7 @@ def _provider_has_key(provider_id: str) -> bool:
     2. ``os.environ`` for the known env var
     3. ``config.yaml → model.api_key`` (only if provider is the active one)
     4. ``config.yaml → providers.<id>.api_key``
-    5. ``config.yaml → custom_providers[].api_key`` (for custom providers)
+    5. ``config.yaml → custom_providers[].api_key`` / ``key_env`` (for custom providers)
     """
     env_var = _provider_env_var_for(provider_id)
     if env_var:
@@ -1338,7 +1338,12 @@ def _provider_has_key(provider_id: str) -> bool:
         for cp in custom_providers:
             if isinstance(cp, dict):
                 if _custom_provider_name_matches(provider_id, cp.get("name")):
-                    if _provider_value_counts_as_api_key(provider_id, cp.get("api_key")):
+                    from api.config import resolve_provider_credential
+
+                    provider_key = resolve_provider_credential(
+                        cp.get("api_key"), cp.get("key_env"), provider_id
+                    )
+                    if _provider_value_counts_as_api_key(provider_id, provider_key):
                         return True
     return False
 
@@ -1392,11 +1397,13 @@ def _get_provider_api_key(provider_id: str) -> str | None:
             if not isinstance(cp, dict):
                 continue
             if _custom_provider_name_matches(provider_id, cp.get("name")):
-                cp_key = str(cp.get("api_key") or "").strip()
-                if cp_key.startswith("${") and cp_key.endswith("}"):
-                    return _thread_local_env_value(cp_key[2:-1]).strip() or None
-                if _provider_value_counts_as_api_key(provider_id, cp_key):
-                    return cp_key
+                from api.config import resolve_provider_credential
+
+                provider_key = resolve_provider_credential(
+                    cp.get("api_key"), cp.get("key_env"), provider_id
+                )
+                if _provider_value_counts_as_api_key(provider_id, provider_key):
+                    return provider_key
     # Fallback: try credential pool (e.g. bothub key stored via auth.json)
     for entry in _pool_entry_payloads(provider_id):
         status = str(entry.get("last_status") or "").strip().lower()
@@ -2863,13 +2870,12 @@ def get_providers() -> dict[str, Any]:
                 if _mid not in cp_model_ids:
                     cp_model_ids.append(_mid)
             cp_models = [{"id": mid, "label": mid} for mid in cp_model_ids]
-            # Check for env var reference (${VAR_NAME} pattern)
-            cp_api_key = str(cp.get("api_key") or "")
-            cp_has_key = bool(cp_api_key.strip())
-            # Replace env var reference to check actual value
-            if cp_api_key.startswith("${") and cp_api_key.endswith("}"):
-                env_var = cp_api_key[2:-1]
-                cp_has_key = bool(_thread_local_env_value(env_var).strip())
+            from api.config import resolve_provider_credential
+
+            cp_api_key = resolve_provider_credential(
+                cp.get("api_key"), cp.get("key_env"), f"custom:{cp_id}"
+            )
+            cp_has_key = _provider_value_counts_as_api_key(f"custom:{cp_id}", cp_api_key)
             # Fallback: check credential pool (key added via hermes auth add)
             if not cp_has_key:
                 try:
