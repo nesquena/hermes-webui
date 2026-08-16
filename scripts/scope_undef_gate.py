@@ -72,6 +72,7 @@ BROWSER_GLOBALS = [
     "clearTimeout", "setInterval", "clearInterval", "requestAnimationFrame",
     "cancelAnimationFrame", "requestIdleCallback", "cancelIdleCallback", "queueMicrotask", "reportError", "fetch", "URL",
     "URLSearchParams", "Blob", "File", "FileList", "FileReader", "FormData", "navigator",
+    "DOMException", "TransformStream",  # standard browser APIs; media-cache feature-detects TransformStream
     "location", "history", "alert", "prompt", "confirm", "EventSource", "WebSocket",
     "BroadcastChannel", "Image", "Audio", "MediaRecorder", "speechSynthesis",
     "SpeechSynthesisUtterance", "AudioContext", "webkitAudioContext", "MutationObserver",

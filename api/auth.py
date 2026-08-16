@@ -657,6 +657,57 @@ def verify_session(cookie_value: str) -> bool:
     return True
 
 
+def build_media_cache_scope(
+    handler,
+    *,
+    profile_name: str | None = None,
+    workspace_path: str | None = None,
+    cache_context: str = "",
+) -> str | None:
+    """Return an opaque browser-cache partition for the current authority.
+
+    Authenticated partitions bind to the random, verified WebUI session token;
+    unauthenticated installs use one installation-local authority. The scope also
+    includes the request-resolved profile, canonical workspace, media-root
+    policy, and schema so bytes are never reused after an authorization change.
+    Only the HMAC is exposed to the browser.
+    """
+    if profile_name is None:
+        from api.profiles import get_active_profile_name
+
+        profile_name = get_active_profile_name()
+    profile = str(profile_name or 'default').strip() or 'default'
+    if workspace_path is None:
+        try:
+            from api.workspace import get_last_workspace
+
+            workspace_path = str(Path(get_last_workspace()).resolve())
+        except Exception:
+            workspace_path = '<none>'
+    workspace = str(workspace_path or '<none>')
+    media_roots_policy = os.getenv('MEDIA_ALLOWED_ROOTS', '')
+    authority = 'no-auth'
+    if is_auth_enabled():
+        # check_auth() runs before this route. Trusted-header auth may mint its
+        # first session cookie during that same request, so it is not present in
+        # the inbound Cookie header yet; use the reconciled value that the auth
+        # gate attached to the handler. Password/passkey/OIDC requests continue
+        # to use their verified inbound session cookie.
+        cookie_value = getattr(handler, '_trusted_auth_session_cookie_value', None) or parse_cookie(handler)
+        if not cookie_value or not verify_session(cookie_value):
+            return None
+        authority = cookie_value.rsplit('.', 1)[0]
+    try:
+        from api.updates import WEBUI_VERSION
+
+        build_version = str(WEBUI_VERSION or 'unknown')
+    except Exception:
+        build_version = 'unknown'
+    context = str(cache_context or '').strip()
+    material = f'media-cache:v1:{build_version}:{authority}:{profile}:{workspace}:{media_roots_policy}:{context}'.encode('utf-8')
+    return hmac.new(_signing_key(), material, hashlib.sha256).hexdigest()
+
+
 def _trusted_auth_header_name() -> str | None:
     name = os.getenv(_TRUSTED_AUTH_HEADER_ENV, '').strip()
     if not name:
