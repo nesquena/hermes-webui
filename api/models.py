@@ -12036,7 +12036,7 @@ def _reconciled_visible_count_for_sidebar(sid) -> int | None:
 
 
 def get_state_db_session_summary(sid, *, profile=None) -> dict:
-    """Return a cheap message count/timestamp summary for one state.db session."""
+    """Return a cheap active-message count/timestamp summary for one session."""
     try:
         import sqlite3
     except ImportError:
@@ -12059,10 +12059,13 @@ def get_state_db_session_summary(sid, *, profile=None) -> dict:
             available = {str(row['name']) for row in cur.fetchall()}
             if 'session_id' not in available:
                 return {"message_count": 0, "last_message_at": 0.0}
+            active_clause = ""
+            if 'active' in available:
+                active_clause = " AND (active IS NULL OR active != 0)"
             if 'timestamp' in available:
                 cur.execute(
                     "SELECT COUNT(*) AS message_count, MAX(timestamp) AS last_message_at "
-                    "FROM messages WHERE session_id = ?",
+                    f"FROM messages WHERE session_id = ?{active_clause}",
                     (str(sid),),
                 )
                 row = cur.fetchone()
@@ -12072,7 +12075,10 @@ def get_state_db_session_summary(sid, *, profile=None) -> dict:
                     "message_count": max(0, int(row["message_count"] or 0)),
                     "last_message_at": float(row["last_message_at"] or 0) if row["last_message_at"] is not None else 0.0,
                 }
-            cur.execute("SELECT COUNT(*) AS message_count FROM messages WHERE session_id = ?", (str(sid),))
+            cur.execute(
+                f"SELECT COUNT(*) AS message_count FROM messages WHERE session_id = ?{active_clause}",
+                (str(sid),),
+            )
             row = cur.fetchone()
             return {
                 "message_count": max(0, int(row["message_count"] or 0)) if row else 0,
