@@ -6,6 +6,7 @@ import subprocess
 ROOT = pathlib.Path(__file__).parents[1]
 UI = ROOT / "static/ui.js"
 I18N = ROOT / "static/i18n.js"
+ROUTES = ROOT / "api/routes.py"
 
 
 def _function_source(source, signature):
@@ -170,3 +171,11 @@ def test_source_contracts_and_locales_are_present():
     assert i18n.count("edit_fork_title:") == 15
     assert i18n.count("edit_fork_message:") == 15
     assert i18n.count("edit_fork_confirm:") == 15
+
+
+def test_empty_branch_is_persisted_for_first_prompt_edit():
+    source = ROUTES.read_text(encoding="utf-8")
+    branch_block = source[source.index('if parsed.path == "/api/session/branch"') :]
+    branch_block = branch_block[: branch_block.index('if parsed.path == "/api/session/compress/start"')]
+    assert "branch.save()" in branch_block
+    assert "if forked_messages:" not in branch_block
