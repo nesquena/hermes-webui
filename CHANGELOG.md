@@ -5,6 +5,8 @@
 
 ### Fixed
 
+- **A stale approval card no longer dead-ends with "Approval response not accepted."** On the local backend, clicking a dangerous-command approval card whose approval had already been resolved or cleared could leave the card stuck showing an error, because WebUI failed to match the resolved approval back to its producer (the agent core delivers the approval as a copy that carries a `request_id` but no `approval_id`, so the existing identity/`approval_id` matches both missed and a tokenless mirror was orphaned). WebUI now also matches on the core's per-approval `request_id`, so a resolved/stale card clears gracefully. (#4948)
+
 - **Docker single-container: an explicitly configured UID/GID is no longer lost, fixing a restart loop.** The entrypoint now probes the configured state-dir bind mount before the image-owned `/workspace` when auto-detecting the container UID/GID, and persists an `explicit` marker so a deliberately supplied `WANTED_UID`/`WANTED_GID` (e.g. `1024`) survives the root→user re-entry instead of being re-detected and overwritten. This fixes the documented single-container restart loop; the default stays `1024`, the two- and three-container topologies are unaffected, and a missing legacy marker falls back safely. Thanks @jorgejiro. (#7027)
 
 - **The Z.AI model list now includes GLM-5.3.** GLM-5.3 was added to the Z.AI provider catalog so it's selectable in the model picker. The Z.AI onboarding default stays at GLM-5.1 until the direct API serves 5.3. Thanks @rh-id. (#7017)
