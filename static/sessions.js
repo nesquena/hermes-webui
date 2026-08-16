@@ -2387,7 +2387,7 @@ async function loadSession(sid){
     );
   }
 
-  if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
+  if(typeof projectSessionArtifactsForOwner==='function') projectSessionArtifactsForOwner(sid);
 
   // ── Cross-channel handoff hint ──
   // After session fully loaded, check if this is a messaging session with
