@@ -8,6 +8,7 @@ import pytest
 
 from tests.test_webui_state_db_reconciliation import (
     _GetHandler,
+    _append_state_db_rows,
     _install_test_session,
     _make_state_db,
 )
@@ -272,6 +273,66 @@ def test_foreign_boundary_summary_cache_skips_unchanged_uncapped_read(monkeypatc
     assert len(summary_calls) == 2
     assert len(reader_calls) == 1
     assert "limit" not in reader_calls[0][1]
+
+    _append_state_db_rows(
+        tmp_path / "state.db",
+        sid,
+        [{"role": "assistant", "content": "new", "timestamp": 1004.0}],
+    )
+    _session_payload(routes, f"/api/session?session_id={sid}&messages=0&resolve_model=0")
+    assert len(reader_calls) == 2
+
+
+def test_foreign_summary_cache_is_profile_scoped(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    sid = _foreign_fixture(monkeypatch, tmp_path, truncation_boundary=1001.0)
+    real_summary = routes.get_state_db_session_summary
+    real_reader = routes.get_state_db_session_messages
+    reader_profiles = []
+    monkeypatch.setattr(
+        routes,
+        "get_state_db_session_summary",
+        lambda session_id, **kwargs: real_summary(session_id, **kwargs),
+    )
+    monkeypatch.setattr(
+        routes,
+        "get_state_db_session_messages",
+        lambda session_id, **kwargs: (
+            reader_profiles.append(kwargs.get("profile"))
+            or real_reader(session_id, **kwargs)
+        ),
+    )
+
+    routes._foreign_display_coordinate_summary(sid, profile="profile-a")
+    routes._foreign_display_coordinate_summary(sid, profile="profile-b")
+
+    assert reader_profiles == ["profile-a", "profile-b"]
+
+
+def test_foreign_summary_cache_reloads_changed_sidecar(monkeypatch, tmp_path):
+    import api.models as models
+    import api.routes as routes
+
+    sid = _foreign_fixture(monkeypatch, tmp_path, truncation_boundary=1001.0)
+    reader_calls = []
+    real_reader = routes.get_state_db_session_messages
+    monkeypatch.setattr(
+        routes,
+        "get_state_db_session_messages",
+        lambda session_id, **kwargs: (
+            reader_calls.append((session_id, kwargs))
+            or real_reader(session_id, **kwargs)
+        ),
+    )
+
+    _session_payload(routes, f"/api/session?session_id={sid}&messages=0&resolve_model=0")
+    session = models.Session.load(sid)
+    session.messages[-1]["content"] = "changed without changing the count"
+    session.save(touch_updated_at=False)
+    _session_payload(routes, f"/api/session?session_id={sid}&messages=0&resolve_model=0")
+
+    assert len(reader_calls) == 2
 
 
 def test_foreign_metadata_poll_respects_truncation_watermark(monkeypatch, tmp_path):
