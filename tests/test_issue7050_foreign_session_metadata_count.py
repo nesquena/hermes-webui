@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import subprocess
 import textwrap
 from urllib.parse import urlparse
@@ -333,6 +334,41 @@ def test_foreign_summary_cache_reloads_changed_sidecar(monkeypatch, tmp_path):
     _session_payload(routes, f"/api/session?session_id={sid}&messages=0&resolve_model=0")
 
     assert len(reader_calls) == 2
+
+
+def test_foreign_summary_cache_tracks_active_state_changes(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    sid = _foreign_fixture(monkeypatch, tmp_path, truncation_boundary=1001.0)
+    with sqlite3.connect(tmp_path / "state.db") as conn:
+        conn.execute("ALTER TABLE messages ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
+        conn.commit()
+    _append_state_db_rows(
+        tmp_path / "state.db",
+        sid,
+        [{"role": "assistant", "content": "extra", "timestamp": 1002.5}],
+    )
+    reader_calls = []
+    real_reader = routes.get_state_db_session_messages
+    monkeypatch.setattr(
+        routes,
+        "get_state_db_session_messages",
+        lambda session_id, **kwargs: (
+            reader_calls.append((session_id, kwargs))
+            or real_reader(session_id, **kwargs)
+        ),
+    )
+
+    first = _session_payload(routes, f"/api/session?session_id={sid}&messages=0&resolve_model=0")
+    with sqlite3.connect(tmp_path / "state.db") as conn:
+        conn.execute("UPDATE messages SET active = 0 WHERE content = 'extra'")
+        conn.commit()
+    second = _session_payload(routes, f"/api/session?session_id={sid}&messages=0&resolve_model=0")
+    unbounded = _session_payload(routes, f"/api/session?session_id={sid}&messages=1&resolve_model=0")
+
+    assert first["message_count"] == 5
+    assert second["message_count"] == unbounded["message_count"] == 4
+    assert len(reader_calls) == 3
 
 
 def test_foreign_metadata_poll_respects_truncation_watermark(monkeypatch, tmp_path):
