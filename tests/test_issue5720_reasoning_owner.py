@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.js_source_loader import node_validated_read_snippet
+
 
 ROOT = Path(__file__).resolve().parents[1]
 NODE = shutil.which("node")
@@ -200,18 +202,13 @@ def test_later_deferred_anchor_paint_remains_hidden_in_final_answer_only_mode():
     assert result["anchor_reasoning_text"] == "Plan step"
 
 
-_NODE_SCENE = r"""
-const fs = require('fs');
-function readValidated(p){
-  const expectedSize = fs.statSync(p).size;
-  let src = null;
-  for(let attempt = 0; attempt < 5; attempt++){
-    src = fs.readFileSync(p, 'utf8');
-    if(Buffer.byteLength(src, 'utf8') === expectedSize) return src;
-  }
-  throw new Error('source read incomplete: ' + p + ' (' +
-    Buffer.byteLength(src, 'utf8') + '/' + expectedSize + ' bytes)');
-}
+# Build the Node scene using the shared validated-read snippet to avoid
+# hand-maintained divergence (issue #6972). The snippet defines
+# `readValidated(path, options?)` with per-attempt identity validation,
+# zero-byte reject, and optional tail-sentinel checking.
+_NODE_SCENE = (
+    node_validated_read_snippet()
+    + r"""
 const uiSrc = readValidated(process.env.ISSUE5720_UI_JS);
 const messagesSrc = readValidated(process.env.ISSUE5720_MESSAGES_JS);
 const anchorsSrc = readValidated(process.env.ISSUE5720_ANCHORS_JS);
@@ -683,3 +680,4 @@ process.stdout.write(JSON.stringify({
   multi_segment_exact_fallback:multiSegmentExactFallback,
 }));
 """
+)
