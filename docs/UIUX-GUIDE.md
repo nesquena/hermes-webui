@@ -146,6 +146,18 @@ When adding a control, consider where users will find it on both wide desktop an
 mobile. If a setting or quota/control surface does not fit in the composer, route
 it through the appropriate Control Center panel instead of squeezing the footer.
 
+### Model picker catalog limits
+
+The model picker renders provider catalogs in full up to a per-provider
+overflow threshold, then samples down to a visible target with the remainder
+moved to the overflow/extra list. Curated providers (OpenRouter, Nous) keep
+their curated entries visible in full; OpenRouter's threshold is dynamic —
+the free-tier augmentation shares the same visible list, so the curated
+limit is raised by exactly the number of free rows actually appended.
+Generic providers keep the default threshold/target. See
+`_picker_caps_for_provider()` in `api/config.py` for the authoritative
+values and `tests/test_featured_picker_caps.py` for the boundary matrix.
+
 ## Responsive behavior
 
 Mobile is not an afterthought. The repository documents a responsive layout with
