@@ -442,10 +442,14 @@ def _resolve_ctx_indices_for_messages(
     """Return context_indices that should be dropped for the given display message_ids.
 
     Walks the display list in order and matches each row to its context counterpart
-    via the same first-match semantics as truncate_context_for_display_keep (id,
-    then id+timestamp, then signature). Used by delete_message_at_signature so a
-    removed display row also drops its model-context row, preserving the
-    display<->context alignment that the next LLM turn depends on.
+    using the same first-match semantics as truncate_context_for_display_keep:
+    id match first, then id+timestamp, then signature (+ optional timestamp).
+    The cursor (next_ctx_idx) advances on EVERY matched display row, not just
+    on target rows -- otherwise an id-less context row with a duplicate signature
+    that precedes the target's true counterpart would be matched first, the
+    deleted content would remain in the model history, and an unrelated context
+    row would be removed. See PR #7075 review (Greptile comment 3791689081,
+    P1) for the failure mode this ordering fixes.
 
     Returns indices in ascending order. A display row that cannot be resolved
     to a context index is silently skipped (large-session context trimming may
@@ -454,40 +458,53 @@ def _resolve_ctx_indices_for_messages(
     """
     if not ctx or not messages or not target_message_ids:
         return []
-    ctx_indices: list[int] = []
+
+    # First pass: build display_idx -> ctx_idx map by walking both lists in
+    # order. The cursor advances on every match so the O(n) pair remains
+    # order-preserving (the same guarantee truncate_context_for_display_keep
+    # relies on for its large-session alignment).
+    matches: list[int | None] = [None] * len(messages)
     next_ctx_idx = 0
-    for msg in messages:
+    for msg_idx, msg in enumerate(messages):
         if not isinstance(msg, dict):
             continue
         msg_id = msg.get('id')
-        if msg_id not in target_message_ids:
-            continue
         msg_sig = _row_signature(msg)
         if msg_sig is None:
             continue
-        # Linear scan, preserving "first match at or after next_ctx_idx" semantics
-        # (same constraint as truncate_context_for_display_keep). For a deletion
-        # walk the typical len(ctx) is small (recent turn), so an O(n) scan is
-        # cheaper than rebuilding the full id/signature indexes.
         for ctx_idx in range(next_ctx_idx, len(ctx)):
             ctx_row = ctx[ctx_idx]
             ctx_sig = _row_signature(ctx_row)
             if ctx_sig is None or not isinstance(ctx_row, dict):
                 continue
             ctx_id = ctx_row.get('id')
+            # Strongest match: row id matches (skips timestamp check entirely).
             if ctx_id is not None and msg_id is not None and ctx_id == msg_id:
-                ctx_indices.append(ctx_idx)
+                matches[msg_idx] = ctx_idx
                 next_ctx_idx = ctx_idx + 1
                 break
+            # Weak match: signature must match, then timestamp must match
+            # too when both are present (mirrors truncate_context_for_display_keep).
             if ctx_sig != msg_sig:
                 continue
             ctx_ts = ctx_row.get('timestamp')
             msg_ts = msg.get('timestamp')
             if ctx_ts is not None and msg_ts is not None and ctx_ts != msg_ts:
                 continue
-            ctx_indices.append(ctx_idx)
+            matches[msg_idx] = ctx_idx
             next_ctx_idx = ctx_idx + 1
             break
+
+    # Second pass: collect ctx indices for target rows that resolved.
+    ctx_indices: list[int] = []
+    for msg_idx, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            continue
+        if msg.get('id') not in target_message_ids:
+            continue
+        ctx_idx = matches[msg_idx]
+        if ctx_idx is not None:
+            ctx_indices.append(ctx_idx)
     return ctx_indices
 
 

@@ -218,3 +218,86 @@ def test_truncation_watermark_stamped_after_shrink():
     assert s.intentional_shrink_generation is not None
     assert isinstance(s.intentional_shrink_generation, str)
     assert len(s.intentional_shrink_generation) > 0
+
+
+def test_id_less_context_duplicate_signature_targets_correct_row():
+    """Cursor advances on every match, not just on targets (PR #7075 review).
+
+    Regression test for Greptile review comment 3791689081 (P1). The earlier
+    implementation only advanced next_ctx_idx when it matched a TARGET row,
+    so an id-less context that contained an earlier row with the same
+    signature as the deleted target would be matched first — the deleted
+    content stayed in the model history while an unrelated context row was
+    removed. The fix pre-computes display->ctx matches for ALL rows in
+    order, then collects indices only for targets.
+
+    Fixture: display has rows in order (u1, u2, u3); context has rows
+    (u1_idless, u2, u3_idless) where u1_idless and u3_idless are id-less
+    duplicates of u1 and u3 respectively. Deleting u1 must:
+      - drop the u1_idless context row (the TRUE counterpart),
+      - leave u2 and u3_idless untouched in context.
+    """
+    s = Session(
+        session_id="t-idless-dup",
+        messages=[
+            {"id": "u1", "role": "user", "content": "first", "timestamp": 1.0},
+            {"id": "u2", "role": "user", "content": "second", "timestamp": 2.0},
+            {"id": "u3", "role": "user", "content": "third", "timestamp": 3.0},
+        ],
+        context_messages=[
+            # u1_idless: id-less duplicate of u1. The cursor must consume
+            # this when matching display row u1, so the next ctx row (u2)
+            # is not mistaken for u1's counterpart.
+            {"role": "user", "content": "first", "timestamp": 1.0},
+            {"id": "u2", "role": "user", "content": "second", "timestamp": 2.0},
+            # u3_idless: id-less duplicate of u3. Not adjacent to u1, so the
+            # correct cursor position after u1's match is index 1, and the
+            # scanner for u2 / u3 must not loop back to this row.
+            {"role": "user", "content": "third", "timestamp": 3.0},
+        ],
+    )
+    result = delete_message_at_signature(s, "u1", scope="single")
+    assert result["removed_message_ids"] == ["u1"]
+    # The crucial assertion: exactly 1 ctx row removed, and it is the
+    # u1_idless row at index 0 — not anything else.
+    assert result["removed_context_count"] == 1
+    assert [m["content"] for m in s.context_messages] == ["second", "third"]
+    # And the true target (u2 in context) is still present, so the next
+    # LLM turn does not see a stale "first" content.
+    assert s.context_messages[0]["id"] == "u2"
+    assert s.context_messages[1]["content"] == "third"
+    # Display cleanup is unaffected by the fix.
+    assert [m["content"] for m in s.messages] == ["second", "third"]
+
+
+def test_id_less_context_duplicate_signature_middle_target():
+    """Cursor stays correct when the target is the ID-less row itself.
+
+    Companion to the previous test: here the target row itself is id-less,
+    so the matcher must fall back to signature matching. A naive matcher
+    that loops ctx from index 0 again would still pick the correct row
+    once the cursor has advanced past the earlier display row.
+
+    Fixture: display (u1, u2_idless, u3); context (u1_idless, u2_idless,
+    u3_idless). Deleting u2_idless must drop the u2_idless context row
+    (index 1), not anything else.
+    """
+    s = Session(
+        session_id="t-idless-middle",
+        messages=[
+            {"id": "u1", "role": "user", "content": "first", "timestamp": 1.0},
+            {"id": "u2_idless", "role": "user", "content": "second", "timestamp": 2.0},
+            {"id": "u3", "role": "user", "content": "third", "timestamp": 3.0},
+        ],
+        context_messages=[
+            {"role": "user", "content": "first", "timestamp": 1.0},
+            {"role": "user", "content": "second", "timestamp": 2.0},
+            {"role": "user", "content": "third", "timestamp": 3.0},
+        ],
+    )
+    result = delete_message_at_signature(s, "u2_idless", scope="single")
+    assert result["removed_message_ids"] == ["u2_idless"]
+    result_ctx = [m["content"] for m in s.context_messages]
+    assert result["removed_context_count"] == 1
+    # The middle context row (u2_idless's true counterpart) is gone.
+    assert result_ctx == ["first", "third"]
