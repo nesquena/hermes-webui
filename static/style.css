@@ -7316,3 +7316,10 @@ html[data-conversation-outline="enabled"] #outlineToggleBtn:not([hidden]){displa
 /* Settings field highlight (mirrors msg-question-highlight / _highlightQuestionRow pattern) */
 .settings-field-highlight { animation: settings-field-pulse 1.6s ease-out; }
 @keyframes settings-field-pulse { 0% { box-shadow: 0 0 0 0 var(--focus-ring); } 35% { box-shadow: 0 0 0 4px var(--focus-ring); } 100% { box-shadow: 0 0 0 0 rgba(0, 0, 0, 0); } }
+
+
+/* ── Per-message delete (companion to /api/session/message/delete, #6737) ── */
+/* Subtle danger tint on hover so the destructive action is visually distinct
+   from copy/fork without screaming red on the resting state. Reuses the
+   .msg-action-btn base so it lines up with the other icon buttons. */
+.msg-delete-btn:hover{color:var(--danger, #c0392b);background:var(--danger-bg, rgba(192,57,43,0.08));}

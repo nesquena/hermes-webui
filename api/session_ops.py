@@ -20,6 +20,30 @@ logger = logging.getLogger(__name__)
 AUTO_TITLE_LABELS = {'untitled', 'new chat'}
 
 
+def _row_signature(row: Any) -> tuple[str, ...] | None:
+    """Stable identity tuple for a message row.
+
+    Promoted to module scope so it can be reused by both
+    ``truncate_context_for_display_keep`` (display↔context alignment) and
+    ``delete_message_at_signature`` (per-message splice). The signature is
+    the same tuple the inner matcher used to compute, so existing alignment
+    behavior is unchanged. A non-dict row returns ``None`` (caller treats it
+    as unmatchable).
+    """
+    if not isinstance(row, dict):
+        return None
+    tool_calls = row.get('tool_calls')
+    tool_calls_sig = json.dumps(tool_calls, sort_keys=True, default=str) if tool_calls else ''
+    return (
+        str(row.get('role') or ''),
+        str(row.get('content') or ''),
+        str(row.get('tool_call_id') or ''),
+        str(row.get('tool_use_id') or ''),
+        str(row.get('tool_name') or row.get('name') or ''),
+        tool_calls_sig,
+    )
+
+
 def _live_active_stream_id(session) -> str | None:
     """Return session.active_stream_id ONLY if that stream is live in THIS
     process; else None.
@@ -139,20 +163,6 @@ def truncate_context_for_display_keep(
     # at all), so we do not re-do that trimming here.
     if len(ctx) == len(msgs):
         return ctx[:keep]
-
-    def _row_signature(row: Any) -> tuple[str, ...] | None:
-        if not isinstance(row, dict):
-            return None
-        tool_calls = row.get('tool_calls')
-        tool_calls_sig = json.dumps(tool_calls, sort_keys=True, default=str) if tool_calls else ''
-        return (
-            str(row.get('role') or ''),
-            str(row.get('content') or ''),
-            str(row.get('tool_call_id') or ''),
-            str(row.get('tool_use_id') or ''),
-            str(row.get('tool_name') or row.get('name') or ''),
-            tool_calls_sig,
-        )
 
     # Materialize signatures once.  The matcher deliberately keeps the original
     # rows in ``ctx``; these records are only an alignment index. A signature
@@ -422,6 +432,180 @@ def truncate_session_at_keep(session, keep: int) -> tuple[int, int]:
     session.truncation_watermark = _truncation_watermark_for(session.messages)
     session.truncation_boundary = session.truncation_watermark
     return old_msg_count, old_ctx_count
+
+
+def _resolve_ctx_indices_for_messages(
+    ctx: list,
+    messages: list,
+    target_message_ids: set,
+) -> list[int]:
+    """Return context_indices that should be dropped for the given display message_ids.
+
+    Walks the display list in order and matches each row to its context counterpart
+    via the same first-match semantics as truncate_context_for_display_keep (id,
+    then id+timestamp, then signature). Used by delete_message_at_signature so a
+    removed display row also drops its model-context row, preserving the
+    display<->context alignment that the next LLM turn depends on.
+
+    Returns indices in ascending order. A display row that cannot be resolved
+    to a context index is silently skipped (large-session context trimming may
+    have already dropped its counterpart). Caller removes indices in reverse
+    order to avoid resequencing.
+    """
+    if not ctx or not messages or not target_message_ids:
+        return []
+    ctx_indices: list[int] = []
+    next_ctx_idx = 0
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        msg_id = msg.get('id')
+        if msg_id not in target_message_ids:
+            continue
+        msg_sig = _row_signature(msg)
+        if msg_sig is None:
+            continue
+        # Linear scan, preserving "first match at or after next_ctx_idx" semantics
+        # (same constraint as truncate_context_for_display_keep). For a deletion
+        # walk the typical len(ctx) is small (recent turn), so an O(n) scan is
+        # cheaper than rebuilding the full id/signature indexes.
+        for ctx_idx in range(next_ctx_idx, len(ctx)):
+            ctx_row = ctx[ctx_idx]
+            ctx_sig = _row_signature(ctx_row)
+            if ctx_sig is None or not isinstance(ctx_row, dict):
+                continue
+            ctx_id = ctx_row.get('id')
+            if ctx_id is not None and msg_id is not None and ctx_id == msg_id:
+                ctx_indices.append(ctx_idx)
+                next_ctx_idx = ctx_idx + 1
+                break
+            if ctx_sig != msg_sig:
+                continue
+            ctx_ts = ctx_row.get('timestamp')
+            msg_ts = msg.get('timestamp')
+            if ctx_ts is not None and msg_ts is not None and ctx_ts != msg_ts:
+                continue
+            ctx_indices.append(ctx_idx)
+            next_ctx_idx = ctx_idx + 1
+            break
+    return ctx_indices
+
+
+def delete_message_at_signature(
+    session,
+    message_id: str,
+    scope: str = "pair",
+) -> dict[str, Any]:
+    """Remove a single message (or its whole turn-pair) from display + context.
+
+    This is the per-message splice primitive that backs
+    ``POST /api/session/message/delete``. Unlike truncate_session_at_keep
+    (which keeps a prefix), this targets an arbitrary middle row by identity
+    while preserving the rest of the conversation.
+
+    The mutation is a splice, not a slice: ``s.messages`` keeps every row whose
+    id is not in the dropped set, and ``s.context_messages`` is aligned by
+    signature match so the next LLM turn does not see a stale summary that
+    referenced the deleted content.
+
+    Args:
+        session: the live ``Session`` instance to mutate (caller holds LOCK).
+        message_id: the ``id`` field of the row in ``s.messages`` to delete.
+        scope: ``"single"`` drops only the targeted row;
+               ``"pair"`` (default) also drops the adjacent user/assistant
+               sibling on the other side of the turn. The pair collapse
+               prevents the "dangling user turn" pathology that some providers
+               reject on the next resend (called out by maintainer in #7001).
+
+    Returns:
+        Dict with removed display ids, removed context index count, and the
+        resulting counts so the handler can log + build the response.
+
+    Raises:
+        ValueError: ``message_id`` not found in ``s.messages`` or unknown scope.
+    """
+    if scope not in ("single", "pair"):
+        raise ValueError(f"scope must be 'single' or 'pair', got {scope!r}")
+    history = list(session.messages or [])
+    target_idx: int | None = None
+    for i, row in enumerate(history):
+        if isinstance(row, dict) and row.get('id') == message_id:
+            target_idx = i
+            break
+    if target_idx is None:
+        raise ValueError(f"message_id {message_id!r} not found in session")
+
+    # Compute the set of display ids to drop.
+    drop_ids: set[str] = {message_id}
+    if scope == "pair":
+        role = history[target_idx].get('role')
+        if role == 'user':
+            # Drop the user + the immediately-following assistant (if present).
+            sibling = history[target_idx + 1] if target_idx + 1 < len(history) else None
+            if isinstance(sibling, dict) and sibling.get('role') == 'assistant':
+                sibling_id = sibling.get('id')
+                if sibling_id:
+                    drop_ids.add(sibling_id)
+        elif role == 'assistant':
+            # Drop the assistant + the immediately-preceding user (if present).
+            sibling = history[target_idx - 1] if target_idx - 1 >= 0 else None
+            if isinstance(sibling, dict) and sibling.get('role') == 'user':
+                sibling_id = sibling.get('id')
+                if sibling_id:
+                    drop_ids.add(sibling_id)
+        # For tool/system/tombstone rows or missing siblings, pair collapses to single.
+
+    # Splice display messages.
+    old_msg_count = len(history)
+    new_messages = [m for m in history if not (isinstance(m, dict) and m.get('id') in drop_ids)]
+    session.messages = new_messages
+
+    # Splice context_messages by signature match. Large-session context trimming
+    # may have already dropped the corresponding context row — in that case we
+    # no-op (it is already absent from the model context).
+    ctx_list = getattr(session, 'context_messages', None)
+    removed_ctx_count = 0
+    if isinstance(ctx_list, list) and ctx_list:
+        ctx_indices = _resolve_ctx_indices_for_messages(ctx_list, history, drop_ids)
+        for ctx_idx in reversed(ctx_indices):
+            del ctx_list[ctx_idx]
+        removed_ctx_count = len(ctx_indices)
+        session.context_messages = ctx_list
+
+    # Stamp the shrink so checkpoint + recovery paths can distinguish a
+    # legitimate prefix from a deleted suffix (mirrors truncate_session_at_keep).
+    _stamp_intentional_shrink_generation(session, old_msg_count, len(session.messages))
+    session.truncation_watermark = _truncation_watermark_for(session.messages)
+    session.truncation_boundary = session.truncation_watermark
+
+    return {
+        'removed_message_ids': sorted(drop_ids),
+        'removed_context_count': removed_ctx_count,
+        'old_message_count': old_msg_count,
+        'new_message_count': len(session.messages),
+    }
+
+
+def delete_message(session_id: str, message_id: str, scope: str = "pair") -> dict[str, Any]:
+    """Drop a single message (or its pair) from a session, persisting via disk.
+
+    Public entry point. Acquires the session agent lock and serializes the
+    read-modify-write of ``s.messages`` + ``s.context_messages`` against the
+    checkpoint thread, cancel_stream, and concurrent truncates. Mirror of
+    retry_last / undo_last at api/session_ops.py:427 / :488.
+
+    Raises:
+        KeyError: session not found.
+        ValueError: message_id not found OR unknown scope.
+    """
+    with _get_session_agent_lock(session_id):
+        s = get_session(session_id)  # acquires LOCK transiently
+        with LOCK:
+            # Stale-object guard — see retry_last for the rationale.
+            s = SESSIONS.get(session_id, s)
+            result = delete_message_at_signature(s, message_id, scope)
+        s.save()  # outside LOCK -- save() re-acquires LOCK via _write_session_index()
+    return result
 
 
 def retry_last(session_id: str) -> dict[str, Any]:
