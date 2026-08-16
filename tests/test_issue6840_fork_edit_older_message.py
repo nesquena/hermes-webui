@@ -106,6 +106,16 @@ def test_latest_edit_keeps_existing_truncate_path():
     assert [call[0] for call in result["calls"]].count("send") == 1
 
 
+def test_paginated_latest_edit_compares_absolute_keep_count():
+    result = _run_node(
+        {"index": 2, "oldest": 3, "messages": [{"role": "user"}, {"role": "assistant"}, {"role": "user"}]}
+    )
+    assert "/api/session/branch" not in [call[0] for call in result["calls"]]
+    assert result["calls"][0][0] == "/api/session/truncate"
+    assert result["calls"][0][1]["keep_count"] == 5
+    assert [call[0] for call in result["calls"]].count("send") == 1
+
+
 def test_branchable_read_only_latest_edit_never_truncates():
     result = _run_node(
         {"index": 2, "readOnly": True, "branchable": True, "messages": [{"role": "user"}, {"role": "assistant"}, {"role": "user"}]}
@@ -162,7 +172,8 @@ def test_source_contracts_and_locales_are_present():
     source = UI.read_text(encoding="utf-8")
     i18n = I18N.read_text(encoding="utf-8")
     assert "const isEditableUser=isUser&&!(readOnlySession&&!branchableReadOnlySession);" in source
-    assert "if(branchableReadOnlySession || (lastUserIdx>=0 && absoluteKeepCount!==lastUserIdx)){" in source
+    assert "const lastUserKeepCount=lastUserIdx>=0 ? _oldestIdx+lastUserIdx : -1;" in source
+    assert "if(branchableReadOnlySession || (lastUserIdx>=0 && absoluteKeepCount!==lastUserKeepCount)){" in source
     assert source.count("const readOnlySession=typeof _isReadOnlySession==='function'") == 1
     assert "session_id:initialSid" in source
     assert "keep_count:absoluteKeepCount" in source

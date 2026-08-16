@@ -19147,7 +19147,8 @@ async function submitEdit(msgIdx, newText) {
   const branchableReadOnlySession=typeof _isBranchableReadOnlySession==='function'
     ? _isBranchableReadOnlySession(S.session)
     : false;
-  if(branchableReadOnlySession || (lastUserIdx>=0 && absoluteKeepCount!==lastUserIdx)){
+  const lastUserKeepCount=lastUserIdx>=0 ? _oldestIdx+lastUserIdx : -1;
+  if(branchableReadOnlySession || (lastUserIdx>=0 && absoluteKeepCount!==lastUserKeepCount)){
     const trailing=Math.max(0,(Array.isArray(S.messages)?S.messages.length:0)-absoluteKeepCount-1);
     const ok=await showConfirmDialog({
       title:t('edit_fork_title'),
