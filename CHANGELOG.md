@@ -5,6 +5,10 @@
 
 ### Fixed
 
+- **Docker single-container: an explicitly configured UID/GID is no longer lost, fixing a restart loop.** The entrypoint now probes the configured state-dir bind mount before the image-owned `/workspace` when auto-detecting the container UID/GID, and persists an `explicit` marker so a deliberately supplied `WANTED_UID`/`WANTED_GID` (e.g. `1024`) survives the root→user re-entry instead of being re-detected and overwritten. This fixes the documented single-container restart loop; the default stays `1024`, the two- and three-container topologies are unaffected, and a missing legacy marker falls back safely. Thanks @jorgejiro. (#7027)
+
+- **The Z.AI model list now includes GLM-5.3.** GLM-5.3 was added to the Z.AI provider catalog so it's selectable in the model picker. The Z.AI onboarding default stays at GLM-5.1 until the direct API serves 5.3. Thanks @rh-id. (#7017)
+
 - **A restart can no longer turn a suppressed `[SILENT]` control message into a phantom recovered turn on the `/goal` path.** The `/api/goal` endpoint now recognizes the exact reserved `[SILENT]` delivery-suppression sentinel and treats it as a successful no-op before any session lookup or goal-state mutation — matching the guard the chat-start endpoint already applies. Previously a wake relay that accidentally POSTed the sentinel to `/goal` could, after a restart, materialize it as a visible recovered user turn. Matching is exact and case-sensitive, so ordinary goals are unaffected. Thanks @webtecnica. (#7019)
 
 - **A busy subagent tree no longer promotes an active child to a misleading top-level sidebar row.** The session sidebar builds from a bounded oversampled candidate window; after the recency slice, subagent parents that were present in the candidate set could be dropped, leaving their still-running child leaves rendered as if they were their own top-level conversations. Those parents are now re-added after the slice (bounded, cycle-safe, subagent-scoped so WebUI ancestors stay excluded), so the delegated-session tree nests correctly. Thanks @carlotestor. (#7031)
