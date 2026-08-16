@@ -657,6 +657,10 @@ function _syncAttachChoiceSemantics(){
   if(_shouldOfferCameraChoice())attach.setAttribute('aria-haspopup','menu');
   else attach.removeAttribute('aria-haspopup');
 }
+function _handleAttachChoiceCapabilityChange(){
+  if(!_shouldOfferCameraChoice()&&_attachChoiceOpen)_setAttachChoiceOpen(false);
+  else _syncAttachChoiceSemantics();
+}
 function _setAttachChoiceOpen(open,restoreFocus){
   const popup=$('attachChoicePopup');
   const attach=$('btnAttach');
@@ -716,7 +720,7 @@ function _handleAttachChoiceKeydown(e){
   return false;
 }
 _syncAttachChoiceSemantics();
-window.addEventListener('resize',_syncAttachChoiceSemantics);
+window.addEventListener('resize',_handleAttachChoiceCapabilityChange);
 
 // ── Voice input (Web Speech API + MediaRecorder fallback) ───────────────────
 function _micIsLocalhostOrLoopback(hostname){

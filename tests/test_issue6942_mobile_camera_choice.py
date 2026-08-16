@@ -46,6 +46,9 @@ def test_choice_accessibility_layout_and_locale_parity():
     assert "aria-hidden" in read("static/boot.js")
     assert "min-height:44px" in css
     assert ".attach-choice-popup[hidden]{display:none;}" in css
+    assert ".composer-left{display:flex" in css and "overflow-y:hidden" in css
+    left_start = html.index('class="composer-left"')
+    assert 'id="attachChoicePopup"' not in html[left_start:html.index('</div>', left_start)]
     assert "composer_attach_options" in i18n
 
     locales = re.findall(r"^  (?:[\"']?)([A-Za-z][A-Za-z0-9-]*)(?:[\"']?): \{", i18n, re.MULTILINE)
@@ -97,6 +100,11 @@ eval({block!r});
 assert.equal(attach.getAttribute('aria-haspopup'),'menu');
 attach.onclick({{preventDefault(){{}}}});
 assert.equal(popup.hidden,false); assert.equal(attach.getAttribute('aria-expanded'),'true');
+state.width=1280; state.coarse=false; state.fine=true; window.listeners.resize();
+assert.equal(popup.hidden,true); assert.equal(attach.getAttribute('aria-expanded'),'false');
+state.width=400; state.coarse=true; state.fine=false; window.listeners.resize();
+attach.onclick({{preventDefault(){{}}}});
+assert.equal(popup.hidden,false); assert.equal(attach.getAttribute('aria-expanded'),'true');
 popup.listeners.click({{target:choice}});
 assert.equal(camera.clicks,1); assert.equal(popup.hidden,true); assert.equal(attach.getAttribute('aria-expanded'),'false');
 state.width=1280; state.coarse=false; state.fine=true; window.listeners.resize();
@@ -120,5 +128,5 @@ def test_camera_choice_preserves_direct_desktop_and_hybrid_paths():
     assert "pointer:coarse" in attach or "_shouldOfferCameraChoice" in attach
     assert "getUserMedia" not in attach
     assert 'id="btnAttach"' in read("static/index.html")
-    assert '.composer-left{position:relative;}' in read("static/style.css")
-    assert '.attach-choice-popup{position:absolute;left:0' in read("static/style.css")
+    assert '.composer-left{display:flex' in read("static/style.css")
+    assert '.attach-choice-popup{position:absolute;left:10px' in read("static/style.css")
