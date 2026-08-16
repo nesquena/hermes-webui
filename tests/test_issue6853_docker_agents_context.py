@@ -75,9 +75,10 @@ def _docker_runtime_available() -> bool:
 
 
 @pytest.mark.skipif(
-    not _docker_runtime_available(),
-    reason="Docker Linux engine is unavailable; runtime proof is CI-owned",
+    not os.environ.get("HERMES_RUN_DOCKER_RUNTIME_TESTS") or not _docker_runtime_available(),
+    reason="Docker runtime proof is opt-in for the CI integration job",
 )
+@pytest.mark.timeout(900)
 def test_docker_runtime_keeps_app_clean_in_both_seed_modes_and_workspace_intact(tmp_path):
     """Build the image and exercise the exact normal/rootless seed destinations."""
     docker = shutil.which("docker")
