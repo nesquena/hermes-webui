@@ -18974,17 +18974,17 @@ function renderMessages(options){
     const recoveryHtml=recoveryPayload ? _compressionRecoveryHtml(recoveryPayload, (S.session&&S.session.session_id)||'') : '';
     if(recoveryHtml) bodyHtml += recoveryHtml;
     const statusHtml = (!isUser&&m._statusCard) ? _statusCardHtml(m._statusCard) : '';
-    const isEditableUser=isUser&&rawIdx===lastUserRawIdx;
-    const editBtn  = isEditableUser ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
-    const undoBtn  = isLastAssistant ? `<button class="msg-action-btn" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo',13)}</button>` : '';
-    const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}</button>` : '';
-    const copyBtn  = `<button class="msg-copy-btn msg-action-btn" title="${t('copy')}" onclick="copyMsg(this)">${li('copy',13)}</button>`;
     const readOnlySession=typeof _isReadOnlySession==='function'
       ? _isReadOnlySession(S.session)
       : !!(S.session&&(S.session.read_only||S.session.is_read_only));
     const branchableReadOnlySession=typeof _isBranchableReadOnlySession==='function'
       ? _isBranchableReadOnlySession(S.session)
       : false;
+    const isEditableUser=isUser&&!(readOnlySession&&!branchableReadOnlySession);
+    const editBtn  = isEditableUser ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
+    const undoBtn  = isLastAssistant ? `<button class="msg-action-btn" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo',13)}</button>` : '';
+    const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}</button>` : '';
+    const copyBtn  = `<button class="msg-copy-btn msg-action-btn" title="${t('copy')}" onclick="copyMsg(this)">${li('copy',13)}</button>`;
     const forkBtn  = (readOnlySession&&!branchableReadOnlySession) ? '' : `<button class="msg-action-btn" title="${t('fork_from_here')}" onclick="forkFromMessage(${rawIdx+1})">${li('git-branch',13)}</button>`;
     const ttsBtn   = !isUser ? `<button class="msg-action-btn msg-tts-btn" title="${t('tts_listen')||'Listen'}" onclick="speakMessage(this)">${li('volume-2',13)}</button>` : '';
     const tsVal=m._ts||m.timestamp;
@@ -21303,62 +21303,96 @@ function autoResizeTextarea(ta) {
   ta.style.height = Math.min(ta.scrollHeight, 300) + 'px';
 }
 
-// #2184 follow-up: submitEdit is re-entrant and destructive, and nothing stopped
-// a second invocation. Its only guard was S.busy, which send() does not set until
-// the LAST line — after two multi-second awaits (_ensureAllMessagesLoaded on a long
-// session, then the truncate round-trip). On a laggy instance that leaves a 10s+
-// window in which every further click on "Send edit" starts another full truncate.
-// Observed in the wild: seven concurrent POST /api/session/truncate, 5.2-8.5s each,
-// from one user clicking repeatedly because the UI had not yet acknowledged the first.
-//
-// That is not merely wasteful, it is a data-loss hazard. `absoluteKeepCount` is
-// deliberately captured BEFORE the awaits (see test_submit_edit_captures_absolute_
-// before_await): at click time `_oldestIdx` is the loaded window's offset and
-// `msgIdx` is window-relative, so their sum is the true absolute index. But the
-// first call's _ensureAllMessagesLoaded() sets `_oldestIdx = 0`, so a SECOND call
-// entering afterwards computes `0 + msgIdx` from a still-window-relative msgIdx —
-// a far smaller keep_count. Truncating a 2000-message session to that would delete
-// most of its history.
-//
-// Guard re-entry at the function itself rather than at the click handler: the edit
-// can also be submitted with Enter (the keydown handler clicks the button), and a
-// future caller would silently reopen the hole. Cleared in a finally so an early
-// return or a throw cannot wedge editing off for the rest of the page's life.
+function _lastUserMessageIndex(){
+  const msgs=Array.isArray(S.messages)?S.messages:[];
+  for(let i=msgs.length-1;i>=0;i--){ if(msgs[i]&&msgs[i].role==='user') return i; }
+  return -1;
+}
+
 let _submitEditInFlight = false;
 async function submitEdit(msgIdx, newText) {
   if(!S.session || S.busy || _submitEditInFlight) return;
   _submitEditInFlight = true;
   try {
-    const initialSid = S.session.session_id;
-    const absoluteKeepCount = _oldestIdx + msgIdx;
-    // #5924: capture the deliberate-pick signal up front (pre-network), scoped to
-    // initialSid — a non-default session model (vs profile default), which is
-    // inference-free and survives the failed send's marker consumption. See
-    // _deliberateSessionModelPick. null → no re-arm → server resolution runs.
-    const _recoveryPick=_deliberateSessionModelPick(initialSid);
-    if(typeof _ensureAllMessagesLoaded==='function'){
-      await _ensureAllMessagesLoaded();
-    }
+  const initialSid = S.session.session_id;
+  const absoluteKeepCount = _oldestIdx + msgIdx;
+  const editedText = newText;
+  const sourceProfile = S.session.profile || S.activeProfile || 'default';
+  const sourceModel = S.session.model || '';
+  const sourceProvider = S.session.model_provider || '';
+  const sourceWorkspace = S.session.workspace || '';
+  // #5924: capture the deliberate-pick signal up front (pre-network), scoped to
+  // initialSid — a non-default session model (vs profile default), which is
+  // inference-free and survives the failed send's marker consumption. See
+  // _deliberateSessionModelPick. null → no re-arm → server resolution runs.
+  const _recoveryPick=_deliberateSessionModelPick(initialSid);
+  if(typeof _ensureAllMessagesLoaded==='function'){
+    await _ensureAllMessagesLoaded();
+  }
+  if(!S.session || S.session.session_id !== initialSid) return;
+  const lastUserIdx=_lastUserMessageIndex();
+  const branchableReadOnlySession=typeof _isBranchableReadOnlySession==='function'
+    ? _isBranchableReadOnlySession(S.session)
+    : false;
+  const lastUserKeepCount=lastUserIdx>=0 ? _oldestIdx+lastUserIdx : -1;
+  if(branchableReadOnlySession || (lastUserIdx>=0 && absoluteKeepCount!==lastUserKeepCount)){
+    const trailing=Math.max(0,(Array.isArray(S.messages)?S.messages.length:0)-absoluteKeepCount-1);
+    const ok=await showConfirmDialog({
+      title:t('edit_fork_title'),
+      message:t('edit_fork_message',trailing),
+      confirmLabel:t('edit_fork_confirm'),
+    });
+    if(!ok) return;
     if(!S.session || S.session.session_id !== initialSid) return;
-    try {
-      await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
-        session_id: initialSid,
-        keep_count: absoluteKeepCount
+    try{
+      const data=await api('/api/session/branch',{method:'POST',body:JSON.stringify({
+        session_id:initialSid,
+        keep_count:absoluteKeepCount,
       })});
-      // #5924 SILENT-race guard: a session switch during the truncate await must not
-      // let this recovery apply session A's intent (truncate/re-arm/send) to the
-      // newly-visible session.
       if(!S.session || S.session.session_id !== initialSid) return;
-      S.messages = S.messages.slice(0, absoluteKeepCount);
-      renderMessages();
-      $('msg').value = newText;
-      // #5924 (Facet 1 + Facet 4): edit-resubmit is a recovery send. Re-arm the
-      // Re-arm the single-shot explicit-pick marker from the captured non-default
-      // pick — only if still safe at fire time (session unchanged, current model
-      // still matches, no newer onchange marker to clobber). See _reArmRecoveryPick.
-      _reArmRecoveryPick(initialSid, _recoveryPick);
+      if(!data||!data.session_id) throw new Error('branch returned no session');
+      const childSid=data.session_id;
+      await loadSession(childSid);
+      if(!S.session || S.session.session_id !== childSid) return;
+      const childProfile=S.session.profile||sourceProfile;
+      const childModel=S.session.model||sourceModel;
+      const childProvider=S.session.model_provider||sourceProvider;
+      const childWorkspace=S.session.workspace||sourceWorkspace;
+      if(childProfile!==sourceProfile||childModel!==sourceModel||childProvider!==sourceProvider||childWorkspace!==sourceWorkspace){
+        setStatus(t('branch_failed')+'child session contract changed');
+        return;
+      }
+      if(typeof _ensureAllMessagesLoaded==='function') await _ensureAllMessagesLoaded();
+      if(!S.session || S.session.session_id !== childSid) return;
+      if(typeof renderSessionList==='function') await renderSessionList();
+      if(!S.session || S.session.session_id!==childSid){ showToast(t('branch_forked'),3000); return; }
+      $('msg').value=editedText;
+      if(typeof autoResize==='function') autoResize();
+      _reArmRecoveryPick(childSid,_recoveryPick);
+      showToast(t('branch_forked'),3000);
       await send();
-    } catch(e) { setStatus(t('edit_failed') + e.message); }
+    }catch(e){ setStatus(t('branch_failed')+(e&&e.message||e)); }
+    return;
+  }
+  try {
+    await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
+      session_id: initialSid,
+      keep_count: absoluteKeepCount
+    })});
+    // #5924 SILENT-race guard: a session switch during the truncate await must not
+    // let this recovery apply session A's intent (truncate/re-arm/send) to the
+    // newly-visible session.
+    if(!S.session || S.session.session_id !== initialSid) return;
+    S.messages = S.messages.slice(0, absoluteKeepCount);
+    renderMessages();
+    $('msg').value = editedText;
+    // #5924 (Facet 1 + Facet 4): edit-resubmit is a recovery send. Re-arm the
+    // Re-arm the single-shot explicit-pick marker from the captured non-default
+    // pick — only if still safe at fire time (session unchanged, current model
+    // still matches, no newer onchange marker to clobber). See _reArmRecoveryPick.
+    _reArmRecoveryPick(initialSid, _recoveryPick);
+    await send();
+  } catch(e) { setStatus(t('edit_failed') + e.message); }
   } finally {
     _submitEditInFlight = false;
   }
