@@ -3513,6 +3513,24 @@ def _zai_glm_thinking_toggle_supported(model_id: str, provider_id: str) -> bool 
     return cls in {"effort", "thinking"}
 
 
+_OPENAI_FAMILY_REASONING_PROVIDERS = frozenset({
+    "openai-codex", "openai", "openai-api",
+    "azure-foundry", "azure-openai", "azure",
+})
+
+_GPT_5_6_REASONING_MODELS = frozenset({
+    "gpt-5.6",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+})
+
+
+def _is_gpt_5_6_reasoning_model(bare_model: str) -> bool:
+    """Return whether an OpenAI-family model uses GPT-5.6's max ladder."""
+    return str(bare_model or "").strip().lower() in _GPT_5_6_REASONING_MODELS
+
+
 def _filter_reasoning_efforts_for_provider(
     efforts: list[str],
     model_id: str,
@@ -3527,15 +3545,15 @@ def _filter_reasoning_efforts_for_provider(
     normalized = list(dict.fromkeys(normalized))
     provider = _resolve_provider_alias(str(provider_id or "").strip().lower())
     bare = _strip_provider_hint_for_reasoning(model_id).lower().rsplit("/", 1)[-1]
-    # OpenAI-family lanes (Codex, direct OpenAI, Azure Foundry) cap GPT-5 at xhigh
-    # and o-series at high — 'max' is a WebUI-only level none of them accept.
-    if provider in {"openai-codex", "openai", "openai-api", "azure-foundry", "azure-openai", "azure"}:
+    # OpenAI-family lanes cap pre-GPT-5.6 GPT-5 models at xhigh and o-series at
+    # high. GPT-5.6's alias and Sol/Terra/Luna variants natively accept max.
+    if provider in _OPENAI_FAMILY_REASONING_PROVIDERS:
         if bare.startswith(("o1", "o3", "o4")):
             return [eff for eff in normalized if eff in {"low", "medium", "high"}]
-        if bare.startswith("gpt-5"):
+        if bare.startswith("gpt-5") and not _is_gpt_5_6_reasoning_model(bare):
             return [eff for eff in normalized if eff != "max"]
-    # 'max' is a WebUI-level ceiling; providers whose native ladder tops out lower
-    # must NOT advertise it, otherwise a stored/CLI 'max' degrades WORSE than the
+    # Providers whose native ladder tops out below 'max' must NOT advertise it,
+    # otherwise a stored/CLI 'max' degrades WORSE than the
     # prior max->xhigh coercion (Gemini's adapter treats unknown 'max' as medium;
     # pre-adaptive Anthropic manual-thinking lacks a 'max' budget and falls to 8k).
     # Dropping 'max' here lets the existing downgrade ladder land on xhigh/high.
@@ -3882,11 +3900,11 @@ def resolve_model_reasoning_efforts(
     """Return supported reasoning-effort levels for *model_id*, or [] if none.
 
     Always passes the sourced list through _filter_reasoning_efforts_for_provider
-    so the hard provider ceilings (openai-codex/openai/azure GPT-5 cap at xhigh,
-    Gemini + pre-adaptive/cloud-hosted Claude cap at xhigh) are applied uniformly
-    — the UI dropdown (which gates options on this list) and coercion therefore
-    agree: 'max' is offered ONLY for models whose native ladder genuinely includes
-    it, and is stripped everywhere it would be rejected/mishandled.
+    so the hard provider ceilings (OpenAI-family GPT-5 before 5.6 at xhigh and
+    o-series at high; Gemini + pre-adaptive/cloud-hosted Claude at xhigh) are
+    applied uniformly. The UI dropdown and coercion therefore agree: ``max`` is
+    retained for GPT-5.6 and other models whose native ladder includes it, and
+    stripped where it would be rejected or mishandled.
     """
     raw = _resolve_model_reasoning_efforts_impl(model_id, provider_id, base_url)
     if not raw:
@@ -4079,16 +4097,17 @@ def coerce_reasoning_effort_for_model(
     # Hard provider ceilings must win regardless of what the sourced capability
     # list says. resolve_model_reasoning_efforts() draws from hermes_cli /
     # models.dev / heuristics, and those can (a) return [] for an unrecognized
-    # model or (b) wrongly advertise a WebUI-only level like 'max' for a provider
+    # model or (b) wrongly advertise 'max' for a provider
     # whose native ladder tops out lower. _filter_reasoning_efforts_for_provider
-    # encodes the known ceilings (openai-codex gpt-5, Gemini, pre-adaptive
-    # Anthropic all cap below 'max'); if it actively EXCLUDES the requested level,
-    # honor that ceiling and degrade down the ladder even when the sourced list is
-    # empty or (mistakenly) includes the level. This keeps a stored/CLI 'max' from
-    # reaching an adapter that would silently downgrade it worse than xhigh/high
-    # (Gemini→medium, legacy Claude manual-thinking→8k). For providers with NO
-    # ceiling rule the filter returns the full list unchanged, so genuinely
-    # unknown models still preserve the configured effort (#3505 behavior).
+    # encodes the known ceilings (OpenAI-family GPT-5 before 5.6, Gemini, and
+    # pre-adaptive Anthropic all cap below 'max'); if it actively EXCLUDES the
+    # requested level, honor that ceiling and degrade down the ladder even when
+    # the sourced list is empty or (mistakenly) includes the level. This keeps a
+    # stored/CLI 'max' from reaching an adapter that would silently downgrade it
+    # worse than xhigh/high (Gemini→medium, legacy Claude manual-thinking→8k).
+    # GPT-5.6 is intentionally not capped. For providers with NO ceiling rule the
+    # filter returns the full list unchanged, so genuinely unknown models still
+    # preserve the configured effort (#3505 behavior).
     ceiling = _filter_reasoning_efforts_for_provider(
         list(VALID_REASONING_EFFORTS), str(model_id or ""), str(provider_id or "")
     )
@@ -4106,15 +4125,15 @@ def coerce_reasoning_effort_for_model(
     # both for models KNOWN not to support reasoning AND for models we simply
     # don't recognize (custom providers, aggregator-rewritten ids, brand-new
     # releases). Coercion exists to avoid sending a level a KNOWN-incompatible
-    # model rejects (e.g. openai-codex gpt-5 'max', o1/o3/o4 above 'high') -
+    # model rejects (e.g. pre-5.6 GPT-5 'max', o1/o3/o4 above 'high') -
     # those paths return a NON-empty clamped set, so the degrade ladder below
     # still applies. When the set is empty we can't tell "unsupported" from
     # "unknown", so preserve the user's configured effort verbatim where it is
     # still valid. (#3505 review)
     #
     # EXCEPTION for 'max' (the #3505 default-deny refinement, maintainer call
-    # 2026-07-11): 'max' is a WebUI-only level ABOVE the universally-safe ceiling
-    # 'xhigh'. A genuinely unknown/custom provider will 400 on it. So when the
+    # 2026-07-11): 'max' is ABOVE the universally-safe ceiling 'xhigh'. A
+    # genuinely unknown/custom provider will 400 on it. So when the
     # capability list is empty AND the provider is not one we recognize as
     # reasoning-capable, degrade 'max' -> 'xhigh' rather than send an unsupported
     # supra-ceiling level. But do NOT degrade for a RECOGNIZED reasoning provider
