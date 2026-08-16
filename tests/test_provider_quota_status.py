@@ -885,6 +885,62 @@ def test_account_usage_snapshot_without_window_duration_remains_compatible():
     ]
 
 
+def test_codex_agent_snapshot_with_duration_propagates_limit_window_seconds(monkeypatch, tmp_path):
+    """Agent windows with limit_window_seconds propagate duration through the singleton path.
+
+    When the Agent provides limit_window_seconds on AccountUsageWindow objects,
+    the WebUI must preserve that duration metadata in the serialized response.
+    This covers the non-pool path where the Agent is the authoritative source.
+    """
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    old_cfg, old_mtime = _with_config(model={"provider": "openai-codex"})
+
+    import api.providers as providers
+
+    def fake_fetch(provider, home, api_key=None):
+        return SimpleNamespace(
+            provider="openai-codex",
+            source="usage_api",
+            title="Account limits",
+            plan="Pro",
+            fetched_at=datetime(2030, 3, 17, 12, 30, tzinfo=timezone.utc),
+            available=True,
+            windows=(
+                SimpleNamespace(
+                    label="Session",
+                    used_percent=15.0,
+                    reset_at=datetime(2030, 3, 17, 17, 30, tzinfo=timezone.utc),
+                    detail=None,
+                    limit_window_seconds=18_000,
+                ),
+                SimpleNamespace(
+                    label="Weekly",
+                    used_percent=40.0,
+                    reset_at=datetime(2030, 3, 24, 12, 30, tzinfo=timezone.utc),
+                    detail=None,
+                    limit_window_seconds=604_800,
+                ),
+            ),
+            details=("Credits balance: $12.50",),
+            unavailable_reason=None,
+        )
+
+    monkeypatch.setattr(providers, "_agent_fetch_account_usage_for_home", fake_fetch)
+    try:
+        result = providers.get_provider_quota()
+    finally:
+        _restore_config(old_cfg, old_mtime)
+
+    assert result["ok"] is True
+    assert result["provider"] == "openai-codex"
+    windows = result["account_limits"]["windows"]
+    assert len(windows) == 2
+    assert windows[0]["label"] == "Session"
+    assert windows[0]["limit_window_seconds"] == 18_000
+    assert windows[1]["label"] == "Weekly"
+    assert windows[1]["limit_window_seconds"] == 604_800
+
+
 def test_anthropic_oauth_usage_unavailable_reason_is_reported(monkeypatch, tmp_path):
     """Hermes Agent can report why account limits are not available."""
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
