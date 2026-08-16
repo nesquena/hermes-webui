@@ -267,6 +267,9 @@ _MESSAGING_SESSION_METADATA_CACHE: dict[str, object] = {
     "identity": {},
 }
 _MESSAGING_SESSION_METADATA_LOCK = threading.Lock()
+_FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE: dict[tuple, dict] = {}
+_FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE_LOCK = threading.RLock()
+_FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE_MAX_ENTRIES = 128
 _STALE_MESSAGING_END_REASONS = {"session_reset", "session_switch"}
 _CSP_REPORT_LOGGER = logging.getLogger("csp_report")
 _CSP_REPORT_RATE_LIMIT: dict[str, list[float]] = {}
@@ -8907,7 +8910,7 @@ def _limited_webui_messages_for_display_with_sidecar(session, sidecar_messages, 
         sidecar_messages = list(sidecar_messages or [])
     state_db_messages = list(state_db_messages or [])
     if not state_db_messages:
-        return sidecar_messages
+        return _merged_webui_lineage_messages_for_display(session, sidecar_messages)
     # NOTE: do not short-circuit to the sidecar when state.db has no strictly
     # newer rows. A state.db row whose timestamp is at-or-before the sidecar's
     # newest (recovery / edited-in-place / missing-timestamp cases) is still
@@ -8916,12 +8919,13 @@ def _limited_webui_messages_for_display_with_sidecar(session, sidecar_messages, 
     # the paginated load). The append-only merge is O(n) over already-bounded
     # in-memory lists; the real latency win here is skipping the lineage-parent
     # DISK load above, which we still skip. (#4070 ship-review)
-    return merge_session_messages_append_only(
+    merged_messages = merge_session_messages_append_only(
         sidecar_messages,
         state_db_messages,
         truncation_watermark=getattr(session, "truncation_watermark", None),
         truncation_boundary=getattr(session, "truncation_boundary", None),
     )
+    return _merged_webui_lineage_messages_for_display(session, merged_messages)
 
 
 def _sidecar_file_exceeds_threshold(session_id, threshold_bytes) -> bool:
@@ -9170,6 +9174,54 @@ def _display_coordinate_messages(session, state_db_messages) -> list:
     return _merged_webui_lineage_messages_for_display(session, merged)
 
 
+def _foreign_display_coordinate_sidecar_identity(session) -> tuple:
+    """Return stat identities for the session's sidecar lineage."""
+    identities = []
+    current = session
+    seen = set()
+    for _ in range(20):
+        sid = str(getattr(current, "session_id", "") or "").strip()
+        if not sid or sid in seen:
+            break
+        seen.add(sid)
+        path = Path(getattr(current, "path", SESSION_DIR / f"{sid}.json"))
+        try:
+            stat_result = path.stat()
+            identities.append(
+                (
+                    sid,
+                    int(getattr(stat_result, "st_mtime_ns", 0)),
+                    int(stat_result.st_size),
+                    int(getattr(stat_result, "st_ctime_ns", 0)),
+                )
+            )
+        except OSError:
+            identities.append((sid, None))
+        parent_id = str(getattr(current, "parent_session_id", "") or "").strip()
+        if not parent_id or parent_id in seen:
+            break
+        current = Session.load(parent_id)
+        if not current:
+            identities.append((parent_id, None))
+            break
+    return tuple(identities)
+
+
+def _foreign_display_coordinate_cache_scope(profile) -> str:
+    """Return the state.db scope represented by a foreign summary cache key."""
+    if isinstance(profile, str) and profile.strip():
+        return profile.strip()
+    try:
+        return str(_active_state_db_path())
+    except Exception:
+        return "<active-state-db>"
+
+
+def _clear_foreign_display_coordinate_summary_cache() -> None:
+    with _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE_LOCK:
+        _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE.clear()
+
+
 def _foreign_display_coordinate_summary(sid: str, profile=None):
     """Return the display-coordinate summary for a foreign metadata poll.
 
@@ -9182,12 +9234,30 @@ def _foreign_display_coordinate_summary(sid: str, profile=None):
         session = get_session(sid, metadata_only=False)
         if not session:
             return None
+        state_summary = get_state_db_session_summary(sid, profile=profile)
+        cache_key = (
+            _foreign_display_coordinate_cache_scope(profile),
+            _foreign_display_coordinate_sidecar_identity(session),
+            _numeric_count(state_summary.get("message_count")),
+            float(state_summary.get("last_message_at") or 0.0),
+        )
+        with _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE_LOCK:
+            cached = _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE.get(cache_key)
+            if cached is not None:
+                return dict(cached)
         backstop = _state_db_backstop_limit_for_display(session, None)
         reader_kwargs = {"profile": profile}
         if backstop is not None:
             reader_kwargs["limit"] = backstop
         state_db_messages = get_state_db_session_messages(sid, **reader_kwargs)
-        return _message_summary(_display_coordinate_messages(session, state_db_messages))
+        summary = _message_summary(_display_coordinate_messages(session, state_db_messages))
+        with _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE_LOCK:
+            _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE[cache_key] = dict(summary)
+            while len(_FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE) > _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE_MAX_ENTRIES:
+                _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE.pop(
+                    next(iter(_FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE))
+                )
+        return summary
     except Exception:
         logger.debug("Foreign display-coordinate summary failed for %s", sid, exc_info=True)
         return None
