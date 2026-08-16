@@ -206,6 +206,7 @@ function createEnvironment() {
   globalThis._loadingSessionId = null;
   globalThis._loadingOlder = false;
   globalThis._loadSessionGeneration = 0;
+  globalThis._messagesOwnerSid = null;
   globalThis._pendingCarryForwardSnapshot = null;
   globalThis._messagesTruncated = false;
   globalThis._oldestIdx = 0;

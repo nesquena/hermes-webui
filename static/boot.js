@@ -3621,7 +3621,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   const titleLabel=$('titlebarProfileLabel');
   if(titleLabel) titleLabel.textContent=S.activeProfile||'default';
   const profileIntent=(typeof _profileQueryIntentFromLocation==='function')?_profileQueryIntentFromLocation():null;
-  const _savedLocalBeforeProfileSwitch=localStorage.getItem('hermes-webui-session');
+  const _savedLocalBeforeProfileSwitch=_rememberedActiveSession();
   const _profileSwitchProfileBefore=S.activeProfile||'default';
   const _profileSwitchIsDefaultBefore=!!S.activeProfileIsDefault;
   let _profileSwitchCompleted=false;
@@ -3761,10 +3761,10 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   const _profileQueryBlocksSavedLocal=_profileQueryBlocksSavedLocalRestore(profileIntent, urlSession);
   if(_profileQueryBlocksSavedLocal&&_profileSwitchCompleted&&_profileSwitchChangedProfile){
     try{
-      if(localStorage.getItem('hermes-webui-session')===_savedLocalBeforeProfileSwitch) localStorage.removeItem('hermes-webui-session');
+      if(_rememberedActiveSession()===_savedLocalBeforeProfileSwitch) _forgetActiveSession();
     }catch(_){}
   }
-  const savedLocal=localStorage.getItem('hermes-webui-session');
+  const savedLocal=_rememberedActiveSession();
   const saved=urlSession||savedLocal;
   if(saved){
     try{
@@ -3773,7 +3773,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
         : null;
       if(savedSidebarOnlyState&&savedSidebarOnlyState.sidebarOnly){
         if(savedSidebarOnlyState.archived){
-          try{localStorage.removeItem('hermes-webui-session');}catch(_){}
+          try{_forgetActiveSession();}catch(_){}
         }
         S.session=null; S.messages=[]; S.activeStreamId=null; S.busy=false;
         S._bootReady=true;
@@ -3842,7 +3842,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       }
       S._bootReady=true;
       syncTopbar();syncWorkspacePanelState();await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();await checkInflightOnBoot(saved);await _finalizeComposerPrefillOnBoot(prefillIntent);return;}
-    catch(e){localStorage.removeItem('hermes-webui-session');}
+    catch(e){_forgetActiveSession();}
   }
   // no saved session - show empty state, wait for user to hit +
   S._bootReady=true;

@@ -50,8 +50,8 @@ def test_archive_action_clears_saved_session_pointer_for_archived_current_sessio
     """Archiving the saved active session should not leave boot localStorage stale."""
     helper_body = _function_block(SESSIONS_JS, "_archiveSession")
     stale_saved_pointer_guard = (
-        "try{ if(archived&&session.session_id&&localStorage.getItem('hermes-webui-session')===session.session_id) "
-        "localStorage.removeItem('hermes-webui-session'); }catch(_){ }"
+        "try{ if(archived&&session.session_id&&_rememberedActiveSession()===session.session_id) "
+        "_forgetActiveSession(); }catch(_){ }"
     )
 
     assert stale_saved_pointer_guard in helper_body
