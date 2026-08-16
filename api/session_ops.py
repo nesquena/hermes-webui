@@ -78,11 +78,36 @@ def mark_session_title_generated(session) -> None:
     session.manual_title = False
 
 
+_INTERNAL_USER_SOURCES = frozenset({
+    'process_wakeup',
+    'async_delegation',
+    'goal_continuation',
+    'internal_event',
+})
+_INTERNAL_USER_DISPLAY_KINDS = frozenset({
+    'process_wakeup',
+    'async_delegation_complete',
+    'internal_event',
+})
+
+
+def _is_semantic_user_message(message) -> bool:
+    if not isinstance(message, dict) or message.get('role') != 'user':
+        return False
+    if message.get('_user_originated') is False:
+        return False
+    if str(message.get('_source') or '').strip() in _INTERNAL_USER_SOURCES:
+        return False
+    if str(message.get('_display_kind') or '').strip() in _INTERNAL_USER_DISPLAY_KINDS:
+        return False
+    return True
+
+
 def _truncate_at_last_user(messages):
     history = messages or []
     last_user_idx = None
     for i in range(len(history) - 1, -1, -1):
-        if isinstance(history[i], dict) and history[i].get('role') == 'user':
+        if _is_semantic_user_message(history[i]):
             last_user_idx = i
             break
     if last_user_idx is None:
@@ -463,7 +488,7 @@ def retry_last(session_id: str) -> dict[str, Any]:
             history = s.messages or []
             last_user_idx = None
             for i in range(len(history) - 1, -1, -1):
-                if history[i].get('role') == 'user':
+                if _is_semantic_user_message(history[i]):
                     last_user_idx = i
                     break
             if last_user_idx is None:
@@ -507,7 +532,7 @@ def undo_last(session_id: str) -> dict[str, Any]:
             history = s.messages or []
             last_user_idx = None
             for i in range(len(history) - 1, -1, -1):
-                if history[i].get('role') == 'user':
+                if _is_semantic_user_message(history[i]):
                     last_user_idx = i
                     break
             if last_user_idx is None:
@@ -577,6 +602,10 @@ def session_status(session_id: str) -> dict[str, Any]:
         # bookkeeping). Otherwise report None so the poller waits for a REAL
         # server_turn_started instead of latching a ghost.
         'active_stream_id': _live_active_stream_id(s),
+        'pending_user_source': getattr(s, 'pending_user_source', None) or None,
+        'pending_user_message': getattr(s, 'pending_user_message', None) or None,
+        'pending_started_at': getattr(s, 'pending_started_at', None) or None,
+        'pending_attachments': getattr(s, 'pending_attachments', None) or [],
         'input_tokens': inp,
         'output_tokens': out,
         'total_tokens': inp + out,

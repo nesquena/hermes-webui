@@ -2849,6 +2849,7 @@ from api.config import (
     ACTIVE_RUNS_LOCK,
     register_stream_owner,
     register_session_writeback_owner,
+    clear_session_writeback_owner_if_owned,
     stream_owner_session_id,
     unregister_stream_owner,
     CHAT_LOCK,
@@ -15176,6 +15177,13 @@ def handle_post(handler, parsed) -> bool:
                     logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
         finally:
             session_lock.release()
+        try:
+            from api.goal_continuations import complete_goal_continuation
+
+            complete_goal_continuation(sid)
+            PENDING_GOAL_CONTINUATION.discard(sid)
+        except Exception:
+            logger.debug("Failed to prune goal continuation for deleted session %s", sid, exc_info=True)
         # Evict outside the mutation lock: lifecycle commit may perform provider
         # I/O and must not hold a per-session Session lock.
         from api.config import _evict_session_agent
@@ -20301,7 +20309,7 @@ def _handle_session_sse_stream(handler, parsed):
                     "session_id": sid,
                     "stream_id": recover_stream_id,
                     "pending_started_at": pending_started_at,
-                    "source": "subscribe_recovery",
+                    "source": getattr(recover_session, "pending_user_source", None) or "subscribe_recovery",
                     "recovered": True,
                 })
             else:
@@ -21771,6 +21779,7 @@ def _start_chat_stream_for_session(
     source: str = "webui",
     moa_config=None,
     external_runtime_owned: bool | None = None,
+    continuation_claim_id: str | None = None,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn."""
     if external_runtime_owned is None:
@@ -21800,12 +21809,24 @@ def _start_chat_stream_for_session(
         diag.stage("stale_stream_cleanup") if diag else None
         _clear_stale_stream_state(s)
 
-    # #1932: check if this session has a pending goal continuation flag.
-    # The streaming hook sets PENDING_GOAL_CONTINUATION when goal_continue fires,
-    # so the next chat/start for this session is automatically treated as goal-related.
-    if not goal_related and s.session_id in PENDING_GOAL_CONTINUATION:
+    # ``goal_continuation`` is a server-owned source.  Mark it explicitly so
+    # judge execution never depends on the legacy browser-consumed marker.
+    if source == "goal_continuation":
         goal_related = True
-        PENDING_GOAL_CONTINUATION.discard(s.session_id)
+
+    # #1932 compatibility: only an old-tab replay whose prompt exactly matches
+    # the current durable intent is goal-related.  An ordinary user turn keeps
+    # normal priority even while a continuation marker exists.
+    legacy_goal_marker_consumed = False
+    if not goal_related and s.session_id in PENDING_GOAL_CONTINUATION:
+        from api.goal_continuations import legacy_browser_goal_prompt_matches
+
+        legacy_goal_marker_consumed = legacy_browser_goal_prompt_matches(
+            s.session_id,
+            msg,
+        )
+        if legacy_goal_marker_consumed:
+            goal_related = True
 
     # process_complete wakeup (ours-original, Option B): if this session has a
     # pending process_complete marker (set by api/background_process.py drain),
@@ -21840,6 +21861,28 @@ def _start_chat_stream_for_session(
                     }
                 needs_stale_cleanup = False
                 stream_id = uuid.uuid4().hex
+                if source == "goal_continuation":
+                    from api.goal_continuations import bind_goal_continuation_stream
+
+                    if not bind_goal_continuation_stream(
+                        s.session_id,
+                        stream_id,
+                        claim_id=continuation_claim_id,
+                    ):
+                        return {
+                            "error": "durable goal continuation claim is no longer current",
+                            "_status": 409,
+                        }
+                    PENDING_GOAL_CONTINUATION.discard(s.session_id)
+                elif legacy_goal_marker_consumed:
+                    from api.goal_continuations import adopt_legacy_browser_goal_stream
+
+                    if not adopt_legacy_browser_goal_stream(s.session_id, stream_id, msg):
+                        return {
+                            "error": "server already owns this goal continuation",
+                            "_status": 409,
+                        }
+                    PENDING_GOAL_CONTINUATION.discard(s.session_id)
                 diag.stage("save_pending_state") if diag else None
                 was_hidden_empty_session = _is_hidden_empty_session(s)
                 _prepare_chat_start_session_for_stream(
@@ -21885,6 +21928,7 @@ def _start_chat_stream_for_session(
                 "model": model,
                 "model_provider": model_provider,
                 "created_at": s.pending_started_at,
+                "source": s.pending_user_source or source or "webui",
             },
         )
     except Exception:
@@ -21916,6 +21960,23 @@ def _start_chat_stream_for_session(
     try:
         thr.start()
     except Exception:
+        if goal_related:
+            try:
+                from api.goal_continuations import (
+                    requeue_goal_continuation_after_no_response,
+                )
+
+                if requeue_goal_continuation_after_no_response(
+                    s.session_id,
+                    stream_id,
+                    had_activity=False,
+                ):
+                    PENDING_GOAL_CONTINUATION.add(s.session_id)
+            except Exception:
+                logger.warning(
+                    "Failed to release goal continuation after thread-start failure",
+                    exc_info=True,
+                )
         if backend_is_gateway:
             try:
                 from api.gateway_chat import _finish_gateway_run_starting
@@ -21924,6 +21985,27 @@ def _start_chat_stream_for_session(
                 _clear_gateway_run_starting(stream_id)
             except Exception:
                 logger.debug("Failed to record gateway run-start failure for stream %s", stream_id, exc_info=True)
+        with STREAMS_LOCK:
+            STREAMS.pop(stream_id, None)
+            STREAM_GOAL_RELATED.pop(stream_id, None)
+        unregister_stream_owner(stream_id)
+        clear_session_writeback_owner_if_owned(s.session_id, stream_id)
+        if getattr(s, "active_stream_id", None) == stream_id:
+            s.active_stream_id = None
+            s.pending_user_message = None
+            s.pending_attachments = []
+            s.pending_started_at = None
+            s.pending_user_source = None
+            try:
+                save_session = getattr(s, "save", None)
+                if callable(save_session):
+                    save_session()
+            except Exception:
+                logger.warning(
+                    "Failed to persist stream-start rollback for session %s",
+                    s.session_id,
+                    exc_info=True,
+                )
         raise
     response = {
         "stream_id": stream_id,
@@ -22005,6 +22087,8 @@ def _start_run(
     diag=None,
     moa_config=None,
     gateway_chat_enabled: bool | None = None,
+    goal_related: bool = False,
+    continuation_claim_id: str | None = None,
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
 
@@ -22032,6 +22116,32 @@ def _start_run(
         runtime_adapter_runner_enabled,
     )
 
+    def _direct_start():
+        return _start_chat_stream_for_session(
+            s,
+            msg=msg,
+            attachments=attachments,
+            workspace=workspace,
+            model=model,
+            model_provider=model_provider,
+            normalized_model=normalized_model,
+            diag=diag,
+            source=source,
+            moa_config=moa_config,
+            external_runtime_owned=gateway_chat_enabled,
+            goal_related=goal_related,
+            continuation_claim_id=continuation_claim_id,
+        )
+
+    # A runner-owned continuation must stay with the WebUI scheduler.  The
+    # legacy adapter remains valid when it is explicitly enabled.
+    if (
+        source == "goal_continuation"
+        and runtime_adapter_runner_enabled()
+        and not runtime_adapter_enabled()
+    ):
+        return _direct_start()
+
     if runtime_adapter_enabled() or runtime_adapter_runner_enabled():
         def _legacy_start_run(request: StartRunRequest) -> dict:
             return _start_chat_stream_for_session(
@@ -22046,6 +22156,8 @@ def _start_run(
                 source=request.source or source,
                 moa_config=moa_config,
                 external_runtime_owned=gateway_chat_enabled,
+                goal_related=goal_related,
+                continuation_claim_id=continuation_claim_id,
             )
 
         def _legacy_adapter_factory():
@@ -22068,7 +22180,10 @@ def _start_run(
                     provider=model_provider,
                     model=model,
                     source=source,
-                    metadata={"route": route},
+                    metadata={
+                        "route": route,
+                        **({"goal_related": True} if goal_related else {}),
+                    },
                 )
             )
         except NotImplementedError as exc:
@@ -22087,6 +22202,8 @@ def _start_run(
         source=source,
         moa_config=moa_config,
         external_runtime_owned=gateway_chat_enabled,
+        goal_related=goal_related,
+        continuation_claim_id=continuation_claim_id,
     )
 
 
@@ -22146,6 +22263,7 @@ def start_session_turn(
     message: str,
     *,
     source: str = "process_wakeup",
+    continuation_claim_id: str | None = None,
 ):
     """Start a server-side agent turn for ``session_id`` with ``message``.
 
@@ -22240,7 +22358,7 @@ def start_session_turn(
                     session_id,
                     exc_info=True,
                 )
-        if turn_source == "process_wakeup":
+        if turn_source in {"process_wakeup", "async_delegation"}:
             _credential_state_changed = False
             try:
                 _credential_state_changed = process_wakeup_pause_credential_state_changed(s)
@@ -22343,6 +22461,8 @@ def start_session_turn(
         normalized_model=normalized_model,
         source=turn_source,
         route="start_session_turn",
+        goal_related=(turn_source == "goal_continuation"),
+        continuation_claim_id=continuation_claim_id,
     )
 
     # ── Defect B: live-view of server-initiated turns ──────────────────────

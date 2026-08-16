@@ -19,6 +19,7 @@ import sys
 import subprocess
 import threading
 import time
+import uuid
 import traceback
 import copy
 import inspect
@@ -8013,6 +8014,22 @@ def _refresh_cached_agent_primary_runtime_snapshot(agent) -> None:
             rt['is_anthropic_oauth'] = getattr(agent, '_is_anthropic_oauth')
 
 
+def _goal_retry_event_has_observable_activity(event: str) -> bool:
+    """Return whether an emitted local SSE event makes replay unsafe."""
+    normalized = str(event or '').strip().lower()
+    return normalized.startswith((
+        'token',
+        'reason',
+        'tool',
+        'approval',
+        'clarify',
+        'process',
+        'bg_',
+        'assistant',
+        'intermediate',
+    ))
+
+
 def _run_agent_streaming(
     session_id,
     msg_text,
@@ -8047,6 +8064,16 @@ def _run_agent_streaming(
                 exc_info=True,
             )
         return
+    if goal_related:
+        from api.goal_continuations import mark_goal_continuation_worker_started
+
+        if not mark_goal_continuation_worker_started(session_id, stream_id):
+            with STREAMS_LOCK:
+                STREAMS.pop(stream_id, None)
+                STREAM_GOAL_RELATED.pop(stream_id, None)
+            unregister_stream_owner(stream_id)
+            clear_session_writeback_owner_if_owned(session_id, stream_id)
+            return
     register_active_run(
         stream_id,
         session_id=session_id,
@@ -8395,11 +8422,15 @@ def _run_agent_streaming(
     _metering_thread = threading.Thread(target=_metering_ticker, daemon=True)
 
     _success_writeback_committed = False
+    _goal_retry_observable_activity = False
 
     def put(event, data):
+        nonlocal _goal_retry_observable_activity
         # If cancelled, drop all further events except the cancel event itself
         if cancel_event.is_set() and not _success_writeback_committed and event not in ('cancel', 'apperror'):
             return
+        if _goal_retry_event_has_observable_activity(event):
+            _goal_retry_observable_activity = True
         event_id = None
         if run_journal is not None:
             try:
@@ -10429,6 +10460,85 @@ def _run_agent_streaming(
                         put('cancel', _cancel_event_payload('Cancelled by user'))
                         return
                     _err_str = str(_last_err) if _last_err else ''
+                    if (
+                        _classification['type'] == 'no_response'
+                        and _turn_pending_source == 'goal_continuation'
+                    ):
+                        from api.goal_continuations import (
+                            get_goal_continuation,
+                            requeue_goal_continuation_after_no_response,
+                        )
+
+                        _goal_retry_had_activity = bool(
+                            _goal_retry_observable_activity
+                            or _token_sent
+                            or STREAM_PARTIAL_TEXT.get(stream_id)
+                            or STREAM_REASONING_TEXT.get(stream_id)
+                            or STREAM_LIVE_TOOL_CALLS.get(stream_id)
+                            or any(
+                                isinstance(_goal_retry_msg, dict)
+                                and _goal_retry_msg.get('role') in {'assistant', 'tool'}
+                                and bool(
+                                    _message_text(_goal_retry_msg.get('content', '')).strip()
+                                    or _goal_retry_msg.get('tool_calls')
+                                    or _goal_retry_msg.get('reasoning')
+                                )
+                                for _goal_retry_msg in _all_result_messages[_prev_len:]
+                            )
+                        )
+                        if requeue_goal_continuation_after_no_response(
+                            session_id,
+                            stream_id,
+                            had_activity=_goal_retry_had_activity,
+                            cancellation_check=cancel_event.is_set,
+                        ):
+                            _goal_retry_record = get_goal_continuation(session_id) or {}
+                            _goal_retry_attempts = int(_goal_retry_record.get('attempts') or 0)
+                            _goal_retry_max = int(_goal_retry_record.get('max_attempts') or 0)
+                            _goal_retry_message = (
+                                'The provider returned no content before any activity. '
+                                f'Retrying this goal continuation automatically '
+                                f'({_goal_retry_attempts + 1}/{_goal_retry_max}).'
+                            )
+                            _materialize_pending_user_turn_before_error(s)
+                            s.active_stream_id = None
+                            s.pending_user_message = None
+                            s.pending_attachments = []
+                            s.pending_started_at = None
+                            s.pending_user_source = None
+                            s.messages.append({
+                                'role': 'assistant',
+                                'content': _goal_retry_message,
+                                'timestamp': int(time.time()),
+                                '_goal_retry': True,
+                            })
+                            try:
+                                s.save()
+                            except Exception:
+                                logger.warning(
+                                    'Failed to persist automatic goal retry status for %s',
+                                    session_id,
+                                    exc_info=True,
+                                )
+                            put('warning', {
+                                'type': 'goal_retry_scheduled',
+                                'message': _goal_retry_message,
+                                'retry_scheduled': True,
+                                'attempt': _goal_retry_attempts + 1,
+                                'max_attempts': _goal_retry_max,
+                            })
+                            put('done', {
+                                'session': redact_session_data(
+                                    _session_payload_with_full_messages(s, tool_calls=s.tool_calls)
+                                ),
+                                'goal_retry_scheduled': True,
+                            })
+                            put('stream_end', {
+                                'session_id': session_id,
+                                'stream_id': stream_id,
+                                'goal_retry_scheduled': True,
+                            })
+                            return
                     if _is_quota:
                         _err_label = _classification['label']
                         _err_type = _classification['type']
@@ -11440,15 +11550,24 @@ def _run_agent_streaming(
             except Exception:
                 logger.debug("Failed to drain pending steer for session %s", session_id)
             # /goal parity: after a successful assistant turn, run the Hermes
-            # GoalManager judge before terminal done/stream_end events. The
-            # frontend surfaces the status line and queues continuation_prompt as
-            # a normal next user message so /queue and user input keep priority.
+            # GoalManager judge before terminal done/stream_end events.  The
+            # continuation intent is durably persisted and dispatched by the
+            # server; goal_continue is observation-only for browser clients.
             # #1932: only evaluate when the turn was goal-related (set via
             # STREAM_GOAL_RELATED or goal_related parameter).
             try:
                 from api.goals import evaluate_goal_after_turn, has_active_goal
 
-                if not goal_related or not has_active_goal(session_id, profile_home=_profile_home):
+                _goal_is_active = (
+                    has_active_goal(session_id, profile_home=_profile_home)
+                    if goal_related
+                    else False
+                )
+                if goal_related and not _goal_is_active:
+                    from api.goal_continuations import complete_goal_continuation
+
+                    complete_goal_continuation(session_id, stream_id)
+                if not goal_related or not _goal_is_active:
                     _goal_decision = {}
                 else:
                     _last_goal_response = ''
@@ -11493,8 +11612,38 @@ def _run_agent_streaming(
                 if decision.get('should_continue'):
                     continuation_prompt = str(decision.get('continuation_prompt') or '').strip()
                     if continuation_prompt:
-                        # #1932: mark this session as pending a goal continuation
-                        # so the next /chat/start creates a goal-related stream.
+                        from api.goal_continuations import schedule_goal_continuation
+                        from api.goals import goal_state_snapshot
+
+                        _goal_state = goal_state_snapshot(session_id, profile_home=_profile_home)
+                        try:
+                            _continuation_record = schedule_goal_continuation(
+                                session_id,
+                                continuation_prompt,
+                                source_stream_id=stream_id,
+                                profile_home=_profile_home,
+                                goal_turns_used=int(getattr(_goal_state, 'turns_used', 0) or 0),
+                            )
+                        except Exception as _schedule_exc:
+                            logger.exception(
+                                "Failed to persist goal continuation for session %s",
+                                session_id,
+                            )
+                            put('goal', {
+                                'session_id': session_id,
+                                'state': 'needs_attention',
+                                'message': 'Goal continuation could not be persisted.',
+                                'message_key': 'goal_continuation_schedule_failed',
+                            })
+                            put('apperror', {
+                                'type': 'goal_continuation_schedule_failed',
+                                'label': 'Goal continuation stopped',
+                                'message': str(_schedule_exc)[:500],
+                            })
+                            put('stream_end', {'session_id': session_id})
+                            return
+                        # Retain the in-memory marker only for mixed-version tabs;
+                        # the server registry above is the execution authority.
                         PENDING_GOAL_CONTINUATION.add(session_id)
                         put('goal_continue', {
                             'session_id': session_id,
@@ -11504,7 +11653,13 @@ def _run_agent_streaming(
                             'message_key': decision.get('message_key') or 'goal_continuing',
                             'message_args': decision.get('message_args') or [],
                             'decision': decision,
+                            'server_scheduled': True,
+                            'continuation_id': _continuation_record.get('continuation_id'),
                         })
+                elif goal_related:
+                    from api.goal_continuations import complete_goal_continuation
+
+                    complete_goal_continuation(session_id, stream_id)
             except Exception as _goal_exc:
                 logger.debug("Goal continuation hook failed for session %s: %s", session_id, _goal_exc)
             with _stream_writeback_stage(_writeback_timings, "done_payload"):
@@ -11980,15 +12135,24 @@ def _run_agent_streaming(
                     "Failed to clear session writeback owner for stream %s", stream_id,
                     exc_info=True,
                 )
-            # NOTE: do NOT discard PENDING_GOAL_CONTINUATION here. The marker
-            # is set by goal_continue (line ~3328) inside the SAME function
-            # call and consumed atomically by `_start_chat_stream_for_session`
-            # in routes.py (around line 6522) when the next stream starts.
-            # Discarding here in the streaming worker's `finally` would
-            # almost always race ahead of the frontend's SSE-receive →
-            # POST /api/chat/start round-trip and erase the marker before
-            # the next stream can read it, breaking the goal-continuation
-            # chain. Stage-326 critical fix per Opus advisor review.
+            # NOTE: do NOT discard PENDING_GOAL_CONTINUATION here. The durable
+            # scheduler consumes the marker when its server-owned stream starts;
+            # mixed-version browser tabs may also race safely against that start.
+
+        try:
+            from api.goal_continuations import (
+                fail_goal_continuation,
+                wake_goal_continuation_worker,
+            )
+
+            fail_goal_continuation(
+                session_id,
+                stream_id,
+                "goal continuation stream ended without a durable judge settlement",
+            )
+            wake_goal_continuation_worker()
+        except Exception:
+            logger.debug("goal-continuation teardown wake failed", exc_info=True)
 
         # ── Defer-path fix: turn-teardown idle-hook ────────────────────────
         # The session has just transitioned active→idle: unregister_active_run
@@ -12337,6 +12501,21 @@ def cancel_stream(stream_id: str) -> bool:
     # would race that teardown and return None.
     if not _cancel_session_id and _snap_owner_session_id:
         _cancel_session_id = _snap_owner_session_id
+    if _cancel_session_id:
+        try:
+            from api.goal_continuations import cancel_goal_continuation
+
+            cancel_goal_continuation(
+                _cancel_session_id,
+                stream_id,
+                reason="stream cancelled by user",
+            )
+        except Exception:
+            logger.warning(
+                "Failed to durably cancel goal continuation for stream %s",
+                stream_id,
+                exc_info=True,
+            )
     # Use the snapshots captured under streams_lock above (the worker's finally
     # may have popped the live buffers by now via agent.interrupt()). For the
     # ACTIVE_RUNS-only path (stream absent) the snapshots are None → fall back to
@@ -12516,14 +12695,31 @@ def cancel_stream(stream_id: str) -> bool:
                 logger.debug("Failed to clear session state on cancel for %s", _cancel_session_id)
 
     if _emit_cancel_event and q:
-        _cancel_event_id = STREAM_LAST_EVENT_ID.get(stream_id)
-        if _cancel_event_id and hasattr(q, "note_last_event_id"):
+        _payload = _cancel_event_payload('Cancelled by user', session=_cancel_session_payload)
+        try:
+            from api.run_journal import append_run_event
+
+            _cancel_row = append_run_event(
+                _cancel_session_id,
+                stream_id,
+                'cancel',
+                _payload,
+            )
+            _cancel_event_id = str(_cancel_row.get('event_id') or '')
+        except Exception:
+            _cancel_event_id = f"{stream_id}:cancel:{uuid.uuid4().hex}"
+            logger.debug(
+                "Failed to journal cancel event for stream %s",
+                stream_id,
+                exc_info=True,
+            )
+        STREAM_LAST_EVENT_ID[stream_id] = _cancel_event_id
+        if hasattr(q, "note_last_event_id"):
             try:
                 q.note_last_event_id(_cancel_event_id)
             except Exception:
                 logger.debug("Failed to note cancel event_id %s for stream %s", _cancel_event_id, stream_id, exc_info=True)
         try:
-            _payload = _cancel_event_payload('Cancelled by user', session=_cancel_session_payload)
             q.put_nowait(('cancel', _payload))
         except Exception:
             logger.debug("Failed to put cancel event to queue")

@@ -978,7 +978,7 @@ def _start_async_delegation_wakeup_turn(
             resp = start_session_turn(
                 session_id,
                 wakeup_prompt,
-                source="process_wakeup",
+                source="async_delegation",
             )
             raw_status = (resp or {}).get("_status")
             if raw_status is None:
@@ -1772,6 +1772,9 @@ def start_drain_thread() -> bool:
 
 
 def stop_drain_thread(timeout: float = 2.0) -> None:
+    from api.goal_continuations import stop_goal_continuation_worker
+
+    stop_goal_continuation_worker(timeout=timeout)
     _DRAIN_STOP.set()
     th = _DRAIN_THREAD
     if th is not None and th.is_alive():

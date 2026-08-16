@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass
+import hashlib
 import logging
 import math
 import re
@@ -73,6 +74,10 @@ _WAKEUP_WATCH_MATCH_RE = re.compile(
     r"Command: (?P<cmd>[^\n]*)\n"
     r"Matched output:\n"
 )
+_ASYNC_DELEGATION_HEADER_RE = re.compile(
+    r"^\s*\[ASYNC DELEGATION(?: BATCH)? COMPLETE\s+—\s+(?P<id>[^\]\s]+)\]",
+    re.IGNORECASE,
+)
 
 
 def wakeup_display_meta(text: Any) -> dict | None:
@@ -138,6 +143,26 @@ def attach_wakeup_display_meta(msg: Any, source: Any) -> None:
         msg["_wakeup_meta"] = meta
 
 
+def attach_internal_event_meta(msg: Any, source: Any) -> None:
+    """Keep transport events auditable without attributing them to the user."""
+    if not isinstance(msg, dict) or source not in {"process_wakeup", "async_delegation"}:
+        return
+    msg["_display_kind"] = "internal_event"
+    msg["_user_originated"] = False
+    if source != "async_delegation":
+        return
+    msg["_event_kind"] = "workflow.async_delegation.terminal"
+    try:
+        match = _ASYNC_DELEGATION_HEADER_RE.match(str(msg.get("content") or ""))
+    except Exception:
+        match = None
+    if not match:
+        return
+    delegation_id = match.group("id")
+    msg["_event_id"] = f"async_delegation:{delegation_id}:terminal"
+    msg["_workflow_id"] = f"delegation:{delegation_id}"
+
+
 def build_active_turn_token(stream_id: Any, started_at: Any) -> str | None:
     """Return the exact eager-row token for one active WebUI turn."""
     if not stream_id:
@@ -149,6 +174,115 @@ def build_active_turn_token(stream_id: Any, started_at: Any) -> str | None:
     if not math.isfinite(started) or started <= 0:
         return None
     return f"{str(stream_id).strip()}:{started:.17g}"
+
+
+_WORKSPACE_TAG_RE = re.compile(r"\A\[Workspace::v1: [^\n]*\]\n{0,2}")
+_INTERNAL_WAKEUP_PREFIX = "[INTERNAL BACKGROUND EVENT"
+
+
+def _strip_workspace_tag(text: Any) -> str:
+    """Remove a leading ``[Workspace::v1: ...]`` tag line, if present."""
+    return _WORKSPACE_TAG_RE.sub("", str(text or ""), count=1)
+
+
+def is_wakeup_user_text(text: Any) -> bool:
+    """Whether *text* is a process-wakeup payload in any delivery shape.
+
+    Matches the raw agent-side formatter envelope (optionally preceded by a
+    workspace tag line) and the WebUI-internal wrapped prompt
+    (``[INTERNAL BACKGROUND EVENT ...``). This is the ONLY signal available
+    on delivery paths that carry no durable source metadata — e.g. the
+    api_server adapter's self-POSTed wake turns, which arrive as ordinary
+    user messages (``deliver_wake`` → ``/v1/chat/completions``).
+    """
+    body = _strip_workspace_tag(text)
+    if body.startswith(_INTERNAL_WAKEUP_PREFIX):
+        return True
+    return bool(
+        _WAKEUP_COMPLETION_RE.match(body)
+        or _WAKEUP_WATCH_MATCH_RE.match(body)
+        or _ASYNC_DELEGATION_HEADER_RE.match(body)
+    )
+
+
+def wakeup_event_key(text: Any) -> tuple | None:
+    """Return a dedup key ``("completion", sid, exit_code)`` for a completion
+    wakeup text, else None.
+
+    A process completes exactly once, so two rows with the same key are the
+    same event delivered twice (eager row + state.db merge row, or a stale
+    post-restart redelivery). Watch-match wakeups deliberately return None:
+    they can legitimately fire several times for one process and must never
+    be deduplicated.
+    """
+    body = _strip_workspace_tag(text)
+    canonical_body = body
+    if body.startswith(_INTERNAL_WAKEUP_PREFIX):
+        inner = body.find("[IMPORTANT: Background process ")
+        if inner >= 0:
+            if body.endswith("]]"):
+                canonical_body = body[inner:-1]
+            else:
+                canonical_body = body[inner:]
+    async_match = _ASYNC_DELEGATION_HEADER_RE.match(canonical_body)
+    if async_match is not None:
+        payload_digest = hashlib.sha256(canonical_body.encode("utf-8")).hexdigest()
+        return ("async_delegation", async_match.group("id"), payload_digest)
+    m = _WAKEUP_COMPLETION_RE.match(canonical_body)
+    if m is None:
+        return None
+    payload_digest = hashlib.sha256(canonical_body.encode("utf-8")).hexdigest()
+    return (
+        "completion",
+        m.group("sid"),
+        m.group("exit_code"),
+        payload_digest,
+    )
+
+
+def stamp_wakeup_source_if_untagged(msg: Any) -> bool:
+    """Backstop: stamp ``_source='process_wakeup'`` on a wakeup-shaped user
+    message that carries no explicit source.
+
+    Wakeup rows are never renderable (the UI contract), and the ``[[SILENT]]``
+    collapse keys on this marker — both break when a delivery path (self-POST
+    wake, state.db merge of a gateway-run turn) persists the row untagged.
+    Only user-role messages without an existing ``_source`` and with an
+    independent trusted-internal provenance signal are touched. Text shape
+    alone is never authority: a human pasting the exact envelope stays human.
+    Never raises.
+    """
+    try:
+        if not isinstance(msg, dict) or msg.get("role") != "user":
+            return False
+        if msg.get("_source"):
+            return False
+        trusted_internal = bool(
+            msg.get("_transport_internal") is True
+            or msg.get("_user_originated") is False
+            or str(msg.get("_display_kind") or "")
+            in {"internal_event", "process_wakeup", "async_delegation_complete"}
+        )
+        if not trusted_internal:
+            return False
+        content = msg.get("content")
+        # isinstance guard first: never coerce exotic content objects (the
+        # merge key-cache perf contract counts str() calls on message rows).
+        if not isinstance(content, str) or not is_wakeup_user_text(content):
+            return False
+        body = _strip_workspace_tag(content)
+        source = (
+            "async_delegation"
+            if _ASYNC_DELEGATION_HEADER_RE.match(body)
+            else "process_wakeup"
+        )
+        msg["_source"] = source
+        attach_wakeup_display_meta(msg, source)
+        attach_internal_event_meta(msg, source)
+        return True
+    except Exception:
+        logger.debug("wakeup source backstop failed", exc_info=True)
+        return False
 
 
 def stamp_message_source(
@@ -168,10 +302,18 @@ def stamp_message_source(
     """
     if isinstance(msg, dict) and active_turn_token:
         msg["_active_turn_token"] = str(active_turn_token)
-    if not isinstance(msg, dict) or not source or source == "webui":
+    if not isinstance(msg, dict) or source == "webui":
+        return
+    if not source:
+        # No explicit source: fall back to the content-shape backstop so
+        # wakeup deliveries that arrive untagged (self-POST wake turns,
+        # gateway-side turns merged from state.db) still carry the durable
+        # marker the UI hide/collapse contract needs.
+        stamp_wakeup_source_if_untagged(msg)
         return
     msg["_source"] = source
     attach_wakeup_display_meta(msg, source)
+    attach_internal_event_meta(msg, source)
 
 
 def _claim_bounded_local(delegation_id: str) -> bool:

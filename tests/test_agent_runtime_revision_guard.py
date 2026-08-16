@@ -441,6 +441,48 @@ def test_runner_owned_start_run_does_not_enter_local_stream_barrier(monkeypatch)
     assert len(calls) == 1
 
 
+def test_server_owned_goal_continuation_never_hands_execution_to_runner(monkeypatch):
+    """A WebUI-owned durable intent stays on the WebUI/Gateway settlement path."""
+    from api import routes
+
+    local_calls = []
+    session = types.SimpleNamespace(session_id="goal-session", profile=None)
+    monkeypatch.setenv("HERMES_WEBUI_RUNTIME_ADAPTER", "runner-local")
+    monkeypatch.setattr("api.runtime_adapter.runtime_adapter_enabled", lambda: False)
+    monkeypatch.setattr("api.runtime_adapter.runtime_adapter_runner_enabled", lambda: True)
+    monkeypatch.setattr(
+        routes,
+        "_runtime_runner_client_factory",
+        lambda: (_ for _ in ()).throw(AssertionError("durable WebUI intent escaped to runner")),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_start_chat_stream_for_session",
+        lambda *args, **kwargs: local_calls.append(kwargs) or {
+            "stream_id": "local-goal-stream",
+            "session_id": session.session_id,
+        },
+    )
+
+    response = routes._start_run(
+        session,
+        msg="continue",
+        attachments=[],
+        workspace="/tmp/workspace",
+        model="test-model",
+        model_provider="test-provider",
+        normalized_model=False,
+        source="goal_continuation",
+        route="start_session_turn",
+        goal_related=True,
+        continuation_claim_id="claim-1",
+    )
+
+    assert response["stream_id"] == "local-goal-stream"
+    assert len(local_calls) == 1
+    assert local_calls[0]["continuation_claim_id"] == "claim-1"
+
+
 @pytest.mark.parametrize("gateway_owned", [False, True])
 def test_stream_admission_uses_one_gateway_ownership_snapshot(monkeypatch, gateway_owned):
     """The barrier and worker must share one immutable backend decision."""

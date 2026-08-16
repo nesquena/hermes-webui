@@ -615,9 +615,48 @@ function _cancelMessageVirtualizedRender(){
     _messageVirtualScrollRaf=0;
   }
 }
+function _isInternalTransportMessage(m){
+  if(!m||typeof m!=='object') return false;
+  return m._display_kind==='internal_event'
+    || m._user_originated===false
+    || m._source==='process_wakeup'
+    || m._source==='async_delegation';
+}
+function _assistantFollowsInternalTransport(messages, rawIdx){
+  const rows=Array.isArray(messages)?messages:[];
+  for(let i=Number(rawIdx)-1;i>=0;i--){
+    const candidate=rows[i];
+    if(!candidate||candidate.role==='tool') continue;
+    if(candidate.role==='user') return _isInternalTransportMessage(candidate);
+  }
+  return false;
+}
+function _hasLaterRenderableAssistant(messages, rawIdx){
+  const rows=Array.isArray(messages)?messages:[];
+  for(let i=Number(rawIdx)+1;i<rows.length;i++){
+    const candidate=rows[i];
+    if(candidate&&candidate.role==='user'&&!_isInternalTransportMessage(candidate)) return false;
+    if(candidate&&candidate.role==='assistant'&&_messageIsRenderable(candidate)) return true;
+  }
+  return false;
+}
+function _projectInternalProgressContent(messages, rawIdx, content){
+  const text=String(content||'').trim();
+  if(!text||!_assistantFollowsInternalTransport(messages, rawIdx)) return content;
+  if(!_hasLaterRenderableAssistant(messages, rawIdx)) return content;
+  let summary=text
+    .replace(/^\s*#\s*CONCLUSION\s*\n\s*---\s*\n?/i,'')
+    .replace(/^\s*>?\s*🟢\s*Réponse\s*\/\s*recommandation\s*:\s*/i,'')
+    .split(/\n\s*\n/,1)[0]
+    .replace(/\s+/g,' ')
+    .trim();
+  if(!summary) summary='Étape interne terminée';
+  if(summary.length>240) summary=summary.slice(0,237).trimEnd()+'…';
+  return `**Progression** — ${summary}`;
+}
 function _messageIsRenderable(m){
   if(!m||!m.role||m.role==='tool') return false;
-  if(m._source === 'process_wakeup') return !!(msgContent(m)||m.attachments?.length);
+  if(_isInternalTransportMessage(m)) return false;
   if(_isContextCompactionMessage(m)||_isPreservedCompressionTaskListMessage(m)) return false;
   if(_isRecoveryControlMessage(m)) return false;
   const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
@@ -16808,8 +16847,9 @@ function renderMessages(options){
         }
       }
     }
-    const isProcessWakeup=m&&m._source==='process_wakeup';
     const isUser=m.role==='user';
+    const isProcessWakeup=m&&m._source==='process_wakeup';
+    if(!isUser&&typeof _projectInternalProgressContent==='function') content=_projectInternalProgressContent(S.messages, rawIdx, content);
     if(!isUser&&_isMarkerOnlyAssistantCompressionMessage(m)){
       content='**Error:** No response received after context compression. Please retry.';
     }
@@ -16857,9 +16897,10 @@ function renderMessages(options){
     if(recoveryHtml) bodyHtml += recoveryHtml;
     const statusHtml = (!isUser&&m._statusCard) ? _statusCardHtml(m._statusCard) : '';
     const isEditableUser=isUser&&rawIdx===lastUserRawIdx;
+    const followsInternalTransport=!isUser&&typeof _assistantFollowsInternalTransport==='function'&&_assistantFollowsInternalTransport(S.messages,rawIdx);
     const editBtn  = isEditableUser ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
     const undoBtn  = isLastAssistant ? `<button class="msg-action-btn" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo',13)}</button>` : '';
-    const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}</button>` : '';
+    const retryBtn = isLastAssistant&&!followsInternalTransport ? `<button class="msg-action-btn" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}</button>` : '';
     const copyBtn  = `<button class="msg-copy-btn msg-action-btn" title="${t('copy')}" onclick="copyMsg(this)">${li('copy',13)}</button>`;
     const readOnlySession=typeof _isReadOnlySession==='function'
       ? _isReadOnlySession(S.session)
@@ -19158,12 +19199,16 @@ async function regenerateResponse(btn) {
   const row = btn.closest('[data-msg-idx]');
   if(!row) return;
   const assistantIdx = parseInt(row.dataset.msgIdx, 10);
+  if(_assistantFollowsInternalTransport(S.messages,assistantIdx)) return;
   const absoluteKeepCount = _oldestIdx + assistantIdx;
   const initialSid = S.session.session_id;
   let lastUserText = '';
   for(let i = assistantIdx - 1; i >= 0; i--) {
     const m = S.messages[i];
-    if(m && m.role === 'user') { lastUserText = msgContent(m); break; }
+    if(m && m.role === 'user' && !_isInternalTransportMessage(m)) {
+      lastUserText = msgContent(m);
+      break;
+    }
   }
   if(!lastUserText) return;
   if(typeof _ensureAllMessagesLoaded==='function'){

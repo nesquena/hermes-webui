@@ -779,3 +779,205 @@ def test_non_auth_seeded_replayed_assistant_does_not_satisfy_current_turn(tmp_pa
     assert apperrors, "expected apperror for seeded replay silent failure"
     assert apperrors[-1]["type"] == "no_response"
     assert not any(event == "done" for event, _ in events)
+
+
+def test_goal_continuation_empty_response_is_retried_without_apperror(tmp_path, monkeypatch):
+    from api import goal_continuations as gc
+
+    monkeypatch.setattr(gc, "REGISTRY_PATH", tmp_path / "goal-continuations.json")
+    monkeypatch.setattr(gc, "_REGISTRY", None)
+    monkeypatch.setattr(gc, "OWNER_ID", "streaming-test-owner")
+
+    session = _prepare_session(
+        "goal_empty_retry",
+        "stream_goal_empty_retry",
+        pending_user_message="continue the active goal",
+        partial_source="goal_continuation",
+    )
+    gc.schedule_goal_continuation(
+        session.session_id,
+        session.pending_user_message,
+        source_stream_id="prior-judge-stream",
+        profile_home=tmp_path,
+        goal_turns_used=1,
+        now=100.0,
+    )
+    assert gc.drain_goal_continuations_once(
+        start_turn=lambda *_args, **_kwargs: {
+            "stream_id": "stream_goal_empty_retry",
+            "_status": 200,
+        },
+        is_goal_active=lambda *_args, **_kwargs: True,
+        now=101.0,
+    ) == 1
+
+    class EmptyResponseAgent(MockAgent):
+        def run_conversation(self, **kwargs):
+            return {"messages": list(kwargs.get("conversation_history") or [])}
+
+    fake_queue = _run_stream(
+        monkeypatch,
+        session,
+        "stream_goal_empty_retry",
+        EmptyResponseAgent,
+        workspace=str(tmp_path),
+    )
+    events = _queue_events(fake_queue)
+    assert any(
+        event == "warning" and data.get("type") == "goal_retry_scheduled"
+        for event, data in events
+    )
+    assert any(
+        event == "done" and data.get("goal_retry_scheduled") is True
+        for event, data in events
+    )
+    event_names = [event for event, _data in events]
+    assert "stream_end" in event_names
+    assert event_names.index("done") < event_names.index("stream_end")
+    assert not any(event == "apperror" for event, _data in events)
+    record = gc.get_goal_continuation(session.session_id)
+    assert record["status"] == "pending"
+    assert record["attempts"] == 1
+
+
+def test_goal_continuation_empty_response_after_activity_is_not_replayed(tmp_path, monkeypatch):
+    from api import goal_continuations as gc
+
+    monkeypatch.setattr(gc, "REGISTRY_PATH", tmp_path / "goal-continuations.json")
+    monkeypatch.setattr(gc, "_REGISTRY", None)
+    monkeypatch.setattr(gc, "OWNER_ID", "streaming-test-owner")
+
+    session = _prepare_session(
+        "goal_activity_no_retry",
+        "stream_goal_activity_no_retry",
+        pending_user_message="continue the active goal",
+        partial_source="goal_continuation",
+    )
+    gc.schedule_goal_continuation(
+        session.session_id,
+        session.pending_user_message,
+        source_stream_id="prior-judge-stream",
+        profile_home=tmp_path,
+        goal_turns_used=1,
+        now=100.0,
+    )
+    gc.drain_goal_continuations_once(
+        start_turn=lambda *_args, **_kwargs: {
+            "stream_id": "stream_goal_activity_no_retry",
+            "_status": 200,
+        },
+        is_goal_active=lambda *_args, **_kwargs: True,
+        now=101.0,
+    )
+
+    class ActivityThenEmptyAgent(MockAgent):
+        def run_conversation(self, **kwargs):
+            self.stream_delta_callback("observable partial")
+            return {"messages": list(kwargs.get("conversation_history") or [])}
+
+    fake_queue = _run_stream(
+        monkeypatch,
+        session,
+        "stream_goal_activity_no_retry",
+        ActivityThenEmptyAgent,
+        workspace=str(tmp_path),
+    )
+    events = _queue_events(fake_queue)
+    assert any(
+        event == "apperror" and data.get("type") == "no_response"
+        for event, data in events
+    )
+    assert not any(
+        event == "warning" and data.get("type") == "goal_retry_scheduled"
+        for event, data in events
+    )
+    assert gc.get_goal_continuation(session.session_id)["status"] == "failed"
+
+
+@pytest.mark.parametrize("activity_event", ["approval", "clarify"])
+def test_goal_continuation_empty_response_after_user_mediated_activity_is_not_replayed(
+    tmp_path,
+    monkeypatch,
+    activity_event,
+):
+    from api import goal_continuations as gc
+
+    monkeypatch.setattr(gc, "REGISTRY_PATH", tmp_path / "goal-continuations.json")
+    monkeypatch.setattr(gc, "_REGISTRY", None)
+    monkeypatch.setattr(gc, "OWNER_ID", "streaming-test-owner")
+    callbacks = {}
+    if activity_event == "approval":
+        approval = types.ModuleType("tools.approval")
+        tools_pkg = types.ModuleType("tools")
+        tools_pkg.__path__ = []
+        tools_pkg.__dict__["approval"] = approval
+        monkeypatch.setitem(sys.modules, "tools", tools_pkg)
+        monkeypatch.setitem(sys.modules, "tools.approval", approval)
+
+        monkeypatch.setattr(
+            approval,
+            "register_gateway_notify",
+            lambda sid, cb: callbacks.setdefault(sid, cb),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            approval,
+            "unregister_gateway_notify",
+            lambda sid: callbacks.pop(sid, None),
+            raising=False,
+        )
+    else:
+        from api import clarify
+
+        monkeypatch.setattr(
+            clarify,
+            "register_gateway_notify",
+            lambda sid, cb: callbacks.setdefault(sid, cb),
+        )
+        monkeypatch.setattr(
+            clarify,
+            "unregister_gateway_notify",
+            lambda sid: callbacks.pop(sid, None),
+        )
+
+    stream_id = f"stream-goal-{activity_event}-no-retry"
+    session = _prepare_session(
+        f"goal_{activity_event}_no_retry",
+        stream_id,
+        pending_user_message="continue the active goal",
+        partial_source="goal_continuation",
+    )
+    gc.schedule_goal_continuation(
+        session.session_id,
+        session.pending_user_message,
+        source_stream_id="prior-judge-stream",
+        profile_home=tmp_path,
+        goal_turns_used=1,
+        now=100.0,
+    )
+    gc.drain_goal_continuations_once(
+        start_turn=lambda *_args, **_kwargs: {"stream_id": stream_id, "_status": 200},
+        is_goal_active=lambda *_args, **_kwargs: True,
+        now=101.0,
+    )
+
+    class ActivityThenEmptyAgent(MockAgent):
+        def run_conversation(self, **kwargs):
+            callback = callbacks[self.session_id]
+            callback({"session_id": self.session_id, "kind": activity_event})
+            return {"messages": list(kwargs.get("conversation_history") or [])}
+
+    fake_queue = _run_stream(
+        monkeypatch,
+        session,
+        stream_id,
+        ActivityThenEmptyAgent,
+        workspace=str(tmp_path),
+    )
+    events = _queue_events(fake_queue)
+    assert any(event == activity_event for event, _data in events)
+    assert not any(
+        event == "warning" and data.get("type") == "goal_retry_scheduled"
+        for event, data in events
+    )
+    assert gc.get_goal_continuation(session.session_id)["status"] == "failed"

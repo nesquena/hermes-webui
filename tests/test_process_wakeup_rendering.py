@@ -1,10 +1,10 @@
 """Regression coverage for process-wakeup transcript rendering.
 
-A background-process wakeup is stored as a synthetic user turn
-(`_source: "process_wakeup"`).  It must be visible by default, but it must not
-look like a human-authored chat bubble.  Keeping it in the visible message list
-also preserves the user-turn boundary between the assistant response that
-preceded the notification and the assistant response produced by the wakeup.
+A background-process or delegation wakeup is stored as an internal user turn.
+It remains in the durable transcript and model context, but the executive
+projection must not attribute it to the human. Earlier assistant replies to
+internal turns are collapsed to one bounded progress line; the latest reply
+remains the candidate final answer.
 """
 
 import json
@@ -75,6 +75,10 @@ if(heightStart !== -1 && heightEnd !== -1) eval(src.slice(heightStart, heightEnd
 if(src.indexOf('function _isProcessWakeupMessage') !== -1) eval(extractFunc('_isProcessWakeupMessage'));
 eval(extractFunc('_stripWorkspaceDisplayPrefix'));
 eval(extractFunc('_stripAttachedFilesMarkerForDisplay'));
+eval(extractFunc('_isInternalTransportMessage'));
+eval(extractFunc('_assistantFollowsInternalTransport'));
+eval(extractFunc('_hasLaterRenderableAssistant'));
+eval(extractFunc('_projectInternalProgressContent'));
 eval(extractFunc('_messageIsRenderable'));
 eval(extractFunc('_getVisibleMessagesWithIdx'));
 eval(extractFunc('_messageVirtualRoleForEntry'));
@@ -88,7 +92,9 @@ const wakeup = {
 S.messages = [
   {role: 'assistant', content: 'previous assistant report', timestamp: 1783405252.05},
   wakeup,
-  {role: 'assistant', content: 'assistant response to wakeup', timestamp: 1783405254.10},
+  {role: 'assistant', content: '# CONCLUSION\n---\n> 🟢 Réponse / recommandation: phase one done\n\nVerbose internal details', timestamp: 1783405254.10},
+  {role: 'user', content: '[ASYNC DELEGATION BATCH COMPLETE — deleg_abc]', _source: 'async_delegation', timestamp: 1783405255.10},
+  {role: 'assistant', content: '# CONCLUSION\n---\n> 🟢 Réponse / recommandation: final answer', timestamp: 1783405256.10},
 ];
 
 const visible = _getVisibleMessagesWithIdx();
@@ -121,6 +127,12 @@ const markerWakeupContent = [
   '',
   '[Attached files: result.txt]',
 ].join(String.fromCharCode(10));
+const humanBoundary = [
+  {role: 'user', content: '[ASYNC DELEGATION BATCH COMPLETE — deleg_boundary]', _source: 'async_delegation'},
+  {role: 'assistant', content: '# CONCLUSION\n---\n> 🟢 Réponse / recommandation: critical internal result'},
+  {role: 'user', content: 'unrelated human request'},
+  {role: 'assistant', content: 'answer to unrelated request'},
+];
 
 process.stdout.write(JSON.stringify({
   visible: visible.map(e => ({rawIdx: e.rawIdx, role: e.m.role, source: e.m._source || '', text: String(e.m.content).slice(0, 32)})),
@@ -128,6 +140,9 @@ process.stdout.write(JSON.stringify({
   virtualRole,
   virtualHeight,
   attachmentOnlyRenderable: _messageIsRenderable(attachmentOnlyWakeup),
+  projectedIntermediate: _projectInternalProgressContent(S.messages, 2, S.messages[2].content),
+  projectedFinal: _projectInternalProgressContent(S.messages, 4, S.messages[4].content),
+  projectedBeforeHumanBoundary: _projectInternalProgressContent(humanBoundary, 1, humanBoundary[1].content),
   strippedWakeupDisplay: _stripAttachedFilesMarkerForDisplay(_stripWorkspaceDisplayPrefix(markerWakeupContent)),
 }));
 """
@@ -146,19 +161,19 @@ def _run_driver():
     return json.loads(proc.stdout)
 
 
-def test_process_wakeup_message_stays_visible_and_preserves_turn_boundary():
+def test_internal_wakeups_stay_out_of_the_executive_projection():
     result = _run_driver()
 
     assert result["visible"] == [
         {"rawIdx": 0, "role": "assistant", "source": "", "text": "previous assistant report"},
-        {"rawIdx": 1, "role": "user", "source": "process_wakeup", "text": "[IMPORTANT: Background process p"},
-        {"rawIdx": 2, "role": "assistant", "source": "", "text": "assistant response to wakeup"},
+        {"rawIdx": 2, "role": "assistant", "source": "", "text": "# CONCLUSION\n---\n> 🟢 Réponse / "},
+        {"rawIdx": 4, "role": "assistant", "source": "", "text": "# CONCLUSION\n---\n> 🟢 Réponse / "},
     ]
-    assert result["turns"] == [
-        ["assistant:previous assistant report"],
-        ["user:process_wakeup:[IMPORTANT: Background process proc"],
-        ["assistant:assistant response to wakeup"],
-    ]
+    assert result["turns"] == [[
+        "assistant:previous assistant report",
+        "assistant:# CONCLUSION\n---\n> 🟢 Réponse / recommandation: phase one done\n\nVerbose internal details",
+        "assistant:# CONCLUSION\n---\n> 🟢 Réponse / recommandation: final answer",
+    ]]
 
 
 def test_process_wakeup_has_its_own_virtual_height_role():
@@ -169,11 +184,83 @@ def test_process_wakeup_has_its_own_virtual_height_role():
     assert 1 <= result["virtualHeight"] <= 120
 
 
-def test_attachment_only_process_wakeup_is_visible_and_display_markers_are_stripped():
+def test_attachment_only_process_wakeup_is_internal_and_display_markers_are_stripped():
     result = _run_driver()
 
-    assert result["attachmentOnlyRenderable"] is True
+    assert result["attachmentOnlyRenderable"] is False
     assert result["strippedWakeupDisplay"] == "Visible wakeup text"
+
+
+def test_intermediate_internal_reply_is_compact_but_latest_candidate_final_is_unchanged():
+    result = _run_driver()
+    assert result["projectedIntermediate"] == "**Progression** — phase one done"
+    assert result["projectedFinal"].startswith("# CONCLUSION")
+
+
+def test_internal_projection_never_crosses_a_real_user_boundary():
+    result = _run_driver()
+    assert result["projectedBeforeHumanBoundary"].startswith("# CONCLUSION")
+
+
+def test_regenerate_never_replays_an_internal_transport_as_human_input():
+    driver = r"""
+const fs=require('fs');
+const src=fs.readFileSync(process.argv[1],'utf8');
+function extractFunc(name){
+  let start=src.indexOf('function '+name);
+  if(start===-1) throw new Error(name+' not found');
+  if(src.slice(Math.max(0,start-6),start)==='async ') start-=6;
+  const params=src.indexOf('(',start);
+  let depth=0,close=-1;
+  for(let i=params;i<src.length;i++){
+    if(src[i]==='(') depth++;
+    else if(src[i]===')'&&--depth===0){close=i;break;}
+  }
+  const brace=src.indexOf('{',close); depth=0;
+  for(let i=brace;i<src.length;i++){
+    if(src[i]==='{') depth++;
+    else if(src[i]==='}'&&--depth===0) return src.slice(start,i+1);
+  }
+  throw new Error(name+' body did not close');
+}
+function msgContent(m){return String((m&&m.content)||'');}
+global._oldestIdx=0;
+global.S={busy:false,session:{session_id:'sid'},messages:[
+  {role:'user',content:'[ASYNC DELEGATION COMPLETE]',_source:'async_delegation',_user_originated:false},
+  {role:'assistant',content:'internal result'},
+]};
+let apiCalls=0,sends=0;
+global.api=async()=>{apiCalls++;};
+global.send=async()=>{sends++;};
+global.renderMessages=()=>{};
+global.setStatus=()=>{};
+global.t=(x)=>x;
+global.$=()=>({value:''});
+eval(extractFunc('_isInternalTransportMessage'));
+eval(extractFunc('_assistantFollowsInternalTransport'));
+eval(extractFunc('regenerateResponse'));
+(async()=>{
+  await regenerateResponse({closest:()=>({dataset:{msgIdx:'1'}})});
+  process.stdout.write(JSON.stringify({apiCalls,sends}));
+})().catch(err=>{console.error(err);process.exit(1);});
+"""
+    proc = subprocess.run(
+        [NODE, "-e", driver, str(UI_JS_PATH)],
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {"apiCalls": 0, "sends": 0}
+
+
+def test_internal_reply_does_not_offer_regenerate_action():
+    ui = UI_JS_PATH.read_text(encoding="utf-8")
+    render_start = ui.index("const isEditableUser=")
+    render_block = ui[render_start : render_start + 1200]
+    assert "_assistantFollowsInternalTransport(S.messages,rawIdx)" in render_block
+    assert "isLastAssistant&&!followsInternalTransport" in render_block
 
 
 def test_process_wakeup_uses_compact_status_row_not_normal_user_bubble():
