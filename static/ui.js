@@ -10320,6 +10320,15 @@ async function applyUpdates(){
 function _showUpdateError(target,res){
   const errEl=$('updateError');
   const forceBtn=$('btnForceUpdate');
+  const clearLockBtn=$('btnClearUpdateLock');
+  if(res.transaction_in_progress||res.outcome==='transaction_in_progress'){
+    if(forceBtn){forceBtn.style.display='none';forceBtn.dataset.target='';}
+    if(clearLockBtn){clearLockBtn.style.display='none';clearLockBtn.dataset.target='';}
+    const waitMessage='Update already in progress for this Agent installation. Wait a moment, then retry.';
+    if(errEl){errEl.textContent=waitMessage;errEl.style.display='block';}
+    else showToast(waitMessage);
+    return;
+  }
   const msg='Update failed ('+target+'): '+(res.message||'unknown error');
   if(errEl){
     errEl.textContent=msg;
@@ -10339,7 +10348,6 @@ function _showUpdateError(target,res){
   // Show "Clear lock and retry update" when the only failure was a stale
   // git lock. This calls the new non-destructive /api/updates/clear_lock
   // endpoint, which probes the lock for a holder and refuses if held.
-  const clearLockBtn=$('btnClearUpdateLock');
   if(clearLockBtn&&res.lock_conflict){
     clearLockBtn.dataset.target=target;
     clearLockBtn.style.display='inline-block';

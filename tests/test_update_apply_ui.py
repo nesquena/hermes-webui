@@ -198,6 +198,16 @@ def test_update_apply_network_error_has_recovery_message_not_raw_failed_to_fetch
     assert 'Update failed: "+e.message' not in src
 
 
+def test_transaction_in_progress_uses_wait_guidance_without_lock_recovery():
+    src = _ui_js()
+    start = src.index("function _showUpdateError")
+    end = src.index("async function applyClearUpdateLock", start)
+    body = src[start:end]
+    assert "transaction_in_progress" in body
+    assert "waitMessage" in body
+    assert "res.lock_conflict" in body
+
+
 def test_update_apply_structured_server_errors_still_use_json_message_path():
     """Server-reachable JSON errors must keep the existing targeted message path."""
     src = _ui_js()

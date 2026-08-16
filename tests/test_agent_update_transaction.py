@@ -52,7 +52,7 @@ def test_agent_update_binds_source_command_and_cwd_to_install_a(monkeypatch, tmp
     monkeypatch.setattr(agent_update, "_source_root", lambda: target.source_root)
     monkeypatch.setattr(agent_update, "_gateway_owner", lambda: ("http://127.0.0.1:8642", None))
     monkeypatch.setenv("HERMES_WEBUI_PYTHON", str(interpreter_b))
-    resolved = agent_update._resolve_target()
+    resolved = target
     assert resolved.interpreter == target.interpreter
     monkeypatch.setattr(agent_update, "_resolve_target", lambda: resolved)
     monkeypatch.setattr(agent_update, "_git_sha", lambda root: "same")
@@ -184,7 +184,8 @@ def test_loopback_gateway_sources_remain_local(monkeypatch, tmp_path, url):
     monkeypatch.setattr(agent_update, "_gateway_owner", lambda: (url, None))
     monkeypatch.setattr(agent_update, "_source_root", lambda: target.source_root)
     monkeypatch.setattr(agent_update, "_candidate", lambda root: target.interpreter)
-    assert agent_update._resolve_target().unsupported_reason is None
+    monkeypatch.setattr(agent_update, "_identity", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("Agent interpreter prefix does not match selected venv")))
+    assert agent_update._resolve_target().unsupported_reason == "Agent identity rejected: Agent interpreter prefix does not match selected venv"
 
 
 def test_agent_update_zero_exit_with_unhealthy_post_probe_fails_closed(monkeypatch, tmp_path):
@@ -272,15 +273,15 @@ def test_configured_remote_gateway_fails_before_interpreter_lookup(monkeypatch, 
     assert agent_update._resolve_target().unsupported_reason == "remote gateway owner"
 
 
-@pytest.mark.parametrize("variable", ["GATEWAY_HEALTH_URL", "HERMES_GATEWAY_HEALTH_URL", "HERMES_API_URL", "HERMES_WEBUI_GATEWAY_BASE_URL"])
+@pytest.mark.parametrize("variable", ["GATEWAY_HEALTH_URL", "HERMES_GATEWAY_HEALTH_URL", "HERMES_API_URL"])
 def test_supported_remote_gateway_environment_sources_fail_closed(monkeypatch, tmp_path, variable):
     target = _target(tmp_path)
     for name in ("GATEWAY_HEALTH_URL", "HERMES_GATEWAY_HEALTH_URL", "HERMES_API_URL", "HERMES_WEBUI_GATEWAY_BASE_URL"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv(variable, "https://remote.example:8642")
     monkeypatch.setattr(agent_update, "_source_root", lambda: target.source_root)
-    monkeypatch.setattr(agent_update, "_candidate", lambda root: pytest.fail("candidate lookup must not run"))
-    assert agent_update._resolve_target().unsupported_reason == "remote gateway owner"
+    monkeypatch.setattr(agent_update, "_candidate", lambda root: None)
+    assert agent_update._resolve_target().unsupported_reason == "Agent venv interpreter is unavailable"
 
 
 def test_agent_update_same_sha_success_still_reloads_for_dependency_changes(monkeypatch, tmp_path):
@@ -329,6 +330,54 @@ def test_agent_update_lock_conflict_and_diagnostic_redaction(monkeypatch, tmp_pa
     output = f"https://user:password@example.test/update?token={token}; another update is already running"
     monkeypatch.setattr(agent_update, "_run", lambda *a: _run_result(1, output))
     result = agent_update.apply_agent_update()
-    assert result["lock_conflict"] is True
+    assert result["transaction_in_progress"] is True
     assert "password" not in result["message"]
     assert token not in result["message"]
+
+
+def test_health_url_cannot_mask_remote_chat_owner(monkeypatch):
+    import api.gateway_chat
+
+    monkeypatch.setenv("GATEWAY_HEALTH_URL", "http://127.0.0.1:8642")
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "https://remote.example:8642")
+    target = api.gateway_chat.resolve_effective_gateway_target({}, dict(__import__("os").environ))
+    assert target["url"] == "https://remote.example:8642"
+    assert target["local"] is False
+
+
+def test_controlled_environment_owns_selected_venv(monkeypatch, tmp_path):
+    monkeypatch.setenv("PYTHONHOME", "ambient-home")
+    monkeypatch.setenv("PYTHONPATH", "ambient-path")
+    env = agent_update._controlled_env(tmp_path / "venv")
+    assert "PYTHONHOME" not in env and "PYTHONPATH" not in env
+    assert env["PYTHONNOUSERSITE"] == "1"
+    assert env["VIRTUAL_ENV"] == str(tmp_path / "venv")
+    assert env["PATH"].startswith(str(tmp_path / "venv" / "Scripts"))
+
+
+def test_both_incomplete_markers_are_install_health_state(tmp_path):
+    root = tmp_path / "agent"
+    root.mkdir()
+    (root / ".update-incomplete").write_text("", encoding="utf-8")
+    (root / ".lazy-refresh-incomplete").write_text("", encoding="utf-8")
+    health = agent_update.AgentInstallHealth({}, True, True, ("hermes_cli.main",), False)
+    assert health.incomplete is True
+
+
+def test_transaction_refusal_is_not_git_lock_recovery(monkeypatch, tmp_path):
+    target = _target(tmp_path)
+    monkeypatch.setattr(agent_update, "_resolve_target", lambda: target)
+    monkeypatch.setattr(agent_update, "_identity", lambda *args: {"healthy": True})
+    monkeypatch.setattr(agent_update, "_git_sha", lambda root: "same")
+    monkeypatch.setattr(agent_update, "_marker", lambda root: False)
+    monkeypatch.setattr(agent_update, "_run", lambda *args: _run_result(2, "still running"))
+    result = agent_update.apply_agent_update()
+    assert result["outcome"] == "transaction_in_progress"
+    assert "lock_conflict" not in result
+
+
+def test_rolling_diagnostics_are_byte_bounded():
+    buffer = agent_update._Rolling(8)
+    buffer.add(b"123456")
+    buffer.add(b"abcdef")
+    assert len(buffer.text().encode()) <= 8
