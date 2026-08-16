@@ -9146,6 +9146,56 @@ LAST_RUN_FINISHED_AT: float | None = None
 SERVER_START_TIME = time.time()
 
 
+def active_run_is_attachable(run_entry) -> bool:
+    """Return whether a run row still represents renderable live work.
+
+    ``ACTIVE_RUNS`` tracks WORKER LIFECYCLE, which is deliberately broader than
+    "a turn a browser may attach to": ``cancel_stream()`` leaves the row in
+    ``phase="cancelling"`` while the worker unwinds so a successor cannot start
+    on top of it. That row is already terminal from the client's perspective —
+    its run journal ends in a terminal event — so recovery paths that hand a
+    stream id to the renderer must exclude it. Otherwise every fresh
+    ``/api/session/stream`` subscription replays ``server_turn_started`` for a
+    cancelled run, the client attaches, consumes the terminal event, tears the
+    renderer down and resubscribes, and the loop repeats indefinitely.
+
+    Non-dict entries stay attachable so callers that store an opaque marker are
+    unaffected; production registrations are dicts carrying ``phase``.
+    """
+    return not (
+        isinstance(run_entry, dict)
+        and str(run_entry.get("phase") or "").strip() == "cancelling"
+    )
+
+
+def active_run_cancel_is_stale(
+    run_entry,
+    *,
+    grace_seconds: float,
+    now: float | None = None,
+) -> bool:
+    """Return whether a cancelling worker outlived its bounded unwind window.
+
+    The age anchor is ``cancelled_at`` rather than the original ``started_at``
+    so a long-running turn that was just cancelled is never mistaken for an
+    orphan; ``started_at`` remains the fallback for rows created before the
+    cancellation timestamp existed. Callers own the grace window because the
+    tolerated unwind differs per surface.
+    """
+    if not isinstance(run_entry, dict):
+        return False
+    if str(run_entry.get("phase") or "").strip() != "cancelling":
+        return False
+    anchor = run_entry.get("cancelled_at") or run_entry.get("started_at")
+    if not anchor:
+        return False
+    try:
+        age = (time.time() if now is None else float(now)) - float(anchor)
+        return age >= float(grace_seconds)
+    except (TypeError, ValueError):
+        return False
+
+
 def register_active_run(stream_id: str, **metadata) -> None:
     """Mark a WebUI agent worker as alive until its outer finally exits."""
     if not stream_id:
