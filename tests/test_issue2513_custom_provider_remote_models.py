@@ -53,11 +53,14 @@ def test_custom_provider_model_field_does_not_block_remote_catalog(monkeypatch, 
     monkeypatch.setattr(config, "_LIVE_REBUILD_BUDGET_SECONDS", 0.0, raising=False)
     monkeypatch.setattr(config, "_models_cache_path", tmp_path / "models_cache.json")
     monkeypatch.setattr(config, "_get_auth_store_path", lambda: tmp_path / "auth.json")
+    # Keep unrelated provider probes from replacing this complete catalog assertion with the bounded fallback.
+    monkeypatch.setattr(config, "_LIVE_REBUILD_BUDGET_SECONDS", 0)
 
     old_cfg = config.cfg
     old_mtime = config._cfg_mtime
     old_cache = config._available_models_cache
     old_cache_ts = config._available_models_cache_ts
+    old_live_rebuild_ts = config._available_models_live_rebuild_ts
     old_cache_fp = config._available_models_cache_source_fingerprint
     try:
         config.cfg = {
@@ -82,6 +85,7 @@ def test_custom_provider_model_field_does_not_block_remote_catalog(monkeypatch, 
         config._cfg_mtime = 0.0
         config._available_models_cache = None
         config._available_models_cache_ts = 0.0
+        config._available_models_live_rebuild_ts = 0.0
         config._available_models_cache_source_fingerprint = None
 
         data = config.get_available_models()
@@ -90,6 +94,7 @@ def test_custom_provider_model_field_does_not_block_remote_catalog(monkeypatch, 
         config._cfg_mtime = old_mtime
         config._available_models_cache = old_cache
         config._available_models_cache_ts = old_cache_ts
+        config._available_models_live_rebuild_ts = old_live_rebuild_ts
         config._available_models_cache_source_fingerprint = old_cache_fp
 
     groups = {group["provider_id"]: group for group in data["groups"]}
