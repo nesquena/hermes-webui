@@ -823,8 +823,6 @@ def test_insights_absolute_range_dst_transition_daily_buckets(monkeypatch, tmp_p
         # March 8 "spring forward" (2:00->3:00).  Old fixed-86400 stepping
         # would produce 4 daily buckets; the DST-safe calendar-day iteration
         # produces 5.
-        start_ts = time.mktime((2026, 3, 6, 12, 0, 0, 0, 0, -1))
-        end_ts = time.mktime((2026, 3, 10, 12, 0, 0, 0, 0, -1))
         entries = [
             {
                 "session_id": "s1", "updated_at": now, "created_at": now,
@@ -833,7 +831,7 @@ def test_insights_absolute_range_dst_transition_daily_buckets(monkeypatch, tmp_p
             },
         ]
         data = _call_insights(monkeypatch, tmp_path, entries,
-                              query=f"start=2026-03-06&end=2026-03-10", now=now)
+                              query="start=2026-03-06&end=2026-03-10", now=now)
         dates = [d["date"] for d in data["daily_tokens"]]
         assert dates == ["2026-03-06", "2026-03-07", "2026-03-08", "2026-03-09", "2026-03-10"]
         assert data["period_days"] == 5
@@ -867,7 +865,6 @@ def test_insights_absolute_range_dst_end_boundary_next_local_midnight(monkeypatc
         end_day_last_hour = time.mktime((2026, 3, 8, 23, 30, 0, 0, 0, -1))  # 23:30 EDT
         # First hour of the NEXT local day = 2026-03-09 00:00-01:00 EDT.
         next_day_first_hour = time.mktime((2026, 3, 9, 0, 30, 0, 0, 0, -1))  # 00:30 EDT
-        start_ts = time.mktime((2026, 3, 6, 12, 0, 0, 0, 0, -1))
         end_ts = time.mktime((2026, 3, 8, 12, 0, 0, 0, 0, -1))
         assert end_day_last_hour > end_ts  # sanity: the final-hour probe is inside the selected day
         assert next_day_first_hour > end_day_last_hour
@@ -885,7 +882,7 @@ def test_insights_absolute_range_dst_end_boundary_next_local_midnight(monkeypatc
             },
         ]
         data = _call_insights(monkeypatch, tmp_path, entries,
-                              query=f"start=2026-03-06&end=2026-03-08", now=now)
+                              query="start=2026-03-06&end=2026-03-08", now=now)
         # Spring-forward: the OLD fixed +86400s cutoff lands at 2026-03-09
         # 01:00 EDT (Mar 9 00:00 EST + 86400s), so an 00:30 EDT session of
         # the NEXT date would leak INTO the window.  The next-local-midnight
@@ -908,8 +905,6 @@ def test_insights_absolute_range_excludes_session_exactly_at_next_midnight(monke
     "Exclusive midnight remains included" (the `<`/`>` comparisons retained
     equality at the explicitly exclusive cutoff)."""
     now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
-    start_ts = time.mktime((2026, 5, 1, 0, 0, 0, 0, 0, -1))   # selected start day
-    end_ts = time.mktime((2026, 5, 2, 0, 0, 0, 0, 0, -1))     # selected end day
     next_midnight = time.mktime((2026, 5, 3, 0, 0, 0, 0, 0, -1))  # == end_cutoff
     one_sec_before = next_midnight - 1
     entries = [
@@ -925,7 +920,7 @@ def test_insights_absolute_range_excludes_session_exactly_at_next_midnight(monke
         },
     ]
     data = _call_insights(monkeypatch, tmp_path, entries,
-                          query=f"start=2026-05-01&end=2026-05-02", now=now)
+                          query="start=2026-05-01&end=2026-05-02", now=now)
     # The session exactly at the exclusive next-midnight cutoff is excluded.
     assert data["total_sessions"] == 1
     assert data["total_input_tokens"] == 10
@@ -938,8 +933,6 @@ def test_insights_absolute_range_state_db_excludes_row_exactly_at_next_midnight(
     be excluded from an absolute range (SQL used <= before - equality at the
     explicitly exclusive cutoff leaked the following date in)."""
     now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
-    start_ts = time.mktime((2026, 5, 1, 0, 0, 0, 0, 0, -1))
-    end_ts = time.mktime((2026, 5, 2, 0, 0, 0, 0, 0, -1))
     next_midnight = time.mktime((2026, 5, 3, 0, 0, 0, 0, 0, -1))
     one_sec_before = next_midnight - 1
     state_rows = [
@@ -951,7 +944,7 @@ def test_insights_absolute_range_state_db_excludes_row_exactly_at_next_midnight(
          "started_at": next_midnight, "ended_at": next_midnight},
     ]
     data = _call_insights_with_state_db(monkeypatch, tmp_path, [], state_rows,
-                                        query=f"start=2026-05-01&end=2026-05-02", now=now)
+                                        query="start=2026-05-01&end=2026-05-02", now=now)
     assert data["total_sessions"] == 1
     assert data["total_input_tokens"] == 10
     assert data["total_output_tokens"] == 5
