@@ -2,6 +2,7 @@ import io
 import json
 import socket
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
@@ -274,6 +275,17 @@ def test_login_page_hides_password_controls_when_only_oidc_is_enabled(monkeypatc
     assert 'id="oidc-login"' in captured["body"]
     assert 'id="pw"' not in captured["body"]
     assert 'Enter your password to continue' not in captured["body"]
+
+
+def test_settings_hides_disable_auth_action_when_oidc_is_enabled():
+    """The action only clears local password auth, never native OIDC."""
+    panels_js = (Path(__file__).parent.parent / "static" / "panels.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert "let _settingsOidcEnabled=false;" in panels_js
+    assert "_settingsOidcEnabled=!!authStatus.oidc_enabled;" in panels_js
+    assert "disableBtn.style.display=active&&!_settingsOidcEnabled?'':'none';" in panels_js
 
 
 def test_oidc_enablement_requires_explicit_allowlist(monkeypatch):
