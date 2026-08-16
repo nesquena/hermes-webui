@@ -45,6 +45,12 @@ def test_custom_provider_model_field_does_not_block_remote_catalog(monkeypatch, 
         raise AssertionError(f"unexpected urlopen: {url}")
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    # This file pins the custom-provider catalog contract, not the separate
+    # async provider-catalog budget fallback. Force the synchronous rebuild
+    # path so a slow/loaded CI shard cannot blow the global 4s budget and
+    # serve the degraded fallback catalog, which drops the live-fetched
+    # models under test and leaves only the config-declared sticky model.
+    monkeypatch.setattr(config, "_LIVE_REBUILD_BUDGET_SECONDS", 0.0, raising=False)
     monkeypatch.setattr(config, "_models_cache_path", tmp_path / "models_cache.json")
     monkeypatch.setattr(config, "_get_auth_store_path", lambda: tmp_path / "auth.json")
 
