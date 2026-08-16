@@ -8,7 +8,7 @@ import time
 from collections import OrderedDict
 from pathlib import Path
 
-from api.config import LOCK, SESSION_DIR, SESSIONS, SETTINGS_FILE
+from api.config import LOCK, SESSION_DIR, SESSIONS, SETTINGS_FILE, active_run_session_snapshot
 from api.models import _active_state_db_path, _active_stream_ids
 from api.profiles import _profiles_match
 
@@ -278,15 +278,46 @@ def _session_list_cache_stale_reason(key: tuple) -> str | None:
         return None
 
 
-def _session_list_cache_set(key: tuple, payload: dict) -> None:
+def _session_list_cache_source_stamps_equivalent(expected, current) -> bool:
+    if expected == current:
+        return True
+    # An empty WAL can appear or disappear while a read-only fingerprint
+    # connection closes; its mtime carries no committed source content.
+    if (
+        isinstance(expected, tuple)
+        and isinstance(current, tuple)
+        and len(expected) == len(current) == 7
+        and isinstance(expected[1], tuple)
+        and isinstance(current[1], tuple)
+        and len(expected[1]) == len(current[1]) == 2
+        and expected[1][1] == current[1][1] == 0
+    ):
+        return expected[:1] + expected[2:] == current[:1] + current[2:]
+    return False
+
+
+def _session_list_cache_set(
+    key: tuple,
+    payload: dict,
+    *,
+    expected_source_stamp=None,
+) -> bool:
     if not isinstance(payload, dict):
-        return
-    stamp = _session_list_cache_resolved_source_stamp(key)
+        return False
     with _SESSIONS_CACHE_LOCK:
+        stamp = _session_list_cache_resolved_source_stamp(key)
+        if (
+            expected_source_stamp is not None
+            and not _session_list_cache_source_stamps_equivalent(
+                expected_source_stamp, stamp
+            )
+        ):
+            return False
         _SESSIONS_CACHE[key] = (time.monotonic(), stamp, copy.deepcopy(payload))
         _SESSIONS_CACHE.move_to_end(key)
         while len(_SESSIONS_CACHE) > _SESSIONS_CACHE_MAX_ENTRIES:
             _SESSIONS_CACHE.popitem(last=False)
+    return True
 
 
 def _session_list_cache_clear(profile: str | None = None) -> None:
@@ -484,7 +515,11 @@ def _session_list_cache_settings_write_version() -> int:
         return 0
 
 
-def _session_list_cache_overlay_runtime_rows(rows: list[dict]) -> list[dict]:
+def _session_list_cache_overlay_runtime_rows(
+    rows: list[dict],
+    *,
+    source_authoritative: bool = True,
+) -> list[dict]:
     if not rows:
         return []
     try:
@@ -496,6 +531,8 @@ def _session_list_cache_overlay_runtime_rows(rows: list[dict]) -> list[dict]:
     except Exception:
         running_cron_jobs = {}
     cron_job_prefixes = [(jid, f"cron_{jid}_", started_at) for jid, started_at in running_cron_jobs.items()]
+    active_runs = active_run_session_snapshot()
+    now = time.time()
     session_ids = [
         str(row.get("session_id") or "").strip()
         for row in rows
@@ -512,6 +549,7 @@ def _session_list_cache_overlay_runtime_rows(rows: list[dict]) -> list[dict]:
     for row in rows:
         item = dict(row) if isinstance(row, dict) else {}
         sid = str(item.get("session_id") or "").strip()
+        item.pop("active_run", None)
         live = live_sessions.get(sid)
         if live is not None:
             live_stream_id = getattr(live, "active_stream_id", None)
@@ -537,6 +575,12 @@ def _session_list_cache_overlay_runtime_rows(rows: list[dict]) -> list[dict]:
         item["cron_running"] = _session_list_row_cron_running(
             sid, item, cron_job_prefixes
         )
+        if source_authoritative and sid in active_runs and not item.get("archived"):
+            started_at = active_runs[sid]["started_at"]
+            item["active_run"] = {
+                "started_at": started_at,
+                "age_seconds": round(max(0.0, now - started_at), 1),
+            }
         overlaid.append(item)
     overlaid.sort(key=_session_list_runtime_sort_key, reverse=True)
     return overlaid

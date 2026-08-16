@@ -135,6 +135,10 @@
     </span>
     <span class="app-titlebar-title" id="appTitlebarTitle">Hermes</span>
     <span class="app-titlebar-sub" id="appTitlebarSub" hidden></span>
+    <div id="activeRunVisibility" class="active-run-visibility" hidden>
+      <button id="activeRunPill" class="chip active-run-pill" type="button" aria-expanded="false" aria-controls="activeRunTray"></button>
+      <div id="activeRunTray" class="active-run-tray" hidden role="list"></div>
+    </div>
   </div>
   <div class="app-titlebar-spacer" aria-hidden="true"></div>
   <button class="app-titlebar-new-chat" id="btnTitlebarNewChat" onclick="$('btnNewChat') && $('btnNewChat').click()" type="button" aria-label="New conversation" data-i18n-title="new_conversation" data-i18n-aria-label="new_conversation" title="New conversation">

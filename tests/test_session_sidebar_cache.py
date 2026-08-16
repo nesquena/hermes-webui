@@ -267,6 +267,8 @@ def test_session_list_cache_source_changed_owner_rebuilds_while_follower_reuses_
 
     assert owner_result["payload"] == _session_cache_payload("fresh")
     assert follower_result["payload"] == _session_cache_payload("stale")
+    assert owner_result["payload"].source_authoritative is True
+    assert follower_result["payload"].source_authoritative is False
     assert "session_list_cache_rebuild_owner" in owner_diag.stages
     assert "session_list_cache_wait_stale_fallback" in follower_diag.stages
 
@@ -319,6 +321,78 @@ def test_session_list_cache_owner_returns_stale_and_rebuilds_in_background(monke
             break
         deadline.wait(0.05)
     assert cached == _session_cache_payload("fresh")
+
+
+def test_session_list_cache_unknown_stale_reason_does_not_authorize_stale(
+    monkeypatch,
+):
+    routes._session_list_cache_clear()
+    monkeypatch.setattr(routes, "_session_list_cache_source_stamp", lambda _key: ("stable",))
+    monkeypatch.setattr(routes, "_session_list_cache_stale_reason", lambda _key: None)
+
+    key = routes._session_list_cache_key(
+        active_profile="default",
+        all_profiles=False,
+        show_cli_sessions=False,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+    )
+    routes._session_list_cache_set(key, _session_cache_payload("stale"))
+    with routes._SESSIONS_CACHE_LOCK:
+        ts, stamp, payload = routes._SESSIONS_CACHE[key]
+        routes._SESSIONS_CACHE[key] = (
+            ts - routes._SESSIONS_CACHE_TTL_SECONDS - 1.0,
+            stamp,
+            payload,
+        )
+
+    result = routes._get_cached_session_list_payload(
+        key=key,
+        builder=lambda: _session_cache_payload("fresh"),
+    )
+
+    assert result == _session_cache_payload("fresh")
+    assert result.source_authoritative is True
+
+
+def test_session_list_cache_source_change_during_stale_return_fails_closed(
+    monkeypatch,
+):
+    routes._session_list_cache_clear()
+    monkeypatch.setattr(routes, "_session_list_cache_source_stamp", lambda _key: ("stable",))
+    stale_reasons = iter(("age", "source"))
+    monkeypatch.setattr(
+        routes,
+        "_session_list_cache_stale_reason",
+        lambda _key: next(stale_reasons),
+    )
+
+    key = routes._session_list_cache_key(
+        active_profile="default",
+        all_profiles=False,
+        show_cli_sessions=False,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+    )
+    stale = _session_cache_payload("stale")
+    stale["sessions"][0]["active_run"] = {"started_at": 1}
+    routes._session_list_cache_set(key, stale)
+    with routes._SESSIONS_CACHE_LOCK:
+        ts, stamp, payload = routes._SESSIONS_CACHE[key]
+        routes._SESSIONS_CACHE[key] = (
+            ts - routes._SESSIONS_CACHE_TTL_SECONDS - 1.0,
+            stamp,
+            payload,
+        )
+
+    result = routes._get_cached_session_list_payload(
+        key=key,
+        builder=lambda: _session_cache_payload("fresh"),
+    )
+
+    assert result == stale
+    assert result.source_authoritative is False
+    assert "active_run" not in routes._session_list_payload_to_response(result)["sessions"][0]
 
 
 def test_session_list_cache_stale_background_rebuild_failure_releases_owner(monkeypatch):
@@ -440,7 +514,208 @@ def test_session_list_cache_rebuild_retries_after_invalidation():
     payload = routes._get_cached_session_list_payload(key=key, builder=builder)
 
     assert payload == _session_cache_payload("fresh")
+    assert payload.source_authoritative is True
     assert calls == ["build", "build"]
+
+
+def test_session_list_cache_retry_limit_escape_is_non_authoritative(monkeypatch):
+    routes._session_list_cache_clear()
+    key = routes._session_list_cache_key(
+        active_profile="profile-a",
+        all_profiles=False,
+        show_cli_sessions=False,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+    )
+    calls = []
+
+    def builder():
+        calls.append(len(calls) + 1)
+        routes._session_list_cache_clear("profile-a")
+        return _session_cache_payload(f"attempt-{calls[-1]}")
+
+    result = routes._get_cached_session_list_payload(key=key, builder=builder)
+
+    assert calls == [1, 2, 3]
+    assert result == _session_cache_payload("attempt-3")
+    assert result.source_authoritative is False
+    assert routes._session_list_cache_get(key, allow_stale=True)[0] is None
+
+
+def test_session_list_cache_rebuild_retries_after_source_change(monkeypatch):
+    routes._session_list_cache_clear()
+    key = routes._session_list_cache_key(
+        active_profile="profile-a",
+        all_profiles=False,
+        show_cli_sessions=False,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+    )
+    source_stamps = iter([
+        ("initial",),
+        ("before-build",),
+        ("changed-during-build",),
+        ("changed-during-build",),
+        ("changed-during-build",),
+    ])
+    monkeypatch.setattr(
+        routes,
+        "_session_list_cache_source_stamp",
+        lambda _key: next(source_stamps),
+    )
+    calls = []
+
+    def builder():
+        calls.append(len(calls) + 1)
+        return _session_cache_payload(f"attempt-{calls[-1]}")
+
+    result = routes._get_cached_session_list_payload(key=key, builder=builder)
+
+    assert calls == [1, 2]
+    assert result == _session_cache_payload("attempt-2")
+    assert result.source_authoritative is True
+
+
+@pytest.mark.parametrize("stamps, authoritative", [
+    ([('same',), ('same',)], True),
+    ([('before',), ('changed',)], False),
+])
+def test_session_list_cache_safety_rebuild_carries_post_build_stamp(
+    monkeypatch,
+    stamps,
+    authoritative,
+):
+    routes._session_list_cache_clear()
+    key = routes._session_list_cache_key(
+        active_profile="profile-a",
+        all_profiles=False,
+        show_cli_sessions=False,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+    )
+    inflight = threading.Event()
+    with routes._SESSIONS_CACHE_LOCK:
+        routes._SESSIONS_CACHE_INFLIGHT[key] = inflight
+    monkeypatch.setattr(routes, "_SESSIONS_CACHE_WAIT_SECONDS", 0)
+    stamp_values = iter(stamps)
+    monkeypatch.setattr(
+        routes,
+        "_session_list_cache_invalidation_stamp",
+        lambda _key: next(stamp_values),
+    )
+
+    try:
+        result = routes._get_cached_session_list_payload(
+            key=key,
+            builder=lambda: _session_cache_payload("safety"),
+        )
+    finally:
+        with routes._SESSIONS_CACHE_LOCK:
+            routes._SESSIONS_CACHE_INFLIGHT.pop(key, None)
+
+    assert result == _session_cache_payload("safety")
+    assert result.source_authoritative is authoritative
+    cached, _fresh = routes._session_list_cache_get(key, allow_stale=True)
+    assert (cached is not None) is authoritative
+
+
+def test_session_list_runtime_overlay_fail_closed_and_preserves_authoritative_rows(
+    monkeypatch,
+):
+    from api import route_session_list_cache as cache
+
+    monkeypatch.setattr(
+        cache,
+        "_session_list_cache_active_stream_ids",
+        lambda: {"live-stream"},
+    )
+    with config.ACTIVE_RUNS_LOCK:
+        config.ACTIVE_RUNS.clear()
+        config.ACTIVE_RUNS["run-1"] = {
+            "session_id": "session-1",
+            "started_at": 10,
+        }
+    row = {
+        "session_id": "session-1",
+        "active_run": {"started_at": 1},
+        "active_stream_id": "old-stream",
+        "has_pending_user_message": False,
+        "pending_started_at": 2,
+        "updated_at": 10,
+        "last_message_at": 20,
+        "is_streaming": False,
+        "cron_running": True,
+    }
+    with routes.LOCK:
+        original = dict(routes.SESSIONS)
+        routes.SESSIONS.clear()
+        routes.SESSIONS["session-1"] = SimpleNamespace(
+            active_stream_id="live-stream",
+            pending_user_message="queued prompt",
+            pending_started_at=30,
+            updated_at=40,
+            last_message_at=50,
+        )
+    try:
+        degraded = cache._session_list_cache_overlay_runtime_rows(
+            [row], source_authoritative=False
+        )[0]
+        authoritative = cache._session_list_cache_overlay_runtime_rows(
+            [row], source_authoritative=True
+        )[0]
+    finally:
+        with routes.LOCK:
+            routes.SESSIONS.clear()
+            routes.SESSIONS.update(original)
+        with config.ACTIVE_RUNS_LOCK:
+            config.ACTIVE_RUNS.clear()
+
+    assert "active_run" not in degraded
+    assert degraded["active_stream_id"] == "live-stream"
+    assert degraded["has_pending_user_message"] is True
+    assert degraded["pending_started_at"] == 30
+    assert degraded["updated_at"] == 40
+    assert degraded["last_message_at"] == 50
+    assert degraded["is_streaming"] is True
+    assert degraded["cron_running"] is False
+    assert authoritative["active_run"]["started_at"] == 10
+    assert authoritative["active_stream_id"] == "live-stream"
+    assert authoritative["has_pending_user_message"] is True
+    assert authoritative["pending_started_at"] == 30
+    assert authoritative["updated_at"] == 40
+    assert authoritative["last_message_at"] == 50
+    assert authoritative["is_streaming"] is True
+
+
+def test_session_list_response_propagates_non_authoritative_cache_result(
+    monkeypatch,
+):
+    from api import route_session_list_cache as cache
+
+    monkeypatch.setattr(routes, "load_settings", lambda: {"api_redact_enabled": False})
+    monkeypatch.setattr(
+        routes,
+        "_sidebar_session_response_item",
+        lambda row, *, redact_enabled=None: dict(row),
+    )
+    monkeypatch.setattr(
+        cache,
+        "active_run_session_snapshot",
+        lambda: {"sid": {"started_at": 10}},
+    )
+    result = routes._SessionListCacheResult(
+        {"sessions": [{"session_id": "sid", "archived": False}]},
+        source_authoritative=False,
+    )
+
+    response = routes._session_list_payload_to_response(result)
+
+    assert response["sessions"] == [{
+        "session_id": "sid",
+        "archived": False,
+        "is_streaming": False,
+        "cron_running": False,
+    }]
 
 
 def test_session_list_cache_source_stamp_tracks_state_db_wal(tmp_path, monkeypatch):

@@ -629,7 +629,7 @@ console.log(JSON.stringify({{
 
 
 def test_session_list_response_omits_bucket_counts_when_missing(monkeypatch):
-    monkeypatch.setattr(routes, "_session_list_cache_overlay_runtime_rows", lambda rows: rows)
+    monkeypatch.setattr(routes, "_session_list_cache_overlay_runtime_rows", lambda rows, **kwargs: rows)
     monkeypatch.setattr(routes, "_sidebar_session_response_item", lambda row, *, redact_enabled=None: row)
 
     body = routes._session_list_payload_to_response(

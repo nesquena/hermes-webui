@@ -820,6 +820,58 @@ function _isSessionEffectivelyStreaming(s) {
   ));
 }
 
+function _isSessionRingStreaming(s) {
+  return _isSessionEffectivelyStreaming(s) || Boolean(s && s.active_run);
+}
+
+function _activeRunLineageKey(row, rows) {
+  if (!row) return null;
+  const list = Array.isArray(rows) ? rows : [];
+  const ids = new Set(list.map(item => item && item.session_id).filter(Boolean));
+  const byId = new Map(list.filter(item => item && item.session_id).map(item => [item.session_id, item]));
+  if (typeof _sessionLineageKey === 'function') {
+    const key = _sessionLineageKey(row, ids, byId);
+    if (key) return key;
+  }
+  return typeof _sidebarLineageKeyForRow === 'function'
+    ? _sidebarLineageKeyForRow(row)
+    : String(row.session_id || '');
+}
+
+function _activeRunRowsForProjection(rows) {
+  const sourceRows = Array.isArray(rows) ? rows : [];
+  const partition = typeof _partitionSidebarSessionRows === 'function'
+    ? _partitionSidebarSessionRows(
+      sourceRows,
+      typeof _activeSessionIdForSidebar === 'function' ? _activeSessionIdForSidebar() : null,
+    )
+    : {sessionsRaw: sourceRows};
+  const acceptedRows = Array.isArray(partition.sessionsRaw) ? partition.sessionsRaw : [];
+  const filtered = acceptedRows.filter(s => s && !s.archived);
+  const activeByLineage = new Map();
+  for (const row of filtered) {
+    if (!row.active_run) continue;
+    const key = _activeRunLineageKey(row, filtered);
+    if (!key) continue;
+    const previous = activeByLineage.get(key);
+    const startedAt = Number(row.active_run.started_at);
+    if (!Number.isFinite(startedAt)) continue;
+    if (!previous || startedAt < Number(previous.started_at)) activeByLineage.set(key, row.active_run);
+  }
+  const visibleRows = typeof _collapseSessionLineageForSidebar === 'function' ? _collapseSessionLineageForSidebar(filtered) : filtered;
+  return visibleRows.flatMap(row => {
+    const key = _activeRunLineageKey(row, filtered);
+    const activeRun = activeByLineage.get(key);
+    return activeRun ? [{...row, active_run: activeRun}] : [];
+  });
+}
+function _clearActiveRunProjection() {
+  if (typeof window !== 'undefined' && typeof window._renderActiveRunProjection === 'function') {
+    window._renderActiveRunProjection([]);
+  }
+}
+if(typeof window!=='undefined') window._activeRunRowsForProjection = _activeRunRowsForProjection;
+
 function _hasPendingUserMessageSignal(s) {
   return Boolean(s && (s.pending_user_message || s.has_pending_user_message));
 }
@@ -2593,6 +2645,7 @@ function _setActiveProjectFilter(projectId) {
   const next = projectId === NO_PROJECT_FILTER ? NO_PROJECT_FILTER : (projectId || null);
   if (_activeProject === next) return;
   _activeProject = next;
+  if(typeof _clearActiveRunProjection==='function') _clearActiveRunProjection();
   renderSessionListFromCache();
   void renderSessionList({deferWhileInteracting:false});
 }
@@ -2602,6 +2655,7 @@ function _setSessionSourceFilter(filter) {
   if (_sessionSourceFilter === next) return;
   _sessionSourceFilter = next;
   _activeProject = null;
+  if(typeof _clearActiveRunProjection==='function') _clearActiveRunProjection();
   _selectedSessions.clear();
   _sessionSelectMode = false;
   try { localStorage.setItem('hermes-session-source-filter', next); } catch (_e) {}
@@ -4104,7 +4158,7 @@ function _optimisticallyArchiveSessionInList(sid, archived){
     changed=true;
     return {...s,archived:!!archived};
   });
-  if(changed) renderSessionListFromCache();
+  if(changed){ _clearActiveRunProjection(); renderSessionListFromCache(); }
 }
 function _optimisticallyRemoveSessionFromList(sid){
   if(!sid||!Array.isArray(_allSessions)) return;
@@ -4112,7 +4166,7 @@ function _optimisticallyRemoveSessionFromList(sid){
   _allSessions=_allSessions.filter(s=>!s||s.session_id!==sid);
   if(_selectedSessions&&_selectedSessions.has(sid)) _selectedSessions.delete(sid);
   if(typeof _dropStaleOptimisticSessionRow==='function') _dropStaleOptimisticSessionRow(sid);
-  if(_allSessions.length!==before) renderSessionListFromCache();
+  if(_allSessions.length!==before){ _clearActiveRunProjection(); renderSessionListFromCache(); }
 }
 
 function _sessionIdFromLocation(){
@@ -5080,6 +5134,7 @@ let _sessionListEnterAllAnimationPending = false;
 // pending/queued payloads drops a deferred apply that would do the same.
 function _invalidateSessionListRenders(){
   _renderSessionListGen++;
+  if(typeof window!=='undefined' && typeof window._renderActiveRunProjection==='function') window._renderActiveRunProjection([]);
   _pendingSessionListPayload = null;
   _renderSessionListQueuedRequest = null;
   // A retry whose fetch is invalidated here (e.g. a profile switch mid-retry)
@@ -5093,6 +5148,14 @@ function _invalidateSessionListRenders(){
     delete _sessionListLoadError.retrying;
     delete _sessionListLoadError._retryFailedFocus;
   }
+}
+function _sessionListGenerationIsCurrent(generation){
+  return generation===_renderSessionListGen;
+}
+function _applySessionListPayloadIfCurrent(generation,sessData,projData,opts){
+  if(!_sessionListGenerationIsCurrent(generation)||_profileSwitchListEmbargo)return false;
+  _applySessionListPayload(sessData,projData,opts);
+  return true;
 }
 if(typeof window!=='undefined') window._invalidateSessionListRenders = _invalidateSessionListRenders;
 
@@ -5314,7 +5377,7 @@ function _schedulePendingSessionListApply(){
     if(payload.gen!==_renderSessionListGen) return;
     // Profile switch may have bumped unread gen after the list gen check
     // window; still drop completion-marking for the stale pre-switch payload.
-    _applySessionListPayload(payload.sessData,payload.projData,{
+    _applySessionListPayloadIfCurrent(payload.gen,payload.sessData,payload.projData,{
       unreadGen:payload.unreadGen,
     });
   }, Math.max(120, SESSION_LIST_INTERACTION_IDLE_MS));
@@ -5420,6 +5483,7 @@ function _applySessionListPayload(sessData, projData, opts){
     : [];
   _reconcileActiveSessionIdleStateFromList(serverSessions);
   _allSessions = _mergeOptimisticFirstTurnSessions(serverSessions);
+  if(typeof window!=='undefined' && typeof window._renderActiveRunProjection==='function') window._renderActiveRunProjection(_allSessions);
   // Tag the cache with the scope it was loaded under (active profile +
   // all-profiles flag). If a later /api/sessions fails right after a profile
   // switch, the catch path checks this so it won't re-render the PRIOR
@@ -5638,7 +5702,9 @@ async function _runRenderSessionListRefresh(opts, _gen){
       _schedulePendingSessionListApply();
       return;
     }
-    _applySessionListPayload(sessData,projData,{unreadGen});
+    if(_gen===_renderSessionListGen&&!_profileSwitchListEmbargo){
+      _applySessionListPayload(sessData,projData,{unreadGen});
+    }
   }catch(e){
     if (_gen !== _renderSessionListGen) return;
     // #4671: same embargo guard as the success path — a mid-switch /api/sessions that
@@ -5647,6 +5713,7 @@ async function _runRenderSessionListRefresh(opts, _gen){
     // skeleton; if the switch itself fails, its catch clears the skeleton + embargo.
     if (_profileSwitchListEmbargo) return;
     _showSessionListLoadError(e);
+    if(typeof _clearCachedActiveRunProjection==='function') _clearCachedActiveRunProjection();
     // Only fall back to the cached rows if they were loaded under the SAME
     // scope we're requesting now. After a profile switch the cache holds the
     // PRIOR profile's sessions; re-rendering them would falsely show another
@@ -5676,6 +5743,15 @@ async function _runRenderSessionListRefresh(opts, _gen){
       _clearSessionSourceTabCounts();
       renderSessionListFromCache();
     }
+  }
+}
+
+function _clearCachedActiveRunProjection(){
+  for(const row of Array.isArray(_allSessions)?_allSessions:[]){
+    if(row&&typeof row==='object') delete row.active_run;
+  }
+  if(typeof window!=='undefined'&&typeof window._renderActiveRunProjection==='function'){
+    window._renderActiveRunProjection([]);
   }
 }
 
@@ -7493,7 +7569,9 @@ function _sessionAttentionState(s){
 function _sidebarRowHasVisibleMessages(s, activeSidForSidebar){
   return (s.message_count||0)>0 ||
     _sessionAttentionState(s) ||
-    _isSessionEffectivelyStreaming(s) ||
+    (typeof _isSessionRingStreaming==='function'
+      ? _isSessionRingStreaming(s)
+      : _isSessionEffectivelyStreaming(s)) ||
     !!s.active_stream_id ||
     !!s.pending_user_message ||
     !!s.has_pending_user_message ||
@@ -8069,14 +8147,16 @@ function renderSessionListFromCache(){
     const el=document.createElement('div');
     const isActive=_sessionLineageContainsSession(s,activeSidForSidebar);
     const ownStreaming=_isSessionEffectivelyStreaming(s);
+    const ownRingStreaming=_isSessionRingStreaming(s);
     const isStreaming=ownStreaming||!!s._child_session_streaming;
+    const isRingStreaming=ownRingStreaming||!!s._child_session_streaming;
     _rememberRenderedStreamingState(s, ownStreaming);
     _rememberRenderedSessionSnapshot(s);
     const hasUnread=(_hasUnreadForSession(s)||!!s._child_session_has_unread)&&!isActive;
     const attention=_sessionAttentionState(s)||_sessionAttentionState({_child:true,attention:s._child_session_attention});
     const attentionClass=attention?(attention.kind==='approval'?' attention-approval':(attention.kind==='clarify'?' attention-clarify':' attention-attention')):'';
     const readOnly=_isReadOnlySession(s);
-    el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(ownStreaming?' streaming':'')+(hasUnread?' unread':'')+(attention?' needs-attention':'')+attentionClass;
+    el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(ownRingStreaming?' streaming':'')+(hasUnread?' unread':'')+(attention?' needs-attention':'')+attentionClass;
     const swipeReturnOffset=_sessionSwipeReturnOffsets.get(s.session_id);
     if(swipeReturnOffset!==undefined){
       _sessionSwipeReturnOffsets.delete(s.session_id);
@@ -8155,8 +8235,11 @@ function renderSessionListFromCache(){
     const tsMs=_sessionTimestampMs(s);
     const ts=document.createElement('span');
     const hasAttentionState=isStreaming||hasUnread||Boolean(attention);
+    const hasRingAttentionState=isRingStreaming||hasUnread||Boolean(attention);
     ts.className='session-time'+(hasAttentionState?' is-hidden':'');
+    if(hasRingAttentionState&&!hasAttentionState) ts.classList.add('is-hidden');
     ts.textContent=hasAttentionState?'':_formatRelativeSessionTime(tsMs);
+    if(hasRingAttentionState&&!hasAttentionState) ts.textContent='';
     titleRow.appendChild(title);
     // Project color dot: placed BETWEEN title and timestamp, not inside the
     // title span. Inside the title span it would be clipped by the ellipsis
@@ -8489,7 +8572,7 @@ function renderSessionListFromCache(){
       for(const child of sortedChildren){
         if(child.session_source==='fork'){
           const childIsActive=!!(activeSidForSidebar&&child.session_id===activeSidForSidebar);
-          const childStreaming=_isSessionEffectivelyStreaming(child);
+          const childStreaming=_isSessionRingStreaming(child);
           const childHasUnread=_hasUnreadForSession(child)&&!childIsActive;
           const childAttention=_sessionAttentionState(child);
           const childAttentionClass=childAttention?(childAttention.kind==='approval'?' attention-approval':(childAttention.kind==='clarify'?' attention-clarify':' attention-attention')):'';
@@ -8631,7 +8714,7 @@ function renderSessionListFromCache(){
     el.appendChild(sessionText);
     const state=document.createElement('span');
     const attentionDotClass=attention?(attention.kind==='approval'?' is-attention-approval':(attention.kind==='clarify'?' is-attention-clarify':' is-attention-generic')):'';
-    state.className='session-attention-indicator session-state-indicator'+(isStreaming?' is-streaming':(hasUnread?' is-unread':''))+attentionDotClass;
+    state.className='session-attention-indicator session-state-indicator'+(ownRingStreaming?' is-streaming':(hasUnread?' is-unread':''))+attentionDotClass;
     state.setAttribute('aria-hidden','true');
     // Tooltip precedence: a localized attention title (pending approval/clarify,
     // from the attention-indicator feature) is more specific and actionable than
@@ -8639,7 +8722,11 @@ function renderSessionListFromCache(){
     // tooltip only when there is no attention title AND the state tooltip is
     // non-empty — never blank an otherwise-meaningful tooltip.
     const _stateTip=_sessionStateTooltip({isStreaming,hasUnread});
+    const _ringStateTip=ownRingStreaming===isStreaming
+      ? _stateTip
+      : _sessionStateTooltip({isStreaming:ownRingStreaming,hasUnread});
     if(attention&&attention.title) state.title=attention.title;
+    else if(_ringStateTip) state.title=_ringStateTip;
     else if(_stateTip) state.title=_stateTip;
     el.appendChild(state);
     // Single trigger button that opens a shared dropdown menu

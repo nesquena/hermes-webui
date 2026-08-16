@@ -14,6 +14,9 @@ const LOCALES = {
     offline_stream_waiting: 'Connection lost. Waiting to refresh…',
     _lang: 'en',
     _label: 'English',
+    active_run_conversation_fallback: 'Active conversation',
+    active_run_open_conversation: 'Open conversation',
+    active_run_visibility_label: (count, duration) => `${count} active · ${duration}`,
     _speech: 'en-US',
     // boot.js
     cancelling: 'Cancelling\u2026',
@@ -1791,6 +1794,9 @@ const LOCALES = {
     offline_stream_waiting: 'Connessione persa. In attesa di aggiornare…',
     _lang: 'it',
     _label: 'Italiano',
+    active_run_conversation_fallback: 'Conversazione attiva',
+    active_run_open_conversation: 'Apri conversazione',
+    active_run_visibility_label: (count, duration) => `${count} attive · ${duration}`,
     _speech: 'it-IT',
     // boot.js
     cancelling: 'Annullamento\u2026',
@@ -3550,6 +3556,9 @@ const LOCALES = {
     offline_stream_waiting: '接続が切断されました。更新を待っています…',
     _lang: 'ja',
     _label: '日本語',
+    active_run_conversation_fallback: 'アクティブな会話',
+    active_run_open_conversation: '会話を開く',
+    active_run_visibility_label: (count, duration) => `${count} 件が実行中 · ${duration}`,
     _speech: 'ja-JP',
     // boot.js
     cancelling: 'キャンセル中…',
@@ -5314,6 +5323,9 @@ const LOCALES = {
     offline_stream_waiting: 'Соединение потеряно. Ожидаю обновления…',
     _lang: 'ru',
     _label: 'Русский',
+    active_run_conversation_fallback: 'Активный разговор',
+    active_run_open_conversation: 'Открыть разговор',
+    active_run_visibility_label: (count, duration) => `${count} активных · ${duration}`,
     _speech: 'ru-RU',
     cancelling: 'Отменяю…',
     cancel_failed: 'Не удалось отменить.',
@@ -7052,6 +7064,9 @@ const LOCALES = {
     offline_stream_waiting: 'Conexión perdida. Esperando para actualizar…',
     _lang: 'es',
     _label: 'Español',
+    active_run_conversation_fallback: 'Conversación activa',
+    active_run_open_conversation: 'Abrir conversación',
+    active_run_visibility_label: (count, duration) => `${count} activas · ${duration}`,
     _speech: 'es-ES',
     // boot.js
     cancelling: 'Cancelando…',
@@ -8757,6 +8772,9 @@ const LOCALES = {
     offline_stream_waiting: 'Verbindung verloren. Warte auf Aktualisierung…',
     _lang: 'de',
     _label: 'Deutsch',
+    active_run_conversation_fallback: 'Aktive Konversation',
+    active_run_open_conversation: 'Konversation öffnen',
+    active_run_visibility_label: (count, duration) => `${count} aktiv · ${duration}`,
     _speech: 'de-DE',
     // boot.js
     cancelling: 'Wird abgebrochen\u2026',
@@ -10456,6 +10474,9 @@ const LOCALES = {
     offline_stream_waiting: '连接已断开。正在等待刷新…',
     _lang: 'zh',
     _label: '\u7b80\u4f53\u4e2d\u6587',
+    active_run_conversation_fallback: '活动会话',
+    active_run_open_conversation: '打开会话',
+    active_run_visibility_label: (count, duration) => `${count} 个活动 · ${duration}`,
     _speech: 'zh-CN',
     // boot.js
     cancelling: '正在取消...',
@@ -12150,6 +12171,9 @@ const LOCALES = {
     offline_stream_waiting: '連線中斷。等待重新整理…',
     _lang: 'zh-Hant',
     _label: '繁體中文',
+    active_run_conversation_fallback: '作用中對話',
+    active_run_open_conversation: '開啟對話',
+    active_run_visibility_label: (count, duration) => `${count} 個作用中 · ${duration}`,
     _speech: 'zh-TW',
     // boot.js
     cancelling: '正在取消……',
@@ -13911,6 +13935,9 @@ const LOCALES = {
     offline_stream_waiting: 'Conexão perdida. Aguardando para atualizar…',
     _lang: 'pt',
     _label: 'Português',
+    active_run_conversation_fallback: 'Conversa ativa',
+    active_run_open_conversation: 'Abrir conversa',
+    active_run_visibility_label: (count, duration) => `${count} ativas · ${duration}`,
     _speech: 'pt-BR',
     // boot.js
     cancelling: 'Cancelando…',
@@ -15489,6 +15516,9 @@ const LOCALES = {
     offline_stream_waiting: '연결이 끊겼습니다. 새로고침을 기다리는 중…',
     _lang: 'ko',
     _label: '한국어',
+    active_run_conversation_fallback: '활성 대화',
+    active_run_open_conversation: '대화 열기',
+    active_run_visibility_label: (count, duration) => `${count}개 활성 · ${duration}`,
     _speech: 'ko-KR',
     // boot.js
     cancelling: '취소 중\u2026',
@@ -17238,6 +17268,9 @@ const LOCALES = {
     offline_stream_waiting: 'Connexion perdue. En attente de rafraîchissement\u2026',
     _lang: 'fr',
     _label: 'Français',
+    active_run_conversation_fallback: 'Conversation active',
+    active_run_open_conversation: 'Ouvrir la conversation',
+    active_run_visibility_label: (count, duration) => `${count} actives · ${duration}`,
     _speech: 'fr-FR',
     cancelling: 'Annulation\u2026',
     cancel_failed: 'Échec de l\'annulation.',
@@ -18962,6 +18995,9 @@ const LOCALES = {
 
   cs: {
     _label: 'Čeština',
+    active_run_conversation_fallback: 'Aktivní konverzace',
+    active_run_open_conversation: 'Otevřít konverzaci',
+    active_run_visibility_label: (count, duration) => `${count} aktivní · ${duration}`,
     _lang: 'cs',
     _speech: 'cs-CZ',
     copy_relative_path: 'Kopírovat relativní cestu',
@@ -20692,6 +20728,9 @@ const LOCALES = {
     offline_stream_waiting: 'Bağlantı kesildi. Yenilenmesi bekleniyor\u2026',
     _lang: 'tr',
     _label: 'Türkçe',
+    active_run_conversation_fallback: 'Aktif konuşma',
+    active_run_open_conversation: 'Konuşmayı aç',
+    active_run_visibility_label: (count, duration) => `${count} aktif · ${duration}`,
     _speech: 'tr-TR',
     // boot.js
     cancelling: 'İptal ediliyor\u2026',
@@ -22442,6 +22481,9 @@ const LOCALES = {
     offline_stream_waiting: 'Połączenie utracone. Oczekiwanie na odświeżenie…',
     _lang: 'pl',
     _label: 'Polski',
+    active_run_conversation_fallback: 'Aktywna rozmowa',
+    active_run_open_conversation: 'Otwórz rozmowę',
+    active_run_visibility_label: (count, duration) => `${count} aktywne · ${duration}`,
     _speech: 'pl-PL',
     // boot.js
     cancelling: 'Anulowanie…',
@@ -24196,6 +24238,9 @@ const LOCALES = {
     offline_stream_waiting: 'Mất kết nối. Đang chờ làm mới…',
     _lang: 'vi',
     _label: 'Tiếng Việt',
+    active_run_conversation_fallback: 'Cuộc trò chuyện đang hoạt động',
+    active_run_open_conversation: 'Mở cuộc trò chuyện',
+    active_run_visibility_label: (count, duration) => `${count} đang hoạt động · ${duration}`,
     _speech: 'vi-VN',
     // boot.js
     cancelling: 'Đang hủy…',
@@ -26388,3 +26433,10 @@ function applyLocaleToDOM() {
 
 // Apply saved locale immediately so there's no flash of English on reload.
 loadLocale();
+function _activeRunLocaleNames(source){
+  const names=[];
+  const pattern=/^  (?:'([^']+)'|([A-Za-z-]+))\s*:\s*\{/gm;
+  let match;
+  while((match=pattern.exec(String(source||'')))) names.push(match[1]||match[2]);
+  return names;
+}

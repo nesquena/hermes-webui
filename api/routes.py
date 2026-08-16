@@ -2213,6 +2213,11 @@ def _build_session_list_cache_payload(
     diag=None,
 ) -> dict:
     diag_stage = diag.stage if diag is not None else lambda *_a, **_k: None
+    try:
+        from api.config import active_run_session_snapshot
+        active_run_session_ids = set(active_run_session_snapshot())
+    except Exception:
+        active_run_session_ids = set()
 
     def _session_has_server_visible_messages(session: dict) -> bool:
         """Return True when a non-active sidebar row has a visibility signal.
@@ -2232,6 +2237,8 @@ def _build_session_list_cache_payload(
             if _numeric_count(attention.get("count")) > 0:
                 return True
 
+        if str(session.get("session_id") or "") in active_run_session_ids:
+            return True
         return bool(
             session.get("is_streaming")
             or session.get("active_stream_id")
@@ -2584,9 +2591,37 @@ def _build_session_list_cache_payload(
     }
 
 
-def _session_list_payload_to_response(payload: dict) -> dict:
+class _SessionListCacheResult(dict):
+    """Internal cache result carrying whether rows may receive runtime claims."""
+
+    def __init__(self, payload: dict, *, source_authoritative: bool):
+        super().__init__(payload)
+        self.source_authoritative = bool(source_authoritative)
+
+
+def _session_list_cache_result(payload: dict, *, source_authoritative: bool):
+    if isinstance(payload, _SessionListCacheResult):
+        return payload
+    return _SessionListCacheResult(
+        payload,
+        source_authoritative=source_authoritative,
+    )
+
+
+def _session_list_payload_to_response(
+    payload: dict,
+    *,
+    source_authoritative: bool | None = None,
+) -> dict:
+    if source_authoritative is None:
+        source_authoritative = bool(
+            getattr(payload, "source_authoritative", True)
+        )
     safe_merged = []
-    runtime_rows = _session_list_cache_overlay_runtime_rows(payload.get("sessions", []) or [])
+    runtime_rows = _session_list_cache_overlay_runtime_rows(
+        payload.get("sessions", []) or [],
+        source_authoritative=source_authoritative,
+    )
     # Read the redaction setting ONCE for the whole response and thread it through
     # every row, instead of letting each row's _redact_text() re-read settings.json
     # from disk (per title). The _sidebar_session_response_item -> _redact_text(_enabled=...)
@@ -2684,7 +2719,7 @@ def _get_cached_session_list_payload(
     key: tuple,
     builder,
     diag=None,
-) -> dict:
+) -> _SessionListCacheResult:
     if diag is not None:
         try:
             diag.stage("session_list_cache_lookup")
@@ -2698,11 +2733,11 @@ def _get_cached_session_list_payload(
                 diag.stage("session_list_cache_hit")
             except Exception:
                 pass
-        return cached
+        return _session_list_cache_result(cached, source_authoritative=True)
 
     stale = cached  # now actually a stale payload when one exists, else None
     stale_reason = _session_list_cache_stale_reason(key) if stale is not None else None
-    if stale is not None and stale_reason != "source":
+    if stale is not None and stale_reason == "age":
         event, is_owner = _session_list_cache_claim_rebuild(key)
         if is_owner:
             if diag is not None:
@@ -2716,6 +2751,7 @@ def _get_cached_session_list_payload(
                     rebuild_attempts = 0
                     while True:
                         invalidation_stamp = _session_list_cache_invalidation_stamp(key)
+                        source_stamp = _session_list_cache_source_stamp(key)
                         try:
                             payload = builder()
                         except Exception:
@@ -2723,8 +2759,14 @@ def _get_cached_session_list_payload(
                                 "session list stale-cache background rebuild failed"
                             )
                             return
-                        if _session_list_cache_invalidation_stamp(key) == invalidation_stamp:
-                            _session_list_cache_set(key, payload)
+                        if (
+                            _session_list_cache_invalidation_stamp(key) == invalidation_stamp
+                            and _session_list_cache_set(
+                                key,
+                                payload,
+                                expected_source_stamp=source_stamp,
+                            )
+                        ):
                             return
                         rebuild_attempts += 1
                         if rebuild_attempts >= 3:
@@ -2746,7 +2788,14 @@ def _get_cached_session_list_payload(
                 diag.stage("session_list_cache_stale_return")
             except Exception:
                 pass
-        return stale
+        source_authoritative = (
+            stale_reason == "age"
+            and _session_list_cache_stale_reason(key) == "age"
+        )
+        return _session_list_cache_result(
+            stale,
+            source_authoritative=source_authoritative,
+        )
 
     event, is_owner = _session_list_cache_claim_rebuild(key)
     if is_owner:
@@ -2759,15 +2808,25 @@ def _get_cached_session_list_payload(
             rebuild_attempts = 0
             while True:
                 invalidation_stamp = _session_list_cache_invalidation_stamp(key)
+                source_stamp = _session_list_cache_source_stamp(key)
                 payload = builder()
-                if _session_list_cache_invalidation_stamp(key) == invalidation_stamp:
-                    _session_list_cache_set(key, payload)
+                if (
+                    _session_list_cache_invalidation_stamp(key) == invalidation_stamp
+                    and _session_list_cache_set(
+                        key,
+                        payload,
+                        expected_source_stamp=source_stamp,
+                    )
+                ):
                     if diag is not None:
                         try:
                             diag.stage("session_list_cache_stored")
                         except Exception:
                             pass
-                    return payload
+                    return _session_list_cache_result(
+                        payload,
+                        source_authoritative=True,
+                    )
                 rebuild_attempts += 1
                 if diag is not None:
                     try:
@@ -2775,7 +2834,10 @@ def _get_cached_session_list_payload(
                     except Exception:
                         pass
                 if rebuild_attempts >= 3:
-                    return payload
+                    return _session_list_cache_result(
+                        payload,
+                        source_authoritative=False,
+                    )
         finally:
             _session_list_cache_done(key, event)
 
@@ -2801,7 +2863,7 @@ def _get_cached_session_list_payload(
                 diag.stage("session_list_cache_wait_hit")
             except Exception:
                 pass
-        return latest
+        return _session_list_cache_result(latest, source_authoritative=True)
 
     if stale is not None:
         if diag is not None:
@@ -2809,7 +2871,7 @@ def _get_cached_session_list_payload(
                 diag.stage("session_list_cache_wait_stale_fallback")
             except Exception:
                 pass
-        return stale
+        return _session_list_cache_result(stale, source_authoritative=False)
 
     # Safety path if the owner died before storing anything.
     if diag is not None:
@@ -2818,10 +2880,20 @@ def _get_cached_session_list_payload(
         except Exception:
             pass
     invalidation_stamp = _session_list_cache_invalidation_stamp(key)
+    source_stamp = _session_list_cache_source_stamp(key)
     payload = builder()
-    if _session_list_cache_invalidation_stamp(key) == invalidation_stamp:
-        _session_list_cache_set(key, payload)
-    return payload
+    source_authoritative = (
+        _session_list_cache_invalidation_stamp(key) == invalidation_stamp
+        and _session_list_cache_set(
+            key,
+            payload,
+            expected_source_stamp=source_stamp,
+        )
+    )
+    return _session_list_cache_result(
+        payload,
+        source_authoritative=source_authoritative,
+    )
 
 from api.config import (
     STATE_DIR,
@@ -10033,6 +10105,7 @@ _SIDEBAR_SESSION_RESPONSE_FIELDS = {
     "cron_running",
     "active_stream_id",
     "has_pending_user_message",
+    "active_run",
     "pending_started_at",
     "default_hidden",
     "worktree_path",
@@ -13406,7 +13479,11 @@ def handle_get(handler, parsed) -> bool:
                 diag=diag,
             )
             diag.stage("response_write")
-            return j(handler, _session_list_payload_to_response(payload), pretty=False)
+            return j(
+                handler,
+                _session_list_payload_to_response(payload),
+                pretty=False,
+            )
         finally:
             diag.finish()
 
@@ -21379,6 +21456,8 @@ def _handle_btw(handler, body):
     ephemeral.title = f"btw: {question[:60]}"
     ephemeral.save()
     stream_id = uuid.uuid4().hex
+    from api.config import suppress_active_run_visibility
+    suppress_active_run_visibility(stream_id, body["session_id"])
     ephemeral.active_stream_id = stream_id
     register_session_writeback_owner(ephemeral.session_id, stream_id)
     ephemeral.save()
@@ -21430,6 +21509,8 @@ def _handle_background(handler, body):
     bg.title = f"bg: {prompt[:60]}"
     bg.save()
     stream_id = uuid.uuid4().hex
+    from api.config import suppress_active_run_visibility
+    suppress_active_run_visibility(stream_id, body["session_id"])
     bg.active_stream_id = stream_id
     register_session_writeback_owner(bg.session_id, stream_id)
     bg.save()

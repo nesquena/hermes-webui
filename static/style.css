@@ -1555,7 +1555,14 @@
   .app-titlebar-icon{display:inline-flex;align-items:center;color:var(--accent);}
   .app-titlebar-title{font-size:12px;font-weight:600;color:var(--text);letter-spacing:-.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:60vw;}
   .app-titlebar-sub{font-size:10px;color:var(--muted);background:var(--hover-bg);padding:2px 7px;border-radius:4px;font-family:var(--font-mono);white-space:nowrap;flex-shrink:0;}
-  .app-titlebar-sub[hidden]{display:none;}
+.app-titlebar-sub[hidden]{display:none;}
+.active-run-visibility{position:relative;margin-left:auto;-webkit-app-region:no-drag;}
+.active-run-pill{-webkit-app-region:no-drag;cursor:pointer;color:var(--accent-text);border-color:var(--accent-bg-strong);background:var(--accent-bg);}
+.active-run-tray{position:absolute;right:0;top:calc(100% + 8px);z-index:30;min-width:230px;max-width:min(320px,calc(100vw - 24px));padding:6px;border:1px solid var(--border2);border-radius:10px;background:var(--surface);box-shadow:0 12px 30px rgba(0,0,0,.24);-webkit-app-region:no-drag;}
+.active-run-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px;border-radius:7px;color:var(--text);font-size:12px;text-align:left;}
+.active-run-row:hover{background:var(--accent-bg);}
+.active-run-row button{flex:1;min-width:0;border:0;background:none;color:inherit;font:inherit;text-align:left;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;-webkit-app-region:no-drag;}
+.active-run-age{color:var(--muted);white-space:nowrap;font-size:11px;}
   .app-titlebar-title-popover{position:fixed;z-index:300;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:8px 12px;font-size:13px;color:var(--text);box-shadow:0 4px 16px rgba(0,0,0,.18);word-break:break-word;line-height:1.4;max-width:calc(100vw - 16px);pointer-events:auto;}
   .app-titlebar-hamburger,.app-titlebar-spacer{display:none;width:44px;height:44px;flex-shrink:0;}
   .app-titlebar-hamburger{-webkit-app-region:no-drag;align-items:center;justify-content:center;background:none;border:none;color:var(--muted);border-radius:8px;cursor:pointer;padding:0;-webkit-tap-highlight-color:transparent;transition:background-color .15s,color .15s;}

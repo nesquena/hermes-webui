@@ -46,3 +46,17 @@ def test_active_row_reinjection_gated_to_zero_message_ephemeral_only():
     assert "[activeRow,...rows]" in body
     # The unconditional return that shipped in the original PR must be gone.
     assert "return activeRow?[activeRow,...rows]:rows;" not in body
+
+
+def test_active_empty_session_flows_through_canonical_sidebar_filters():
+    from api import config
+
+    with config.ACTIVE_RUNS_LOCK:
+        config.ACTIVE_RUNS.clear()
+        config.ACTIVE_RUNS["run"] = {"session_id": "empty-parent", "started_at": 10}
+    try:
+        assert "active_session_ids" in Path(ROOT / "api" / "models.py").read_text(encoding="utf-8")
+        assert "not in active_session_ids" in Path(ROOT / "api" / "models.py").read_text(encoding="utf-8")
+    finally:
+        with config.ACTIVE_RUNS_LOCK:
+            config.ACTIVE_RUNS.clear()
