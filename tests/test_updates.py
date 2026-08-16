@@ -1896,6 +1896,7 @@ def test_agent_force_and_clear_lock_use_the_same_transaction(monkeypatch, tmp_pa
         },
     )
     monkeypatch.setattr(updates, '_AGENT_DIR', tmp_path)
+    (tmp_path / '.git').mkdir()
     assert updates.apply_force_update('agent')['outcome'] == 'noop'
     assert updates.apply_clear_lock('agent')['outcome'] == 'noop'
     assert calls == [{'force': True}, {}]

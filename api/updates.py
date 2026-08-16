@@ -312,17 +312,15 @@ def apply_clear_lock(target: str) -> dict:
         return {'ok': False, 'message': 'Update already in progress'}
 
     try:
+        if target == 'agent':
+            return _apply_agent_transaction()
         if target == 'webui':
             path = REPO_ROOT
-        elif target == 'agent':
-            path = _AGENT_DIR
         else:
             return {'ok': False, 'message': f'Unknown target: {target}'}
 
         if path is None:
             return {'ok': False, 'message': 'Not a git repository'}
-        if target == 'agent' and not (path / '.git').exists():
-            return _apply_agent_transaction()
         if not (path / '.git').exists():
             return {'ok': False, 'message': 'Not a git repository'}
 

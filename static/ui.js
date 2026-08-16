@@ -10243,6 +10243,12 @@ function _formatUpdateApplyExceptionMessage(error){
   const message=(error&&error.message)||String(error||'unknown error');
   return _i18nUpdateText('update_failed_prefix','Update failed: ')+message;
 }
+function _markUpdateTargetApplied(target){
+  const current=window._updateData;
+  const targetData=current&&current[target];
+  if(!targetData) return;
+  _showUpdateBanner({...current,[target]:{...targetData,behind:0,up_to_date:true}});
+}
 async function applyUpdates(){
   if(window._updateApplyInFlight) return;
   window._updateApplyInFlight=true;
@@ -10263,6 +10269,8 @@ async function applyUpdates(){
   // retry starts clean (otherwise stale state points at the wrong target).
   const forceBtnReset=$('btnForceUpdate');
   if(forceBtnReset){forceBtnReset.style.display='none';forceBtnReset.dataset.target='';}
+  const clearLockBtnReset=$('btnClearUpdateLock');
+  if(clearLockBtnReset){clearLockBtnReset.style.display='none';clearLockBtnReset.dataset.target='';}
   const targets=[];
   if(window._updateData?.agent?.behind>0) targets.push('agent');
   if(window._updateData?.webui?.behind>0&&!window._updateData?.webui?.manual_update) targets.push('webui');
@@ -10307,6 +10315,7 @@ async function applyUpdates(){
     if(restartScheduled){
       _waitForServerThenReload({baselineServerIdentity});
     } else {
+      targets.forEach(_markUpdateTargetApplied);
       window._updateApplyInFlight=false;
       if(btn){btn.disabled=false;btn.textContent=updateText('update_now','Update Now');}
     }
@@ -10321,9 +10330,8 @@ function _showUpdateError(target,res){
   const errEl=$('updateError');
   const forceBtn=$('btnForceUpdate');
   const clearLockBtn=$('btnClearUpdateLock');
+  [forceBtn,clearLockBtn].forEach((button)=>{if(button){button.style.display='none';button.dataset.target='';}});
   if(res.transaction_in_progress||res.outcome==='transaction_in_progress'){
-    if(forceBtn){forceBtn.style.display='none';forceBtn.dataset.target='';}
-    if(clearLockBtn){clearLockBtn.style.display='none';clearLockBtn.dataset.target='';}
     const waitMessage='Update already in progress for this Agent installation. Wait a moment, then retry.';
     if(errEl){errEl.textContent=waitMessage;errEl.style.display='block';}
     else showToast(waitMessage);
@@ -10524,6 +10532,7 @@ async function forceUpdate(btn){
       return;
     }
     if(!res.restart_scheduled){
+      _markUpdateTargetApplied(target);
       btn.disabled=false;btn.textContent='Force update';
       if(res.outcome==='noop'||res.no_op||res.up_to_date) showToast('Force update found no changes.');
       return;

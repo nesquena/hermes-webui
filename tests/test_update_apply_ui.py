@@ -25,17 +25,19 @@ const updateData = JSON.parse(process.argv[1]);
 const responses = JSON.parse(process.argv[2]);
 const uiPath = process.argv[3];
 const src = fs.readFileSync(uiPath, 'utf8');
-const start = src.indexOf('async function applyUpdates()');
+const start = src.indexOf('function _isUpdateApplyNetworkError');
 const end = src.indexOf('function _showUpdateError', start);
 const snippet = src.slice(start, end);
 
 const button = { disabled: false, textContent: 'Update Now' };
 const errorEl = { style: { display: 'none' }, textContent: '' };
 const forceBtn = { style: { display: 'block' }, dataset: { target: 'stale-target' } };
+const clearLockBtn = { style: { display: 'block' }, dataset: { target: 'stale-target' } };
 const dom = {
   btnApplyUpdate: button,
   updateError: errorEl,
   btnForceUpdate: forceBtn,
+  btnClearUpdateLock: clearLockBtn,
 };
 const sessionStorage = {
   removed: [],
@@ -65,6 +67,7 @@ function _waitForServerThenReload(opts) {
     apiCallsSnapshot: apiCalls.slice(),
   });
 }
+function _showUpdateBanner(data) { window._updateData = data; }
 function _showUpdateError(target, res) { errors.push({ target, message: res.message || '' }); }
 function _formatUpdateApplyExceptionMessage(e) { return 'Update failed: ' + e.message; }
 function showToast(message, duration, kind) {
@@ -79,6 +82,7 @@ global.$ = $;
 global.api = api;
 global._readHealthServerIdentity = _readHealthServerIdentity;
 global._waitForServerThenReload = _waitForServerThenReload;
+global._showUpdateBanner = _showUpdateBanner;
 global._showUpdateError = _showUpdateError;
 global._formatUpdateApplyExceptionMessage = _formatUpdateApplyExceptionMessage;
 global.showToast = showToast;
@@ -102,6 +106,8 @@ eval(snippet);
     buttonText: button.textContent,
     forceHidden: forceBtn.style.display,
     forceTarget: forceBtn.dataset.target,
+    clearLockHidden: clearLockBtn.style.display,
+    clearLockTarget: clearLockBtn.dataset.target,
     readHealthCalls,
   }));
 })().catch((error) => {
@@ -314,6 +320,8 @@ def test_apply_updates_does_not_poll_after_agent_noop():
     assert result["waitCalls"] == []
     assert result["inFlight"] is False
     assert any(toast["message"] == "Update already applied." for toast in result["showToasts"])
+    assert result["clearLockHidden"] == "none"
+    assert result["clearLockTarget"] == ""
 
 
 def test_apply_updates_does_not_poll_after_up_to_date_response():
@@ -366,6 +374,15 @@ def test_force_update_routes_transaction_contention_through_shared_error_state()
     assert "if(!res.ok)" in body
     assert "_showUpdateError(target,res);" in body
     assert "transaction_in_progress" in src[src.index("function _showUpdateError"):start]
+
+
+def test_update_error_resets_both_recovery_controls_before_classifying_failure():
+    src = _ui_js()
+    start = src.index("function _showUpdateError")
+    end = src.index("async function applyClearUpdateLock", start)
+    body = src[start:end]
+    assert "[forceBtn,clearLockBtn].forEach" in body
+    assert "button.dataset.target=''" in body
 
 
 def test_apply_updates_wait_for_all_targets_before_reload():

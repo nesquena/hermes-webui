@@ -198,6 +198,18 @@ def test_agent_update_zero_exit_with_unhealthy_critical_import_fails_closed(monk
     assert result["source_before"] == "changed"
 
 
+def test_agent_update_accepts_changed_official_critical_module_list(monkeypatch, tmp_path):
+    target = _target(tmp_path)
+    after = dict(target.identity)
+    after["critical_modules"] = tuple(target.identity["critical_modules"]) + ("new_agent_module",)
+    after["healthy"] = True
+    _install_test_runner(monkeypatch)
+    monkeypatch.setattr(agent_update, "_resolve_target", lambda: target)
+    monkeypatch.setattr(agent_update, "_identity", lambda root, exe, env=None: after)
+    result = agent_update.apply_agent_update()
+    assert result["outcome"] == "updated"
+
+
 def test_agent_force_uses_official_transaction_without_force_flags(monkeypatch, tmp_path):
     target = _target(tmp_path)
     calls = _install_test_runner(monkeypatch, calls=[])
@@ -300,7 +312,7 @@ def test_process_runner_terminates_descendants_and_bounds_output(tmp_path):
     assert len(result.stderr.encode()) <= agent_update._MAX_OUTPUT
 
 
-def test_process_runner_without_optional_tree_observer_uses_pipe_quiescence(monkeypatch, tmp_path):
+def test_process_runner_without_optional_tree_observer_fails_closed(monkeypatch, tmp_path):
     monkeypatch.setattr(agent_update, "_load_process_observer", lambda: None)
     result, timed_out, quiescent = _REAL_RUN_TRANSACTION(
         [sys.executable, "-c", "print('done')"],
@@ -311,7 +323,7 @@ def test_process_runner_without_optional_tree_observer_uses_pipe_quiescence(monk
     )
     assert timed_out is False
     assert result.returncode == 0
-    assert quiescent is True
+    assert quiescent is False
 
 
 def test_rolling_diagnostics_are_byte_bounded():

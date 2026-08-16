@@ -19,7 +19,7 @@ from pathlib import Path
 _MAX_DETAIL = 600
 _MAX_OUTPUT = 64 * 1024
 _PROBE = r'''
-import importlib, importlib.util, json, pathlib, site, sys
+import importlib, importlib.util, json, pathlib, site, subprocess, sys
 root = pathlib.Path(__ROOT__).resolve()
 venv = root / "venv"
 cfg_path = venv / "pyvenv.cfg"
@@ -36,7 +36,24 @@ try:
     critical = tuple(owner._UPDATE_CRITICAL_MODULES)
     if not critical or any(not isinstance(x, str) or not x for x in critical):
         raise ValueError("malformed official critical module list")
-    critical_validation = owner._validate_critical_modules_import(root)
+    validator_run = {"called": False, "returncodes": [], "error": ""}
+    real_run = subprocess.run
+    def observe_validator_run(*args, **kwargs):
+        validator_run["called"] = True
+        try:
+            result = real_run(*args, **kwargs)
+        except BaseException as exc:
+            validator_run["error"] = str(exc)
+            raise
+        validator_run["returncodes"].append(getattr(result, "returncode", None))
+        return result
+    subprocess.run = observe_validator_run
+    try:
+        critical_validation = owner._validate_critical_modules_import(root)
+    finally:
+        subprocess.run = real_run
+    if not validator_run["called"] or validator_run["error"] or any(code != 0 for code in validator_run["returncodes"]):
+        critical_validation = (False, None, validator_run["error"] or "official critical-module validator was unavailable")
 except Exception as exc:
     critical_error = str(exc)
 deps = {}
@@ -351,7 +368,7 @@ def _run_transaction(args, root, env, timeout=1800, helper=None):
     except subprocess.TimeoutExpired: pass
     for t in threads: t.join(timeout=2)
     _record_descendants(observer, proc, known_descendants)
-    descendants_quiescent = True if observer is None else _live_owned_descendants(observer, known_descendants) == []
+    descendants_quiescent = observer is not None and _live_owned_descendants(observer, known_descendants) == []
     if observer is not None and not descendants_quiescent:
         _stop_owned_descendants(observer, known_descendants)
         descendants_quiescent = _live_owned_descendants(observer, known_descendants) == []
@@ -395,7 +412,7 @@ def apply_agent_update(*, force: bool = False) -> dict:
     try: after_id = _identity(root, interpreter, env=target.environment)
     except Exception as exc: return AgentUpdateResult("failed", 0, f"Post-update Agent health probe failed: {_bounded(exc)}", quiescent=quiescent).as_dict()
     after = AgentInstallHealth(after_id, (root / ".update-incomplete").exists(), (root / ".lazy-refresh-incomplete").exists(), tuple(after_id["critical_modules"]), bool(after_id.get("healthy")))
-    if after.incomplete or not after.healthy or after.critical_modules != pre.critical_modules:
+    if after.incomplete or not after.healthy:
         return AgentUpdateResult(
             "incomplete",
             exit_code=0,
