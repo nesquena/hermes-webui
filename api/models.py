@@ -27,7 +27,10 @@ except ImportError:  # pragma: no cover
     _msvcrt = None
 
 import api.config as _cfg
-from api.compression_anchor import is_context_compression_marker
+from api.compression_anchor import (
+    compaction_summary_segment,
+    is_context_compression_marker,
+)
 from api.config import (
     SESSION_DIR, SESSION_INDEX_FILE, SESSIONS, SESSIONS_MAX,
     LOCK, STREAMS, STREAMS_LOCK, DEFAULT_WORKSPACE, DEFAULT_MODEL, PROJECTS_FILE, HOME,
@@ -9654,11 +9657,14 @@ def _context_messages_include_compression_marker(messages: list) -> bool:
     for message in messages or []:
         if not is_context_compression_marker(message):
             continue
-        text = _message_content_text(message).lower().lstrip()
+        text = _message_content_text(message)
         # Only prompt compaction summaries require fail-closed state.db replay.
         # Other compression-adjacent summaries, such as Session Arc Summary,
         # keep the existing prefix-delta behavior so fresh follow-ups survive.
-        if text.startswith("[context compaction") or text.startswith("context compaction"):
+        # compaction_summary_segment recognizes both the plain marker and the
+        # agent's merged [PRIOR CONTEXT …] envelope (trust was already
+        # established by is_context_compression_marker above).
+        if compaction_summary_segment(text) is not None:
             return True
     return False
 

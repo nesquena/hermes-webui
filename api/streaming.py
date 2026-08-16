@@ -57,7 +57,11 @@ from api.helpers import (
     scrub_internal_replay_fields,
     _redact_text,
 )
-from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
+from api.compression_anchor import (
+    compaction_summary_segment,
+    is_context_compression_marker,
+    visible_messages_for_anchor,
+)
 from api.compression_recovery import stamp_compression_exhausted_recovery
 from api.metering import meter
 from api.run_journal import RunJournalWriter
@@ -6427,7 +6431,11 @@ def _auto_snapshot_summary_from_compression(display_messages, context_messages):
     raw = raw_marker_text(context_messages) or raw_marker_text(display_messages)
     if not isinstance(raw, str):
         return None
-    text = raw.strip()
+    # Merged [PRIOR CONTEXT …] markers embed the compaction summary after the
+    # END-OF-PRIOR-CONTEXT delimiter; isolate that segment first so the strip
+    # logic below never treats the replayed prior-context turns as summary.
+    segment = compaction_summary_segment(raw)
+    text = (segment if segment is not None else raw).strip()
     marker_match = re.match(r"^\[CONTEXT COMPACTION[^\]]*\]\s*", text, re.IGNORECASE)
     if marker_match:
         text = text[marker_match.end():].lstrip()

@@ -53,6 +53,40 @@ def _content_has_part_type(content, part_types):
     )
 
 
+def compaction_summary_segment(text):
+    """Return the compaction-summary portion of a marker text, or None.
+
+    Plain markers (text starting with ``[CONTEXT COMPACTION``) are returned
+    unchanged.  The agent's merge-into-tail compaction instead wraps its
+    summary in a ``[PRIOR CONTEXT — for reference only…]`` envelope where the
+    ``[CONTEXT COMPACTION — REFERENCE ONLY]`` marker only appears *after* the
+    ``[END OF PRIOR CONTEXT — COMPACTION SUMMARY BELOW]`` delimiter; for that
+    shape, return the segment starting at the inner compaction marker.
+
+    Returns None when the text carries no compaction marker in either shape,
+    so callers can use this as a detector as well as an extractor.  Trust
+    (the ``_compressed_summary`` stamp) is intentionally NOT checked here —
+    callers own that decision.
+    """
+    stripped = str(text or "").lstrip()
+    low = stripped.lower()
+    if low.startswith("[context compaction") or low.startswith("context compaction"):
+        return stripped
+    if not low.startswith("[prior context"):
+        return None
+    delim_idx = low.find("[end of prior context")
+    if delim_idx == -1:
+        return None
+    after = stripped[delim_idx:]
+    close = after.find("]")
+    if close == -1:
+        return None
+    segment = after[close + 1:].lstrip()
+    if segment.lower().startswith("[context compaction"):
+        return segment
+    return None
+
+
 def is_context_compression_marker(message):
     """Return true for synthetic compression/reference cards, not user turns."""
     if not isinstance(message, dict):
@@ -65,12 +99,20 @@ def is_context_compression_marker(message):
         part_types={"text", "input_text", "output_text"},
     ).lower().lstrip()
     synthetic_unbracketed_marker = bool(message.get("_compressed_summary"))
-    return (
+    if (
         text.startswith("[context compaction")
         or (synthetic_unbracketed_marker and text.startswith("context compaction"))
         or text.startswith("[your active task list was preserved across context compression]")
         or text.startswith("[session arc summary")
-    )
+    ):
+        return True
+    # Agent merge-into-tail compaction: the compaction marker is embedded
+    # after the [PRIOR CONTEXT …] envelope. Only the synthetic
+    # ``_compressed_summary`` stamp (never forgeable by pasted user text)
+    # makes this shape a marker — fail closed otherwise.
+    if synthetic_unbracketed_marker and compaction_summary_segment(text) is not None:
+        return True
+    return False
 
 
 def _is_context_compression_marker(message):

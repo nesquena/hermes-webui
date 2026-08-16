@@ -1076,8 +1076,13 @@ def test_context_anchor_reference_uses_session_summary_fallback():
 
     assert "sessionCompressionSummary" in src
     assert "const sessionCompressionSummary" in src
-    assert "referenceText=referenceMessage" in src
-    assert ": sessionCompressionSummary" in src
+    # The reference text falls back to the session-level summary when no
+    # compaction marker message exists in the transcript; with a marker
+    # message present, the merged-envelope summary segment is preferred over
+    # the raw content ([PRIOR CONTEXT ...] wrappers never render whole).
+    assert "if(!referenceMessage) return sessionCompressionSummary;" in src
+    assert "const segment=_compactionSummarySegment(raw);" in src
+    assert "return segment!==null?segment:raw;" in src
     assert "_shouldShowSettledCompressionReference(referenceText)" in src
     assert "!_isContextCompactionText(referenceText)" in src
 

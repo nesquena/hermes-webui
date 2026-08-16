@@ -156,7 +156,7 @@ def _is_user_request(msg: dict) -> bool:
     if not text:
         return False
     # Compaction handoffs are reference blocks, not user demands.
-    if text.startswith("[CONTEXT COMPACTION"):
+    if text.startswith("[CONTEXT COMPACTION") or text.startswith("[PRIOR CONTEXT"):
         return False
     return True
 
