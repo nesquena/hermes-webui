@@ -128,12 +128,41 @@ globalThis._isSkillUpdate = () => false;
 globalThis._snippetLooksLikeDiff = () => false;
 globalThis._colorDiffLines = esc;
 globalThis._worklogDetailsExpandedDefault = () => false;
+globalThis._worklogDetailHashKey = value => {
+  const s = String(value || '');
+  let hash = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    hash ^= s.charCodeAt(i);
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+  return hash.toString(36);
+};
+globalThis._toolDisclosureIdentity = tc => {
+  if (!tc) return '';
+  const tid = tc.tid || tc.id || tc.tool_call_id || tc.tool_use_id || tc.call_id || '';
+  if (tid) return `id:${tid}`;
+  const stable = [
+    tc.assistant_msg_idx !== undefined ? `a:${tc.assistant_msg_idx}` : '',
+    tc.name || 'tool',
+  ].join('\x1f');
+  return stable.trim() ? `derived:${_worklogDetailHashKey(stable)}` : '';
+};
+globalThis.S = {toolCalls: [], messages: []};
+eval(extractFunc('_toolCallByDisclosureKey'));
+eval(extractFunc('_toggleToolDiff'));
 globalThis.document = {
-  createElement: () => ({
-    dataset: {},
-    setAttribute() {},
-    removeAttribute() {},
-  }),
+  createElement: () => {
+    const attrs = {};
+    return {
+      dataset: {},
+      _attrs: attrs,
+      setAttribute(k, v) { attrs[k] = String(v); },
+      getAttribute(k) { return Object.prototype.hasOwnProperty.call(attrs, k) ? attrs[k] : null; },
+      removeAttribute(k) { delete attrs[k]; },
+      querySelector() { return null; },
+      classList: { add() {}, remove() {}, contains() { return false; } },
+    };
+  },
 };
 eval(extractFunc('buildToolCard'));
 eval(extractFunc('_transparentToolDetailHtml'));
@@ -144,6 +173,22 @@ process.stdin.on('end', () => {
   const payload = JSON.parse(input);
   if (payload.mode === 'transparent-detail') {
     process.stdout.write(JSON.stringify({html: _transparentToolDetailHtml(payload.tc, 'Completed')}));
+    return;
+  }
+  if (payload.mode === 'recover') {
+    // Simulate an HTML-cache round-trip: build the card, then drop the
+    // _tcData expando exactly like innerHTML restore does.
+    const row = buildToolCard(payload.tc);
+    try { delete row._tcData; } catch (_) {}
+    const key = row.getAttribute && row.getAttribute('data-tool-disclosure-key');
+    // After a session switch the in-memory canonical tool calls survive.
+    S.toolCalls = [payload.tc];
+    const recovered = _toolCallByDisclosureKey(key);
+    process.stdout.write(JSON.stringify({
+      disclosureKey: key,
+      recoveredSnippet: recovered && recovered.snippet ? recovered.snippet.length : 0,
+      recoveredName: recovered && recovered.name,
+    }));
     return;
   }
   const row = buildToolCard(payload.tc);
@@ -301,3 +346,27 @@ def test_transparent_tool_detail_bounds_opaque_args_and_output(tool_driver_path:
 
     assert len(html) < 20_000
     assert html.count("opaque payload abbreviated for display") == 2
+
+
+def test_restore_recovers_full_snippet_via_disclosure_key(tool_driver_path: str) -> None:
+    """After an HTML-cache round-trip (_tcData expando dropped), Show more
+    must still recover the FULL snippet for tool cards that lack anchor-scene
+    attrs (worklog / ordered-transparent rows) — via the durable
+    data-tool-disclosure-key → S.toolCalls lookup."""
+    assert NODE is not None
+    full = "D" * 200_000
+    tc = {"name": "terminal", "tid": "call_abc123", "done": True, "snippet": full}
+
+    result = subprocess.run(
+        [NODE, tool_driver_path, str(UI_JS_PATH)],
+        input=json.dumps({"tc": tc, "mode": "recover"}),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+
+    assert data["disclosureKey"] == "id:call_abc123"
+    assert data["recoveredName"] == "terminal"
+    assert data["recoveredSnippet"] == len(full)

@@ -18602,14 +18602,20 @@ function _toggleToolDiff(btn){
   const expanded=btn.textContent===btn.dataset.moreLabel;
   const row=btn.closest('.tool-card-row');
   // Expando properties are lost when the session HTML cache restores innerHTML.
-  // Recover from the canonical anchor scene in that case rather than falling
-  // back to the already-truncated preview.
+  // Recover the canonical tool call in order: (1) the live _tcData expando,
+  // (2) the anchor scene (data-anchor-row-id stamped on anchor-scene rows),
+  // (3) S.toolCalls by the durable data-tool-disclosure-key every
+  // buildToolCard row carries — ordered-transparent and worklog tool cards
+  // have no anchor attrs, so (2) alone would still fall back to the truncated
+  // preview for those.
   const canonicalTool=row&&row._tcData
     ? row._tcData
     : (row&&typeof _transparentToolCallFromRowDataset==='function'
       ? _transparentToolCallFromRowDataset(row)
       : null);
-  const canonicalSnippet=canonicalTool&&canonicalTool.snippet;
+  const disclosureKey=row&&row.getAttribute?row.getAttribute('data-tool-disclosure-key'):'';
+  const recovered=canonicalTool||_toolCallByDisclosureKey(disclosureKey);
+  const canonicalSnippet=recovered&&recovered.snippet;
   const raw=expanded
     ? (canonicalSnippet==null?btn.dataset.short:String(canonicalSnippet))
     : btn.dataset.short;
@@ -18621,6 +18627,27 @@ function _toggleToolDiff(btn){
     pre.textContent=raw;
   }
   btn.textContent=expanded?btn.dataset.lessLabel:btn.dataset.moreLabel;
+}
+function _toolCallByDisclosureKey(key){
+  // Fall back to the in-memory canonical tool calls for rows whose expando
+  // AND anchor attrs were dropped by an HTML-cache round-trip (worklog /
+  // ordered-transparent tool cards). S.toolCalls survives session switches
+  // (it is rehydrated from the backend), so a disclosure-key match recovers
+  // the full snippet instead of the truncated data-short preview.
+  if(!key) return null;
+  const candidates=[];
+  if(typeof S!=='undefined'&&S&&Array.isArray(S.toolCalls)) candidates.push(...S.toolCalls);
+  if(typeof S!=='undefined'&&S&&Array.isArray(S.messages)){
+    for(const m of S.messages){
+      if(m&&Array.isArray(m.tool_calls)) candidates.push(...m.tool_calls);
+    }
+  }
+  for(const tc of candidates){
+    try{
+      if(tc&&typeof _toolDisclosureIdentity==='function'&&_toolDisclosureIdentity(tc)===key) return tc;
+    }catch(_){}
+  }
+  return null;
 }
 
 function _syncToolCallGroupSummary(group){
