@@ -44,10 +44,10 @@ const LOCALES = {
     image_pasted: 'Image pasted: ',
     text_pasted: 'Pasted text attached as ',
     // messages.js
-      edit_message: 'Edit message',
-      edit_fork_title: 'Edit an earlier message',
-      edit_fork_message: (n) => `You edited an earlier prompt. ${n} message(s) come after it. Forking keeps the original conversation intact.`,
-      edit_fork_confirm: 'Fork from here',
+    edit_message: 'Edit message',
+    edit_fork_title: 'Edit an earlier message',
+    edit_fork_message: (n) => `You edited an earlier prompt. ${n} message(s) come after it. Forking keeps the original conversation intact.`,
+    edit_fork_confirm: 'Fork from here',
     regenerate: 'Regenerate response',
     copy: 'Copy',
     copied: 'Copied!',
@@ -3588,7 +3588,7 @@ const LOCALES = {
     // messages.js
     edit_message: 'メッセージを編集',
     edit_fork_title: '以前のメッセージを編集',
-    edit_fork_message: (n) => `以前のプロンプトを編集しました。後続のメッセージは${n}件です。分岐すると元の会話はそのまま残ります。`,
+    edit_fork_message: (n) => `You edited an earlier prompt. ${n} message(s) come after it. Forking keeps the original conversation intact.`,
     edit_fork_confirm: 'ここから分岐',
     regenerate: '応答を再生成',
     copy: 'コピー',

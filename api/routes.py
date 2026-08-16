@@ -15522,14 +15522,14 @@ def handle_post(handler, parsed) -> bool:
             SESSIONS.move_to_end(branch.session_id)
             _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
 
-        # Persist only if there are messages (matches new_session pattern)
-        if forked_messages:
-            branch.save()
-            publish_session_list_changed(
-                "session_branch",
-                profile=getattr(branch, "profile", None),
-                session_id=getattr(branch, "session_id", None),
-            )
+        # Persist empty branches too: editing the first prompt creates an empty
+        # child before the replacement prompt is sent.
+        branch.save()
+        publish_session_list_changed(
+            "session_branch",
+            profile=getattr(branch, "profile", None),
+            session_id=getattr(branch, "session_id", None),
+        )
 
         return j(handler, {
             "session_id": branch.session_id,
