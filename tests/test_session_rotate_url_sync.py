@@ -31,6 +31,6 @@ def test_stream_completion_syncs_rotated_session_id_to_tab_state():
     settled_block = MESSAGES_JS[settled_pos : settled_pos + 1800]
 
     for block in (completion_block, settled_block):
-        assert "localStorage.setItem('hermes-webui-session',S.session.session_id);" in block
+        assert "_rememberActiveSession(S.session.session_id);" in block
         assert "_setActiveSessionUrl(S.session.session_id)" in block
         assert "typeof _setActiveSessionUrl==='function'" in block

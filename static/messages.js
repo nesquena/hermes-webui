@@ -1854,7 +1854,7 @@ async function send(){
     // re-inject the dead id via _sessionIdFromLocation(), then reset to the
     // empty state instead of pushing a confusing error bubble into the chat.
     if(e&&e.status===404){
-      try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
+      try{ _forgetActiveSession(); }catch(_){ }
       try{
         if(typeof _appRootPath==='function') history.replaceState(null,'',_appRootPath());
         else history.replaceState(null,'',window.location.pathname.replace(/\/session\/[^/]+/,'')+window.location.search);
@@ -6334,7 +6334,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
           if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();
           if(S.session&&S.session.session_id){
-            try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
+            try{_rememberActiveSession(S.session.session_id);}catch(_){}
             if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
           }
           const _markerOnlyAssistantError=_replaceMarkerOnlyAssistantWithStreamError(S.messages);
@@ -6775,7 +6775,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             _attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);
             S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
             if(S.session&&S.session.session_id){
-              try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
+              try{_rememberActiveSession(S.session.session_id);}catch(_){}
               if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
             }
           } else {
@@ -7179,7 +7179,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(typeof _oldestIdx!=='undefined') _oldestIdx=session._messages_offset||0;
         if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(session);
         if(S.session&&S.session.session_id){
-          try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
+          try{_rememberActiveSession(S.session.session_id);}catch(_){}
           if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
         }
         const _stagedMessages=_carryForwardEphemeralTurnFields(_currentMessages, _nextMsgs3018);
