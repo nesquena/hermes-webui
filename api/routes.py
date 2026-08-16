@@ -15209,6 +15209,26 @@ def handle_post(handler, parsed) -> bool:
         except Exception:
             logger.debug("Failed to resolve profile for deleted session %s", sid, exc_info=True)
             event_profile = None
+        # Interrupt any live async delegations owned by this session BEFORE
+        # deleting records, so the delegations can stop cooperatively. The
+        # session_id is passed as all three selectors (OR semantics) because
+        # delegate_task captures HERMES_UI_SESSION_ID as origin_ui_session_id
+        # and also populates session_key/parent_session_id with the same value.
+        interrupted_count = 0
+        try:
+            from tools.async_delegation import interrupt_for_session
+
+            interrupted_count = interrupt_for_session(
+                session_key=sid,
+                origin_ui_session_id=sid,
+                parent_session_id=sid,
+                reason="session_deleted",
+            )
+        except Exception:
+            # Deletion must never be blocked by a delegation interrupt failure.
+            logger.debug(
+                "Failed to interrupt async delegations for deleted session %s", sid, exc_info=True
+            )
         # Serialize with recovery, but bound contention so a browser timeout
         # cannot be followed by a delayed server-side delete.
         session_lock = _get_session_agent_lock(sid)
@@ -15303,6 +15323,7 @@ def handle_post(handler, parsed) -> bool:
             {
                 "ok": True,
                 "state_db_cleanup_failed": state_db_cleanup_failed,
+                "interrupted": interrupted_count,
                 **worktree_retained,
             },
         )
