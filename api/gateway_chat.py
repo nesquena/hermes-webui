@@ -732,7 +732,16 @@ def stop_gateway_run(run_id: str) -> bool:
         return False
 
 
-def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, model_provider, terminal_error):
+def _settle_gateway_terminal_error(
+    session_id,
+    stream_id,
+    workspace,
+    model,
+    model_provider,
+    terminal_error,
+    *,
+    error_classification_override=None,
+):
     from api.streaming import (
         _classify_provider_error,
         _materialize_pending_user_turn_before_error,
@@ -747,6 +756,11 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
         if not _stream_writeback_is_current(session, stream_id):
             return None
         error_classification = _classify_provider_error(terminal_error)
+        if isinstance(error_classification_override, dict):
+            error_classification = {
+                **error_classification,
+                **error_classification_override,
+            }
         error_payload = _provider_error_payload(
             terminal_error,
             error_classification["type"],
@@ -796,6 +810,62 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
         if terminal_session_persisted:
             error_payload["terminal_session_persisted_session_id"] = session.session_id
         return error_payload
+
+
+def _settle_gateway_empty_response(
+    session_id,
+    stream_id,
+    workspace,
+    model,
+    model_provider,
+):
+    return _settle_gateway_terminal_error(
+        session_id,
+        stream_id,
+        workspace,
+        model,
+        model_provider,
+        "Gateway returned no assistant message for this turn.",
+        error_classification_override={
+            "label": "Gateway returned no response",
+            "type": "gateway_empty_response",
+            "hint": "Check that Hermes Gateway API server is running and reachable.",
+        },
+    )
+
+
+def _emit_gateway_empty_response_events(put_gateway_event, error_payload, session_id):
+    """Close an empty Gateway turn with a replayable terminal session payload."""
+    put_gateway_event("apperror", error_payload)
+    try:
+        from api.streaming import _session_payload_with_full_messages
+
+        s = get_session(session_id)
+        gateway_session_payload = redact_session_data(
+            _session_payload_with_full_messages(s, tool_calls=[])
+        )
+    except Exception:
+        gateway_fallback_payload = (
+            error_payload.get("session") if isinstance(error_payload, dict) else None
+        )
+        if gateway_fallback_payload is not None:
+            put_gateway_event("done", {"session": gateway_fallback_payload, "usage": {}})
+    else:
+        if gateway_session_payload is not None:
+            put_gateway_event("done", {"session": gateway_session_payload, "usage": {}})
+    put_gateway_event("stream_end", {"session_id": session_id})
+
+
+def _gateway_event_blocks_empty_retry(event: str) -> bool:
+    return str(event or "") in {
+        "approval",
+        "clarify",
+        "tool_call",
+        "tool_result",
+        "tool_progress",
+        "tool",
+        "tool_complete",
+    }
 
 
 def _stream_writeback_is_current(session: Any, stream_id: str) -> bool:
@@ -855,6 +925,16 @@ def _run_gateway_chat_streaming(
         # path (the teardown finally below never runs when we early-return here).
         clear_session_writeback_owner_if_owned(session_id, stream_id)
         return
+    if goal_related:
+        from api.goal_continuations import mark_goal_continuation_worker_started
+
+        if not mark_goal_continuation_worker_started(session_id, stream_id):
+            with STREAMS_LOCK:
+                STREAMS.pop(stream_id, None)
+                STREAM_GOAL_RELATED.pop(stream_id, None)
+            unregister_stream_owner(stream_id)
+            clear_session_writeback_owner_if_owned(session_id, stream_id)
+            return
     register_active_run(
         stream_id,
         session_id=session_id,
@@ -879,8 +959,12 @@ def _run_gateway_chat_streaming(
 
     success_writeback_committed = False
     runs_api_pending_marked = True
+    non_retryable_activity_seen = False
 
     def put_gateway_event(event, data):
+        nonlocal non_retryable_activity_seen
+        if _gateway_event_blocks_empty_retry(event):
+            non_retryable_activity_seen = True
         if cancel_event.is_set() and not success_writeback_committed and event not in ("cancel", "error", "apperror"):
             return
         if event == "apperror" and isinstance(data, dict):
@@ -1181,12 +1265,44 @@ def _run_gateway_chat_streaming(
             put_gateway_event("apperror", error_payload)
             return
         if not assistant_text:
-            put_gateway_event("apperror", {
-                "label": "Gateway returned no response",
-                "type": "gateway_empty_response",
-                "message": "Gateway returned no assistant message for this turn.",
-                "hint": "Check that Hermes Gateway API server is running and reachable.",
-            })
+            _gateway_turn_source = getattr(s, "pending_user_source", None) or "webui"
+            if _gateway_turn_source == "goal_continuation":
+                from api.goal_continuations import (
+                    requeue_goal_continuation_after_no_response,
+                )
+
+                _gateway_retry_had_activity = bool(
+                    non_retryable_activity_seen
+                    or STREAM_PARTIAL_TEXT.get(stream_id)
+                    or STREAM_REASONING_TEXT.get(stream_id)
+                    or STREAM_LIVE_TOOL_CALLS.get(stream_id)
+                )
+                if requeue_goal_continuation_after_no_response(
+                    session_id,
+                    stream_id,
+                    had_activity=_gateway_retry_had_activity,
+                    cancellation_check=cancel_event.is_set,
+                ):
+                    _emit_gateway_goal_retry_scheduled(
+                        session_id,
+                        stream_id,
+                        put_gateway_event,
+                    )
+                    return
+            error_payload = _settle_gateway_empty_response(
+                session_id,
+                stream_id,
+                workspace,
+                model,
+                model_provider,
+            )
+            if error_payload is None:
+                return
+            _emit_gateway_empty_response_events(
+                put_gateway_event,
+                error_payload,
+                session_id,
+            )
             return
         with _get_session_agent_lock(session_id):
             s = get_session(session_id)
@@ -1307,7 +1423,16 @@ def _run_gateway_chat_streaming(
             from api.profiles import get_hermes_home_for_profile
 
             profile_home = get_hermes_home_for_profile(getattr(s, "profile", None))
-            if goal_related and has_active_goal(session_id, profile_home=profile_home):
+            gateway_goal_is_active = (
+                has_active_goal(session_id, profile_home=profile_home)
+                if goal_related
+                else False
+            )
+            if goal_related and not gateway_goal_is_active:
+                from api.goal_continuations import complete_goal_continuation
+
+                complete_goal_continuation(session_id, stream_id)
+            if goal_related and gateway_goal_is_active:
                 put_gateway_event("goal", {
                     "session_id": session_id,
                     "state": "evaluating",
@@ -1335,6 +1460,36 @@ def _run_gateway_chat_streaming(
                 if decision.get("should_continue"):
                     continuation_prompt = str(decision.get("continuation_prompt") or "").strip()
                     if continuation_prompt:
+                        from api.goal_continuations import schedule_goal_continuation
+                        from api.goals import goal_state_snapshot
+
+                        goal_state = goal_state_snapshot(session_id, profile_home=profile_home)
+                        try:
+                            continuation_record = schedule_goal_continuation(
+                                session_id,
+                                continuation_prompt,
+                                source_stream_id=stream_id,
+                                profile_home=profile_home,
+                                goal_turns_used=int(getattr(goal_state, "turns_used", 0) or 0),
+                            )
+                        except Exception as schedule_exc:
+                            logger.exception(
+                                "Failed to persist Gateway goal continuation for session %s",
+                                session_id,
+                            )
+                            put_gateway_event("goal", {
+                                "session_id": session_id,
+                                "state": "needs_attention",
+                                "message": "Goal continuation could not be persisted.",
+                                "message_key": "goal_continuation_schedule_failed",
+                            })
+                            put_gateway_event("apperror", {
+                                "type": "goal_continuation_schedule_failed",
+                                "label": "Goal continuation stopped",
+                                "message": str(schedule_exc)[:500],
+                            })
+                            put_gateway_event("stream_end", {"session_id": session_id})
+                            return
                         PENDING_GOAL_CONTINUATION.add(session_id)
                         put_gateway_event("goal_continue", {
                             "session_id": session_id,
@@ -1344,7 +1499,13 @@ def _run_gateway_chat_streaming(
                             "message_key": decision.get("message_key") or "goal_continuing",
                             "message_args": decision.get("message_args") or [],
                             "decision": decision,
+                            "server_scheduled": True,
+                            "continuation_id": continuation_record.get("continuation_id"),
                         })
+                elif goal_related:
+                    from api.goal_continuations import complete_goal_continuation
+
+                    complete_goal_continuation(session_id, stream_id)
         except Exception as goal_exc:
             logger.debug(
                 "Gateway goal continuation hook failed for session %s: %s",
@@ -1406,3 +1567,72 @@ def _run_gateway_chat_streaming(
         # the process lifetime (compare-and-clear: only clears if still owned by
         # this stream, mirroring the local streaming teardown).
         clear_session_writeback_owner_if_owned(session_id, stream_id)
+        try:
+            from api.goal_continuations import (
+                fail_goal_continuation,
+                wake_goal_continuation_worker,
+            )
+
+            fail_goal_continuation(
+                session_id,
+                stream_id,
+                "gateway goal continuation ended without a durable judge settlement",
+            )
+            wake_goal_continuation_worker()
+        except Exception:
+            logger.debug("Gateway goal-continuation teardown wake failed", exc_info=True)
+
+
+def _emit_gateway_goal_retry_scheduled(session_id, stream_id, put_gateway_event):
+    """Settle a silent goal turn while preserving the historical success path order."""
+    from api.goal_continuations import get_goal_continuation
+    from api.streaming import (
+        _materialize_pending_user_turn_before_error,
+        _session_payload_with_full_messages,
+    )
+
+    with _get_session_agent_lock(session_id):
+        session = get_session(session_id)
+        if not _stream_writeback_is_current(session, stream_id):
+            return False
+        retry_record = get_goal_continuation(session_id) or {}
+        retry_attempts = int(retry_record.get("attempts") or 0)
+        retry_max = int(retry_record.get("max_attempts") or 0)
+        retry_message = (
+            "The provider returned no content before any activity. "
+            f"Retrying this goal continuation automatically "
+            f"({retry_attempts + 1}/{retry_max})."
+        )
+        _materialize_pending_user_turn_before_error(session)
+        session.active_stream_id = None
+        session.pending_user_message = None
+        session.pending_attachments = []
+        session.pending_started_at = None
+        session.pending_user_source = None
+        session.messages.append({
+            "role": "assistant",
+            "content": retry_message,
+            "timestamp": int(time.time()),
+            "_goal_retry": True,
+        })
+        session.save()
+        retry_session = redact_session_data(
+            _session_payload_with_full_messages(session, tool_calls=[])
+        )
+    put_gateway_event("warning", {
+        "type": "goal_retry_scheduled",
+        "message": retry_message,
+        "retry_scheduled": True,
+        "attempt": retry_attempts + 1,
+        "max_attempts": retry_max,
+    })
+    put_gateway_event("done", {
+        "session": retry_session,
+        "goal_retry_scheduled": True,
+    })
+    put_gateway_event("stream_end", {
+        "session_id": session_id,
+        "stream_id": stream_id,
+        "goal_retry_scheduled": True,
+    })
+    return True
