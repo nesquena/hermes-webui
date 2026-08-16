@@ -4598,6 +4598,16 @@ body.resizing .sidebar{transition:none!important;}
 .auto-compression-divider-done .auto-compression-divider-label{
   color:var(--muted);
 }
+.tail-reduced-banner{
+  padding:3px 0 4px;
+  color:var(--muted);
+  opacity:.58;
+  font-size:calc(var(--message-body-font-size) * .86);
+  font-weight:400;
+  line-height:1.2;
+  user-select:none;
+  pointer-events:none;
+}
 .tool-card-compress-reference{
   background:rgba(124,185,255,.04);
   border-color:rgba(124,185,255,.18);
