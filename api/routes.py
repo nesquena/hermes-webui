@@ -9171,7 +9171,13 @@ def _display_coordinate_messages(session, state_db_messages) -> list:
 
 
 def _foreign_display_coordinate_summary(sid: str, profile=None):
-    """Return the display-coordinate summary for a foreign metadata poll."""
+    """Return the display-coordinate summary for a foreign metadata poll.
+
+    Foreign ``messages=0`` responses use the same merged count and timestamp
+    as message loads. This costs one sidecar load plus one state.db read,
+    capped at the existing 50,000-row backstop when no boundary prefix is
+    needed; failures return ``None`` so the caller keeps the legacy summary.
+    """
     try:
         session = get_session(sid, metadata_only=False)
         if not session:
