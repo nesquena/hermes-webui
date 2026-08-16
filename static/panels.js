@@ -8408,7 +8408,7 @@ function _showSettingsUnsavedBar(){
   bar.innerHTML = `<span style="color:var(--text)">${esc(t('settings_unsaved_changes'))}</span>`
     + '<span style="display:flex;gap:8px">'
     + `<button onclick="_discardSettings()" style="padding:5px 12px;border-radius:6px;border:1px solid var(--border2);background:rgba(255,255,255,.06);color:var(--muted);cursor:pointer;font-size:12px;font-weight:600">${esc(t('discard'))}</button>`
-    + `<button onclick="saveSettings(true)" style="padding:5px 12px;border-radius:6px;border:none;background:var(--accent);color:#fff;cursor:pointer;font-size:12px;font-weight:600">${esc(t('save'))}</button>`
+    + `<button onclick="saveSettings(true)" style="padding:5px 12px;border-radius:6px;border:none;background:var(--accent);color:var(--btn-primary-text);cursor:pointer;font-size:12px;font-weight:600">${esc(t('save'))}</button>`
     + '</span>';
   const body = document.querySelector('#mainSettings .settings-main') || document.querySelector('.settings-main');
   if(body) body.prepend(bar);
