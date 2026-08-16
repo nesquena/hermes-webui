@@ -6503,6 +6503,23 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(typeof clearCompressionUi==='function') clearCompressionUi();
       else window._compressionUi=null;
       if(typeof _setCompressionSessionLock==='function') _setCompressionSessionLock(null);
+      // Follow the rotation: compression replaces session A with continuation B
+      // and freezes A as a pre-compression archive. Until the tab moves to B,
+      // the address bar (and any reload/restore built from it) points at that
+      // archive -- where the active-session tail reduction deliberately refuses
+      // to prune, so the user sees the full pre-compression transcript and
+      // concludes compaction did nothing. The terminal 'done' handler already
+      // calls _setActiveSessionUrl, but that can be minutes away on a long turn
+      // and is lost entirely if the tab is reloaded or backgrounded first.
+      // Purely local: no fetch, no re-render. The transcript itself is handled
+      // by 'tail_reduced' (mid-turn) and by 'done' (settlement).
+      if(continuationSid&&continuationSid!==currentSid){
+        try{
+          S.session.session_id=continuationSid;
+          if(typeof _rememberActiveSession==='function') _rememberActiveSession(continuationSid);
+          if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(continuationSid,{replace:true});
+        }catch(_rotateErr){ }
+      }
       if(!S.busy&&typeof renderMessages==='function') renderMessages();
     });
 

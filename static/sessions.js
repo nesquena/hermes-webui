@@ -1970,6 +1970,15 @@ async function loadSession(sid){
   const continuationSid=(data.session&&data.session.continuation_session_id)||'';
   if(continuationSid&&continuationSid!==sid&&!opts.skipContinuationResolve){
     _loadingSessionId=null;
+    // Tell the user why the session swapped under them: the requested id is a
+    // frozen pre-compression archive and we are following it to the live
+    // continuation. Silent redirects read as data loss when the transcript
+    // that loads is shorter than the one that was bookmarked.
+    try{
+      if(typeof showToast==='function'){
+        showToast((typeof t==='function')?t('continuation_followed_toast'):'Conversation continued after compression',3000);
+      }
+    }catch(_toastErr){}
     return loadSession(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
   }
   S.session=data.session;
@@ -4292,7 +4301,7 @@ function _sessionUrlForSid(sid){
   }catch(_e){}
   return base.pathname+base.search+base.hash;
 }
-function _setActiveSessionUrl(sid){
+function _setActiveSessionUrl(sid,opts){
   if(typeof window==='undefined'||!window.history||!sid) return;
   const next=_sessionUrlForSid(sid);
   if(next && next!==(window.location.pathname+window.location.search+window.location.hash)){
@@ -4301,7 +4310,12 @@ function _setActiveSessionUrl(sid){
       const current=new URL(window.location.href);
       consumeLaunchAction=current.searchParams.getAll('action').includes('new-chat');
     }catch(_e){}
-    const method=consumeLaunchAction?'replaceState':'pushState';
+    // Callers that are *following* a session identity change (rather than
+    // navigating) pass {replace:true}: the superseded id must not become a
+    // Back-button destination. Compression rotation is the motivating case —
+    // the parent it replaces is a frozen pre-compression archive.
+    const forceReplace=!!(opts&&opts.replace);
+    const method=(consumeLaunchAction||forceReplace)?'replaceState':'pushState';
     window.history[method]({session_id:sid},'',next);
   }
 }
