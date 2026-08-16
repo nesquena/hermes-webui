@@ -643,7 +643,80 @@ $('btnSend').onclick=()=>{
   send();
 };
 $('mainChat')?.addEventListener('pointerdown', closeMobileWorkspacePanelFromChat);
-$('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInput').value='';$('fileInput').click();};
+let _attachChoiceOpen=false;
+function _shouldOfferCameraChoice(){
+  try{
+    return _isPhoneWidthViewport()
+      && matchMedia('(pointer:coarse)').matches
+      && !matchMedia('(any-pointer:fine)').matches;
+  }catch(_){return false;}
+}
+function _syncAttachChoiceSemantics(){
+  const attach=$('btnAttach');
+  if(!attach)return;
+  if(_shouldOfferCameraChoice())attach.setAttribute('aria-haspopup','menu');
+  else attach.removeAttribute('aria-haspopup');
+}
+function _setAttachChoiceOpen(open,restoreFocus){
+  const popup=$('attachChoicePopup');
+  const attach=$('btnAttach');
+  if(!popup||!attach)return;
+  _attachChoiceOpen=!!open;
+  popup.hidden=!_attachChoiceOpen;
+  popup.setAttribute('aria-hidden',String(!_attachChoiceOpen));
+  attach.setAttribute('aria-expanded',String(_attachChoiceOpen));
+  if(_attachChoiceOpen) popup.querySelector('[data-attach-choice]')?.focus();
+  else if(restoreFocus) attach.focus();
+  _syncAttachChoiceSemantics();
+}
+function _openAttachInput(input){
+  _setAttachChoiceOpen(false);
+  if(!input)return;
+  input.value='';
+  input.click();
+}
+function _cameraFileWithUniqueName(file,usedNames){
+  if(!file||!usedNames.has(file.name))return file;
+  const match=/^(.*?)(\.[^.]*)?$/.exec(file.name);
+  const stem=match?.[1]||file.name;
+  const ext=match?.[2]||'';
+  let index=1;
+  let name;
+  do{name=`${stem} (${index++})${ext}`;}while(usedNames.has(name));
+  return new File([file],name,{type:file.type,lastModified:file.lastModified});
+}
+function _handleCameraFiles(files){
+  const usedNames=new Set((S.pendingFiles||[]).map(file=>file.name));
+  const normalized=[];
+  for(const file of files||[]){
+    const normalizedFile=_cameraFileWithUniqueName(file,usedNames);
+    if(normalizedFile){normalized.push(normalizedFile);usedNames.add(normalizedFile.name);}
+  }
+  addFiles(normalized);
+}
+$('btnAttach').onclick=e=>{
+  if(e&&e.preventDefault)e.preventDefault();
+  if(_shouldOfferCameraChoice())_setAttachChoiceOpen(!_attachChoiceOpen);
+  else {$('fileInput').value='';$('fileInput').click();}
+};
+$('attachChoicePopup')?.addEventListener('click',e=>{
+  const choice=e.target.closest('[data-attach-choice]')?.dataset.attachChoice;
+  if(choice==='camera')_openAttachInput($('cameraFileInput'));
+  if(choice==='files')_openAttachInput($('fileInput'));
+});
+document.addEventListener('pointerdown',e=>{
+  if(_attachChoiceOpen&&!e.target.closest('#attachChoicePopup,#btnAttach'))_setAttachChoiceOpen(false);
+});
+function _handleAttachChoiceKeydown(e){
+  if(_attachChoiceOpen&&e.key==='Escape'){
+    e.preventDefault();
+    _setAttachChoiceOpen(false,true);
+    return true;
+  }
+  return false;
+}
+_syncAttachChoiceSemantics();
+window.addEventListener('resize',_syncAttachChoiceSemantics);
 
 // ── Voice input (Web Speech API + MediaRecorder fallback) ───────────────────
 function _micIsLocalhostOrLoopback(hostname){
@@ -2077,6 +2150,7 @@ function _currentSessionIsReusableEmptyChat(){
 }
 
 $('fileInput').onchange=e=>{addFiles(Array.from(e.target.files));e.target.value='';};
+$('cameraFileInput').onchange=e=>{_handleCameraFiles(Array.from(e.target.files));e.target.value='';};
 $('btnNewChat').onclick=async()=>{
   // If the current session has no messages AND nothing is in flight, just focus
   // the composer rather than creating another empty session that will clutter the
@@ -2430,6 +2504,7 @@ $('msg').addEventListener('keydown',e=>{
 });
 // B14: Cmd/Ctrl+K creates a new chat from anywhere
 document.addEventListener('keydown',async e=>{
+  if(_handleAttachChoiceKeydown(e))return;
   // Cmd/Ctrl+B toggles desktop sidebar collapse (VS Code convention).
   // Skip when typing in an input/textarea/contenteditable so text-edit
   // shortcuts (e.g. bold in some embedded editors) are never stolen.
