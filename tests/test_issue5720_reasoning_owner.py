@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.js_source_loader import node_validated_read_snippet
+from tests.js_source_loader import node_validated_read_options, node_validated_read_snippet
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -205,14 +205,22 @@ def test_later_deferred_anchor_paint_remains_hidden_in_final_answer_only_mode():
 # Build the Node scene using the shared validated-read snippet to avoid
 # hand-maintained divergence (issue #6972). The snippet defines
 # `readValidated(path, options?)` with per-attempt identity validation,
-# zero-byte reject, and optional tail-sentinel checking.
+# zero-byte reject, and tail-sentinel checking; every source is read with
+# the registered EOF tail enforced (extraction parity with the Python path).
 _NODE_SCENE = (
     node_validated_read_snippet()
+    + (
+        "\nconst uiSrc = readValidated(process.env.ISSUE5720_UI_JS, "
+        + node_validated_read_options(ROOT / "static" / "ui.js")
+        + ");\n"
+        "const messagesSrc = readValidated(process.env.ISSUE5720_MESSAGES_JS, "
+        + node_validated_read_options(ROOT / "static" / "messages.js")
+        + ");\n"
+        "const anchorsSrc = readValidated(process.env.ISSUE5720_ANCHORS_JS, "
+        + node_validated_read_options(ROOT / "static" / "assistant_turn_anchors.js")
+        + ");\n"
+    )
     + r"""
-const uiSrc = readValidated(process.env.ISSUE5720_UI_JS);
-const messagesSrc = readValidated(process.env.ISSUE5720_MESSAGES_JS);
-const anchorsSrc = readValidated(process.env.ISSUE5720_ANCHORS_JS);
-
 function extractFunc(src, name){
   const start = src.indexOf('function ' + name);
   if(start < 0){

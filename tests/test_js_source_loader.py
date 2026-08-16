@@ -17,9 +17,12 @@ from pathlib import Path
 import pytest
 
 from tests.js_source_loader import (
+    EXTRACTION_TAILS,
     MAX_READ_ATTEMPTS,
     SourceReadError,
+    node_validated_read_options,
     node_validated_read_snippet,
+    read_extraction_source,
     read_js_source,
 )
 
@@ -289,12 +292,19 @@ def test_read_js_source_require_tail_enforces_eof_sentinel(tmp_path):
         read_js_source(real, expected_tail=None, require_tail=True)
 
 
-def _run_node_read_script(tmp_path, node_body: str) -> str:
+def _run_node_read_script(tmp_path, node_body: str, read_call: str | None = None) -> str:
     """Run a Node script built on the shared snippet; return stdout or raise
-    with stderr on failure."""
+    with stderr on failure.
+
+    ``node_body`` is injected before the snippet (mock setup etc.).
+    ``read_call`` defaults to ``const src = readValidated(p);``; pass a
+    custom call (e.g. with extraction-tail options) to exercise it.
+    """
     node = shutil.which("node")
     if not node:
         pytest.skip("node is required for the Node-side snippet check")
+    if read_call is None:
+        read_call = "const src = readValidated(p);"
     script = (
         "const fs = require('fs');\n"
         f"const p = {str(tmp_path / 'ui.js')!r};\n"
@@ -302,8 +312,8 @@ def _run_node_read_script(tmp_path, node_body: str) -> str:
         + "\n"
         + node_validated_read_snippet()
         + "\ntry {\n"
-        "  const src = readValidated(p);\n"
-        "  console.log('RESULT:' + src);\n"
+        + read_call
+        + "\n  console.log('RESULT:' + src);\n"
         "} catch(e) {\n"
         "  console.log('EXPECTED_ERROR: ' + e.message);\n"
         "}\n"
@@ -344,14 +354,16 @@ def test_node_validated_read_snippet_rejects_partial_rewrite_observed_by_stat(tm
             "const realStat = fs.statSync;\n"
             "const realRead = fs.readFileSync;\n"
             "let statCalls = 0;\n"
-            "fs.statSync = function(path){\n"
+            "fs.statSync = function(path, opts){\n"
             "  statCalls++;\n"
             "  // Attempt 0 pre-read stat observes a 31-byte partial rewrite.\n"
-            "  if(statCalls === 1) return { size: 31, ino: 100, mtimeNs: 1 };\n"
+            "  // BigInt fields: the snippet reads with { bigint: true } and\n"
+            "  // requires BigInt size/mtimeNs (parity with the Python path).\n"
+            "  if(statCalls === 1) return { size: 31n, ino: 100n, mtimeNs: 1n };\n"
             "  // Attempt 0 post-read stat observes the full 41-byte file.\n"
-            "  if(statCalls === 2) return { size: " + str(full_len) + ", ino: 100, mtimeNs: 2 };\n"
+            "  if(statCalls === 2) return { size: " + str(full_len) + "n, ino: 100n, mtimeNs: 2n };\n"
             "  // Attempt 1: stable at full size.\n"
-            "  return realStat(path);\n"
+            "  return realStat(path, opts);\n"
             "};\n"
             "fs.readFileSync = function(path, enc){\n"
             "  const full = realRead(path, 'utf8');\n"
@@ -376,15 +388,106 @@ def test_node_validated_read_snippet_accepts_stable_different_size_between_attem
         (
             "const realStat = fs.statSync;\n"
             "let statCalls = 0;\n"
-            "fs.statSync = function(path){\n"
+            "fs.statSync = function(path, opts){\n"
             "  statCalls++;\n"
             "  // Attempt 0 pre-read stat observes the *old* 9-byte size.\n"
-            "  if(statCalls === 1) return { size: 9, ino: 100, mtimeNs: 1 };\n"
+            "  // BigInt fields: the snippet reads with { bigint: true } and\n"
+            "  // requires BigInt size/mtimeNs (parity with the Python path).\n"
+            "  if(statCalls === 1) return { size: 9n, ino: 100n, mtimeNs: 1n };\n"
             "  // Attempt 0 post-read stat (and attempt 1) observe the stable\n"
             "  // new size — the file was legitimately replaced.\n"
-            "  return realStat(path);\n"
+            "  return realStat(path, opts);\n"
             "};\n"
         ),
     )
     assert "RESULT:" in stdout, stdout
     assert stdout.split("RESULT:")[1] == new_full, stdout
+
+
+# --- Round-3 regressions (#7023 re-gate) ---
+#
+# 1. Extraction sources must enforce the registered EOF tail (Python and
+#    Node), and the tail registry itself must not drift from the real files.
+# 2. The Node snippet must use BigInt stats; a stat without mtimeNs (the
+#    old dead-code shape) must throw instead of passing silently.
+
+
+def test_extraction_tail_registry_matches_real_static_files():
+    """Every EXTRACTION_TAILS entry must be an exact suffix of the real
+    static file it names — a drift in a registered source's final line
+    fails loudly here instead of silently weakening the EOF sentinel.
+
+    Also proves each registered source can be read end-to-end through
+    ``read_extraction_source`` (the extraction entry point)."""
+    root = Path(__file__).resolve().parents[1]
+    assert EXTRACTION_TAILS, "tail registry must not be empty"
+    for name, tail in EXTRACTION_TAILS.items():
+        real = root / "static" / name
+        assert real.is_file(), f"registered extraction source missing: {real}"
+        text = real.read_text(encoding="utf-8")
+        assert text.endswith(tail), (
+            f"extraction tail for {name} drifted: {tail!r} is no longer a "
+            f"suffix of static/{name}; update EXTRACTION_TAILS in "
+            "tests/js_source_loader.py"
+        )
+        # The extraction path must succeed on the real file (tail enforced).
+        assert read_extraction_source(real) == text
+
+
+def test_read_extraction_source_rejects_stable_partial_rewrite(tmp_path):
+    """A *stable* partial rewrite — the file is smaller but consistent
+    between attempts, so size/identity checks pass — must still fail closed
+    via the registered EOF tail sentinel instead of reaching extraction."""
+    root = Path(__file__).resolve().parents[1]
+    real_ui = root / "static" / "ui.js"
+    partial = real_ui.read_bytes()[: real_ui.stat().st_size // 2]
+    target = tmp_path / "ui.js"
+    target.write_bytes(partial)
+
+    with pytest.raises(SourceReadError, match="EOF sentinel missing"):
+        read_extraction_source(target, retry_delay_seconds=0.001)
+
+
+def test_read_extraction_source_refuses_unregistered_source(tmp_path):
+    """A source without a registered tail must raise ValueError — a new
+    extraction source can never silently read without the sentinel."""
+    target = tmp_path / "mystery.js"
+    target.write_text("function x(){ return 1; }\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="no registered extraction tail"):
+        read_extraction_source(target)
+
+
+def test_node_validated_read_snippet_requires_registered_tail(tmp_path):
+    """Node parity for extraction: readValidated with the registry options
+    must reject a stable partial source (identity/size consistent, tail
+    missing) exactly like the Python path."""
+    full = "function loadSession(sid){\n  return rows;\n}\n"
+    (tmp_path / "ui.js").write_text(full[: len(full) // 2], encoding="utf-8")
+    stdout = _run_node_read_script(
+        tmp_path,
+        "",
+        read_call=(
+            "const src = readValidated(p, "
+            + node_validated_read_options(Path("static") / "ui.js")
+            + ");"
+        ),
+    )
+    assert "EXPECTED_ERROR: source read incomplete" in stdout, stdout
+
+
+def test_node_validated_read_snippet_throws_on_stat_without_bigint_fields(tmp_path):
+    """The Node mtimeNs check must never be dead code: a stat result without
+    BigInt fields (the old `fs.statSync(p)` shape, where mtimeNs is
+    undefined) throws instead of silently passing the identity check."""
+    full = "function loadSession(sid){ return rows; }\n"
+    (tmp_path / "ui.js").write_text(full, encoding="utf-8")
+    stdout = _run_node_read_script(
+        tmp_path,
+        (
+            "fs.statSync = function(path, opts){\n"
+            "  // Non-bigint stat: mtimeNs absent -> the snippet must throw.\n"
+            "  return { size: " + str(len(full.encode("utf-8"))) + ", ino: 100 };\n"
+            "};\n"
+        ),
+    )
+    assert "EXPECTED_ERROR: source stat missing BigInt" in stdout, stdout

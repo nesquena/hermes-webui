@@ -7,7 +7,7 @@ import textwrap
 
 import pytest
 
-from tests.js_source_loader import node_validated_read_snippet
+from tests.js_source_loader import node_validated_read_options, node_validated_read_snippet
 
 ROOT = Path(__file__).parent.parent
 EXTENSION_SETTINGS_JS = ROOT / "static" / "extension_settings.js"
@@ -64,7 +64,7 @@ def test_extension_settings_runtime_normalizes_persists_resets_and_clears():
           }}
         }};
 {_VALIDATED_READ}
-        const settingsSrc = readValidated({str(EXTENSION_SETTINGS_JS)!r});
+        const settingsSrc = readValidated({str(EXTENSION_SETTINGS_JS)!r}, {node_validated_read_options(EXTENSION_SETTINGS_JS)});
         eval(settingsSrc);
 
         const settings = window.HermesExtensionSettings.settingsForExtension('demo.ext');
@@ -186,7 +186,7 @@ def test_hermes_ext_register_runtime_identity_and_reload_lifecycle():
           }}
         }};
         {_VALIDATED_READ}
-        const settingsSrc = readValidated({str(EXTENSION_SETTINGS_JS)!r});
+        const settingsSrc = readValidated({str(EXTENSION_SETTINGS_JS)!r}, {node_validated_read_options(EXTENSION_SETTINGS_JS)});
         eval(settingsSrc);
 
         const forgedMetadata = {{

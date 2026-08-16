@@ -9,17 +9,22 @@ import textwrap
 
 import pytest
 
-from tests.js_source_loader import node_validated_read_snippet, read_js_source
+from tests.js_source_loader import (
+    node_validated_read_options,
+    node_validated_read_snippet,
+    read_extraction_source,
+    read_js_source,
+)
 
 
 ROOT = Path(__file__).parent.parent
 STATIC = ROOT / "static"
 EXTENSION_SETTINGS_JS = ROOT / "static" / "extension_settings.js"
-MESSAGES_JS = read_js_source(ROOT / "static" / "messages.js")
+MESSAGES_JS = read_extraction_source(ROOT / "static" / "messages.js")
 INDEX_HTML = read_js_source(STATIC / "index.html")
-UI_JS = read_js_source(STATIC / "ui.js")
+UI_JS = read_extraction_source(STATIC / "ui.js")
 SUPPORT_SCRIPTS = [
-    read_js_source(STATIC / name)
+    read_extraction_source(STATIC / name)
     for name in ("i18n.js", "icons.js", "assistant_turn_anchors.js")
 ]
 _NODE_VALIDATED_READ = node_validated_read_snippet()
@@ -249,7 +254,7 @@ def test_registered_extension_receives_bounded_turn_lifecycle_events():
           error(...args) {{ loggedErrors.push(args.map(String).join(' ')); }},
         }};
         {_NODE_VALIDATED_READ}
-        const extensionSettingsSrc = readValidated({str(EXTENSION_SETTINGS_JS)!r});
+        const extensionSettingsSrc = readValidated({str(EXTENSION_SETTINGS_JS)!r}, {node_validated_read_options(EXTENSION_SETTINGS_JS)});
         eval(extensionSettingsSrc);
 
         const alpha = window.hermesExt.register('alpha.ext');
@@ -412,7 +417,7 @@ def _run_lifecycle_scenario(browser, kind: str) -> list[dict]:
         )
         for script in SUPPORT_SCRIPTS:
             page.add_script_tag(content=script)
-        page.add_script_tag(content=read_js_source(EXTENSION_SETTINGS_JS))
+        page.add_script_tag(content=read_extraction_source(EXTENSION_SETTINGS_JS))
         page.add_script_tag(content=UI_JS)
         page.add_script_tag(content=MESSAGES_JS)
         page.evaluate(_STABILIZE_UNRELATED_UI)
