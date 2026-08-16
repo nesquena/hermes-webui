@@ -2,7 +2,6 @@
 
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -298,6 +297,8 @@ def test_critical_module_list_is_required_before_update_launch(monkeypatch, tmp_
 
 
 def test_process_runner_terminates_descendants_and_bounds_output(tmp_path):
+    if agent_update._load_process_observer() is None:
+        pytest.skip("optional process-tree observer is not installed")
     script = "import subprocess,sys,time; subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']); print('x'*200000, flush=True); print('y'*200000, file=sys.stderr, flush=True); time.sleep(30)"
     result, timed_out, quiescent = _REAL_RUN_TRANSACTION(
         [sys.executable, "-c", script],
