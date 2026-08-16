@@ -9231,7 +9231,9 @@ def _foreign_display_coordinate_summary(sid: str, profile=None):
     needed; failures return ``None`` so the caller keeps the legacy summary.
     """
     try:
-        session = get_session(sid, metadata_only=False)
+        # Bypass the Session LRU so the cache key and merged rows observe an
+        # atomic sidecar replacement even when its count stays unchanged.
+        session = Session.load(sid)
         if not session:
             return None
         state_summary = get_state_db_session_summary(sid, profile=profile)
