@@ -201,6 +201,30 @@ def _unwrap_profile_home_to_base(home: Path) -> Path:
 _PROTECTED_ENV_KEYS = frozenset({'HERMES_WEBUI_ISOLATED_PROFILE'})
 
 
+# #7048: explicit, origin-aware allowlist of root/parent .env keys that MAY fall
+# back into a named profile's agent runtime env. The root .env is the
+# deployment/operator layer ($HERMES_HOME/.env in the Docker two-container
+# setup); only the operator/runtime settings listed here are intended to be
+# shared across profiles (e.g. SEARXNG_URL, FIRECRAWL_*). Everything else —
+# server auth secrets, provider credentials, arbitrary *_API_KEY — stays at the
+# root and is NEVER blanket-inherited, preserving the named-profile isolation
+# invariant. A profile that defines any of these keys itself (even empty) still
+# wins over the root fallback.
+_ROOT_ENV_SHARE_ALLOWLIST = frozenset({
+    'SEARXNG_URL',
+})
+_ROOT_ENV_SHARE_ALLOWLIST_PREFIXES = (
+    'FIRECRAWL_',
+)
+
+
+def _root_env_key_allowlisted(key: str) -> bool:
+    """Return True when *key* is an explicitly allowlisted root .env setting."""
+    return key in _ROOT_ENV_SHARE_ALLOWLIST or key.startswith(
+        _ROOT_ENV_SHARE_ALLOWLIST_PREFIXES
+    )
+
+
 def _isolated_profile_opt_in() -> bool:
     """Return True only when isolated single-profile mode is EXPLICITLY enabled.
     Isolated mode is an intentional multi-user deployment posture (each user is
@@ -863,6 +887,54 @@ def _stringify_env_value(value) -> str:
     return str(value)
 
 
+def _parse_dotenv_text(text: str) -> dict[str, str]:
+    """Parse dotenv text into a key/value dict (canonical module parser).
+
+    Handles blank lines, ``#`` comments, the ``export KEY=value`` prefix
+    (supported copy-pasted shell-rc syntax — a naive ``split('=', 1)`` would
+    misparse the key as ``export KEY``), and single/double-quoted values.
+
+    Empty values are preserved on purpose: a profile that defines a key as
+    empty must be able to *suppress* root/process inheritance for that key
+    (#7048 precedence: profile-defined key, including empty, wins).
+    """
+    values: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith('#'):
+            continue
+        # Strip an optional 'export ' prefix (supported dotenv syntax).
+        if line.startswith('export '):
+            line = line[len('export '):].lstrip()
+        if '=' not in line:
+            continue
+        k, v = line.split('=', 1)
+        k = k.strip()
+        v = v.strip().strip('"').strip("'")
+        if k:
+            values[k] = v
+    return values
+
+
+def _root_env_path_for(home: Path) -> Optional[Path]:
+    """Return the root/parent .env a named profile may inherit from, else None.
+
+    Only a named profile home at ``*/profiles/<name>`` has a root layer
+    (``<base>/.env`` — the ``$HERMES_HOME/.env`` of the Docker two-container
+    deployment). The default/root profile and any other layout have no root
+    fallback: their own ``.env`` is already the top layer (#7048).
+    """
+    try:
+        home = Path(home).expanduser()
+        if home.name != 'default' and home.parent.name == 'profiles':
+            root_candidate = home.parent.parent / '.env'
+            if root_candidate.exists():
+                return root_candidate
+    except Exception:
+        pass
+    return None
+
+
 def get_profile_runtime_env(home: Path) -> dict[str, str]:
     """Return env vars needed to run an agent turn for a profile home.
 
@@ -872,6 +944,14 @@ def get_profile_runtime_env(home: Path) -> dict[str, str]:
     environment variables (matching ``hermes -p <profile>``), so streaming must
     apply the selected profile's terminal config and ``.env`` for the duration
     of that run.
+
+    Precedence for the resulting env dict (#7048):
+      1. profile-defined key — from the profile's ``.env``, INCLUDING an empty
+         value (empty deliberately suppresses inheritance below);
+      2. existing launcher/process value — keys already present in the server
+         process env are never overridden by the root fallback;
+      3. root/parent ``.env`` fallback — only explicitly allowlisted
+         operator/runtime settings (never credentials or server auth secrets).
     """
     home = Path(home).expanduser()
     env: dict[str, str] = {}
@@ -895,22 +975,39 @@ def get_profile_runtime_env(home: Path) -> dict[str, str]:
     env_path = home / '.env'
     if env_path.exists():
         try:
-            for line in env_path.read_text(encoding='utf-8').splitlines():
-                line = line.strip()
-                if line and not line.startswith('#') and '=' in line:
-                    k, v = line.split('=', 1)
-                    k = k.strip()
-                    v = v.strip().strip('"').strip("'")
-                    if k and v:
-                        # #4589: never let a profile's own .env override an
-                        # operator/deployment posture (e.g. disable isolation via
-                        # HERMES_WEBUI_ISOLATED_PROFILE=0) on the runtime-env path
-                        # the same way _reload_dotenv() protects the live env.
-                        if k in _PROTECTED_ENV_KEYS:
-                            continue
-                        env[k] = v
+            for k, v in _parse_dotenv_text(env_path.read_text(encoding='utf-8')).items():
+                # #4589: never let a profile's own .env override an
+                # operator/deployment posture (e.g. disable isolation via
+                # HERMES_WEBUI_ISOLATED_PROFILE=0) on the runtime-env path
+                # the same way _reload_dotenv() protects the live env.
+                if k in _PROTECTED_ENV_KEYS:
+                    continue
+                env[k] = v
         except Exception:
             logger.debug("Failed to read runtime env from %s", env_path)
+
+    # #7048: root/parent .env fallback — explicit allowlist only, so a named
+    # profile inherits intended operator/runtime settings (SEARXNG_URL,
+    # FIRECRAWL_*) without blanket-inheriting credentials or server auth
+    # secrets. Profile-defined keys (including empty) and existing
+    # launcher/process values always win over this fallback.
+    root_env_path = _root_env_path_for(home)
+    if root_env_path is not None and root_env_path != env_path and root_env_path.exists():
+        try:
+            for k, v in _parse_dotenv_text(root_env_path.read_text(encoding='utf-8')).items():
+                if not v:
+                    continue  # an empty root value carries no fallback
+                if not _root_env_key_allowlisted(k):
+                    continue  # never blanket-inherit credentials/auth secrets
+                if k in _PROTECTED_ENV_KEYS:
+                    continue  # defense-in-depth: posture keys stay operator-only
+                if k in env:
+                    continue  # profile-defined key (incl. empty) suppresses
+                if k in os.environ:
+                    continue  # launcher/process value wins over root fallback
+                env[k] = v
+        except Exception:
+            logger.debug("Failed to read root env from %s", root_env_path)
 
     return env
 
