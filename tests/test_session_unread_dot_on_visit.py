@@ -260,6 +260,7 @@ function _markSessionCompletionUnread(sid, count) {{
 }}
 const document = {{ visibilityState: 'visible', hasFocus: () => true }};
 let _loadingSessionId = null;
+let _messagesOwnerSid = null;
 const _allSessionsScope = null;
 const _sessionListSourceById = new Map();
 {get_counts}
@@ -348,6 +349,7 @@ let _msgLimitMax = _MSG_LIMIT_MAX;
 let _pendingCarryForwardSnapshot = null;
 let _loadingSessionId = 'open';
 let _loadSessionGeneration = 0;
+let _messagesOwnerSid = null;
 const window = {{}};
 // Tab starts VISIBLE+FOCUSED: the load begins while the user is watching.
 let _visibility = 'visible';
