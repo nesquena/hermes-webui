@@ -45,10 +45,26 @@ def test_top_level_conversation_titles_use_separate_native_open_controls():
     assert "if(isActive) title.setAttribute('aria-current','page');" in render
     assert "_installSessionOpenControl(title,s);" in render
 
-    title_append = render.index("titleRow.appendChild(title);")
-    tag_append = render.index("titleRow.appendChild(chip);")
+    title_append = render.index("titleGroup.appendChild(title);")
+    tag_append = render.index("titleGroup.appendChild(chip);")
     assert title_append < tag_append
     assert "title.appendChild(chip);" not in render
+
+
+def test_title_and_tag_controls_share_a_constrained_layout_group():
+    render = _function_source("renderSessionListFromCache")
+
+    group_create = render.index("const titleGroup=document.createElement('div');")
+    group_class = render.index("titleGroup.className='session-title-group';")
+    title_append = render.index("titleGroup.appendChild(title);")
+    tag_block_start = render.index("// Keep tag/filter controls outside")
+    tag_block_end = render.index("// Project color dot:", tag_block_start)
+    tag_block = render[tag_block_start:tag_block_end]
+    tag_append = render.index("titleGroup.appendChild(chip);", tag_block_start, tag_block_end)
+    row_append = render.index("titleRow.appendChild(titleGroup);")
+
+    assert group_create < group_class < title_append < tag_append < row_append
+    assert "titleRow.appendChild(chip);" not in tag_block
 
 
 def test_focus_identity_wraps_the_destructive_list_rebuild():
@@ -187,3 +203,101 @@ def test_keyboard_activation_and_focus_restore_in_browser():
     assert kept == {"sid": "session-a", "restored": True, "activeSid": "session-a"}
     assert hidden == {"sid": "session-a", "restored": False, "activeSid": None}
     assert removed == {"sid": "session-a", "restored": False, "activeSid": None}
+
+
+def test_tagged_titles_and_focus_ring_fit_narrow_sidebar_in_browser():
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:  # pragma: no cover - dependency missing path
+        pytest.skip("playwright is unavailable; run the sidebar layout browser test")
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        page = browser.new_page(viewport={"width": 420, "height": 240})
+        page.set_content(
+            """
+            <!doctype html>
+            <html class="dark">
+              <body>
+                <div class="probe">
+                  <div class="session-item active" data-sid="session-a">
+                    <div class="session-text">
+                      <div class="session-title-row">
+                        <div class="session-title-group">
+                          <button type="button" class="session-title session-open-control" data-sid="session-a">
+                            Visible conversation title
+                          </button>
+                          <span class="session-tag">#alpha</span>
+                          <span class="session-tag">#hyphenated-long-tag</span>
+                          <span class="session-tag">#gamma</span>
+                          <span class="session-tag">#delta</span>
+                        </div>
+                        <span class="session-time">now</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </body>
+            </html>
+            """
+        )
+        page.add_style_tag(path=str(ROOT / "static" / "style.css"))
+        page.add_style_tag(content="body{margin:0}.probe{margin:8px}")
+
+        page.keyboard.press("Tab")
+        control = page.locator(".session-open-control")
+        assert control.evaluate("el => el.matches(':focus-visible')") is True
+        page.wait_for_timeout(200)
+
+        metrics = []
+        for width in (260, 300):
+            page.locator(".probe").evaluate("(el, width) => { el.style.width = width + 'px'; }", width)
+            metrics.append(
+                page.locator(".session-item").evaluate(
+                    """
+                    row => {
+                      const titleRow = row.querySelector('.session-title-row');
+                      const group = row.querySelector('.session-title-group');
+                      const title = row.querySelector('.session-open-control');
+                      const tags = Array.from(row.querySelectorAll('.session-tag'));
+                      const rowStyle = getComputedStyle(row);
+                      const titleStyle = getComputedStyle(title);
+                      const groupRect = group.getBoundingClientRect();
+                      const rowRect = titleRow.getBoundingClientRect();
+                      return {
+                        titleWidth: title.getBoundingClientRect().width,
+                        rowClientWidth: titleRow.clientWidth,
+                        rowScrollWidth: titleRow.scrollWidth,
+                        groupInsideRow:
+                          groupRect.left >= rowRect.left - 1 &&
+                          groupRect.right <= rowRect.right + 1,
+                        tagsSingleLine: tags.every(tag => {
+                          const style = getComputedStyle(tag);
+                          return style.whiteSpace === 'nowrap' &&
+                            style.overflowX === 'hidden' &&
+                            style.textOverflow === 'ellipsis';
+                        }),
+                        tagsFitRowHeight: tags.every(tag =>
+                          tag.getBoundingClientRect().height <= rowRect.height + 1
+                        ),
+                        rowBoxShadow: rowStyle.boxShadow,
+                        buttonOutlineStyle: titleStyle.outlineStyle,
+                      };
+                    }
+                    """
+                )
+            )
+        browser.close()
+
+    for result in metrics:
+        assert result["titleWidth"] >= 36
+        assert result["rowScrollWidth"] <= result["rowClientWidth"] + 1
+        assert result["groupInsideRow"] is True
+        assert result["tagsSingleLine"] is True
+        assert result["tagsFitRowHeight"] is True
+        assert "inset" in result["rowBoxShadow"]
+        assert re.search(r"\b2px\b", result["rowBoxShadow"])
+        assert result["buttonOutlineStyle"] == "none"

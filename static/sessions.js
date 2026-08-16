@@ -8214,8 +8214,11 @@ function renderSessionListFromCache(){
     const hasAttentionState=isStreaming||hasUnread||Boolean(attention);
     ts.className='session-time'+(hasAttentionState?' is-hidden':'');
     ts.textContent=hasAttentionState?'':_formatRelativeSessionTime(tsMs);
-    titleRow.appendChild(title);
-    // Keep tag/filter controls outside the conversation-open button.
+    const titleGroup=document.createElement('div');
+    titleGroup.className='session-title-group';
+    titleGroup.appendChild(title);
+    // Keep tag/filter controls outside the conversation-open button while one
+    // constrained flex group preserves a visible title on narrow sidebars.
     for(const tag of tags){
       const chip=document.createElement('span');
       chip.className='session-tag';
@@ -8227,8 +8230,9 @@ function renderSessionListFromCache(){
         const searchBox=$('sessionSearch');
         if(searchBox){searchBox.value=tag;filterSessions();}
       };
-      titleRow.appendChild(chip);
+      titleGroup.appendChild(chip);
     }
+    titleRow.appendChild(titleGroup);
     // Project color dot: placed BETWEEN title and timestamp, not inside the
     // title span. Inside the title span it would be clipped by the ellipsis
     // truncation, becoming invisible exactly when the title is long enough

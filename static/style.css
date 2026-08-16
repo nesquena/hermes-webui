@@ -1654,9 +1654,11 @@
   .session-item.streaming .session-title-row{color:var(--text);}
   .session-text{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;overflow:hidden;}
   .session-title-row{display:flex;align-items:center;gap:6px;min-width:0;}
-  .session-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);user-select:none;border:0;background:transparent;padding:0;margin:0;text-align:left;font:inherit;line-height:inherit;}
+  .session-title-group{display:flex;align-items:center;gap:6px;flex:1 1 auto;min-width:0;max-width:100%;overflow:hidden;}
+  .session-title{flex:1 1 auto;min-width:6ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);user-select:none;border:0;background:transparent;padding:0;margin:0;text-align:left;font:inherit;line-height:inherit;}
   .session-open-control{cursor:pointer;}
-  .session-open-control:focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px;border-radius:4px;}
+  .session-open-control:focus-visible{outline:none;}
+  .session-item:has(.session-open-control:focus-visible){box-shadow:inset 0 0 0 2px var(--focus-ring);}
   .session-search-hit{border-radius:4px;background:var(--accent-bg);color:var(--accent-text);box-decoration-break:clone;-webkit-box-decoration-break:clone;padding:0 .08em;}
   .session-search-preview{font-size:11px;line-height:1.35;color:var(--muted);overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow-wrap:anywhere;opacity:.9;}
   .session-search-hit-preview{background:var(--accent-bg);color:var(--accent-text);}
@@ -5709,7 +5711,7 @@ main.main > #mainPlugin{display:none;}
 .session-tree-badge{display:inline-flex;align-items:center;justify-content:center;min-width:16px;height:16px;font-size:9px;font-weight:700;padding:0 4px;border-radius:8px;background:rgba(99,179,237,.2);color:#63b3ed;margin-left:auto;flex-shrink:0;user-select:none;}
 
 /* ── Session tags ── */
-.session-tag{display:inline-block;font-size:9px;font-weight:600;padding:1px 5px;margin-left:4px;border-radius:3px;background:rgba(99,179,237,.2);color:#63b3ed;cursor:pointer;vertical-align:middle;}
+.session-tag{display:inline-block;flex:0 1 auto;min-width:0;max-width:10ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:9px;font-weight:600;padding:1px 5px;margin-left:0;border-radius:3px;background:rgba(99,179,237,.2);color:#63b3ed;cursor:pointer;vertical-align:middle;}
 .session-tag:hover{background:rgba(99,179,237,.35);}
 
 /* ── File rename input ── */
