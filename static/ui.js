@@ -5272,6 +5272,12 @@ let _lastReasoningFetchKey=null;
 // profile switch that resets the cache and refetches the same default model but
 // a different agent.reasoning_effort) — #4650 review.
 let _reasoningFetchSeq=0;
+// Per-session generation token for effort MUTATIONS. Two rapid selections for
+// the SAME session both pass the session-ID fence; without ordering, the older
+// request settling last would overwrite the newer chip/session value and show a
+// misleading confirmation toast (Greptile P1 on #6629). Each click bumps its
+// session's generation and the callbacks only apply while still the newest.
+let _reasoningMutationSeqBySession={};
 
 function fetchReasoningChip(keyOverride){
   // Set the cache key OPTIMISTICALLY before the request so rapid routine syncs
@@ -5413,13 +5419,23 @@ document.addEventListener('click',function(e){
       // request may settle after navigation, when applying its value or toast
       // would misrepresent the newly visible conversation.
       const requestedSessionId=(session&&session.session_id)||null;
+      // Same-session ordering fence (Greptile P1): two rapid selections for one
+      // session may settle out of order; only the NEWEST dispatch for this
+      // session may apply its result or toast. '~none' scopes the profile-wide
+      // (session-less) mutations under the same rule.
+      const seqKey=requestedSessionId||'~none';
+      const seq=(_reasoningMutationSeqBySession[seqKey]||0)+1;
+      _reasoningMutationSeqBySession[seqKey]=seq;
+      const isCurrentMutation=function(){
+        const currentSessionId=(S&&S.session&&S.session.session_id)||null;
+        return currentSessionId===requestedSessionId&&_reasoningMutationSeqBySession[seqKey]===seq;
+      };
       const request=requestedSessionId
         ?api('/api/session/update',{method:'POST',body:JSON.stringify({session_id:requestedSessionId,reasoning_effort:effort})})
         :api('/api/reasoning',{method:'POST',body:JSON.stringify(Object.assign({effort:effort},_reasoningEffortContext()))});
       request
         .then(function(st){
-          const currentSessionId=(S&&S.session&&S.session.session_id)||null;
-          if(currentSessionId!==requestedSessionId) return;
+          if(!isCurrentMutation()) return;
           if(session) session.reasoning_effort=effort||null;
           const display=effort||'Auto';
           if(!effort) fetchReasoningChip();
@@ -5427,8 +5443,7 @@ document.addEventListener('click',function(e){
           showToast('🧠 Reasoning effort set to '+display);
         })
         .catch(function(){
-          const currentSessionId=(S&&S.session&&S.session.session_id)||null;
-          if(currentSessionId!==requestedSessionId) return;
+          if(!isCurrentMutation()) return;
           showToast('🧠 Failed to set effort');
         });
       closeReasoningDropdown();

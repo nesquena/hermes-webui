@@ -9362,6 +9362,10 @@ def get_gateway_caps(base_url: str, api_key: str = "") -> dict:
         "approval_events": False,
         "run_approval_response": False,
         "approval_identity_v1": False,
+        # Advertised reasoning-effort ladder (features.reasoning_efforts).
+        # None = the gateway predates the advertisement; callers must assume
+        # the legacy six-level model_options contract (no 'max'/'ultra').
+        "reasoning_efforts": None,
         "capabilities_reachable": False,
         "probe_error": None,
         "fetched_at": 0.0,
@@ -9380,6 +9384,13 @@ def get_gateway_caps(base_url: str, api_key: str = "") -> dict:
         caps["approval_events"] = bool(features.get("approval_events"))
         caps["run_approval_response"] = bool(features.get("run_approval_response"))
         caps["approval_identity_v1"] = bool(features.get("approval_identity_v1"))
+        raw_efforts = features.get("reasoning_efforts")
+        if isinstance(raw_efforts, (list, tuple)):
+            caps["reasoning_efforts"] = [
+                str(level).strip().lower()
+                for level in raw_efforts
+                if isinstance(level, str) and str(level).strip()
+            ]
     except urllib.error.HTTPError as exc:
         caps["capabilities_reachable"] = True
         caps["probe_error"] = f"{type(exc).__name__}: {exc}"

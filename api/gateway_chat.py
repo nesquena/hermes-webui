@@ -394,6 +394,68 @@ def _auto_approve_gateway_run(
     )
 
 
+# Effort ladder every runs-API gateway can carry inside ``model_options``.
+# The installed API server's ``_request_reasoning_config`` parser accepts only
+# this six-level set; a level outside it (WebUI 'max'/'ultra') is DROPPED by the
+# receiver and parsed as a bare ``{"enabled": True}`` — losing the session's
+# choice. Newer gateways may advertise a wider ladder through
+# ``/v1/capabilities`` ``features.reasoning_efforts``.
+_GATEWAY_LEGACY_MODEL_OPTIONS_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
+
+
+def _gateway_run_model_options(effort, base_url="", api_key=""):
+    """Serialize the effective session effort under the receiver's model_options contract.
+
+    The installed Hermes Agent API server constructs ``AIAgent.reasoning_config``
+    exclusively from ``body.model_options`` (``_request_agent_overrides`` →
+    ``_request_reasoning_config``); a top-level ``reasoning_effort`` field is
+    ignored on ``/v1/runs``. Returns the ``model_options`` dict to send, or
+    None when no explicit reasoning should be requested (gateway resolves its
+    own profile/per-model default).
+
+    Capability/version handling for supra-legacy levels ('max'/'ultra'): send
+    them verbatim only when the receiving gateway advertises them via
+    ``features.reasoning_efforts``; otherwise degrade down the WebUI ladder to
+    the closest lower level the receiver's parser can carry — never escalate,
+    and never let the receiver silently fall back to the profile default.
+    """
+    effort = str(effort or "").strip().lower()
+    if not effort:
+        return None
+    if effort == "none":
+        return {"reasoning": {"enabled": False}, "reasoning_effort": "none"}
+    wire_effort = effort
+    if effort not in _GATEWAY_LEGACY_MODEL_OPTIONS_EFFORTS:
+        advertised = None
+        try:
+            from api.config import get_gateway_caps
+
+            advertised = get_gateway_caps(base_url, api_key).get("reasoning_efforts")
+        except Exception:
+            advertised = None
+        supported = advertised if advertised else list(_GATEWAY_LEGACY_MODEL_OPTIONS_EFFORTS)
+        if effort not in supported:
+            try:
+                from api.config import VALID_REASONING_EFFORTS
+
+                ladder = [str(level) for level in VALID_REASONING_EFFORTS]
+            except Exception:
+                ladder = []
+            wire_effort = None
+            if effort in ladder:
+                idx = ladder.index(effort)
+                for level in reversed(ladder[:idx]):  # strictly lower, highest first
+                    if level in supported:
+                        wire_effort = level
+                        break
+    if not wire_effort:
+        # No representable lower level: request reasoning-on and let the
+        # receiver pick its default effort — still better than dropping the
+        # override entirely (which could resolve to reasoning-off).
+        return {"reasoning": {"enabled": True}}
+    return {"reasoning": {"enabled": True, "effort": wire_effort}, "reasoning_effort": wire_effort}
+
+
 def gateway_chat_config_status(config_data=None, environ: dict[str, str] | None = None) -> dict:
     """Return redacted Gateway-backed chat configuration status."""
     mode = webui_chat_backend_mode(config_data, environ)
@@ -1056,9 +1118,23 @@ def _run_gateway_chat_streaming(
             if model_provider:
                 body_extras["provider"] = model_provider
             if reasoning_effort is not None:
+                # Kept for forward/older-gateway compatibility, but the
+                # installed runs handler ignores top-level reasoning_effort…
                 body_extras["reasoning_effort"] = reasoning_effort
+            # …so the effective session value MUST also ride in
+            # body.model_options, the only field the installed Agent API
+            # authority reads when constructing AIAgent.reasoning_config
+            # (nesquena re-gate 2026-08-13). Same contract for service_tier:
+            # _request_service_tier() reads model_options, not the top level.
+            _run_model_options = _gateway_run_model_options(
+                reasoning_effort, base_url=base_url, api_key=api_key
+            )
             if _gw_overrides.get("service_tier"):
                 body_extras["service_tier"] = _gw_overrides["service_tier"]
+                _run_model_options = dict(_run_model_options or {})
+                _run_model_options["service_tier"] = _gw_overrides["service_tier"]
+            if _run_model_options:
+                body_extras["model_options"] = _run_model_options
             try:
                 final_text, usage = _run_gateway_runs_api_streaming(
                     session_id, msg_text, model, workspace, stream_id,
