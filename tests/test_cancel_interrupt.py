@@ -1897,6 +1897,10 @@ class TestCancelInterrupt:
                 # Second save (active_stream_id clear): no publish, just snapshot
                 # durable state so the oracle can assert B never landed durably.
                 _save_snapshots.append(copy.deepcopy(ws.messages))
+                assert _save_call_count[0] == 2, (
+                    "_finalize_cancelled_turn saved a third time — exact-count "
+                    "oracle broken"
+                )
 
         ws = Mock()
         ws.session_id = session_id
@@ -1929,6 +1933,9 @@ class TestCancelInterrupt:
         # generation 2.
         assert _current_notice_generation(stream_id) == 2
         assert _STREAM_FALLBACK_NOTICES[stream_id]["message"] == "notice B"
+        # Capture the IDENTITY of the exact generation-2 B dict — retirement
+        # must preserve THIS object, not a same-content replacement.
+        b_obj = _STREAM_FALLBACK_NOTICES[stream_id]
 
         # Let save finish
         save_can_finish.set()
@@ -1937,7 +1944,14 @@ class TestCancelInterrupt:
         # The worker's finalize path calls save() at least once for turn
         # persistence and then again to clear active_stream_id.  Both calls
         # must have happened; B must have been published EXACTLY once.
-        assert len(_save_snapshots) >= 1, "no saves captured — oracle empty"
+        # EXACT save count: _finalize_cancelled_turn saves once for turn
+        # persistence and exactly once more to clear active_stream_id — assert
+        # the precise count, not a lower bound (a silent third save would
+        # invalidate every snapshot-based durable claim below).
+        assert len(_save_snapshots) == 2, (
+            f"expected exactly 2 saves in _finalize_cancelled_turn, got "
+            f"{len(_save_snapshots)}"
+        )
         assert _published_once[0] is True, (
             "B was never published — the first save did not run the publish step"
         )
@@ -1951,17 +1965,25 @@ class TestCancelInterrupt:
         # Durable authority: EVERY saved snapshot must carry notice A, not B.
         # The first snapshot was taken before B was published (A only).
         # Subsequent snapshots were taken after B was published but must NOT
-        # reflect it, since the worker never re-stamped.
+        # reflect it, since the worker never re-stamped.  In addition to
+        # "B never appears", require exactly one A stamp per snapshot so a
+        # regression that dropped the stamp entirely (empty oracle) cannot
+        # pass silently.
         for snapshot_idx, snap in enumerate(_save_snapshots):
             stamped = [
                 m for m in snap
                 if isinstance(m, dict) and m.get("_fallbackNotice")
             ]
+            assert stamped, (
+                f"snapshot {snapshot_idx}: no _fallbackNotice stamp at all — "
+                f"A must be durable in every saved snapshot"
+            )
             for stamped_msg in stamped:
                 msg = stamped_msg["_fallbackNotice"].get("message")
-                assert msg != "notice B", (
-                    f"snapshot {snapshot_idx}: B appeared in durable state — "
-                    f"the worker must not re-stamp with the post-A publication"
+                assert msg == "notice A", (
+                    f"snapshot {snapshot_idx}: stamped row carries {msg!r}, "
+                    f"expected 'notice A' (B must never be durable and the "
+                    f"worker must not re-stamp with the post-A publication)"
                 )
 
         # Worker retirement: must NOT delete B (B is a different generation)
@@ -1970,8 +1992,20 @@ class TestCancelInterrupt:
             "worker retirement deleted generation B — it should only retire "
             "the exact saved generation A"
         )
+        # The generation-2 B OBJECT itself must survive retirement — same
+        # identity, not just same content — and the generation counter must
+        # still read 2.
+        assert _STREAM_FALLBACK_NOTICES[stream_id] is b_obj, (
+            "worker retirement replaced the generation-2 B map object — the "
+            "exact published dict must be preserved, not a copy"
+        )
         assert _STREAM_FALLBACK_NOTICES[stream_id]["message"] == "notice B", (
             "worker retirement changed the live notice — B should be preserved"
+        )
+        assert _current_notice_generation(stream_id) == 2, (
+            f"generation counter drifted to "
+            f"{_current_notice_generation(stream_id)} after retirement — must "
+            f"remain 2 (B's generation)"
         )
         # B must NOT be marked durable (it was never saved to disk)
         assert _STREAM_WORKER_SAVED.get(stream_id) != _current_notice_generation(stream_id), (
@@ -1988,6 +2022,245 @@ class TestCancelInterrupt:
         _STREAM_CANCEL_CLAIMED.discard(stream_id)
         models.SESSIONS.pop(session_id, None)
         config.clear_session_writeback_owner_if_owned(session_id, stream_id)
+
+    def test_stamp_to_wrapper_B_publication_stays_unsaved_and_owned(self):
+        """Deterministic seam test: B published BETWEEN row-stamp selection and
+        save-wrapper entry stays unsaved + owned while only A is marked durable.
+
+        Exercises the real production seam factored out of the four
+        stamp→_turn_final_save_commit call sites
+        (_snapshot_fallback_notice_for_commit): publish A, bind the
+        (generation, notice) pair at the stamp point, then publish B in the
+        stamp→wrapper gap (the window the normal terminal path exposes between
+        the _dm['_fallbackNotice'] stamp and the compressor-work → s.save()
+        wrapper entry).  The wrapper runs with the SNAPSHOTTED pair, so:
+
+        - _STREAM_WORKER_SAVED must record A's generation only,
+        - B's exact map object must remain live and unretired,
+        - B's generation counter must remain 2,
+        - worker retirement must preserve B (identity + generation) and must
+          NOT mark B durable.
+
+        (gate-certifier blocker: previously _turn_final_save_commit re-inferred
+        the durable generation from the global map at wrapper ENTRY, recording
+        B as durable even though only A was stamped/saved — teardown could then
+        retire the never-durable B.)
+        """
+        from unittest.mock import Mock
+        from api.streaming import (
+            _STREAM_FALLBACK_NOTICES, _STREAM_WORKER_SAVED,
+            _STREAM_CANCEL_CLAIMED, _STREAM_SETTLEMENT_TERMINAL,
+            _STREAM_NOTICE_GENERATION, _STREAM_SETTLEMENT_PARTICIPANTS,
+            _STREAM_SETTLEMENT_COMPLETED,
+            _publish_fallback_notice, _current_notice_generation,
+            _snapshot_fallback_notice_for_commit, _turn_final_save_commit,
+            _retire_worker_cancelled_state,
+        )
+
+        stream_id = "seam_AB"
+        _notice_A = {"message": "seam A", "to_model": "mA", "to_provider": "pA"}
+        _notice_B = {"message": "seam B", "to_model": "mB", "to_provider": "pB"}
+        try:
+            # Publish A (gen=1) through the production gate.
+            assert _publish_fallback_notice(stream_id, dict(_notice_A)) is True
+            gen_A = _current_notice_generation(stream_id)
+            assert gen_A == 1
+
+            # ROW-STAMP POINT: the production stamp site reads
+            # _pending_fallback_notices[-1] == A and binds the (gen, notice)
+            # pair lock-atomically.
+            commit_gen, commit_notice = _snapshot_fallback_notice_for_commit(
+                stream_id, dict(_notice_A),
+            )
+            assert (commit_gen, commit_notice["message"]) == (1, "seam A")
+
+            # GAP: the status callback publishes B AFTER the row was stamped
+            # with A but BEFORE the save-wrapper entry — exactly the window
+            # the normal terminal path leaves open across the compressor /
+            # context-length work between stamp and s.save().
+            assert _publish_fallback_notice(stream_id, dict(_notice_B)) is True
+            assert _current_notice_generation(stream_id) == 2
+            b_obj = _STREAM_FALLBACK_NOTICES[stream_id]
+
+            # WRAPPER ENTRY + SAVE: runs with the snapshotted pair (A),
+            # NEVER rereading the map.
+            ws = Mock()
+            ws.session_id = "sess_seam_AB"
+            ws.profile = None
+            saved = [False]
+
+            def _save():
+                saved[0] = True
+
+            ws.save = _save
+            with _turn_final_save_commit(
+                stream_id, ws,
+                committed_generation=commit_gen,
+                committed_notice=commit_notice,
+            ):
+                ws.save()
+
+            assert saved[0] is True
+            # Only A's generation is marked durable.
+            assert _STREAM_WORKER_SAVED.get(stream_id) == 1, (
+                f"wrapper recorded gen {_STREAM_WORKER_SAVED.get(stream_id)} "
+                f"as durable — must be 1 (the stamped A), never 2 (B)"
+            )
+            # B remains live, owned by the map, untouched.
+            assert _STREAM_FALLBACK_NOTICES[stream_id] is b_obj
+            assert _current_notice_generation(stream_id) == 2
+
+            # Worker retirement on teardown: must preserve B (object identity
+            # AND generation) and must NOT mark B durable.
+            _retire_worker_cancelled_state(stream_id)
+            assert _STREAM_FALLBACK_NOTICES.get(stream_id) is b_obj, (
+                "retirement deleted/replaced the exact generation-2 B object"
+            )
+            assert _current_notice_generation(stream_id) == 2
+            assert _STREAM_WORKER_SAVED.get(stream_id) != 2, (
+                "B was marked durable — it was never stamped or saved"
+            )
+        finally:
+            _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
+            _STREAM_WORKER_SAVED.pop(stream_id, None)
+            _STREAM_SETTLEMENT_PARTICIPANTS.pop(stream_id, None)
+            _STREAM_SETTLEMENT_COMPLETED.pop(stream_id, None)
+            _STREAM_SETTLEMENT_TERMINAL.discard(stream_id)
+            _STREAM_NOTICE_GENERATION.pop(stream_id, None)
+            _STREAM_CANCEL_CLAIMED.discard(stream_id)
+
+    def test_cancel_registration_first_lock_no_worker_retirement_gap(self):
+        """Worker-first and cancel-first schedules both return every settlement
+        registry to baseline: cancel installs participants+claim INSIDE the
+        first streams_lock acquisition (the admission step), so a validated
+        live worker can no longer retire in the gap between the first and the
+        (old) second lock.
+
+        Schedule 1 (worker-first): the worker's teardown runs
+        _retire_worker_cancelled_state BEFORE cancel is invoked, draining the
+        validated live stream maps in the same critical section (the
+        production teardown shape).  Cancel's first-lock registration must
+        then see no live worker signal and decline to install a phantom
+        'worker' participant that nothing can clear.
+
+        Schedule 2 (cancel-first / concurrent): cancel registers in the first
+        lock; when the worker then retires it finds the settlement record and
+        completes its own participant — the LAST completer retires the fence
+        and the record.  With the old second-lock registration, a worker that
+        retired between the two locks was classified as ordinary completion
+        (no counterpart) while cancel later installed a permanent 'worker'
+        entry (the exact gate-certifier leak).
+        """
+        import queue
+        import threading
+        from api.streaming import (
+            _STREAM_FALLBACK_NOTICES, _STREAM_CANCEL_CLAIMED,
+            _STREAM_SETTLEMENT_TERMINAL, _STREAM_NOTICE_GENERATION,
+            _STREAM_SETTLEMENT_PARTICIPANTS, _STREAM_SETTLEMENT_COMPLETED,
+            _STREAM_WORKER_SAVED, _STREAM_FALLBACK_DEAD_LETTER,
+            _retire_worker_cancelled_state_locked,
+            cancel_stream,
+            STREAMS_LOCK,
+        )
+        from api import config as _config
+
+        def _all_settlement_registries():
+            return (
+                _STREAM_SETTLEMENT_PARTICIPANTS, _STREAM_SETTLEMENT_COMPLETED,
+                _STREAM_SETTLEMENT_TERMINAL, _STREAM_CANCEL_CLAIMED,
+                _STREAM_FALLBACK_NOTICES, _STREAM_NOTICE_GENERATION,
+                _STREAM_WORKER_SAVED, _STREAM_FALLBACK_DEAD_LETTER,
+            )
+
+        def _assert_baseline(sid):
+            assert sid not in _STREAM_SETTLEMENT_PARTICIPANTS, (
+                f"'worker'/'cancel' participant leaked for {sid}"
+            )
+            assert sid not in _STREAM_SETTLEMENT_COMPLETED
+            assert sid not in _STREAM_SETTLEMENT_TERMINAL
+            assert sid not in _STREAM_CANCEL_CLAIMED
+
+        def _cleanup(sid):
+            _STREAM_FALLBACK_NOTICES.pop(sid, None)
+            _STREAM_WORKER_SAVED.pop(sid, None)
+            _STREAM_SETTLEMENT_PARTICIPANTS.pop(sid, None)
+            _STREAM_SETTLEMENT_COMPLETED.pop(sid, None)
+            _STREAM_SETTLEMENT_TERMINAL.discard(sid)
+            _STREAM_NOTICE_GENERATION.pop(sid, None)
+            _STREAM_CANCEL_CLAIMED.discard(sid)
+            _config.STREAMS.pop(sid, None)
+            _config.CANCEL_FLAGS.pop(sid, None)
+            _config.AGENT_INSTANCES.pop(sid, None)
+            try:
+                _config.unregister_active_run(sid)
+            except Exception:
+                pass
+
+        regs = _all_settlement_registries()
+        for reg in regs:
+            if isinstance(reg, dict):
+                assert not reg, "settlement registry not at baseline pre-test"
+
+        # ── Schedule 1: worker retires FIRST, cancel runs after ──
+        sid = "sched_worker_first"
+        try:
+            _config.STREAMS[sid] = queue.Queue()
+            _config.CANCEL_FLAGS[sid] = threading.Event()
+            # Worker retires (e.g. its finally won the race before cancel's
+            # HTTP call arrived): no counterpart registered at retire time.
+            # Production-faithful teardown: the streaming finally pops the
+            # stream/flag/agent maps AND retires in ONE critical section —
+            # a retired worker NEVER leaves validated live maps behind.
+            with STREAMS_LOCK:
+                _config.STREAMS.pop(sid, None)
+                _config.CANCEL_FLAGS.pop(sid, None)
+                _config.AGENT_INSTANCES.pop(sid, None)
+                _retire_worker_cancelled_state_locked(sid)
+            # Ordinary-completion retire must be a no-op tombstone-wise.
+            assert sid not in _STREAM_SETTLEMENT_COMPLETED
+            # Now cancel: registration happens atomically in the FIRST lock.
+            # With no validated live worker signal, cancel must not install
+            # a phantom 'worker' participant — the job already finished.
+            _config.register_active_run(sid, session_id="sess_sched_wf")
+            result = cancel_stream(sid)
+            assert result.get("cancelled") is True
+            # After cancel's outer finally retires 'cancel', the completed
+            # tombstones must all drain back to baseline — no permanent
+            # 'worker' entry.
+            _assert_baseline(sid)
+        finally:
+            _cleanup(sid)
+
+        # ── Schedule 2: cancel registers FIRST, worker retires after ──
+        sid = "sched_cancel_first"
+        try:
+            _config.STREAMS[sid] = queue.Queue()
+            _config.CANCEL_FLAGS[sid] = threading.Event()
+            _config.register_active_run(sid, session_id="sess_sched_cf")
+
+            # Two-thread interleave: cancel (registers in its first lock)
+            # races the worker teardown.  The barrier forces the worker to
+            # retire only AFTER cancel has acquired/released its first lock
+            # via STREAMS_LOCK provenance — deterministic by construction:
+            # cancel owns the registries first, then worker retires.
+            cancel_done = threading.Event()
+
+            def _run_cancel():
+                cancel_stream(sid)
+                cancel_done.set()
+
+            t = threading.Thread(target=_run_cancel, daemon=True)
+            t.start()
+            assert cancel_done.wait(timeout=10), "cancel_stream hung"
+            # Cancel's outer finally retired 'cancel'; participants may still
+            # hold 'worker' (the worker hasn't retired yet).
+            # Simulate the worker's finally now retiring its participant.
+            with STREAMS_LOCK:
+                _retire_worker_cancelled_state_locked(sid)
+            # Worker was the LAST completer → fence and record drained.
+            _assert_baseline(sid)
+        finally:
+            _cleanup(sid)
 
     def test_ordinary_completed_streams_leave_no_settlement_tombstone(self):
         """Ordinary completed streams (no cancellation) must not leak entries

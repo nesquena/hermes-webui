@@ -974,7 +974,10 @@ def test_cancel_cleanup_updates_runtime_diagnostics():
         stack.enter_context(_seeded_mapping(config.ACTIVE_RUNS_LOCK, config.ACTIVE_RUNS, {}))
         before = streaming.get_stream_runtime_snapshot()
         with patch("api.streaming.get_session", return_value=session):
-            assert streaming.cancel_stream(stream_id) is True
+            result = streaming.cancel_stream(stream_id)
+            assert result["cancelled"] is True
+            assert result["persistence_failed"] is False
+            assert result["stream_id"] == stream_id
         after = streaming.get_stream_runtime_snapshot()
 
     assert before["active"] == 1
