@@ -813,24 +813,26 @@ def test_stream_end_restore_attaches_projected_anchor_scene_before_render():
 
     assert "function _attachProjectedAnchorSceneToLastAssistant" in MESSAGES_JS
     carry_idx = restore.index("const _stagedMessages=_carryForwardEphemeralTurnFields(_currentMessages, _nextMsgs3018);")
-    filter_idx = restore.index("S.messages=_filterRecoveryControlMessages(_resolvedMessages || []);")
+    install_idx = restore.index("S.messages=_resolvedMessages || [];" )
     attach_idx = restore.index("_attachProjectedAnchorSceneToLastAssistant(S.messages);")
     render_idx = restore.index("syncTopbar();renderMessages({preserveScroll:true})")
-    assert carry_idx < filter_idx < attach_idx < render_idx
+    assert carry_idx < install_idx < attach_idx < render_idx
+    assert "_filterRecoveryControlMessages" not in restore
 
 
 def test_cancel_settlement_attaches_projected_anchor_scene_before_render():
     cancel = _event_listener_body(MESSAGES_JS, "cancel")
 
-    fetch_idx = cancel.index("const _nextMsgs3018=(sessionPayload.messages||[]).filter(m=>m&&m.role);")
-    attach_idx = cancel.index("_attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);")
-    carry_idx = cancel.index("S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);")
+    session_idx = cancel.index("const _currentTerminalSession=S.session;")
+    apply_idx = cancel.index("_applyEmbeddedTerminalSession(", session_idx)
+    attach_idx = cancel.index("_attachProjectedAnchorSceneToLastAssistant(S.messages);")
     render_idx = cancel.index("renderMessages({preserveScroll:true});")
-    assert fetch_idx < attach_idx < carry_idx < render_idx
+    assert session_idx < apply_idx < attach_idx < render_idx
+    assert "_filterRecoveryControlMessages" not in cancel
 
-    embedded_idx = cancel.index("if(_applyCancelSessionPayload(_cancelSessionPayload)) return;")
-    fallback_get_idx = cancel.index("const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);")
-    fallback_apply_idx = cancel.index("if(data&&data.session) _applyCancelSessionPayload(data.session);")
+    embedded_idx = cancel.index("if(_cancelSessionPayload&&_applyCancelSessionPayload(_cancelSessionPayload)) return;")
+    fallback_get_idx = cancel.index("const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);", embedded_idx)
+    fallback_apply_idx = cancel.index("if(data&&data.session) _applyCancelSessionPayload(data.session,true);", fallback_get_idx)
     assert embedded_idx < fallback_get_idx < fallback_apply_idx
 
     fallback_push_idx = cancel.index("S.messages.push({role:'assistant',content:`**Task cancelled:**")
@@ -843,11 +845,12 @@ def test_application_error_settlement_attaches_projected_anchor_scene_before_ren
     apperror = _event_listener_body(MESSAGES_JS, "apperror")
 
     assert "_applyToAnchor('apperror'" in apperror
-    session_idx = apperror.index("const _nextMsgs3018=(d.session.messages||[]).filter(m=>m&&m.role);")
-    attach_idx = apperror.index("_attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);")
-    carry_idx = apperror.index("S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);")
+    session_idx = apperror.index("const _currentTerminalSession=S.session;")
+    apply_idx = apperror.index("_applyEmbeddedTerminalSession(", session_idx)
+    attach_idx = apperror.index("_attachProjectedAnchorSceneToLastAssistant(S.messages);")
     render_idx = apperror.index("renderMessages({preserveScroll:true});")
-    assert session_idx < attach_idx < carry_idx < render_idx
+    assert session_idx < apply_idx < attach_idx < render_idx
+    assert "_filterRecoveryControlMessages" not in apperror
 
     synthetic_push_idx = apperror.index("S.messages.push({role:'assistant',content:`**${label}:**")
     synthetic_attach_idx = apperror.index("_attachProjectedAnchorSceneToLastAssistant(S.messages);", synthetic_push_idx)

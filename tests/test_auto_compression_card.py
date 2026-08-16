@@ -971,7 +971,7 @@ def test_auto_compression_card_survives_compression_session_rotation():
     src = _read("static/messages.js")
 
     assert "window._compressionUi.sessionId===activeSid" in src
-    assert "sessionId:d.session.session_id" in src
+    assert "sessionId:completedSession.session_id" in src
 
 
 def test_preserved_task_list_marker_is_detected_case_insensitively():

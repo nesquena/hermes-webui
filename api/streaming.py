@@ -23,7 +23,7 @@ import traceback
 import copy
 import inspect
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +72,11 @@ from api.models import (
     record_process_wakeup_provider_unavailable_pause,
     reconciled_state_db_messages_for_session,
 )
-from api.session_ops import mark_session_title_generated, session_has_manual_title
+from api.session_ops import (
+    _messages_for_limited_payload,
+    mark_session_title_generated,
+    session_has_manual_title,
+)
 from api.process_event_utils import (
     build_active_turn_token,
     claim_async_delegation_delivery,
@@ -159,6 +163,53 @@ def _session_payload_with_full_messages(session, *, tool_calls=None):
     return raw
 
 
+def _redacted_terminal_session_payload(session) -> dict:
+    """Return a bounded, redacted session snapshot for ordinary terminal SSE."""
+    messages = list(getattr(session, 'messages', None) or [])
+    renderable_indexes = []
+    renderable_count = 0
+    for index, message in enumerate(messages):
+        if visible_messages_for_anchor([message], auto_compression=True):
+            renderable_count += 1
+            renderable_indexes.append(index)
+            if len(renderable_indexes) > 30:
+                renderable_indexes.pop(0)
+    start = renderable_indexes[0] if renderable_count > 30 else 0
+    start = max(start, len(messages) - 300)
+    retained = _messages_for_limited_payload(messages[start:])
+    raw = session.compact() | {
+        'messages': retained,
+        'message_count': len(messages),
+        '_messages_offset': start,
+        '_messages_truncated': bool(start),
+    }
+    terminal_tool_calls = []
+    for tool_call in getattr(session, 'tool_calls', None) or []:
+        if not isinstance(tool_call, dict):
+            continue
+        assistant_msg_idx = tool_call.get('assistant_msg_idx')
+        if isinstance(assistant_msg_idx, bool) or not isinstance(assistant_msg_idx, int):
+            continue
+        if assistant_msg_idx == -1:
+            terminal_tool_calls.append(dict(tool_call))
+        elif start <= assistant_msg_idx < len(messages):
+            projected = dict(tool_call)
+            projected['assistant_msg_idx'] = assistant_msg_idx - start
+            terminal_tool_calls.append(projected)
+    raw['_tool_calls_truncated'] = len(terminal_tool_calls) > 300
+    raw['tool_calls'] = terminal_tool_calls[-300:]
+    attach_todo_state(raw, messages)
+    return redact_session_data(raw)
+
+
+def _best_effort_terminal_session_payload(session) -> dict | None:
+    try:
+        return _redacted_terminal_session_payload(session)
+    except Exception:
+        logger.debug("Failed to build terminal session payload", exc_info=True)
+        return None
+
+
 def _compact_for_echo_compare(value: str) -> str:
     """Normalize visible stream text for duplicate echo detection."""
     return re.sub(r'\s+', '', str(value or ''))
@@ -178,28 +229,18 @@ def _strip_compact_echo_suffix(value: str, suffix: str, *, search_window: int = 
     return raw, False
 
 
-def _redacted_session_payload_with_full_messages(session, *, tool_calls=None) -> dict | None:
-    """Best-effort terminal SSE session payload for already-persisted state."""
-    try:
-        return redact_session_data(
-            _session_payload_with_full_messages(session, tool_calls=tool_calls)
-        )
-    except Exception:
-        logger.debug("Failed to build redacted session payload", exc_info=True)
-        return None
-
-
 def _ephemeral_session_payload(session_id: str, messages) -> dict:
     """Project the non-persistent ``/btw`` terminal session for public SSE."""
-    return redact_session_data(
-        {'session_id': session_id, 'messages': messages if isinstance(messages, list) else []}
-    )
+    raw: dict[str, Any] = {'session_id': session_id}
+    if isinstance(messages, list) and messages:
+        raw['messages'] = messages
+    return redact_session_data(raw)
 
 
 def _cancel_event_payload(
     message: str = "Cancelled by user",
     *,
-    session: dict | None = None,
+    session: object | None = None,
 ) -> dict:
     """Return base cancel terminal event metadata."""
     payload = {
@@ -208,8 +249,13 @@ def _cancel_event_payload(
         'status': 'cancelled',
     }
     if session:
-        payload['session'] = session
-        payload['session_id'] = session.get('session_id')
+        if isinstance(session, dict):
+            session_payload = session
+        else:
+            session_payload = _best_effort_terminal_session_payload(session)
+        if session_payload:
+            payload['session'] = session_payload
+            payload['session_id'] = session_payload.get('session_id')
     return payload
 
 
@@ -8539,7 +8585,7 @@ def _run_agent_streaming(
         if cancel_event.is_set():
             with _agent_lock:
                 _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
-            put('cancel', _cancel_event_payload('Cancelled before start'))
+            put('cancel', _cancel_event_payload('Cancelled before start', session=None if ephemeral else s))
             return
 
         # Resolve profile home for this agent run — use the session's own profile
@@ -9831,7 +9877,7 @@ def _run_agent_streaming(
                         logger.debug("Failed to interrupt agent before start")
                     with _agent_lock:
                         _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
-                    put('cancel', _cancel_event_payload('Cancelled by user'))
+                    put('cancel', _cancel_event_payload('Cancelled by user', session=None if ephemeral else s))
                     return
 
             # Prepend workspace context so the agent always knows which directory
@@ -10063,7 +10109,7 @@ def _run_agent_streaming(
                             )
                         except Exception:
                             logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-                put('cancel', _cancel_event_payload('Cancelled by user'))
+                put('cancel', _cancel_event_payload('Cancelled by user', session=None if ephemeral else s))
                 return
             # ── Ephemeral mode (/btw): deliver answer, skip persistence, cleanup ──
             if ephemeral:
@@ -10076,9 +10122,7 @@ def _run_agent_streaming(
                 # payload is still public output.  Project the ephemeral
                 # session before enqueueing it so raw Agent ``api_content`` or
                 # provenance aliases cannot cross the wire.
-                _ephemeral_session = _ephemeral_session_payload(
-                    session_id, result.get('messages', [])
-                )
+                _ephemeral_session = _ephemeral_session_payload(session_id, [])
                 put('done', {
                     'session': _ephemeral_session,
                     'usage': {'input_tokens': 0, 'output_tokens': 0},
@@ -10112,7 +10156,7 @@ def _run_agent_streaming(
                         )
                     except Exception:
                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-                put('cancel', _cancel_event_payload('Cancelled by user'))
+                put('cancel', _cancel_event_payload('Cancelled by user', session=None if ephemeral else s))
                 return
             _writeback_timings = []
             _writeback_started = time.perf_counter()
@@ -10173,7 +10217,7 @@ def _run_agent_streaming(
                             )
                         except Exception:
                             logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-                        put('cancel', _cancel_event_payload('Cancelled by user'))
+                        put('cancel', _cancel_event_payload('Cancelled by user', session=None if ephemeral else s))
                         return
                     _result_messages = _settle_result_messages(
                         s,
@@ -10426,7 +10470,7 @@ def _run_agent_streaming(
                                 )
                             except Exception:
                                 logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-                        put('cancel', _cancel_event_payload('Cancelled by user'))
+                        put('cancel', _cancel_event_payload('Cancelled by user', session=None if ephemeral else s))
                         return
                     _err_str = str(_last_err) if _last_err else ''
                     if _is_quota:
@@ -10653,9 +10697,9 @@ def _run_agent_streaming(
                             s.save()
                         except Exception:
                             pass
-                        _error_payload['session'] = redact_session_data(
-                            _session_payload_with_full_messages(s, tool_calls=s.tool_calls)
-                        )
+                        _terminal_session_payload = _best_effort_terminal_session_payload(s)
+                        if _terminal_session_payload is not None:
+                            _error_payload['session'] = _terminal_session_payload
                         _error_payload['session_id'] = s.session_id
                         _error_payload['old_session_id'] = _compression_origin_session_id
                         if _compression_continuation_session_id is not None:
@@ -11095,7 +11139,7 @@ def _run_agent_streaming(
                         )
                     except Exception:
                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-                    put('cancel', _cancel_event_payload('Cancelled by user'))
+                    put('cancel', _cancel_event_payload('Cancelled by user', session=None if ephemeral else s))
                     return
                 with _stream_writeback_stage(_writeback_timings, "session_save"):
                     s.save()
@@ -11113,7 +11157,7 @@ def _run_agent_streaming(
                         )
                     except Exception:
                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-                    put('cancel', _cancel_event_payload('Cancelled by user'))
+                    put('cancel', _cancel_event_payload('Cancelled by user', session=None if ephemeral else s))
                     return
                 if not ephemeral:
                     try:
@@ -11217,7 +11261,7 @@ def _run_agent_streaming(
                         )
                     except Exception:
                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-                    put('cancel', _cancel_event_payload('Cancelled by user'))
+                    put('cancel', _cancel_event_payload('Cancelled by user', session=None if ephemeral else s))
                     return
                 try:
                     _latest_pause_owner = get_session(getattr(s, 'session_id', session_id))
@@ -11249,7 +11293,7 @@ def _run_agent_streaming(
                             )
                         except Exception:
                             logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-                        put('cancel', _cancel_event_payload('Cancelled by user'))
+                        put('cancel', _cancel_event_payload('Cancelled by user', session=None if ephemeral else s))
                         return
                     with _stream_writeback_stage(_writeback_timings, "process_wakeup_pause_clear_save"):
                         s.save(touch_updated_at=False)
@@ -11272,7 +11316,7 @@ def _run_agent_streaming(
                             )
                         except Exception:
                             logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-                        put('cancel', _cancel_event_payload('Cancelled by user'))
+                        put('cancel', _cancel_event_payload('Cancelled by user', session=None if ephemeral else s))
                         return
                 _success_writeback_committed = True
             usage = {
@@ -11508,8 +11552,10 @@ def _run_agent_streaming(
             except Exception as _goal_exc:
                 logger.debug("Goal continuation hook failed for session %s: %s", session_id, _goal_exc)
             with _stream_writeback_stage(_writeback_timings, "done_payload"):
-                raw_session = _session_payload_with_full_messages(s, tool_calls=tool_calls)
-                _done_payload = {'session': redact_session_data(raw_session), 'usage': usage}
+                _done_payload = {'usage': usage}
+                _terminal_session_payload = _best_effort_terminal_session_payload(s)
+                if _terminal_session_payload is not None:
+                    _done_payload['session'] = _terminal_session_payload
                 if _tool_limit_reached:
                     _done_payload['terminal_state'] = 'tool_limit_reached'
                     _done_payload['terminal_reason'] = 'max_iterations'
@@ -11651,7 +11697,7 @@ def _run_agent_streaming(
                             )
                         except Exception:
                             logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-            put('cancel', _cancel_event_payload('Cancelled by user'))
+            put('cancel', _cancel_event_payload('Cancelled by user', session=None if ephemeral else s))
             return
         _exc_is_quota = _classification['type'] == 'quota_exhausted'
         # Exception quota text still includes: 'more credits' in _exc_lower, 'can only afford' in _exc_lower, 'fewer max_tokens' in _exc_lower.
@@ -11902,6 +11948,9 @@ def _run_agent_streaming(
                         )
                     except Exception:
                         logger.debug("Failed to append interrupted turn journal event", exc_info=True)
+                    _terminal_session_payload = _best_effort_terminal_session_payload(s)
+                    if _terminal_session_payload is not None:
+                        _error_payload['session'] = _terminal_session_payload
             _error_payload['session_id'] = getattr(s, 'session_id', session_id)
             _error_payload['old_session_id'] = session_id
         put('apperror', _error_payload)
@@ -12511,7 +12560,7 @@ def cancel_stream(stream_id: str) -> bool:
                         'timestamp': int(time.time()),
                     })
                 _cs.save()
-                _cancel_session_payload = _redacted_session_payload_with_full_messages(_cs)
+                _cancel_session_payload = _redacted_terminal_session_payload(_cs)
             except Exception:
                 logger.debug("Failed to clear session state on cancel for %s", _cancel_session_id)
 

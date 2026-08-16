@@ -877,11 +877,13 @@ def test_issue6751_ephemeral_terminal_sse_projects_agent_messages(monkeypatch):
             }
         ],
     )
+    empty_payload = _ephemeral_session_payload("empty-sid", [])
 
     assert payload == {
         "session_id": "ephemeral-sid",
         "messages": [{"role": "assistant", "content": "visible"}],
     }
+    assert empty_payload == {"session_id": "empty-sid"}
 
 
 def test_issue6751_schema_scrubber_preserves_tool_argument_business_payload(monkeypatch):

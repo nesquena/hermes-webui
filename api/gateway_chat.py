@@ -34,7 +34,7 @@ from api.config import (
     unregister_stream_owner,
     update_active_run,
 )
-from api.helpers import _redact_text, redact_session_data
+from api.helpers import _redact_text
 from api.models import clear_process_wakeup_pause, get_session, merge_session_messages_append_only
 from api.run_journal import RunJournalWriter, bound_run_journal_snapshot_args
 
@@ -737,7 +737,7 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
         _classify_provider_error,
         _materialize_pending_user_turn_before_error,
         _provider_error_payload,
-        _session_payload_with_full_messages,
+        _best_effort_terminal_session_payload,
         _snapshot_and_append_partial_on_error,
         _terminal_turn_duration,
     )
@@ -788,9 +788,9 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
             terminal_session_persisted = True
         except Exception:
             logger.debug("Failed to persist gateway terminal error settlement", exc_info=True)
-        error_payload["session"] = redact_session_data(
-            _session_payload_with_full_messages(session, tool_calls=[])
-        )
+        terminal_session_payload = _best_effort_terminal_session_payload(session)
+        if terminal_session_payload is not None:
+            error_payload["session"] = terminal_session_payload
         error_payload["session_id"] = session.session_id
         error_payload["terminal_session_persisted"] = terminal_session_persisted
         if terminal_session_persisted:
@@ -1351,9 +1351,12 @@ def _run_gateway_chat_streaming(
                 session_id,
                 goal_exc,
             )
-        from api.streaming import _session_payload_with_full_messages
-        gateway_session_payload = _session_payload_with_full_messages(s, tool_calls=[])
-        put_gateway_event("done", {"session": redact_session_data(gateway_session_payload), "usage": usage})
+        from api.streaming import _best_effort_terminal_session_payload
+        gateway_done_payload = {"usage": usage}
+        gateway_session_payload = _best_effort_terminal_session_payload(s)
+        if gateway_session_payload is not None:
+            gateway_done_payload["session"] = gateway_session_payload
+        put_gateway_event("done", gateway_done_payload)
         put_gateway_event("stream_end", {"session_id": session_id})
     except urllib.error.HTTPError as exc:
         try:

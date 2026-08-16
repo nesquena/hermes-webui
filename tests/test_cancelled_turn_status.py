@@ -216,16 +216,17 @@ class TestCancelledTurnPersistenceGuards:
         assert start != -1 and end != -1, "cancel handler not found"
         block = src[start:end]
 
-        assert "const _applyCancelSessionPayload=(sessionPayload)=>" in block
+        assert "const _applyCancelSessionPayload=(sessionPayload, fullSnapshot=false)=>" in block
         assert "const _cancelSessionPayload=_cancelData&&typeof _cancelData.session==='object'?_cancelData.session:null;" in block
-        assert "if(_applyCancelSessionPayload(_cancelSessionPayload)) return;" in block
+        assert "if(_cancelSessionPayload&&_applyCancelSessionPayload(_cancelSessionPayload)) return;" in block
         assert "const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);" in block
-        assert block.index("if(_applyCancelSessionPayload(_cancelSessionPayload)) return;") < block.index("const data=await api("), (
+        assert "if(data&&data.session) _applyCancelSessionPayload(data.session,true);" in block
+        assert block.index("if(_cancelSessionPayload&&_applyCancelSessionPayload(_cancelSessionPayload)) return;") < block.index("const data=await api("), (
             "Cancel handler must apply the terminal SSE session payload before falling back "
             "to /api/session so captured _partial reasoning/tool rows are visible immediately."
         )
 
-    def test_worker_cancel_events_do_not_embed_session_payload(self):
+    def test_worker_cancel_events_embed_bounded_session_payload(self):
         src = _read("api/streaming.py")
         worker_start = src.find("def _run_agent_streaming(")
         cancel_stream_start = src.find("def cancel_stream(", worker_start)
@@ -234,6 +235,6 @@ class TestCancelledTurnPersistenceGuards:
         cancel_stream_block = src[cancel_stream_start:]
 
         assert "_cancel_event_payload('Cancelled by user', s)" not in worker_block
-        assert "_cancel_event_payload('Cancelled by user', session=" not in worker_block
-        assert "None if ephemeral else s" not in worker_block
+        assert "_cancel_event_payload('Cancelled by user', session=" in worker_block
+        assert "None if ephemeral else s" in worker_block
         assert "_cancel_event_payload('Cancelled by user', session=_cancel_session_payload)" in cancel_stream_block
