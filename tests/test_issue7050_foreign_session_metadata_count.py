@@ -19,6 +19,7 @@ pytestmark = pytest.mark.requires_agent_modules
 def _foreign_fixture(monkeypatch, tmp_path, *, profile=None, truncation_watermark=None, truncation_boundary=None):
     import api.routes as routes
 
+    routes._clear_foreign_display_coordinate_summary_cache()
     sid = "foreign_metadata_count_7050"
     tool_call = [{"id": "call-1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}]
     sidecar_messages = [
@@ -187,6 +188,90 @@ def test_foreign_metadata_poll_keeps_boundary_read_uncapped(monkeypatch, tmp_pat
     )
     _session_payload(routes, f"/api/session?session_id={sid}&messages=0&resolve_model=0")
     assert "limit" not in calls[-1]
+
+
+def test_foreign_paged_load_matches_non_snapshot_parent_lineage(monkeypatch, tmp_path):
+    import api.models as models
+    import api.routes as routes
+
+    routes._clear_foreign_display_coordinate_summary_cache()
+    parent_id = "foreign_metadata_parent_7050"
+    sid = "foreign_metadata_child_7050"
+    child_messages = [
+        {"role": "user", "content": f"child {idx}", "timestamp": 1000.0 + idx}
+        for idx in range(35)
+    ]
+    child = _install_test_session(monkeypatch, tmp_path, sid, child_messages)
+    parent_messages = [{"role": "user", "content": "parent", "timestamp": 900.0}]
+    parent = models.Session(
+        session_id=parent_id,
+        title="Parent",
+        workspace=str(tmp_path),
+        model="test-model",
+        messages=parent_messages,
+        created_at=899.0,
+        updated_at=900.0,
+    )
+    parent.save(touch_updated_at=False)
+    child.parent_session_id = parent_id
+    child.is_cli_session = True
+    child.source_tag = "tui"
+    child.raw_source = "tui"
+    child.session_source = "tui"
+    child.save(touch_updated_at=False)
+    monkeypatch.setattr(
+        routes,
+        "_lookup_cli_session_metadata",
+        lambda _sid: {"source_tag": "tui", "session_source": "tui", "is_cli_session": True},
+    )
+    _make_state_db(tmp_path / "state.db", sid, child_messages)
+
+    metadata = _session_payload(routes, f"/api/session?session_id={sid}&messages=0&resolve_model=0")
+    paged = _session_payload(
+        routes,
+        f"/api/session?session_id={sid}&messages=1&resolve_model=0&msg_limit=30",
+    )
+    unbounded = _session_payload(routes, f"/api/session?session_id={sid}&messages=1&resolve_model=0")
+
+    assert metadata["message_count"] == paged["message_count"] == unbounded["message_count"] == 36
+    assert metadata["last_message_at"] == paged["last_message_at"] == unbounded["last_message_at"] == 1034.0
+    assert len(paged["messages"]) == 30
+    assert paged["_messages_offset"] == 6
+
+
+def test_foreign_boundary_summary_cache_skips_unchanged_uncapped_read(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    sid = _foreign_fixture(monkeypatch, tmp_path, truncation_boundary=1001.0)
+    summary_calls = []
+    reader_calls = []
+    real_summary = routes.get_state_db_session_summary
+    real_reader = routes.get_state_db_session_messages
+    monkeypatch.setattr(
+        routes,
+        "get_state_db_session_summary",
+        lambda session_id, **kwargs: (
+            summary_calls.append((session_id, kwargs))
+            or real_summary(session_id, **kwargs)
+        ),
+    )
+    monkeypatch.setattr(
+        routes,
+        "get_state_db_session_messages",
+        lambda session_id, **kwargs: (
+            reader_calls.append((session_id, kwargs))
+            or real_reader(session_id, **kwargs)
+        ),
+    )
+
+    first = _session_payload(routes, f"/api/session?session_id={sid}&messages=0&resolve_model=0")
+    second = _session_payload(routes, f"/api/session?session_id={sid}&messages=0&resolve_model=0")
+
+    assert first["message_count"] == second["message_count"]
+    assert first["last_message_at"] == second["last_message_at"]
+    assert len(summary_calls) == 2
+    assert len(reader_calls) == 1
+    assert "limit" not in reader_calls[0][1]
 
 
 def test_foreign_metadata_poll_respects_truncation_watermark(monkeypatch, tmp_path):
