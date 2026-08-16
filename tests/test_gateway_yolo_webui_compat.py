@@ -28,6 +28,11 @@ except ImportError:
     APPROVAL_AVAILABLE = False
 
 
+def _js_block(source, start_marker, end_marker):
+    start = source.index(start_marker)
+    return source[start:source.index(end_marker, start)]
+
+
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
 def test_approval_card_yolo_resumes_current_prompt_with_one_webui_request():
     messages_js = (pathlib.Path(__file__).resolve().parents[1] / "static" / "messages.js").read_text()
@@ -41,15 +46,19 @@ def test_approval_card_yolo_resumes_current_prompt_with_one_webui_request():
         "const S={session:{session_id:'browser-session'}};",
         "let _approvalSessionId='browser-session';",
         "let _approvalCurrentId='approval-1';",
+        "let _loadSessionGeneration=1;",
         "let _approvalResponding=null;",
+        "let _approvalClearedOwner=null;",
         "let _yoloEnabled=false;",
         "const _approvalPendingBySession=new Map([['browser-session',{pending:{approval_id:'approval-1'}}]]);",
         "const api=async(path,opts={})=>{calls.push([path,JSON.parse(opts.body||'{}')]);return {ok:true,yolo_enabled:true};};",
-        "const $=()=>({disabled:false,classList:{add(){},remove(){}}});",
+        "const $=()=>({disabled:false,classList:{contains:v=>v==='visible',add(){},remove(){}}});",
         "const t=k=>k; const showToast=()=>{}; const setStatus=()=>{};",
-        "const _unmarkApprovalDismissed=()=>{}; const _approvalResponseMatches=()=>false;",
+        "const _unmarkApprovalDismissed=()=>{};",
         "const _setApprovalControlsDisabled=()=>{}; const _clearApprovalPendingForSession=()=>{};",
         "const hideApprovalCard=()=>{}; const _updateYoloPill=()=>{};",
+        _js_block(messages_js, "function _captureApprovalResponseOwner(", "\nfunction _setApprovalControlsDisabled"),
+        _js_block(messages_js, "function _applyApprovalYoloProjection(", "\nfunction toggleApprovalCardCollapsed"),
         extract("respondApproval", "\nfunction startApprovalPolling"),
         extract("toggleYoloFromApproval", "\n// ── Approval polling"),
         "(async()=>{",
@@ -79,15 +88,19 @@ def test_approval_card_yolo_uses_authoritative_disabled_response():
         "const S={session:{session_id:'browser-session'}};",
         "let _approvalSessionId='browser-session';",
         "let _approvalCurrentId='approval-1';",
+        "let _loadSessionGeneration=1;",
         "let _approvalResponding=null;",
+        "let _approvalClearedOwner=null;",
         "let _yoloEnabled=true;",
         "const _approvalPendingBySession=new Map([['browser-session',{pending:{approval_id:'approval-1'}}]]);",
         "const api=async()=>({ok:true,yolo_enabled:false});",
-        "const $=()=>({disabled:false,classList:{add(){},remove(){}}});",
+        "const $=()=>({disabled:false,classList:{contains:v=>v==='visible',add(){},remove(){}}});",
         "const t=k=>k; const showToast=msg=>toasts.push(msg); const setStatus=()=>{};",
-        "const _unmarkApprovalDismissed=()=>{}; const _approvalResponseMatches=()=>false;",
+        "const _unmarkApprovalDismissed=()=>{};",
         "const _setApprovalControlsDisabled=()=>{}; const _clearApprovalPendingForSession=()=>{};",
         "const hideApprovalCard=()=>{}; const _updateYoloPill=()=>{pillUpdates+=1;};",
+        _js_block(messages_js, "function _captureApprovalResponseOwner(", "\nfunction _setApprovalControlsDisabled"),
+        _js_block(messages_js, "function _applyApprovalYoloProjection(", "\nfunction toggleApprovalCardCollapsed"),
         extract("respondApproval", "\nfunction startApprovalPolling"),
         extract("toggleYoloFromApproval", "\n// ── Approval polling"),
         "(async()=>{",
@@ -115,16 +128,20 @@ def test_failed_approval_relay_applies_authoritative_yolo_and_restores_card():
         "const S={session:{session_id:'browser-session'}};",
         "let _approvalSessionId='browser-session';",
         "let _approvalCurrentId='approval-1';",
+        "let _loadSessionGeneration=1;",
         "let _approvalResponding=null;",
+        "let _approvalClearedOwner=null;",
         "let _yoloEnabled=false;",
         "const _approvalPendingBySession=new Map([['browser-session',{pending:{approval_id:'approval-1'}}]]);",
         "const api=async()=>{const e=new Error('relay failed');e.status=502;e.body=JSON.stringify({ok:false,error:'relay failed',yolo_enabled:true});throw e;};",
+        "const $=()=>({disabled:false,classList:{contains:v=>v==='visible',add(){},remove(){}}});",
         "const t=k=>k; const showToast=msg=>toasts.push(msg); const setStatus=msg=>statuses.push(msg);",
-        "const _unmarkApprovalDismissed=()=>{}; const _approvalResponseMatches=()=>false;",
+        "const _unmarkApprovalDismissed=()=>{};",
         "const _setApprovalControlsDisabled=()=>{}; const _clearApprovalPendingForSession=()=>{};",
         "const hideApprovalCard=()=>{}; const _updateYoloPill=()=>{pillUpdates+=1;};",
         "const _approvalPromptBelongsToActiveSession=()=>true;",
         "const _renderPendingApprovalForActiveSession=()=>{cardRenders+=1;};",
+        extract("function _captureApprovalResponseOwner(", "\nfunction _setApprovalControlsDisabled"),
         extract("function _restoreFailedApprovalResponse(", "\nfunction toggleApprovalCardCollapsed"),
         extract("async function respondApproval(", "\nfunction startApprovalPolling"),
         extract("async function toggleYoloFromApproval(", "\n// ── Approval polling"),
@@ -150,12 +167,15 @@ def test_yolo_command_resumes_visible_approval_through_same_atomic_action():
     script = "\n".join([
         "const calls=[];",
         "const S={session:{session_id:'browser-session'}};",
+        "let _loadSessionGeneration=1;",
         "let _approvalSessionId='browser-session';",
         "let _approvalCurrentId='approval-1';",
         "let _yoloEnabled=false;",
         "let atomicCalls=0;",
         "const api=async(path,opts={})=>{calls.push([path,opts]);return {yolo_enabled:false};};",
         "const toggleYoloFromApproval=async()=>{atomicCalls+=1;return true;};",
+        "const $=()=>({classList:{contains:()=>true}});",
+        "const _captureApprovalResponseOwner=()=>({sid:'browser-session',generation:1,approvalId:'approval-1'});",
         "const t=k=>k; const showToast=()=>{}; const _updateYoloPill=()=>{}; const hideApprovalCard=()=>{};",
         body,
         "(async()=>{",
@@ -176,9 +196,11 @@ def test_yolo_command_uses_authoritative_post_response_state():
     script = "\n".join([
         "const calls=[]; const toasts=[]; let pillUpdates=0; let cardHides=0;",
         "const S={session:{session_id:'browser-session'}};",
+        "let _loadSessionGeneration=1;",
         "let _approvalSessionId=null; let _approvalCurrentId=null; let _yoloEnabled=false;",
         "const api=async(path,opts={})=>{calls.push(path);return path.includes('?')?{yolo_enabled:false}:{ok:true,yolo_enabled:false};};",
         "const toggleYoloFromApproval=async()=>{throw new Error('card path must not run');};",
+        "const $=()=>({classList:{contains:()=>false}});",
         "const t=k=>k; const showToast=msg=>toasts.push(msg);",
         "const _updateYoloPill=()=>{pillUpdates+=1;}; const hideApprovalCard=()=>{cardHides+=1;};",
         body,
@@ -202,9 +224,11 @@ def test_yolo_command_applies_authoritative_state_from_failed_post():
     script = "\n".join([
         "const toasts=[]; let pillUpdates=0; let cardHides=0;",
         "const S={session:{session_id:'browser-session'}};",
+        "let _loadSessionGeneration=1;",
         "let _approvalSessionId=null; let _approvalCurrentId=null; let _yoloEnabled=false;",
         "const api=async(path)=>{if(path.includes('?'))return {yolo_enabled:false};const e=new Error('relay busy');e.body=JSON.stringify({error:'relay busy',yolo_enabled:true});throw e;};",
         "const toggleYoloFromApproval=async()=>{throw new Error('card path must not run');};",
+        "const $=()=>({classList:{contains:()=>false}});",
         "const t=k=>k; const showToast=msg=>toasts.push(msg);",
         "const _updateYoloPill=()=>{pillUpdates+=1;}; const hideApprovalCard=()=>{cardHides+=1;};",
         body,
@@ -1269,15 +1293,18 @@ def test_card_yolo_response_does_not_overwrite_switched_session_state():
             "let _approvalSessionId='old-session';",
             "let _approvalCurrentId='approval-1';",
             "let _approvalResponding=null;",
+            "let _approvalClearedOwner=null;",
             "let _yoloEnabled=false;",
             "const _approvalPendingBySession=new Map([['old-session',{pending:{approval_id:'approval-1'}}]]);",
             f"const api={api_source};",
-            "const $=()=>({disabled:false,classList:{add(){},remove(){}}});",
+            "const $=()=>({disabled:false,classList:{contains:v=>v==='visible',add(){},remove(){}}});",
             "const t=k=>k; const showToast=msg=>toasts.push(msg); const setStatus=()=>{};",
-            "const _unmarkApprovalDismissed=()=>{}; const _approvalResponseMatches=()=>false;",
+            "const _unmarkApprovalDismissed=()=>{};",
             "const _setApprovalControlsDisabled=()=>{}; const _clearApprovalPendingForSession=()=>{};",
             "const hideApprovalCard=()=>{}; const _updateYoloPill=()=>{pillUpdates+=1;};",
             "const _restoreFailedApprovalResponse=()=>{};",
+            _js_block(messages_js, "function _captureApprovalResponseOwner(", "\nfunction _setApprovalControlsDisabled"),
+            _js_block(messages_js, "function _applyApprovalYoloProjection(", "\nfunction toggleApprovalCardCollapsed"),
             respond_approval,
             toggle_yolo,
             "(async()=>{",
@@ -1293,7 +1320,7 @@ def test_card_yolo_response_does_not_overwrite_switched_session_state():
 
     run(
         "async()=>{S.session.session_id='new-session';return {ok:true,yolo_enabled:true};}",
-        True,
+        False,
     )
     run(
         "async()=>{S.session.session_id='new-session';const e=new Error('relay failed');e.body=JSON.stringify({error:'relay failed',yolo_enabled:true});throw e;}",
@@ -1301,9 +1328,126 @@ def test_card_yolo_response_does_not_overwrite_switched_session_state():
     )
     run(
         "async()=>{_loadSessionGeneration=2;return {ok:true,yolo_enabled:true};}",
-        True,
+        False,
     )
     run(
         "async()=>{_loadSessionGeneration=2;const e=new Error('relay failed');e.body=JSON.stringify({error:'relay failed',yolo_enabled:true});throw e;}",
         False,
     )
+
+
+def _run_card_yolo_owner_scenario(scenario):
+    messages_js = (pathlib.Path(__file__).resolve().parents[1] / "static" / "messages.js").read_text()
+
+    def extract(start_marker, end_marker):
+        start = messages_js.index(start_marker)
+        return messages_js[start:messages_js.index(end_marker, start)]
+
+    owner_sid = "card-session"
+    active_sid = "other-session" if scenario.startswith("inactive-") else owner_sid
+    approval_id = "Approval-Case-ID" if scenario.startswith("case-distinct-") else "approval-1"
+    script = "\n".join([
+        "const calls=[]; const toasts=[]; const statuses=[]; const controlWrites=[];",
+        "let pillUpdates=0; let cardHideMutations=0; let pendingClears=0; let cardRenders=0;",
+        f"const scenario={json.dumps(scenario)};",
+        f"const ownerSid={json.dumps(owner_sid)}; const approvalId={json.dumps(approval_id)};",
+        f"const S={{session:{{session_id:{json.dumps(active_sid)}}}}};",
+        "let _loadSessionGeneration=1;",
+        "let _approvalSessionId=ownerSid; let _approvalCurrentId=approvalId;",
+        "let _approvalResponding=null; let _approvalClearedOwner=null; let _yoloEnabled=false;",
+        "let _approvalHideTimer=null; let _approvalVisibleSince=0; let _approvalSignature='owner-card';",
+        "const _approvalPendingBySession=new Map([[ownerSid,{pending:{approval_id:approvalId}}]]);",
+        "const classList={",
+        " values:new Set(['visible']),",
+        " contains(v){return this.values.has(v);},",
+        " add(v){this.values.add(v);},",
+        " remove(...values){for(const v of values){if(v==='visible'&&this.values.has(v))cardHideMutations+=1;this.values.delete(v);}},",
+        " toggle(v,on){if(on===undefined)on=!this.values.has(v);if(on)this.values.add(v);else this.values.delete(v);return on;},",
+        "};",
+        "const card={classList,hidden:false,setAttribute(){},removeAttribute(){}};",
+        "const textNode={textContent:''};",
+        "const makeButton=()=>{let value=false;return{classList:{add(){},remove(){}},get disabled(){return value;},set disabled(next){value=!!next;controlWrites.push(value);}};};",
+        "const elements={approvalCard:card,approvalCmd:{...textNode},approvalDesc:{...textNode},approvalCounter:{...textNode,style:{}},approvalBtnOnce:makeButton(),approvalBtnSession:makeButton(),approvalBtnAlways:makeButton(),approvalBtnDeny:makeButton()};",
+        "const $=id=>elements[id]||null;",
+        "const t=k=>k; const showToast=msg=>toasts.push(msg); const setStatus=msg=>statuses.push(msg);",
+        "const _setPromptFlyoutHidden=()=>{};",
+        "const _updateYoloPill=()=>{pillUpdates+=1;}; const syncTopbar=()=>{};",
+        "const _unmarkApprovalDismissed=()=>{};",
+        "const _clearApprovalPendingForSession=sid=>{pendingClears+=1;_approvalPendingBySession.delete(sid);};",
+        "const _approvalPromptBelongsToActiveSession=sid=>!!(sid&&S.session&&S.session.session_id===sid);",
+        "const _renderPendingApprovalForActiveSession=()=>{cardRenders+=1;};",
+        "const api=async(path,opts={})=>{",
+        " calls.push({path,body:opts.body?JSON.parse(opts.body):null});",
+        " if(path.startsWith('/api/approval/pending'))return {pending:null};",
+        " if(scenario.startsWith('same-generation-')){_loadSessionGeneration=2;_approvalSessionId=ownerSid;_approvalCurrentId=approvalId;classList.add('visible');}",
+        " if(scenario==='case-distinct-id'){_approvalCurrentId=approvalId.toLowerCase();classList.add('visible');}",
+        " if(scenario==='case-distinct-pending'){_approvalPendingBySession.set(ownerSid,{pending:{approval_id:approvalId.toLowerCase()}});}",
+        " if(scenario.endsWith('-error')){const e=new Error('relay failed');e.body=JSON.stringify({error:'relay failed',yolo_enabled:true});throw e;}",
+        " return {ok:true,yolo_enabled:true,stale_cleared:scenario==='same-generation-stale-cleared'||scenario==='case-distinct-pending'};",
+        "};",
+        extract("function _clearApprovalHideTimer(", "\n// Track session_id of the active approval"),
+        extract("function _captureApprovalResponseOwner(", "\nfunction startApprovalPolling"),
+        extract("async function toggleYoloFromApproval(", "\n// ── Approval polling"),
+        "(async()=>{",
+        " const ok=await toggleYoloFromApproval();",
+        " await new Promise(resolve=>setTimeout(resolve,0));",
+        " if(scenario==='case-distinct-pending'){",
+        "  if(!ok)throw new Error('owned response reported failure');",
+        "  if(calls.length!==2)throw new Error('expected response plus requery '+JSON.stringify(calls));",
+        "  if(calls[0].body.approval_id!==approvalId)throw new Error('approval ID changed '+JSON.stringify(calls[0].body));",
+        "  const successor=_approvalPendingBySession.get(ownerSid);",
+        "  if(!successor||successor.pending.approval_id!==approvalId.toLowerCase())throw new Error('case-distinct pending successor was cleared');",
+        "  if(JSON.stringify(controlWrites)!==JSON.stringify([true,true,true,true]))throw new Error('response changed successor controls '+JSON.stringify(controlWrites));",
+        "  if(_approvalResponding!==null)throw new Error('response owner was not released');",
+        "  if(cardHideMutations!==1||pendingClears!==0||cardRenders!==0)throw new Error('wrong owned cleanup '+JSON.stringify({cardHideMutations,pendingClears,cardRenders}));",
+        "  if(_yoloEnabled!==true||pillUpdates!==1)throw new Error('owned response did not project YOLO');",
+        "  if(JSON.stringify(toasts)!==JSON.stringify(['yolo_enabled'])||statuses.length)throw new Error('wrong owned feedback '+JSON.stringify({toasts,statuses}));",
+        "  return;",
+        " }",
+        " if(scenario.startsWith('inactive-')){",
+        "  if(ok!==false)throw new Error('inactive card action reported success');",
+        "  if(calls.length!==0)throw new Error('inactive card posted '+JSON.stringify(calls));",
+        "  if(controlWrites.length!==0)throw new Error('inactive card changed controls '+JSON.stringify(controlWrites));",
+        " }else{",
+        "  if(calls.length!==1)throw new Error('stale response made extra requests '+JSON.stringify(calls));",
+        "  if(calls[0].body.approval_id!==approvalId)throw new Error('approval ID changed '+JSON.stringify(calls[0].body));",
+        "  if(JSON.stringify(controlWrites)!==JSON.stringify([true,true,true,true]))throw new Error('stale response changed controls '+JSON.stringify(controlWrites));",
+        " }",
+        " if(_approvalResponding!==null)throw new Error('response owner was not released');",
+        " if(cardHideMutations!==0)throw new Error('stale response hid successor card');",
+        " if(pendingClears!==0)throw new Error('stale response cleared successor pending state');",
+        " if(cardRenders!==0)throw new Error('stale response rendered a card');",
+        " if(_yoloEnabled!==false||pillUpdates!==0)throw new Error('stale response changed YOLO projection');",
+        " if(toasts.length||statuses.length)throw new Error('stale response emitted feedback '+JSON.stringify({toasts,statuses}));",
+        "})().catch(e=>{console.error(e.stack||e);process.exit(1)});",
+    ])
+    node = shutil.which("node")
+    assert node is not None
+    result = subprocess.run([node, "-e", script], text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+@pytest.mark.parametrize("scenario", ["inactive-success", "inactive-error"])
+def test_card_yolo_rejects_visible_approval_owned_by_inactive_session(scenario):
+    _run_card_yolo_owner_scenario(scenario)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+@pytest.mark.parametrize("scenario", [
+    "same-generation-success",
+    "same-generation-stale-cleared",
+    "same-generation-error",
+])
+def test_card_yolo_ignores_response_from_prior_same_session_generation(scenario):
+    _run_card_yolo_owner_scenario(scenario)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_card_yolo_keeps_case_distinct_successor_approval_untouched():
+    _run_card_yolo_owner_scenario("case-distinct-id")
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_stale_clear_preserves_case_distinct_pending_successor():
+    _run_card_yolo_owner_scenario("case-distinct-pending")

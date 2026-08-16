@@ -7264,27 +7264,9 @@ function _updateYoloPill() {
 }
 
 async function toggleYoloFromApproval() {
-  const sid = S.session && S.session.session_id;
-  if (!sid) return false;
-  const responseGeneration = typeof _loadSessionGeneration === 'number'
-    ? _loadSessionGeneration
-    : null;
-  const result = await respondApproval('once', {
-    yolo: true,
-    _sessionGeneration: responseGeneration,
-  });
-  if (!result) return false;
-  // The approval request may outlive a session switch or same-session reload.
-  // Do not apply the original view's authoritative state to a newer view.
-  const sameSessionView = responseGeneration === null || (
-    typeof _loadSessionGeneration === 'number' &&
-    _loadSessionGeneration === responseGeneration
-  );
-  if (!S || !S.session || S.session.session_id !== sid || !sameSessionView) return true;
-  _yoloEnabled = !!result.yolo_enabled;
-  _updateYoloPill();
-  showToast(t(_yoloEnabled ? 'yolo_enabled' : 'yolo_disabled'));
-  return true;
+  const owner = _captureApprovalResponseOwner();
+  if (!owner) return false;
+  return !!(await respondApproval('once', {yolo: true, owner}));
 }
 
 // ── Approval polling ──
@@ -7361,6 +7343,7 @@ let _approvalSessionId = null;
 let _approvalCurrentId = null;  // approval_id of the card currently shown
 let _approvalPendingBySession = new Map();
 let _approvalResponding = null;
+let _approvalClearedOwner = null;
 
 const _DISMISSED_APPROVALS_KEY = 'hermes_dismissed_approvals';
 
@@ -7449,11 +7432,49 @@ function _renderPendingApprovalForActiveSession() {
   if (entry) showApprovalCard(entry.pending, entry.pendingCount);
 }
 
-function _approvalResponseMatches(sid, approvalId) {
+function _captureApprovalResponseOwner() {
+  const card = $("approvalCard");
+  const sid = _approvalSessionId;
+  const approvalId = _approvalCurrentId;
+  if (!card || !card.classList.contains("visible") || !sid || !approvalId) return null;
+  if (!S.session || S.session.session_id !== sid) return null;
+  return {sid, generation: _loadSessionGeneration, approvalId};
+}
+
+function _approvalResponseOwnerIsCurrent(owner) {
+  return !!(
+    owner &&
+    S.session &&
+    S.session.session_id === owner.sid &&
+    _loadSessionGeneration === owner.generation &&
+    _approvalSessionId === owner.sid &&
+    _approvalCurrentId === owner.approvalId
+  );
+}
+
+function _approvalResponseMatches(sid, approvalId, generation = _loadSessionGeneration) {
   return !!(
     _approvalResponding &&
     _approvalResponding.sid === sid &&
-    (_approvalResponding.approvalId || null) === (approvalId || null)
+    _approvalResponding.generation === generation &&
+    _approvalResponding.approvalId === approvalId
+  );
+}
+
+function _releaseApprovalResponseOwner(owner) {
+  if (_approvalResponseMatches(owner.sid, owner.approvalId, owner.generation)) {
+    _approvalResponding = null;
+  }
+}
+
+function _approvalClearedOwnerMayRefresh(owner) {
+  return !!(
+    _approvalClearedOwner === owner &&
+    S.session &&
+    S.session.session_id === owner.sid &&
+    _loadSessionGeneration === owner.generation &&
+    _approvalSessionId === null &&
+    _approvalCurrentId === null
   );
 }
 
@@ -7480,6 +7501,7 @@ function showApprovalCard(pending, pendingCount) {
   const sid = _rememberApprovalPending(pending, pendingCount);
   if (!_approvalPromptBelongsToActiveSession(sid)) return;
   if (pending && pending.approval_id && _isApprovalDismissed(sid, pending.approval_id)) return;
+  _approvalClearedOwner = null;
   const keys = pending.pattern_keys || (pending.pattern_key ? [pending.pattern_key] : []);
   const desc = (pending.description || "") + (keys.length ? " [" + keys.join(", ") + "]" : "");
   const cmd = pending.command || "";
@@ -7584,12 +7606,20 @@ function _syncApprovalTranscriptSpace(card, opts) {
   setTimeout(measure, 420);
 }
 
-function _restoreFailedApprovalResponse(sid, errMsg) {
-  _approvalResponding = null;
+function _restoreFailedApprovalResponse(owner, errMsg) {
+  const isCurrent = _approvalResponseOwnerIsCurrent(owner);
+  _releaseApprovalResponseOwner(owner);
+  if (!isCurrent) return;
   _setApprovalControlsDisabled(null, false);
-  if (_approvalPromptBelongsToActiveSession(sid)) _renderPendingApprovalForActiveSession();
+  _renderPendingApprovalForActiveSession();
   if (typeof showToast === "function") showToast(errMsg, 5000);
   if (typeof setStatus === "function") setStatus(errMsg);
+}
+
+function _applyApprovalYoloProjection(result) {
+  if (!result || typeof result.yolo_enabled !== "boolean") return;
+  _yoloEnabled = result.yolo_enabled;
+  _updateYoloPill();
 }
 
 function toggleApprovalCardCollapsed(forceCollapsed) {
@@ -7601,14 +7631,14 @@ function toggleApprovalCardCollapsed(forceCollapsed) {
   _syncApprovalTranscriptSpace(card, {immediate: true});
 }
 
-async function respondApproval(choice) {
-  const options = arguments[1] || {};
-  const sid = _approvalSessionId || (S.session && S.session.session_id);
-  if (!sid) return false;
-  const approvalId = _approvalCurrentId;
-  if (_approvalResponseMatches(sid, approvalId)) return false;
+async function respondApproval(choice, options = {}) {
+  const owner = options.owner || _captureApprovalResponseOwner();
+  if (!_approvalResponseOwnerIsCurrent(owner)) return false;
+  const {sid, approvalId} = owner;
+  if (_approvalResponseMatches(sid, approvalId, owner.generation)) return false;
+  _approvalClearedOwner = null;
   _unmarkApprovalDismissed(sid, approvalId);
-  _approvalResponding = {sid, approvalId: approvalId || null, choice};
+  _approvalResponding = {...owner, choice};
   _setApprovalControlsDisabled(choice, true);
   try {
     const result = await api("/api/approval/respond", {
@@ -7620,61 +7650,53 @@ async function respondApproval(choice) {
         ...(options.yolo ? {yolo: true} : {}),
       })
     });
+    if (!_approvalResponseOwnerIsCurrent(owner)) {
+      _releaseApprovalResponseOwner(owner);
+      return false;
+    }
     if (result && result.ok) {
-      _approvalResponding = null;
+      _releaseApprovalResponseOwner(owner);
+      if (options.yolo) _applyApprovalYoloProjection(result);
       const pendingEntry = _approvalPendingBySession.get(sid);
-      const samePending = !!(pendingEntry && pendingEntry.pending && (pendingEntry.pending.approval_id || null) === (approvalId || null));
-      // `stale_cleared` means the server found nothing pending for this session
-      // (the approval already resolved or its stream ended while the card was
-      // up). The orphan card must be cleared unconditionally so it can never
-      // get stuck — even if the displayed id has since drifted. (#4948 local
-      // variant: previously surfaced as a stuck "Approval response not
-      // accepted." toast.)
-      if (result.stale_cleared || (_approvalSessionId === sid && _approvalCurrentId === approvalId)) {
-        _approvalSessionId = null;
-        _approvalCurrentId = null;
-        hideApprovalCard(true);
-      }
-      if (samePending || result.stale_cleared) _clearApprovalPendingForSession(sid);
-      // Hardening for the narrow stale-clear race: a brand-new approval could
-      // have been parked server-side after the server's empty-check but before
-      // we processed this stale response. The unconditional clear above would
-      // hide that fresh card. Re-query the authoritative server pending state
-      // (same endpoint the fallback poll uses) so any approval that arrived in
-      // the window re-surfaces immediately instead of waiting for the next
-      // SSE/poll tick. Best-effort; poll/SSE remain the backstop. (Opus review
-      // nit on the #4948 fix.)
+      const samePending = !!(pendingEntry && pendingEntry.pending && pendingEntry.pending.approval_id === approvalId);
+      if (samePending) _clearApprovalPendingForSession(sid);
+      _approvalSessionId = null;
+      _approvalCurrentId = null;
+      _approvalClearedOwner = owner;
+      hideApprovalCard(true);
       if (result.stale_cleared) {
-        api("/api/approval/pending?session_id=" + encodeURIComponent(sid), {timeoutToast: false})
-          .then(data => {
-            if (data && data.pending && _approvalPromptBelongsToActiveSession(sid)) {
-              showApprovalForSession(sid, data.pending, data.pending_count || 1);
-            }
-          })
-          .catch(() => {});
+        void (async () => {
+          if (!_approvalClearedOwnerMayRefresh(owner)) return;
+          try {
+            const data = await api("/api/approval/pending?session_id=" + encodeURIComponent(sid), {timeoutToast: false});
+            if (!_approvalClearedOwnerMayRefresh(owner)) return;
+            _approvalClearedOwner = null;
+            if (data && data.pending) showApprovalForSession(sid, data.pending, data.pending_count || 1);
+          } catch (_) {
+            if (_approvalClearedOwner === owner) _approvalClearedOwner = null;
+          }
+        })();
       }
+      if (options.yolo) showToast(t(_yoloEnabled ? 'yolo_enabled' : 'yolo_disabled'));
       return options.yolo ? result : true;
     }
     const errMsg = (result && result.error) || "Approval response not accepted.";
-    _restoreFailedApprovalResponse(sid, errMsg);
+    _restoreFailedApprovalResponse(owner, errMsg);
     return false;
   } catch(e) {
     let errorPayload = null;
     if (e && typeof e.body === 'string') {
       try { errorPayload = JSON.parse(e.body); } catch (_) { /* non-JSON HTTP error */ }
     }
-    if (options.yolo && errorPayload && typeof errorPayload.yolo_enabled === 'boolean'
-      && S && S.session && S.session.session_id === sid
-      && (typeof options._sessionGeneration !== 'number'
-        || (typeof _loadSessionGeneration === 'number'
-          && _loadSessionGeneration === options._sessionGeneration))) {
-      _yoloEnabled = errorPayload.yolo_enabled;
-      _updateYoloPill();
-    }
     const errMsg = (errorPayload && (errorPayload.error || errorPayload.message))
       || (e && e.message)
       || (t("approval_responding") + " failed");
-    _restoreFailedApprovalResponse(sid, errMsg);
+    if (!_approvalResponseOwnerIsCurrent(owner)) {
+      _releaseApprovalResponseOwner(owner);
+      return false;
+    }
+    if (options.yolo) _applyApprovalYoloProjection(errorPayload);
+    _restoreFailedApprovalResponse(owner, errMsg);
     return false;
   }
 }

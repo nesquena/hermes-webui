@@ -279,8 +279,8 @@ class TestApprovalMessagesJS:
 
     def test_respond_disables_buttons_immediately(self):
         src = read(REPO / "static/messages.js")
-        assert "_approvalResponding = {sid, approvalId: approvalId || null, choice};" in src, \
-            "respondApproval should record the in-flight approval before the API call"
+        assert "_approvalResponding = {...owner, choice};" in src, \
+            "respondApproval should record the immutable owner before the API call"
         assert "_setApprovalControlsDisabled(choice, true);" in src, \
             "respondApproval should disable buttons immediately to prevent double-submit"
 
