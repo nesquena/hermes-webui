@@ -1635,7 +1635,7 @@ def _result_has_authoritative_full_history_prefix(
         and _messages_have_prefix(
             result_messages,
             previous_context,
-            key_fn=_canonical_message_digest,
+            key_fn=_canonical_replay_digest,
         )
     ):
         return True
@@ -1664,7 +1664,7 @@ def _result_has_authoritative_full_history_prefix(
             return _messages_have_prefix(
                 result_messages,
                 previous_context,
-                key_fn=_canonical_message_digest,
+                key_fn=_canonical_replay_digest,
             )
     if current_turn_user_idx >= len(result_messages):
         return False
@@ -1689,7 +1689,7 @@ def _result_has_authoritative_full_history_prefix(
     return _messages_have_prefix(
         result_messages,
         previous_context,
-        key_fn=_canonical_message_digest,
+        key_fn=_canonical_replay_digest,
     )
 
 
@@ -2062,7 +2062,7 @@ def _has_replay_safe_history_prefix(messages, previous_context) -> bool:
         and _messages_have_prefix(
             messages,
             previous_context,
-            key_fn=_canonical_message_digest,
+            key_fn=_canonical_replay_digest,
         )
     )
 
@@ -2124,8 +2124,8 @@ def _reconcile_payload_distinct_history_prefix(
         strict=True,
     ):
         if _comparison_keys_equal(
-            _canonical_message_digest(actual),
-            _canonical_message_digest(durable),
+            _canonical_replay_digest(actual),
+            _canonical_replay_digest(durable),
         ):
             continue
         payload_distinct_prefix_rows.append(copy.deepcopy(actual))
@@ -2197,7 +2197,7 @@ def _collapse_repeated_exact_history_prefixes(
         return result_messages, False
 
     history_keys = [
-        _canonical_message_digest(message) for message in previous_context
+        _canonical_replay_digest(message) for message in previous_context
     ]
     if any(key is None for key in history_keys):
         return result_messages, False
@@ -2207,7 +2207,7 @@ def _collapse_repeated_exact_history_prefixes(
             return False
         return all(
             _comparison_keys_equal(
-                _canonical_message_digest(actual),
+                _canonical_replay_digest(actual),
                 expected,
             )
             for actual, expected in zip(
@@ -2363,7 +2363,7 @@ def _settle_result_messages(
         and _messages_have_prefix(
             next_context_messages,
             previous_context_messages,
-            key_fn=_canonical_message_digest,
+            key_fn=_canonical_replay_digest,
         )
     ):
         history_size = len(previous_context_messages)
@@ -5952,6 +5952,20 @@ def _deduplicate_context_messages(messages):
             prior_exact_idx = user_exact_index.get(user_exact_key)
             if msg.get('_active_turn_token'):
                 if prior_exact_idx is not None:
+                    prior_row = deduped[prior_exact_idx]
+                    prior_token = (
+                        prior_row.get('_active_turn_token')
+                        if isinstance(prior_row, dict)
+                        else None
+                    )
+                    if prior_token and prior_token != msg.get('_active_turn_token'):
+                        # Conflicting request-local turn tokens prove two
+                        # distinct durable turns that merely share a visible
+                        # projection.  Replacing would delete history; keep
+                        # both rows.
+                        deduped.append(msg)
+                        user_exact_index[user_exact_key] = len(deduped) - 1
+                        continue
                     deduped[prior_exact_idx] = msg
                     continue
                 if key in seen:
@@ -6352,6 +6366,25 @@ def _comparison_keys_equal(left, right):
     return left is not None and right is not None and left == right
 
 
+def _canonical_replay_digest(message):
+    """Strict canonical payload digest for replay/prefix comparison.
+
+    ``_active_turn_token`` is request-local bookkeeping, not payload:
+    ``_sanitize_messages_for_agent()`` strips it from the history the Agent
+    replays back, so a persisted row and its exact replayed copy can differ by
+    that one field only.  Exclude it from the comparison digest on both sides;
+    every other byte of the payload must still match exactly, and non-strict
+    JSON payloads keep failing closed to ``None``.
+    """
+    if type(message) is dict and '_active_turn_token' in message:
+        message = {
+            key: value
+            for key, value in message.items()
+            if key != '_active_turn_token'
+        }
+    return _canonical_message_digest(message)
+
+
 def _display_backfill_key(message):
     """Return one strict unary backfill identity.
 
@@ -6522,16 +6555,16 @@ def _messages_have_prefix(
             or _message_requires_exact_prefix_payload(expected)
         ):
             if allow_exact_payload and _comparison_keys_equal(
-                _canonical_message_digest(actual),
-                _canonical_message_digest(expected),
+                _canonical_replay_digest(actual),
+                _canonical_replay_digest(expected),
             ):
                 continue
             return False
         if _comparison_keys_equal(key_fn(actual), key_fn(expected)):
             continue
         if allow_exact_payload and _comparison_keys_equal(
-            _canonical_message_digest(actual),
-            _canonical_message_digest(expected),
+            _canonical_replay_digest(actual),
+            _canonical_replay_digest(expected),
         ):
             continue
         return False
@@ -6708,6 +6741,26 @@ def _dedupe_replayed_context_messages(
             previous_context,
             key_fn=_message_replay_key,
         )
+    if not has_authoritative_prefix and any(
+        type(message) is dict and message.get('role') == 'user'
+        for message in previous_context
+    ) and _messages_have_prefix(
+        result_messages,
+        previous_context,
+        key_fn=_canonical_replay_digest,
+    ):
+        # A byte-exact canonical replay of the complete durable context —
+        # containing at least one real historical user turn — is conclusive
+        # history even when strict turn provenance was unavailable or was
+        # rejected upstream.  The comparator is the payload-strict digest
+        # (tolerant only of the request-local ``_active_turn_token`` that
+        # ``_sanitize_messages_for_agent()`` strips), so payload-distinct
+        # lookalikes still fail closed.  Reclassifying keeps the durable
+        # ``previous_context`` rows authoritative instead of letting the
+        # Agent's sanitized copy replace them wholesale, which would drop
+        # their turn-token bookkeeping and let a later dedup collapse the
+        # historical user row into the current turn.
+        has_authoritative_prefix = True
     if not has_authoritative_prefix:
         # Agent-side role-sequence repair can replace the last prior user row
         # with a repaired current-user row. In that shape the result no longer
@@ -6749,7 +6802,15 @@ def _dedupe_replayed_context_messages(
                     candidates = [cleaned_boundary] + result_messages[boundary_idx + 1:]
                 else:
                     candidates = result_messages[boundary_idx:]
-                candidates = _strip_replayed_prefix(previous_context, candidates)
+                # Payload-strict reduction on this destructive branch too: the
+                # persisted prefix rows carry durable ids/token bookkeeping the
+                # replayed copies lack, so only canonical payload identity
+                # (token-tolerant) may authorize dropping a candidate row.
+                candidates = _strip_replayed_prefix(
+                    previous_context,
+                    candidates,
+                    key_fn=_canonical_replay_digest,
+                )
                 if candidates:
                     candidates = _strip_replayed_context_items(previous_context, candidates)
                 return previous_context + candidates
@@ -6778,7 +6839,18 @@ def _dedupe_replayed_context_messages(
             previous_user_tail,
             previous_context=previous_context,
         )
-    candidates = _strip_replayed_prefix(previous_context, candidates)
+    # Mirror the display projection's payload-strict reduction for the
+    # authoritative-prefix delta: only byte-identical canonical payloads are
+    # replay duplicates here, tolerating solely the request-local
+    # ``_active_turn_token`` that ``_sanitize_messages_for_agent()`` strips
+    # from the history the Agent replays back.  The weak visible-text key
+    # ignores ``reasoning``/``id``/token and can misjudge payload-distinct
+    # rows on this destructive path.
+    candidates = _strip_replayed_prefix(
+        previous_context,
+        candidates,
+        key_fn=_canonical_replay_digest,
+    )
     if candidates:
         candidates = _strip_replayed_context_items(previous_context, candidates)
     return previous_context + candidates
