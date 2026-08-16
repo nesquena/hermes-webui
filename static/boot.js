@@ -644,11 +644,15 @@ $('btnSend').onclick=()=>{
 };
 $('mainChat')?.addEventListener('pointerdown', closeMobileWorkspacePanelFromChat);
 let _attachChoiceOpen=false;
+const _attachChoiceCapabilityQueries={
+  coarse:matchMedia('(pointer:coarse)'),
+  fine:matchMedia('(any-pointer:fine)'),
+};
 function _shouldOfferCameraChoice(){
   try{
     return _isPhoneWidthViewport()
-      && matchMedia('(pointer:coarse)').matches
-      && !matchMedia('(any-pointer:fine)').matches;
+      && _attachChoiceCapabilityQueries.coarse.matches
+      && !_attachChoiceCapabilityQueries.fine.matches;
   }catch(_){return false;}
 }
 function _syncAttachChoiceSemantics(){
@@ -658,8 +662,8 @@ function _syncAttachChoiceSemantics(){
   else attach.removeAttribute('aria-haspopup');
 }
 function _handleAttachChoiceCapabilityChange(){
-  if(!_shouldOfferCameraChoice()&&_attachChoiceOpen)_setAttachChoiceOpen(false);
-  else _syncAttachChoiceSemantics();
+  if(!_shouldOfferCameraChoice())_dismissAttachChoice();
+  _syncAttachChoiceSemantics();
 }
 function _setAttachChoiceOpen(open,restoreFocus){
   const popup=$('attachChoicePopup');
@@ -673,8 +677,12 @@ function _setAttachChoiceOpen(open,restoreFocus){
   else if(restoreFocus) attach.focus();
   _syncAttachChoiceSemantics();
 }
+function _dismissAttachChoice(restoreFocus){
+  if(_attachChoiceOpen)_setAttachChoiceOpen(false,restoreFocus);
+}
+window._dismissAttachChoice=_dismissAttachChoice;
 function _openAttachInput(input){
-  _setAttachChoiceOpen(false);
+  _dismissAttachChoice();
   if(!input)return;
   input.value='';
   input.click();
@@ -709,18 +717,22 @@ $('attachChoicePopup')?.addEventListener('click',e=>{
   if(choice==='files')_openAttachInput($('fileInput'));
 });
 document.addEventListener('pointerdown',e=>{
-  if(_attachChoiceOpen&&!e.target.closest('#attachChoicePopup,#btnAttach'))_setAttachChoiceOpen(false);
+  if(_attachChoiceOpen&&!e.target.closest('#attachChoicePopup,#btnAttach'))_dismissAttachChoice();
 });
 function _handleAttachChoiceKeydown(e){
   if(_attachChoiceOpen&&e.key==='Escape'){
     e.preventDefault();
-    _setAttachChoiceOpen(false,true);
+    _dismissAttachChoice(true);
     return true;
   }
   return false;
 }
 _syncAttachChoiceSemantics();
 window.addEventListener('resize',_handleAttachChoiceCapabilityChange);
+Object.values(_attachChoiceCapabilityQueries).forEach(query=>{
+  if(typeof query.addEventListener==='function')query.addEventListener('change',_handleAttachChoiceCapabilityChange);
+  else if(typeof query.addListener==='function')query.addListener(_handleAttachChoiceCapabilityChange);
+});
 
 // ── Voice input (Web Speech API + MediaRecorder fallback) ───────────────────
 function _micIsLocalhostOrLoopback(hostname){
@@ -3224,6 +3236,7 @@ function _setComposerControlHidden(el, hidden){
 
 function _applyComposerFooterVisibilitySettings(){
   const hidden=window._composerControlVisibility||{};
+  if(hidden.hide_composer_attach&&typeof _dismissAttachChoice==='function')_dismissAttachChoice();
   for(const def of _allComposerControlToggleDefs()){
     const isHidden=!!hidden[def.key];
     for(const selector of def.selectors){

@@ -17,7 +17,7 @@ def test_mobile_camera_choice_is_new_and_routes_through_existing_intake():
     assert 'id="cameraFileInput"' in html
     assert 'accept="image/*" capture="environment"' in html
     assert "_shouldOfferCameraChoice" in boot
-    assert "!matchMedia('(any-pointer:fine)').matches" in boot
+    assert "fine:matchMedia('(any-pointer:fine)')" in boot
     assert "addFiles(normalized)" in boot
     assert "cameraFileInput').onchange" in boot
 
@@ -86,8 +86,15 @@ const files = new Element('files');
 const camera = new Element('camera');
 const elements = {{ btnAttach:attach, attachChoicePopup:popup, fileInput:files, cameraFileInput:camera }};
 const document = {{ listeners:{{}}, addEventListener(k,fn){{this.listeners[k]=fn;}} }};
+const mediaQueries = {{}};
 const window = {{ listeners:{{}}, addEventListener(k,fn){{this.listeners[k]=fn;}}, matchMedia(q){{
-  return {{ matches: q.includes('max-width: 640px') ? state.width <= 640 : q.includes('pointer:coarse') ? state.coarse : q.includes('any-pointer:fine') ? state.fine : false }};
+  const query = {{
+    get matches() {{ return q.includes('max-width: 640px') ? state.width <= 640 : q.includes('pointer:coarse') ? state.coarse : q.includes('any-pointer:fine') ? state.fine : false; }},
+    listeners:[],
+    addEventListener(k,fn) {{ if(k==='change') this.listeners.push(fn); }},
+  }};
+  mediaQueries[q] = query;
+  return query;
 }} }};
 globalThis.document=document; globalThis.window=window;
 globalThis.matchMedia=(q)=>window.matchMedia(q);
@@ -105,6 +112,9 @@ assert.equal(popup.hidden,true); assert.equal(attach.getAttribute('aria-expanded
 state.width=400; state.coarse=true; state.fine=false; window.listeners.resize();
 attach.onclick({{preventDefault(){{}}}});
 assert.equal(popup.hidden,false); assert.equal(attach.getAttribute('aria-expanded'),'true');
+state.fine=true; mediaQueries['(any-pointer:fine)'].listeners.forEach(fn=>fn());
+assert.equal(popup.hidden,true); assert.equal(attach.getAttribute('aria-expanded'),'false');
+state.fine=false;
 popup.listeners.click({{target:choice}});
 assert.equal(camera.clicks,1); assert.equal(popup.hidden,true); assert.equal(attach.getAttribute('aria-expanded'),'false');
 state.width=1280; state.coarse=false; state.fine=true; window.listeners.resize();
@@ -130,3 +140,18 @@ def test_camera_choice_preserves_direct_desktop_and_hybrid_paths():
     assert 'id="btnAttach"' in read("static/index.html")
     assert '.composer-left{display:flex' in read("static/style.css")
     assert '.attach-choice-popup{position:absolute;left:10px' in read("static/style.css")
+
+
+def test_popup_dismissal_has_one_owner_across_lifecycle_boundaries():
+    boot = read("static/boot.js")
+    panels = read("static/panels.js")
+
+    assert "window._dismissAttachChoice=_dismissAttachChoice" in boot
+    capability = boot[boot.index("function _handleAttachChoiceCapabilityChange"):boot.index("function _setAttachChoiceOpen")]
+    assert "_dismissAttachChoice();" in capability
+    visibility = boot[boot.index("function _applyComposerFooterVisibilitySettings"):boot.index("window._applyComposerFooterVisibilitySettings")]
+    assert "hidden.hide_composer_attach" in visibility
+    assert "_dismissAttachChoice()" in visibility
+    switch = panels[panels.index("async function switchPanel"):panels.index("async function switchPanel") + 2400]
+    assert "prevPanel === 'chat'" in switch
+    assert "_dismissAttachChoice()" in switch
