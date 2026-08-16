@@ -2497,6 +2497,18 @@ async function _openSidebarSession(session, loadOpts={}){
   // Tell loadSession to skip its pre-hook — we already ran it above.
   await loadSession(session.session_id, Object.assign({}, loadOpts, {_preloadNotified:true}));
   renderSessionListFromCache();
+  _focusComposerAfterSidebarOpen();
+}
+
+function _focusComposerAfterSidebarOpen(){
+  // Touch-primary phones: auto-focus pops the virtual keyboard and covers the
+  // transcript. Desktop / fine-pointer (including the macOS WKWebView shell)
+  // should land the caret in the composer so a sidebar click is ready to type.
+  if(typeof _isTouchKeyboardViewport==='function' && _isTouchKeyboardViewport()) return;
+  const composer=(typeof $==='function')?$('msg'):(typeof document!=='undefined'?document.getElementById('msg'):null);
+  if(!composer||typeof composer.focus!=='function') return;
+  try{composer.focus({preventScroll:true});}
+  catch(_){composer.focus();}
 }
 
 function _isReadOnlySession(session) {
@@ -2615,6 +2627,7 @@ function _renderSessionSourceMenuItem(item,onToggle){
   row.setAttribute('role','menuitemcheckbox');row.setAttribute('aria-checked',item.selected?'true':'false');
   const checkbox=document.createElement('input');
   checkbox.type='checkbox';checkbox.className='session-source-menu-checkbox';checkbox.checked=item.selected;
+  checkbox.dataset.origin=item.origin;
   checkbox.setAttribute('aria-label',item.label);
   checkbox.onchange=(event)=>{event.stopPropagation();onToggle(item.origin,checkbox.checked);};
   const label=document.createElement('span');label.className='session-source-menu-label';label.textContent=item.label;

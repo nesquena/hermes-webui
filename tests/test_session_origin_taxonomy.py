@@ -84,7 +84,8 @@ global.document = {{
   createElement(tag) {{
     return {{
       tagName: tag.toUpperCase(), type: '', className: '', textContent: '', checked: false,
-      children: [], attrs: {{}},
+      dataset: {{}}, attrs: {{}},
+      children: [],
       appendChild(child) {{ this.children.push(child); }},
       setAttribute(key, value) {{ this.attrs[key] = value; }},
     }};
@@ -103,6 +104,7 @@ console.log(JSON.stringify({{
   rowTag: row.tagName,
   checkboxTag: checkbox.tagName,
   checkboxType: checkbox.type,
+  origin: checkbox.dataset.origin,
   initialSelected: row.attrs['aria-checked'],
   changes,
 }}));
@@ -112,6 +114,7 @@ console.log(JSON.stringify({{
         "rowTag": "LABEL",
         "checkboxTag": "INPUT",
         "checkboxType": "checkbox",
+        "origin": "slack",
         "initialSelected": "false",
         "changes": [["slack", True]],
     }
