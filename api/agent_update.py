@@ -193,6 +193,13 @@ def _flags() -> int:
     return int(getattr(subprocess, "CREATE_NO_WINDOW", 0)) if os.name == "nt" else 0
 
 
+def _transaction_flags() -> int:
+    flags = _flags()
+    if os.name == "nt":
+        flags |= int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+    return flags
+
+
 def _run(args: list[str], root: Path, timeout: float, *, env=None):
     return subprocess.run(args, cwd=str(root), shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, creationflags=_flags(), env=env)
 
@@ -209,12 +216,7 @@ def _marker(root: Path) -> bool:
 
 def _identity(root: Path, interpreter: Path, env=None) -> dict:
     probe = _PROBE.replace("__ROOT__", repr(str(root)))
-    try:
-        result = _run([str(interpreter), "-c", probe], root, 30, env=env)
-    except TypeError:
-        # Keeps narrow test doubles from silently dropping the controlled env
-        # in production, where _run accepts env explicitly.
-        result = _run([str(interpreter), "-c", probe], root, 30)
+    result = _run([str(interpreter), "-c", probe], root, 30, env=env)
     if result.returncode != 0: raise RuntimeError(_bounded(result.stderr or result.stdout or "identity probe failed"))
     try: value = json.loads(result.stdout)
     except (TypeError, ValueError) as exc: raise RuntimeError("Agent identity probe returned malformed health state") from exc
@@ -222,7 +224,11 @@ def _identity(root: Path, interpreter: Path, env=None) -> dict:
     if not isinstance(value, dict) or any(k not in value for k in required): raise RuntimeError("Agent identity probe returned malformed health state")
     if not value["pyvenv_config"] or not isinstance(value["pyvenv_config"], dict) or "home" not in value["pyvenv_config"]: raise RuntimeError("Agent venv pyvenv.cfg metadata is malformed")
     venv = (root / "venv").resolve()
+    runtime_executable = Path(value["executable"]).resolve()
+    selected_executable = Path(interpreter).resolve()
+    if runtime_executable != selected_executable: raise RuntimeError("Agent interpreter executable does not match selected venv launcher")
     if Path(value["prefix"]).resolve() != venv or Path(value["base_prefix"]).resolve() == venv or Path(value["pyvenv"]).resolve() != venv / "pyvenv.cfg": raise RuntimeError("Agent interpreter prefix does not match selected venv")
+    if Path(value["pyvenv_config"]["home"]).resolve() != Path(value["base_prefix"]).resolve(): raise RuntimeError("Agent venv home does not match runtime base prefix")
     if Path(value["package"]).resolve() != root / "hermes_cli" or Path(value["project"]).resolve() != root: raise RuntimeError("Agent interpreter identity does not match source root")
     roots = [Path(x).resolve() for x in value["site_roots"] if isinstance(x, str)]
     if not roots or any(not isinstance(x, str) or not x or not any(Path(x).resolve().is_relative_to(r) for r in roots if r.is_relative_to(venv)) for x in value["dependencies"].values()): raise RuntimeError("Agent dependencies are not owned by selected venv")
@@ -260,12 +266,67 @@ def _load_process_helper(root: Path):
     return module
 
 
+def _load_process_observer():
+    try:
+        return importlib.import_module("psutil")
+    except Exception:
+        return None
+
+
+def _record_descendants(observer, proc, known: dict[int, float]) -> None:
+    if observer is None:
+        return
+    try:
+        children = observer.Process(proc.pid).children(recursive=True)
+    except Exception:
+        return
+    for child in children:
+        try:
+            known[child.pid] = child.create_time()
+        except Exception:
+            continue
+
+
+def _live_owned_descendants(observer, known: dict[int, float]) -> list[object] | None:
+    if observer is None:
+        return None
+    live = []
+    for pid, created in known.items():
+        try:
+            child = observer.Process(pid)
+            if abs(child.create_time() - created) < 0.01 and child.is_running() and child.status() != observer.STATUS_ZOMBIE:
+                live.append(child)
+        except Exception:
+            continue
+    return live
+
+
+def _stop_owned_descendants(observer, known: dict[int, float]) -> None:
+    live = _live_owned_descendants(observer, known) or []
+    for child in live:
+        try:
+            child.terminate()
+        except Exception:
+            continue
+    deadline = time.monotonic() + 2
+    while live and time.monotonic() < deadline:
+        time.sleep(0.05)
+        live = _live_owned_descendants(observer, known) or []
+    for child in live:
+        try:
+            child.kill()
+        except Exception:
+            continue
+
+
 def _run_transaction(args, root, env, timeout=1800, helper=None):
-    kwargs = {"cwd": str(root), "env": env, "shell": False, "stdin": subprocess.DEVNULL, "stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "creationflags": _flags()}
+    kwargs = {"cwd": str(root), "env": env, "shell": False, "stdin": subprocess.DEVNULL, "stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "creationflags": _transaction_flags()}
     if os.name != "nt": kwargs["process_group"] = 0
     try: proc = subprocess.Popen(args, **kwargs)
     except OSError: raise
     out, err = _Rolling(), _Rolling()
+    observer = _load_process_observer()
+    known_descendants: dict[int, float] = {}
     def drain(stream, buf):
         try:
             while True:
@@ -276,7 +337,9 @@ def _run_transaction(args, root, env, timeout=1800, helper=None):
     threads = [threading.Thread(target=drain, args=(proc.stdout, out), daemon=True), threading.Thread(target=drain, args=(proc.stderr, err), daemon=True)]
     for t in threads: t.start()
     deadline = time.monotonic() + timeout; timed_out = False
-    while proc.poll() is None and time.monotonic() < deadline: time.sleep(.05)
+    while proc.poll() is None and time.monotonic() < deadline:
+        _record_descendants(observer, proc, known_descendants)
+        time.sleep(.05)
     if proc.poll() is None:
         timed_out = True
         try:
@@ -285,10 +348,16 @@ def _run_transaction(args, root, env, timeout=1800, helper=None):
         except Exception:
             try: proc.kill()
             except OSError: pass
+        _stop_owned_descendants(observer, known_descendants)
     try: proc.wait(timeout=3)
     except subprocess.TimeoutExpired: pass
     for t in threads: t.join(timeout=2)
-    quiescent = all(not t.is_alive() for t in threads) and proc.poll() is not None
+    _record_descendants(observer, proc, known_descendants)
+    descendants_quiescent = _live_owned_descendants(observer, known_descendants) == []
+    if not descendants_quiescent:
+        _stop_owned_descendants(observer, known_descendants)
+        descendants_quiescent = _live_owned_descendants(observer, known_descendants) == []
+    quiescent = observer is not None and all(not t.is_alive() for t in threads) and proc.poll() is not None and descendants_quiescent
     return subprocess.CompletedProcess(args, proc.returncode, out.text(), err.text()), timed_out, quiescent
 
 
@@ -312,26 +381,6 @@ def apply_agent_update(*, force: bool = False) -> dict:
     assert target.source_root and target.interpreter
     root, interpreter = target.source_root, target.interpreter
     before = _git_sha(root)
-    # Compatibility for the pre-Phase-4 unit doubles; production targets always use the bounded runner.
-    legacy = target.environment is None
-    if legacy:
-        marker_before = _marker(root)
-        try: before_identity = _identity(root, interpreter)
-        except Exception as exc: return AgentUpdateResult("unsupported", detail=f"Agent identity rejected: {_bounded(exc)}").as_dict()
-        try: result = _run([str(interpreter), "-m", "hermes_cli.main", "update", "--yes"], root, 1800)
-        except subprocess.TimeoutExpired: return AgentUpdateResult("indeterminate", detail="Agent update timed out").as_dict()
-        except OSError as exc: return AgentUpdateResult("indeterminate", detail=f"Agent update could not start: {_bounded(exc)}").as_dict()
-        output = _bounded((result.stdout or "") + (result.stderr or ""))
-        if result.returncode != 0:
-            if result.returncode == 2 or "already running" in output.lower() or ".hermes-update-in-progress" in output.lower(): return AgentUpdateResult("transaction_in_progress", result.returncode, output, transaction_in_progress=True).as_dict()
-            return AgentUpdateResult("failed", result.returncode, output).as_dict()
-        try: after_identity = _identity(root, interpreter)
-        except Exception as exc: return AgentUpdateResult("failed", 0, f"Post-update Agent health probe failed: {_bounded(exc)}").as_dict()
-        marker_after = _marker(root)
-        if marker_after: return AgentUpdateResult("incomplete", 0, "Agent update remains incomplete; rerun the official update transaction", source_before=before, source_after=_git_sha(root), marker_before=marker_before, marker_after=marker_after).as_dict()
-        if not after_identity.get("healthy", False): return AgentUpdateResult("failed", 0, "Agent post-update import health is unhealthy", source_before=before, source_after=_git_sha(root)).as_dict()
-        outcome = "repaired" if marker_before or not before_identity.get("healthy") else "updated"
-        return AgentUpdateResult(outcome, 0, output or f"Agent update {outcome}", output if "warn" in output.lower() else "", before, _git_sha(root), marker_before, marker_after, reload_eligible=True).as_dict()
     pre = target.health; marker_before = pre.incomplete if pre else False
     try:
         helper = _load_process_helper(root)
@@ -341,15 +390,38 @@ def apply_agent_update(*, force: bool = False) -> dict:
     except OSError as exc: return AgentUpdateResult("indeterminate", detail=f"Agent update could not start: {_bounded(exc)}").as_dict()
     output = _bounded((result.stdout or "") + (result.stderr or ""))
     if timed_out: return AgentUpdateResult("indeterminate", result.returncode, f"Agent update timed out; process cleanup quiescence={quiescent}: {output}", quiescent=quiescent).as_dict()
+    if not quiescent:
+        return AgentUpdateResult("indeterminate", result.returncode, f"Agent update process tree did not reach quiescence: {output}", quiescent=False).as_dict()
     if result.returncode == (pre.identity.get("concurrent_exit") if pre else 2): return AgentUpdateResult("transaction_in_progress", result.returncode, "Another Agent update is in progress; wait and retry later", transaction_in_progress=True, quiescent=quiescent).as_dict()
     if result.returncode != 0: return AgentUpdateResult("failed", result.returncode, output, quiescent=quiescent).as_dict()
     try: after_id = _identity(root, interpreter, env=target.environment)
     except Exception as exc: return AgentUpdateResult("failed", 0, f"Post-update Agent health probe failed: {_bounded(exc)}", quiescent=quiescent).as_dict()
     after = AgentInstallHealth(after_id, (root / ".update-incomplete").exists(), (root / ".lazy-refresh-incomplete").exists(), tuple(after_id["critical_modules"]), all(after_id["critical_imports"][x].get("ok") for x in after_id["critical_modules"]))
-    if after.incomplete or not after.healthy: return AgentUpdateResult("incomplete", 0, "Agent update remains incomplete or critical imports are unhealthy; rerun the official update transaction", before, _git_sha(root), marker_before, after.incomplete, quiescent=quiescent).as_dict()
+    if after.incomplete or not after.healthy:
+        return AgentUpdateResult(
+            "incomplete",
+            exit_code=0,
+            detail="Agent update remains incomplete or critical imports are unhealthy; rerun the official update transaction",
+            source_before=before,
+            source_after=_git_sha(root),
+            marker_before=marker_before,
+            marker_after=after.incomplete,
+            quiescent=quiescent,
+        ).as_dict()
     outcome = "repaired" if marker_before or not pre.healthy else "updated"
     warning = output if any(x in output.lower() for x in ("warning", "warn", "failed to refresh")) else ""
-    return AgentUpdateResult(outcome, 0, output or f"Agent update {outcome}", warning, before, _git_sha(root), marker_before, after.incomplete, reload_eligible=True, quiescent=quiescent).as_dict()
+    return AgentUpdateResult(
+        outcome,
+        exit_code=0,
+        detail=output or f"Agent update {outcome}",
+        warnings_detail=warning,
+        source_before=before,
+        source_after=_git_sha(root),
+        marker_before=marker_before,
+        marker_after=after.incomplete,
+        reload_eligible=True,
+        quiescent=quiescent,
+    ).as_dict()
 
 
 run_agent_update = apply_agent_update

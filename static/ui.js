@@ -10364,6 +10364,10 @@ async function applyClearUpdateLock(btn){
   try{
     const baselineServerIdentity = await _readHealthServerIdentity();
     const res=await api('/api/updates/clear_lock',{method:'POST',body:JSON.stringify({target}),timeoutMs:target==='agent'?2100000:120000});
+    if(res.transaction_in_progress||res.outcome==='transaction_in_progress'){
+      _showUpdateError(target,res);
+      return;
+    }
     if(res.ok){
       const errEl=$('updateError');
       if(errEl){errEl.style.display='none';errEl.textContent='';}
@@ -10515,7 +10519,7 @@ async function forceUpdate(btn){
     const baselineServerIdentity = await _readHealthServerIdentity();
     const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify((()=>{const b={target};const _ch=window._updateData?.[target]?.channel;if(_ch==='stable'||_ch==='experimental')b.channel=_ch;return b;})()),timeoutMs:target==='agent'?2100000:120000});
     if(!res.ok){
-      if(errEl){errEl.textContent='Force update failed: '+(res.message||'unknown error');errEl.style.display='block';}
+      _showUpdateError(target,res);
       btn.disabled=false;btn.textContent='Force update';
       return;
     }

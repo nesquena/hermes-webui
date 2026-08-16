@@ -145,6 +145,13 @@ async function api() { return response; }
 async function _readHealthServerIdentity() { readHealthCalls += 1; return 'baseline-id'; }
 function _waitForServerThenReload(opts) { waitCalls.push(opts); }
 function showToast(message) { showToasts.push(message); }
+function _showUpdateError(target, response) {
+  const message = response.message || 'wait and retry later';
+  button.style.display = 'none';
+  button.dataset.target = '';
+  errorEl.style.display = 'block';
+  errorEl.textContent = message;
+}
 function setTimeout(cb) { cb(); return 1; }
 function clearTimeout() {}
 
@@ -154,6 +161,7 @@ global.$ = $;
 global.api = api;
 global._readHealthServerIdentity = _readHealthServerIdentity;
 global._waitForServerThenReload = _waitForServerThenReload;
+global._showUpdateError = _showUpdateError;
 global.showToast = showToast;
 global.setTimeout = setTimeout;
 global.clearTimeout = clearTimeout;
@@ -341,6 +349,30 @@ def test_clear_lock_noop_clears_old_error_ui_without_polling():
     assert result["errorText"] == ""
     assert result["buttonDisplay"] == "none"
     assert result["buttonTarget"] == ""
+
+
+def test_clear_lock_transaction_in_progress_uses_wait_guidance_without_git_recovery():
+    result = _run_clear_lock_harness(
+        {
+            "ok": False,
+            "outcome": "transaction_in_progress",
+            "transaction_in_progress": True,
+            "message": "Another Agent update is in progress; wait and retry later",
+        }
+    )
+    assert result["waitCalls"] == []
+    assert result["buttonDisplay"] == "none"
+    assert result["buttonTarget"] == ""
+    assert "wait and retry later" in result["errorText"]
+
+
+def test_force_update_routes_transaction_contention_through_shared_error_state():
+    src = _ui_js()
+    start = src.index("async function forceUpdate")
+    body = src[start:]
+    assert "if(!res.ok)" in body
+    assert "_showUpdateError(target,res);" in body
+    assert "transaction_in_progress" in src[src.index("function _showUpdateError"):start]
 
 
 def test_apply_updates_wait_for_all_targets_before_reload():

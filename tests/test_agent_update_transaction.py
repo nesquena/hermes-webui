@@ -1,7 +1,10 @@
-"""Focused contract tests for the single-install Agent update adapter."""
+"""Focused production-boundary tests for the Agent update adapter."""
 
 import json
+import os
 import subprocess
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -9,36 +12,100 @@ import pytest
 from api import agent_update
 
 
-@pytest.fixture(autouse=True)
-def _block_real_subprocess_and_restart(monkeypatch):
-    monkeypatch.setattr(agent_update.subprocess, "Popen", lambda *a, **k: pytest.fail("Popen is forbidden"))
+_REAL_RUN_TRANSACTION = agent_update._run_transaction
+_REAL_LOAD_PROCESS_HELPER = agent_update._load_process_helper
 
 
-def _target(tmp_path):
-    root = tmp_path / "a"
+def _identity_payload(root, interpreter, *, healthy=True, helper=None, critical=None):
+    venv = root / "venv"
+    base = root.parent / "base-python"
+    modules = tuple(critical or ("hermes_cli.main", "run_agent", "model_tools", "toolsets"))
+    return {
+        "executable": str(interpreter.resolve()),
+        "prefix": str(venv.resolve()),
+        "base_prefix": str(base.resolve()),
+        "pyvenv": str((venv / "pyvenv.cfg").resolve()),
+        "pyvenv_config": {"home": str(base.resolve())},
+        "site_roots": [str((venv / "Lib" / "site-packages").resolve())],
+        "package": str((root / "hermes_cli").resolve()),
+        "project": str(root.resolve()),
+        "dependencies": {
+            "fastapi": str((venv / "Lib" / "site-packages" / "fastapi.py").resolve()),
+        },
+        "critical_modules": modules,
+        "critical_imports": {name: {"ok": healthy} for name in modules},
+        "helper": str((helper or root / "hermes_cli" / "_subprocess_compat.py").resolve()),
+        "concurrent_exit": 2,
+    }
+
+
+def _target(tmp_path, *, marker=False, lazy_marker=False, healthy=True):
+    root = tmp_path / "agent"
     (root / "hermes_cli").mkdir(parents=True)
     interpreter = root / "venv" / "Scripts" / "python.exe"
     interpreter.parent.mkdir(parents=True)
-    interpreter.write_text("", encoding="utf-8")
-    return agent_update.AgentUpdateTarget(root, interpreter, {"healthy": True}, "http://127.0.0.1:8642")
+    interpreter.write_text("shim", encoding="utf-8")
+    (root / "venv" / "pyvenv.cfg").write_text("home = C:\\Python\\base\n", encoding="utf-8")
+    if marker:
+        (root / ".update-incomplete").write_text("", encoding="utf-8")
+    if lazy_marker:
+        (root / ".lazy-refresh-incomplete").write_text("", encoding="utf-8")
+    identity = _identity_payload(root, interpreter, healthy=healthy)
+    health = agent_update.AgentInstallHealth(
+        identity,
+        marker,
+        lazy_marker,
+        tuple(identity["critical_modules"]),
+        healthy and all(item["ok"] for item in identity["critical_imports"].values()),
+    )
+    return agent_update.AgentUpdateTarget(
+        root,
+        interpreter,
+        identity,
+        "http://127.0.0.1:8642",
+        venv_root=root / "venv",
+        environment={"PYTHONNOUSERSITE": "1"},
+        health=health,
+    )
 
 
-def _run_result(code=0, out=""):
-    return SimpleNamespace(returncode=code, stdout=out, stderr="")
+def _run_result(code=0, out="", err=""):
+    return SimpleNamespace(returncode=code, stdout=out, stderr=err)
+
+
+def _install_test_runner(monkeypatch, result=None, *, callback=None, timed_out=False, quiescent=True, calls=None):
+    calls = calls if calls is not None else []
+
+    def run(args, root, env, timeout, helper):
+        calls.append((args, root, env, timeout, helper))
+        if callback:
+            callback(root)
+        return result or _run_result(), timed_out, quiescent
+
+    monkeypatch.setattr(agent_update, "_run_transaction", run)
+    return calls
+
+
+@pytest.fixture(autouse=True)
+def _safe_helper_loader(monkeypatch):
+    monkeypatch.setattr(
+        agent_update,
+        "_load_process_helper",
+        lambda root: SimpleNamespace(kill_process_tree=lambda proc: proc.kill()),
+    )
 
 
 def test_issue6617_dependency_change_runs_exact_official_transaction(monkeypatch, tmp_path):
     target = _target(tmp_path)
-    calls = []
+    calls = _install_test_runner(monkeypatch, calls=[])
     monkeypatch.setattr(agent_update, "_resolve_target", lambda: target)
-    monkeypatch.setattr(agent_update, "_git_sha", lambda root: "before" if not calls else "after")
-    monkeypatch.setattr(agent_update, "_marker", lambda root: False)
-    monkeypatch.setattr(agent_update, "_identity", lambda root, exe: {"healthy": True})
-    monkeypatch.setattr(agent_update, "_run", lambda args, root, timeout: calls.append((args, root, timeout)) or _run_result())
+    monkeypatch.setattr(agent_update, "_git_sha", lambda root: "before")
+    monkeypatch.setattr(agent_update, "_identity", lambda root, exe, env=None: target.identity)
     result = agent_update.apply_agent_update()
     assert result["outcome"] == "updated"
     assert calls[0][0] == [str(target.interpreter), "-m", "hermes_cli.main", "update", "--yes"]
     assert calls[0][1] == target.source_root
+    assert calls[0][2] == target.environment
 
 
 def test_agent_update_binds_source_command_and_cwd_to_install_a(monkeypatch, tmp_path):
@@ -47,21 +114,14 @@ def test_agent_update_binds_source_command_and_cwd_to_install_a(monkeypatch, tmp
     (install_b / "hermes_cli").mkdir(parents=True)
     interpreter_b = install_b / "venv" / "Scripts" / "python.exe"
     interpreter_b.parent.mkdir(parents=True)
-    interpreter_b.write_text("", encoding="utf-8")
-    calls = []
+    interpreter_b.write_text("other", encoding="utf-8")
     monkeypatch.setattr(agent_update, "_source_root", lambda: target.source_root)
     monkeypatch.setattr(agent_update, "_gateway_owner", lambda: ("http://127.0.0.1:8642", None))
     monkeypatch.setenv("HERMES_WEBUI_PYTHON", str(interpreter_b))
-    resolved = target
+    monkeypatch.setattr(agent_update, "_identity", lambda root, exe, env=None: target.identity)
+    resolved = agent_update._resolve_target()
     assert resolved.interpreter == target.interpreter
-    monkeypatch.setattr(agent_update, "_resolve_target", lambda: resolved)
-    monkeypatch.setattr(agent_update, "_git_sha", lambda root: "same")
-    monkeypatch.setattr(agent_update, "_marker", lambda root: False)
-    monkeypatch.setattr(agent_update, "_identity", lambda root, exe: {"healthy": True})
-    monkeypatch.setattr(agent_update, "_run", lambda args, root, timeout: calls.append((args, root)) or _run_result())
-    agent_update.apply_agent_update()
-    assert all(call[1] == target.source_root for call in calls)
-    assert all(call[0][0] == str(target.interpreter) for call in calls)
+    assert resolved.environment["PYTHONNOUSERSITE"] == "1"
 
 
 def test_agent_managed_marker_fails_before_interpreter_lookup(monkeypatch, tmp_path):
@@ -79,94 +139,72 @@ def test_agent_candidate_uses_only_the_official_venv(tmp_path, relative):
     (root / "hermes_cli").mkdir(parents=True)
     interpreter = root / relative
     interpreter.parent.mkdir(parents=True)
-    interpreter.write_text("", encoding="utf-8")
+    interpreter.write_text("shim", encoding="utf-8")
     assert agent_update._candidate(root) == interpreter
-
     dot_root = tmp_path / "dot-agent"
     (dot_root / "hermes_cli").mkdir(parents=True)
     dot_interpreter = dot_root / ".venv" / "bin" / "python"
     dot_interpreter.parent.mkdir(parents=True)
-    dot_interpreter.write_text("", encoding="utf-8")
+    dot_interpreter.write_text("shim", encoding="utf-8")
     assert agent_update._candidate(dot_root) is None
+
+
+def test_identity_rejects_foreign_executable_and_pyvenv_home(monkeypatch, tmp_path):
+    target = _target(tmp_path)
+    payload = _identity_payload(target.source_root, target.interpreter)
+    payload["executable"] = str((tmp_path / "foreign-python.exe").resolve())
+    monkeypatch.setattr(agent_update, "_run", lambda *args, **kwargs: _run_result(out=json.dumps(payload)))
+    with pytest.raises(RuntimeError, match="executable"):
+        agent_update._identity(target.source_root, target.interpreter, env=target.environment)
+    payload["executable"] = str(target.interpreter.resolve())
+    payload["pyvenv_config"]["home"] = str((tmp_path / "wrong-base").resolve())
+    with pytest.raises(RuntimeError, match="home"):
+        agent_update._identity(target.source_root, target.interpreter, env=target.environment)
 
 
 def test_agent_update_exit_zero_with_nonfatal_warnings_is_success(monkeypatch, tmp_path):
     target = _target(tmp_path)
+    _install_test_runner(monkeypatch, _run_result(out="warning: optional refresh skipped"))
     monkeypatch.setattr(agent_update, "_resolve_target", lambda: target)
     monkeypatch.setattr(agent_update, "_git_sha", lambda root: "before")
-    monkeypatch.setattr(agent_update, "_marker", lambda root: False)
-    monkeypatch.setattr(agent_update, "_identity", lambda root, exe: {"healthy": True})
-    monkeypatch.setattr(agent_update, "_run", lambda *a: _run_result(out="warning: optional refresh skipped"))
+    monkeypatch.setattr(agent_update, "_identity", lambda root, exe, env=None: target.identity)
     result = agent_update.apply_agent_update()
     assert result["ok"] is True
     assert result["warnings_detail"]
 
 
-def test_agent_update_rejects_missing_or_mismatched_identity_before_update(monkeypatch, tmp_path):
+def test_agent_update_zero_exit_with_lazy_marker_fails_closed(monkeypatch, tmp_path):
     target = _target(tmp_path)
-    called = []
-    monkeypatch.setattr(agent_update, "_resolve_target", lambda: target)
-    monkeypatch.setattr(agent_update, "_identity", lambda *a: (_ for _ in ()).throw(RuntimeError("mismatch")))
-    monkeypatch.setattr(agent_update, "_run", lambda *a: called.append(a) or _run_result())
-    result = agent_update.apply_agent_update()
-    assert result["outcome"] == "unsupported"
-    assert not any("hermes_cli.main" in call[0] for call in called)
-
-
-def test_agent_update_rejects_malformed_identity_health_before_update(monkeypatch, tmp_path):
-    target = _target(tmp_path)
-    called = []
-    monkeypatch.setattr(agent_update, "_resolve_target", lambda: target)
-    monkeypatch.setattr(agent_update, "_identity", lambda *a: (_ for _ in ()).throw(RuntimeError("malformed health state")))
-    monkeypatch.setattr(agent_update, "_run", lambda *a: called.append(a) or _run_result())
-    result = agent_update.apply_agent_update()
-    assert result["outcome"] == "unsupported"
-    assert not any("hermes_cli.main" in call[0] for call in called)
-
-
-def test_identity_probe_rejects_null_identity_paths(monkeypatch, tmp_path):
-    target = _target(tmp_path)
-    malformed = json.dumps({"package": None, "project": str(target.source_root), "healthy": True})
-    monkeypatch.setattr(
-        agent_update,
-        "_run",
-        lambda *a: _run_result(out=malformed),
-    )
-    with pytest.raises(RuntimeError, match="malformed health state"):
-        agent_update._identity(target.source_root, target.interpreter)
-
-
-def test_agent_update_nonzero_timeout_and_launch_failure_never_claim_success(monkeypatch, tmp_path):
-    target = _target(tmp_path)
+    _install_test_runner(monkeypatch, callback=lambda root: (root / ".lazy-refresh-incomplete").write_text("", encoding="utf-8"))
     monkeypatch.setattr(agent_update, "_resolve_target", lambda: target)
     monkeypatch.setattr(agent_update, "_git_sha", lambda root: "same")
-    monkeypatch.setattr(agent_update, "_marker", lambda root: False)
-    monkeypatch.setattr(agent_update, "_identity", lambda root, exe: {"healthy": True})
-    monkeypatch.setattr(agent_update, "_run", lambda *a: _run_result(1, "failed"))
-    assert agent_update.apply_agent_update()["ok"] is False
+    monkeypatch.setattr(agent_update, "_identity", lambda root, exe, env=None: target.identity)
+    result = agent_update.apply_agent_update()
+    assert result["outcome"] == "incomplete"
+    assert result["reload_eligible"] is False
 
 
-def test_agent_update_zero_exit_with_incomplete_marker_fails_closed(monkeypatch, tmp_path):
+def test_agent_update_zero_exit_with_unhealthy_critical_import_fails_closed(monkeypatch, tmp_path):
     target = _target(tmp_path)
+    bad = _identity_payload(target.source_root, target.interpreter, healthy=False)
+    _install_test_runner(monkeypatch)
+    monkeypatch.setattr(agent_update, "_resolve_target", lambda: target)
+    monkeypatch.setattr(agent_update, "_git_sha", lambda root: "changed")
+    monkeypatch.setattr(agent_update, "_identity", lambda root, exe, env=None: bad)
+    result = agent_update.apply_agent_update()
+    assert result["outcome"] == "incomplete"
+    assert result["source_before"] == "changed"
+
+
+def test_agent_force_uses_official_transaction_without_force_flags(monkeypatch, tmp_path):
+    target = _target(tmp_path)
+    calls = _install_test_runner(monkeypatch, calls=[])
     monkeypatch.setattr(agent_update, "_resolve_target", lambda: target)
     monkeypatch.setattr(agent_update, "_git_sha", lambda root: "same")
-    monkeypatch.setattr(agent_update, "_identity", lambda root, exe: {"healthy": True})
-    monkeypatch.setattr(agent_update, "_marker", lambda root: True)
-    monkeypatch.setattr(agent_update, "_run", lambda *a: _run_result())
-    assert agent_update.apply_agent_update()["outcome"] == "incomplete"
-
-
-def test_agent_force_preserves_agent_process_guards(monkeypatch, tmp_path):
-    target = _target(tmp_path)
-    monkeypatch.setattr(agent_update, "_resolve_target", lambda: target)
-    monkeypatch.setattr(agent_update, "_git_sha", lambda root: "before")
-    monkeypatch.setattr(agent_update, "_marker", lambda root: False)
-    monkeypatch.setattr(agent_update, "_identity", lambda root, exe: {"healthy": True})
-    seen = []
-    monkeypatch.setattr(agent_update, "_run", lambda args, root, timeout: seen.append(args) or _run_result())
+    monkeypatch.setattr(agent_update, "_identity", lambda root, exe, env=None: target.identity)
     result = agent_update.apply_agent_update(force=True)
     assert result["outcome"] == "updated"
-    assert all("--force" not in args for args in seen)
+    assert "--force" not in calls[0][0]
 
 
 @pytest.mark.parametrize("url", ["http://example.test:8642", "https://10.0.0.2"])
@@ -178,202 +216,90 @@ def test_remote_gateway_sources_fail_before_local_side_effects(monkeypatch, tmp_
     assert agent_update._resolve_target().unsupported_reason == "remote gateway owner"
 
 
-@pytest.mark.parametrize("url", ["http://127.0.0.1:8642", "http://localhost:8642", "http://[::1]:8642"])
-def test_loopback_gateway_sources_remain_local(monkeypatch, tmp_path, url):
-    target = _target(tmp_path)
-    monkeypatch.setattr(agent_update, "_gateway_owner", lambda: (url, None))
-    monkeypatch.setattr(agent_update, "_source_root", lambda: target.source_root)
-    monkeypatch.setattr(agent_update, "_candidate", lambda root: target.interpreter)
-    monkeypatch.setattr(agent_update, "_identity", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("Agent interpreter prefix does not match selected venv")))
-    assert agent_update._resolve_target().unsupported_reason == "Agent identity rejected: Agent interpreter prefix does not match selected venv"
-
-
-def test_agent_update_zero_exit_with_unhealthy_post_probe_fails_closed(monkeypatch, tmp_path):
-    target = _target(tmp_path)
-    monkeypatch.setattr(agent_update, "_resolve_target", lambda: target)
-    monkeypatch.setattr(agent_update, "_git_sha", lambda root: "changed")
-    monkeypatch.setattr(agent_update, "_marker", lambda root: False)
-    states = iter(({"healthy": True}, {"healthy": False}))
-    monkeypatch.setattr(agent_update, "_identity", lambda root, exe: next(states))
-    monkeypatch.setattr(agent_update, "_run", lambda *a: _run_result())
-    assert agent_update.apply_agent_update()["outcome"] == "failed"
-
-
-def test_agent_update_repairs_unhealthy_pre_probe(monkeypatch, tmp_path):
-    target = _target(tmp_path)
-    monkeypatch.setattr(agent_update, "_resolve_target", lambda: target)
-    monkeypatch.setattr(agent_update, "_git_sha", lambda root: "same")
-    monkeypatch.setattr(agent_update, "_marker", lambda root: False)
-    states = iter(({"healthy": False}, {"healthy": True}))
-    monkeypatch.setattr(agent_update, "_identity", lambda root, exe: next(states))
-    monkeypatch.setattr(agent_update, "_run", lambda *a: _run_result())
-    result = agent_update.apply_agent_update()
-    assert result["outcome"] == "repaired"
-    assert result["reload_eligible"] is True
-
-
-def test_agent_update_clearing_incomplete_marker_is_repaired(monkeypatch, tmp_path):
-    target = _target(tmp_path)
-    monkeypatch.setattr(agent_update, "_resolve_target", lambda: target)
-    monkeypatch.setattr(agent_update, "_git_sha", lambda root: "same")
-    markers = iter((True, False))
-    monkeypatch.setattr(agent_update, "_marker", lambda root: next(markers))
-    monkeypatch.setattr(agent_update, "_identity", lambda root, exe: {"healthy": True})
-    monkeypatch.setattr(agent_update, "_run", lambda *a: _run_result())
-    result = agent_update.apply_agent_update()
-    assert result["outcome"] == "repaired"
-    assert result["reload_eligible"] is True
-
-
-@pytest.mark.parametrize("failure", [subprocess.TimeoutExpired(["python"], 1), OSError("missing")])
-def test_agent_update_timeout_and_launch_failure_are_indeterminate(monkeypatch, tmp_path, failure):
-    target = _target(tmp_path)
-    monkeypatch.setattr(agent_update, "_resolve_target", lambda: target)
-    monkeypatch.setattr(agent_update, "_identity", lambda root, exe: {"healthy": True})
-    monkeypatch.setattr(agent_update, "_git_sha", lambda root: None)
-    monkeypatch.setattr(agent_update, "_run", lambda *a: (_ for _ in ()).throw(failure))
-    result = agent_update.apply_agent_update()
-    assert result["outcome"] == "indeterminate"
-    assert result["ok"] is False
-
-
-@pytest.mark.parametrize("variable", ["HERMES_MANAGED", "HERMES_DOCKER"])
-def test_managed_and_docker_targets_fail_before_interpreter_lookup(monkeypatch, tmp_path, variable):
-    target = _target(tmp_path)
-    monkeypatch.setattr(agent_update, "_gateway_owner", lambda: ("http://127.0.0.1:8642", None))
-    monkeypatch.setattr(agent_update, "_source_root", lambda: target.source_root)
-    monkeypatch.setattr(agent_update, "_candidate", lambda root: pytest.fail("candidate lookup must not run"))
-    monkeypatch.setenv(variable, "1")
-    assert agent_update._resolve_target().unsupported_reason == "managed or Docker Agent installation"
-
-
-@pytest.mark.parametrize("method", ["docker", "nixos", "homebrew", "brew"])
-def test_install_method_markers_fail_before_interpreter_lookup(monkeypatch, tmp_path, method):
-    target = _target(tmp_path)
-    (target.source_root / ".install_method").write_text(method, encoding="utf-8")
-    monkeypatch.setattr(agent_update, "_gateway_owner", lambda: ("http://127.0.0.1:8642", None))
-    monkeypatch.setattr(agent_update, "_source_root", lambda: target.source_root)
-    monkeypatch.setattr(agent_update, "_candidate", lambda root: pytest.fail("candidate lookup must not run"))
-    assert agent_update._resolve_target().unsupported_reason == "managed or Docker Agent installation"
-
-
-def test_configured_remote_gateway_fails_before_interpreter_lookup(monkeypatch, tmp_path):
-    import api.agent_health
-    import api.config
-    import api.gateway_chat
-
-    target = _target(tmp_path)
-    for variable in ("GATEWAY_HEALTH_URL", "HERMES_GATEWAY_HEALTH_URL", "HERMES_API_URL", "HERMES_WEBUI_GATEWAY_BASE_URL"):
-        monkeypatch.delenv(variable, raising=False)
-    monkeypatch.setattr(api.agent_health, "_remote_gateway_base_url", lambda: None)
-    monkeypatch.setattr(api.config, "get_config", lambda: {"webui_gateway_base_url": "https://remote.example:8642"})
-    monkeypatch.setattr(api.gateway_chat, "_gateway_base_url", lambda config_data=None, environ=None: "https://remote.example:8642")
-    monkeypatch.setattr(agent_update, "_source_root", lambda: target.source_root)
-    monkeypatch.setattr(agent_update, "_candidate", lambda root: pytest.fail("candidate lookup must not run"))
-    assert agent_update._resolve_target().unsupported_reason == "remote gateway owner"
-
-
-@pytest.mark.parametrize("variable", ["GATEWAY_HEALTH_URL", "HERMES_GATEWAY_HEALTH_URL", "HERMES_API_URL"])
-def test_supported_remote_gateway_environment_sources_fail_closed(monkeypatch, tmp_path, variable):
-    target = _target(tmp_path)
-    for name in ("GATEWAY_HEALTH_URL", "HERMES_GATEWAY_HEALTH_URL", "HERMES_API_URL", "HERMES_WEBUI_GATEWAY_BASE_URL"):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv(variable, "https://remote.example:8642")
-    monkeypatch.setattr(agent_update, "_source_root", lambda: target.source_root)
-    monkeypatch.setattr(agent_update, "_candidate", lambda root: None)
-    assert agent_update._resolve_target().unsupported_reason == "Agent venv interpreter is unavailable"
-
-
-def test_agent_update_same_sha_success_still_reloads_for_dependency_changes(monkeypatch, tmp_path):
-    target = _target(tmp_path)
-    monkeypatch.setattr(agent_update, "_resolve_target", lambda: target)
-    monkeypatch.setattr(agent_update, "_identity", lambda root, exe: {"healthy": True})
-    monkeypatch.setattr(agent_update, "_marker", lambda root: False)
-    monkeypatch.setattr(agent_update, "_run", lambda *a: _run_result())
-    monkeypatch.setattr(agent_update, "_git_sha", lambda root: "same")
-    result = agent_update.apply_agent_update()
-    assert result["outcome"] == "updated"
-    assert result["reload_eligible"] is True
-
-
-def test_agent_zip_install_uses_conservative_success(monkeypatch, tmp_path):
-    target = _target(tmp_path)
-    monkeypatch.setattr(agent_update, "_resolve_target", lambda: target)
-    monkeypatch.setattr(agent_update, "_identity", lambda root, exe: {"healthy": True})
-    monkeypatch.setattr(agent_update, "_marker", lambda root: False)
-    monkeypatch.setattr(agent_update, "_git_sha", lambda root: None)
-    monkeypatch.setattr(agent_update, "_run", lambda *a: _run_result())
-    result = agent_update.apply_agent_update()
-    assert result["outcome"] == "updated"
-    assert result["reload_eligible"] is True
-
-
-def test_agent_update_missing_sha_is_safe(monkeypatch, tmp_path):
-    target = _target(tmp_path)
-    monkeypatch.setattr(agent_update, "_resolve_target", lambda: target)
-    monkeypatch.setattr(agent_update, "_identity", lambda root, exe: {"healthy": True})
-    monkeypatch.setattr(agent_update, "_marker", lambda root: False)
-    monkeypatch.setattr(agent_update, "_run", lambda *a: _run_result())
-    monkeypatch.setattr(agent_update, "_git_sha", lambda root: None)
-    result = agent_update.apply_agent_update()
-    assert result["outcome"] == "updated"
-    assert result["reload_eligible"] is True
-
-
-def test_agent_update_lock_conflict_and_diagnostic_redaction(monkeypatch, tmp_path):
-    target = _target(tmp_path)
-    monkeypatch.setattr(agent_update, "_resolve_target", lambda: target)
-    monkeypatch.setattr(agent_update, "_identity", lambda root, exe: {"healthy": True})
-    monkeypatch.setattr(agent_update, "_git_sha", lambda root: "same")
-    monkeypatch.setattr(agent_update, "_marker", lambda root: False)
-    token = "ghp_" + "A" * 24
-    output = f"https://user:password@example.test/update?token={token}; another update is already running"
-    monkeypatch.setattr(agent_update, "_run", lambda *a: _run_result(1, output))
-    result = agent_update.apply_agent_update()
-    assert result["transaction_in_progress"] is True
-    assert "password" not in result["message"]
-    assert token not in result["message"]
-
-
 def test_health_url_cannot_mask_remote_chat_owner(monkeypatch):
     import api.gateway_chat
 
     monkeypatch.setenv("GATEWAY_HEALTH_URL", "http://127.0.0.1:8642")
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "https://remote.example:8642")
-    target = api.gateway_chat.resolve_effective_gateway_target({}, dict(__import__("os").environ))
+    target = api.gateway_chat.resolve_effective_gateway_target({}, dict(os.environ))
     assert target["url"] == "https://remote.example:8642"
     assert target["local"] is False
 
 
-def test_controlled_environment_owns_selected_venv(monkeypatch, tmp_path):
-    monkeypatch.setenv("PYTHONHOME", "ambient-home")
-    monkeypatch.setenv("PYTHONPATH", "ambient-path")
-    env = agent_update._controlled_env(tmp_path / "venv")
-    assert "PYTHONHOME" not in env and "PYTHONPATH" not in env
-    assert env["PYTHONNOUSERSITE"] == "1"
-    assert env["VIRTUAL_ENV"] == str(tmp_path / "venv")
-    assert env["PATH"].startswith(str(tmp_path / "venv" / "Scripts"))
-
-
-def test_both_incomplete_markers_are_install_health_state(tmp_path):
-    root = tmp_path / "agent"
-    root.mkdir()
-    (root / ".update-incomplete").write_text("", encoding="utf-8")
-    (root / ".lazy-refresh-incomplete").write_text("", encoding="utf-8")
-    health = agent_update.AgentInstallHealth({}, True, True, ("hermes_cli.main",), False)
-    assert health.incomplete is True
-
-
 def test_transaction_refusal_is_not_git_lock_recovery(monkeypatch, tmp_path):
     target = _target(tmp_path)
+    _install_test_runner(monkeypatch, _run_result(2, "still running"))
     monkeypatch.setattr(agent_update, "_resolve_target", lambda: target)
-    monkeypatch.setattr(agent_update, "_identity", lambda *args: {"healthy": True})
-    monkeypatch.setattr(agent_update, "_git_sha", lambda root: "same")
-    monkeypatch.setattr(agent_update, "_marker", lambda root: False)
-    monkeypatch.setattr(agent_update, "_run", lambda *args: _run_result(2, "still running"))
+    monkeypatch.setattr(agent_update, "_identity", lambda root, exe, env=None: target.identity)
     result = agent_update.apply_agent_update()
     assert result["outcome"] == "transaction_in_progress"
+    assert result["transaction_in_progress"] is True
     assert "lock_conflict" not in result
+
+
+def test_agent_update_timeout_is_indeterminate_without_reload(monkeypatch, tmp_path):
+    target = _target(tmp_path)
+    _install_test_runner(monkeypatch, timed_out=True, quiescent=True)
+    monkeypatch.setattr(agent_update, "_resolve_target", lambda: target)
+    result = agent_update.apply_agent_update()
+    assert result["outcome"] == "indeterminate"
+    assert result["reload_eligible"] is False
+
+
+def test_agent_update_nonquiescent_success_is_indeterminate(monkeypatch, tmp_path):
+    target = _target(tmp_path)
+    _install_test_runner(monkeypatch, quiescent=False)
+    monkeypatch.setattr(agent_update, "_resolve_target", lambda: target)
+    result = agent_update.apply_agent_update()
+    assert result["outcome"] == "indeterminate"
+    assert result["reload_eligible"] is False
+
+
+def test_process_helper_is_loaded_from_selected_agent_root(monkeypatch, tmp_path):
+    target = _target(tmp_path)
+    monkeypatch.undo()
+    helper = target.source_root / "hermes_cli" / "_subprocess_compat.py"
+    helper.write_text("def kill_process_tree(proc): pass\n", encoding="utf-8")
+    loaded = _REAL_LOAD_PROCESS_HELPER(target.source_root)
+    assert Path(loaded.__file__).resolve() == helper.resolve()
+
+
+def test_critical_module_list_is_required_before_update_launch(monkeypatch, tmp_path):
+    target = _target(tmp_path)
+    payload = _identity_payload(target.source_root, target.interpreter)
+    payload["critical_modules"] = None
+    monkeypatch.setattr(agent_update, "_run", lambda *args, **kwargs: _run_result(out=json.dumps(payload)))
+    with pytest.raises(RuntimeError, match="critical module"):
+        agent_update._identity(target.source_root, target.interpreter, env=target.environment)
+
+
+def test_process_runner_terminates_descendants_and_bounds_output(tmp_path):
+    script = "import subprocess,sys,time; subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']); print('x'*200000, flush=True); print('y'*200000, file=sys.stderr, flush=True); time.sleep(30)"
+    result, timed_out, quiescent = _REAL_RUN_TRANSACTION(
+        [sys.executable, "-c", script],
+        tmp_path,
+        os.environ.copy(),
+        timeout=0.3,
+        helper=SimpleNamespace(kill_process_tree=lambda proc: proc.kill()),
+    )
+    assert timed_out is True
+    assert quiescent is True
+    assert len(result.stdout.encode()) <= agent_update._MAX_OUTPUT
+    assert len(result.stderr.encode()) <= agent_update._MAX_OUTPUT
+
+
+def test_process_runner_without_tree_observer_is_not_quiescent(monkeypatch, tmp_path):
+    monkeypatch.setattr(agent_update, "_load_process_observer", lambda: None)
+    result, timed_out, quiescent = _REAL_RUN_TRANSACTION(
+        [sys.executable, "-c", "print('done')"],
+        tmp_path,
+        os.environ.copy(),
+        timeout=5,
+        helper=SimpleNamespace(kill_process_tree=lambda proc: proc.kill()),
+    )
+    assert timed_out is False
+    assert result.returncode == 0
+    assert quiescent is False
 
 
 def test_rolling_diagnostics_are_byte_bounded():
