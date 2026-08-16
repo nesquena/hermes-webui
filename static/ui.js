@@ -3607,6 +3607,14 @@ async function populateModelDropdown(opts={}){
 
 // Cache so we don't re-fetch on every page load
 const _liveModelCache={};
+const _liveModelCacheGen={};
+function _invalidateLiveModelCache(provider){
+  const p=String(provider||'').trim().toLowerCase();
+  if(!p) return;
+  delete _liveModelCache[p];
+  _liveModelCacheGen[p]=(_liveModelCacheGen[p]||0)+1;
+}
+window._invalidateLiveModelCache=_invalidateLiveModelCache;
 // Tracks providers for which a live-model fetch is in flight.
 // Used by syncTopbar() to defer model corrections until the fetch completes,
 // preventing premature fallback to the first static model (#1169).
@@ -3711,15 +3719,18 @@ function _addLiveModelsToSelect(provider, models, sel){
   return added;
 }
 
-async function _fetchLiveModels(provider, sel, requestSeq=null){
-  if(!provider||!sel) return;
+async function _fetchLiveModels(provider, sel, requestSeq=null, opts={}){
+  const required=!!(opts&&opts.required);
+  provider=String(provider||'').trim().toLowerCase();
+  if(!provider||(!sel&&!required)) return required?Promise.reject(new Error('provider is required')):undefined;
   if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
+  const generation=_liveModelCacheGen[provider]||0;
   // Already fetched — apply cached models to this select element (#872)
-  if(_liveModelCache[provider]){
+  if(!required&&_liveModelCache[provider]){
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
     const added=_addLiveModelsToSelect(provider,_liveModelCache[provider],sel);
     if(added>0 && typeof syncModelChip==='function') syncModelChip();
-    return;
+    return _liveModelCache[provider];
   }
   _liveModelFetchPending.add(provider);
   try{
@@ -3728,20 +3739,28 @@ async function _fetchLiveModels(provider, sel, requestSeq=null){
     const _liveRes=await fetch(url.href,{credentials:'include'});
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
     if(_redirectIfUnauth(_liveRes)) return;
+    if(!_liveRes.ok) throw new Error('Live model request failed');
     const data=await _liveRes.json();
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
-    if(!data.models||!data.models.length) return;
+    if(!data.models||!data.models.length){
+      if(required) throw new Error('Fresh live models were not returned');
+      return;
+    }
+    if(generation!==(_liveModelCacheGen[provider]||0)) return;
     _liveModelCache[provider]=data.models;
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
+    if(!sel) return data.models;
     const added=_addLiveModelsToSelect(provider,data.models,sel);
     if(added>0){
       if(typeof syncModelChip==='function') syncModelChip();
       console.debug('[hermes] Live models loaded for',provider+':',added,'new models added');
     }
+    return data.models;
   }catch(e){
+    if(required) throw e;
     console.debug('[hermes] Live model fetch failed for',provider,e.message);
   }finally{
-    _liveModelFetchPending.delete(provider);
+    if(generation===(_liveModelCacheGen[provider]||0)) _liveModelFetchPending.delete(provider);
   }
 }
 

@@ -1840,6 +1840,8 @@ _OPENAI_COMPAT_ENDPOINTS = {
 #
 _LIVE_MODELS_CACHE_TTL = 60.0
 _LIVE_MODELS_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
+_LIVE_MODELS_CACHE_GENERATION: dict[tuple[str, str], int] = {}
+_LIVE_MODELS_REFRESH_REQUIRED: set[tuple[str, str]] = set()
 _LIVE_MODELS_CACHE_LOCK = threading.RLock()
 
 
@@ -1863,6 +1865,8 @@ def _live_models_cache_key(provider: str) -> tuple[str, str]:
 def _get_cached_live_models(key: tuple[str, str]) -> dict | None:
     now = time.monotonic()
     with _LIVE_MODELS_CACHE_LOCK:
+        if key in _LIVE_MODELS_REFRESH_REQUIRED:
+            return None
         cached = _LIVE_MODELS_CACHE.get(key)
         if not cached:
             return None
@@ -1873,14 +1877,46 @@ def _get_cached_live_models(key: tuple[str, str]) -> dict | None:
         return copy.deepcopy(payload)
 
 
-def _set_cached_live_models(key: tuple[str, str], payload: dict) -> None:
+def _live_models_generation(key: tuple[str, str]) -> int:
     with _LIVE_MODELS_CACHE_LOCK:
+        return _LIVE_MODELS_CACHE_GENERATION.setdefault(key, 0)
+
+
+def _invalidate_live_models_for_provider(provider: str) -> None:
+    from api.config import _resolve_provider_alias
+
+    profile = _active_profile_for_live_models_cache()
+    names = {str(provider or "").strip().lower(), _resolve_provider_alias(provider)}
+    with _LIVE_MODELS_CACHE_LOCK:
+        for name in names:
+            if not name:
+                continue
+            key = (profile, name)
+            _LIVE_MODELS_CACHE.pop(key, None)
+            _LIVE_MODELS_CACHE_GENERATION[key] = _LIVE_MODELS_CACHE_GENERATION.get(key, 0) + 1
+            _LIVE_MODELS_REFRESH_REQUIRED.add(key)
+
+
+def _set_cached_live_models(
+    key: tuple[str, str], payload: dict, expected_generation: int | None = None
+) -> bool:
+    with _LIVE_MODELS_CACHE_LOCK:
+        if expected_generation is not None and expected_generation != _LIVE_MODELS_CACHE_GENERATION.get(key, 0):
+            return False
+        if key in _LIVE_MODELS_REFRESH_REQUIRED and not payload.get("models"):
+            return False
         _LIVE_MODELS_CACHE[key] = (time.monotonic(), copy.deepcopy(payload))
+        if payload.get("models"):
+            _LIVE_MODELS_REFRESH_REQUIRED.discard(key)
+        return True
 
 
 def _clear_live_models_cache() -> None:
     with _LIVE_MODELS_CACHE_LOCK:
         _LIVE_MODELS_CACHE.clear()
+        for key in set(_LIVE_MODELS_CACHE_GENERATION) | set(_LIVE_MODELS_REFRESH_REQUIRED):
+            _LIVE_MODELS_CACHE_GENERATION[key] = _LIVE_MODELS_CACHE_GENERATION.get(key, 0) + 1
+        _LIVE_MODELS_REFRESH_REQUIRED.clear()
 
 
 from api import route_session_list_cache as _route_session_list_cache
@@ -14765,6 +14801,9 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "provider is required")
         from api.config import invalidate_provider_models_cache
         invalidate_provider_models_cache(provider_id)
+        from api.config import _resolve_provider_alias
+        provider_id = _resolve_provider_alias(provider_id)
+        _invalidate_live_models_for_provider(provider_id)
         return j(handler, {"ok": True, "provider": provider_id})
 
     if parsed.path == "/api/reasoning":
@@ -20419,17 +20458,21 @@ def _handle_live_models(handler, parsed):
         provider = _resolve_provider_alias(provider)
 
         cache_key = _live_models_cache_key(provider)
+        expected_generation = _live_models_generation(cache_key)
+        with _LIVE_MODELS_CACHE_LOCK:
+            refresh_required = cache_key in _LIVE_MODELS_REFRESH_REQUIRED
         cached = _get_cached_live_models(cache_key)
         if cached is not None:
             return j(handler, cached)
 
         def _finish(payload: dict):
-            _set_cached_live_models(cache_key, payload)
+            _set_cached_live_models(cache_key, payload, expected_generation)
             return j(handler, payload)
 
         # Delegate to the agent's live-fetch + fallback resolver.
         # provider_model_ids() tries live endpoints first and falls back to
         # the static _PROVIDER_MODELS list — it never raises.
+        _lookup_failed = False
         try:
             import sys as _sys
             import os as _os
@@ -20439,10 +20482,25 @@ def _handle_live_models(handler, parsed):
             if _agent_dir not in _sys.path:
                 _sys.path.insert(0, _agent_dir)
             from hermes_cli.models import provider_model_ids as _pmi
-            ids = _pmi(provider)
+            if refresh_required:
+                import inspect as _inspect
+                try:
+                    _params = _inspect.signature(_pmi).parameters
+                    _supports_force = "force_refresh" in _params or any(
+                        p.kind is _inspect.Parameter.VAR_KEYWORD for p in _params.values()
+                    )
+                except (TypeError, ValueError):
+                    _supports_force = False
+                ids = _pmi(provider, force_refresh=True) if _supports_force else _pmi(provider)
+            else:
+                ids = _pmi(provider)
         except Exception as _import_err:
             logger.debug("provider_model_ids import failed for %s: %s", provider, _import_err)
+            _lookup_failed = True
             ids = []
+
+        if refresh_required and _lookup_failed:
+            return _finish({"error": "live_models_unavailable", "models": []})
 
         if not ids:
             custom_provider_entry = None
@@ -20641,6 +20699,8 @@ def _handle_live_models(handler, parsed):
 
         # Static fallback — only reached when live fetch also failed.
         if not ids:
+            if refresh_required:
+                return _finish({"error": "live_models_unavailable", "models": []})
             from api.config import _PROVIDER_MODELS as _pm
             ids = [m["id"] for m in _pm.get(provider, [])]
         if not ids:
