@@ -59,6 +59,16 @@ def test_ui_posts_reasoning_context_with_effort():
     assert "Object.assign({effort:effort},_reasoningEffortContext())" in src
 
 
+def test_slash_reasoning_posts_active_session_context():
+    src = read("static/commands.js")
+    match = re.search(r"function cmdReasoning\(.*?\n\}", src, re.DOTALL)
+    assert match
+    command = match.group(0)
+
+    assert "_reasoningEffortContext()" in command
+    assert "Object.assign({effort:arg},context)" in command
+
+
 def test_reasoning_post_route_threads_model_context():
     src = read("api/routes.py")
     match = re.search(
@@ -70,6 +80,50 @@ def test_reasoning_post_route_threads_model_context():
     body = match.group(1)
     assert 'body.get("model")' in body
     assert 'body.get("provider")' in body
+    assert 'body.get("base_url")' in body
     assert 'set_reasoning_effort(' in body
     assert "model_id=model_id" in body
     assert "provider_id=provider_id" in body
+    assert "base_url=base_url" in body
+
+
+def test_named_custom_provider_base_url_is_resolvable(monkeypatch):
+    monkeypatch.setattr(
+        cfg,
+        "cfg",
+        {
+            "custom_providers": [
+                {
+                    "name": "Local Lab",
+                    "base_url": "http://127.0.0.1:1234/v1/",
+                    "models": {"lab-model": {}},
+                }
+            ]
+        },
+    )
+
+    assert cfg._get_provider_base_url("custom:local-lab") == "http://127.0.0.1:1234/v1"
+
+
+def test_reasoning_resolves_provider_base_url_server_side(monkeypatch):
+    monkeypatch.setattr(
+        cfg,
+        "cfg",
+        {
+            "providers": {
+                "lmstudio": {"base_url": "http://127.0.0.1:1234/v1"}
+            }
+        },
+    )
+    seen = {}
+
+    def fake_options(model, base_url, **kwargs):
+        seen["args"] = (model, base_url)
+        return ["low", "high"]
+
+    monkeypatch.setattr(cfg, "_lmstudio_model_reasoning_options", fake_options)
+
+    assert cfg.resolve_model_reasoning_efforts(
+        "lab-model", provider_id="lmstudio"
+    ) == ["low", "high"]
+    assert seen["args"] == ("lab-model", "http://127.0.0.1:1234/v1")
