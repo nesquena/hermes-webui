@@ -439,6 +439,29 @@ def submit_gateway_pending_mirror(session_key: str, approval: dict) -> tuple[dic
                 ),
                 None,
             )
+        if exact_local_entry is None and not run_id:
+            # Fall back to matching on the core's per-approval `request_id`.
+            # The gateway core notifies WebUI with a COPY of the entry payload
+            # (`notify_cb(dict(entry.data))`), so the identity match above
+            # (`entry.data is approval`) never holds for a real gateway head,
+            # and a local `_ApprovalEntry` carries a `request_id` but no
+            # `approval_id`, so the approval_id fallback misses too. The
+            # `request_id` is stamped once on the source entry
+            # (`_ApprovalEntry.__init__` -> `data.setdefault("request_id", ...)`)
+            # and preserved through the copy, so it uniquely reunites the
+            # notified copy with its queued entry. Without this, the mirror is
+            # created with no token, reconcile keeps the orphan, and
+            # `_session_has_pending_approval` stays True after the entry is
+            # dropped (the stale-approval-card dead-end, #4948 local variant).
+            request_id = str(approval.get("request_id") or "").strip()
+            if request_id:
+                exact_local_entry = next(
+                    (
+                        entry for entry in live_gateway_queue
+                        if str(((getattr(entry, "data", None) or {}).get("request_id") or "")).strip() == request_id
+                    ),
+                    None,
+                )
         if exact_local_entry is not None:
             mirror_entries = _normalize_pending_queue_locked(session_key)
             entries_to_mirror = [live_gateway_queue[0]] if live_gateway_queue else []
