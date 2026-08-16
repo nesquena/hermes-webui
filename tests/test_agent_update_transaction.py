@@ -34,6 +34,8 @@ def _identity_payload(root, interpreter, *, healthy=True, helper=None, critical=
         },
         "critical_modules": modules,
         "critical_imports": {name: {"ok": healthy} for name in modules},
+        "critical_validation": [healthy, None if healthy else modules[0], None if healthy else "broken"],
+        "healthy": healthy,
         "helper": str((helper or root / "hermes_cli" / "_subprocess_compat.py").resolve()),
         "concurrent_exit": 2,
     }
@@ -226,6 +228,16 @@ def test_health_url_cannot_mask_remote_chat_owner(monkeypatch):
     assert target["local"] is False
 
 
+def test_resolve_target_rejects_remote_chat_before_interpreter_lookup(monkeypatch, tmp_path):
+    target = _target(tmp_path)
+    monkeypatch.setenv("GATEWAY_HEALTH_URL", "http://127.0.0.1:8642")
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "https://remote.example:8642")
+    monkeypatch.setattr(agent_update, "_source_root", lambda: target.source_root)
+    monkeypatch.setattr(agent_update, "_candidate", lambda root: pytest.fail("candidate lookup must not run"))
+    resolved = agent_update._resolve_target()
+    assert resolved.unsupported_reason == "remote gateway owner"
+
+
 def test_transaction_refusal_is_not_git_lock_recovery(monkeypatch, tmp_path):
     target = _target(tmp_path)
     _install_test_runner(monkeypatch, _run_result(2, "still running"))
@@ -288,7 +300,7 @@ def test_process_runner_terminates_descendants_and_bounds_output(tmp_path):
     assert len(result.stderr.encode()) <= agent_update._MAX_OUTPUT
 
 
-def test_process_runner_without_tree_observer_is_not_quiescent(monkeypatch, tmp_path):
+def test_process_runner_without_optional_tree_observer_uses_pipe_quiescence(monkeypatch, tmp_path):
     monkeypatch.setattr(agent_update, "_load_process_observer", lambda: None)
     result, timed_out, quiescent = _REAL_RUN_TRANSACTION(
         [sys.executable, "-c", "print('done')"],
@@ -299,7 +311,7 @@ def test_process_runner_without_tree_observer_is_not_quiescent(monkeypatch, tmp_
     )
     assert timed_out is False
     assert result.returncode == 0
-    assert quiescent is False
+    assert quiescent is True
 
 
 def test_rolling_diagnostics_are_byte_bounded():

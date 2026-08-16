@@ -128,13 +128,14 @@ const fs = require('fs');
 const response = JSON.parse(process.argv[1]);
 const uiPath = process.argv[2];
 const src = fs.readFileSync(uiPath, 'utf8');
-const start = src.indexOf('async function applyClearUpdateLock');
+const start = src.indexOf('function _showUpdateError');
 const end = src.indexOf('function _renderLockManualInstruction', start);
 const snippet = src.slice(start, end);
 
 const button = { disabled: false, textContent: 'Clear lock and retry', style: { display: 'inline-block' }, dataset: { target: 'agent' } };
+const forceButton = { disabled: false, textContent: 'Force update', style: { display: 'inline-block' }, dataset: { target: 'agent' } };
 const errorEl = { style: { display: 'block' }, textContent: 'old lock error' };
-const dom = { btnClearUpdateLock: button, updateError: errorEl };
+const dom = { btnClearUpdateLock: button, btnForceUpdate: forceButton, updateError: errorEl };
 const sessionStorage = { removed: [], removeItem(key) { this.removed.push(key); } };
 const waitCalls = [];
 const showToasts = [];
@@ -145,13 +146,6 @@ async function api() { return response; }
 async function _readHealthServerIdentity() { readHealthCalls += 1; return 'baseline-id'; }
 function _waitForServerThenReload(opts) { waitCalls.push(opts); }
 function showToast(message) { showToasts.push(message); }
-function _showUpdateError(target, response) {
-  const message = response.message || 'wait and retry later';
-  button.style.display = 'none';
-  button.dataset.target = '';
-  errorEl.style.display = 'block';
-  errorEl.textContent = message;
-}
 function setTimeout(cb) { cb(); return 1; }
 function clearTimeout() {}
 
@@ -161,7 +155,6 @@ global.$ = $;
 global.api = api;
 global._readHealthServerIdentity = _readHealthServerIdentity;
 global._waitForServerThenReload = _waitForServerThenReload;
-global._showUpdateError = _showUpdateError;
 global.showToast = showToast;
 global.setTimeout = setTimeout;
 global.clearTimeout = clearTimeout;
@@ -363,7 +356,7 @@ def test_clear_lock_transaction_in_progress_uses_wait_guidance_without_git_recov
     assert result["waitCalls"] == []
     assert result["buttonDisplay"] == "none"
     assert result["buttonTarget"] == ""
-    assert "wait and retry later" in result["errorText"]
+    assert "Wait a moment, then retry" in result["errorText"]
 
 
 def test_force_update_routes_transaction_contention_through_shared_error_state():

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
-import ipaddress
 import json
 import os
 import re
@@ -15,7 +14,6 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import urlparse
 
 
 _MAX_DETAIL = 600
@@ -32,19 +30,15 @@ if cfg_path.is_file():
             k, v = line.split("=", 1); cfg[k.strip().lower()] = v.strip()
 critical = None
 critical_error = ""
+critical_validation = None
 try:
     owner = importlib.import_module("hermes_cli.update_cmd")
     critical = tuple(owner._UPDATE_CRITICAL_MODULES)
     if not critical or any(not isinstance(x, str) or not x for x in critical):
         raise ValueError("malformed official critical module list")
+    critical_validation = owner._validate_critical_modules_import(root)
 except Exception as exc:
     critical_error = str(exc)
-imports = {}
-for name in critical or ():
-    try:
-        importlib.import_module(name); imports[name] = {"ok": True}
-    except Exception as exc:
-        imports[name] = {"ok": False, "error": str(exc)}
 deps = {}
 for name in ("fastapi", "uvicorn", "pydantic", "openai", "yaml"):
     try:
@@ -75,7 +69,7 @@ print(json.dumps({"executable": str(pathlib.Path(sys.executable).resolve()),
  "base_prefix": str(pathlib.Path(sys.base_prefix).resolve()),
  "pyvenv": str(cfg_path), "pyvenv_config": cfg, "site_roots": site_roots,
  "package": package, "project": project, "dependencies": deps,
- "critical_modules": critical, "critical_imports": imports,
+ "critical_modules": critical, "critical_validation": critical_validation,
  "critical_error": critical_error, "helper": helper_file,
  "concurrent_exit": concurrent}))
 '''
@@ -106,7 +100,6 @@ class AgentUpdateTarget:
     unsupported_reason: str | None = None
     venv_root: Path | None = None
     environment: dict[str, str] | None = field(default=None, repr=False, compare=False)
-    gateway_target: dict | None = None
     health: AgentInstallHealth | None = None
 
 
@@ -132,6 +125,8 @@ class AgentUpdateResult:
         for k in ("exit_code", "source_before", "source_after", "warnings_detail"):
             v = getattr(self, k)
             if v is not None and v != "": p[k] = v
+        if self.marker_before: p["marker_before"] = True
+        if self.marker_after: p["marker_after"] = True
         if self.lock_conflict: p["lock_conflict"] = True
         if self.transaction_in_progress: p["transaction_in_progress"] = True
         if self.quiescent is not None: p["quiescent"] = self.quiescent
@@ -144,14 +139,6 @@ def _bounded(value: object) -> str:
     updates = sys.modules.get("api.updates")
     if updates is not None: return updates._sanitize_git_diagnostic(text, limit=_MAX_DETAIL)
     return _QUERY_SECRET_RE.sub(r"\1<redacted>", _GITHUB_TOKEN_RE.sub("<redacted>", _CREDENTIAL_IN_URL_RE.sub(r"\1<redacted>@", text))).strip()[:_MAX_DETAIL]
-
-
-def _local_gateway(url: str | None) -> bool:
-    if not url: return True
-    try:
-        host = (urlparse(url).hostname or "").strip().lower().rstrip(".")
-        return host in {"localhost", "localhost.localdomain"} or ipaddress.ip_address(host).is_loopback
-    except ValueError: return False
 
 
 def _gateway_owner() -> tuple[str | None, str | None]:
@@ -210,17 +197,13 @@ def _git_sha(root: Path) -> str | None:
     except (OSError, subprocess.SubprocessError): return None
 
 
-def _marker(root: Path) -> bool:
-    return (root / ".update-incomplete").exists()
-
-
 def _identity(root: Path, interpreter: Path, env=None) -> dict:
     probe = _PROBE.replace("__ROOT__", repr(str(root)))
     result = _run([str(interpreter), "-c", probe], root, 30, env=env)
     if result.returncode != 0: raise RuntimeError(_bounded(result.stderr or result.stdout or "identity probe failed"))
     try: value = json.loads(result.stdout)
     except (TypeError, ValueError) as exc: raise RuntimeError("Agent identity probe returned malformed health state") from exc
-    required = ("executable", "prefix", "base_prefix", "pyvenv", "pyvenv_config", "site_roots", "package", "project", "dependencies", "critical_modules", "critical_imports", "helper", "concurrent_exit")
+    required = ("executable", "prefix", "base_prefix", "pyvenv", "pyvenv_config", "site_roots", "package", "project", "dependencies", "critical_modules", "critical_validation", "helper", "concurrent_exit")
     if not isinstance(value, dict) or any(k not in value for k in required): raise RuntimeError("Agent identity probe returned malformed health state")
     if not value["pyvenv_config"] or not isinstance(value["pyvenv_config"], dict) or "home" not in value["pyvenv_config"]: raise RuntimeError("Agent venv pyvenv.cfg metadata is malformed")
     venv = (root / "venv").resolve()
@@ -231,8 +214,21 @@ def _identity(root: Path, interpreter: Path, env=None) -> dict:
     if Path(value["pyvenv_config"]["home"]).resolve() != Path(value["base_prefix"]).resolve(): raise RuntimeError("Agent venv home does not match runtime base prefix")
     if Path(value["package"]).resolve() != root / "hermes_cli" or Path(value["project"]).resolve() != root: raise RuntimeError("Agent interpreter identity does not match source root")
     roots = [Path(x).resolve() for x in value["site_roots"] if isinstance(x, str)]
-    if not roots or any(not isinstance(x, str) or not x or not any(Path(x).resolve().is_relative_to(r) for r in roots if r.is_relative_to(venv)) for x in value["dependencies"].values()): raise RuntimeError("Agent dependencies are not owned by selected venv")
-    if not value["critical_modules"] or any(not value["critical_imports"].get(x, {}).get("ok") for x in value["critical_modules"]): raise RuntimeError("Agent critical module imports are unhealthy")
+    owned_roots = [r for r in roots if r.is_relative_to(venv)]
+    if not owned_roots: raise RuntimeError("Agent venv site-packages are unavailable")
+    dependency_healthy = True
+    for origin in value["dependencies"].values():
+        if not isinstance(origin, str) or not origin:
+            raise RuntimeError("Agent dependency origin is malformed")
+        if origin.startswith("!"):
+            dependency_healthy = False
+            continue
+        if not any(Path(origin).resolve().is_relative_to(r) for r in owned_roots):
+            raise RuntimeError("Agent dependencies are not owned by selected venv")
+    if not isinstance(value["critical_modules"], (list, tuple)) or not value["critical_modules"] or any(not isinstance(x, str) or not x for x in value["critical_modules"]): raise RuntimeError("Agent critical module list is malformed")
+    validation = value["critical_validation"]
+    if not isinstance(validation, (list, tuple)) or len(validation) != 3 or not isinstance(validation[0], bool): raise RuntimeError("Agent critical module validation is malformed")
+    value["healthy"] = dependency_healthy and validation[0]
     if Path(value["helper"]).resolve() != (root / "hermes_cli" / "_subprocess_compat.py").resolve() or value["concurrent_exit"] != 2: raise RuntimeError("Agent official helper or transaction contract is unavailable")
     if not (root / "venv" / "pyvenv.cfg").is_file(): raise RuntimeError("Agent venv pyvenv.cfg is unavailable")
     return value
@@ -260,7 +256,10 @@ def _load_process_helper(root: Path):
     if spec is None or spec.loader is None:
         raise RuntimeError("Agent process helper cannot be loaded")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        raise RuntimeError("Agent process helper cannot be imported") from exc
     if not callable(getattr(module, "kill_process_tree", None)):
         raise RuntimeError("Agent process helper is malformed")
     return module
@@ -322,8 +321,7 @@ def _stop_owned_descendants(observer, known: dict[int, float]) -> None:
 def _run_transaction(args, root, env, timeout=1800, helper=None):
     kwargs = {"cwd": str(root), "env": env, "shell": False, "stdin": subprocess.DEVNULL, "stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "creationflags": _transaction_flags()}
     if os.name != "nt": kwargs["process_group"] = 0
-    try: proc = subprocess.Popen(args, **kwargs)
-    except OSError: raise
+    proc = subprocess.Popen(args, **kwargs)
     out, err = _Rolling(), _Rolling()
     observer = _load_process_observer()
     known_descendants: dict[int, float] = {}
@@ -353,11 +351,11 @@ def _run_transaction(args, root, env, timeout=1800, helper=None):
     except subprocess.TimeoutExpired: pass
     for t in threads: t.join(timeout=2)
     _record_descendants(observer, proc, known_descendants)
-    descendants_quiescent = _live_owned_descendants(observer, known_descendants) == []
-    if not descendants_quiescent:
+    descendants_quiescent = True if observer is None else _live_owned_descendants(observer, known_descendants) == []
+    if observer is not None and not descendants_quiescent:
         _stop_owned_descendants(observer, known_descendants)
         descendants_quiescent = _live_owned_descendants(observer, known_descendants) == []
-    quiescent = observer is not None and all(not t.is_alive() for t in threads) and proc.poll() is not None and descendants_quiescent
+    quiescent = all(not t.is_alive() for t in threads) and proc.poll() is not None and descendants_quiescent
     return subprocess.CompletedProcess(args, proc.returncode, out.text(), err.text()), timed_out, quiescent
 
 
@@ -371,8 +369,8 @@ def _resolve_target() -> AgentUpdateTarget:
     venv = root / "venv"; env = _controlled_env(venv)
     try: identity = _identity(root, interpreter, env=env)
     except Exception as exc: return AgentUpdateTarget(root, interpreter, gateway_owner=owner, venv_root=venv, environment=env, unsupported_reason=f"Agent identity rejected: {_bounded(exc)}")
-    health = AgentInstallHealth(identity, (root / ".update-incomplete").exists(), (root / ".lazy-refresh-incomplete").exists(), tuple(identity["critical_modules"]), not any(identity["critical_imports"][x].get("ok") is False for x in identity["critical_modules"]))
-    return AgentUpdateTarget(root, interpreter, identity, owner, venv_root=venv, environment=env, gateway_target={"url": owner, "local": True}, health=health)
+    health = AgentInstallHealth(identity, (root / ".update-incomplete").exists(), (root / ".lazy-refresh-incomplete").exists(), tuple(identity["critical_modules"]), bool(identity.get("healthy")))
+    return AgentUpdateTarget(root, interpreter, identity, owner, venv_root=venv, environment=env, health=health)
 
 
 def apply_agent_update(*, force: bool = False) -> dict:
@@ -396,8 +394,8 @@ def apply_agent_update(*, force: bool = False) -> dict:
     if result.returncode != 0: return AgentUpdateResult("failed", result.returncode, output, quiescent=quiescent).as_dict()
     try: after_id = _identity(root, interpreter, env=target.environment)
     except Exception as exc: return AgentUpdateResult("failed", 0, f"Post-update Agent health probe failed: {_bounded(exc)}", quiescent=quiescent).as_dict()
-    after = AgentInstallHealth(after_id, (root / ".update-incomplete").exists(), (root / ".lazy-refresh-incomplete").exists(), tuple(after_id["critical_modules"]), all(after_id["critical_imports"][x].get("ok") for x in after_id["critical_modules"]))
-    if after.incomplete or not after.healthy:
+    after = AgentInstallHealth(after_id, (root / ".update-incomplete").exists(), (root / ".lazy-refresh-incomplete").exists(), tuple(after_id["critical_modules"]), bool(after_id.get("healthy")))
+    if after.incomplete or not after.healthy or after.critical_modules != pre.critical_modules:
         return AgentUpdateResult(
             "incomplete",
             exit_code=0,
