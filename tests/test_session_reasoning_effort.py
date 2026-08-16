@@ -169,6 +169,7 @@ const handlers={{}};
 global.document={{addEventListener:(name, fn)=>{{handlers[name]=fn;}}}};
 global.closeReasoningDropdown=()=>{{}};
 global._reasoningEffortContext=()=>({{}});
+global._reasoningMutationSeqBySession={{}};
 global.fetchReasoningChip=()=>{{effects.push('fetch');}};
 global._applyReasoningChip=(effort)=>{{effects.push('apply:'+effort);}};
 global.showToast=(message)=>{{effects.push('toast:'+message);}};
@@ -204,3 +205,119 @@ setImmediate(()=>{{
 def test_clearing_session_effort_refetches_effective_model_override():
     click_handler = UI.split("if(e.target.closest('.reasoning-option')){", 1)[1].split("// ── Session toolsets chip", 1)[0]
     assert "if(!effort) fetchReasoningChip()" in click_handler
+
+
+def test_same_session_rapid_selections_settle_in_dispatch_order(tmp_path):
+    """Greptile P1: an OLDER same-session mutation settling LAST must be ignored.
+
+    Drives the real click handler twice for one session ('low' then 'high'),
+    resolves the requests in reverse order, and asserts the newest selection
+    owns the chip, session value, and toast — with no late overwrite.
+    """
+    reasoning_start = UI.index("// ── Reasoning effort chip")
+    handler_start = UI.index("document.addEventListener('click',function(e){", reasoning_start)
+    handler_end = UI.index("// ── Session toolsets chip", handler_start)
+    handler = UI[handler_start:handler_end]
+    script = tmp_path / "reasoning_same_session_order.js"
+    script.write_text(
+        f"""
+const handlers={{}};
+global.document={{addEventListener:(name, fn)=>{{handlers[name]=fn;}}}};
+global.closeReasoningDropdown=()=>{{}};
+global._reasoningEffortContext=()=>({{}});
+global._reasoningMutationSeqBySession={{}};
+global.fetchReasoningChip=()=>{{effects.push('fetch');}};
+global._applyReasoningChip=(effort)=>{{effects.push('apply:'+effort);}};
+global.showToast=(message)=>{{effects.push('toast:'+message);}};
+const settlers=[];
+global.api=()=>new Promise((resolve,reject)=>{{settlers.push({{resolve,reject}});}});
+global.S={{session:{{session_id:'session-a',reasoning_effort:null}}}};
+const effects=[];
+eval({json.dumps(handler)});
+const clickOn=(effort)=>{{
+  const option={{dataset:{{effort}}}};
+  const target={{closest:(selector)=>selector==='.reasoning-option'?option:null}};
+  handlers.click({{target}});
+}};
+clickOn('low');
+clickOn('high');
+if(settlers.length!==2) throw new Error('expected two dispatched mutations, got '+settlers.length);
+// Newer request ('high') settles FIRST…
+settlers[1].resolve({{reasoning_effort:'high'}});
+setImmediate(()=>{{
+  if(S.session.reasoning_effort!=='high') throw new Error('newest selection not applied: '+S.session.reasoning_effort);
+  if(!effects.includes('apply:high')) throw new Error('newest selection did not update chip: '+effects.join(','));
+  const before=effects.slice();
+  // …then the OLDER request ('low') completes last and must be a no-op.
+  settlers[0].resolve({{reasoning_effort:'low'}});
+  setImmediate(()=>{{
+    if(S.session.reasoning_effort!=='high') throw new Error('stale success overwrote session value: '+S.session.reasoning_effort);
+    if(effects.length!==before.length) throw new Error('stale success produced UI effects: '+effects.slice(before.length).join(','));
+    // Same ordering rule for a stale FAILURE: no misleading error toast.
+    const failEffects=effects.length;
+    clickOn('medium');
+    clickOn('xhigh');
+    settlers[3].resolve({{reasoning_effort:'xhigh'}});
+    setImmediate(()=>{{
+      const afterNewest=effects.length;
+      settlers[2].reject(new Error('late failure of superseded request'));
+      setImmediate(()=>{{
+        if(S.session.reasoning_effort!=='xhigh') throw new Error('stale failure disturbed session value');
+        if(effects.length!==afterNewest) throw new Error('stale failure produced UI effects: '+effects.slice(afterNewest).join(','));
+      }});
+    }});
+  }});
+}});
+""",
+        encoding="utf-8",
+    )
+    subprocess.run(["node", str(script)], check=True, timeout=10)
+
+
+def test_reasoning_dropdown_is_viewport_bounded_and_scrollable():
+    """With Ultra the upward-opening menu is nine rows; on a short viewport it
+    must cap to the visual viewport and scroll instead of clipping rows
+    (overflow:hidden with no max-height made Ultra unreachable)."""
+    css = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+    rule_start = css.index(".composer-reasoning-dropdown{")
+    rule = css[rule_start:css.index("}", rule_start)]
+    assert "max-height:min(60dvh,360px)" in rule
+    assert "overflow-y:auto" in rule
+    assert "overflow:hidden" not in rule
+
+
+def test_reasoning_dropdown_short_viewport_keeps_all_options_reachable(tmp_path):
+    """Short-viewport coverage: simulate a 300px-tall visual viewport against
+    the dropdown's computed cap and prove every option row — including the
+    ninth (Ultra) — lands inside the scrollable range."""
+    css = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+    rule_start = css.index(".composer-reasoning-dropdown{")
+    rule = css[rule_start:css.index("}", rule_start)]
+    option_count = INDEX.count('class="reasoning-option"')
+    assert option_count == 9  # Default..Ultra after the 'ultra' sync
+    script = tmp_path / "reasoning_dropdown_short_viewport.js"
+    script.write_text(
+        f"""
+const rule={json.dumps(rule)};
+const optionCount={option_count};
+const capMatch=rule.match(/max-height:min\\((\\d+)dvh,(\\d+)px\\)/);
+if(!capMatch) throw new Error('viewport-relative max-height missing: '+rule);
+if(!/overflow-y:auto/.test(rule)) throw new Error('dropdown must scroll vertically');
+const dvhCap=Number(capMatch[1]);
+const pxCap=Number(capMatch[2]);
+// Mobile-landscape-ish short viewport.
+const viewportHeight=300;
+const maxHeight=Math.min(viewportHeight*dvhCap/100, pxCap);
+if(maxHeight>viewportHeight) throw new Error('menu taller than the viewport: '+maxHeight);
+// Row metrics from .reasoning-option: 8px vertical padding x2 + 13px text line.
+const rowHeight=8+13+8;
+const contentHeight=optionCount*rowHeight+8; // + dropdown 4px padding x2
+if(contentHeight<=maxHeight) throw new Error('scenario must overflow to exercise scrolling');
+// Scrollable box: every row's offset must be reachable within scrollRange.
+const scrollRange=contentHeight-maxHeight;
+const lastRowTop=(optionCount-1)*rowHeight+4;
+if(lastRowTop>scrollRange+maxHeight-rowHeight) throw new Error('last option (Ultra) unreachable when scrolled to bottom');
+""",
+        encoding="utf-8",
+    )
+    subprocess.run(["node", str(script)], check=True, timeout=10)
