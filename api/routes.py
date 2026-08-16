@@ -10180,6 +10180,37 @@ def _merged_webui_lineage_messages_for_display(
     return merged_messages
 
 
+def _display_coordinate_messages(session, state_db_messages) -> list:
+    """Return the reconciled message list shared by display-coordinate paths."""
+    state_db_messages = _suppress_native_image_display_mirrors(
+        session,
+        state_db_messages,
+    )
+    sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)
+    lineage_parent = _webui_lineage_parent_session_for_display(session)
+    projection_sidecar_messages = _merged_webui_lineage_messages_for_display(
+        session,
+        sidecar_messages,
+        parent_session=lineage_parent,
+    )
+    merged = merge_session_messages_append_only(
+        sidecar_messages,
+        state_db_messages,
+        truncation_watermark=getattr(session, "truncation_watermark", None),
+        truncation_boundary=getattr(session, "truncation_boundary", None),
+    )
+    merged = _merged_webui_lineage_messages_for_display(
+        session,
+        merged,
+        parent_session=lineage_parent,
+    )
+    return _project_native_image_payload_conflicts_for_display(
+        projection_sidecar_messages,
+        state_db_messages,
+        merged,
+    )
+
+
 def _message_summary(messages) -> dict:
     messages = list(messages or [])
     last_message_at = 0.0
@@ -10191,6 +10222,23 @@ def _message_summary(messages) -> dict:
         except (TypeError, ValueError):
             pass
     return {"message_count": len(messages), "last_message_at": last_message_at}
+
+
+def _foreign_display_coordinate_summary(sid: str, profile=None):
+    """Return the display-coordinate summary for a foreign metadata poll."""
+    try:
+        session = get_session(sid, metadata_only=False)
+        if not session:
+            return None
+        backstop = _state_db_backstop_limit_for_display(session, None)
+        reader_kwargs = {"profile": profile}
+        if backstop is not None:
+            reader_kwargs["limit"] = backstop
+        state_db_messages = get_state_db_session_messages(sid, **reader_kwargs)
+        return _message_summary(_display_coordinate_messages(session, state_db_messages))
+    except Exception:
+        logger.debug("Foreign display-coordinate summary failed for %s", sid, exc_info=True)
+        return None
 
 
 def _metadata_only_message_summary(sid: str, profile: str | None = None) -> dict:
@@ -13423,7 +13471,16 @@ def _handle_session_get(handler, parsed) -> bool:
         original_stream_id = getattr(s, "active_stream_id", None)
         _clear_stale_stream_state(s)
         cli_meta = _lookup_cli_session_metadata(sid) if _session_requires_cli_metadata_lookup(s) else {}
+        is_cli_session = (
+            bool(getattr(s, "is_cli_session", False) or getattr(s, "read_only", False))
+            or is_cli_session_row(s)
+            or is_cli_session_row(cli_meta)
+        )
         is_messaging_session = _is_messaging_session_record(s) or _is_messaging_session_record(cli_meta)
+        foreign_source = cli_meta or {
+            key: getattr(s, key, None)
+            for key in ("source_tag", "raw_source", "session_source", "source")
+        }
         cli_messages = []
         state_db_messages = []
         metadata_summary = None
@@ -13503,12 +13560,18 @@ def _handle_session_get(handler, parsed) -> bool:
                         **_state_db_reader_kwargs,
                     )
         elif not is_messaging_session:
-            # Metadata-only callers still need the same append-only
-            # reconciliation contract as full loads so stale/replayed
-            # state.db rows do not make sidebar polling think the
-            # transcript is always newer. Helper threads profile= to
-            # honor #2827's TLS-vs-thread fix.
-            metadata_summary = _metadata_only_message_summary(sid, profile=_session_profile)
+            if is_cli_session and not _session_source_is_webui(foreign_source):
+                metadata_summary = _foreign_display_coordinate_summary(
+                    sid,
+                    profile=_session_profile,
+                )
+            if metadata_summary is None:
+                # Metadata-only callers still need the same append-only
+                # reconciliation contract as full loads so stale/replayed
+                # state.db rows do not make sidebar polling think the
+                # transcript is always newer. Helper threads profile= to
+                # honor #2827's TLS-vs-thread fix.
+                metadata_summary = _metadata_only_message_summary(sid, profile=_session_profile)
         _t2 = _time.monotonic()
         if _diag: _diag.stage("t2_after_state_db_load")
         effective_model = (
@@ -13545,33 +13608,7 @@ def _handle_session_get(handler, parsed) -> bool:
                         msg_before=msg_before,
                     )
             else:
-                state_db_messages = _suppress_native_image_display_mirrors(
-                    s,
-                    state_db_messages,
-                )
-                sidecar_messages = _webui_sidecar_lineage_messages_for_display(s)
-                lineage_parent = _webui_lineage_parent_session_for_display(s)
-                projection_sidecar_messages = _merged_webui_lineage_messages_for_display(
-                    s,
-                    sidecar_messages,
-                    parent_session=lineage_parent,
-                )
-                _all_msgs = merge_session_messages_append_only(
-                    sidecar_messages,
-                    state_db_messages,
-                    truncation_watermark=getattr(s, "truncation_watermark", None),
-                    truncation_boundary=getattr(s, "truncation_boundary", None),
-                )
-                _all_msgs = _merged_webui_lineage_messages_for_display(
-                    s,
-                    _all_msgs,
-                    parent_session=lineage_parent,
-                )
-                _all_msgs = _project_native_image_payload_conflicts_for_display(
-                    projection_sidecar_messages,
-                    state_db_messages,
-                    _all_msgs,
-                )
+                _all_msgs = _display_coordinate_messages(s, state_db_messages)
         else:
             if is_messaging_session and cli_messages:
                 _all_msgs = _merged_session_messages_for_display(s, cli_messages)
