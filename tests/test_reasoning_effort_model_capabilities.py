@@ -133,20 +133,21 @@ def test_coerce_preserves_effort_for_unrecognized_model():
         "some-unknown-model-xyz",
         provider_id="some-custom-provider",
     ) == "high"
-    # #3505 default-deny refinement (maintainer 2026-07-11): 'max' is above the
-    # universally safe ceiling, so on an UNRECOGNIZED provider it degrades to
-    # xhigh (a truly-unknown provider would 400 on max). All OTHER levels still
-    # preserve verbatim below.
+    # #3505 default-deny refinement, tightened by the 2026-08-13 gate: 'max' /
+    # 'ultra' are supra-ceiling levels, so on an UNRECOGNIZED provider they
+    # degrade to the universally proven 'high' ceiling — nothing proves an
+    # unknown OpenAI-compatible endpoint accepts xhigh either. All OTHER
+    # levels still preserve verbatim below.
     assert cfg.coerce_reasoning_effort_for_model(
         "max",
         "brand-new-model-2099",
         provider_id="some-custom-provider",
-    ) == "xhigh"
+    ) == "high"
     assert cfg.coerce_reasoning_effort_for_model(
         "ultra",
         "brand-new-model-2099",
         provider_id="some-custom-provider",
-    ) == "xhigh"
+    ) == "high"
     # 'none' / unset still pass through unchanged for unknown models.
     assert cfg.coerce_reasoning_effort_for_model(
         "none", "some-unknown-model-xyz", provider_id="custom"
@@ -566,13 +567,18 @@ def test_max_degrades_for_azure_bedrock_hosted_legacy_claude():
 
 
 def test_max_degrades_on_unknown_provider_but_other_levels_preserved():
-    # #3505 default-deny refinement (maintainer call 2026-07-11): 'max' is above
-    # the universally safe ceiling, so an unknown/custom provider (empty capability list)
-    # must degrade 'max'->'xhigh' rather than send an unsupported level — while all
-    # other levels keep the conservative preserve-verbatim behavior.
+    # #3505 default-deny refinement, tightened by the 2026-08-13 gate: max and
+    # ultra sit above the universal ceiling, so an unknown/custom provider
+    # (empty capability list, no explicit allowlist) must degrade both to the
+    # universally proven 'high' — an unknown OpenAI-compatible endpoint has no
+    # authority proving xhigh support. All other levels keep the conservative
+    # preserve-verbatim behavior.
     assert cfg.coerce_reasoning_effort_for_model(
         "max", model_id="some-unknown-model", provider_id="customprovider"
-    ) == "xhigh"
+    ) == "high"
+    assert cfg.coerce_reasoning_effort_for_model(
+        "ultra", model_id="some-unknown-model", provider_id="customprovider"
+    ) == "high"
     # other levels still preserved verbatim for an unknown provider
     for eff in ("minimal", "low", "medium", "high", "xhigh"):
         assert cfg.coerce_reasoning_effort_for_model(
@@ -881,3 +887,161 @@ def test_negative_metadata_does_not_hide_first_party_gpt56_contract(monkeypatch)
         "ultra", "gpt-5.6-sol", provider_id="openai-codex"
     ) == "ultra"
 
+
+
+# --- 2026-08-13 gate regressions (#6018) -----------------------------------
+
+
+def test_unknown_provider_top_tiers_land_on_universal_high_ceiling(tmp_path, monkeypatch):
+    # Gate blocker 1: for unknown/custom providers WITHOUT an explicit
+    # provider/model allowlist, max AND ultra must land on the universally
+    # proven 'high' ceiling — an unknown OpenAI-compatible endpoint has no
+    # authority proving xhigh support.
+    # Resolver: no ladder is advertised at all for the unknown model.
+    assert cfg.resolve_model_reasoning_efforts(
+        "frontier-model-x", provider_id="unknown-gw"
+    ) == []
+    # Coercion: both supra-ceiling tiers degrade to high, not xhigh.
+    for eff in ("max", "ultra"):
+        assert cfg.coerce_reasoning_effort_for_model(
+            eff, "frontier-model-x", provider_id="unknown-gw"
+        ) == "high", f"{eff} must land on the universal high ceiling"
+    # Wire: the /api/reasoning persistence path reports the coerced high, so
+    # what boot/status/chip read agrees with what streaming would send.
+    cfgfile = tmp_path / "config.yaml"
+    cfgfile.write_text("agent: {}\n", encoding="utf-8")
+    monkeypatch.setattr(cfg, "_get_config_path", lambda: cfgfile)
+    monkeypatch.setattr(cfg, "reload_config", lambda: None)
+    status = cfg.set_reasoning_effort(
+        "ultra", model_id="frontier-model-x", provider_id="unknown-gw"
+    )
+    assert status["reasoning_effort"] == "high"
+    status = cfg.get_reasoning_status(
+        model_id="frontier-model-x", provider_id="unknown-gw"
+    )
+    assert status["reasoning_effort"] == "high"
+
+
+def test_unknown_provider_allowlists_stay_authoritative_over_high_ceiling(monkeypatch):
+    # Gate blocker 1 (control): explicit provider- and model-level allowlists
+    # remain authoritative — an authorized top tier survives verbatim instead
+    # of landing on the universal high ceiling.
+    original = cfg.cfg.get("custom_providers")
+    monkeypatch.setitem(cfg.cfg, "custom_providers", [
+        {"name": "authorized-gw", "reasoning_efforts": ["high", "max", "ultra"]},
+        {"name": "model-gw", "models": {"inkling": {"reasoning_efforts": ["high", "max"]}}},
+    ])
+    try:
+        assert cfg.coerce_reasoning_effort_for_model(
+            "ultra", "some-model", provider_id="custom:authorized-gw"
+        ) == "ultra"
+        assert cfg.coerce_reasoning_effort_for_model(
+            "max", "inkling", provider_id="custom:model-gw"
+        ) == "max"
+        # The model-level allowlist does not leak to sibling models: an
+        # unlisted model on the same unknown gateway still lands on high.
+        assert cfg.coerce_reasoning_effort_for_model(
+            "ultra", "other-model", provider_id="custom:model-gw"
+        ) == "high"
+    finally:
+        if original is None:
+            cfg.cfg.pop("custom_providers", None)
+        else:
+            monkeypatch.setitem(cfg.cfg, "custom_providers", original)
+
+
+def test_pre_adaptive_claude_ceiling_follows_model_across_aggregators():
+    # Gate blocker 2: the pre-adaptive Claude ceiling is model-scoped and must
+    # apply on OpenRouter/Nous and every routed lane, for prefixed and bare
+    # legacy IDs alike — not only on the named Anthropic/cloud-host lanes.
+    legacy_ids = (
+        "anthropic/claude-sonnet-4.5",
+        "claude-sonnet-4-5",
+        "anthropic/claude-3-7-sonnet",
+        "claude-3-5-sonnet-20241022",
+    )
+    for prov in ("openrouter", "nous"):
+        for model in legacy_ids:
+            efforts = cfg.resolve_model_reasoning_efforts(model, provider_id=prov)
+            assert "max" not in efforts and "ultra" not in efforts, (
+                f"{model} via {prov} must cap below max/ultra, got {efforts}"
+            )
+            if efforts:  # date-stamped Claude 3.x is heuristic-denied entirely
+                assert "xhigh" in efforts, (model, prov, efforts)
+            for eff in ("max", "ultra"):
+                assert cfg.coerce_reasoning_effort_for_model(
+                    eff, model, provider_id=prov
+                ) == "xhigh", f"{eff} for {model} via {prov} must degrade to xhigh"
+        # Qualified @provider:model form resolves the same ceiling.
+        qualified = f"@{prov}:anthropic/claude-sonnet-4.5"
+        q_efforts = cfg.resolve_model_reasoning_efforts(qualified, provider_id=prov)
+        assert "max" not in q_efforts and "ultra" not in q_efforts
+        assert cfg.coerce_reasoning_effort_for_model(
+            "ultra", qualified, provider_id=prov
+        ) == "xhigh"
+        # Control: adaptive Claude via the same aggregator keeps the top tiers
+        # — the ceiling is model-scoped, not lane-scoped.
+        adaptive = cfg.resolve_model_reasoning_efforts(
+            "anthropic/claude-opus-4.6", provider_id=prov
+        )
+        assert "max" in adaptive and "ultra" in adaptive
+    # The same model-scoped ceiling holds on unknown/custom gateway lanes.
+    assert cfg.coerce_reasoning_effort_for_model(
+        "ultra", "claude-sonnet-4-5", provider_id="custom:some-gw"
+    ) == "xhigh"
+
+
+def test_ai_gateway_alias_family_recognized_with_claude_max_contract():
+    # Gate blocker 3: ai-gateway is a registered production provider that
+    # forwards reasoning config. Every installed Agent alias must resolve to
+    # the canonical slug, preserve adaptive Claude 'max', and map the
+    # Codex-only 'ultra' tier down to the wire 'max' instead of xhigh.
+    aliases = ("ai-gateway", "vercel", "vercel-ai-gateway", "ai_gateway", "aigateway")
+    for alias in aliases:
+        assert cfg._resolve_provider_alias(alias) == "ai-gateway", alias
+        for model in ("anthropic/claude-opus-4.6", "claude-opus-4.6"):
+            efforts = cfg.resolve_model_reasoning_efforts(model, provider_id=alias)
+            assert "max" in efforts, (alias, model, efforts)
+            assert "ultra" not in efforts, (
+                f"ultra is Codex product-only; {alias} wire ladder tops at max"
+            )
+            assert cfg.coerce_reasoning_effort_for_model(
+                "max", model, provider_id=alias
+            ) == "max", (alias, model)
+            assert cfg.coerce_reasoning_effort_for_model(
+                "ultra", model, provider_id=alias
+            ) == "max", f"ultra must map to max on {alias}, not degrade to xhigh"
+        # Qualified @provider:model form keeps the same contract.
+        qualified = f"@{alias}:anthropic/claude-opus-4.6"
+        q_efforts = cfg.resolve_model_reasoning_efforts(qualified, provider_id=alias)
+        assert "max" in q_efforts and "ultra" not in q_efforts, (alias, q_efforts)
+        assert cfg.coerce_reasoning_effort_for_model(
+            "ultra", qualified, provider_id=alias
+        ) == "max"
+        # Model-scoped ceilings still ride through the gateway: pre-adaptive
+        # Claude caps at xhigh, older GPT-5 at xhigh, o-series at high.
+        assert cfg.coerce_reasoning_effort_for_model(
+            "ultra", "anthropic/claude-sonnet-4.5", provider_id=alias
+        ) == "xhigh"
+        assert cfg.coerce_reasoning_effort_for_model(
+            "ultra", "openai/gpt-5.5", provider_id=alias
+        ) == "xhigh"
+        assert cfg.coerce_reasoning_effort_for_model(
+            "ultra", "openai/o3", provider_id=alias
+        ) == "high"
+
+
+def test_ai_gateway_status_reports_wire_max_for_stored_ultra(monkeypatch):
+    # Gate blocker 3 (status boundary): a stored 'ultra' surfaces as the wire
+    # 'max' for Claude 4.6 behind every ai-gateway alias, so the chip and the
+    # streamed value agree.
+    monkeypatch.setattr(cfg, "_load_yaml_config_file", lambda *_args: {
+        "agent": {"reasoning_effort": "ultra"},
+    })
+    for alias in ("ai-gateway", "vercel", "vercel-ai-gateway", "ai_gateway", "aigateway"):
+        status = cfg.get_reasoning_status(
+            model_id="anthropic/claude-opus-4.6", provider_id=alias
+        )
+        assert "max" in status["supported_efforts"], alias
+        assert "ultra" not in status["supported_efforts"], alias
+        assert status["reasoning_effort"] == "max", alias

@@ -1252,6 +1252,14 @@ _PROVIDER_ALIASES = {
     "nemotron": "nvidia",
     "mimo": "xiaomi",
     "xiaomi-mimo": "xiaomi",
+    # Vercel AI Gateway is a registered production provider in the installed
+    # Agent (hermes_cli PROVIDER_REGISTRY canonical ``ai-gateway``); mirror
+    # its alias family so standalone WebUI installs resolve every documented
+    # spelling to the same recognized reasoning lane. (#6018 gate 2026-08-13)
+    "vercel": "ai-gateway",
+    "vercel-ai-gateway": "ai-gateway",
+    "ai_gateway": "ai-gateway",
+    "aigateway": "ai-gateway",
     # Legacy alias — earlier WebUI builds wrote ``provider: local`` for unknown
     # loopback endpoints, but ``local`` is not registered in
     # ``hermes_cli.auth.PROVIDER_REGISTRY``. Routing it through ``custom``
@@ -3563,15 +3571,19 @@ def _filter_reasoning_efforts_for_provider(
     # tops out lower; the downgrade ladder then lands on xhigh/high safely.
     if provider in {"gemini", "google", "google-gemini", "google-vertex", "vertex"}:
         return [eff for eff in normalized if eff not in {"max", "ultra"}]
-    # Legacy Claude is pre-adaptive whether served natively OR via Azure Foundry /
-    # Bedrock / Vertex — the ceiling follows the MODEL, not just the provider name.
-    _anthropic_lanes = {
-        "anthropic", "claude", "anthropic-claude",
-        "azure-foundry", "azure-openai", "azure", "bedrock", "aws-bedrock",
-        "vertex", "google-vertex",
-    }
-    if provider in _anthropic_lanes and "claude" in bare and _is_pre_adaptive_anthropic(bare):
+    # Legacy Claude is pre-adaptive whether served natively, via cloud hosts
+    # (Azure Foundry / Bedrock / Vertex), OR through aggregator/routed lanes
+    # (OpenRouter, Nous, AI Gateway, custom gateways). The ceiling follows the
+    # MODEL across every serving lane — no provider gate, exactly like the
+    # older-GPT-5 and o-series ceilings above. (#6018 gate 2026-08-13)
+    if "claude" in bare and _is_pre_adaptive_anthropic(bare):
         return [eff for eff in normalized if eff not in {"max", "ultra"}]
+    # Vercel AI Gateway forwards the reasoning config to the routed model, so
+    # adaptive Claude keeps ``max``; the Codex product-only ``ultra`` tier does
+    # not exist on that wire and must map down to ``max`` instead of leaking
+    # through. (#6018 gate 2026-08-13)
+    if provider == "ai-gateway":
+        return [eff for eff in normalized if eff != "ultra"]
     # Z.AI / GLM native-endpoint gate: see _zai_glm_reasoning_efforts_supported.
     # True → keep the full ladder (GLM-5.2+); False → strip it entirely (pre-5.2
     # GLM and forced-thinking GLM-4.7); None → not a zai GLM case, defer.
@@ -3608,6 +3620,12 @@ _KNOWN_REASONING_PROVIDERS = frozenset({
     # OpenRouter and the Nous Portal are recognized aggregators: model-scoped
     # ceilings above still cap what each routed model can accept. (#6018)
     "copilot", "github-copilot", "openrouter", "nous",
+    # Vercel AI Gateway is a registered production provider that forwards the
+    # reasoning config to the routed model (canonical slug ``ai-gateway``;
+    # aliases vercel / vercel-ai-gateway / ai_gateway / aigateway all resolve
+    # to it). Recognizing it keeps adaptive Claude ``max`` intact while the
+    # filter above maps the Codex-only ``ultra`` down to ``max``. (#6018)
+    "ai-gateway",
     # First-class WebUI catalog providers are RECOGNIZED lanes, not custom /
     # unknown gateways — the max/ultra default-deny must not strip them.
     # (Canonical post-alias slugs; e.g. xai-oauth is the xAI Grok OAuth lane.)
@@ -4265,6 +4283,23 @@ def coerce_reasoning_effort_for_model(
     ceiling = _filter_reasoning_efforts_for_provider(
         list(VALID_REASONING_EFFORTS), model, provider
     )
+    # For a NAMED unknown/custom provider whose top-tier request was denied by
+    # the default-deny gate (no explicit provider/model allowlist — otherwise
+    # ``raw`` would survive in ``ceiling``) and whose capability set is empty,
+    # the only universally proven landing level is ``high``: nothing proves an
+    # unknown OpenAI-compatible endpoint accepts ``xhigh``. Recognized model
+    # families keep their proven ladders: a non-empty capability set degrades
+    # through the supported ladder below, and model-scoped family ceilings
+    # (older GPT-5 → xhigh, o-series → high) stay encoded in ``ceiling``
+    # itself. (#6018 gate 2026-08-13)
+    if (
+        raw in {"max", "ultra"}
+        and not supported
+        and provider
+        and not _provider_known_reasoning_capable(provider)
+        and raw not in ceiling
+    ):
+        return "high"
     if ceiling and raw not in ceiling:
         ladder = list(VALID_REASONING_EFFORTS)  # ascending: minimal..xhigh..max..ultra
         try:
@@ -4306,7 +4341,17 @@ def coerce_reasoning_effort_for_model(
         if _zai_glm_reasoning_efforts_supported(model, provider) is False:
             return ""
         if raw in {"max", "ultra"} and not _provider_known_reasoning_capable(provider):
-            return "xhigh"
+            # An explicit provider/model allowlist is authoritative — the
+            # ceiling filter preserves an authorized top tier through the
+            # default-deny, so honor it verbatim.
+            if provider and raw in ceiling:
+                return raw
+            # A named unknown/custom lane without authorization lands on the
+            # universally proven ``high`` ceiling (#6018 gate 2026-08-13); an
+            # UNNAMED (empty) provider keeps the historical conservative
+            # ``xhigh`` landing — the caller simply didn't name a provider,
+            # which is not the same as naming one we don't recognize.
+            return "high" if provider else "xhigh"
         return raw
     if raw in supported:
         return raw
