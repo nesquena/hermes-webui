@@ -1322,8 +1322,15 @@ def _provider_has_key(provider_id: str) -> bool:
     providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
         provider_cfg = providers_cfg.get(provider_id, {})
-        if isinstance(provider_cfg, dict) and str(provider_cfg.get("api_key") or "").strip():
-            if _provider_value_counts_as_api_key(provider_id, provider_cfg.get("api_key")):
+        if isinstance(provider_cfg, dict) and (
+            provider_cfg.get("api_key") or provider_cfg.get("key_env")
+        ):
+            from api.config import resolve_provider_credential
+
+            provider_key = resolve_provider_credential(
+                provider_cfg.get("api_key"), provider_cfg.get("key_env"), provider_id
+            )
+            if _provider_value_counts_as_api_key(provider_id, provider_key):
                 return True
     # Check custom_providers
     custom_providers = cfg.get("custom_providers", [])
@@ -1368,8 +1375,14 @@ def _get_provider_api_key(provider_id: str) -> str | None:
     providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
         provider_cfg = providers_cfg.get(provider_id, {})
-        if isinstance(provider_cfg, dict):
-            provider_key = str(provider_cfg.get("api_key") or "").strip()
+        if isinstance(provider_cfg, dict) and (
+            provider_cfg.get("api_key") or provider_cfg.get("key_env")
+        ):
+            from api.config import resolve_provider_credential
+
+            provider_key = resolve_provider_credential(
+                provider_cfg.get("api_key"), provider_cfg.get("key_env"), provider_id
+            )
             if _provider_value_counts_as_api_key(provider_id, provider_key):
                 return provider_key
 
