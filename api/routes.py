@@ -22305,7 +22305,7 @@ def _handle_live_models(handler, parsed):
                 if _base_url and _api_key:
                     try:
                         import urllib.request
-                        import json
+                        import json as _json
                         
                         # Build the models endpoint URL
                         # AxonHub and similar OpenAI-compat endpoints serve /v1/models
@@ -22322,7 +22322,7 @@ def _handle_live_models(handler, parsed):
                         )
                         
                         with urllib.request.urlopen(_req, timeout=CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS) as _resp:
-                            _body = json.loads(_resp.read())
+                            _body = _json.loads(_resp.read())
                         
                         # Parse response: {"data": [{"id": "model1", ...}, ...]}
                         if isinstance(_body, dict):
@@ -22390,8 +22390,8 @@ def _handle_live_models(handler, parsed):
             if _ep:
                 try:
                     import urllib.request
-                    _providers_cfg = cfg.get("providers") or {}
-                    _prov = _providers_cfg.get(provider, {}) if isinstance(_providers_cfg, dict) else {}
+                    from api.config import _canonical_provider_config
+                    _prov = _canonical_provider_config(cfg, provider)
                     # Only use a provider-scoped key.  A top-level model.api_key
                     # is safe here only when it belongs to the requested provider;
                     # otherwise /api/models/live?provider=<other> could forward
