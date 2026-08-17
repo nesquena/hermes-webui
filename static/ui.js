@@ -3608,11 +3608,19 @@ async function populateModelDropdown(opts={}){
 // Cache so we don't re-fetch on every page load
 const _liveModelCache={};
 const _liveModelCacheGen={};
+function _liveModelCacheKey(provider){
+  const p=String(provider||'').trim().toLowerCase();
+  const profile=(typeof S!=='undefined'&&S&&S.activeProfile)
+    ? String(S.activeProfile).trim().toLowerCase()
+    : 'default';
+  return `${profile||'default'}::${p}`;
+}
 function _invalidateLiveModelCache(provider){
   const p=String(provider||'').trim().toLowerCase();
   if(!p) return;
-  delete _liveModelCache[p];
-  _liveModelCacheGen[p]=(_liveModelCacheGen[p]||0)+1;
+  const cacheKey=_liveModelCacheKey(p);
+  delete _liveModelCache[cacheKey];
+  _liveModelCacheGen[cacheKey]=(_liveModelCacheGen[cacheKey]||0)+1;
 }
 window._invalidateLiveModelCache=_invalidateLiveModelCache;
 // Tracks providers for which a live-model fetch is in flight.
@@ -3724,15 +3732,17 @@ async function _fetchLiveModels(provider, sel, requestSeq=null, opts={}){
   provider=String(provider||'').trim().toLowerCase();
   if(!provider||(!sel&&!required)) return required?Promise.reject(new Error('provider is required')):undefined;
   if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
-  const generation=_liveModelCacheGen[provider]||0;
+  const cacheKey=_liveModelCacheKey(provider);
+  const generation=_liveModelCacheGen[cacheKey]||0;
+  const pendingKey=`${cacheKey}:${generation}`;
   // Already fetched — apply cached models to this select element (#872)
-  if(!required&&_liveModelCache[provider]){
+  if(!required&&_liveModelCache[cacheKey]){
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
-    const added=_addLiveModelsToSelect(provider,_liveModelCache[provider],sel);
+    const added=_addLiveModelsToSelect(provider,_liveModelCache[cacheKey],sel);
     if(added>0 && typeof syncModelChip==='function') syncModelChip();
-    return _liveModelCache[provider];
+    return _liveModelCache[cacheKey];
   }
-  _liveModelFetchPending.add(provider);
+  _liveModelFetchPending.add(pendingKey);
   try{
     const url=new URL('api/models/live',document.baseURI||location.href);
     url.searchParams.set('provider',provider);
@@ -3746,8 +3756,8 @@ async function _fetchLiveModels(provider, sel, requestSeq=null, opts={}){
       if(required) throw new Error('Fresh live models were not returned');
       return;
     }
-    if(generation!==(_liveModelCacheGen[provider]||0)) return;
-    _liveModelCache[provider]=data.models;
+    if(generation!==(_liveModelCacheGen[cacheKey]||0)) return;
+    _liveModelCache[cacheKey]=data.models;
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
     if(!sel) return data.models;
     const added=_addLiveModelsToSelect(provider,data.models,sel);
@@ -3760,7 +3770,7 @@ async function _fetchLiveModels(provider, sel, requestSeq=null, opts={}){
     if(required) throw e;
     console.debug('[hermes] Live model fetch failed for',provider,e.message);
   }finally{
-    if(generation===(_liveModelCacheGen[provider]||0)) _liveModelFetchPending.delete(provider);
+    _liveModelFetchPending.delete(pendingKey);
   }
 }
 
@@ -10929,7 +10939,11 @@ function syncTopbar(){
         // Also defer if a live model fetch is still in flight — the model may be
         // in the list once the fetch completes. Persisting now would corrupt the
         // session with the wrong model before live models arrive (#1169).
-        const liveStillPending=window._activeProvider&&_liveModelFetchPending.has(window._activeProvider);
+        const activeProvider=window._activeProvider&&String(window._activeProvider).trim().toLowerCase();
+        const activeCacheKey=activeProvider?_liveModelCacheKey(activeProvider):'';
+        const liveStillPending=!!activeCacheKey&&_liveModelFetchPending.has(
+          `${activeCacheKey}:${_liveModelCacheGen[activeCacheKey]||0}`
+        );
         if(liveStillPending||missingModelIsRoutable){
           // Live fetch in flight — don't touch sel.value or S.session.model yet.
           // _addLiveModelsToSelect() will re-apply S.session.model once done (#1169).
