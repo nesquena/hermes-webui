@@ -186,13 +186,22 @@ function executeCommand(text){
 // submitted. The autocomplete must not advertise anything outside this set:
 // a non-dispatchable registry command (e.g. /agents) would otherwise fall
 // through send() to the ordinary chat path and trigger an unintended
-// model/API request. Keep this in sync with _AGENT_COMMANDS_RUN_ON_WEBUI in
-// messages.js -- the announced list is a subset of the dispatched list
-// (fail-closed), never a superset. Plugin-category commands are always
-// dispatchable via the plugin exec transport. #6951.
+// model/API request.
+//
+// This set holds canonical registry names only. getMatchingCommands() matches
+// cmd.name (the canonical metadata name), so alias/underscore forms such as
+// /reload_mcp are covered implicitly: typing one resolves through
+// getAgentCommandMetadata() at dispatch time and the canonical name is what
+// gets tested against the dispatcher allowlist (#6951).
+//
+// Keep this in sync with _AGENT_COMMANDS_RUN_ON_WEBUI in messages.js and
+// _ALLOWED_AGENT_COMMANDS in api/commands.py -- the announced list is a
+// subset of the dispatched list (fail-closed), never a superset.
+// Plugin-category commands are always dispatchable via the plugin exec
+// transport. #6951.
 const _WEBUI_DISPATCHABLE_AGENT_COMMANDS=new Set([
   // Backend-executed via /api/commands/exec (see _ALLOWED_AGENT_COMMANDS in api/commands.py).
-  'reload-mcp','reload_mcp','reload-skills','reload_skills','codex-runtime','codex_runtime','credits',
+  'reload-mcp','reload-skills','codex-runtime','credits',
   // Native WebUI behaviors handled inside send() without an agent round-trip.
   'moa','sessions','resume',
   // Desktop Companion extension command handled by handlePetSlashCommand().
@@ -244,6 +253,8 @@ function getMatchingCommands(prefix){
     matches.push({
       name,
       desc:String(cmd&&cmd.description||'').trim()||'Agent command',
+      // Surface the registry's argument hint on the autocomplete row (#6951).
+      arg:String(cmd&&cmd.args_hint||'').trim()||undefined,
       source:cmd.category==='Plugin'?'plugin':'agent',
     });
     seen.add(name);
