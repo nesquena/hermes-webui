@@ -476,6 +476,40 @@ globalThis.eval({json.dumps(bundle)});
     assert not any(message == "refreshed" for message in messages)
 
 
+def test_refresh_discards_profile_switched_continuation():
+    source = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
+    invalidate = _extract_js_function(source, "function _invalidateLiveModelCacheForProvider(")
+    rebuild = _extract_js_function(source, "function _refreshModelDropdownsAfterProviderChange(")
+    refresh = _extract_js_function(source, "async function _refreshProviderModels(")
+    bundle = invalidate + "\n" + rebuild + "\n" + refresh
+    script = """
+const events=[];
+let resolveLive;
+globalThis.S={activeProfile:'profile-a'};
+globalThis.window={
+  _invalidateLiveModelCache: provider => events.push(['invalidate',provider]),
+  _invalidateSlashModelCache: () => events.push(['slash']),
+  _ensureModelDropdownReady: async () => events.push(['rebuild'])
+};
+globalThis.api=async () => ({ok:true,provider:'provider'});
+globalThis._fetchLiveModels=() => new Promise(resolve => {
+  resolveLive=() => { globalThis.S.activeProfile='profile-b'; resolve([{id:'provider/model'}]); };
+});
+globalThis.t=() => 'refreshed';
+globalThis.showToast=value => events.push(['toast',value]);
+globalThis.eval(""" + json.dumps(bundle) + """);
+(async () => {
+  const task=globalThis._refreshProviderModels('provider',{disabled:false,innerHTML:''});
+  await new Promise(resolve => setTimeout(resolve,0));
+  resolveLive();
+  await task;
+  console.log(JSON.stringify(events));
+})();
+"""
+    events = _run_node(script)
+    assert events == [["invalidate", "provider"]]
+
+
 def test_provider_key_save_and_remove_invalidate_requested_and_canonical_live_caches():
     source = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
     invalidate = _extract_js_function(source, "function _invalidateLiveModelCacheForProvider(")
