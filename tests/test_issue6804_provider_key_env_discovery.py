@@ -347,12 +347,15 @@ def test_stale_publication_after_disk_save_is_discarded(monkeypatch, tmp_path):
         "fetch_models",
         lambda _connection: [{"id": "syn:stale", "label": "syn:stale"}],
     )
+    cache_after = None
     try:
         result = config.get_available_models(force_refresh=True)
+        cache_after = config._available_models_cache
     finally:
         _restore(old_cfg, old_mtime)
     assert not any(group.get("provider_id") == "synthetic" for group in result["groups"])
     assert deleted
+    assert cache_after is None
 
 
 def test_pinned_fetch_resolves_once_and_uses_vetted_addresses():

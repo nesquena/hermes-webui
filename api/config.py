@@ -8500,6 +8500,13 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         _authority_matches = _provider_publication_tuple() == _build_authority.get("value")
                         if not _authority_matches:
                             _delete_models_cache_on_disk()
+                            with _cache_build_cv:
+                                if _available_models_cache is result:
+                                    _available_models_cache = None
+                                    _available_models_cache_ts = 0.0
+                                    _available_models_live_rebuild_ts = 0.0
+                                    _available_models_cache_source_fingerprint = None
+                                    _sync_models_cache_provenance()
             except BaseException:
                 # Always reset the flag so waiting threads don't block for 60s
                 with _cache_build_cv:
