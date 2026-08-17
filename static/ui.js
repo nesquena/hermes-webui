@@ -2586,6 +2586,37 @@ function _applyMediaPlaybackRate(media, rate=_getStoredMediaPlaybackRate()){
   media.playbackRate=rate;
   _syncMediaSpeedButtons(media.closest('.msg-media-editor,.preview-media-wrap'),rate);
 }
+let _mediaVisibilityObserver=null;
+function _promoteVisibleVideoPreload(video){
+  if(!video||!video.matches||!video.matches('.msg-media-video')) return;
+  if(video.isConnected===false) return;
+  if(video.dataset&&video.dataset.visiblePreload==='1') return;
+  if(video.dataset) video.dataset.visiblePreload='1';
+  video.preload='auto';
+  // Off-screen history stays metadata-only. Once a card approaches the
+  // viewport, restart just that resource so Chromium fills a playable buffer.
+  if(video.paused&&video.readyState<4&&typeof video.load==='function') video.load();
+}
+function _observeVideoPreload(video){
+  if(!video||!video.matches||!video.matches('.msg-media-video')) return;
+  if(video.dataset&&video.dataset.visiblePreload==='1') return;
+  if(_mediaVisibilityObserver) _mediaVisibilityObserver.observe(video);
+}
+function _unobserveVideoPreload(video){
+  if(!video||!_mediaVisibilityObserver) return;
+  _mediaVisibilityObserver.unobserve(video);
+}
+function _initMediaVisibilityObserver(){
+  if(_mediaVisibilityObserver||typeof IntersectionObserver==='undefined') return;
+  _mediaVisibilityObserver=new IntersectionObserver(entries=>{
+    for(const entry of entries){
+      if(!entry.isIntersecting) continue;
+      const video=entry.target;
+      _unobserveVideoPreload(video);
+      _promoteVisibleVideoPreload(video);
+    }
+  },{root:null,rootMargin:'300px 0px',threshold:0.01});
+}
 function _mediaKindForName(name=''){
   const clean=String(name||'').split('?')[0].toLowerCase();
   if(_VIDEO_EXTS.test(clean)) return 'video';
@@ -2752,21 +2783,40 @@ document.addEventListener("loadedmetadata", e=>{
     _applyMediaPlaybackRate(e.target);
   }
 },true);
+document.addEventListener('play',e=>{
+  if(e.target&&e.target.matches&&e.target.matches('.msg-media-video')){
+    _promoteVisibleVideoPreload(e.target);
+  }
+},true);
 function _initMediaPlaybackObserver(){
   if(!document.body||window._mediaPlaybackObserver) return;
+  _initMediaVisibilityObserver();
   window._mediaPlaybackObserver=new MutationObserver(records=>{
     for(const rec of records){
+      for(const node of rec.removedNodes||[]){
+        if(!node||node.nodeType!==1) continue;
+        const videos=[];
+        if(node.matches&&node.matches('.msg-media-video')) videos.push(node);
+        if(node.querySelectorAll) videos.push(...node.querySelectorAll('.msg-media-video'));
+        videos.forEach(_unobserveVideoPreload);
+      }
       for(const node of rec.addedNodes||[]){
         if(!node||node.nodeType!==1) continue;
         const media=[];
         if(node.matches&&node.matches('audio,video')) media.push(node);
         if(node.querySelectorAll) media.push(...node.querySelectorAll('audio,video'));
-        media.forEach(m=>_applyMediaPlaybackRate(m));
+        media.forEach(m=>{
+          _applyMediaPlaybackRate(m);
+          _observeVideoPreload(m);
+        });
       }
     }
   });
   window._mediaPlaybackObserver.observe(document.body,{childList:true,subtree:true});
-  document.querySelectorAll('audio,video').forEach(m=>_applyMediaPlaybackRate(m));
+  document.querySelectorAll('audio,video').forEach(m=>{
+    _applyMediaPlaybackRate(m);
+    _observeVideoPreload(m);
+  });
 }
 if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',_initMediaPlaybackObserver);
 else _initMediaPlaybackObserver();
