@@ -1520,6 +1520,10 @@ def _canonicalise_provider_id(name: object) -> str:
     raw = str(name).strip().lower().replace("_", "-")
     if not raw:
         return ""
+    # xAI is a WebUI-owned ``x-ai`` provider. Keep dotted and display-name
+    # spellings in that namespace before adapting to the Agent alias later.
+    if raw in {"x.ai", "grok"}:
+        return "x-ai"
     # Already a canonical id known to _PROVIDER_DISPLAY/_PROVIDER_MODELS:
     # keep as-is to avoid round-tripping through aliases (e.g. x-ai → xai).
     if raw in _PROVIDER_DISPLAY or raw in _PROVIDER_MODELS:
@@ -6728,11 +6732,13 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         # user-facing name from config.yaml (``provider: ollama-local``) and
         # route it through the same ``custom:<name>`` slug the picker emits.
         if active_provider:
-            active_provider = _resolve_configured_provider_id(
-                active_provider,
-                cfg,
-                base_url=cfg_base_url,
-            )
+            _named_provider = _named_custom_provider_slug_for_provider(active_provider, cfg)
+            active_provider = _named_provider or _canonicalise_provider_id(active_provider)
+            if active_provider == "custom" and cfg_base_url:
+                active_provider = (
+                    _named_custom_provider_slug_for_base_url(cfg_base_url, cfg)
+                    or active_provider
+                )
 
         # 2. Read auth store (active_provider fallback + credential_pool inspection)
         auth_store = {}
@@ -6743,11 +6749,14 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
 
                 auth_store = _j.loads(auth_store_path.read_text(encoding="utf-8"))
                 if not active_provider:
-                    active_provider = _resolve_configured_provider_id(
-                        auth_store.get("active_provider"),
-                        cfg,
-                        base_url=cfg_base_url,
-                    )
+                    _stored_provider = auth_store.get("active_provider")
+                    _named_provider = _named_custom_provider_slug_for_provider(_stored_provider, cfg)
+                    active_provider = _named_provider or _canonicalise_provider_id(_stored_provider)
+                    if active_provider == "custom" and cfg_base_url:
+                        active_provider = (
+                            _named_custom_provider_slug_for_base_url(cfg_base_url, cfg)
+                            or active_provider
+                        )
             except Exception:
                 logger.debug("Failed to load auth store from %s", auth_store_path)
 
@@ -6875,7 +6884,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         except Exception:
             logger.debug("Failed to detect auth providers from hermes")
 
-        if not _hermes_auth_used:
+        # Environment credentials supplement the roster. The roster-aware sink
+        # above still excludes unauthenticated roster entries and Codex ambient auth.
+        if _hermes_auth_used or not roster_authoritative:
             try:
                 from api.profiles import get_active_hermes_home as _gah2
 
@@ -7852,8 +7863,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     # ``CLIPpoxy`` or ``snake_case_provider`` still resolve
                     # (#2245).  Fall back to the canonical pid for providers
                     # that appear in _PROVIDER_MODELS but not in cfg.
-                    _raw_key = _canonical_to_raw_provider_key.get(pid, pid)
-                    provider_cfg = _get_provider_cfg(_raw_key)
+                    provider_cfg = _canonical_provider_config(cfg, pid)
                     raw_models = []
 
                     # User-configured model allowlists are explicit local
