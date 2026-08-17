@@ -1742,6 +1742,11 @@ async function loadSession(sid){
   const _isCurrentLoad = () => _loadingSessionId === sid && _loadSessionGeneration === _loadGeneration;
   _loadingSessionId = sid;
   if(currentSid!==sid&&typeof _uploadPendingFilesSyncProgressForSession==='function')_uploadPendingFilesSyncProgressForSession(sid);
+  // #6704 P1: the 'squash-running' pulse lives on SHARED desktop/mobile
+  // controls; re-sync it against the session being displayed so a job running
+  // on another conversation doesn't leak its indicator here (and re-asserts
+  // when navigating back to the owner). Same pattern as the upload bar above.
+  if(currentSid!==sid&&typeof _squashSyncRunningIndicatorForSession==='function')_squashSyncRunningIndicatorForSession(sid);
   // Reset scroll state for fresh session navigation — the reader expects to
   // land at the bottom of the new transcript, not wherever a stale unpin flag
   // from a prior session or a stray touch event during loading would place them.

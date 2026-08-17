@@ -10,6 +10,9 @@ manual anchor + watermark barrier + lineage detach), and job status.
 import gzip
 import hashlib
 import json
+import shutil
+import subprocess
+import textwrap
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -378,3 +381,110 @@ def test_squash_completion_reload_is_conditional_on_current_session():
     for line in body.splitlines():
         if "loadSession(sid" in line:
             assert "S.session.session_id === sid" in line, line
+
+
+def test_squash_running_indicator_is_owner_scoped_wiring():
+    """Focused regression (#6704 P1 follow-up): 'squash-running' renders on the
+    SHARED desktop/mobile controls, so it must be keyed by the owning session
+    (upload-bar pattern) and re-synced on every session switch — not toggled
+    unconditionally on whatever conversation happens to be displayed."""
+    repo = Path(__file__).resolve().parent.parent
+    panels = (repo / "static" / "panels.js").read_text(encoding="utf-8")
+    sessions = (repo / "static" / "sessions.js").read_text(encoding="utf-8")
+
+    # The per-owner state + sync/set helpers exist.
+    assert "const _squashRunningSessions = new Set()" in panels
+    assert "function _squashSyncRunningIndicatorForSession(" in panels
+    assert "function _squashSetRunning(" in panels
+
+    # squashConversation must go through the owner-scoped setter, never flip
+    # the shared class directly on the buttons.
+    fn_start = panels.index("async function squashConversation")
+    fn_end = panels.index("function _pollSquashJob")
+    body = panels[fn_start:fn_end]
+    assert "_squashSetRunning(sid, true)" in body
+    assert "_squashSetRunning(sid, false)" in body
+    assert "classList.add('squash-running')" not in body
+    assert "classList.remove('squash-running')" not in body
+
+    # loadSession re-syncs the shared controls against the displayed session
+    # on switch, alongside the existing upload-bar owner resync.
+    ls_start = sessions.index("async function loadSession")
+    ls_body = sessions[ls_start : sessions.index("\nasync function", ls_start + 10)]
+    assert "_squashSyncRunningIndicatorForSession(sid)" in ls_body
+
+
+def test_squash_running_indicator_does_not_leak_across_sessions_runtime():
+    """Behavioral regression (#6704 P1 follow-up), running the REAL helper
+    block from panels.js in node's ``vm``:
+
+    start a squash on session A → switch to session B mid-job → the shared
+    desktop+mobile controls must drop 'squash-running'; switch back to A →
+    the indicator re-asserts; the job settles while B is displayed → B's
+    controls stay clean (no flash, no stale removal on the wrong session).
+    """
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        pytest.skip("node not available")
+    repo = Path(__file__).resolve().parent.parent
+    panels = (repo / "static" / "panels.js").read_text(encoding="utf-8")
+    start = panels.index("const _squashRunningSessions = new Set()")
+    end = panels.index("async function squashConversation")
+    helpers = panels[start:end]
+    harness = textwrap.dedent(
+        """
+        'use strict';
+        const vm = require('vm');
+        function makeBtn(){
+          const classes = new Set();
+          return {classes, classList: {
+            toggle(name, force){ if(force) classes.add(name); else classes.delete(name); },
+            add(name){ classes.add(name); },
+            remove(name){ classes.delete(name); },
+            contains(name){ return classes.has(name); },
+          }};
+        }
+        const desktop = makeBtn();
+        const mobile = makeBtn();
+        const ctx = {
+          $: (id) => (id === 'btnSquash' ? desktop : (id === 'composerMobileSquashBtn' ? mobile : null)),
+          S: {session: {session_id: 'sess-A'}},
+        };
+        vm.createContext(ctx);
+        vm.runInContext(HELPERS_SRC, ctx);
+        const running = () => [desktop, mobile].map(b => b.classList.contains('squash-running'));
+        const out = {};
+        // Viewing A, squash starts on A -> both shared controls pulse.
+        vm.runInContext("_squashSetRunning('sess-A', true)", ctx);
+        out.owner_shows = running();
+        // User switches to B mid-job (loadSession resyncs for the new sid).
+        ctx.S.session = {session_id: 'sess-B'};
+        vm.runInContext("_squashSyncRunningIndicatorForSession('sess-B')", ctx);
+        out.other_session_clean = running();
+        // Back to the owner while the job is still running -> re-asserts.
+        ctx.S.session = {session_id: 'sess-A'};
+        vm.runInContext("_squashSyncRunningIndicatorForSession('sess-A')", ctx);
+        out.owner_reasserts = running();
+        // Switch to B again; the job settles while B is displayed -> B stays clean.
+        ctx.S.session = {session_id: 'sess-B'};
+        vm.runInContext("_squashSyncRunningIndicatorForSession('sess-B')", ctx);
+        vm.runInContext("_squashSetRunning('sess-A', false)", ctx);
+        out.settle_on_other_session_clean = running();
+        // Back on A after settle -> nothing lingers.
+        ctx.S.session = {session_id: 'sess-A'};
+        vm.runInContext("_squashSyncRunningIndicatorForSession('sess-A')", ctx);
+        out.owner_clean_after_settle = running();
+        console.log(JSON.stringify(out));
+        """
+    ).replace("HELPERS_SRC", json.dumps(helpers))
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
+    out = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert out["owner_shows"] == [True, True]
+    assert out["other_session_clean"] == [False, False], (
+        "P1 leak: 'squash-running' must clear on the shared controls when a "
+        "different conversation is displayed while the job runs"
+    )
+    assert out["owner_reasserts"] == [True, True]
+    assert out["settle_on_other_session_clean"] == [False, False]
+    assert out["owner_clean_after_settle"] == [False, False]

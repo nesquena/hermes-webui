@@ -4860,6 +4860,33 @@ async function clearConversation() {
 // Server-side counterpart of the squash-chat skill: archives the full
 // transcript, collapses the session to a single summary message and reloads
 // the view. Runs as a background job (aux-LLM summary can take minutes).
+
+// P1 (#6704): the 'squash-running' pulse renders on the SHARED desktop and
+// mobile controls, so it must be scoped to the session that owns the running
+// job — otherwise switching conversations mid-job leaves the newly selected
+// conversation with a pulsing, pointer-disabled squash action. Same
+// owner-scoping pattern as the upload progress bar in ui.js: state is keyed
+// by owner sid and loadSession() re-syncs the shared controls on switch.
+const _squashRunningSessions = new Set();
+function _squashRunningButtons() {
+  return [$('btnSquash'), $('composerMobileSquashBtn')].filter(Boolean);
+}
+function _squashSyncRunningIndicatorForSession(sessionId) {
+  const owner = String(sessionId || '');
+  const running = !!(owner && _squashRunningSessions.has(owner));
+  _squashRunningButtons().forEach(btn => btn.classList.toggle('squash-running', running));
+}
+function _squashSetRunning(sessionId, running) {
+  const owner = String(sessionId || '');
+  if(!owner) return;
+  if(running) _squashRunningSessions.add(owner);
+  else _squashRunningSessions.delete(owner);
+  // Re-sync the shared controls against the CURRENTLY displayed session:
+  // if it owns a running job the indicator (re)asserts, otherwise it clears —
+  // a job settling in the background never touches another conversation's UI.
+  _squashSyncRunningIndicatorForSession(S.session ? S.session.session_id : '');
+}
+
 async function squashConversation() {
   if(!S.session) return;
   const sid = S.session.session_id;
@@ -4871,8 +4898,7 @@ async function squashConversation() {
     focusCancel: true,
   });
   if(!_sqConfirmed) return;
-  const buttons = [$('btnSquash'), $('composerMobileSquashBtn')].filter(Boolean);
-  buttons.forEach(btn => btn.classList.add('squash-running'));
+  _squashSetRunning(sid, true);
   showToast(t('squash_started'), 4000);
   try {
     const start = await api('/api/session/squash', {method:'POST', timeoutMs: 30000,
@@ -4897,7 +4923,7 @@ async function squashConversation() {
   } catch(e) {
     showToast(t('squash_failed') + e.message, 7000, 'error');
   } finally {
-    buttons.forEach(btn => btn.classList.remove('squash-running'));
+    _squashSetRunning(sid, false);
   }
 }
 
