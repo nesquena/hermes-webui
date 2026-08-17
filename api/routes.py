@@ -13082,6 +13082,12 @@ def handle_get(handler, parsed) -> bool:
                 "threshold_tokens": _threshold_tokens,
                 "last_prompt_tokens": getattr(s, "last_prompt_tokens", 0) or 0,
             }
+            from api.process_event_utils import build_active_turn_token
+
+            raw["active_turn_token"] = build_active_turn_token(
+                getattr(s, "active_stream_id", None),
+                getattr(s, "pending_started_at", None),
+            )
             if original_stream_id:
                 try:
                     journal = find_run_summary(original_stream_id)
@@ -20220,6 +20226,7 @@ def _handle_session_sse_stream(handler, parsed):
         persisted_message_count_for_session,
         should_emit_session_updated,
     )
+    from api.process_event_utils import build_active_turn_token
 
     # Atomic get-or-create + subscribe under SESSION_CHANNELS_LOCK. Doing these
     # two steps separately (get_or_create_session_channel then ch.subscribe)
@@ -20300,6 +20307,9 @@ def _handle_session_sse_stream(handler, parsed):
                     "session_id": sid,
                     "stream_id": recover_stream_id,
                     "pending_started_at": pending_started_at,
+                    "active_turn_token": build_active_turn_token(
+                        recover_stream_id, pending_started_at
+                    ),
                     "source": "subscribe_recovery",
                     "recovered": True,
                 })
@@ -21924,13 +21934,13 @@ def _start_chat_stream_for_session(
             except Exception:
                 logger.debug("Failed to record gateway run-start failure for stream %s", stream_id, exc_info=True)
         raise
-    response = {
+    response = _chat_start_response_with_turn_identity({
         "stream_id": stream_id,
         "session_id": s.session_id,
         "pending_started_at": s.pending_started_at,
         "turn_id": journal_event.get("turn_id"),
         "title": s.title,
-    }
+    })
     if normalized_model:
         response["effective_model"] = model
     if model_provider:
@@ -21955,6 +21965,20 @@ def _runtime_runner_client_factory():
     return HttpRunnerClient.from_env()
 
 
+def _chat_start_response_with_turn_identity(response, *, stream_id=None, pending_started_at=None):
+    """Add the server-owned active-turn identity to a successful start response."""
+    from api.process_event_utils import build_active_turn_token
+
+    normalized = dict(response or {})
+    normalized.setdefault("stream_id", stream_id)
+    if normalized.get("pending_started_at") is None:
+        normalized["pending_started_at"] = pending_started_at
+    normalized["active_turn_token"] = build_active_turn_token(
+        normalized.get("stream_id"), normalized.get("pending_started_at")
+    )
+    return normalized
+
+
 def _chat_start_response_from_run_start(result):
     """Expose only the legacy browser-facing chat-start response fields."""
     payload = dict(getattr(result, "payload", {}) or {})
@@ -21973,9 +21997,16 @@ def _chat_start_response_from_run_start(result):
     ):
         if key in payload:
             response[key] = payload[key]
-    response.setdefault("stream_id", result.stream_id)
-    response.setdefault("session_id", result.session_id)
-    return response
+    response["stream_id"] = result.stream_id
+    response["session_id"] = result.session_id
+    pending_started_at = response.get("pending_started_at")
+    if pending_started_at is None:
+        pending_started_at = getattr(result, "started_at", None)
+    return _chat_start_response_with_turn_identity(
+        response,
+        stream_id=result.stream_id,
+        pending_started_at=pending_started_at,
+    )
 
 
 def _runtime_adapter_goal_action(goal_args: str) -> str:
@@ -22373,6 +22404,7 @@ def start_session_turn(
                         "session_id": str(session_id),
                         "stream_id": str(stream_id),
                         "pending_started_at": (resp or {}).get("pending_started_at"),
+                        "active_turn_token": (resp or {}).get("active_turn_token"),
                         "source": source,
                     },
                 )

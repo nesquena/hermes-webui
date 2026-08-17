@@ -556,6 +556,9 @@ def session_status(session_id: str) -> dict[str, Any]:
         hermes_home = str(get_hermes_home_for_profile(profile))
     except Exception:
         hermes_home = ''
+    live_stream_id = _live_active_stream_id(s)
+    from api.process_event_utils import build_active_turn_token
+
     return {
         'session_id': s.session_id,
         'title': s.title,
@@ -583,7 +586,10 @@ def session_status(session_id: str) -> dict[str, Any]:
         # only if it's in STREAMS (SSE channel open) or ACTIVE_RUNS (worker
         # bookkeeping). Otherwise report None so the poller waits for a REAL
         # server_turn_started instead of latching a ghost.
-        'active_stream_id': _live_active_stream_id(s),
+        'active_stream_id': live_stream_id,
+        'active_turn_token': build_active_turn_token(
+            live_stream_id, getattr(s, 'pending_started_at', None)
+        ),
         'input_tokens': inp,
         'output_tokens': out,
         'total_tokens': inp + out,

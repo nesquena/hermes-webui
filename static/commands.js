@@ -1231,6 +1231,7 @@ async function cmdGoal(args){
   if(!S.session){await newSession();await renderSessionList();}
   if(!S.session||!S.session.session_id){showToast(t('no_active_session'));return;}
   const activeSid=S.session.session_id;
+  const activeMessages=Array.isArray(S.messages)?[...S.messages]:[];
   try{
     const r=await api('/api/goal',{method:'POST',body:JSON.stringify({
       session_id:activeSid,
@@ -1251,8 +1252,19 @@ async function cmdGoal(args){
       }
       return raw;
     })();
-    if(msg){
-      S.messages.push({role:'assistant',content:msg,_ts:Date.now()/1000,_goalStatus:true,_transient:true});
+    const statusMessage=msg?{role:'assistant',content:msg,_ts:Date.now()/1000,_goalStatus:true,_transient:true}:null;
+    const activeTurnToken=typeof _opaqueActiveTurnToken==='function'
+      ?_opaqueActiveTurnToken(r&&r.active_turn_token):null;
+    if(!_isSessionCurrentPane(activeSid)){
+      if(!r||!r.stream_id)return;
+      const messages=activeMessages.slice();
+      if(statusMessage)messages.push(statusMessage);
+      INFLIGHT[activeSid]={streamId:r.stream_id,messages,uploaded:[],toolCalls:[],activeTurnToken,reattach:true};
+      if(typeof saveInflightState==='function')saveInflightState(activeSid,{streamId:r.stream_id,messages,uploaded:[],toolCalls:[],activeTurnToken});
+      return;
+    }
+    if(statusMessage){
+      S.messages.push(statusMessage);
       renderMessages({preserveScroll:true});
       showToast(msg.split('\n')[0],2600);
     }
@@ -1265,18 +1277,20 @@ async function cmdGoal(args){
     if(S.session&&S.session.session_id===activeSid){
       S.session.active_stream_id=r.stream_id;
       if(typeof r.pending_started_at==='number')S.session.pending_started_at=r.pending_started_at;
+      S.session.active_turn_token=activeTurnToken;
       if(r.effective_model)S.session.model=r.effective_model;
       if(r.effective_model_provider)S.session.model_provider=r.effective_model_provider;
     }
-    INFLIGHT[activeSid]={messages:[...S.messages],uploaded:[],toolCalls:[]};
+    INFLIGHT[activeSid]={streamId:r.stream_id,messages:[...S.messages],uploaded:[],toolCalls:[],activeTurnToken};
     if(typeof markInflight==='function')markInflight(activeSid,r.stream_id);
-    if(typeof saveInflightState==='function')saveInflightState(activeSid,{streamId:r.stream_id,messages:INFLIGHT[activeSid].messages,uploaded:[],toolCalls:[]});
+    if(typeof saveInflightState==='function')saveInflightState(activeSid,{streamId:r.stream_id,messages:INFLIGHT[activeSid].messages,uploaded:[],toolCalls:[],activeTurnToken});
     startApprovalPolling(activeSid);
     startClarifyPolling(activeSid);
     if(typeof _fetchYoloState==='function')_fetchYoloState(activeSid);
     attachLiveStream(activeSid,r.stream_id,[]);
     if(typeof renderSessionList==='function')void renderSessionList();
   }catch(e){
+    if(!_isSessionCurrentPane(activeSid))return;
     const err=String((e&&e.message)||e||'Goal command failed');
     S.messages.push({role:'assistant',content:`**Goal command failed:** ${err}`,_ts:Date.now()/1000,_error:true});
     renderMessages({preserveScroll:true});

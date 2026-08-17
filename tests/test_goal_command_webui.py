@@ -1,7 +1,7 @@
 """Regression tests for first-class WebUI /goal command parity."""
 
-import io
 import json
+import subprocess
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +13,20 @@ COMMANDS_JS = (REPO_ROOT / "static" / "commands.js").read_text(encoding="utf-8")
 MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 ROUTES_PY = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
 STREAMING_PY = (REPO_ROOT / "api" / "streaming.py").read_text(encoding="utf-8")
+
+
+def _function_body(src: str, signature: str) -> str:
+    start = src.index(signature)
+    brace = src.index("{", start)
+    depth = 1
+    i = brace + 1
+    while depth and i < len(src):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+        i += 1
+    return src[brace + 1 : i - 1]
 
 
 def test_goal_command_payload_matches_gateway_controls(monkeypatch):
@@ -665,6 +679,196 @@ def test_frontend_has_goal_slash_command_and_status_event_handler():
     assert "source.addEventListener('goal_continue'" in MESSAGES_JS
     assert "['steer','interrupt','queue','terminal','goal','yolo'].includes(_pc.name)" in MESSAGES_JS
     assert "queueSessionMessage" in MESSAGES_JS
+
+
+@pytest.mark.parametrize("pane_state", ("same", "assigned", "loading"))
+def test_frontend_cmd_goal_keeps_late_a_response_out_of_b_pane(pane_state):
+    """cmdGoal() must keep late A responses in A recovery state after a pane switch."""
+    cmd_goal_body = _function_body(COMMANDS_JS, "async function cmdGoal")
+    script = f"""
+const assert = require('assert');
+let releaseGoal;
+let goalCalled;
+const goalCalledPromise = new Promise(resolve => goalCalled = resolve);
+const goalResponse = new Promise(resolve => releaseGoal = resolve);
+const calls = {{
+  attach: [], approval: [], clarify: [], yolo: [], marked: [], saved: [],
+  render: 0, clear: 0, thinking: 0, busy: [], composer: [], list: 0, toasts: [],
+}};
+const localStorage = {{
+  values: Object.create(null),
+  getItem(key) {{ return this.values[key] || null; }},
+  setItem(key, value) {{ this.values[key] = String(value); }},
+  removeItem(key) {{ delete this.values[key]; }},
+}};
+const A = {{
+  session_id: 'A', workspace: '/a', model: 'A model', model_provider: 'provider-a',
+  profile: 'profile-a', active_stream_id: null, active_turn_token: 'A-old-token',
+}};
+const B = {{
+  session_id: 'B', workspace: '/b', model: 'B model', model_provider: 'provider-b',
+  profile: 'profile-b', active_stream_id: 'B-stream', active_turn_token: 'B-token',
+}};
+const aMessages = [
+  {{role:'user', content:'A prompt', attachments:['a.txt'], _ts:10}},
+  {{role:'assistant', content:'A reply', _ts:11}},
+];
+const bMessages = [
+  {{role:'user', content:'B prompt', _active_turn_token:'B-token', _ts:20}},
+  {{role:'assistant', content:'B reply', _active_turn_token:'B-token', _ts:21}},
+];
+const bToolCalls = [{{call_id:'b-call', name:'inspect'}}];
+const S = {{
+  session: A,
+  messages: aMessages.slice(),
+  toolCalls: [],
+  busy: false,
+  activeStreamId: null,
+  activeProfile: 'profile-a',
+}};
+const INFLIGHT = Object.create(null);
+let _loadingSessionId = null;
+function _isSessionCurrentPane(sid) {{
+  if(!sid || !S.session || S.session.session_id!==sid) return false;
+  if(typeof _loadingSessionId!=='undefined' && _loadingSessionId && _loadingSessionId!==sid) return false;
+  return true;
+}}
+function _opaqueActiveTurnToken(value) {{
+  return typeof value === 'string' && value.trim() ? value : null;
+}}
+function api(path) {{
+  assert.strictEqual(path, '/api/goal');
+  goalCalled();
+  return goalResponse;
+}}
+function t(key) {{ return key; }}
+function renderMessages() {{ calls.render++; }}
+function showToast(...args) {{ calls.toasts.push(args); }}
+function clearLiveToolCards() {{ calls.clear++; }}
+function appendThinking() {{ calls.thinking++; }}
+function setBusy(value) {{ calls.busy.push(value); S.busy = value; }}
+function setComposerStatus(value) {{ calls.composer.push(value); }}
+function renderSessionList() {{ calls.list++; return Promise.resolve(); }}
+function startApprovalPolling(sid) {{ calls.approval.push(sid); }}
+function startClarifyPolling(sid) {{ calls.clarify.push(sid); }}
+function _fetchYoloState(sid) {{ calls.yolo.push(sid); }}
+function attachLiveStream(sid, streamId, uploaded) {{ calls.attach.push([sid, streamId, uploaded]); }}
+function markInflight(sid, streamId) {{
+  localStorage.setItem('hermes-webui-inflight', JSON.stringify({{sid, streamId, ts:123}}));
+  calls.marked.push([sid, streamId]);
+}}
+function saveInflightState(sid, state) {{
+  calls.saved.push([sid, JSON.parse(JSON.stringify(state))]);
+}}
+async function cmdGoal(args) {{{cmd_goal_body}}}
+
+(async () => {{
+  const goalPromise = cmdGoal('ship A');
+  await goalCalledPromise;
+  const expectedA = JSON.parse(JSON.stringify(aMessages));
+  if ({json.dumps(pane_state)} !== 'same') {{
+    S.messages = bMessages.slice();
+    S.toolCalls = bToolCalls.slice();
+    S.busy = true;
+    S.activeStreamId = 'B-stream';
+    S.activeProfile = 'profile-b';
+  }}
+  INFLIGHT.B = {{
+    streamId:'B-stream', activeTurnToken:'B-token', messages:bMessages.slice(),
+    uploaded:['b.txt'], toolCalls:bToolCalls.slice(),
+  }};
+  const bMarker = JSON.stringify({{sid:'B', streamId:'B-stream', ts:123}});
+  localStorage.setItem('hermes-webui-inflight', bMarker);
+  const bSessionBefore = JSON.parse(JSON.stringify(B));
+  if ({json.dumps(pane_state)} === 'assigned') S.session = B;
+  else if ({json.dumps(pane_state)} === 'loading') _loadingSessionId = 'B';
+  const visibleSessionBefore = JSON.parse(JSON.stringify(S.session));
+  const visibleMessagesBefore = JSON.parse(JSON.stringify(S.messages));
+  const visibleToolCallsBefore = JSON.parse(JSON.stringify(S.toolCalls));
+  const visibleBusyBefore = S.busy;
+  const visibleStreamBefore = S.activeStreamId;
+  const visibleProfileBefore = S.activeProfile;
+  const visibleInflightBefore = JSON.parse(JSON.stringify(INFLIGHT.B));
+
+  releaseGoal({{
+    message:'A goal status', stream_id:'A-stream', active_turn_token:'A-token',
+    pending_started_at:30, effective_model:'A effective model',
+    effective_model_provider:'provider-a-effective',
+  }});
+  await goalPromise;
+
+  const a = INFLIGHT.A;
+  assert(a);
+  assert.strictEqual(a.streamId, 'A-stream');
+  assert.strictEqual(a.activeTurnToken, 'A-token');
+  assert.deepStrictEqual(a.messages.slice(0, expectedA.length), expectedA);
+  const aStatus = a.messages.at(-1);
+  assert.strictEqual(aStatus.content, 'A goal status');
+  assert.strictEqual(aStatus._goalStatus, true);
+  assert.strictEqual(aStatus._transient, true);
+  assert(!JSON.stringify(a.messages).includes('B prompt'));
+  assert(!JSON.stringify(a.messages).includes('B-token'));
+  const savedA = calls.saved.filter(item => item[0] === 'A').at(-1)[1];
+  assert.strictEqual(savedA.streamId, 'A-stream');
+  assert.strictEqual(savedA.activeTurnToken, 'A-token');
+  assert.deepStrictEqual(savedA.messages.slice(0, expectedA.length), expectedA);
+  assert.strictEqual(savedA.messages.at(-1).content, 'A goal status');
+
+  if ({json.dumps(pane_state)} === 'same') {{
+    assert.strictEqual(INFLIGHT.A.reattach, undefined);
+    assert.strictEqual(S.activeStreamId, 'A-stream');
+    assert.strictEqual(S.busy, true);
+    assert.strictEqual(S.session.active_stream_id, 'A-stream');
+    assert.strictEqual(S.session.pending_started_at, 30);
+    assert.strictEqual(S.session.active_turn_token, 'A-token');
+    assert.strictEqual(S.session.model, 'A effective model');
+    assert.strictEqual(S.session.model_provider, 'provider-a-effective');
+    assert.strictEqual(calls.render, 1);
+    assert.strictEqual(calls.clear, 1);
+    assert.strictEqual(calls.thinking, 1);
+    assert.deepStrictEqual(calls.busy, [true]);
+    assert.deepStrictEqual(calls.composer, ['goal_working_toward']);
+    assert.deepStrictEqual(calls.marked, [['A', 'A-stream']]);
+    assert.deepStrictEqual(calls.approval, ['A']);
+    assert.deepStrictEqual(calls.clarify, ['A']);
+    assert.deepStrictEqual(calls.yolo, ['A']);
+    assert.deepStrictEqual(calls.attach, [['A', 'A-stream', []]]);
+    assert.strictEqual(calls.list, 1);
+    assert.deepStrictEqual(calls.toasts, [['A goal status', 2600]]);
+    assert.deepStrictEqual(JSON.parse(localStorage.getItem('hermes-webui-inflight')), {{
+      sid:'A', streamId:'A-stream', ts:123,
+    }});
+  }} else {{
+    assert.strictEqual(INFLIGHT.A.reattach, true);
+    assert.deepStrictEqual(S.session, visibleSessionBefore);
+    assert.deepStrictEqual(S.messages, visibleMessagesBefore);
+    assert.deepStrictEqual(S.toolCalls, visibleToolCallsBefore);
+    assert.strictEqual(S.busy, visibleBusyBefore);
+    assert.strictEqual(S.activeStreamId, visibleStreamBefore);
+    assert.strictEqual(S.activeProfile, visibleProfileBefore);
+    assert.deepStrictEqual(B, bSessionBefore);
+    assert.deepStrictEqual(INFLIGHT.B, visibleInflightBefore);
+    assert.strictEqual(localStorage.getItem('hermes-webui-inflight'), bMarker);
+    assert.strictEqual(calls.render, 0);
+    assert.strictEqual(calls.clear, 0);
+    assert.strictEqual(calls.thinking, 0);
+    assert.deepStrictEqual(calls.busy, []);
+    assert.deepStrictEqual(calls.composer, []);
+    assert.strictEqual(calls.list, 0);
+    assert.deepStrictEqual(calls.toasts, []);
+    assert.deepStrictEqual(calls.marked, []);
+    assert.deepStrictEqual(calls.approval, []);
+    assert.deepStrictEqual(calls.clarify, []);
+    assert.deepStrictEqual(calls.yolo, []);
+    assert.deepStrictEqual(calls.attach, []);
+  }}
+}})().catch(error => {{
+  console.error(error.stack || error);
+  process.exitCode = 1;
+}});
+"""
+    result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr or result.stdout
 
 
 def test_frontend_goal_evaluating_state_uses_calm_composer_indicator():

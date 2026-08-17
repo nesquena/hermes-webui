@@ -163,8 +163,18 @@ def test_moa_config_is_per_turn_not_persisted():
     assert "MoA override is unavailable on gateway-backed sessions" in routes_source
     js_path = Path(__file__).resolve().parent.parent / "static" / "messages.js"
     js_source = js_path.read_text(encoding="utf-8")
-    assert "moa_config:_pendingMoaConfig?true:undefined" in js_source
-    assert "_pendingMoaConfig=null" in js_source
+    send_start = js_source.index("async function send(){")
+    send_end = js_source.index("\n}\n\nconst LIVE_STREAMS", send_start)
+    send_body = js_source[send_start:send_end]
+    capture = "const _submittedMoaConfig=!!_pendingMoaConfig;"
+    assert capture in send_body, "MoA selection must be frozen in the per-send local payload"
+    assert "moa_config:_submittedMoaConfig?true:undefined" in send_body
+    capture_idx = send_body.index(capture)
+    assert send_body.index("let _pendingMoaConfig=null;") < capture_idx
+    assert capture_idx < send_body.index("const startData=await api('/api/chat/start'")
+    assert re.search(r"(?m)^\s*_pendingMoaConfig=null;", send_body) is None, (
+        "the per-send MoA marker must not be cleared by a later continuation"
+    )
 
 
 def test_moa_gateway_chat_start_fails_closed(monkeypatch, tmp_path):
