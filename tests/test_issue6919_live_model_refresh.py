@@ -278,13 +278,17 @@ globalThis.eval({json.dumps(bundle)});
 
 def test_browser_refresh_fences_stale_live_lookup():
     source = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
+    cache_key = _extract_js_function(source, "function _liveModelCacheKey(")
     invalidate = _extract_js_function(source, "function _invalidateLiveModelCache(")
     fetch_live = _extract_js_function(source, "async function _fetchLiveModels(")
     bundle = (
         "globalThis._liveModelCache={}; globalThis._liveModelCacheGen={}; "
         "globalThis._liveModelFetchPending=new Set(); globalThis._modelDropdownRequestSeq=0; "
+        "globalThis.S={activeProfile:'default'}; "
         "globalThis.document={baseURI:'http://localhost/'}; globalThis._redirectIfUnauth=()=>false; "
         "globalThis._addLiveModelsToSelect=()=>0; globalThis.syncModelChip=()=>{}; "
+        + cache_key
+        + "\n"
         + invalidate
         + "\n"
         + fetch_live
@@ -299,11 +303,44 @@ globalThis.eval({json.dumps(bundle)});
   globalThis.runInvalidate('provider');
   resolveFetch({{ok:true, json:async () => ({{models:[{{id:'stale'}}]}})}});
   const result = await pending;
-  console.log(JSON.stringify({{result:result===undefined?null:result, cached:globalThis._liveModelCache.provider||null}}));
+  console.log(JSON.stringify({{result:result===undefined?null:result, cached:globalThis._liveModelCache['default::provider']||null, pending:globalThis._liveModelFetchPending.size}}));
 }})();
 """
     result = _run_node(script)
-    assert result == {"result": None, "cached": None}
+    assert result == {"result": None, "cached": None, "pending": 0}
+
+
+def test_browser_live_model_cache_is_profile_scoped():
+    source = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
+    cache_key = _extract_js_function(source, "function _liveModelCacheKey(")
+    fetch_live = _extract_js_function(source, "async function _fetchLiveModels(")
+    bundle = (
+        "globalThis._liveModelCache={}; globalThis._liveModelCacheGen={}; "
+        "globalThis._liveModelFetchPending=new Set(); globalThis._modelDropdownRequestSeq=0; "
+        "globalThis.S={activeProfile:'profile-a'}; "
+        "globalThis.document={baseURI:'http://localhost/'}; globalThis._redirectIfUnauth=()=>false; "
+        "globalThis._addLiveModelsToSelect=()=>0; globalThis.syncModelChip=()=>{}; "
+        + cache_key
+        + "\n"
+        + fetch_live
+        + "\nglobalThis.runFetch=_fetchLiveModels;"
+    )
+    script = f"""
+let calls = 0;
+globalThis.fetch = async () => {{
+  calls += 1;
+  return {{ok:true, json:async () => ({{models:[{{id:globalThis.S.activeProfile}}]}})}};
+}};
+globalThis.eval({json.dumps(bundle)});
+(async () => {{
+  await globalThis.runFetch('provider', null, null, {{required:true}});
+  globalThis.S.activeProfile='profile-b';
+  await globalThis.runFetch('provider', null, null, {{required:true}});
+  console.log(JSON.stringify({{calls, keys:Object.keys(globalThis._liveModelCache).sort()}}));
+}})();
+"""
+    result = _run_node(script)
+    assert result == {"calls": 2, "keys": ["profile-a::provider", "profile-b::provider"]}
 
 
 def test_refresh_failure_has_no_success_path():
