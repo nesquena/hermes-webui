@@ -7,7 +7,7 @@ Option A rewrite (2026-05-08): imports api.models and api.profiles
 directly from the webui codebase, using canonical helpers for
 locking, profile scoping, index consistency, and validation.
 
-    pip install "mcp<2"   # one-time setup
+    pip install "mcp>=1.28,<2"   # one-time setup
     python3 mcp_server.py # start via stdio
 
 MCP config for Hermes Agent (add to config.yaml):
@@ -446,6 +446,23 @@ async def handle_move_session(arguments: dict) -> list[TextContent]:
         "method": "api",
     }, ensure_ascii=False, indent=2))]
 
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  MCP SDK version guard
+# ═════════════════════════════════════════════════════════════════════════==
+#
+# mcp>=2.0.0 removed the Server.list_tools / Server.call_tool decorator API
+# used by this server. Fail fast instead of producing secondary errors.
+
+if not hasattr(Server, "list_tools"):  # pragma: no cover
+    import sys
+    print(
+        "ERROR: mcp SDK incompatible. This server requires mcp>=1.28,<2 "
+        "(the 1.x Python SDK with the decorator API). "
+        "Run: pip install 'mcp>=1.28,<2'",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  MCP Server wiring

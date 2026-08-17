@@ -56,6 +56,14 @@ def routes():
     return routes
 
 
+@pytest.fixture(autouse=True)
+def media_allowed_root(tmp_path, monkeypatch):
+    # tmp_path is under /tmp only on Linux; register it and make Path.home()
+    # resolve to the same fixture root on Windows so deny tests reach #3234.
+    monkeypatch.setenv("MEDIA_ALLOWED_ROOTS", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+
+
 @pytest.fixture
 def snap_dir(tmp_path, monkeypatch):
     """Isolate the snapshot store per test and point it at tmp_path."""
@@ -87,6 +95,72 @@ def test_capture_snapshot_stores_content_addressed_bytes(snap_dir, tmp_path):
     stored = snapshot_path_for_digest(digest)
     assert stored is not None
     assert stored.read_bytes() == b"<html>v1</html>"
+
+
+def test_anchored_snapshot_read_preserves_windows_ctrl_z(tmp_path):
+    """Anchored binary reads must not treat DOS Ctrl-Z as text EOF on Windows."""
+    from api.routes import _etag_and_snapshot, _open_file_read_fd
+
+    payload = b"a" * 568 + b"\x1a" + b"b" * 4096
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(payload)
+
+    fd = _open_file_read_fd(source, tmp_path)
+    try:
+        _etag, snapshot, actual_size = _etag_and_snapshot(fd, file_size=len(payload))
+    finally:
+        os.close(fd)
+
+    assert actual_size == len(payload)
+    assert snapshot == payload
+
+
+def test_anchored_file_leaf_uses_binary_open_flag(monkeypatch, tmp_path):
+    """The platform-independent flag contract keeps Windows binary-safe in CI."""
+    from api import workspace
+
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"payload")
+    seen = {}
+
+    def fake_open(path, flags, *args, **kwargs):
+        seen["path"] = path
+        seen["flags"] = flags
+        return 123
+
+    monkeypatch.setattr(workspace, "_DIR_FD_OK", False)
+    monkeypatch.setattr(workspace, "_O_BINARY", 0x40000000)
+    monkeypatch.setattr(workspace.os, "open", fake_open)
+
+    fd = workspace.open_anchored_fd(tmp_path, source, want_dir=False)
+
+    assert fd == 123
+    assert seen["path"] == str(source)
+    assert seen["flags"] & workspace._O_BINARY
+
+
+def test_anchored_directory_does_not_use_binary_open_flag(monkeypatch, tmp_path):
+    """Directory opens keep their directory-only flag contract."""
+    from api import workspace
+
+    target = tmp_path / "folder"
+    target.mkdir()
+    seen = {}
+
+    def fake_open(path, flags, *args, **kwargs):
+        seen["flags"] = flags
+        return 124
+
+    monkeypatch.setattr(workspace, "_DIR_FD_OK", False)
+    monkeypatch.setattr(workspace, "_O_BINARY", 0x40000000)
+    monkeypatch.setattr(workspace, "_O_DIRECTORY", 0x20000000)
+    monkeypatch.setattr(workspace.os, "open", fake_open)
+
+    fd = workspace.open_anchored_fd(tmp_path, target, want_dir=True)
+
+    assert fd == 124
+    assert seen["flags"] & workspace._O_DIRECTORY
+    assert not seen["flags"] & workspace._O_BINARY
 
 
 def test_capture_snapshot_dedupes_identical_content(snap_dir, tmp_path):

@@ -1150,6 +1150,7 @@ _FALLBACK_MODELS = [
     {"provider": "MiniMax",   "id": "minimax/MiniMax-M2.7",             "label": "MiniMax M2.7"},
     {"provider": "MiniMax",   "id": "minimax/MiniMax-M2.7-highspeed",   "label": "MiniMax M2.7 Highspeed"},
     # Z.AI / GLM
+    {"provider": "Z.AI",      "id": "zai/glm-5.3",                      "label": "GLM-5.3"},
     {"provider": "Z.AI",      "id": "zai/glm-5.2",                      "label": "GLM-5.2"},
     {"provider": "Z.AI",      "id": "zai/glm-5.1",                      "label": "GLM-5.1"},
     {"provider": "Z.AI",      "id": "zai/glm-5",                        "label": "GLM-5"},
@@ -1735,6 +1736,7 @@ _PROVIDER_MODELS = {
         {"id": "@nous:google/gemini-3.1-pro-preview", "label": "Gemini 3.1 Pro Preview (via Nous)"},
     ],
     "zai": [
+        {"id": "glm-5.3", "label": "GLM-5.3"},
         {"id": "glm-5.2", "label": "GLM-5.2"},
         {"id": "glm-5.1", "label": "GLM-5.1"},
         {"id": "glm-5", "label": "GLM-5"},
@@ -3513,6 +3515,24 @@ def _zai_glm_thinking_toggle_supported(model_id: str, provider_id: str) -> bool 
     return cls in {"effort", "thinking"}
 
 
+_OPENAI_FAMILY_REASONING_PROVIDERS = frozenset({
+    "openai-codex", "openai", "openai-api",
+    "azure-foundry", "azure-openai", "azure",
+})
+
+_GPT_5_6_REASONING_MODELS = frozenset({
+    "gpt-5.6",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+})
+
+
+def _is_gpt_5_6_reasoning_model(bare_model: str) -> bool:
+    """Return whether an OpenAI-family model uses GPT-5.6's max ladder."""
+    return str(bare_model or "").strip().lower() in _GPT_5_6_REASONING_MODELS
+
+
 def _filter_reasoning_efforts_for_provider(
     efforts: list[str],
     model_id: str,
@@ -3527,15 +3547,15 @@ def _filter_reasoning_efforts_for_provider(
     normalized = list(dict.fromkeys(normalized))
     provider = _resolve_provider_alias(str(provider_id or "").strip().lower())
     bare = _strip_provider_hint_for_reasoning(model_id).lower().rsplit("/", 1)[-1]
-    # OpenAI-family lanes (Codex, direct OpenAI, Azure Foundry) cap GPT-5 at xhigh
-    # and o-series at high — 'max' is a WebUI-only level none of them accept.
-    if provider in {"openai-codex", "openai", "openai-api", "azure-foundry", "azure-openai", "azure"}:
+    # OpenAI-family lanes cap pre-GPT-5.6 GPT-5 models at xhigh and o-series at
+    # high. GPT-5.6's alias and Sol/Terra/Luna variants natively accept max.
+    if provider in _OPENAI_FAMILY_REASONING_PROVIDERS:
         if bare.startswith(("o1", "o3", "o4")):
             return [eff for eff in normalized if eff in {"low", "medium", "high"}]
-        if bare.startswith("gpt-5"):
+        if bare.startswith("gpt-5") and not _is_gpt_5_6_reasoning_model(bare):
             return [eff for eff in normalized if eff != "max"]
-    # 'max' is a WebUI-level ceiling; providers whose native ladder tops out lower
-    # must NOT advertise it, otherwise a stored/CLI 'max' degrades WORSE than the
+    # Providers whose native ladder tops out below 'max' must NOT advertise it,
+    # otherwise a stored/CLI 'max' degrades WORSE than the
     # prior max->xhigh coercion (Gemini's adapter treats unknown 'max' as medium;
     # pre-adaptive Anthropic manual-thinking lacks a 'max' budget and falls to 8k).
     # Dropping 'max' here lets the existing downgrade ladder land on xhigh/high.
@@ -3882,11 +3902,11 @@ def resolve_model_reasoning_efforts(
     """Return supported reasoning-effort levels for *model_id*, or [] if none.
 
     Always passes the sourced list through _filter_reasoning_efforts_for_provider
-    so the hard provider ceilings (openai-codex/openai/azure GPT-5 cap at xhigh,
-    Gemini + pre-adaptive/cloud-hosted Claude cap at xhigh) are applied uniformly
-    — the UI dropdown (which gates options on this list) and coercion therefore
-    agree: 'max' is offered ONLY for models whose native ladder genuinely includes
-    it, and is stripped everywhere it would be rejected/mishandled.
+    so the hard provider ceilings (OpenAI-family GPT-5 before 5.6 at xhigh and
+    o-series at high; Gemini + pre-adaptive/cloud-hosted Claude at xhigh) are
+    applied uniformly. The UI dropdown and coercion therefore agree: ``max`` is
+    retained for GPT-5.6 and other models whose native ladder includes it, and
+    stripped where it would be rejected or mishandled.
     """
     raw = _resolve_model_reasoning_efforts_impl(model_id, provider_id, base_url)
     if not raw:
@@ -4079,16 +4099,17 @@ def coerce_reasoning_effort_for_model(
     # Hard provider ceilings must win regardless of what the sourced capability
     # list says. resolve_model_reasoning_efforts() draws from hermes_cli /
     # models.dev / heuristics, and those can (a) return [] for an unrecognized
-    # model or (b) wrongly advertise a WebUI-only level like 'max' for a provider
+    # model or (b) wrongly advertise 'max' for a provider
     # whose native ladder tops out lower. _filter_reasoning_efforts_for_provider
-    # encodes the known ceilings (openai-codex gpt-5, Gemini, pre-adaptive
-    # Anthropic all cap below 'max'); if it actively EXCLUDES the requested level,
-    # honor that ceiling and degrade down the ladder even when the sourced list is
-    # empty or (mistakenly) includes the level. This keeps a stored/CLI 'max' from
-    # reaching an adapter that would silently downgrade it worse than xhigh/high
-    # (Gemini→medium, legacy Claude manual-thinking→8k). For providers with NO
-    # ceiling rule the filter returns the full list unchanged, so genuinely
-    # unknown models still preserve the configured effort (#3505 behavior).
+    # encodes the known ceilings (OpenAI-family GPT-5 before 5.6, Gemini, and
+    # pre-adaptive Anthropic all cap below 'max'); if it actively EXCLUDES the
+    # requested level, honor that ceiling and degrade down the ladder even when
+    # the sourced list is empty or (mistakenly) includes the level. This keeps a
+    # stored/CLI 'max' from reaching an adapter that would silently downgrade it
+    # worse than xhigh/high (Gemini→medium, legacy Claude manual-thinking→8k).
+    # GPT-5.6 is intentionally not capped. For providers with NO ceiling rule the
+    # filter returns the full list unchanged, so genuinely unknown models still
+    # preserve the configured effort (#3505 behavior).
     ceiling = _filter_reasoning_efforts_for_provider(
         list(VALID_REASONING_EFFORTS), str(model_id or ""), str(provider_id or "")
     )
@@ -4106,15 +4127,15 @@ def coerce_reasoning_effort_for_model(
     # both for models KNOWN not to support reasoning AND for models we simply
     # don't recognize (custom providers, aggregator-rewritten ids, brand-new
     # releases). Coercion exists to avoid sending a level a KNOWN-incompatible
-    # model rejects (e.g. openai-codex gpt-5 'max', o1/o3/o4 above 'high') -
+    # model rejects (e.g. pre-5.6 GPT-5 'max', o1/o3/o4 above 'high') -
     # those paths return a NON-empty clamped set, so the degrade ladder below
     # still applies. When the set is empty we can't tell "unsupported" from
     # "unknown", so preserve the user's configured effort verbatim where it is
     # still valid. (#3505 review)
     #
     # EXCEPTION for 'max' (the #3505 default-deny refinement, maintainer call
-    # 2026-07-11): 'max' is a WebUI-only level ABOVE the universally-safe ceiling
-    # 'xhigh'. A genuinely unknown/custom provider will 400 on it. So when the
+    # 2026-07-11): 'max' is ABOVE the universally-safe ceiling 'xhigh'. A
+    # genuinely unknown/custom provider will 400 on it. So when the
     # capability list is empty AND the provider is not one we recognize as
     # reasoning-capable, degrade 'max' -> 'xhigh' rather than send an unsupported
     # supra-ceiling level. But do NOT degrade for a RECOGNIZED reasoning provider
@@ -6372,6 +6393,51 @@ def _get_label_for_model(model_id: str, existing_groups: list) -> str:
     # preserving vendor hierarchy for multi-slash IDs (#3360).
     # Skip for URI-scheme IDs whose slashes are path separators (#3429).
     bare = lookup_id.split("/", 1)[1] if ("/" in lookup_id and not _has_scheme(lookup_id)) else lookup_id
+    # Bedrock/Vertex IDs carry a dotted cross-region routing prefix and a vendor
+    # namespace -- ``us.anthropic.claude-opus-5``,
+    # ``mistral.mistral-large-2407-v1:0`` -- plus sometimes a trailing ``:<n>``
+    # provisioned-revision suffix. None of that belongs in a human label, which
+    # otherwise reads "Us.anthropic.claude Opus 5" in the turn footer.
+    #
+    # Only the two documented shapes are stripped, against a CLOSED allow-list.
+    # A generic "drop leading letters-only dot segments" loop rewrites any
+    # uncatalogued dotted ID: ``deepseek.v3`` renders as "V3" (vendor silently
+    # deleted) and ``foo.bar.baz`` as "BAZ".
+    #
+    # Inlined rather than factored into a module-level helper because the
+    # regression harnesses in tests/test_issue3429_* extract this function's
+    # source and eval it in isolation; a module-level call would NameError there.
+    # Kept in lockstep with ``_stripDottedModelPrefix()`` in static/ui.js --
+    # tests/test_dotted_model_label.py drives both from one table.
+    if bare and "." in bare and not _has_scheme(bare):
+        # ``global`` is a real Bedrock routing head, not just a region code --
+        # the catalog at api/config.py:1901-1909 ships six
+        # ``global.anthropic.claude-*`` IDs and the routing notes below use that
+        # as the canonical Bedrock shape. Omitting it left those labels reading
+        # "Global.anthropic.claude Opus 4 7".
+        _regions = {"us", "eu", "apac", "global", "us-gov"}
+        _vendors = {
+            "anthropic", "amazon", "meta", "mistral", "cohere", "ai21",
+            "stability", "writer", "deepseek", "qwen", "openai", "google",
+            # Bedrock foundation-model vendors added after the first pass. Without
+            # these, real IDs rendered with the namespace intact -- "Us.luma.ray 2",
+            # "Twelvelabs.marengo Embed 2 7", "Ibm.granite 3 8B Instruct".
+            "luma", "twelvelabs", "ibm", "nvidia", "snowflake",
+        }
+        _segs = bare.split(".")
+        _i = 0
+        if (len(_segs) - _i >= 3 and _segs[_i].lower() in _regions
+                and _segs[_i + 1].lower() in _vendors):
+            _i += 1
+        if len(_segs) - _i >= 2 and _segs[_i].lower() in _vendors:
+            # Dropping the vendor is only safe when what remains still names the
+            # model. A bare version remainder (``deepseek.v3``) means the vendor
+            # WAS the name.
+            _rest = ".".join(_segs[_i + 1:])
+            if not re.fullmatch(r"v?\d+(?:[.\-]\d+)*", _rest, re.IGNORECASE):
+                _i += 1
+        if _i > 0:
+            bare = re.sub(r":\d+$", "", ".".join(_segs[_i:]))
     return " ".join(
         w.upper() if (len(w) <= 3 and w.replace(".", "").isalnum() and not w.isdigit()) else w.capitalize()
         for w in bare.replace("_", "-").split("-")
@@ -9142,6 +9208,56 @@ ACTIVE_RUNS: dict = {}
 ACTIVE_RUNS_LOCK = threading.Lock()
 LAST_RUN_FINISHED_AT: float | None = None
 SERVER_START_TIME = time.time()
+
+
+def active_run_is_attachable(run_entry) -> bool:
+    """Return whether a run row still represents renderable live work.
+
+    ``ACTIVE_RUNS`` tracks WORKER LIFECYCLE, which is deliberately broader than
+    "a turn a browser may attach to": ``cancel_stream()`` leaves the row in
+    ``phase="cancelling"`` while the worker unwinds so a successor cannot start
+    on top of it. That row is already terminal from the client's perspective —
+    its run journal ends in a terminal event — so recovery paths that hand a
+    stream id to the renderer must exclude it. Otherwise every fresh
+    ``/api/session/stream`` subscription replays ``server_turn_started`` for a
+    cancelled run, the client attaches, consumes the terminal event, tears the
+    renderer down and resubscribes, and the loop repeats indefinitely.
+
+    Non-dict entries stay attachable so callers that store an opaque marker are
+    unaffected; production registrations are dicts carrying ``phase``.
+    """
+    return not (
+        isinstance(run_entry, dict)
+        and str(run_entry.get("phase") or "").strip() == "cancelling"
+    )
+
+
+def active_run_cancel_is_stale(
+    run_entry,
+    *,
+    grace_seconds: float,
+    now: float | None = None,
+) -> bool:
+    """Return whether a cancelling worker outlived its bounded unwind window.
+
+    The age anchor is ``cancelled_at`` rather than the original ``started_at``
+    so a long-running turn that was just cancelled is never mistaken for an
+    orphan; ``started_at`` remains the fallback for rows created before the
+    cancellation timestamp existed. Callers own the grace window because the
+    tolerated unwind differs per surface.
+    """
+    if not isinstance(run_entry, dict):
+        return False
+    if str(run_entry.get("phase") or "").strip() != "cancelling":
+        return False
+    anchor = run_entry.get("cancelled_at") or run_entry.get("started_at")
+    if not anchor:
+        return False
+    try:
+        age = (time.time() if now is None else float(now)) - float(anchor)
+        return age >= float(grace_seconds)
+    except (TypeError, ValueError):
+        return False
 
 
 def register_active_run(stream_id: str, **metadata) -> None:

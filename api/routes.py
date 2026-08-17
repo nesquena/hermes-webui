@@ -2934,16 +2934,15 @@ def _cancelled_run_is_stale(run_entry) -> bool:
     phase="cancelling". ``started_at`` is accepted as a fallback anchor so runs
     cancelled before the stamp was introduced are still reclaimed eventually.
     """
-    if not isinstance(run_entry, dict) or run_entry.get("phase") != "cancelling":
-        return False
-    anchor = run_entry.get("cancelled_at") or run_entry.get("started_at")
-    if not anchor:
-        return False
     try:
-        age = time.time() - float(anchor)
-    except (TypeError, ValueError):
+        from api import config as _live_config
+
+        return _live_config.active_run_cancel_is_stale(
+            run_entry,
+            grace_seconds=_STALE_CANCELLED_RUN_GRACE_SECONDS,
+        )
+    except Exception:
         return False
-    return age >= _STALE_CANCELLED_RUN_GRACE_SECONDS
 
 
 def _clear_stale_stream_state(session) -> bool:
@@ -22209,6 +22208,12 @@ def start_session_turn(
     PR #2279 next-turn drain delivers the wakeup when the active turn ends.
     """
     msg = str(message or "").strip()
+    if _is_silent_control_message(msg):
+        return {
+            "status": "suppressed",
+            "reason": "silent_control_message",
+            "_status": 200,
+        }
     if not msg:
         return {"error": "message is required", "_status": 400}
     stale_response = _agent_runtime_barrier_response(runner_local_owned=True)
@@ -22562,6 +22567,12 @@ def _handle_goal_command(handler, body):
         require(body, "session_id")
     except ValueError as e:
         return bad(handler, str(e))
+    if _is_silent_control_message(body.get("args") or body.get("text")):
+        return j(
+            handler,
+            {"status": "suppressed", "reason": "silent_control_message"},
+            status=200,
+        )
     if _session_is_subagent_view_only(str(body.get("session_id") or "")):
         return bad(handler, "Subagent sessions are view-only and cannot run /goal from WebUI", 400)
     try:
@@ -22705,6 +22716,18 @@ def _handle_goal_command(handler, body):
     return j(handler, payload)
 
 
+def _is_silent_control_message(message) -> bool:
+    """Return True only for the scheduler's exact suppression sentinel.
+
+    ``[SILENT]`` is control-plane output, never conversation content. If a wake
+    relay POSTs it and 8701 restarts while the turn is pending, recovery
+    materializes it as a visible ``_recovered`` user message. Suppress it before
+    session lookup or pending-state mutation. Matching stays exact and
+    case-sensitive so ordinary user text is unaffected.
+    """
+    return str(message or "").strip() == "[SILENT]"
+
+
 def _handle_chat_start(handler, body, diag=None):
     try:
         diag.stage("validate_session_id") if diag else None
@@ -22712,6 +22735,12 @@ def _handle_chat_start(handler, body, diag=None):
             require(body, "session_id")
         except ValueError as e:
             return bad(handler, str(e))
+        if _is_silent_control_message(body.get("message")):
+            return j(
+                handler,
+                {"status": "suppressed", "reason": "silent_control_message"},
+                status=200,
+            )
         # Reject a stale local Agent runtime before materialising, claiming, or
         # mutating any session state. Gateway-backed turns run in the gateway's
         # process and do not depend on this WebUI process's imported checkout.

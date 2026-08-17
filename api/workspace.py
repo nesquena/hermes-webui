@@ -1016,6 +1016,7 @@ def safe_resolve_ws(root: Path, requested: str) -> Path:
 _DIR_FD_OK = os.open in getattr(os, "supports_dir_fd", set())
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+_O_BINARY = getattr(os, "O_BINARY", 0)
 
 
 def open_anchored_fd(workspace: Path, target: Path, *, want_dir: bool) -> int:
@@ -1037,7 +1038,11 @@ def open_anchored_fd(workspace: Path, target: Path, *, want_dir: bool) -> int:
         # Windows / no openat: fall back to a plain pathname open. No new race
         # protection, but no regression vs the prior path-based behaviour, and
         # symlink creation needs admin on Windows anyway.
-        flags = os.O_RDONLY | (_O_DIRECTORY if want_dir else 0) | _O_NOFOLLOW
+        flags = (
+            os.O_RDONLY
+            | (_O_DIRECTORY if want_dir else _O_BINARY)
+            | _O_NOFOLLOW
+        )
         try:
             return os.open(str(target), flags)
         except OSError:
@@ -1052,7 +1057,11 @@ def open_anchored_fd(workspace: Path, target: Path, *, want_dir: bool) -> int:
         for i, part in enumerate(rel_parts):
             is_last = i == len(rel_parts) - 1
             want_directory = (not is_last) or want_dir
-            flags = os.O_RDONLY | _O_NOFOLLOW | (_O_DIRECTORY if want_directory else 0)
+            flags = (
+                os.O_RDONLY
+                | _O_NOFOLLOW
+                | (_O_DIRECTORY if want_directory else _O_BINARY)
+            )
             try:
                 nfd = os.open(part, flags, dir_fd=fd)
             except OSError:

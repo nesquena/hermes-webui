@@ -271,6 +271,77 @@ def subscribe_to_session_channel(
         return ch, q
 
 
+# Bounded window a cancelling worker may stay lifecycle-busy before an entry
+# with no live SSE channel is treated as an orphan. Matches the unwind ceiling
+# used by the chat-start successor guard in ``api.routes``.
+_ACTIVE_RUN_CANCEL_UNWIND_SECONDS = 180.0
+
+
+def _active_run_ids_for_session(
+    session_id: str,
+    *,
+    attachable_only: bool,
+) -> list[str]:
+    """Return this session's run stream ids under the requested semantics.
+
+    ``attachable_only`` selects browser-recovery semantics and drops every
+    ``phase="cancelling"`` row: cancellation is already terminal for the client
+    even while the worker unwinds. Busy checks pass ``False`` so a freshly
+    cancelled run still blocks a successor for its bounded unwind window.
+
+    A cancelling row past that window with no live ``STREAMS`` channel is an
+    orphan: it is dropped from ``ACTIVE_RUNS`` and its stream-owner entry is
+    released, so a wedged worker cannot suppress background wakeups forever.
+    """
+    from api import config as _cfg
+
+    sid = str(session_id or "").strip()
+    if not sid:
+        return []
+    try:
+        with _cfg.STREAMS_LOCK:
+            live_stream_ids = set((_cfg.STREAMS or {}).keys())
+        now = time.time()
+        matches: list[str] = []
+        stale_keys: list[str] = []
+        with _cfg.ACTIVE_RUNS_LOCK:
+            for run_key, meta in list((_cfg.ACTIVE_RUNS or {}).items()):
+                if not isinstance(meta, dict) or meta.get("session_id") != sid:
+                    continue
+                stream_id = str(meta.get("stream_id") or run_key or "").strip()
+                if not stream_id:
+                    continue
+                cancelling = not _cfg.active_run_is_attachable(meta)
+                stale_cancel = (
+                    cancelling
+                    and _cfg.active_run_cancel_is_stale(
+                        meta,
+                        grace_seconds=_ACTIVE_RUN_CANCEL_UNWIND_SECONDS,
+                        now=now,
+                    )
+                    and run_key not in live_stream_ids
+                    and stream_id not in live_stream_ids
+                )
+                if stale_cancel:
+                    stale_keys.append(run_key)
+                    continue
+                if attachable_only and cancelling:
+                    continue
+                matches.append(stream_id)
+            for run_key in stale_keys:
+                (_cfg.ACTIVE_RUNS or {}).pop(run_key, None)
+        for run_key in stale_keys:
+            _cfg.unregister_stream_owner(run_key)
+        return matches
+    except Exception:
+        logger.debug(
+            "ACTIVE_RUNS lookup failed for %s",
+            sid,
+            exc_info=True,
+        )
+        return []
+
+
 def active_stream_id_for_session(session_id: str) -> Optional[str]:
     """Return the stream_id of the live run for *session_id*, or None.
 
@@ -288,25 +359,14 @@ def active_stream_id_for_session(session_id: str) -> Optional[str]:
 
     Keys on ACTIVE_RUNS (worker-lifecycle registry) — the same source
     ``_session_has_active_turn`` / ``_emit_to_session_streams`` already trust
-    to map a stream back to its owning session. Returns the first matching
-    stream_id (a session has at most one live run; cancel/reconnect can
-    briefly hold two — either is a valid attach target, the frontend dedupes
-    by stream_id).
+    to map a stream back to its owning session — but returns only rows that
+    are still ATTACHABLE. A ``phase="cancelling"`` row stays lifecycle-busy
+    while its worker unwinds, yet the client already reached a terminal state
+    for that run, so replaying ``server_turn_started`` for it makes the tab
+    attach, receive the terminal event, resubscribe, and loop forever.
     """
-    from api import config as _cfg
-
-    try:
-        with _cfg.ACTIVE_RUNS_LOCK:
-            for _stream_id, meta in (_cfg.ACTIVE_RUNS or {}).items():
-                if isinstance(meta, dict) and meta.get("session_id") == session_id:
-                    return str(_stream_id)
-    except Exception:
-        logger.debug(
-            "active_stream_id_for_session lookup failed for %s",
-            session_id,
-            exc_info=True,
-        )
-    return None
+    matches = _active_run_ids_for_session(session_id, attachable_only=True)
+    return matches[0] if matches else None
 
 
 def persisted_message_count_for_session(session_id: str) -> Optional[int]:
@@ -1518,16 +1578,7 @@ def _session_has_active_turn(session_id: str) -> bool:
     ``_start_chat_stream_for_session``'s own active-stream guard — i.e. the
     same lock /api/chat/start uses is the authoritative race backstop.
     """
-    from api import config as _cfg
-
-    try:
-        with _cfg.ACTIVE_RUNS_LOCK:
-            for _stream_id, meta in (_cfg.ACTIVE_RUNS or {}).items():
-                if isinstance(meta, dict) and meta.get("session_id") == session_id:
-                    return True
-    except Exception:
-        logger.debug("ACTIVE_RUNS active-turn check failed", exc_info=True)
-    return False
+    return bool(_active_run_ids_for_session(session_id, attachable_only=False))
 
 
 def _start_server_side_wakeup_turn(
