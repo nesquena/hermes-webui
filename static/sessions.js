@@ -9190,7 +9190,9 @@ function _showProjectPicker(session, anchorEl){
   if(pickerH<=spaceBelow){
     // Preferred placement: directly below the session action button.
   }else if(pickerH<=spaceAbove){
-    top=rect.top-gap-pickerH;
+    // Keep above-positioned pickers bottom-anchored so they stay attached across resize.
+    top=null;
+    picker.style.bottom=(window.innerHeight-rect.top+gap)+'px';
   }else{
     // Neither side fits the natural height. Use the roomier side and keep every
     // project reachable by scrolling inside the picker.
@@ -9200,8 +9202,12 @@ function _showProjectPicker(session, anchorEl){
     picker.style.maxHeight=available+'px';
     picker.style.overflowY='auto';
   }
-  picker.style.top=top+'px';
-  picker.style.bottom='auto';
+  if(top===null){
+    picker.style.top='auto';
+  }else{
+    picker.style.top=top+'px';
+    picker.style.bottom='auto';
+  }
   // Align right edge of picker with right edge of button; keep within viewport
   const pickerW=Math.min(220,Math.max(160,picker.scrollWidth||160));
   let left=rect.right-pickerW;

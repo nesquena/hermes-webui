@@ -83,13 +83,25 @@ function runCase(rect, pickerHeight) {
   );
   if (!mountedPicker) throw new Error('project picker was not mounted');
   const style = mountedPicker.style;
-  const top = Number.parseFloat(style.top);
   const maxHeight = style.maxHeight && style.maxHeight !== 'none'
     ? Number.parseFloat(style.maxHeight)
     : null;
   const renderedHeight = maxHeight === null ? pickerHeight : Math.min(pickerHeight, maxHeight);
+  const topStyle = style.top || '';
+  const bottomStyle = style.bottom || '';
+  const top = topStyle && topStyle !== 'auto'
+    ? Number.parseFloat(topStyle)
+    : window.innerHeight - Number.parseFloat(bottomStyle) - renderedHeight;
+  const resizeDelta = 200;
+  const resizedTop = topStyle === 'auto'
+    ? (window.innerHeight + resizeDelta) - Number.parseFloat(bottomStyle) - renderedHeight
+    : top;
+  const resizedAnchorTop = rect.top + resizeDelta;
   return {
     top,
+    topStyle,
+    bottomStyle,
+    resizeGap: resizedAnchorTop - (resizedTop + renderedHeight),
     maxHeight,
     overflowY: style.overflowY || '',
     renderedBottom: top + renderedHeight,
@@ -127,6 +139,9 @@ def test_project_picker_uses_its_rendered_height_to_stay_in_viewport():
         "the old fixed 160px threshold incorrectly opens it below."
     )
     assert screenshot_like["renderedBottom"] <= 892
+    assert screenshot_like["topStyle"] == "auto"
+    assert screenshot_like["bottomStyle"] == "224px"
+    assert screenshot_like["resizeGap"] == 4
 
     room_below = cases["roomBelow"]
     assert room_below["top"] == 144
