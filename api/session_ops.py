@@ -30,19 +30,26 @@ def _live_active_stream_id(session) -> str | None:
     the hidden-tab poller) would make a client attach its renderer to a stream
     that never emits — a permanent fake "thinking" state. Liveness test mirrors
     routes._clear_stale_stream_state: live iff present in STREAMS (open SSE
-    channel) or ACTIVE_RUNS (worker bookkeeping).
+    channel) or ACTIVE_RUNS (worker bookkeeping) — except that a
+    ``phase="cancelling"`` run is excluded on both paths, because the worker may
+    still be unwinding while the client already reached a terminal state for
+    that stream.
     """
     stream_id = getattr(session, 'active_stream_id', None)
     if not stream_id:
         return None
     try:
         from api import config as _cfg
+        with _cfg.ACTIVE_RUNS_LOCK:
+            _active_run_present = stream_id in (_cfg.ACTIVE_RUNS or {})
+            _active_run_entry = (_cfg.ACTIVE_RUNS or {}).get(stream_id)
+        if _active_run_present and not _cfg.active_run_is_attachable(_active_run_entry):
+            return None
         with _cfg.STREAMS_LOCK:
             if stream_id in _cfg.STREAMS:
                 return stream_id
-        with _cfg.ACTIVE_RUNS_LOCK:
-            if stream_id in (_cfg.ACTIVE_RUNS or {}):
-                return stream_id
+        if _active_run_present:
+            return stream_id
     except Exception:
         # On any introspection failure, fail SAFE (report no live stream) rather
         # than surfacing a possibly-stale id.
