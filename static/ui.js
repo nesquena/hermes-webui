@@ -3608,17 +3608,19 @@ async function populateModelDropdown(opts={}){
 // Cache so we don't re-fetch on every page load
 const _liveModelCache={};
 const _liveModelCacheGen={};
-function _liveModelCacheKey(provider){
+function _liveModelCacheKey(provider, profileOverride=null){
   const p=String(provider||'').trim().toLowerCase();
-  const profile=(typeof S!=='undefined'&&S&&S.activeProfile)
+  const profile=(profileOverride!==null&&profileOverride!==undefined)
+    ? String(profileOverride).trim().toLowerCase()
+    : (typeof S!=='undefined'&&S&&S.activeProfile)
     ? String(S.activeProfile).trim().toLowerCase()
     : 'default';
   return `${profile||'default'}::${p}`;
 }
-function _invalidateLiveModelCache(provider){
+function _invalidateLiveModelCache(provider, profileOverride=null){
   const p=String(provider||'').trim().toLowerCase();
   if(!p) return;
-  const cacheKey=_liveModelCacheKey(p);
+  const cacheKey=_liveModelCacheKey(p, profileOverride);
   delete _liveModelCache[cacheKey];
   _liveModelCacheGen[cacheKey]=(_liveModelCacheGen[cacheKey]||0)+1;
 }
@@ -3742,7 +3744,8 @@ async function _fetchLiveModels(provider, sel, requestSeq=null, opts={}){
     if(added>0 && typeof syncModelChip==='function') syncModelChip();
     return _liveModelCache[cacheKey];
   }
-  _liveModelFetchPending.add(pendingKey);
+  const pendingToken=`${pendingKey}:${Math.random()}`;
+  _liveModelFetchPending.add(pendingToken);
   try{
     const url=new URL('api/models/live',document.baseURI||location.href);
     url.searchParams.set('provider',provider);
@@ -3770,7 +3773,7 @@ async function _fetchLiveModels(provider, sel, requestSeq=null, opts={}){
     if(required) throw e;
     console.debug('[hermes] Live model fetch failed for',provider,e.message);
   }finally{
-    _liveModelFetchPending.delete(pendingKey);
+    _liveModelFetchPending.delete(pendingToken);
   }
 }
 
@@ -10941,9 +10944,11 @@ function syncTopbar(){
         // session with the wrong model before live models arrive (#1169).
         const activeProvider=window._activeProvider&&String(window._activeProvider).trim().toLowerCase();
         const activeCacheKey=activeProvider?_liveModelCacheKey(activeProvider):'';
-        const liveStillPending=!!activeCacheKey&&_liveModelFetchPending.has(
-          `${activeCacheKey}:${_liveModelCacheGen[activeCacheKey]||0}`
-        );
+        const activePendingPrefix=activeCacheKey
+          ? `${activeCacheKey}:${_liveModelCacheGen[activeCacheKey]||0}:`
+          : '';
+        const liveStillPending=!!activePendingPrefix&&Array.from(_liveModelFetchPending)
+          .some(token=>String(token).startsWith(activePendingPrefix));
         if(liveStillPending||missingModelIsRoutable){
           // Live fetch in flight — don't touch sel.value or S.session.model yet.
           // _addLiveModelsToSelect() will re-apply S.session.model once done (#1169).

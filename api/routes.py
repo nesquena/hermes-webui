@@ -20652,7 +20652,8 @@ def _handle_live_models(handler, parsed):
                     for _cid in _config_ids:
                         if _cid not in _live_set:
                             ids.append(_cid)
-                else:
+                elif not refresh_required:
+                    # Configured custom models are only an ordinary-request fallback.
                     ids = list(_config_ids)
 
         # ── OpenAI-compat live fetch fallback ──────────────────────────────────
