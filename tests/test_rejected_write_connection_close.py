@@ -11,13 +11,15 @@ from typing import Any, cast
 import pytest
 
 
-def test_auth_rejected_write_closes_connection(monkeypatch):
+def _rejected_write(monkeypatch, headers):
+    """Drive the production _handle_write through an auth rejection."""
     import api.auth as auth
     import server
 
     handler = SimpleNamespace(
         path="/api/session/new",
         command="POST",
+        headers=headers,
         close_connection=False,
     )
     monkeypatch.setattr(server, "reset_trusted_auth_request_state", lambda _handler: None)
@@ -29,25 +31,65 @@ def test_auth_rejected_write_closes_connection(monkeypatch):
         raise AssertionError("route ran after auth rejection")
 
     server.Handler._handle_write(cast(Any, handler), route_must_not_run)
+    return handler
 
-    assert handler.close_connection is True
+
+@pytest.mark.parametrize(
+    "headers",
+    [{"Content-Length": "15"}, {"Transfer-Encoding": "chunked"}, {"Content-Length": "banana"}],
+    ids=["content-length", "chunked", "unreadable-length"],
+)
+def test_auth_rejected_write_closes_connection(headers, monkeypatch):
+    """A rejected write whose framing declares a body leaves it unread — close."""
+    assert _rejected_write(monkeypatch, headers).close_connection is True
 
 
-def test_origin_rejected_csrf_closes_connection(monkeypatch):
+@pytest.mark.parametrize(
+    "headers", [{}, {"Content-Length": "0"}], ids=["no-content-length", "zero-content-length"]
+)
+def test_bodyless_auth_rejected_write_keeps_connection(headers, monkeypatch):
+    """The over-close half at the auth gate: no declared body, nothing to protect.
+
+    `check_auth_or_close()` armed unconditionally, so a body-less POST that failed
+    auth answered 401 WITH `Connection: close` and dropped the client's pipelined
+    follow-up (reproduced on the wire — see the pooled-client file). Same rule as
+    the sidecar path: the framing decides, not the method or the site.
+    """
+    assert _rejected_write(monkeypatch, headers).close_connection is False
+
+
+def _csrf_origin_rejection(monkeypatch, headers):
     import api.routes as routes
 
-    handler = SimpleNamespace(close_connection=False)
+    handler = SimpleNamespace(headers=headers, close_connection=False)
     monkeypatch.setattr(routes, "_check_same_origin_browser_request", lambda _handler: False)
 
     assert routes._check_csrf(handler) is False
-    assert handler.close_connection is True
+    return handler
 
 
-def test_token_rejected_csrf_closes_connection(monkeypatch):
+@pytest.mark.parametrize(
+    "headers",
+    [{"Content-Length": "15"}, {"Transfer-Encoding": "chunked"}, {"Content-Length": "banana"}],
+    ids=["content-length", "chunked", "unreadable-length"],
+)
+def test_origin_rejected_csrf_closes_connection(headers, monkeypatch):
+    assert _csrf_origin_rejection(monkeypatch, headers).close_connection is True
+
+
+@pytest.mark.parametrize(
+    "headers", [{}, {"Content-Length": "0"}], ids=["no-content-length", "zero-content-length"]
+)
+def test_bodyless_origin_rejected_csrf_keeps_connection(headers, monkeypatch):
+    """A cross-origin rejection of a body-less write must not drop the socket."""
+    assert _csrf_origin_rejection(monkeypatch, headers).close_connection is False
+
+
+def _csrf_token_rejection(monkeypatch, headers):
     import api.auth as auth
     import api.routes as routes
 
-    handler = SimpleNamespace(headers={}, close_connection=False)
+    handler = SimpleNamespace(headers=headers, close_connection=False)
     monkeypatch.setattr(routes, "_check_same_origin_browser_request", lambda _handler: True)
     monkeypatch.setattr(routes, "_is_browser_unsafe_request", lambda _handler: True)
     monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
@@ -55,7 +97,24 @@ def test_token_rejected_csrf_closes_connection(monkeypatch):
     monkeypatch.setattr(auth, "verify_csrf_token", lambda _cookie, _token: False)
 
     assert routes._check_csrf(handler) is False
-    assert handler.close_connection is True
+    return handler
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [{"Content-Length": "15"}, {"Transfer-Encoding": "chunked"}, {"Content-Length": "banana"}],
+    ids=["content-length", "chunked", "unreadable-length"],
+)
+def test_token_rejected_csrf_closes_connection(headers, monkeypatch):
+    assert _csrf_token_rejection(monkeypatch, headers).close_connection is True
+
+
+@pytest.mark.parametrize(
+    "headers", [{}, {"Content-Length": "0"}], ids=["no-content-length", "zero-content-length"]
+)
+def test_bodyless_token_rejected_csrf_keeps_connection(headers, monkeypatch):
+    """A token mismatch on a body-less write has nothing unread either."""
+    assert _csrf_token_rejection(monkeypatch, headers).close_connection is False
 
 
 def test_sidecar_provenance_rejected_closes_connection(monkeypatch):
@@ -671,28 +730,118 @@ def test_transfer_encoding_beside_a_content_length_still_declares_a_body(length)
     assert request_declares_body(cast(Any, handler)) is True
 
 
-def test_csp_report_rate_limited_closes_connection(monkeypatch):
-    """A rate-limited CSP report is dropped before its body is read."""
+def _rate_limited_csp_report(monkeypatch, headers):
     import api.routes as routes
 
-    handler = SimpleNamespace(close_connection=False)
+    handler = SimpleNamespace(headers=headers, close_connection=False)
     monkeypatch.setattr(routes, "_csp_report_rate_limited", lambda _handler: True)
     monkeypatch.setattr(routes, "_send_no_content", lambda _handler: True)
 
     assert routes._handle_csp_report(handler) is True
-    assert handler.close_connection is True
+    return handler
 
 
-def test_health_restart_closes_connection(monkeypatch):
-    """health/restart never consumes its body on any outcome."""
+@pytest.mark.parametrize(
+    "headers",
+    [{"Content-Length": "15"}, {"Transfer-Encoding": "chunked"}, {"Content-Length": "banana"}],
+    ids=["content-length", "chunked", "unreadable-length"],
+)
+def test_csp_report_rate_limited_closes_connection(headers, monkeypatch):
+    """A rate-limited CSP report is dropped before its body is read."""
+    assert _rate_limited_csp_report(monkeypatch, headers).close_connection is True
+
+
+@pytest.mark.parametrize(
+    "headers", [{}, {"Content-Length": "0"}], ids=["no-content-length", "zero-content-length"]
+)
+def test_bodyless_rate_limited_csp_report_keeps_connection(headers, monkeypatch):
+    """A body-less report dropped by the limiter must not cost the browser its socket."""
+    assert _rate_limited_csp_report(monkeypatch, headers).close_connection is False
+
+
+_RESTART_OUTCOMES = [
+    {"status": "completed"},
+    {"status": "in_progress"},
+    {"status": "busy"},
+    {"status": "error"},
+]
+
+
+@pytest.mark.parametrize("outcome", _RESTART_OUTCOMES, ids=lambda o: o["status"])
+@pytest.mark.parametrize(
+    "headers",
+    [{"Content-Length": "15"}, {"Transfer-Encoding": "chunked"}, {"Content-Length": "banana"}],
+    ids=["content-length", "chunked", "unreadable-length"],
+)
+def test_health_restart_closes_connection(headers, outcome, monkeypatch):
+    """health/restart never consumes its body on any outcome — so a declared one closes."""
     import api.routes as routes
 
-    handler = SimpleNamespace(close_connection=False)
-    monkeypatch.setattr(routes, "restart_active_profile_gateway", lambda: {"status": "completed"})
+    handler = SimpleNamespace(headers=headers, close_connection=False)
+    monkeypatch.setattr(routes, "restart_active_profile_gateway", lambda: outcome)
     monkeypatch.setattr(routes, "j", lambda _handler, _payload, status=200: True)
 
     routes._handle_health_restart(handler)
     assert handler.close_connection is True
+
+
+@pytest.mark.parametrize("outcome", _RESTART_OUTCOMES, ids=lambda o: o["status"])
+@pytest.mark.parametrize(
+    "headers", [{}, {"Content-Length": "0"}], ids=["no-content-length", "zero-content-length"]
+)
+def test_bodyless_health_restart_keeps_connection(headers, outcome, monkeypatch):
+    """Including the SUCCESS path, which closed a healthy socket on every call.
+
+    The WebUI's restart button sends no body, so the old unconditional arming made
+    a 200 "restarted successfully" hang up the connection every single time. The
+    framing decides for all four outcomes, not the result.
+    """
+    import api.routes as routes
+
+    handler = SimpleNamespace(headers=headers, close_connection=False)
+    monkeypatch.setattr(routes, "restart_active_profile_gateway", lambda: outcome)
+    monkeypatch.setattr(routes, "j", lambda _handler, _payload, status=200: True)
+
+    routes._handle_health_restart(handler)
+    assert handler.close_connection is False
+
+
+def _deprecated_ack_post(monkeypatch, headers):
+    """Drive the deprecated /api/process-complete-ack 410, which runs pre-CSRF."""
+    import api.routes as routes
+
+    handler = SimpleNamespace(
+        path="/api/process-complete-ack",
+        command="POST",
+        headers=headers,
+        close_connection=False,
+    )
+    monkeypatch.setattr(
+        routes, "j", lambda _handler, _payload, status=200, extra_headers=None: True
+    )
+
+    assert routes.handle_post(
+        cast(Any, handler), SimpleNamespace(path=handler.path, query="")
+    ) is True
+    return handler
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [{"Content-Length": "15"}, {"Transfer-Encoding": "chunked"}, {"Content-Length": "banana"}],
+    ids=["content-length", "chunked", "unreadable-length"],
+)
+def test_deprecated_ack_with_a_body_closes_connection(headers, monkeypatch):
+    """A stale tab's JSON ack is never read, so a declared body must close."""
+    assert _deprecated_ack_post(monkeypatch, headers).close_connection is True
+
+
+@pytest.mark.parametrize(
+    "headers", [{}, {"Content-Length": "0"}], ids=["no-content-length", "zero-content-length"]
+)
+def test_bodyless_deprecated_ack_keeps_connection(headers, monkeypatch):
+    """A body-less ack has nothing queued — the 410 must not kill keep-alive."""
+    assert _deprecated_ack_post(monkeypatch, headers).close_connection is False
 
 
 def test_upload_oversize_rejects_before_read(monkeypatch):
@@ -777,6 +926,52 @@ def test_bodyless_multipart_rejection_keeps_connection(handler_name, monkeypatch
 
     assert answered["status"] == 400, answered
     assert handler.close_connection is False
+
+
+@pytest.mark.parametrize("handler_name", _MULTIPART_HANDLERS)
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"Content-Type": "application/json"},
+        {"Content-Type": "application/json", "Content-Length": "0"},
+        {"Content-Type": "multipart/form-data"},  # multipart, but no boundary parameter
+    ],
+    ids=["json-no-length", "json-zero-length", "multipart-without-boundary"],
+)
+def test_bodyless_boundary_rejection_keeps_connection(handler_name, headers, monkeypatch):
+    """`_reject_before_read()` fires on a body-less request too — via the boundary check.
+
+    Every other rejection the preflight raises (any Transfer-Encoding, an unreadable
+    or conflicting length, an over-cap length) already declares a body. The missing
+    `boundary=` in Content-Type is the one that can fire with no body at all, and
+    the unconditional arming closed a healthy pooled socket for it: on the wire,
+    `POST /api/upload` with `Content-Type: application/json` and no `Content-Length`
+    answered 400 "No boundary in Content-Type" WITH `Connection: close` and the
+    pipelined GET was dropped. `_NeverRead` also proves the boundary check still
+    runs ahead of any `rfile.read()`.
+    """
+    handler, answered = _run_multipart_handler(
+        monkeypatch, handler_name, headers, _NeverRead()
+    )
+
+    assert answered["status"] == 400, answered
+    assert answered["payload"]["error"] == "No boundary in Content-Type", answered
+    assert handler.close_connection is False
+
+
+@pytest.mark.parametrize("handler_name", _MULTIPART_HANDLERS)
+def test_boundary_rejection_with_a_declared_body_still_closes(handler_name, monkeypatch):
+    """The close half of the same rejection: a declared body is still queued."""
+    handler, answered = _run_multipart_handler(
+        monkeypatch,
+        handler_name,
+        {"Content-Type": "application/json", "Content-Length": "15"},
+        _NeverRead(),
+    )
+
+    assert answered["status"] == 400, answered
+    assert answered["payload"]["error"] == "No boundary in Content-Type", answered
+    assert handler.close_connection is True
 
 
 @pytest.mark.parametrize("handler_name", _MULTIPART_HANDLERS)
@@ -1038,15 +1233,55 @@ def test_check_auth_or_close_on_handler_stub_without_close_connection(monkeypatc
     assert not hasattr(handler, "close_connection")
 
 
-def test_check_auth_or_close_restores_keep_alive_on_success(monkeypatch):
-    """A successful auth must not inherit the armed close."""
+@pytest.mark.parametrize(
+    "headers",
+    [{}, {"Content-Length": "0"}, {"Content-Length": "15"}, {"Transfer-Encoding": "chunked"}],
+    ids=["no-content-length", "zero-content-length", "content-length", "chunked"],
+)
+def test_check_auth_or_close_restores_keep_alive_on_success(headers, monkeypatch):
+    """A successful auth must not inherit the armed close.
+
+    The two body-bearing rows are the ones that actually arm before `check_auth()`,
+    so they are what pins the restore; the body-less rows never arm at all.
+    """
     import api.auth as auth
 
-    handler = SimpleNamespace(close_connection=False)
+    handler = SimpleNamespace(headers=headers, close_connection=False)
     monkeypatch.setattr(auth, "check_auth", lambda _handler, _parsed: True)
 
     assert auth.check_auth_or_close(cast(Any, handler), SimpleNamespace(path="/api/x")) is True
     assert handler.close_connection is False
+
+
+def test_check_auth_or_close_restores_a_prior_close_on_success(monkeypatch):
+    """Restore means restore: a connection already doomed stays doomed.
+
+    `Connection: close` sent by the client sets `close_connection` before routing,
+    and the restore must not overwrite that with keep-alive.
+    """
+    import api.auth as auth
+
+    handler = SimpleNamespace(headers={"Content-Length": "15"}, close_connection=True)
+    monkeypatch.setattr(auth, "check_auth", lambda _handler, _parsed: True)
+
+    assert auth.check_auth_or_close(cast(Any, handler), SimpleNamespace(path="/api/x")) is True
+    assert handler.close_connection is True
+
+
+def test_check_auth_or_close_tolerates_a_handler_without_headers(monkeypatch):
+    """The framing read must never raise here: an exception becomes a spurious 500."""
+    import api.auth as auth
+
+    monkeypatch.setattr(auth, "check_auth", lambda _handler, _parsed: False)
+
+    for handler in (
+        SimpleNamespace(close_connection=False),
+        SimpleNamespace(headers=None, close_connection=False),
+        SimpleNamespace(headers=object(), close_connection=False),
+    ):
+        assert auth.check_auth_or_close(cast(Any, handler), SimpleNamespace(path="/api/x")) is False
+        # No framing could be read, so nothing proves a body is pending.
+        assert handler.close_connection is False
 
 
 def test_arm_connection_close_tolerates_a_read_only_handler():
