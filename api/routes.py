@@ -23371,7 +23371,7 @@ def _handle_live_models(handler, parsed):
                         for _aid in _allowlist_ids:
                             if _aid not in ids:
                                 ids.append(_aid)
-                else:
+                elif not refresh_required:
                     ids = list(_allowlist_ids or _config_ids)
 
         # ── OpenAI-compat live fetch fallback ──────────────────────────────────

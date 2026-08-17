@@ -277,6 +277,44 @@ def test_forced_lookup_exception_uses_custom_live_fallback(monkeypatch):
     assert key not in routes._LIVE_MODELS_REFRESH_REQUIRED
 
 
+def test_forced_custom_lookup_does_not_use_configured_static_model(monkeypatch):
+    import urllib.request
+
+    import api.config as config
+    import api.routes as routes
+
+    _install_provider_model_ids(monkeypatch, lambda provider, *, force_refresh=False: [])
+    _prepare(monkeypatch, routes)
+    monkeypatch.setattr(
+        config,
+        "get_config",
+        lambda: {
+            "model": {"provider": "openai"},
+            "custom_providers": [
+                {
+                    "name": "custom:relay",
+                    "api_key": "relay-key",
+                    "base_url": "https://relay.example/v1",
+                    "model": "configured-only",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda request, timeout: (_ for _ in ()).throw(OSError("provider unavailable")),
+    )
+    routes._invalidate_live_models_for_provider("custom:relay")
+    result = routes._handle_live_models(
+        object(), urlparse("/api/models/live?provider=custom%3Arelay")
+    )
+    key = routes._live_models_cache_key("custom:relay")
+    assert result == {"error": "live_models_unavailable", "models": []}
+    assert key not in routes._LIVE_MODELS_REFRESH_REQUIRED
+    assert routes._get_cached_live_models(key) is None
+
+
 def test_post_refresh_lookup_forces_agent_until_current_generation_publishes(monkeypatch):
     import api.routes as routes
 
@@ -350,6 +388,40 @@ globalThis.eval({json.dumps(bundle)});
     assert result == {"result": None, "cached": None, "pending": 0}
 
 
+def test_browser_pending_state_tracks_concurrent_fetches():
+    source = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
+    cache_key = _extract_js_function(source, "function _liveModelCacheKey(")
+    fetch_live = _extract_js_function(source, "async function _fetchLiveModels(")
+    bundle = (
+        "globalThis._liveModelCache={}; globalThis._liveModelCacheGen={}; "
+        "globalThis._liveModelFetchPending=new Set(); globalThis._modelDropdownRequestSeq=0; "
+        "globalThis.S={activeProfile:'default'}; "
+        "globalThis.document={baseURI:'http://localhost/'}; globalThis._redirectIfUnauth=()=>false; "
+        "globalThis._addLiveModelsToSelect=()=>0; globalThis.syncModelChip=()=>{}; "
+        + cache_key
+        + "\n"
+        + fetch_live
+        + "\nglobalThis.runFetch=_fetchLiveModels;"
+    )
+    script = """
+const resolvers=[];
+globalThis.fetch = () => new Promise(resolve => resolvers.push(resolve));
+globalThis.eval(""" + json.dumps(bundle) + """);
+(async () => {
+  const first=globalThis.runFetch('provider',null,null,{required:true});
+  const second=globalThis.runFetch('provider',null,null,{required:true});
+  resolvers[0]({ok:true,json:async () => ({models:[{id:'first'}]})});
+  await first;
+  const pendingAfterFirst=globalThis._liveModelFetchPending.size;
+  resolvers[1]({ok:true,json:async () => ({models:[{id:'second'}]})});
+  await second;
+  console.log(JSON.stringify({pendingAfterFirst,pendingAfterSecond:globalThis._liveModelFetchPending.size}));
+})();
+"""
+    result = _run_node(script)
+    assert result == {"pendingAfterFirst": 1, "pendingAfterSecond": 0}
+
+
 def test_browser_live_model_cache_is_profile_scoped():
     source = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
     cache_key = _extract_js_function(source, "function _liveModelCacheKey(")
@@ -421,8 +493,12 @@ def test_provider_key_save_and_remove_invalidate_requested_and_canonical_live_ca
 const events = [];
 const card = {{input: {{value: 'long-enough-key'}}, saveBtn: {{disabled:false, textContent:''}}}};
 globalThis._providerCardEls = new Map([['provider-alias', card]]);
-globalThis.window = {{_invalidateLiveModelCache: provider => events.push(provider)}};
-globalThis.api = async path => ({{ok:true, provider:'provider', action:path.includes('delete')?'removed':'updated'}});
+    globalThis.window = {{_invalidateLiveModelCache: (provider, profile) => events.push([provider, profile])}};
+    globalThis.S = {{activeProfile:'profile-a'}};
+    globalThis.api = async path => {{
+      globalThis.S.activeProfile='profile-b';
+      return {{ok:true, provider:'provider', action:path.includes('delete')?'removed':'updated'}};
+    }};
 globalThis.showToast = () => {{}};
 globalThis.t = () => 'text';
 globalThis._refreshModelDropdownsAfterProviderChange = () => {{}};
@@ -435,4 +511,9 @@ globalThis.eval({json.dumps(bundle)});
 }})();
 """
     events = _run_node(script)
-    assert events == ["provider-alias", "provider", "provider-alias", "provider"]
+    assert events == [
+        ["provider-alias", "profile-a"],
+        ["provider", "profile-a"],
+        ["provider-alias", "profile-b"],
+        ["provider", "profile-b"],
+    ]
