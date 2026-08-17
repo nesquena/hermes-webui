@@ -42,9 +42,11 @@ def _deepcopy_providers():
 def restore_providers():
     """Restore _PROVIDER_MODELS to its pre-test state."""
     snapshot = _deepcopy_providers()
-    yield
-    _PROVIDER_MODELS.clear()
-    _PROVIDER_MODELS.update(snapshot)
+    try:
+        yield
+    finally:
+        _PROVIDER_MODELS.clear()
+        _PROVIDER_MODELS.update(snapshot)
 
 
 def _patch_core_pm(fake_pm: dict):
@@ -100,6 +102,28 @@ class TestSeederAddsMissingModels:
         assert zai_ids.count("glm-5.2") == 1, (
             f"glm-5.2 appears {zai_ids.count('glm-5.2')} times — should be 1"
         )
+
+    def test_codex_entitlement_models_are_not_seeded(self, restore_providers):
+        """Core Codex entries must not become static WebUI fallback entries."""
+        retired_or_account_specific = {"gpt-5.3-codex", "gpt-5.3-codex-spark"}
+        _PROVIDER_MODELS["openai-codex"] = [
+            model
+            for model in _PROVIDER_MODELS["openai-codex"]
+            if model["id"] not in retired_or_account_specific
+        ]
+        fake_pm = {
+            "openai-codex": sorted(retired_or_account_specific),
+            "zai": ["glm-9.99-experimental"],
+        }
+
+        with _patch_core_pm(fake_pm):
+            _seed_provider_models_from_core()
+
+        codex_ids = {model["id"] for model in _PROVIDER_MODELS["openai-codex"]}
+        assert retired_or_account_specific.isdisjoint(codex_ids)
+        assert "glm-9.99-experimental" in {
+            model["id"] for model in _PROVIDER_MODELS["zai"]
+        }
 
     def test_no_op_without_hermes_cli(self, restore_providers):
         """Seeder must be a no-op (not raise) when hermes_cli is unavailable."""

@@ -5,8 +5,7 @@ in the model picker when OPENAI_API_KEY is configured.
 The env-var detection block in ``api/config.py`` previously mapped
 ``OPENAI_API_KEY`` to only the ``openai`` provider group; the
 ``openai-codex`` group has its own static model list in
-``_PROVIDER_MODELS`` (9 models: gpt-5.5, gpt-5.4, codex-specific
-variants, etc.) but no automatic detection path.
+``_PROVIDER_MODELS`` but no automatic detection path.
 
 Note (cross-tool): hermes-agent's ``openai-codex`` provider config
 declares ``auth_type="oauth_external"`` with a default

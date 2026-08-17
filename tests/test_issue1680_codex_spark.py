@@ -55,14 +55,7 @@ def test_openai_codex_group_uses_provider_model_ids_for_spark(monkeypatch, tmp_p
     result = config.get_available_models()
 
     codex_groups = [g for g in result["groups"] if g.get("provider_id") == "openai-codex"]
-    # Resilient to test-isolation pollution: when a sibling test replaces
-    # sys.modules['hermes_cli.models'] without restoring it, list_available_providers
-    # may report a different provider list and `calls` won't be ['openai-codex'].
-    # Skip rather than fail — the contract under test is "Codex group surfaces
-    # gpt-5.3-codex-spark when hermes_cli.provider_model_ids returns it".
-    if calls != ["openai-codex"]:
-        import pytest
-        pytest.skip(f"hermes_cli stub not active for openai-codex (likely test-isolation pollution from sibling test). Got calls={calls}")
+    assert "openai-codex" in calls
     assert codex_groups, "OpenAI Codex group should be present"
     assert "gpt-5.3-codex-spark" in _flatten_ids(codex_groups)
     assert codex_groups[0]["models"][0]["label"] == "GPT 5.4"

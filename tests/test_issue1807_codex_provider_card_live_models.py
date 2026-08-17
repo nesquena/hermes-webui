@@ -86,5 +86,5 @@ def test_codex_provider_card_keeps_static_fallback_when_live_catalog_empty(monke
     expected_ids = [m["id"] for m in config._PROVIDER_MODELS["openai-codex"]]
 
     assert ids == expected_ids
-    assert "gpt-5.3-codex-spark" in ids
+    assert "gpt-5.3-codex-spark" not in ids
     assert codex["models_total"] == len(expected_ids)

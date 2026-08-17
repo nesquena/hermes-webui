@@ -1706,7 +1706,6 @@ _PROVIDER_MODELS = {
         {"id": "gpt-5.5", "label": "GPT-5.5"},
         {"id": "gpt-5.4", "label": "GPT-5.4"},
         {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini"},
-        {"id": "gpt-5.3-codex-spark", "label": "GPT-5.3 Codex Spark"},
     ],
     "google": [
         {"id": "gemini-3.1-pro-preview",            "label": "Gemini 3.1 Pro Preview"},
@@ -1908,11 +1907,12 @@ def _seed_provider_models_from_core() -> None:
     """Enrich existing provider model lists with missing IDs from hermes_cli.
 
     The core's _PROVIDER_MODELS is the authoritative curated list of agent-capable
-    models per provider.  The WebUI's static dict above is a display-oriented copy
-    (with {id, label} entries) that can go stale when new models are added to the
-    core without a matching WebUI update.  This function bridges the gap by
-    injecting any missing model IDs from the core into **existing** WebUI provider
-    entries.
+    models for ordinary providers.  The WebUI's static dict above is a
+    display-oriented copy (with {id, label} entries) that can go stale when new
+    models are added to the core without a matching WebUI update.  This function
+    bridges the gap by injecting any missing model IDs from the core into
+    **existing** WebUI provider entries.  OpenAI Codex is excluded because its
+    account-entitlement-aware live/cache path owns catalog freshness.
 
     Constrains seeding to providers already in the WebUI catalog — does NOT add
     brand-new providers.  Adding new vendors is a maintainer curation decision.
@@ -1943,6 +1943,8 @@ def _seed_provider_models_from_core() -> None:
             _webui_key_by_canonical[_canon] = _wk
 
     for provider_id, core_models in _core_pm.items():
+        if provider_id == "openai-codex":
+            continue
         if not isinstance(core_models, list):
             continue
 
