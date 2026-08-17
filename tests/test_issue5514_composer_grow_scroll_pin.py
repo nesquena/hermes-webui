@@ -591,6 +591,12 @@ def test_composer_declares_native_field_sizing_and_capped_overflow():
     composer_rules = [part.split("}", 1)[0] for part in STYLE_CSS.split("textarea#msg{")[1:]]
     required = ("field-sizing:content", "overflow-y:auto", "min-height:44px", "max-height:200px")
     assert any(all(declaration in rule for declaration in required) for rule in composer_rules)
+    base_at = STYLE_CSS.index("  textarea#msg{")
+    state_rule = "  textarea#msg:placeholder-shown{field-sizing:fixed;}"
+    assert state_rule in STYLE_CSS
+    state_at = STYLE_CSS.index(state_rule)
+    assert state_at > base_at
+    assert "field-sizing:content" in STYLE_CSS[base_at : STYLE_CSS.index("}", base_at)]
 
 
 def test_native_field_sizing_skips_geometry_and_height_writes():
