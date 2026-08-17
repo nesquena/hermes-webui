@@ -11657,7 +11657,9 @@ async function _saveProviderKey(providerId){
     if(res.ok){
       showToast(res.provider+' key '+res.action);
       els.input.value='';
-      _invalidateLiveModelCacheForProvider(providerId,res.provider,initiatingProfile);
+      if(typeof _invalidateLiveModelCacheForProvider==='function'){
+        _invalidateLiveModelCacheForProvider(providerId,res.provider,initiatingProfile);
+      }
       // Invalidate every dropdown surface that caches /api/models so the
       // newly-configured provider's models show up without a server restart
       // or page reload (#1539). Server-side invalidate_models_cache() is
@@ -11804,7 +11806,9 @@ async function _saveSelfHostedProvider(providerId){
     if(res&&res.ok){
       showToast(`${res.provider} configured`);
       if(els.apiKeyInput) els.apiKeyInput.value='';
-      _invalidateLiveModelCacheForProvider(providerId,res.provider,initiatingProfile);
+      if(typeof _invalidateLiveModelCacheForProvider==='function'){
+        _invalidateLiveModelCacheForProvider(providerId,res.provider,initiatingProfile);
+      }
       _refreshModelDropdownsAfterProviderChange();
       await loadProvidersPanel();
     }else{
