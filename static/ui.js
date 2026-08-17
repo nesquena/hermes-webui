@@ -16589,22 +16589,27 @@ function renderMessages(options){
   if(sid&&INFLIGHT[sid]){
     const _lt=document.getElementById('liveAssistantTurn');
     if(_lt&&(!_lt.dataset||!_lt.dataset.sessionId||_lt.dataset.sessionId===sid)){
-      // Blank-turn fix (对话消失): only preserve the live turn across the DOM
-      // wipe if it is GENUINELY live — either an active stream is still running
-      // (S.activeStreamId set: the #3877 mid-stream flicker case this preserve
-      // was written for), or the turn already holds real rendered content (a
-      // visible answer body, a tool card, or a reasoning row). A DEAD shell —
-      // an interrupted turn whose stream dropped (S.activeStreamId cleared to
-      // null) but whose INFLIGHT[sid] entry was not cleaned, leaving only an
-      // empty worklog group ("Processed Ns" with no body/tool rows) — must NOT
-      // be preserved: re-attaching it on a session-updated swap re-render pins
-      // an avatar-only empty turn OVER the settled transcript, hiding the real
-      // (already-persisted) answer. That is the reported blank. Reproduced +
-      // fix verified on an isolated debug instance (8710): stale INFLIGHT +
-      // empty live-turn survived the swap → blank; gating on real-content /
-      // active-stream clears it while a genuine live turn still renders.
-      const _hasRealLiveContent=!!_lt.querySelector('.msg-body, .tool-card-row, .wl-reason');
-      if(_hasRealLiveContent || S.activeStreamId){
+      // Live-turn preservation requires a PROVABLE live owner — never bare DOM
+      // content. (#6948) The live turn is preserved across the wipe only while
+      // (a) the stream is genuinely active (S.activeStreamId — the #3877
+      // mid-stream flicker case this preserve was written for), or (b) the
+      // current message projection (S.messages) still carries explicit
+      // live-assistant evidence — a client-side _live / _activityBurstId /
+      // _liveSegmentSeq marker merged in from the INFLIGHT tail or a server
+      // journal snapshot (the reconnect / terminal-projection case). A settled
+      // transcript has neither, so a contentful but DEAD live node (stream
+      // ended — S.activeStreamId cleared — while INFLIGHT[sid] was not yet
+      // cleaned) is no longer preserved: re-attaching it over the settled
+      // transcript pinned a second copy of the same assistant message (#6948;
+      // data was always clean — state.db, sidecar, and /api/session each hold
+      // one row; the duplicate existed only in the rendered DOM). The #5390
+      // blank-turn guard (对话消失) is preserved: a dead EMPTY shell has no live
+      // projection either, so it is still dropped with the wipe instead of
+      // pinning an avatar-only blank turn over the settled answer.
+      const _hasLiveAssistantProjection=Array.isArray(S.messages)&&S.messages.some(m=>
+        m&&m.role==='assistant'&&(m._live||m._activityBurstId!==undefined||m._liveSegmentSeq!==undefined)
+      );
+      if(S.activeStreamId || _hasLiveAssistantProjection){
         _preservedLiveTurn=_lt;
       }
     }
