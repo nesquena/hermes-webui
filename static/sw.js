@@ -241,7 +241,7 @@ function validateNotificationMessage(event) {
       data.type !== NOTIFICATION_PRESENT_MESSAGE ||
       data.protocolVersion !== NOTIFICATION_PRESENT_PROTOCOL_VERSION ||
       !isBoundedString(data.eventId, MAX_NOTIFICATION_IDENTITY_LENGTH) ||
-      !/^[^:]+:[1-9]\d*$/.test(data.eventId)) return null;
+      data.eventId.trim().length === 0) return null;
   if (!isBoundedString(data.title, MAX_NOTIFICATION_TITLE_LENGTH)) return null;
   const options = normalizeNotificationOptions(data.options, data.eventId);
   if (!options) return null;

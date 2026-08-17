@@ -62,6 +62,24 @@ def _records(page):
     return page.evaluate("""async () => (await (await navigator.serviceWorker.ready).getNotifications({tag:'hermes-session-6673'})).map(n => ({id:n.data.eventId, tag:n.tag, renotify:n.renotify, url:n.data.url}))""")
 
 
+def _observe_direct_notifications(page) -> None:
+    page.evaluate("""
+      () => {
+        const NativeNotification = window.Notification;
+        let count = 0;
+        function ObservedNotification(...args) {
+          count += 1;
+          window.__issue6673DirectCount = count;
+          return new NativeNotification(...args);
+        }
+        Object.setPrototypeOf(ObservedNotification, NativeNotification);
+        ObservedNotification.prototype = NativeNotification.prototype;
+        window.Notification = ObservedNotification;
+        window.__issue6673DirectCount = 0;
+      }
+    """)
+
+
 def _listen(page) -> None:
     page.evaluate("""
       () => {
@@ -111,13 +129,13 @@ def main() -> int:
         if permission != "granted":
             print(json.dumps({"status":"unreached", "reason":"headless Notification permission is not granted", "permission":permission}))
             return 2
+        _observe_direct_notifications(page_a)
         _listen(page_a)
         _emit(page_a, "stream-6673:1")
-        page_a.wait_for_function("async () => (await (await navigator.serviceWorker.ready).getNotifications({tag:'hermes-session-6673'})).some(n => n.data && n.data.eventId === 'stream-6673:1')", timeout=10000)
+        page_a.wait_for_function("() => window.__issue6673DirectCount >= 1", timeout=10000)
+        direct_before_no_id = page_a.evaluate("() => window.__issue6673DirectCount")
         _emit(page_a, None)
-        page_a.wait_for_timeout(250)
-        if any(record.get("id") for record in _records(page_a)):
-            raise AssertionError("journal-less event reused the previous EventSource identity")
+        page_a.wait_for_function("count => window.__issue6673DirectCount > count", arg=direct_before_no_id, timeout=10000)
         context.unroute("**/sw.js")
         page_a.evaluate("""
           () => {
@@ -145,17 +163,23 @@ def main() -> int:
         page_b.reload(wait_until="domcontentloaded")
         for page in (page_a, page_b):
             page.wait_for_function("async () => Boolean((await navigator.serviceWorker.ready).active && navigator.serviceWorker.controller)", timeout=15000)
+            _observe_direct_notifications(page)
             _listen(page)
         _emit(page_a, "stream-6673:3")
         _emit(page_b, "stream-6673:3")
-        page_a.wait_for_timeout(500)
+        page_a.wait_for_function("async () => (await (await navigator.serviceWorker.ready).getNotifications({tag:'hermes-session-6673'})).some(n => n.data && n.data.eventId === 'stream-6673:3')", timeout=10000)
+        same_event_records = _records(page_a)
+        if [record["id"] for record in same_event_records if record.get("id") == "stream-6673:3"] != ["stream-6673:3"]:
+            raise AssertionError(same_event_records)
         _emit(page_a, "stream-6673:4")
-        page_a.wait_for_timeout(500)
+        page_a.wait_for_function("async () => (await (await navigator.serviceWorker.ready).getNotifications({tag:'hermes-session-6673'})).some(n => n.data && n.data.eventId === 'stream-6673:4')", timeout=10000)
         records = _records(page_a)
         source = page_a.evaluate("""async () => await (await fetch('/static/messages.js')).text()""")
         if "indexedDB.open(" in source:
             raise AssertionError("served notification path still contains indexedDB.open(")
         if not any(record["id"] == "stream-6673:4" and record["renotify"] for record in records):
+            raise AssertionError(records)
+        if not all(record["url"].startswith(BASE + "/") for record in records):
             raise AssertionError(records)
         if "activated" not in page_a.evaluate("() => window.__issue6673UpgradeStates"):
             raise AssertionError(page_a.evaluate("() => window.__issue6673UpgradeStates"))

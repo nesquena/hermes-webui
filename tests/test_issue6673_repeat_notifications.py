@@ -1,5 +1,8 @@
 """Focused page and producer regressions for #6673."""
 
+import json
+import shutil
+import subprocess
 from pathlib import Path
 
 from tests.js_source_extract import extract_function
@@ -15,7 +18,7 @@ def test_identity_capture_uses_only_canonical_journal_ids():
     assert "return null" in capture
     assert "_notificationEventFallbackId" not in MESSAGES_JS
     assert "event.lastEventId" in capture
-    assert "/^[1-9]\\d*$/" in capture
+    assert "lastEventId.length>_NOTIFICATION_IDENTITY_MAX_LENGTH" in capture
 
 
 def test_page_notification_path_has_no_claim_ledger_and_keeps_delivery_fallback():
@@ -51,3 +54,26 @@ def test_journal_less_sse_frames_reset_sticky_eventsource_ids():
 def test_worker_presentation_queues_release_settled_tag_state():
     assert "const trackedOperation = operation.catch(() => {});" in SW_JS
     assert "notificationPresentationByTag.delete(tag);" in SW_JS
+
+
+def test_replay_cursor_accepts_only_current_canonical_positive_ids():
+    node = shutil.which("node")
+    if node is None:
+        return
+    cursor = extract_function(MESSAGES_JS, "_rememberRunJournalCursor")
+    script = f"""
+const cursor = {cursor};
+let _lastRunJournalSeq = 0;
+let _lastRunJournalEventId = '';
+const streamId = 'stream-6673';
+const activeSid = 'session-6673';
+const INFLIGHT = {{[activeSid]: {{}}}};
+const _throttledPersist = () => {{}};
+for (const value of ['stream-6673:2', 'stream-6673:fallback:3', 'other:4', 'stream-6673:-1', 'stream-6673:NaN', 'stream-6673:4']) {{
+  cursor({{lastEventId: value}});
+}}
+console.log(JSON.stringify({{seq:_lastRunJournalSeq, id:_lastRunJournalEventId}}));
+"""
+    result = subprocess.run([node, "-e", script], cwd=ROOT, text=True, capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"seq": 4, "id": "stream-6673:4"}

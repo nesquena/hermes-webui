@@ -63,8 +63,8 @@ function send(eventId) {{ return new Promise(resolve => {{ const c = new Message
   rejectNext = true;
   const rejected = await send('stream-6673:3');
   const retry = await send('stream-6673:3');
-  const invalid = await send('stream-6673:fallback:4');
-  console.log(JSON.stringify({{same, distinct, rejected, retry, invalid, attempts: attempts.length, ids: displayed.map(item => item.data.eventId)}}));
+  const opaque = await send('opaque-event-4');
+  console.log(JSON.stringify({{same, distinct, rejected, retry, opaque, attempts: attempts.length, ids: displayed.map(item => item.data.eventId)}}));
 }})().catch(error => {{ console.error(error.stack || error); process.exitCode = 1; }});
 """
     result = _run_node(script)
@@ -72,9 +72,9 @@ function send(eventId) {{ return new Promise(resolve => {{ const c = new Message
     assert result["distinct"]["status"] == "shown"
     assert result["rejected"]["status"] == "unavailable"
     assert result["retry"]["status"] == "shown"
-    assert result["invalid"]["status"] == "invalid"
-    assert result["attempts"] == 4
-    assert result["ids"] == ["stream-6673:1", "stream-6673:2", "stream-6673:3"]
+    assert result["opaque"]["status"] == "shown"
+    assert result["attempts"] == 5
+    assert result["ids"] == ["stream-6673:1", "stream-6673:2", "stream-6673:3", "opaque-event-4"]
 
 
 def test_worker_has_no_notification_claim_database():

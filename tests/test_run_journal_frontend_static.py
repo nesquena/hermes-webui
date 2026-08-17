@@ -418,7 +418,8 @@ def test_frontend_replay_cursor_uses_eventsource_last_event_id():
     block = MESSAGES_SRC[cursor_pos : cursor_pos + 1000]
 
     assert "e.lastEventId" in block
-    assert "lastIndexOf(':')" in block
+    assert "raw.startsWith(prefix)" in block
+    assert "/^[1-9]\\d*$/.test(tail)" in block
     assert "_lastRunJournalSeq=seq" in block
     assert "source.addEventListener(_runJournalEventName,_rememberRunJournalCursor)" in MESSAGES_SRC
     assert "after_seq=${encodeURIComponent(String(_runJournalReplayAfterSeq()))}" in MESSAGES_SRC

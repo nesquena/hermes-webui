@@ -100,9 +100,10 @@ gate covers listener, sender, versioned worker presenter, displayed-record looku
 and click-data composition. Submit one canonical event from both pages, then the
 next event under the same stable tag; the first event must have one displayed
 record and the next event must create a new record with its event id and
-`renotify:true`. A worker display rejection must remain retryable. The served
-notification path must contain no IndexedDB claim database. Journal-less frames
-carry no durable SSE id and use the existing delivery fallback.
+`renotify:true`. The focused presenter protocol test covers worker display
+rejection and retry. The served notification path must contain no IndexedDB claim
+database. Journal-less frames carry no durable SSE id and use the existing
+delivery fallback.
 
 ```bash
 python tests/browser_issue6673_service_worker.py

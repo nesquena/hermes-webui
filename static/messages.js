@@ -9122,8 +9122,7 @@ function _notificationOptions(body,options={}){
 const _NOTIFICATION_IDENTITY_MAX_LENGTH=512;
 function _captureNotificationEventIdentity(streamId,event){
   const lastEventId=String(event&&event.lastEventId||'').trim();
-  const prefix=`${String(streamId||'')}:`;
-  if(!streamId||!lastEventId.startsWith(prefix)||!/^[1-9]\d*$/.test(lastEventId.slice(prefix.length))) return null;
+  if(!streamId||!lastEventId||lastEventId.length>_NOTIFICATION_IDENTITY_MAX_LENGTH) return null;
   return {streamId:String(streamId),lastEventId};
 }
 function _sendStreamNotification(title,body,eventIdentity,options={}){
@@ -9188,8 +9187,8 @@ function _showPwaNotification(title,body,options={}){
   const direct=()=>new Notification(title||botName,opts);
   const identityBearing=_hasNotificationIdentity(options);
   const identity=options&&options.eventIdentity;
-  if(identityBearing&&!_isValidNotificationIdentity(identity)) return Promise.resolve('invalid');
   const deliverDirect=()=>{try{return Promise.resolve(direct());}catch(error){return Promise.reject(error);}};
+  if(identityBearing&&!_isValidNotificationIdentity(identity)) return deliverDirect();
   // Prefer the service worker (the only path that works in a standalone PWA,
   // notably iOS). Use getRegistration() + a short timeout race rather than
   // navigator.serviceWorker.ready, because `.ready` NEVER settles when no
