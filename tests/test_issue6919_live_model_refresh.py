@@ -97,6 +97,36 @@ def test_refresh_post_invalidates_live_cache_and_marks_required_generation(monke
     assert key in routes._LIVE_MODELS_REFRESH_REQUIRED
 
 
+def test_provider_mutations_invalidate_server_live_cache(monkeypatch):
+    import api.onboarding as onboarding
+    import api.routes as routes
+
+    _prepare(monkeypatch, routes)
+    bodies = [
+        {"provider": "gpt", "api_key": "long-enough-key"},
+        {"provider": "gpt"},
+        {"provider": "ollama", "base_url": "http://localhost:11434", "model": "llama"},
+    ]
+    invalidated = []
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "_guard_request_session_visibility", lambda *args, **kwargs: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: bodies.pop(0))
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, **kwargs: payload)
+    monkeypatch.setattr(routes, "set_provider_key", lambda provider, api_key: {"ok": True, "provider": provider})
+    monkeypatch.setattr(routes, "remove_provider_key", lambda provider: {"ok": True, "provider": provider})
+    monkeypatch.setattr(
+        onboarding,
+        "apply_self_hosted_provider_setup",
+        lambda body: {"ok": True, "provider": body["provider"]},
+    )
+    monkeypatch.setattr(routes, "_invalidate_live_models_for_provider", invalidated.append)
+
+    assert routes.handle_post(object(), urlparse("/api/providers"))["ok"]
+    assert routes.handle_post(object(), urlparse("/api/providers/delete"))["ok"]
+    assert routes.handle_post(object(), urlparse("/api/providers/self-hosted"))["ok"]
+    assert invalidated == ["gpt", "gpt", "ollama"]
+
+
 def test_refresh_evicts_only_canonical_profile_provider_key(monkeypatch):
     import api.routes as routes
     import api.profiles as profiles
@@ -141,7 +171,7 @@ def test_ordinary_cache_clear_fences_unknown_in_flight_key(monkeypatch):
     assert routes._get_cached_live_models(key) is None
 
 
-def test_forced_empty_lookup_stays_uncached_and_retryable(monkeypatch):
+def test_forced_empty_lookup_stays_uncached_after_failure(monkeypatch):
     import api.routes as routes
 
     _install_provider_model_ids(monkeypatch, lambda provider, *, force_refresh=False: [])
@@ -151,15 +181,20 @@ def test_forced_empty_lookup_stays_uncached_and_retryable(monkeypatch):
     key = routes._live_models_cache_key("provider")
     assert result["models"] == []
     assert result["error"] == "live_models_unavailable"
-    assert key in routes._LIVE_MODELS_REFRESH_REQUIRED
+    assert key not in routes._LIVE_MODELS_REFRESH_REQUIRED
     assert routes._get_cached_live_models(key) is None
 
 
-def test_forced_lookup_exception_stays_required(monkeypatch):
+def test_failed_refresh_does_not_poison_ordinary_lookup(monkeypatch):
     import api.routes as routes
 
+    force_flags = []
+
     def provider_model_ids(provider, *, force_refresh=False):
-        raise RuntimeError("provider unavailable")
+        force_flags.append(force_refresh)
+        if force_refresh:
+            raise RuntimeError("provider unavailable")
+        return ["provider/static-after-failure"]
 
     _install_provider_model_ids(monkeypatch, provider_model_ids)
     _prepare(monkeypatch, routes)
@@ -168,7 +203,12 @@ def test_forced_lookup_exception_stays_required(monkeypatch):
     key = routes._live_models_cache_key("provider")
     assert result["models"] == []
     assert result["error"] == "live_models_unavailable"
-    assert key in routes._LIVE_MODELS_REFRESH_REQUIRED
+    assert key not in routes._LIVE_MODELS_REFRESH_REQUIRED
+    recovered = routes._handle_live_models(object(), urlparse("/api/models/live?provider=provider"))
+    assert recovered["models"] == [
+        {"id": "provider/static-after-failure", "label": "Static After Failure"}
+    ]
+    assert force_flags == [True, False]
 
 
 def test_forced_lookup_exception_uses_custom_live_fallback(monkeypatch):
@@ -333,9 +373,9 @@ globalThis.fetch = async () => {{
 }};
 globalThis.eval({json.dumps(bundle)});
 (async () => {{
-  await globalThis.runFetch('provider', null, null, {{required:true}});
+  await globalThis.runFetch('provider', {{}}, null, {{}});
   globalThis.S.activeProfile='profile-b';
-  await globalThis.runFetch('provider', null, null, {{required:true}});
+  await globalThis.runFetch('provider', {{}}, null, {{}});
   console.log(JSON.stringify({{calls, keys:Object.keys(globalThis._liveModelCache).sort()}}));
 }})();
 """

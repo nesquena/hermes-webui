@@ -14777,6 +14777,7 @@ def handle_post(handler, parsed) -> bool:
         result = set_provider_key(provider_id, api_key)
         if not result.get("ok"):
             return bad(handler, result.get("error", "Unknown error"))
+        _invalidate_live_models_for_provider(result.get("provider") or provider_id)
         return j(handler, result)
 
     if parsed.path == "/api/providers/delete":
@@ -14786,12 +14787,16 @@ def handle_post(handler, parsed) -> bool:
         result = remove_provider_key(provider_id)
         if not result.get("ok"):
             return bad(handler, result.get("error", "Unknown error"))
+        _invalidate_live_models_for_provider(result.get("provider") or provider_id)
         return j(handler, result)
 
     if parsed.path == "/api/providers/self-hosted":
         try:
             from api.onboarding import apply_self_hosted_provider_setup
-            return j(handler, apply_self_hosted_provider_setup(body))
+            result = apply_self_hosted_provider_setup(body)
+            if result.get("ok"):
+                _invalidate_live_models_for_provider(result.get("provider") or body.get("provider"))
+            return j(handler, result)
         except ValueError as exc:
             return bad(handler, str(exc), 400)
 
@@ -20466,6 +20471,8 @@ def _handle_live_models(handler, parsed):
             return j(handler, cached)
 
         def _finish(payload: dict):
+            if payload.get("error"):
+                return j(handler, payload)
             _set_cached_live_models(cache_key, payload, expected_generation)
             return j(handler, payload)
 
@@ -20695,6 +20702,8 @@ def _handle_live_models(handler, parsed):
         # Static fallback — only reached when live fetch also failed.
         if not ids:
             if refresh_required:
+                with _LIVE_MODELS_CACHE_LOCK:
+                    _LIVE_MODELS_REFRESH_REQUIRED.discard(cache_key)
                 return _finish({"error": "live_models_unavailable", "models": []})
             from api.config import _PROVIDER_MODELS as _pm
             ids = [m["id"] for m in _pm.get(provider, [])]
