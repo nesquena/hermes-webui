@@ -1136,22 +1136,52 @@ def read_body(handler) -> dict:
     The latter is required for bodies proxied by cloudflared / any HTTP/2 front
     end, which forward to the HTTP/1.1 origin without a Content-Length header.
 
-    Transfer-Encoding is parsed as comma-separated codings. chunked must be
-    the only coding; any other coding (gzip, deflate, or a lookalike such as
-    "xchunked") is rejected, since the server cannot decode it.
+    Transfer-Encoding is parsed as comma-separated codings, gathered across
+    every repeated Transfer-Encoding header line (an attacker cannot hide a
+    second coding in a duplicate header). chunked must be the only coding; any
+    other coding (gzip, deflate, or a lookalike such as "xchunked") is rejected,
+    since the server cannot decode it.
+
+    Ambiguous framing is refused outright: a request that carries BOTH
+    Transfer-Encoding and Content-Length is the classic CL.TE / TE.CL request-
+    smuggling vector, so it is rejected and the connection is closed even though
+    Transfer-Encoding would otherwise take precedence (RFC 9112 §6.1).
     """
-    transfer_encoding = handler.headers.get('Transfer-Encoding', '') or ''
-    if transfer_encoding:
-        codings = [token.strip().lower() for token in transfer_encoding.split(',') if token.strip()]
+    # Gather EVERY Transfer-Encoding header line, not just the first — a repeated
+    # or comma-split header must not let a hidden coding slip past the check.
+    te_values = []
+    try:
+        te_values = handler.headers.get_all('Transfer-Encoding') or []
+    except AttributeError:
+        _te_single = handler.headers.get('Transfer-Encoding')
+        if _te_single is not None:
+            te_values = [_te_single]
+    # An exactly-empty Transfer-Encoding header is still a present TE header and
+    # must not be silently treated as absent (smuggling desync). Treat any
+    # present TE header — empty or not — as "TE is in play".
+    te_present = len(te_values) > 0
+    if te_present:
+        codings = [
+            token.strip().lower()
+            for value in te_values
+            for token in (value or '').split(',')
+            if token.strip()
+        ]
         if not codings:
             handler.close_connection = True
             raise ValueError('Invalid Transfer-Encoding header')
+        # CL.TE / TE.CL smuggling guard: refuse a request that also carries a
+        # Content-Length, and close the connection so no trailing bytes can be
+        # replayed as a smuggled second request.
+        if handler.headers.get('Content-Length') is not None:
+            handler.close_connection = True
+            raise ValueError('Ambiguous framing: both Transfer-Encoding and Content-Length present')
         if codings[-1] != 'chunked':
             handler.close_connection = True
-            raise ValueError(f'Unsupported Transfer-Encoding: {transfer_encoding!r}')
+            raise ValueError(f'Unsupported Transfer-Encoding: {te_values!r}')
         if len(codings) > 1:
             handler.close_connection = True
-            raise ValueError(f'Unsupported Transfer-Encoding codings: {transfer_encoding!r}')
+            raise ValueError(f'Unsupported Transfer-Encoding codings: {te_values!r}')
         raw = _read_chunked_body(handler, MAX_BODY_BYTES)
         try:
             return _json.loads(raw)

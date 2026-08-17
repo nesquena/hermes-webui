@@ -309,6 +309,101 @@ def test_read_body_accepts_trailer_fields():
     assert handler.close_connection is False
 
 
+def _real_http_headers(pairs):
+    """Build a genuine http.client.HTTPMessage (what http.server hands the
+    handler) so get_all() repeated-header semantics are exercised for real."""
+    import http.client
+
+    msg = http.client.HTTPMessage()
+    for key, value in pairs:
+        msg[key] = value
+    return msg
+
+
+def test_read_body_rejects_content_length_and_transfer_encoding_together():
+    """CL.TE / TE.CL smuggling guard: a request carrying BOTH Content-Length
+    and Transfer-Encoding must be refused with the connection closed, so
+    trailing bytes cannot be replayed as a smuggled second request."""
+    from api.helpers import read_body
+
+    body = b'{"a": 1}'
+    chunked = b"8\r\n" + body + b"\r\n0\r\n\r\n"
+    handler = SimpleNamespace(
+        headers=_real_http_headers([("Transfer-Encoding", "chunked"), ("Content-Length", "8")]),
+        rfile=io.BytesIO(chunked),
+        close_connection=False,
+    )
+
+    with pytest.raises(ValueError, match="Ambiguous framing"):
+        read_body(handler)
+    assert handler.close_connection is True
+
+
+def test_read_body_rejects_duplicate_transfer_encoding_hiding_a_coding():
+    """A repeated Transfer-Encoding header must not let a non-chunked coding
+    slip past a .get()-only check. get_all() sees every line, so
+    'Transfer-Encoding: chunked' + 'Transfer-Encoding: gzip' is rejected."""
+    from api.helpers import read_body
+
+    handler = SimpleNamespace(
+        headers=_real_http_headers([("Transfer-Encoding", "chunked"), ("Transfer-Encoding", "gzip")]),
+        rfile=io.BytesIO(b"0\r\n\r\n"),
+        close_connection=False,
+    )
+
+    with pytest.raises(ValueError, match="Unsupported Transfer-Encoding"):
+        read_body(handler)
+    assert handler.close_connection is True
+
+
+def test_read_body_rejects_duplicate_te_chunked_then_chunked():
+    """Two Transfer-Encoding: chunked lines still collapse to >1 coding and are
+    rejected — multiple codings are never accepted even if all are 'chunked'."""
+    from api.helpers import read_body
+
+    handler = SimpleNamespace(
+        headers=_real_http_headers([("Transfer-Encoding", "chunked"), ("Transfer-Encoding", "chunked")]),
+        rfile=io.BytesIO(b"0\r\n\r\n"),
+        close_connection=False,
+    )
+
+    with pytest.raises(ValueError, match="Unsupported Transfer-Encoding codings"):
+        read_body(handler)
+    assert handler.close_connection is True
+
+
+def test_read_body_empty_transfer_encoding_header_is_not_treated_as_absent():
+    """An exactly-empty Transfer-Encoding header is still a present TE header;
+    it must take the TE path (and be rejected as having no valid coding) rather
+    than silently falling through to Content-Length parsing."""
+    from api.helpers import read_body
+
+    handler = SimpleNamespace(
+        headers=_real_http_headers([("Transfer-Encoding", ""), ("Content-Length", "2")]),
+        rfile=io.BytesIO(b"{}"),
+        close_connection=False,
+    )
+
+    # Present-but-empty TE with a Content-Length is ambiguous framing → rejected.
+    with pytest.raises(ValueError):
+        read_body(handler)
+    assert handler.close_connection is True
+
+
+def test_read_body_plain_content_length_still_works_with_real_headers():
+    """Non-chunked Content-Length requests remain unchanged with real headers."""
+    from api.helpers import read_body
+
+    handler = SimpleNamespace(
+        headers=_real_http_headers([("Content-Length", "8")]),
+        rfile=io.BytesIO(b'{"a": 1}'),
+        close_connection=False,
+    )
+
+    assert read_body(handler) == {"a": 1}
+    assert handler.close_connection is False
+
+
 def test_session_save_rejects_unsafe_session_id(tmp_path, monkeypatch):
     import api.models as models
 
