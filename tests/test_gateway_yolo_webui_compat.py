@@ -75,6 +75,40 @@ def test_approval_card_yolo_resumes_current_prompt_with_one_webui_request():
     assert result.returncode == 0, result.stderr
 
 
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_approval_card_yolo_marks_skip_all_busy_while_request_is_pending():
+    messages_js = (pathlib.Path(__file__).resolve().parents[1] / "static" / "messages.js").read_text()
+
+    script = "\n".join([
+        "const classes=()=>{const values=new Set();return {add:v=>values.add(v),remove:v=>values.delete(v),contains:v=>values.has(v)};};",
+        "const buttons=Object.fromEntries(['approvalBtnOnce','approvalBtnSession','approvalBtnAlways','approvalBtnDeny','approvalSkipAll'].map(id=>[id,{id,disabled:false,classList:classes()}]));",
+        "const card={classList:{contains:v=>v==='visible'}};",
+        "const $=id=>id==='approvalCard'?card:buttons[id];",
+        "const S={session:{session_id:'browser-session'}};",
+        "let _loadSessionGeneration=1; let _approvalSessionId='browser-session'; let _approvalCurrentId='approval-1';",
+        "let _approvalResponding=null; let _approvalClearedOwner=null; let _yoloEnabled=false; let finishRequest;",
+        "const _approvalPendingBySession=new Map([['browser-session',{pending:{approval_id:'approval-1'}}]]);",
+        "const api=async()=>await new Promise(resolve=>{finishRequest=resolve;});",
+        "const t=k=>k; const showToast=()=>{}; const setStatus=()=>{}; const _updateYoloPill=()=>{};",
+        "const _unmarkApprovalDismissed=()=>{}; const _clearApprovalPendingForSession=()=>{}; const hideApprovalCard=()=>{};",
+        _js_block(messages_js, "function _approvalMirrorOwnerFor(", "\nfunction showApprovalForSession"),
+        _js_block(messages_js, "function _applyApprovalYoloProjection(", "\nfunction toggleApprovalCardCollapsed"),
+        _js_block(messages_js, "async function respondApproval(", "\nfunction startApprovalPolling"),
+        _js_block(messages_js, "async function toggleYoloFromApproval(", "\n// ── Approval polling"),
+        "(async()=>{",
+        " const action=toggleYoloFromApproval();",
+        " if(!buttons.approvalSkipAll.disabled) throw new Error('clicked Skip all stayed enabled');",
+        " if(!buttons.approvalSkipAll.classList.contains('loading')) throw new Error('clicked Skip all lacks loading state');",
+        " if(buttons.approvalBtnOnce.classList.contains('loading')) throw new Error('Allow once incorrectly shows loading state');",
+        " for(const button of Object.values(buttons)){if(!button.disabled) throw new Error(button.id+' stayed enabled');}",
+        " finishRequest({ok:true,yolo_enabled:true});",
+        " if(!(await action)) throw new Error('action failed');",
+        "})().catch(e=>{console.error(e.stack||e);process.exit(1)});",
+    ])
+    result = subprocess.run([shutil.which("node"), "-e", script], text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+
+
 @pytest.mark.skipif(not APPROVAL_AVAILABLE, reason="tools.approval unavailable")
 def test_card_yolo_drains_all_already_parked_local_approvals(monkeypatch):
     from api import routes
