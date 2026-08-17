@@ -672,8 +672,24 @@ def _is_fallback_lifecycle_message(kind: str, message: str) -> bool:
             or 'falling back' in m
             or 'fallback activated' in m
             or 'trying fallback' in m
+            or 'switched to fallback model:' in m
         )
     )
+
+
+def _is_effective_fallback_lifecycle_message(kind: str, message: str) -> bool:
+    """Return True only after Hermes has durably installed a fallback runtime.
+
+    Retry notices such as ``trying fallback`` and ``switching to fallback`` are
+    emitted before activation and may still recover on the primary.  Hermes
+    emits the one-shot ``Switched to fallback model: ...`` lifecycle notice
+    after it has replaced ``agent.model``, ``agent.provider`` and
+    ``agent.reasoning_config``.  Only that post-activation notice is safe to use
+    as the trigger for replacing live effective-run metadata.
+    """
+    k = str(kind or '').strip().lower()
+    m = str(message or '').strip().lower()
+    return k == 'lifecycle' and 'switched to fallback model:' in m
 
 
 def _is_agent_compression_start_status(kind: str, message: str) -> bool:
@@ -2623,6 +2639,43 @@ def _effective_reasoning_effort_label(agent, fallback_config=None):
         return 'off'
     effort = str(cfg.get('effort') or '').strip().lower()
     return effort or None
+
+
+def _effective_run_meta_payload(agent, session_id):
+    """Build the live metadata payload from the runtime currently on *agent*."""
+    return {
+        'session_id': session_id,
+        'model': getattr(agent, 'model', None),
+        'provider': getattr(agent, 'provider', None),
+        'reasoning_effort': _effective_reasoning_effort_label(agent),
+    }
+
+
+def _bridge_fallback_lifecycle_status(
+    kind,
+    message,
+    *,
+    agent,
+    session_id,
+    put,
+    emit_effective_run_meta=None,
+):
+    """Bridge fallback lifecycle status to warning and effective live metadata.
+
+    All recognized retry/fallback lifecycle lines remain user-visible warnings.
+    A replacement ``run_meta`` is emitted only for Hermes' post-activation
+    success notice, never for speculative retry chatter.
+    """
+    text = str(message or '').strip()
+    if not text or not _is_fallback_lifecycle_message(kind, text):
+        return False
+    put('warning', {'type': 'fallback', 'message': text})
+    if _is_effective_fallback_lifecycle_message(kind, text):
+        if emit_effective_run_meta is not None:
+            emit_effective_run_meta()
+        else:
+            put('run_meta', _effective_run_meta_payload(agent, session_id))
+    return True
 
 
 def _extract_gateway_routing_metadata(agent, result, requested_model=None, requested_provider=None):
@@ -9113,14 +9166,7 @@ def _run_agent_streaming(
         Missing values stay missing; consumers must not infer an effective
         value from the originally requested session settings.
         """
-        _effective_model = getattr(agent, 'model', None)
-        _effective_effort = _effective_reasoning_effort_label(agent)
-        put('run_meta', {
-            'session_id': session_id,
-            'model': _effective_model,
-            'provider': getattr(agent, 'provider', None),
-            'reasoning_effort': _effective_effort,
-        })
+        put('run_meta', _effective_run_meta_payload(agent, session_id))
 
     def _agent_status_callback(kind, message):
         """Bridge Agent lifecycle status into WebUI SSE.
@@ -9153,14 +9199,14 @@ def _run_agent_streaming(
             return
         # Pass through rate-limit and fallback messages so the frontend can
         # show them as warnings via the existing messages.js 'warning' listener.
-        _is_fallback_notice = _is_fallback_lifecycle_message(_kind, _message)
-        if _is_fallback_notice:
-            put('warning', {'type': 'fallback', 'message': _message})
-            # The agent has already installed the fallback model and its
-            # resolved reasoning config when it emits this lifecycle notice.
-            # Replace the initial run metadata now so live and replayed footers
-            # never keep showing the pre-fallback values.
-            _emit_effective_run_meta()
+        _bridge_fallback_lifecycle_status(
+            _kind,
+            _message,
+            agent=agent,
+            session_id=session_id,
+            put=put,
+            emit_effective_run_meta=_emit_effective_run_meta,
+        )
 
     # xsession wakeup misroute root fix (Option 1): pre-init so the outer
     # finally can always reset even if an exception fires before the bind.

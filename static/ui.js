@@ -12492,6 +12492,11 @@ function _transparentTurnMetaMessage(turn){
   }
   return fallback;
 }
+function _transparentTurnFooterOwnsSettledMeta(turn){
+  if(!turn||!isTransparentStream())return false;
+  const blocks=_assistantTurnBlocks(turn);
+  return !!(blocks&&blocks.querySelector(':scope > .transparent-event-row'));
+}
 // ── Transparent turn footer (elapsed · tokens · TTFT · status) ───────────
 // Mirrors the live run-status line for settled turns in transparent
 // mode. Shows duration, first-token time, token usage, and final status.
@@ -17920,10 +17925,10 @@ function renderMessages(options){
       // the turn has transparent event rows — skip the generic chip there so
       // exactly one model label renders per turn. Model sits after duration to
       // match the transparent footer order (elapsed · model · …).
-      const _transparentFooterOwnsModel=usedModelText&&isTransparentStream()&&row&&(()=>{
-        const blocks=_assistantTurnBlocks(row);
-        return !!(blocks&&blocks.querySelector(':scope > .transparent-event-row'));
-      })();
+      const _transparentFooterOwnsSettledMeta=
+        (usedModelText||effortText)&&_transparentTurnFooterOwnsSettledMeta(row);
+      const _transparentFooterOwnsModel=usedModelText&&_transparentFooterOwnsSettledMeta;
+      const _transparentFooterOwnsEffort=effortText&&_transparentFooterOwnsSettledMeta;
       if(usedModelText&&!_transparentFooterOwnsModel){
         const usedModel=document.createElement('span');
         usedModel.className='msg-used-model-inline';
@@ -17933,7 +17938,7 @@ function renderMessages(options){
         if(usedModelFull&&usedModelFull!==usedModelText) usedModel.title=usedModelFull;
         fragments.push(usedModel);
       }
-      if(effortText){
+      if(effortText&&!_transparentFooterOwnsEffort){
         const effort=document.createElement('span');
         effort.className='msg-reasoning-inline';
         effort.textContent=effortText;
