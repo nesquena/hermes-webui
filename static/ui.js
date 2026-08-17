@@ -13872,11 +13872,30 @@ function _refreshTransparentFadeProseRow(existing, node, preservedState){
       // The streaming parser holds a pending tail, so the adopted DOM can lag
       // the source text. When the rendered text is a strict prefix of the
       // source (plain prose), resume the cursor from it so the held-back
-      // characters arrive with the next delta instead of being dropped;
-      // otherwise (markdown: rendered text diverges from source) keep the
-      // full source-space cursor — the append contract stays source-space.
+      // characters arrive with the next delta instead of being dropped.
       const renderedNow = String(body.textContent || '');
-      if(renderedNow && nextText.startsWith(renderedNow)) resumeCursor = renderedNow;
+      if(renderedNow && nextText.startsWith(renderedNow)){
+        resumeCursor = renderedNow;
+      }else{
+        // Markdown (Greptile P1 follow-up): rendered text diverges from the
+        // source, so the rendered-prefix resume above cannot apply — but the
+        // cloned DOM still lags the source by the parser's held-back tail. A
+        // full source-length cursor would make the next reconciliation append
+        // nothing and the pending characters vanish until settlement. The
+        // parser state is bound on the incremental node's body by
+        // _smdBindParserIdentity (messages.js), and `pending`/`text` are its
+        // unrendered source-space buffers (`text` is flushed at the end of
+        // every parser_write; read defensively anyway). Trim the cursor by
+        // exactly that held-back length so the cursor matches what the clone
+        // actually renders and the tail re-appends with the next delta.
+        const liveParser = candidateBody.__smdParser;
+        const heldLen = liveParser
+          ? String(liveParser.pending || '').length + String(liveParser.text || '').length
+          : 0;
+        if(heldLen > 0 && heldLen <= nextText.length){
+          resumeCursor = nextText.slice(0, nextText.length - heldLen);
+        }
+      }
     }else{
       body.textContent = '';
       _appendTransparentFadeText(body, nextText);

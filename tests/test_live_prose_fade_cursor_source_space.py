@@ -358,14 +358,20 @@ process.stdout.write(JSON.stringify({
 # way production wires it (window.__streamFadeMuteRenderedPrefix).
 _REBUILD_PRELUDE = """
 const messagesSrc = readFileSync(process.env.MESSAGES_JS_PATH, 'utf8');
-(0, eval)(extractConst('_TRANSPARENT_FADE_BLOCK_TAGS'));
-(0, eval)(extractFunc('_transparentFadeAppendTarget'));
-(0, eval)(extractFunc('_bindTransparentFadeCleanup'));
-(0, eval)(extractFunc('_appendTransparentFadeText'));
-(0, eval)(extractFunc('_transparentLiveRowAttributePairs'));
-(0, eval)(extractFunc('_transparentLiveRowInteractiveState'));
-(0, eval)(extractFunc('_rehydrateTransparentLiveRow'));
-(0, eval)(extractFunc('_refreshTransparentFadeProseRow'));
+// Single combined eval: sloppy-mode indirect eval hoists function declarations
+// to the global object but discards top-level `const` bindings after the call,
+// so _TRANSPARENT_FADE_BLOCK_TAGS must be evaluated in the SAME eval as the
+// functions that close over it (_transparentFadeAppendTarget).
+(0, eval)([
+  extractConst('_TRANSPARENT_FADE_BLOCK_TAGS'),
+  extractFunc('_transparentFadeAppendTarget'),
+  extractFunc('_bindTransparentFadeCleanup'),
+  extractFunc('_appendTransparentFadeText'),
+  extractFunc('_transparentLiveRowAttributePairs'),
+  extractFunc('_transparentLiveRowInteractiveState'),
+  extractFunc('_rehydrateTransparentLiveRow'),
+  extractFunc('_refreshTransparentFadeProseRow'),
+].join('\\n'));
 (0, eval)(extractFuncFrom(messagesSrc, '_streamFadeMuteRenderedPrefix'));
 globalThis.window.__streamFadeMuteRenderedPrefix = globalThis._streamFadeMuteRenderedPrefix;
 if(typeof window.__streamFadeMuteRenderedPrefix !== 'function'){
@@ -508,12 +514,16 @@ smd.parser_write(parser, SOURCE.slice(0, 10));
 const prevRendered = body.textContent;
 
 // Candidate: the incremental node fed the FULL source through the real
-// streaming-markdown parser (still live, deliberately not ended).
+// streaming-markdown parser (still live, deliberately not ended). Production
+// binds the parser on the body via _smdBindParserIdentity (messages.js), and
+// the cursor fix reads the held-back tail from that binding.
 const candidate = makeRow(SOURCE);
 const candidateBody = candidate.querySelector('.msg-body');
 const candidateParser = smd.parser(smd.default_renderer(candidateBody));
 smd.parser_write(candidateParser, SOURCE);
+candidateBody.__smdParser = candidateParser;
 const candidateRendered = candidateBody.textContent;
+const pendingTail = String(candidateParser.pending || '') + String(candidateParser.text || '');
 
 _refreshTransparentFadeProseRow(existing, candidate, null);
 
@@ -523,6 +533,7 @@ const strong = findTag(refreshedBody, 'STRONG');
 process.stdout.write(JSON.stringify({
   prevRendered,
   candidateRendered,
+  pendingTail,
   finalText: refreshedBody.textContent,
   hasLink: !!link,
   linkText: link ? link.textContent : null,
@@ -546,6 +557,90 @@ process.stdout.write(JSON.stringify({
     assert "**" not in data["finalText"]
     assert "](" not in data["finalText"]
     assert data["finalText"] == data["candidateRendered"]
-    # Rendered text diverges from source here, so the cursor must stay in
-    # source space (the append contract of the cursor branch).
-    assert data["cursor"] == md_source
+    # Rendered text diverges from source here, so the cursor stays in source
+    # space — but trimmed by the parser's held-back tail (Greptile P1
+    # follow-up), so it matches what the adopted DOM actually renders.
+    assert data["pendingTail"] == "."
+    assert data["cursor"] == md_source[: -len(data["pendingTail"])]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_live_prose_rebuild_cursor_excludes_parser_pending_tail():
+    """Greptile P1 follow-up: on a cursorless markdown rebuild the adopted DOM
+    lags the source by the parser's pending tail. The resume cursor must match
+    the adopted content — not the full source length — so the next
+    reconciliation re-appends the held-back text before settlement."""
+    md_source = "Voici **un** [lien](https://example.com) super."
+    script = (
+        _HARNESS
+        + _REBUILD_PRELUDE
+        + """
+const smd = await import(process.env.SMD_PATH);
+
+const SOURCE = %s;
+
+// Existing row: cursorless, the parser has only seen a prefix of the source.
+const existing = makeRow(undefined);
+delete existing.dataset.rawText;
+const body = existing.querySelector('.msg-body');
+const parser = smd.parser(smd.default_renderer(body));
+smd.parser_write(parser, SOURCE.slice(0, 8));
+
+// Candidate: the persistent incremental node, full source written, parser
+// still live (not ended) and bound on the body exactly like
+// _smdBindParserIdentity does in production.
+const candidate = makeRow(SOURCE);
+const candidateBody = candidate.querySelector('.msg-body');
+const candidateParser = smd.parser(smd.default_renderer(candidateBody));
+smd.parser_write(candidateParser, SOURCE);
+candidateBody.__smdParser = candidateParser;
+const pendingTail = String(candidateParser.pending || '') + String(candidateParser.text || '');
+const candidateRendered = candidateBody.textContent;
+
+// First reconciliation: cursorless rebuild adopts the cloned parsed DOM.
+_refreshTransparentFadeProseRow(existing, candidate, null);
+const afterRebuildText = existing.querySelector('.msg-body').textContent;
+const afterRebuildCursor = existing.getAttribute('data-stream-fade-text');
+
+// Next reconciliation of the SAME live row (no new source text needed — the
+// scene re-renders every frame). With a correct cursor this appends the
+// held-back tail; with a full source-length cursor it appends nothing and the
+// pending text stays missing until settlement.
+_refreshTransparentFadeProseRow(existing, candidate, null);
+const afterResumeBody = existing.querySelector('.msg-body');
+
+process.stdout.write(JSON.stringify({
+  pendingTail,
+  candidateRendered,
+  afterRebuildText,
+  afterRebuildCursor,
+  afterResumeText: afterResumeBody.textContent,
+  afterResumeCursor: existing.getAttribute('data-stream-fade-text'),
+}));
+"""
+        % json.dumps(md_source)
+    )
+    data = _run_node_module(script)
+
+    # Precondition: the live parser really holds a non-empty pending tail, and
+    # the adopted DOM therefore lags the source text.
+    assert data["pendingTail"], "expected the streaming parser to hold a pending tail"
+    assert data["pendingTail"] == "."
+    assert data["afterRebuildText"] == data["candidateRendered"]
+    assert not data["afterRebuildText"].endswith(data["pendingTail"])
+
+    # The fix under test: the resume cursor matches the adopted content, i.e.
+    # source minus the parser's held-back tail — not the full source length.
+    assert data["afterRebuildCursor"] == md_source[: -len(data["pendingTail"])], (
+        "resumeCursor must exclude the parser's pending tail; got "
+        f"{data['afterRebuildCursor']!r}"
+    )
+
+    # Regression: the next reconciliation re-appends the pending text, so it is
+    # visible in the live row BEFORE settlement.
+    assert data["afterResumeText"] == data["candidateRendered"] + data["pendingTail"], (
+        "pending text never reached the live row: "
+        f"{data['afterResumeText']!r}"
+    )
+    assert data["afterResumeText"].endswith("super.")
+    assert data["afterResumeCursor"] == md_source
