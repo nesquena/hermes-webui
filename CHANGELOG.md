@@ -5,6 +5,12 @@
 
 ### Fixed
 
+- **Cancelling runs are no longer reattached on recovery.** A background run in the middle of cancellation could be resurrected by a reconnect/recovery reattach, producing a dying run that could double-deliver or churn. Recovery paths now exclude runs whose phase is `cancelling` (they stay busy but are not reattached), while genuinely-live runs still reattach; stale-cancelling reclamation is bounded (age ≥ 180s and absent from active streams) and idempotent. Thanks @allenliang2022. (#7096)
+
+- **GPT-5.6 models expose their full reasoning range.** The four GPT-5.6 model IDs support the `max` reasoning-effort level, but the capability filter capped them below that. The ceiling is now lifted for exactly those IDs on the OpenAI-family lanes (older GPT-5 and o-series ceilings unchanged), and `max` is offered only when the authoritative configured/live catalog includes it. Thanks @boudywho. (#7083)
+
+- **Test suite: two model-catalog tests are now order-independent.** `test_mtime_invalidation` depended on sibling-test cache state and `test_glm_5_3_in_models_payload_for_zai_provider` depended on the installed agent-core catalog version, so both failed spuriously under isolation/sharding. They now set up their own preconditions. Thanks @webtecnica. (#7101)
+
 - **Binary files in the workspace no longer truncate when served on Windows.** The shared anchored file-open helper omitted the platform's `O_BINARY` flag, so on Windows a binary workspace file (video, image, archive) was read in text mode and truncated at its first `0x1A` (Ctrl-Z) byte — a 5.2 MB video could arrive as a few hundred bytes, breaking Range requests and playback. Non-directory anchored opens now set `O_BINARY` where the platform provides it (a no-op on Linux/macOS). Thanks @allenliang2022. (#7077)
 
 - **Unstyled native form controls now use the UI font.** Bare `button`, `input`, `select`, and `textarea` elements fell back to the browser default font instead of the app's UI font, and the markdown table filter lost the UI font after its `font: inherit` shorthand. Both now route through `--font-ui`; mono, conversation, and skin-scoped controls are unchanged. Thanks @starship-s. (#6871)
