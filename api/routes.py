@@ -18239,7 +18239,7 @@ def _handle_session_run_journal_stream_for_session(handler, parsed, session_id):
                 else:
                     event, data = item
                     queued_event_id = STREAM_LAST_EVENT_ID.get(active_stream_id)
-                event_id = queued_event_id or STREAM_LAST_EVENT_ID.get(active_stream_id)
+                event_id = queued_event_id if has_queued_event_id else STREAM_LAST_EVENT_ID.get(active_stream_id)
                 event_seq = _run_journal_same_run_seq(event_id, active_stream_id)
                 _is_terminal = event in SSE_RELAY_CLOSE_EVENTS
                 _already_sent = (
@@ -18259,7 +18259,7 @@ def _handle_session_run_journal_stream_for_session(handler, parsed, session_id):
                     _sse_with_id(handler, event, data, event_id)
                     note_sent_event_id(event_id)
                 else:
-                    _sse(handler, event, data)
+                    _sse_with_reset_id(handler, event, data)
                 if _is_terminal:
                     break
         except _CLIENT_DISCONNECT_ERRORS:

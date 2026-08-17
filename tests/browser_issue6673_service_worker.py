@@ -52,8 +52,7 @@ def _emit(page, event_id: str | None = None) -> None:
     page.evaluate("""
       eventId => {
         const payload = JSON.stringify({description:'Approve the tool call.', session_id:'session-6673'});
-        if (eventId === null) window.__issue6673Source.emit('approval', payload);
-        else window.__issue6673Source.emit('approval', payload, eventId);
+        window.__issue6673Source.emit('approval', payload, eventId === null ? '' : eventId);
       }
     """, event_id)
 
@@ -92,6 +91,13 @@ def _listen(page) -> None:
         window.EventSource = BoundaryEventSource;
         window._notificationsEnabled = true;
         window.__hermesSetBackgrounded(true);
+        const originalSend = window._sendStreamNotification;
+        window.__issue6673IdentityObservations = [];
+        window._sendStreamNotification = (...args) => {
+          const identity = args[2];
+          window.__issue6673IdentityObservations.push(identity ? identity.lastEventId : null);
+          return originalSend(...args);
+        };
         S.session = {...(S.session || {}), session_id:'session-6673'};
         attachLiveStream('session-6673', 'stream-6673');
       }
@@ -136,6 +142,8 @@ def main() -> int:
         direct_before_no_id = page_a.evaluate("() => window.__issue6673DirectCount")
         _emit(page_a, None)
         page_a.wait_for_function("count => window.__issue6673DirectCount > count", arg=direct_before_no_id, timeout=10000)
+        if page_a.evaluate("() => window.__issue6673IdentityObservations.at(-1)") is not None:
+            raise AssertionError(page_a.evaluate("() => window.__issue6673IdentityObservations"))
         context.unroute("**/sw.js")
         page_a.evaluate("""
           () => {

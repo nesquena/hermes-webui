@@ -9121,8 +9121,8 @@ function _notificationOptions(body,options={}){
 }
 const _NOTIFICATION_IDENTITY_MAX_LENGTH=512;
 function _captureNotificationEventIdentity(streamId,event){
-  const lastEventId=String(event&&event.lastEventId||'').trim();
-  if(!streamId||!lastEventId||lastEventId.length>_NOTIFICATION_IDENTITY_MAX_LENGTH) return null;
+  const lastEventId=String(event&&event.lastEventId||'');
+  if(!streamId||!lastEventId.trim()||lastEventId.length>_NOTIFICATION_IDENTITY_MAX_LENGTH) return null;
   return {streamId:String(streamId),lastEventId};
 }
 function _sendStreamNotification(title,body,eventIdentity,options={}){

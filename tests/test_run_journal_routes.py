@@ -169,6 +169,71 @@ def test_active_stream_replay_uses_snapshot_cutoff_and_skips_duplicate_queue_ite
     assert stream.unsubscribed is True
 
 
+def test_session_stream_journal_less_queue_item_resets_eventsource_identity(monkeypatch):
+    import api.routes as routes
+
+    class FakeStream:
+        def __init__(self):
+            self.q = queue.Queue()
+            self.q.put_nowait(("approval", {"description": "journaled"}, "session-run:1"))
+            self.q.put_nowait(("approval", {"description": "journal-less"}, None))
+            self.q.put_nowait(("stream_end", {}, "session-run:2"))
+            self.unsubscribed = False
+
+        def subscribe_with_snapshot(self):
+            return self.q, {"last_event_id": "session-run:1", "offline_buffered_events": 3}
+
+        def unsubscribe(self, q):
+            self.unsubscribed = q is self.q
+
+    class Handler:
+        def __init__(self):
+            self.headers = {}
+            self.wfile = io.BytesIO()
+
+        def send_response(self, _code):
+            pass
+
+        def send_header(self, _name, _value):
+            pass
+
+        def end_headers(self):
+            pass
+
+    handler = Handler()
+    stream = FakeStream()
+    monkeypatch.setattr(routes, "_session_id_visible_to_request_profile", lambda *_args: True)
+    monkeypatch.setattr(routes, "get_session", lambda *_args, **_kwargs: SimpleNamespace(session_id="session-1"))
+    monkeypatch.setattr(routes, "_session_events_resume_event_id", lambda *_args: None)
+    monkeypatch.setattr(routes, "session_journal_fingerprint", lambda *_args: "baseline")
+    monkeypatch.setattr(routes, "_active_run_stream_for_session", lambda *_args: "session-run")
+    monkeypatch.setattr(routes, "_sse_set_write_deadline", lambda *_args: None)
+    previous_streams = dict(routes.STREAMS)
+    previous_last_ids = dict(routes.STREAM_LAST_EVENT_ID)
+    routes.STREAMS.clear()
+    routes.STREAMS["session-run"] = stream
+    routes.STREAM_LAST_EVENT_ID.clear()
+    routes.STREAM_LAST_EVENT_ID["session-run"] = "session-run:1"
+    try:
+        routes._handle_session_run_journal_stream_for_session(
+            handler,
+            urlparse("/api/sessions/session-1/events"),
+            "session-1",
+        )
+    finally:
+        routes.STREAMS.clear()
+        routes.STREAMS.update(previous_streams)
+        routes.STREAM_LAST_EVENT_ID.clear()
+        routes.STREAM_LAST_EVENT_ID.update(previous_last_ids)
+
+    frames = [frame for frame in handler.wfile.getvalue().decode("utf-8").split("\n\n") if frame]
+    assert sum(frame.count("event: approval\n") for frame in frames) == 2
+    assert "id: session-run:1\n" in frames[0]
+    assert frames[1].startswith("id:\n")
+    assert "id: session-run:1\n" not in frames[1]
+    assert stream.unsubscribed is True
+
+
 def test_active_stream_snapshot_keeps_items_for_new_run_with_same_seq_range(monkeypatch):
     import api.routes as routes
 

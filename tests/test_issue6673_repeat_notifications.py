@@ -21,6 +21,24 @@ def test_identity_capture_uses_only_canonical_journal_ids():
     assert "lastEventId.length>_NOTIFICATION_IDENTITY_MAX_LENGTH" in capture
 
 
+def test_identity_capture_preserves_opaque_event_id_bytes():
+    node = shutil.which("node")
+    if node is None:
+        return
+    capture = extract_function(MESSAGES_JS, "_captureNotificationEventIdentity")
+    script = f"""
+const _NOTIFICATION_IDENTITY_MAX_LENGTH = 512;
+const capture = {capture};
+console.log(JSON.stringify(capture('stream-6673', {{lastEventId:' opaque-event '}})));
+"""
+    result = subprocess.run([node, "-e", script], cwd=ROOT, text=True, capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "streamId": "stream-6673",
+        "lastEventId": " opaque-event ",
+    }
+
+
 def test_page_notification_path_has_no_claim_ledger_and_keeps_delivery_fallback():
     assert "indexedDB.open(" not in MESSAGES_JS
     assert "hermes.notification.present" in MESSAGES_JS
@@ -47,8 +65,11 @@ def test_notification_present_protocol_carries_canonical_event_data():
 
 def test_journal_less_sse_frames_reset_sticky_eventsource_ids():
     assert "def _sse_with_reset_id" in ROUTES_PY
-    assert "event_id = queued_event_id if has_queued_event_id else" in ROUTES_PY
-    assert "_sse_with_reset_id(handler, event, data)" in ROUTES_PY
+    session_start = ROUTES_PY.index("def _handle_session_run_journal_stream_for_session")
+    session_end = ROUTES_PY.find("\ndef ", session_start + 1)
+    session_handler = ROUTES_PY[session_start:session_end if session_end >= 0 else None]
+    assert "event_id = queued_event_id if has_queued_event_id else" in session_handler
+    assert "_sse_with_reset_id(handler, event, data)" in session_handler
 
 
 def test_worker_presentation_queues_release_settled_tag_state():
