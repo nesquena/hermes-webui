@@ -45,6 +45,7 @@ def _run_node_module(script):
     env = os.environ.copy()
     env["UI_JS_PATH"] = str(ROOT / "static" / "ui.js")
     env["SMD_PATH"] = str(ROOT / "static" / "vendor" / "smd.min.js")
+    env["MESSAGES_JS_PATH"] = str(ROOT / "static" / "messages.js")
     result = subprocess.run(
         [NODE, "--input-type=module", "-e", script],
         env=env,
@@ -62,24 +63,26 @@ def _run_node_module(script):
 _HARNESS = r"""
 import { readFileSync } from 'node:fs';
 const src = readFileSync(process.env.UI_JS_PATH, 'utf8');
-function extractFunc(name){
+function extractFuncFrom(source, name){
   const marker = new RegExp('function\\s+' + name + '\\s*\\(');
-  const start = src.search(marker);
+  const start = source.search(marker);
   if(start < 0) throw new Error(name + ' not found');
-  let i = src.indexOf('{', start) + 1;
+  let i = source.indexOf('{', start) + 1;
   let depth = 1;
-  while(depth > 0 && i < src.length){
-    if(src[i] === '{') depth += 1;
-    else if(src[i] === '}') depth -= 1;
+  while(depth > 0 && i < source.length){
+    if(source[i] === '{') depth += 1;
+    else if(source[i] === '}') depth -= 1;
     i += 1;
   }
-  return src.slice(start, i);
+  return source.slice(start, i);
 }
+function extractFunc(name){ return extractFuncFrom(src, name); }
 const BLOCK_TAGS = new Set(['P','DIV','H1','H2','H3','H4','H5','H6','BLOCKQUOTE','LI','UL','OL','PRE','TABLE']);
 class TextNode {
   constructor(t){ this.nodeType = 3; this.tagName = '#text'; this._t = String(t); this.parentNode = null; this.childNodes = []; }
   get textContent(){ return this._t; }
   set textContent(v){ this._t = String(v); }
+  cloneNode(){ return new TextNode(this._t); }
 }
 function extractConst(name){
   const marker = new RegExp('const\\s+' + name + '\\s*=');
@@ -141,6 +144,14 @@ class FakeElement {
   removeAttribute(name){ delete this.attributes[String(name)]; }
   getAttributeNames(){ return Object.keys(this.attributes); }
   addEventListener(){}
+  cloneNode(deep){
+    const copy = new FakeElement(this.tagName);
+    copy._classes = new Set(this._classes);
+    for(const k of Object.keys(this.attributes)) copy.attributes[k] = this.attributes[k];
+    for(const k of Object.keys(this.dataset)) copy.dataset[k] = this.dataset[k];
+    if(deep) this.childNodes.forEach(c=>copy.appendChild(c.cloneNode(true)));
+    return copy;
+  }
   querySelector(sel){
     const want = String(sel).split(',')[0].trim().replace(/^\./, '');
     const walk = (node)=>{
@@ -340,3 +351,201 @@ process.stdout.write(JSON.stringify({
     assert data["spanTexts"] == ["old", "new"]
     # Node identity of already-faded words must survive (scroll-anchor stability).
     assert data["oldSpanPreserved"] is True
+
+
+# Shared eval preamble for the rebuild-branch tests: real ui.js reconciler
+# functions plus the real messages.js mute helper, wired to window exactly the
+# way production wires it (window.__streamFadeMuteRenderedPrefix).
+_REBUILD_PRELUDE = """
+const messagesSrc = readFileSync(process.env.MESSAGES_JS_PATH, 'utf8');
+(0, eval)(extractConst('_TRANSPARENT_FADE_BLOCK_TAGS'));
+(0, eval)(extractFunc('_transparentFadeAppendTarget'));
+(0, eval)(extractFunc('_bindTransparentFadeCleanup'));
+(0, eval)(extractFunc('_appendTransparentFadeText'));
+(0, eval)(extractFunc('_transparentLiveRowAttributePairs'));
+(0, eval)(extractFunc('_transparentLiveRowInteractiveState'));
+(0, eval)(extractFunc('_rehydrateTransparentLiveRow'));
+(0, eval)(extractFunc('_refreshTransparentFadeProseRow'));
+(0, eval)(extractFuncFrom(messagesSrc, '_streamFadeMuteRenderedPrefix'));
+globalThis.window.__streamFadeMuteRenderedPrefix = globalThis._streamFadeMuteRenderedPrefix;
+if(typeof window.__streamFadeMuteRenderedPrefix !== 'function'){
+  throw new Error('messages.js must export _streamFadeMuteRenderedPrefix on window');
+}
+function makeRow(rawText){
+  const row = new FakeElement('div');
+  row.className = 'assistant-segment transparent-event-row';
+  row.setAttribute('data-anchor-row-role', 'prose');
+  row.setAttribute('data-anchor-row-id', 'live-prose-row');
+  row.setAttribute('data-anchor-source-event-type', 'process_prose');
+  if(rawText !== undefined) row.dataset.rawText = rawText;
+  const rowBody = new FakeElement('div');
+  rowBody.className = 'msg-body stream-fade-active';
+  row.appendChild(rowBody);
+  return row;
+}
+function collectFadeSpans(root){
+  const out = [];
+  const walk = (node)=>{
+    for(const c of node.childNodes || []){
+      if(c.nodeType !== 1) continue;
+      if(c._classes && c._classes.has('stream-fade-word')){
+        out.push({ text: c.textContent, isNew: c._classes.has('is-new') });
+      }
+      walk(c);
+    }
+  };
+  walk(root);
+  return out;
+}
+function findTag(root, tag){
+  for(const c of root.childNodes || []){
+    if(c.nodeType !== 1) continue;
+    if(c.tagName === tag) return c;
+    const hit = findTag(c, tag);
+    if(hit) return hit;
+  }
+  return null;
+}
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_live_prose_rebuild_mutes_already_rendered_prefix():
+    """#7082 review should-fix: the no-cursor rebuild must not re-animate the
+    already-rendered prefix. Only genuinely-new tail words keep ``.is-new``."""
+    script = (
+        _HARNESS
+        + _REBUILD_PRELUDE
+        + """
+const smd = await import(process.env.SMD_PATH);
+
+const FIRST = %s;
+const SECOND = %s;
+const FULL = FIRST + SECOND;
+
+// Existing row: incrementally built by the real parser, no cursor attribute.
+const existing = makeRow(undefined);
+delete existing.dataset.rawText;
+const body = existing.querySelector('.msg-body');
+const parser = smd.parser(smd.default_renderer(body));
+smd.parser_write(parser, FIRST);
+smd.parser_write(parser, SECOND.slice(0, 4));
+const prevRendered = body.textContent;
+
+// Candidate: the incremental fade node's parsed body — a <p> whose words are
+// wrapped as fade spans, all `.is-new` (worst case: a rewind rebuild of the
+// incremental node re-wrapped every word).
+const candidate = makeRow(FULL);
+const candidateBody = candidate.querySelector('.msg-body');
+const p = new FakeElement('p');
+candidateBody.appendChild(p);
+const words = FULL.split(' ');
+words.forEach((word, i)=>{
+  const span = new FakeElement('span');
+  span.className = 'stream-fade-word is-new';
+  span.textContent = word;
+  p.appendChild(span);
+  if(i < words.length - 1) p.appendChild(new TextNode(' '));
+});
+
+_refreshTransparentFadeProseRow(existing, candidate, null);
+
+const refreshedBody = existing.querySelector('.msg-body');
+process.stdout.write(JSON.stringify({
+  prevRendered,
+  finalText: refreshedBody.textContent,
+  spans: collectFadeSpans(refreshedBody),
+  cursor: existing.getAttribute('data-stream-fade-text'),
+  candidateBodyIntact: candidateBody.childNodes.length === 1 && candidateBody.childNodes[0] === p,
+}));
+"""
+        % (json.dumps(FIRST_DELTA), json.dumps(SECOND_DELTA))
+    )
+    data = _run_node_module(script)
+
+    assert data["finalText"] == FULL_TEXT
+    assert data["cursor"] == FULL_TEXT
+    spans = data["spans"]
+    assert [s["text"] for s in spans] == FULL_TEXT.split(" ")
+    # Words inside the previously-rendered prefix must NOT replay their fade …
+    prev = data["prevRendered"]
+    consumed = 0
+    for span in spans:
+        starts_in_prefix = consumed < len(prev)
+        if starts_in_prefix:
+            assert span["isNew"] is False, (
+                f"already-rendered word {span['text']!r} would replay its fade "
+                f"(prefix was {prev!r})"
+            )
+        consumed += len(span["text"]) + 1  # word + following space
+    # … while genuinely-new tail words still animate.
+    assert spans[-1]["isNew"] is True
+    muted = [s for s in spans if not s["isNew"]]
+    assert muted, "expected at least one muted already-rendered word"
+    # The persistent incremental node (parser-owned DOM) must not be stolen.
+    assert data["candidateBodyIntact"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_live_prose_rebuild_preserves_markdown_dom():
+    """Greptile P1: the no-cursor rebuild must not flatten a live markdown row
+    to literal source text — the parsed DOM (links, emphasis) must survive."""
+    md_source = "Voici **un** [lien](https://example.com) utile pour tout le monde."
+    script = (
+        _HARNESS
+        + _REBUILD_PRELUDE
+        + """
+const smd = await import(process.env.SMD_PATH);
+
+const SOURCE = %s;
+
+// Existing row: the parser has only seen a prefix of the source.
+const existing = makeRow(undefined);
+delete existing.dataset.rawText;
+const body = existing.querySelector('.msg-body');
+const parser = smd.parser(smd.default_renderer(body));
+smd.parser_write(parser, SOURCE.slice(0, 10));
+const prevRendered = body.textContent;
+
+// Candidate: the incremental node fed the FULL source through the real
+// streaming-markdown parser (still live, deliberately not ended).
+const candidate = makeRow(SOURCE);
+const candidateBody = candidate.querySelector('.msg-body');
+const candidateParser = smd.parser(smd.default_renderer(candidateBody));
+smd.parser_write(candidateParser, SOURCE);
+const candidateRendered = candidateBody.textContent;
+
+_refreshTransparentFadeProseRow(existing, candidate, null);
+
+const refreshedBody = existing.querySelector('.msg-body');
+const link = findTag(refreshedBody, 'A');
+const strong = findTag(refreshedBody, 'STRONG');
+process.stdout.write(JSON.stringify({
+  prevRendered,
+  candidateRendered,
+  finalText: refreshedBody.textContent,
+  hasLink: !!link,
+  linkText: link ? link.textContent : null,
+  linkHref: link ? link.getAttribute('href') : null,
+  hasStrong: !!strong,
+  strongText: strong ? strong.textContent : null,
+  cursor: existing.getAttribute('data-stream-fade-text'),
+}));
+"""
+        % json.dumps(md_source)
+    )
+    data = _run_node_module(script)
+
+    # The parsed markdown DOM survived the rebuild …
+    assert data["hasLink"] is True, "rebuild dropped the parsed <a> element"
+    assert data["linkText"] == "lien"
+    assert data["linkHref"] == "https://example.com"
+    assert data["hasStrong"] is True, "rebuild dropped the parsed <strong> element"
+    assert data["strongText"] == "un"
+    # … and no markdown syntax leaked into the visible text.
+    assert "**" not in data["finalText"]
+    assert "](" not in data["finalText"]
+    assert data["finalText"] == data["candidateRendered"]
+    # Rendered text diverges from source here, so the cursor must stay in
+    # source space (the append contract of the cursor branch).
+    assert data["cursor"] == md_source
