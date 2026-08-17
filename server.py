@@ -544,6 +544,48 @@ def _abort_if_already_serving(host: str, port: int) -> None:
         pass
 
 
+def _install_shutdown_signal_handlers(httpd, shutdown_requested) -> None:
+    """Route SIGTERM/SIGINT to an orderly serve_forever() shutdown.
+
+    ctl.sh stops the WebUI with SIGTERM. Python's default SIGTERM handler
+    terminates the process WITHOUT unwinding the try/finally around
+    serve_forever(), so drain_all_on_shutdown() (which flushes in-flight
+    fire-and-forget memory commits) would never run on the normal managed
+    stop. Install a handler that requests an orderly shutdown so
+    serve_forever() returns and the existing `finally` block drains cleanly.
+
+    SIGINT is registered for the same path: ctl.sh spawns the daemon from a
+    non-interactive bash background job, which leaves the child with
+    SIGINT = SIG_IGN (bash: "asynchronous commands ignore SIGINT and SIGQUIT
+    in addition to SIGHUP"). The Settings "Stop server" button (POST
+    /api/shutdown) signals the process with SIGINT, which would otherwise be
+    a silent OS-level no-op. Explicitly installing the handler overrides the
+    inherited ignore disposition, so the button, external `kill -INT`, and
+    foreground Ctrl-C all take the same graceful path.
+
+    httpd.shutdown() blocks until serve_forever() has exited and MUST NOT be
+    called from the thread running serve_forever() (it would deadlock), so we
+    dispatch it from a short-lived helper thread. The handler is idempotent
+    and guards against double-shutdown (e.g. repeated SIGTERM/SIGINT).
+    """
+    def _request_shutdown(signum, _frame):
+        if shutdown_requested.is_set():
+            return
+        shutdown_requested.set()
+        threading.Thread(
+            target=httpd.shutdown,
+            name="webui-sigterm-shutdown",
+            daemon=True,
+        ).start()
+
+    for _sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(_sig, _request_shutdown)
+        except (ValueError, OSError):
+            # Not on the main thread (e.g. embedded/test harness); skip handler.
+            logger.debug("Could not install %s handler", _sig, exc_info=True)
+
+
 def main() -> None:
     from api.config import print_startup_config, verify_hermes_imports, _HERMES_FOUND
 
@@ -691,34 +733,8 @@ def main() -> None:
     print(f'  Then open:     {scheme}://localhost:{PORT}', flush=True)
     print('', flush=True)
 
-    # ctl.sh stops the WebUI with SIGTERM. Python's default SIGTERM handler
-    # terminates the process WITHOUT unwinding the try/finally around
-    # serve_forever(), so drain_all_on_shutdown() (which flushes in-flight
-    # fire-and-forget memory commits) would never run on the normal managed
-    # stop. Install a handler that requests an orderly shutdown so
-    # serve_forever() returns and the existing `finally` block drains cleanly.
-    #
-    # httpd.shutdown() blocks until serve_forever() has exited and MUST NOT be
-    # called from the thread running serve_forever() (it would deadlock), so we
-    # dispatch it from a short-lived helper thread. The handler is idempotent
-    # and guards against double-shutdown (e.g. repeated SIGTERM/SIGINT).
     _shutdown_requested = threading.Event()
-
-    def _request_shutdown(signum, _frame):
-        if _shutdown_requested.is_set():
-            return
-        _shutdown_requested.set()
-        threading.Thread(
-            target=httpd.shutdown,
-            name="webui-sigterm-shutdown",
-            daemon=True,
-        ).start()
-
-    try:
-        signal.signal(signal.SIGTERM, _request_shutdown)
-    except (ValueError, OSError):
-        # Not on the main thread (e.g. embedded/test harness); skip handler.
-        logger.debug("Could not install SIGTERM handler", exc_info=True)
+    _install_shutdown_signal_handlers(httpd, _shutdown_requested)
 
     try:
         httpd.serve_forever()
