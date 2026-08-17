@@ -1585,6 +1585,7 @@ class Session:
         ):
             persisted_fingerprint = None
         self._cache_persisted_fingerprint = persisted_fingerprint
+        self._sidecar_stat_sig = _sidecar_stat_signature(self.path)
         if not skip_index:
             _write_session_index(updates=[self])
 
@@ -1620,8 +1621,15 @@ class Session:
         if enforce_cache_bounds:
             try:
                 with LOCK:
-                    if SESSIONS.get(self.session_id) is self:
-                        _evict_sessions_over_cap()
+                    cached = SESSIONS.get(self.session_id)
+                    if cached is not None:
+                        if cached is self:
+                            _evict_sessions_over_cap()
+                        elif _session_is_evictable(cached) and _session_matches_persisted_state(cached):
+                            # cached in SESSIONS is an unmodified reload of an older generation;
+                            # replace it with the newly saved self
+                            SESSIONS[self.session_id] = self
+                            _evict_sessions_over_cap()
             except Exception:
                 logger.debug(
                     "Post-save session cache enforcement failed for %s",
@@ -1689,6 +1697,7 @@ class Session:
                 except Exception:
                     logger.debug("legacy sidecar facts cache populate failed for %s", sid, exc_info=True)
             session._cache_persisted_fingerprint = _session_state_fingerprint(session)
+        session._sidecar_stat_sig = _pre_read_sig
         return session
 
     @classmethod
@@ -4065,8 +4074,13 @@ def _sync_sidecar_from_state_db_if_newer(
         if enforce_cache_bounds:
             try:
                 with LOCK:
-                    if SESSIONS.get(sid) is session:
-                        _evict_sessions_over_cap()
+                    cached = SESSIONS.get(sid)
+                    if cached is not None:
+                        if cached is session:
+                            _evict_sessions_over_cap()
+                        elif _session_is_evictable(cached) and _session_matches_persisted_state(cached):
+                            SESSIONS[sid] = session
+                            _evict_sessions_over_cap()
             except Exception:
                 logger.debug(
                     "Post-reconciliation session cache enforcement failed for %s",
@@ -4492,8 +4506,15 @@ def _cached_session_lags_disk(cached) -> bool:
             # (which would serve a potentially stale cache). Greptile P1.
             pass
         else:
-            # Inactive session, count matches, scene records match — cache is
-            # at parity with disk.
+            # Inactive session, count matches, scene records match.
+            # Check if disk was modified (e.g. metadata or same-count edit)
+            # while cached has remained clean and unmodified.
+            cached_sig = getattr(cached, '_sidecar_stat_sig', None)
+            if cached_sig is not None:
+                disk_sig = _sidecar_stat_signature(cached.path)
+                if disk_sig is not None and disk_sig != cached_sig:
+                    if _session_matches_persisted_state(cached):
+                        return True
             return False
     try:
         disk_meta = Session.load_metadata_only(sid)
@@ -5149,10 +5170,27 @@ def _resolve_session_once(
     if s:
         if cache_on_miss:
             with LOCK:
-                SESSIONS[sid] = s
-                if promote_cache:
-                    SESSIONS.move_to_end(sid)
-                _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+                current_cached = SESSIONS.get(sid)
+                if current_cached is not None:
+                    s = current_cached
+                    if promote_cache:
+                        SESSIONS.move_to_end(sid)
+                else:
+                    disk_sig = _sidecar_stat_signature(s.path)
+                    s_sig = getattr(s, '_sidecar_stat_sig', None)
+                    if disk_sig is not None and s_sig is not None and disk_sig != s_sig:
+                        fresh = Session.load(sid)
+                        if fresh is not None:
+                            s = fresh
+                            SESSIONS[sid] = s
+                            if promote_cache:
+                                SESSIONS.move_to_end(sid)
+                            _evict_sessions_over_cap()
+                    else:
+                        SESSIONS[sid] = s
+                        if promote_cache:
+                            SESSIONS.move_to_end(sid)
+                        _evict_sessions_over_cap()
         if not metadata_only:
             try:
                 synced_from_state = _sync_sidecar_from_state_db_if_newer(

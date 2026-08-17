@@ -532,6 +532,15 @@ def test_byte_eviction_coordinates_validation_and_removal_with_session_writer(
             with _cfg._get_session_agent_lock(candidate.session_id):
                 if not removal_started.is_set():
                     mutation_before_removal.set()
+                else:
+                    # Eviction removed candidate from cache under lock. Interpose
+                    # a reader that cold-loads the old sidecar into cache before
+                    # this detached save finishes.
+                    reader_session = models.get_session(candidate.session_id)
+                    assert reader_session is not candidate
+                    assert reader_session.composer_draft == {}
+                    assert cache.get(candidate.session_id) is reader_session
+                candidate.composer_draft = {"text": "new composer draft"}
                 candidate.title = "Unsaved concurrent title"
                 mutation_finished.set()
                 candidate.save(touch_updated_at=False)
@@ -552,6 +561,13 @@ def test_byte_eviction_coordinates_validation_and_removal_with_session_writer(
     assert not (
         mutation_before_removal.is_set() and candidate.session_id not in cache
     ), "byte eviction removed state changed after its durability check"
+    # Both disk and cache must return the new draft rather than leaving an
+    # interposed reader's stale-generation reload resident in cache.
+    persisted_disk = json.loads(candidate.path.read_text(encoding="utf-8"))
+    assert persisted_disk.get("composer_draft") == {"text": "new composer draft"}
+    cached_resolved = models.get_session(candidate.session_id)
+    assert cached_resolved.composer_draft == {"text": "new composer draft"}
+    assert cache.get(candidate.session_id).composer_draft == {"text": "new composer draft"}
 
 
 def test_state_db_reconcile_refreshes_cached_weight_and_enforces_budget(
@@ -1490,3 +1506,122 @@ def test_content_search_scan_recovers_newer_state_db_without_lru_churn(
     assert captured["payload"]["sessions"][0]["session_id"] == stale.session_id
     assert list(SESSIONS.keys()) == order_before, "scan recovery must not promote the LRU"
     assert len(SESSIONS) == size_before, "scan recovery must not insert or evict cache entries"
+
+
+def test_cold_load_rejects_stale_sidecar_generation_on_concurrent_disk_change(
+    isolated_session_env, monkeypatch,
+):
+    """Cold-load insertion must detect concurrent sidecar replacement and reload fresh disk."""
+    from api import models
+    from api.config import SESSIONS
+
+    sid = "sess-cas-cold-load"
+    original = models.Session(
+        session_id=sid,
+        title="Original title",
+        messages=[{"role": "user", "content": "hello", "timestamp": 100.0}],
+    )
+    original.save()
+
+    real_load = models.Session.load
+    interposed = False
+
+    def load_and_interpose(cls, session_id):
+        nonlocal interposed
+        loaded = real_load(session_id)
+        if session_id == sid and not interposed:
+            interposed = True
+            # Replace the file on disk concurrently before _resolve_session inserts
+            updated = models.Session(
+                session_id=sid,
+                title="Updated title on disk",
+                composer_draft={"text": "concurrent draft"},
+                messages=[{"role": "user", "content": "hello", "timestamp": 100.0}],
+            )
+            updated.save()
+        return loaded
+
+    monkeypatch.setattr(models.Session, "load", classmethod(load_and_interpose))
+
+    resolved = models.get_session(sid)
+    assert resolved is not None
+    assert resolved.title == "Updated title on disk"
+    assert resolved.composer_draft == {"text": "concurrent draft"}
+    cached = SESSIONS.get(sid)
+    assert cached is not None
+    assert cached.title == "Updated title on disk"
+    assert cached.composer_draft == {"text": "concurrent draft"}
+
+
+def test_detached_save_reconciles_clean_reloaded_cache_across_same_count_metadata_edit(
+    isolated_session_env,
+):
+    """A detached save replacing a sidecar with same count must overwrite a clean old cache entry."""
+    from api import models
+    from api.config import SESSIONS
+
+    sid = "sess-detached-metadata-cas"
+    v1 = models.Session(
+        session_id=sid,
+        title="Version 1",
+        composer_draft={},
+        messages=[{"role": "user", "content": "prompt", "timestamp": 100.0}],
+    )
+    v1.save()
+
+    # Reader cold-loads v1 into SESSIONS
+    loaded_v1 = models.get_session(sid)
+    assert loaded_v1 is not None
+    assert SESSIONS.get(sid) is loaded_v1
+
+    # Detached writer had resolved v1 earlier, mutates metadata, and saves
+    v2 = models.Session(
+        session_id=sid,
+        title="Version 2 Updated",
+        composer_draft={"text": "draft v2"},
+        messages=[{"role": "user", "content": "prompt", "timestamp": 100.0}],
+    )
+    v2.save()
+
+    # Cache must now serve v2, not stale loaded_v1
+    cached = SESSIONS.get(sid)
+    assert cached is not None
+    assert cached.title == "Version 2 Updated"
+    assert cached.composer_draft == {"text": "draft v2"}
+    resolved = models.get_session(sid)
+    assert resolved.title == "Version 2 Updated"
+    assert resolved.composer_draft == {"text": "draft v2"}
+
+
+def test_cached_session_lags_disk_detects_clean_cache_stat_signature_mismatch(
+    isolated_session_env,
+):
+    """An inactive clean cached session detects same-count disk modification via stat signature."""
+    from api import models
+    from api.config import SESSIONS
+
+    sid = "sess-lags-stat-sig"
+    v1 = models.Session(
+        session_id=sid,
+        title="Original",
+        composer_draft={},
+        messages=[{"role": "user", "content": "msg", "timestamp": 100.0}],
+    )
+    v1.save()
+
+    cached = models.get_session(sid)
+    assert cached is not None
+    assert SESSIONS.get(sid) is cached
+    assert models._cached_session_lags_disk(cached) is False
+
+    # An external writer updates disk directly (e.g. outside process or via raw file write)
+    payload = json.loads(v1.path.read_text(encoding="utf-8"))
+    payload["title"] = "Modified on disk directly"
+    payload["composer_draft"] = {"text": "external draft"}
+    v1.path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # Because cached is clean and its _sidecar_stat_sig != disk stat signature, lags_disk returns True
+    assert models._cached_session_lags_disk(cached) is True
+    resolved = models.get_session(sid)
+    assert resolved.title == "Modified on disk directly"
+    assert resolved.composer_draft == {"text": "external draft"}
