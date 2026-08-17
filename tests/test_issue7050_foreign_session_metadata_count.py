@@ -126,6 +126,19 @@ def test_foreign_metadata_failure_falls_back_to_legacy_summary(monkeypatch, tmp_
     assert payload["last_message_at"] == 1003.0
 
 
+def test_foreign_metadata_empty_read_falls_back_to_legacy_summary(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    sid = _foreign_fixture(monkeypatch, tmp_path)
+    monkeypatch.setattr(routes, "get_state_db_session_messages", lambda *_args, **_kwargs: [])
+    payload = _session_payload(
+        routes,
+        f"/api/session?session_id={sid}&messages=0&resolve_model=0",
+    )
+    assert payload["message_count"] == 5
+    assert payload["last_message_at"] == 1003.0
+
+
 def test_external_refresh_equal_and_mismatch_use_real_poll_consumer():
     sessions_js = (Path(__file__).resolve().parents[1] / "static" / "sessions.js").read_text()
     start = sessions_js.index("async function refreshActiveSessionIfExternallyUpdated")
@@ -369,6 +382,30 @@ def test_foreign_summary_cache_tracks_active_state_changes(monkeypatch, tmp_path
     assert first["message_count"] == 5
     assert second["message_count"] == unbounded["message_count"] == 4
     assert len(reader_calls) == 3
+
+
+def test_foreign_summary_cache_tracks_same_high_water_rewrite(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    sid = _foreign_fixture(monkeypatch, tmp_path, truncation_boundary=1001.0)
+    reader_calls = []
+    real_reader = routes.get_state_db_session_messages
+    monkeypatch.setattr(
+        routes,
+        "get_state_db_session_messages",
+        lambda session_id, **kwargs: (
+            reader_calls.append((session_id, kwargs))
+            or real_reader(session_id, **kwargs)
+        ),
+    )
+
+    _session_payload(routes, f"/api/session?session_id={sid}&messages=0&resolve_model=0")
+    with sqlite3.connect(tmp_path / "state.db") as conn:
+        conn.execute("UPDATE messages SET content = 'rewritten' WHERE content = 'done'")
+        conn.commit()
+    _session_payload(routes, f"/api/session?session_id={sid}&messages=0&resolve_model=0")
+
+    assert len(reader_calls) == 2
 
 
 def test_foreign_metadata_poll_respects_truncation_watermark(monkeypatch, tmp_path):
