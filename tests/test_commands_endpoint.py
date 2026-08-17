@@ -653,17 +653,16 @@ def test_reload_mcp_legacy_agent_runs_inline(monkeypatch):
     assert "Reloaded MCP servers from configuration." in output
 
 
-def test_reload_mcp_fence_covers_the_whole_rebuild(monkeypatch):
-    """A stream cannot create an owner during the reload's REBUILD window.
+def test_reload_mcp_does_not_stall_unrelated_first_turn(monkeypatch):
+    """A new-profile first turn never blocks for the reload's discovery wait.
 
-    Regression (Greptile review round 12): the fence used to end right
-    after registry shutdown, while the reload's replacement discovery
-    and readiness invalidation ran LATER.  A concurrent stream could
-    spawn a new owner in that interval, register servers concurrently
-    with the reload's own rebuild, and then be invalidated as stale.  The
-    fence now stays held until the entire reload completes (retry
-    spawn, wait, invalidation), so a fresh registration can never
-    overlap the rebuild.
+    Regression (Greptile review round 13): round 12 held the
+    owner-creation fence across the ENTIRE rebuild, so an unrelated
+    first turn for a NEW profile blocked until the reload's replacement
+    discovery completed (up to the readiness cap).  The fence now covers
+    only the destructive phase (prepare, shutdown, invalidation) and is
+    released before the additive phase, so new-profile owners can be
+    created while the replacement discovery runs.
     """
     import threading
     import time
@@ -707,16 +706,15 @@ def test_reload_mcp_fence_covers_the_whole_rebuild(monkeypatch):
             reload_holder["output"] = execute_agent_command("/reload-mcp")
         except Exception as exc:  # pragma: no cover - failure path
             reload_holder["error"] = repr(exc)
-        reload_holder["finished_at"] = time.monotonic()
         reload_done.set()
 
     rt = threading.Thread(target=_do_reload, daemon=True)
     rt.start()
     assert discover_entered.wait(2.0), "reload never entered replacement discovery"
 
-    # A stream worker for ANOTHER profile tries to create an owner while
-    # the reload's rebuild is still in flight.  It must BLOCK on the
-    # fence, not register servers concurrently with the rebuild.
+    # A first turn for a NEW profile tries to create an owner while the
+    # reload's replacement discovery is still in flight.  It must NOT
+    # stall: the additive phase is unfenced.
     ensure_done = threading.Event()
     ensure_holder = {}
 
@@ -724,32 +722,26 @@ def test_reload_mcp_fence_covers_the_whole_rebuild(monkeypatch):
         ensure_holder["readiness"] = streaming._ensure_mcp_discovery(
             "/profiles/other", lambda: True, "t-other"
         )
-        ensure_holder["returned_at"] = time.monotonic()
         ensure_done.set()
 
     et = threading.Thread(target=_do_ensure, daemon=True)
     et.start()
-    time.sleep(0.3)  # gate still closed → reload mid-rebuild
-    assert not ensure_done.is_set(), (
-        "owner creation must be fenced while the reload's replacement "
-        "discovery is in flight"
+    time.sleep(0.3)  # gate still closed → replacement discovery in flight
+    assert ensure_done.is_set(), (
+        "a new-profile first turn must NOT block for the reload's "
+        "replacement discovery wait"
     )
 
-    # Let the reload finish; then the fenced creator may proceed.
+    # Let the reload finish; the fenced creator's entry must survive
+    # (invalidation ran BEFORE any post-shutdown owner was created).
     gate.set()
     rt.join(timeout=3.0)
     assert reload_done.is_set(), "reload did not finish"
     et.join(timeout=3.0)
-    assert ensure_done.is_set(), "fenced owner creation never ran"
-
-    # The new owner must start only AFTER the reload fully completed
-    # (never mid-rebuild), and its readiness must survive (never be
-    # invalidated out from under a fresh registration).
-    assert ensure_holder["returned_at"] >= reload_holder["finished_at"] - 0.01, (
-        "the fenced owner was created while the reload was still rebuilding"
-    )
     other = streaming._MCP_READINESS.get("/profiles/other")
-    assert other is not None, "the fenced profile's readiness was invalidated"
+    assert other is not None, (
+        "a fresh post-reload registration must not be invalidated as stale"
+    )
     assert streaming._mcp_wait_readiness(other) == "completed"
     assert "Reloaded MCP servers from configuration." in reload_holder["output"]
 
