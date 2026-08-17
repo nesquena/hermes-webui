@@ -1202,12 +1202,9 @@ _PROVIDER_DISPLAY = {
     "bedrock": "AWS Bedrock",
 }
 
-# Provider alias → canonical slug.  Users configure providers using the
-# dotted/hyphenated form they see on the provider website (``z.ai``,
-# ``x.ai``, ``google``) but the internal catalog (``_PROVIDER_MODELS``)
-# uses slugs without punctuation (``zai``, ``xai``, ``gemini``).  Without
-# normalisation the provider lands in the ``else`` branch of the group
-# builder and no models are returned — the bug behind #815.
+# Provider alias → canonical slug. This local table supplies WebUI-compatible
+# normalization when the Agent tree is absent; `_resolve_provider_alias`
+# remains the separate Agent vocabulary adapter.
 #
 # This table is authoritative for the WebUI.  When ``hermes_cli.models``
 # is importable we also merge its ``_PROVIDER_ALIASES`` on top so any
@@ -7065,14 +7062,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 # metadata-only entries in config.yaml (e.g.
                 # ``openai-api: {name: "OpenAI API"}``) would still render
                 # in the model selector after the API key is removed (#6335).
-                # Resolve provider aliases on both sides so an alias-named
-                # config key (e.g. ``x-ai`` in providers, ``google`` in
-                # config.yaml) matches credential evidence reported under the
-                # agent's canonical alias (``xai``, ``gemini``) (#6338).
-                # Normalise detected_providers entries into the same
-                # alias-resolved namespace as _canonical so that a WebUI
-                # canonical form in detected_providers (e.g. ``x-ai`` added
-                # by a prior loop iteration) also matches (#6338).
+                # Compare config keys and credential evidence in the same
+                # WebUI namespace; Agent aliases must not merge Google/Gemini
+                # or xAI identities in the picker (#6338).
                 _resolved_detected = {
                     _canonicalise_provider_id(_pid) for _pid in detected_providers
                 }
