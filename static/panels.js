@@ -11862,9 +11862,12 @@ async function _refreshProviderModels(providerId, btn){
        if(currentProfile!==initiatingProfile) return;
        if(typeof _fetchLiveModels==='function'){
          const fresh=await _fetchLiveModels(res.provider||providerId,null,null,{required:true});
-         if(!fresh) throw new Error('Fresh live models were not returned');
+         const profileAfterFetch=(typeof S!=='undefined'&&S)?S.activeProfile:null;
+         if(profileAfterFetch!==initiatingProfile||!fresh) return;
        }
        await _refreshModelDropdownsAfterProviderChange();
+       const profileAfterRebuild=(typeof S!=='undefined'&&S)?S.activeProfile:null;
+       if(profileAfterRebuild!==initiatingProfile) return;
        showToast(t('providers_models_refreshed')||('Models refreshed for '+res.provider));
     }else{
       showToast(res.error||'Failed to refresh models');
