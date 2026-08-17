@@ -77,16 +77,17 @@ def _custom_provider_name_matches(provider_id: str, name: object) -> bool:
     return pid in candidates
 
 
-def _declared_profile_credential(provider_id: str):
+def _declared_profile_credential(provider_id: str, snapshot: dict | None = None):
     """Resolve a declared source from one raw profile snapshot."""
     from api import config as _config_module
     from api.provider_discovery import capture_raw_profile_snapshot, resolve_credential
 
-    try:
-        snapshot = capture_raw_profile_snapshot(_config_module)
-    except Exception:
-        logger.debug("Failed to capture raw profile credential snapshot", exc_info=True)
-        return None
+    if snapshot is None:
+        try:
+            snapshot = capture_raw_profile_snapshot(_config_module)
+        except Exception:
+            logger.debug("Failed to capture raw profile credential snapshot", exc_info=True)
+            return None
 
     pid = str(provider_id or "").strip().lower()
     providers_cfg = snapshot.get("providers") if isinstance(snapshot, dict) else None
@@ -1310,7 +1311,7 @@ def _write_env_file(env_path: Path, updates: dict[str, str | None]) -> None:
             pass
 
 
-def _provider_has_key(provider_id: str) -> bool:
+def _provider_has_key(provider_id: str, *, _declared_snapshot: dict | None = None) -> bool:
     """Check whether a provider has a configured API key.
 
     Checks (in order):
@@ -1320,9 +1321,12 @@ def _provider_has_key(provider_id: str) -> bool:
     4. ``config.yaml → providers.<id>.api_key``
     5. ``config.yaml → custom_providers[].api_key`` / ``key_env`` (for custom providers)
     """
-    _declared_credential = _declared_profile_credential(provider_id)
+    _declared_credential = _declared_profile_credential(provider_id, _declared_snapshot)
     if _declared_credential is not None:
-        return bool(_declared_credential)
+        return bool(
+            _declared_credential
+            and _provider_value_counts_as_api_key(provider_id, _declared_credential.value)
+        )
 
     env_var = _provider_env_var_for(provider_id)
     if env_var:
@@ -1396,12 +1400,16 @@ def _provider_has_key(provider_id: str) -> bool:
     return False
 
 
-def _get_provider_api_key(provider_id: str) -> str | None:
+def _get_provider_api_key(provider_id: str, *, _declared_snapshot: dict | None = None) -> str | None:
     """Return a configured provider API key without exposing it to callers."""
     provider_id = (provider_id or "").strip().lower()
-    _declared_credential = _declared_profile_credential(provider_id)
+    _declared_credential = _declared_profile_credential(provider_id, _declared_snapshot)
     if _declared_credential is not None:
-        return _declared_credential.value if _declared_credential.state == "resolved" else None
+        if _declared_credential.state == "resolved" and _provider_value_counts_as_api_key(
+            provider_id, _declared_credential.value
+        ):
+            return _declared_credential.value
+        return None
     env_var = _provider_env_var_for(provider_id)
     if env_var:
         env_path = _get_hermes_home() / ".env"

@@ -6753,32 +6753,25 @@ def _custom_provider_api_key_for_context(entry: dict, provider: str) -> str:
     while preserving the same literal, ``${ENV_VAR}``, ``key_env``, and
     sanitized-env shapes used by streaming/provider resolution.
     """
-    raw_api_key = entry.get("api_key")
-    if raw_api_key is not None:
-        api_key_text = str(raw_api_key).strip()
-        if api_key_text.startswith("${") and api_key_text.endswith("}") and len(api_key_text) > 3:
-            env_name = api_key_text[2:-1]
-            resolved = os.getenv(env_name, "").strip()
-            if resolved:
-                return resolved
-            logger.debug(
-                "Custom provider %s api_key references %s, but the environment variable is unset or empty",
-                provider,
-                api_key_text,
-            )
-        elif api_key_text:
-            return api_key_text
-
-    key_env = str(entry.get("key_env") or "").strip()
-    if key_env:
-        resolved = os.getenv(key_env, "").strip()
-        if resolved:
-            return resolved
-
     try:
-        from api.config import _lookup_custom_api_key_env
+        from api.config import resolve_provider_credential
+        from api import config as _config_module
 
-        return _lookup_custom_api_key_env(provider) or ""
+        raw_text = str(entry.get("api_key") or "").strip()
+        if (
+            raw_text.startswith("${")
+            and raw_text.endswith("}")
+            and not _config_module._thread_local_env_value(raw_text[2:-1].strip())
+        ):
+            logger.debug(
+                "Custom provider %s API key template %s is unresolved, environment variable is unset or empty",
+                provider,
+                raw_text,
+            )
+
+        return resolve_provider_credential(
+            entry.get("api_key"), entry.get("key_env"), provider
+        ) or ""
     except Exception:
         return ""
 
@@ -6792,23 +6785,25 @@ def _context_length_config_api_key_for_provider(
     provider = _canonical_context_provider(provider)
 
     def _resolve_key(raw_api_key, raw_key_env=None) -> str:
-        api_key_text = str(raw_api_key or "").strip()
-        if (
-            api_key_text.startswith("${")
-            and api_key_text.endswith("}")
-            and len(api_key_text) > 3
-        ):
-            resolved = os.getenv(api_key_text[2:-1], "").strip()
-            if resolved:
-                return resolved
-        elif api_key_text:
-            return api_key_text
-        key_env = str(raw_key_env or "").strip()
-        if key_env:
-            resolved = os.getenv(key_env, "").strip()
-            if resolved:
-                return resolved
-        return ""
+        try:
+            from api.config import resolve_provider_credential
+            from api import config as _config_module
+
+            raw_text = str(raw_api_key or "").strip()
+            if (
+                raw_text.startswith("${")
+                and raw_text.endswith("}")
+                and not _config_module._thread_local_env_value(raw_text[2:-1].strip())
+            ):
+                logger.debug(
+                    "Context lookup API key template %s is unresolved for %s",
+                    raw_text,
+                    provider,
+                )
+
+            return resolve_provider_credential(raw_api_key, raw_key_env, provider) or ""
+        except Exception:
+            return ""
 
     providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):

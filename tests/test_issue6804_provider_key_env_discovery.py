@@ -5,6 +5,7 @@ import sys
 import types
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -96,6 +97,7 @@ def test_provider_credential_contract_and_custom_delegate(monkeypatch, tmp_path)
     assert config.resolve_provider_credential("literal", "KEY") == "literal"
     assert config.resolve_provider_credential("${KEY}", None) == "env-secret"
     assert config.resolve_provider_credential(None, "KEY") == "env-secret"
+    assert config.resolve_provider_credential("", "KEY") == "env-secret"
 
     monkeypatch.setattr(config, "get_config", lambda: {"custom_providers": [{"name": "demo", "key_env": "KEY", "base_url": "https://demo.test/v1"}]})
     assert config.resolve_custom_provider_connection("custom:demo") == ("env-secret", "https://demo.test/v1")
@@ -139,7 +141,11 @@ def test_key_env_does_not_cross_profile_boundary(monkeypatch):
 def test_allowlist_priority_and_invalid_models_fall_through(monkeypatch, tmp_path):
     old_cfg, old_mtime = _configure(monkeypatch, tmp_path, models_marker="syn:listed")
     calls = []
-    monkeypatch.setattr(urllib.request, "urlopen", lambda request, **_kwargs: calls.append(request.full_url))
+    monkeypatch.setattr(
+        provider_discovery,
+        "fetch_models",
+        lambda connection: calls.append(connection.base_url) or [],
+    )
     try:
         result = config.get_available_models(force_refresh=True)
     finally:
@@ -151,7 +157,6 @@ def test_allowlist_priority_and_invalid_models_fall_through(monkeypatch, tmp_pat
     old_cfg, old_mtime = _configure(monkeypatch, tmp_path, models_marker=None)
     config.cfg["providers"]["synthetic"]["discover_models"] = False
     calls = []
-    monkeypatch.setattr(urllib.request, "urlopen", lambda request, **_kwargs: calls.append(request.full_url))
     try:
         result = config.get_available_models(force_refresh=True)
     finally:
@@ -175,7 +180,6 @@ def test_allowlist_priority_and_invalid_models_fall_through(monkeypatch, tmp_pat
     old_cfg, old_mtime = _configure(monkeypatch, tmp_path, models_marker=["syn:listed"])
     config.cfg["providers"]["synthetic"]["discover_models"] = False
     calls = []
-    monkeypatch.setattr(urllib.request, "urlopen", lambda request, **_kwargs: calls.append(request.full_url))
     try:
         result = config.get_available_models(force_refresh=True)
     finally:
@@ -191,7 +195,11 @@ def test_metadata_and_missing_credential_entries_are_not_probed(monkeypatch, tmp
     config.cfg["providers"]["missing"] = {"name": "missing", "base_url": "https://missing.test/v1", "key_env": "MISSING_KEY"}
     monkeypatch.delenv("MISSING_KEY", raising=False)
     calls = []
-    monkeypatch.setattr(urllib.request, "urlopen", lambda request, **_kwargs: calls.append(request.full_url))
+    monkeypatch.setattr(
+        provider_discovery,
+        "fetch_models",
+        lambda connection: calls.append(connection.base_url) or [],
+    )
     try:
         result = config.get_available_models(force_refresh=True)
     finally:
@@ -204,7 +212,13 @@ def test_metadata_and_missing_credential_entries_are_not_probed(monkeypatch, tmp
 
 def test_probe_failure_is_sanitized_and_private_host_is_not_requested(monkeypatch, tmp_path):
     old_cfg, old_mtime = _configure(monkeypatch, tmp_path)
-    monkeypatch.setattr(urllib.request, "urlopen", lambda *_args, **_kwargs: (_ for _ in ()).throw(urllib.error.HTTPError("https://api.synthetic.new/openai/v1/models", 401, "secret response", {}, None)))
+    monkeypatch.setattr(
+        provider_discovery,
+        "fetch_models",
+        lambda _connection: (_ for _ in ()).throw(
+            provider_discovery.ProviderDiscoveryError("auth", 401)
+        ),
+    )
     try:
         result = config.get_available_models(force_refresh=True)
     finally:
@@ -217,7 +231,16 @@ def test_probe_failure_is_sanitized_and_private_host_is_not_requested(monkeypatc
     old_cfg, old_mtime = _configure(monkeypatch, tmp_path)
     config.cfg["providers"]["synthetic"]["base_url"] = "http://127.0.0.1:9/v1"
     requests = []
-    monkeypatch.setattr(urllib.request, "urlopen", lambda request, **_kwargs: requests.append(request.full_url))
+    monkeypatch.setattr(
+        provider_discovery.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [(2, 1, 6, "", ("127.0.0.1", 9))],
+    )
+    monkeypatch.setattr(
+        provider_discovery.urllib.request,
+        "build_opener",
+        lambda *handlers: requests.append(handlers),
+    )
     try:
         config.get_available_models(force_refresh=True)
     finally:
@@ -438,3 +461,122 @@ def test_default_fetch_uses_no_proxy_no_redirect_handlers_and_rejects_partial_re
         fetch_models(prepared)
     assert auth_info.value.kind == "auth"
     assert auth_info.value.status == 401
+
+
+def test_destination_rejection_redirect_and_response_size_are_enforced():
+    connection = build_connection(
+        profile="alpha",
+        provider_id="synthetic",
+        raw_config_key="synthetic",
+        raw={"base_url": "https://api.synthetic.test/v1", "api_key": "secret"},
+    )
+    for address in ("127.0.0.1", "100.64.0.1"):
+        with pytest.raises(provider_discovery.ProviderDiscoveryError) as blocked:
+            prepare_connection(
+                connection,
+                resolver=lambda *_args, address=address, **_kwargs: [
+                    (2, 1, 6, "", (address, 443))
+                ],
+            )
+        assert blocked.value.kind == "blocked_destination"
+
+    with pytest.raises(provider_discovery.ProviderDiscoveryError) as redirected:
+        provider_discovery._NoRedirect().redirect_request(
+            urllib.request.Request("https://api.synthetic.test/v1/models"),
+            None,
+            302,
+            "redirect",
+            {},
+            "https://other.synthetic.test/models",
+        )
+    assert redirected.value.kind == "redirect"
+
+    prepared = prepare_connection(
+        connection,
+        resolver=lambda *_args, **_kwargs: [(2, 1, 6, "", ("93.184.216.34", 443))],
+    )
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit):
+            return b"12345"
+
+    with pytest.raises(provider_discovery.ProviderDiscoveryError) as too_large:
+        fetch_models(prepared, opener=lambda _request, **_kwargs: Response(), max_bytes=4)
+    assert too_large.value.kind == "response_too_large"
+
+
+def test_profile_snapshot_authority_pairs_endpoint_and_credential():
+    alpha = build_connection(
+        profile="alpha",
+        provider_id="synthetic",
+        raw_config_key="synthetic",
+        raw={"base_url": "https://alpha.synthetic.test/v1", "key_env": "ALPHA_KEY"},
+        env_value=lambda name: {"ALPHA_KEY": "alpha-secret"}.get(name, ""),
+    )
+    beta = build_connection(
+        profile="beta",
+        provider_id="synthetic",
+        raw_config_key="synthetic",
+        raw={"base_url": "https://beta.synthetic.test/v1", "key_env": "BETA_KEY"},
+        env_value=lambda name: {"BETA_KEY": "beta-secret"}.get(name, ""),
+    )
+    assert (alpha.profile, alpha.base_url, alpha.credential.value) == (
+        "alpha",
+        "https://alpha.synthetic.test/v1",
+        "alpha-secret",
+    )
+    assert (beta.profile, beta.base_url, beta.credential.value) == (
+        "beta",
+        "https://beta.synthetic.test/v1",
+        "beta-secret",
+    )
+
+    def build_for(profile):
+        return build_connection(
+            profile=profile,
+            provider_id="synthetic",
+            raw_config_key="synthetic",
+            raw={
+                "base_url": f"https://{profile}.synthetic.test/v1",
+                "key_env": f"{profile.upper()}_KEY",
+            },
+            env_value=lambda name, profile=profile: {
+                f"{profile.upper()}_KEY": f"{profile}-secret"
+            }.get(name, ""),
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        concurrent = list(pool.map(build_for, ("alpha", "beta")))
+    assert {(item.profile, item.base_url, item.credential.value) for item in concurrent} == {
+        ("alpha", "https://alpha.synthetic.test/v1", "alpha-secret"),
+        ("beta", "https://beta.synthetic.test/v1", "beta-secret"),
+    }
+
+
+def test_registered_provider_does_not_enter_strict_probe_lane(monkeypatch, tmp_path):
+    old_cfg, old_mtime = _configure(monkeypatch, tmp_path)
+    config.cfg["providers"] = {
+        "huggingface": {
+            "base_url": "https://evil.synthetic.test/v1",
+            "key_env": "SYNTHETIC_API_KEY",
+        }
+    }
+    probes = []
+    monkeypatch.setattr(
+        provider_discovery,
+        "fetch_models",
+        lambda connection: probes.append(connection.provider_id) or [],
+    )
+    try:
+        config.get_available_models(force_refresh=True)
+    finally:
+        _restore(old_cfg, old_mtime)
+    assert "huggingface" not in probes
