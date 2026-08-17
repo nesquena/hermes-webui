@@ -48,31 +48,40 @@ def _const_line(src: str, name: str) -> str:
 _HELPER_CONSTS = (
     "TAB_ID_KEY",
     "TAB_ID_CLAIM_KEY",
-    "_TAB_CLAIM_TTL_MS",
     "_TAB_CLAIM_HEARTBEAT_MS",
+    "_TAB_OWNER_REVALIDATE_MS",
     "_TAB_SEEN_TTL_MS",
     "TAB_ID_SEEN_KEY",
     "INFLIGHT_KEY_BASE",
     "INFLIGHT_STATE_KEY_BASE",
     "ACTIVE_SESSION_KEY_LEGACY",
+    "ACTIVE_SESSION_TOMBSTONE_BASE",
 )
 
 _HELPER_FUNCS = (
     "function _newTabId",
-    "function _updateTabRegistry",
+    "function _hermesTabNonce",
     "function _readTabClaims",
-    "function _claimTabId",
-    "function _readTabSeen",
+    "function _writeTabClaims",
+    "function _updateTabRegistry",
     "function _touchTabSeen",
-    "function _releaseTabId",
     "function _gcOrphanTabKeys",
+    "function _claimTabOwnership",
+    "function _claimTabId",
+    "function _releaseTabId",
+    "function _revalidateTabOwnership",
     "function _hermesTabId",
     "function _inflightKey",
     "function _inflightStateKey",
     "function _activeSessionKey",
+    "function _activeSessionTombstoneKey",
     "function _rememberActiveSession",
     "function _rememberedActiveSession",
     "function _forgetActiveSession",
+    "function _migrateLegacyInflight",
+    "function _readInflightStateMap",
+    "function loadInflightState",
+    "function clearInflightState",
 )
 
 
@@ -348,15 +357,18 @@ const afterRelease = JSON.parse(localStorage.getItem(TAB_ID_CLAIM_KEY) || '{{}}'
 console.log(JSON.stringify({{
   bothClaimed: !!claims[idA] && !!claims[idB],
   bothSeen: !!seen[idA] && !!seen[idB],
-  bSurvivedRelease: !!afterRelease[idB],
-  aReleased: !afterRelease[idA],
+  bSurvivedRelease: !!(afterRelease[idB] && !afterRelease[idB].released),
+  aReleased: !!(afterRelease[idA] && afterRelease[idA].released),
 }}));
 """
     out = _run(script)
     assert out["bothClaimed"], "a concurrent tab's claim must not be clobbered"
     assert out["bothSeen"], "a concurrent tab's seen entry must not be clobbered"
     assert out["bSurvivedRelease"], "releasing one tab must not drop another's claim"
-    assert out["aReleased"], "the releasing tab's own claim must be removed"
+    assert out["aReleased"], (
+        "the releasing tab's record must be marked released (kept for reload "
+        "re-claim, never silently dropped)"
+    )
 
 
 def test_remembered_session_returns_null_when_empty():
@@ -369,3 +381,321 @@ useTab(makeTab());
 console.log(JSON.stringify({{value: _rememberedActiveSession()}}));
 """
     assert _run(script)["value"] is None
+
+
+# ── Adversarial re-gate regressions (maintainer CHANGES_REQUESTED 2026-08-17) ──
+# Each test below EXECUTES the real helpers under the exact race/upgrade
+# condition the maintainer reproduced against head 590debcf. They fail on the
+# timer-based design and pass only with authoritative ownership.
+
+
+def test_duplicated_tab_never_reuses_id_after_heartbeat_gap():
+    """Must-fix 1 (ui.js:9298): with timeout-based leases, advancing the clock
+    past one 45-second lease made the original tab's claim look expired, so a
+    duplicated tab (copied sessionStorage) kept the original's id and writing
+    session B in the clone made the ORIGINAL tab restore B. A missed heartbeat
+    must never make an id reusable: ownership is a per-context nonce record,
+    and only explicit release frees the id."""
+    script = f"""
+{_HARNESS}
+{_helpers()}
+const original = makeTab();
+useTab(original);
+const idOriginal = _hermesTabId();
+_rememberActiveSession('session-A');
+// Duplicate the tab: sessionStorage is COPIED verbatim; the window is not.
+const clone = makeTab();
+for (const k of original.store._keys()) clone.store.setItem(k, original.store.getItem(k));
+// The original misses several heartbeats (laptop lid closed, tab throttled).
+__now += 46_000;
+useTab(clone);
+const idClone = _hermesTabId();
+_rememberActiveSession('session-B');
+// Even a WEEK of missed heartbeats must not surrender the id.
+__now += 7 * 24 * 60 * 60 * 1000;
+const late = makeTab();
+for (const k of original.store._keys()) late.store.setItem(k, original.store.getItem(k));
+useTab(late);
+const idLate = _hermesTabId();
+useTab(original);
+const restoredByOriginal = _rememberedActiveSession();
+const idOriginalAfter = _hermesTabId();
+console.log(JSON.stringify({{idOriginal, idClone, idLate, restoredByOriginal, idOriginalAfter}}));
+"""
+    out = _run(script)
+    assert out["idClone"] != out["idOriginal"], (
+        "a duplicated tab must NOT reuse the original's id after a heartbeat gap"
+    )
+    assert out["idLate"] != out["idOriginal"], (
+        "no amount of elapsed time may make a claimed (unreleased) id reusable"
+    )
+    assert out["restoredByOriginal"] == "session-A", (
+        "the clone writing session B must not change what the original restores"
+    )
+    assert out["idOriginalAfter"] == out["idOriginal"], (
+        "revalidation must keep the original tab's identity stable"
+    )
+
+
+def test_gc_does_not_collect_live_tab_after_seen_ttl():
+    """Must-fix 2a (ui.js:9330): a live tab whose 'seen' stamp aged past the
+    24-hour TTL used to have its scoped keys garbage-collected by the next
+    booting tab. Liveness is now authoritative: an unreleased ownership record
+    protects the keys no matter how much time elapsed."""
+    script = f"""
+{_HARNESS}
+{_helpers()}
+const longLived = makeTab();
+useTab(longLived);
+const id = _hermesTabId();
+_rememberActiveSession('session-precious');
+localStorage.setItem(_inflightStateKey(), JSON.stringify({{'session-precious':{{streamId:'s1'}}}}));
+// 25 hours pass with no heartbeat (suspended machine). The tab is still open.
+__now += 25 * 60 * 60 * 1000;
+// A brand-new tab boots and runs the GC pass.
+useTab(makeTab());
+_hermesTabId();
+useTab(longLived);
+const scopedSession = localStorage.getItem(_activeSessionKey());
+const scopedInflight = localStorage.getItem(_inflightStateKey());
+console.log(JSON.stringify({{scopedSession, scopedInflightKept: scopedInflight!=null}}));
+"""
+    out = _run(script)
+    assert out["scopedSession"] == "session-precious", (
+        "GC must never collect a claimed (unreleased) tab's keys on elapsed time alone"
+    )
+    assert out["scopedInflightKept"], "the live tab's inflight snapshot must survive GC"
+
+
+def test_gc_is_disabled_fail_safe_on_malformed_registry_json():
+    """Must-fix 2b (ui.js:9330): malformed registry JSON used to parse to {} and
+    be read as 'no tab was ever seen', so the very next GC pass deleted every
+    live tab's keys. Parse failure must DISABLE GC entirely (fail safe)."""
+    script = f"""
+{_HARNESS}
+{_helpers()}
+const tab = makeTab();
+useTab(tab);
+const id = _hermesTabId();
+_rememberActiveSession('session-live');
+// Corrupt BOTH registries (extension writers, quota-truncated writes...).
+localStorage.setItem(TAB_ID_CLAIM_KEY, '{{not json');
+localStorage.setItem(TAB_ID_SEEN_KEY, '{{not json');
+_gcOrphanTabKeys();
+const keptAfterClaimsCorruption = localStorage.getItem(_activeSessionKey());
+// Repair claims but leave 'seen' corrupt: still fail safe (legacy keys with
+// no ownership record would otherwise be judged by garbage data).
+localStorage.removeItem(TAB_ID_CLAIM_KEY);
+_claimTabId(id);
+localStorage.setItem(ACTIVE_SESSION_KEY_LEGACY + '::unrecorded', 'legacy-key');
+_gcOrphanTabKeys();
+const keptLegacy = localStorage.getItem(ACTIVE_SESSION_KEY_LEGACY + '::unrecorded');
+console.log(JSON.stringify({{
+  keptAfterClaimsCorruption,
+  keptLegacy,
+  scopedStillThere: localStorage.getItem(_activeSessionKey()),
+}}));
+"""
+    out = _run(script)
+    assert out["keptAfterClaimsCorruption"] == "session-live", (
+        "malformed claim-registry JSON must disable GC, not unleash it"
+    )
+    assert out["keptLegacy"] == "legacy-key", (
+        "malformed seen-registry JSON must also disable GC for unrecorded keys"
+    )
+    assert out["scopedStillThere"] == "session-live"
+
+
+def test_forgotten_tab_does_not_resurrect_another_tabs_legacy_session():
+    """Must-fix 3a (ui.js:9441): after tab A forgot its session, the legacy
+    fallback (kept fresh by tab B) used to bleed back into tab A's reads. The
+    per-tab 'no session' tombstone pins the forgotten state."""
+    script = f"""
+{_HARNESS}
+{_helpers()}
+const tabA = makeTab();
+const tabB = makeTab();
+useTab(tabA); _rememberActiveSession('session-A');
+useTab(tabB); _rememberActiveSession('session-B');   // legacy slot now = B
+useTab(tabA); _forgetActiveSession();
+const afterForget = _rememberedActiveSession();
+// Tab B keeps refreshing the shared slot; tab A must STAY forgotten.
+useTab(tabB); _rememberActiveSession('session-B');
+useTab(tabA); const afterRewrite = _rememberedActiveSession();
+// Opening a new conversation lifts the tombstone.
+_rememberActiveSession('session-C');
+const afterReopen = _rememberedActiveSession();
+console.log(JSON.stringify({{afterForget, afterRewrite, afterReopen}}));
+"""
+    out = _run(script)
+    assert out["afterForget"] is None, (
+        "a forgotten tab must not restore another tab's legacy session"
+    )
+    assert out["afterRewrite"] is None, (
+        "the tombstone must hold even while another tab rewrites the legacy slot"
+    )
+    assert out["afterReopen"] == "session-C", (
+        "remembering a new session must supersede the tombstone"
+    )
+
+
+def test_forget_clears_expected_legacy_only_sid_on_upgrade():
+    """Must-fix 3b (ui.js:9441): a legacy-only dead session (written by the
+    pre-upgrade build, so no scoped value exists) used to survive
+    _forgetActiveSession(), defeating the 404/profile-switch self-heal. The
+    caller now names the dead sid explicitly and a matching legacy value is
+    cleared even without scoped state."""
+    script = f"""
+{_HARNESS}
+{_helpers()}
+// Pre-upgrade storage: only the unsuffixed key exists.
+localStorage.setItem(ACTIVE_SESSION_KEY_LEGACY, 'dead-session');
+const tab = makeTab();
+useTab(tab);
+_forgetActiveSession('dead-session');           // 404 self-heal names the sid
+const legacyAfterHeal = localStorage.getItem(ACTIVE_SESSION_KEY_LEGACY);
+// A mismatching expected sid must NOT clear someone else's fallback.
+localStorage.setItem(ACTIVE_SESSION_KEY_LEGACY, 'other-tabs-session');
+useTab(makeTab());
+_forgetActiveSession('a-different-dead-sid');
+const legacyAfterMismatch = localStorage.getItem(ACTIVE_SESSION_KEY_LEGACY);
+console.log(JSON.stringify({{legacyAfterHeal, legacyAfterMismatch}}));
+"""
+    out = _run(script)
+    assert out["legacyAfterHeal"] is None, (
+        "forget must clear a matching legacy-only sid so a dead session cannot "
+        "survive the 404 self-heal on upgrade"
+    )
+    assert out["legacyAfterMismatch"] == "other-tabs-session", (
+        "a non-matching expected sid must leave the shared fallback alone"
+    )
+
+
+def test_legacy_session_is_adopted_once_into_scoped_storage():
+    """Must-fix 3 (adoption): the first legacy read is copied into the tab's
+    scoped slot, so later changes to the shared slot by other tabs can no
+    longer change what THIS tab restores."""
+    script = f"""
+{_HARNESS}
+{_helpers()}
+localStorage.setItem(ACTIVE_SESSION_KEY_LEGACY, 'upgraded-session');
+const tab = makeTab();
+useTab(tab);
+const first = _rememberedActiveSession();       // adopts into scoped storage
+const scoped = localStorage.getItem(_activeSessionKey());
+// Another tab moves the shared slot; this tab's restore must not follow.
+localStorage.setItem(ACTIVE_SESSION_KEY_LEGACY, 'other-session');
+const second = _rememberedActiveSession();
+console.log(JSON.stringify({{first, scoped, second}}));
+"""
+    out = _run(script)
+    assert out["first"] == "upgraded-session"
+    assert out["scoped"] == "upgraded-session", (
+        "the legacy value must be adopted into the tab's scoped key on first read"
+    )
+    assert out["second"] == "upgraded-session", (
+        "after adoption, the shared slot must no longer steer this tab"
+    )
+
+
+def test_upgrade_migrates_populated_legacy_inflight_under_new_tab_stamp():
+    """Must-fix 4 (ui.js:9498): both inflight readers use suffixed keys
+    exclusively, so a populated pre-upgrade `hermes-webui-inflight` /
+    `hermes-webui-inflight-state` produced empty scoped reads and mid-stream
+    recovery was lost on upgrade. A valid legacy payload must be migrated once
+    under the adopting tab's stamp, then the legacy entries removed."""
+    script = f"""
+{_HARNESS}
+{_helpers()}
+// Pre-upgrade mid-stream state, written by the old build minutes ago.
+localStorage.setItem(INFLIGHT_KEY_BASE, JSON.stringify({{sid:'sess-1', streamId:'stream-1', ts:__now-60_000}}));
+localStorage.setItem(INFLIGHT_STATE_KEY_BASE, JSON.stringify({{
+  'sess-1': {{streamId:'stream-1', messages:[{{role:'user',content:'hi'}}], updated_at:__now-60_000}},
+}}));
+const tab = makeTab();
+useTab(tab);
+const restored = loadInflightState('sess-1', 'stream-1');
+const marker = JSON.parse(localStorage.getItem(_inflightKey()) || 'null');
+const legacyMarkerGone = localStorage.getItem(INFLIGHT_KEY_BASE) === null;
+const legacyStateGone = localStorage.getItem(INFLIGHT_STATE_KEY_BASE) === null;
+console.log(JSON.stringify({{
+  restoredStream: restored && restored.streamId,
+  restoredTab: restored && restored.tabId,
+  tabId: _hermesTabId(),
+  markerSid: marker && marker.sid,
+  legacyMarkerGone, legacyStateGone,
+}}));
+"""
+    out = _run(script)
+    assert out["restoredStream"] == "stream-1", (
+        "a populated legacy inflight-state map must be readable after upgrade"
+    )
+    assert out["restoredTab"] == out["tabId"], (
+        "migrated entries must be re-stamped under the adopting tab's id"
+    )
+    assert out["markerSid"] == "sess-1", (
+        "the legacy reconnect marker must be migrated under the scoped key"
+    )
+    assert out["legacyMarkerGone"] and out["legacyStateGone"], (
+        "legacy entries must be removed after the one-shot migration"
+    )
+
+
+def test_stale_or_malformed_legacy_inflight_is_invalidated_not_migrated():
+    """Must-fix 4 (validation): the legacy payload is validated (shape + age)
+    before adoption; stale/corrupt entries are removed without migrating, and
+    existing scoped state is never overwritten."""
+    script = f"""
+{_HARNESS}
+{_helpers()}
+// Stale marker (2 hours old) + corrupt state map.
+localStorage.setItem(INFLIGHT_KEY_BASE, JSON.stringify({{sid:'old-sess', streamId:'old-stream', ts:__now-2*60*60*1000}}));
+localStorage.setItem(INFLIGHT_STATE_KEY_BASE, 'not json at all');
+const tab = makeTab();
+useTab(tab);
+_migrateLegacyInflight();
+const scopedMarker = localStorage.getItem(_inflightKey());
+const scopedState = localStorage.getItem(_inflightStateKey());
+const legacyGone = localStorage.getItem(INFLIGHT_KEY_BASE) === null
+  && localStorage.getItem(INFLIGHT_STATE_KEY_BASE) === null;
+// Second scenario: a tab that already HAS scoped state keeps it.
+const tab2 = makeTab();
+useTab(tab2);
+localStorage.setItem(INFLIGHT_KEY_BASE, JSON.stringify({{sid:'legacy-sess', streamId:'legacy-stream', ts:__now-1000}}));
+localStorage.setItem(_inflightKey(), JSON.stringify({{sid:'own-sess', streamId:'own-stream', ts:__now-500}}));
+_migrateLegacyInflight();
+const kept = JSON.parse(localStorage.getItem(_inflightKey()));
+console.log(JSON.stringify({{
+  scopedMarker, scopedState, legacyGone,
+  keptSid: kept && kept.sid,
+  legacyGone2: localStorage.getItem(INFLIGHT_KEY_BASE) === null,
+}}));
+"""
+    out = _run(script)
+    assert out["scopedMarker"] is None, "a stale legacy marker must not be migrated"
+    assert out["scopedState"] is None, "a corrupt legacy state map must not be migrated"
+    assert out["legacyGone"], "invalid legacy entries must still be invalidated (removed)"
+    assert out["keptSid"] == "own-sess", (
+        "migration must never overwrite a tab's existing scoped marker"
+    )
+    assert out["legacyGone2"], "the legacy slot is consumed exactly once either way"
+
+
+def test_inflight_readers_run_the_migration_before_scoped_reads():
+    """Wiring: both readers (the boot marker check and the state-map read) must
+    invoke the one-shot migration BEFORE their scoped read, or a populated
+    legacy payload stays invisible exactly as the re-gate reproduced."""
+    check_body = _function_body(UI_SRC, "async function checkInflightOnBoot")
+    assert "_migrateLegacyInflight()" in check_body, (
+        "checkInflightOnBoot must migrate legacy inflight before reading"
+    )
+    assert check_body.index("_migrateLegacyInflight()") < check_body.index(
+        "localStorage.getItem(_inflightKey())"
+    ), "migration must precede the scoped marker read"
+    read_body = _function_body(UI_SRC, "function _readInflightStateMap")
+    assert "_migrateLegacyInflight()" in read_body, (
+        "_readInflightStateMap must migrate legacy inflight before reading"
+    )
+    assert read_body.index("_migrateLegacyInflight()") < read_body.index(
+        "localStorage.getItem(_inflightStateKey())"
+    ), "migration must precede the scoped state read"
