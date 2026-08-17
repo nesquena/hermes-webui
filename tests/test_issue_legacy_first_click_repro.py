@@ -54,6 +54,14 @@ def test_legacy_no_run_mirror_first_click_unblocks_agent():
         event=threading.Event(),
         result=None,
     )
+    # _ApprovalEntry.__init__ always stamps a request_id via
+    # `data.setdefault("request_id", uuid.uuid4().hex)`, and notify_cb is
+    # handed `dict(entry.data)` — a copy that carries it. Mirror that
+    # contract here so the mirror's identity match (request_id/approval_id)
+    # can find this producer; without it, the fail-closed fallback (no
+    # inferring ownership from "first unclaimed"/head) would correctly
+    # refuse to bind a token, but that never happens for a real entry.
+    live.data["request_id"] = "req-" + uuid.uuid4().hex[:8]
     with ra._lock:
         ra._gateway_queues.pop(sid, None)
         ra._pending.pop(sid, None)
@@ -151,6 +159,145 @@ def test_legacy_non_head_producer_unblocks_only_its_producer():
         # The HEAD producer must remain untouched.
         assert not head.event.is_set()
         assert head.result is None
+    finally:
+        with ra._lock:
+            ra._gateway_queues.pop(sid, None)
+            ra._pending.pop(sid, None)
+
+
+def test_legacy_stale_request_id_does_not_resolve_unrelated_live_producer():
+    """A no-run mirror whose identity matches NO live producer must never
+    resolve a different, unrelated live producer.
+
+    Regression for the approval-integrity violation found in review of
+    818fd2fd: the previous fallback bound an unmatched mirror to "the first
+    unclaimed token" (or the queue head), so approving a stale/foreign
+    command A could silently execute an unrelated live command B.
+    """
+    from api import routes
+    from api import route_approvals as ra
+
+    sid = "sess-stale-reqid-" + uuid.uuid4().hex[:8]
+
+    producer_b = SimpleNamespace(
+        data=_live_head_data(approval_id="", run_id=""),
+        event=threading.Event(),
+        result=None,
+    )
+    producer_b.data["command"] = "rm -rf /tmp/b-command"
+    producer_b.data["request_id"] = "req-b-" + uuid.uuid4().hex[:8]
+
+    with ra._lock:
+        ra._gateway_queues.pop(sid, None)
+        ra._pending.pop(sid, None)
+        ra._gateway_queues.setdefault(sid, []).append(producer_b)
+
+    try:
+        # A stale/foreign approval copy: a distinct request_id that matches
+        # no live producer (e.g. a duplicate resubmit after B replaced A, or
+        # a cross-session replay).
+        stale_approval_a = copy.deepcopy(producer_b.data)
+        stale_approval_a["command"] = "rm -rf /tmp/a-command-DIFFERENT"
+        stale_approval_a["request_id"] = "req-a-stale-" + uuid.uuid4().hex[:8]
+        stale_approval_a["approval_id"] = "appr-a-" + uuid.uuid4().hex[:8]
+
+        ra.submit_gateway_pending_mirror(sid, stale_approval_a)
+
+        with ra._lock:
+            mirrored = next(
+                m for m in ra._pending[sid]
+                if m["command"] == stale_approval_a["command"]
+            )
+        # Fail-closed: an unmatched identity must not borrow another live
+        # producer's token.
+        assert not str(mirrored.get(ra._GATEWAY_MIRROR_TOKEN) or "").strip(), (
+            "BUG: mirror for an unmatched request_id was stamped with a "
+            "foreign producer's token, allowing it to resolve that producer."
+        )
+        approval_id = mirrored["approval_id"]
+
+        routes._resolve_approval_legacy(sid, approval_id, "once")
+
+        # What MUST NOT happen, regardless of whether the stale card itself
+        # cleared: the unrelated live producer B must not be resolved.
+        assert not producer_b.event.is_set(), (
+            "BUG: approving unrelated stale command A resolved live "
+            "producer B instead."
+        )
+        assert producer_b.result is None
+    finally:
+        with ra._lock:
+            ra._gateway_queues.pop(sid, None)
+            ra._pending.pop(sid, None)
+
+
+def test_legacy_identityless_mirror_with_multiple_producers_does_not_bind_to_head():
+    """A tokenless, identity-less no-run mirror submitted while multiple
+    producers are parked must not be silently bound to the queue head.
+
+    Regression for the approval-integrity violation found in review of
+    818fd2fd: inferring ownership from the queue head for an unmatched
+    mirror let approving it resolve the wrong (head) producer instead of
+    failing closed.
+    """
+    from api import routes
+    from api import route_approvals as ra
+
+    sid = "sess-identityless-multi-" + uuid.uuid4().hex[:8]
+
+    head = SimpleNamespace(
+        data=_live_head_data(approval_id="", run_id=""),
+        event=threading.Event(),
+        result=None,
+    )
+    non_head = SimpleNamespace(
+        data=_live_head_data(approval_id="", run_id=""),
+        event=threading.Event(),
+        result=None,
+    )
+    head.data["command"] = "rm -rf /tmp/head-command"
+    head.data["request_id"] = "req-head-" + uuid.uuid4().hex[:8]
+    non_head.data["command"] = "rm -rf /tmp/nonhead-command"
+    non_head.data["request_id"] = "req-nonhead-" + uuid.uuid4().hex[:8]
+
+    with ra._lock:
+        ra._gateway_queues.pop(sid, None)
+        ra._pending.pop(sid, None)
+        ra._gateway_queues.setdefault(sid, []).extend([head, non_head])
+
+    try:
+        # A copy carrying no identity at all: no request_id, no approval_id.
+        # Must NOT be inferred as belonging to `head`.
+        identityless_copy = {
+            "command": "rm -rf /tmp/mystery-command",
+            "description": "mystery",
+            "pattern_key": "dangerous_command",
+            "pattern_keys": ["dangerous_command"],
+            "choices": ["once", "session", "always", "deny"],
+        }
+
+        ra.submit_gateway_pending_mirror(sid, identityless_copy)
+
+        with ra._lock:
+            mirrored = next(
+                m for m in ra._pending[sid]
+                if m["command"] == "rm -rf /tmp/mystery-command"
+            )
+        assert not str(mirrored.get(ra._GATEWAY_MIRROR_TOKEN) or "").strip(), (
+            "BUG: an identity-less mirror was bound to a live producer's "
+            "token while multiple producers were parked."
+        )
+        approval_id = mirrored["approval_id"]
+
+        routes._resolve_approval_legacy(sid, approval_id, "once")
+
+        assert not head.event.is_set(), (
+            "BUG: an identity-less mirror resolved the queue HEAD instead "
+            "of failing closed."
+        )
+        assert not non_head.event.is_set()
+        assert head.result is None
+        assert non_head.result is None
     finally:
         with ra._lock:
             ra._gateway_queues.pop(sid, None)
