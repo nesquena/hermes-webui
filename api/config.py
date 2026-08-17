@@ -1557,20 +1557,40 @@ def _canonical_provider_config(config_obj: dict | None, provider: object) -> dic
         return {}
     keys = _canonical_provider_config_keys(config_obj, provider)
     canonical = _canonicalise_provider_id(provider)
+    # Read legacy aliases first and the canonical key last so canonical scalar
+    # values and duplicate model options win regardless of YAML key order.
+    keys = [key for key in keys if key != canonical]
+    if canonical in providers_cfg:
+        keys.append(canonical)
     merged: dict = {}
     model_values: list = []
+    model_map: dict | None = None
     for key in keys:
         value = providers_cfg.get(key)
         if isinstance(value, dict):
             merged.update(value)
             if isinstance(value.get("models"), list):
                 model_values.extend(value["models"])
-    if canonical in providers_cfg and isinstance(providers_cfg[canonical], dict):
-        merged.update(providers_cfg[canonical])
-        if isinstance(providers_cfg[canonical].get("models"), list):
-            model_values.extend(providers_cfg[canonical]["models"])
+            elif isinstance(value.get("models"), dict):
+                if model_map is None:
+                    model_map = {}
+                model_map.update(value["models"])
     if model_values:
-        merged["models"] = _configured_model_ids(model_values)
+        merged_models: list = []
+        model_positions: dict[str, int] = {}
+        for item in model_values:
+            model_id = _configured_model_ids([item])
+            if not model_id:
+                continue
+            model_key = model_id[0]
+            if model_key in model_positions:
+                merged_models[model_positions[model_key]] = item
+            else:
+                model_positions[model_key] = len(merged_models)
+                merged_models.append(item)
+        merged["models"] = merged_models
+    elif model_map is not None:
+        merged["models"] = model_map
     return merged
 
 
