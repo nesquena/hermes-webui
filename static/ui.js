@@ -4282,7 +4282,23 @@ function renderModelDropdown(){
     const _provider=String((m&&m.providerId)||(m&&m.badge&&m.badge.provider)||((typeof _providerFromModelValue==='function')?_providerFromModelValue(m&&m.value):'')||'').trim();
     return (_provider&&_provider!=='default')?_provider:null;
   };
-  const _isSelectedModelRow=(m)=>String((m&&m.value)||'')===String((_selectedModelState&&_selectedModelState.model)||(sel&&sel.value)||'')&&String(_modelProviderForSelectedBadge(m)||'')===String((_selectedModelState&&_selectedModelState.model_provider)||'');
+  const _isSelectedModelRow=(m)=>{
+    const _rowModel=String((m&&m.value)||'');
+    const _rowProvider=String(_modelProviderForSelectedBadge(m)||'');
+    const _stateModel=String((_selectedModelState&&_selectedModelState.model)||(sel&&sel.value)||'');
+    const _stateProvider=String((_selectedModelState&&_selectedModelState.model_provider)||'');
+    // Normalize both sides to the same model/provider identity. Catalog rows
+    // carry the qualified @custom:<slug>:<model> value while the outgoing
+    // state model is bare (#6884) — a raw string comparison would leave no
+    // row marked active/"Selected" after a restore. _modelPickerOptionIdentity
+    // is the same identity used for picker dedup, so the row that survives is
+    // exactly the one the send path resolves.
+    const _norm=(model,provider)=>typeof _modelPickerOptionIdentity==='function'
+      ?_modelPickerOptionIdentity(model,provider)
+      :String(model||'');
+    return _norm(_rowModel,_rowProvider)===_norm(_stateModel,_stateProvider)
+      &&_rowProvider===_stateProvider;
+  };
   const _selectedModelBadge=(m)=>_isSelectedModelRow(m)
     ?`<span class="model-opt-badge model-opt-badge--selected">${esc(t('model_badge_selected')||'Selected')}</span>`
     :'';

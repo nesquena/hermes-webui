@@ -278,6 +278,275 @@ def test_non_default_named_custom_provider_model_strips_qualified_prefix():
     }
 
 
+# Round-trip: send -> persist -> restore for a colon-bearing named
+# custom-provider model. The send path emits the bare id ("model-a:free");
+# on restore, _findModelInDropdown reverse-matches the bare id back to the
+# qualified catalog option ("@custom:hetmer.net:model-a:free") and the
+# dropdown re-renders. _isSelectedModelRow must normalize both sides to the
+# same model/provider identity so exactly ONE row renders as active /
+# "Selected" — with the model id intact, not truncated.
+_ROUND_TRIP_DRIVER = r"""
+const fs = require('fs');
+const ui = fs.readFileSync(process.argv[2], 'utf8');
+
+function extractFunc(name) {
+  const re = new RegExp('(?:async\\s+)?function\\s+' + name + '\\s*\\(');
+  const start = ui.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let openParen = ui.indexOf('(', start);
+  let i = openParen + 1;
+  let parenDepth = 1;
+  while (parenDepth > 0 && i < ui.length) {
+    if (ui[i] === '(') parenDepth++;
+    else if (ui[i] === ')') parenDepth--;
+    i++;
+  }
+  i = ui.indexOf('{', i);
+  let depth = 1;
+  i++;
+  while (depth > 0 && i < ui.length) {
+    if (ui[i] === '{') depth++;
+    else if (ui[i] === '}') depth--;
+    i++;
+  }
+  return ui.slice(start, i);
+}
+
+function makeClassList(initial) {
+  const set = new Set(initial || []);
+  return {
+    _set: set,
+    add(cls) { set.add(cls); },
+    remove(cls) { set.delete(cls); },
+    contains(cls) { return set.has(cls); },
+    toggle(cls, force) {
+      if (force === true) { set.add(cls); return true; }
+      if (force === false) { set.delete(cls); return false; }
+      if (set.has(cls)) { set.delete(cls); return false; }
+      set.add(cls);
+      return true;
+    },
+  };
+}
+
+function defineClassName(node) {
+  Object.defineProperty(node, 'className', {
+    get() { return [...node.classList._set].join(' '); },
+    set(v) { node.classList = makeClassList(String(v || '').split(/\s+/).filter(Boolean)); },
+  });
+}
+
+function makeNode(tag) {
+  const node = {
+    tagName: String(tag || '').toUpperCase(),
+    children: [],
+    dataset: {},
+    style: {},
+    parentElement: null,
+    textContent: '',
+    value: '',
+    tabIndex: 0,
+    onclick: null,
+    _listeners: {},
+    _innerHTML: '',
+    appendChild(child) {
+      child.parentElement = this;
+      this.children.push(child);
+      if (this.tagName === 'OPTGROUP' && this._ownerSelect && child.tagName === 'OPTION') {
+        this._ownerSelect.options.push(child);
+      }
+      return child;
+    },
+    addEventListener(type, handler) { this._listeners[type] = handler; },
+    querySelector(selector) { return this._qs ? this._qs[selector] || null : null; },
+    setAttribute(name, value) { this[name] = value; },
+    focus() { this._focused = true; },
+  };
+  node.classList = makeClassList();
+  defineClassName(node);
+  Object.defineProperty(node, 'innerHTML', {
+    get() { return this._innerHTML; },
+    set(v) {
+      this._innerHTML = String(v || '');
+      this.children = [];
+      this._qs = {};
+      if (this.tagName === 'DIV' && this._innerHTML.includes('model-search-input')) {
+        const input = makeNode('input');
+        input.className = 'model-search-input';
+        const clear = makeNode('button');
+        clear.className = 'model-search-clear';
+        this._qs['.model-search-input'] = input;
+        this._qs['.model-search-clear'] = clear;
+      } else if (this.tagName === 'DIV' && this._innerHTML.includes('model-custom-input')) {
+        const input = makeNode('input');
+        input.className = 'model-custom-input';
+        const btn = makeNode('button');
+        btn.className = 'model-custom-btn';
+        this._qs['.model-custom-input'] = input;
+        this._qs['.model-custom-btn'] = btn;
+      }
+    },
+  });
+  return node;
+}
+
+function makeOption(value, label, parent) {
+  const opt = makeNode('option');
+  opt.value = value;
+  opt.textContent = label || value;
+  opt.parentElement = parent || null;
+  return opt;
+}
+
+function makeSelect(groups, selectedValue) {
+  const sel = { id: 'modelSelect', children: [], options: [], _value: selectedValue || '' };
+  Object.defineProperty(sel, 'value', {get(){return sel._value;}, set(v){sel._value=String(v||'');}});
+  Object.defineProperty(sel, 'selectedOptions', {get(){const o=sel.options.find(x=>x.value===sel._value);return o?[o]:[];}});
+  sel.appendChild=function(option){option.parentElement=null;sel.options.push(option);};
+  sel.querySelectorAll=function(){return [];};
+  for (const group of groups || []) {
+    const og = makeNode('optgroup');
+    og.label = group.provider || '';
+    og.dataset.provider = group.provider_id || '';
+    og._ownerSelect = sel;
+    for (const model of group.models || []) og.appendChild(makeOption(model.id, model.label || model.id, og));
+    sel.children.push(og);
+    sel.options.push(...og.children);
+  }
+  return sel;
+}
+
+function snapshot(dd) {
+  const out = [];
+  const walk = (node) => {
+    for (const child of (node.children || [])) {
+      out.push({
+        className: child.className,
+        textContent: child.textContent,
+        html: child._innerHTML || '',
+      });
+      if (child.children && child.children.length) walk(child);
+    }
+  };
+  walk(dd);
+  return out;
+}
+
+const payload = JSON.parse(process.argv[3]);
+const dropdown = makeNode('div');
+dropdown.classList.add('open');
+const modelSelect = makeSelect(payload.groups, payload.selectedValue || payload.groups[0].models[0].id);
+
+function $(id) {
+  if (id === 'composerModelDropdown') return dropdown;
+  if (id === 'modelSelect') return modelSelect;
+  return null;
+}
+const window = { _configuredModelBadges: payload.configuredBadges || {} };
+const document = { createElement(tag) { return makeNode(tag); } };
+function esc(v) { return String(v || ''); }
+function t(key, ...args) {
+  if (key === 'model_show_all_models') return `Show all ${args[0]} models`;
+  return key;
+}
+function li() { return 'x'; }
+function getModelLabel(v) { return String(v || ''); }
+function _providerFromModelValue(v) {
+  const value = String(v || '');
+  if (value.startsWith('@') && value.includes(':')) return value.slice(1, value.lastIndexOf(':'));
+  return '';
+}
+function _normalizeConfiguredModelKey(v) { return String(v || '').toLowerCase(); }
+function _getConfiguredModelBadge(value, badgeMap) { return badgeMap[value] || null; }
+function closeModelDropdown() {}
+function syncModelChip() {}
+function _refreshOpenModelDropdown() {}
+function _deduplicateModelPickerOptions() { return 0; }
+async function selectModelFromDropdown(value, provider) {
+  _ensureModelOptionInDropdown(value, modelSelect, provider);
+  window.__picked=_modelStateForSelect(modelSelect,modelSelect.value);
+}
+
+for (const name of [
+  '_modelPickerOptionIdentity',
+  '_readModelOverflowData',
+  '_appendOverflowOptionsToGroup',
+  '_isEquivalentConfiguredModelEntry',
+  '_getOptionProviderId',
+  '_modelStateForSelect',
+  '_findModelInDropdown',
+  '_applyModelToDropdown',
+  '_ensureModelOptionInDropdown',
+  'renderModelDropdown',
+]) {
+  eval(extractFunc(name));
+}
+
+// Send path: the picked state carries the bare, intact model id.
+const sent = _modelStateForSelect(modelSelect, '@custom:hetmer.net:model-a:free');
+// Restore path: _findModelInDropdown reverse-matches the bare id to the
+// qualified catalog option, the picker restores sel.value to it and
+// re-renders the dropdown.
+const restoreValue = _findModelInDropdown(sent.model, modelSelect, sent.model_provider);
+modelSelect.value = restoreValue;
+renderModelDropdown();
+const rows = snapshot(dropdown).filter(n => String(n.className || '').includes('model-opt'));
+const activeRows = rows.filter(n => String(n.className || '').includes(' active'));
+process.stdout.write(JSON.stringify({
+  sent,
+  restoreValue,
+  activeCount: activeRows.length,
+  activeRow: activeRows.length ? {
+    className: activeRows[0].className,
+    text: activeRows[0].textContent,
+    html: activeRows[0].html,
+  } : null,
+}));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_colon_bearing_custom_provider_round_trip_restores_selected_row(tmp_path):
+    driver = tmp_path / "round_trip_driver.js"
+    driver.write_text(_ROUND_TRIP_DRIVER, encoding="utf-8")
+    payload = {
+        "groups": [
+            {
+                "provider": "hetmer.net",
+                "provider_id": "custom:hetmer.net",
+                "models": [
+                    {"id": "luna", "label": "luna"},
+                    {"id": "@custom:hetmer.net:model-a:free", "label": "model-a:free"},
+                ],
+            }
+        ],
+        "configuredBadges": {},
+        "selectedValue": "luna",
+    }
+    assert NODE is not None
+    result = subprocess.run(
+        [NODE, str(driver), str(UI_JS), json.dumps(payload)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    actual = json.loads(result.stdout)
+
+    # Send path: bare model id, intact (NOT truncated to "free").
+    assert actual["sent"] == {
+        "model": "model-a:free",
+        "model_provider": "custom:hetmer.net",
+    }
+    # Restore path: the bare id maps back to the qualified catalog option.
+    assert actual["restoreValue"] == "@custom:hetmer.net:model-a:free"
+    # Exactly one row renders as active/"Selected", with the intact model id.
+    assert actual["activeCount"] == 1, actual
+    assert "model-opt-badge--selected" in actual["activeRow"]["html"]
+    assert "model-a:free" in actual["activeRow"]["html"]
+    assert ">free<" not in actual["activeRow"]["html"].replace("model-a:free", "")
+
+
 _RENDERED_CLICK_DRIVER = r"""
 
 const fs = require('fs');
