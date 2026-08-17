@@ -76,6 +76,50 @@ def _custom_provider_name_matches(provider_id: str, name: object) -> bool:
         candidates.add(slug)
     return pid in candidates
 
+
+def _declared_profile_credential(provider_id: str):
+    """Resolve a declared source from one raw profile snapshot."""
+    from api import config as _config_module
+    from api.provider_discovery import capture_raw_profile_snapshot, resolve_credential
+
+    try:
+        snapshot = capture_raw_profile_snapshot(_config_module)
+    except Exception:
+        logger.debug("Failed to capture raw profile credential snapshot", exc_info=True)
+        return None
+
+    pid = str(provider_id or "").strip().lower()
+    providers_cfg = snapshot.get("providers") if isinstance(snapshot, dict) else None
+    if isinstance(providers_cfg, dict):
+        for raw_pid, entry in providers_cfg.items():
+            try:
+                matches = _config_module._canonicalise_provider_id(raw_pid) == _config_module._canonicalise_provider_id(pid)
+            except Exception:
+                matches = str(raw_pid).strip().lower() == pid
+            if matches and isinstance(entry, dict) and ("api_key" in entry or "key_env" in entry):
+                return resolve_credential(
+                    entry,
+                    provider_hint=pid,
+                    env_value=_config_module._thread_local_env_value,
+                    fallback_value=None,
+                )
+
+    custom_cfg = snapshot.get("custom_providers") if isinstance(snapshot, dict) else None
+    if isinstance(custom_cfg, list):
+        for entry in custom_cfg:
+            if (
+                isinstance(entry, dict)
+                and _custom_provider_name_matches(pid, entry.get("name"))
+                and ("api_key" in entry or "key_env" in entry)
+            ):
+                return resolve_credential(
+                    entry,
+                    provider_hint=pid,
+                    env_value=_config_module._thread_local_env_value,
+                    fallback_value=None,
+                )
+    return None
+
 _OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key"
 _PROVIDER_QUOTA_TIMEOUT_SECONDS = 3.0
 _ACCOUNT_USAGE_SUBPROCESS_TIMEOUT_SECONDS = 35.0
@@ -1276,6 +1320,10 @@ def _provider_has_key(provider_id: str) -> bool:
     4. ``config.yaml → providers.<id>.api_key``
     5. ``config.yaml → custom_providers[].api_key`` / ``key_env`` (for custom providers)
     """
+    _declared_credential = _declared_profile_credential(provider_id)
+    if _declared_credential is not None:
+        return bool(_declared_credential)
+
     env_var = _provider_env_var_for(provider_id)
     if env_var:
         env_path = _get_hermes_home() / ".env"
@@ -1351,6 +1399,9 @@ def _provider_has_key(provider_id: str) -> bool:
 def _get_provider_api_key(provider_id: str) -> str | None:
     """Return a configured provider API key without exposing it to callers."""
     provider_id = (provider_id or "").strip().lower()
+    _declared_credential = _declared_profile_credential(provider_id)
+    if _declared_credential is not None:
+        return _declared_credential.value if _declared_credential.state == "resolved" else None
     env_var = _provider_env_var_for(provider_id)
     if env_var:
         env_path = _get_hermes_home() / ".env"

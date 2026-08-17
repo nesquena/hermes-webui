@@ -3000,20 +3000,20 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
 
 def resolve_provider_credential(raw_api_key, raw_key_env, provider_hint=None) -> str | None:
     """Resolve one provider entry's credential using the active profile env."""
-    api_key = None
+    from api.provider_discovery import resolve_credential
+
+    raw = {}
     if raw_api_key is not None:
-        key_text = str(raw_api_key).strip()
-        if key_text.startswith("${") and key_text.endswith("}") and len(key_text) > 3:
-            api_key = _thread_local_env_value(key_text[2:-1]).strip() or None
-        elif key_text:
-            api_key = key_text
-    if not api_key:
-        key_env = str(raw_key_env or "").strip()
-        if key_env:
-            api_key = _thread_local_env_value(key_env).strip() or None
-    if not api_key and provider_hint:
-        api_key = _lookup_custom_api_key_env(provider_hint)
-    return api_key
+        raw["api_key"] = raw_api_key
+    if raw_key_env is not None:
+        raw["key_env"] = raw_key_env
+    resolved = resolve_credential(
+        raw,
+        provider_hint=str(provider_hint or ""),
+        env_value=_thread_local_env_value,
+        fallback_value=_lookup_custom_api_key_env,
+    )
+    return resolved.value if resolved.state == "resolved" else None
 
 
 def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, str | None]:
@@ -5999,6 +5999,40 @@ def _models_cache_source_fingerprint() -> dict:
     }
 
 
+def _provider_publication_tuple() -> tuple[str, str, str]:
+    """Return non-secret authority identity for a provider catalog result."""
+    try:
+        from api.profiles import get_active_profile_name
+
+        profile = str(get_active_profile_name() or "")
+    except Exception:
+        profile = ""
+    try:
+        from api.provider_discovery import capture_raw_profile_snapshot
+
+        raw = capture_raw_profile_snapshot(sys.modules[__name__])
+    except Exception:
+        raw = copy.deepcopy(cfg)
+    raw_fingerprint = hashlib.sha256(
+        json.dumps(raw, sort_keys=True, default=str, separators=(",", ":")).encode()
+    ).hexdigest()
+    env_names = []
+    providers_cfg = raw.get("providers", {}) if isinstance(raw, dict) else {}
+    if isinstance(providers_cfg, dict):
+        for entry in providers_cfg.values():
+            if isinstance(entry, dict):
+                name = str(entry.get("key_env") or "").strip()
+                if name:
+                    env_names.append(name)
+                literal = entry.get("api_key")
+                if isinstance(literal, str) and literal.strip().startswith("${"):
+                    env_names.append(literal.strip()[2:-1])
+    env_fingerprint = hashlib.sha256(
+        json.dumps(sorted((name, _thread_local_env_value(name)) for name in set(env_names)), separators=(",", ":")).encode()
+    ).hexdigest()
+    return profile, raw_fingerprint, env_fingerprint
+
+
 def _delete_models_cache_on_disk() -> None:
     try:
         os.unlink(str(_get_models_cache_path()))
@@ -6552,10 +6586,77 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     # ── COLD PATH helper ─────────────────────────────────────────────────────
     # Extracted so it runs inside _available_models_cache_lock (RLock) to
     # prevent thundering-herd: only one thread rebuilds while others wait.
+    _build_authority: dict[str, tuple[str, str, str]] = {}
+
     def _build_available_models_uncached() -> dict:
+        _build_authority["value"] = _provider_publication_tuple()
         active_provider = None
         default_model = get_effective_default_model(cfg)
         groups = []
+        # This snapshot is captured while the caller's profile scope is bound.
+        # The process-expanded cache remains the compatibility source for the
+        # legacy active and named-custom lanes below.
+        try:
+            from api.provider_discovery import capture_raw_profile_snapshot
+
+            _raw_profile_cfg = capture_raw_profile_snapshot(sys.modules[__name__])
+        except Exception:
+            _raw_profile_cfg = copy.deepcopy(cfg)
+
+        def _raw_config_entry(provider_id: str) -> tuple[str, dict]:
+            raw_providers = _raw_profile_cfg.get("providers", {})
+            if not isinstance(raw_providers, dict):
+                return provider_id, {}
+            for raw_key, entry in raw_providers.items():
+                if _canonicalise_provider_id(raw_key) == provider_id and isinstance(entry, dict):
+                    return str(raw_key), copy.deepcopy(entry)
+            return provider_id, {}
+
+        def _discover_snapshot_provider_models(provider_id: str, provider_label: str):
+            """Probe only an unregistered, route-bearing configured provider."""
+            raw_key, raw_entry = _raw_config_entry(provider_id)
+            if not raw_entry or provider_id == active_provider:
+                return [], None
+            known = (
+                provider_id in _PROVIDER_MODELS
+                or provider_id in _PROVIDER_DISPLAY
+                or _is_plugin_model_provider(provider_id)
+            )
+            if known or not str(raw_entry.get("base_url") or "").strip():
+                return [], None
+            from api.provider_discovery import (
+                ProviderDiscoveryError,
+                build_connection,
+                fetch_models,
+            )
+
+            connection = build_connection(
+                profile=str(_raw_profile_cfg.get("profile") or ""),
+                provider_id=provider_id,
+                raw_config_key=raw_key,
+                raw=raw_entry,
+                env_value=_thread_local_env_value,
+                fallback_value=_lookup_custom_api_key_env,
+            )
+            if connection.model_options:
+                return list(connection.model_options), None
+            if connection.discovery_policy != "allow" or not connection.credential:
+                return [], None
+            try:
+                return fetch_models(connection), None
+            except ProviderDiscoveryError as exc:
+                code = exc.status if exc.kind in {"auth", "http"} else None
+                return [], {
+                    "kind": exc.kind if exc.kind in {"auth", "http"} else "network",
+                    "code": code,
+                    "message": (
+                        f"Models endpoint returned {code} — check the API key for {provider_label}."
+                        if exc.kind == "auth" and code is not None
+                        else f"Models endpoint returned {code} for {provider_label}; see logs."
+                        if code is not None
+                        else f"Models endpoint unreachable for {provider_label}; verify base_url."
+                    ),
+                }
 
         def _norm_model_id(model_id: str) -> str:
             s = str(model_id or "").strip().lower()
@@ -6994,6 +7095,23 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
 
                 _canonical_to_raw_provider_key.setdefault(_canonical, _pid_key)
                 detected_providers.add(_canonical)
+
+        # The strict lane must enumerate route-bearing providers from the raw
+        # profile snapshot captured above, not only from the process-wide cfg.
+        _raw_profile_providers = _raw_profile_cfg.get("providers", {})
+        if isinstance(_raw_profile_providers, dict):
+            for _raw_pid, _raw_provider_cfg in _raw_profile_providers.items():
+                if not isinstance(_raw_provider_cfg, dict):
+                    continue
+                _raw_canonical = _canonicalise_provider_id(_raw_pid)
+                if not _raw_canonical:
+                    continue
+                if any(
+                    str(_raw_provider_cfg.get(_route_key) or "").strip()
+                    for _route_key in ("api", "base_url", "api_key", "key_env")
+                ):
+                    _canonical_to_raw_provider_key[_raw_canonical] = str(_raw_pid)
+                    detected_providers.add(_raw_canonical)
 
         def _configured_provider_for_base_url(base_url: object) -> str:
             target = _normalize_base_url_for_match(base_url)
@@ -7794,6 +7912,29 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     or pid in _canonical_to_raw_provider_key
                     or _is_plugin_model_provider(pid)
                 ):
+                    _strict_key, _strict_entry = _raw_config_entry(pid)
+                    _strict_lane = bool(
+                        _strict_entry
+                        and pid != active_provider
+                        and pid not in _PROVIDER_MODELS
+                        and pid not in _PROVIDER_DISPLAY
+                        and not _is_plugin_model_provider(pid)
+                        and str(_strict_entry.get("base_url") or "").strip()
+                    )
+                    if _strict_lane:
+                        raw_models, models_endpoint_error = _discover_snapshot_provider_models(
+                            pid, provider_name
+                        )
+                        if raw_models or models_endpoint_error:
+                            _append_picker_group(
+                                provider_name,
+                                pid,
+                                raw_models,
+                                apply_prefix=False,
+                                models_endpoint_error=models_endpoint_error,
+                                allow_empty=bool(models_endpoint_error),
+                            )
+                        continue
                     # Look up provider_cfg using the original raw key from
                     # config.yaml so that mixed-case / underscore keys like
                     # ``CLIPpoxy`` or ``snake_case_provider`` still resolve
@@ -7937,12 +8078,26 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         and resolved_key
                         and isinstance(provider_cfg, dict)
                     ):
-                        models_for_group, models_endpoint_error = _read_custom_endpoint_models(
-                            provider_base_url,
-                            pid,
-                            api_key=resolved_key,
-                            allow_private_base_url=False,
+                        _strict_key, _strict_entry = _raw_config_entry(pid)
+                        _strict_lane = bool(
+                            _strict_entry
+                            and pid != active_provider
+                            and pid not in _PROVIDER_MODELS
+                            and pid not in _PROVIDER_DISPLAY
+                            and not _is_plugin_model_provider(pid)
+                            and str(_strict_entry.get("base_url") or "").strip()
                         )
+                        if _strict_lane:
+                            models_for_group, models_endpoint_error = _discover_snapshot_provider_models(
+                                pid, provider_name
+                            )
+                        else:
+                            models_for_group, models_endpoint_error = _read_custom_endpoint_models(
+                                provider_base_url,
+                                pid,
+                                api_key=resolved_key,
+                                allow_private_base_url=False,
+                            )
                     if models_for_group or models_endpoint_error:
                         # Per-group deep copy so subsequent mutation by
                         # _deduplicate_model_ids() (which prefixes ids with
@@ -8294,19 +8449,22 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     _cache_build_cv.notify_all()
                 raise
             with _cache_build_cv:
-                published_at = time.monotonic()
-                _available_models_cache = result
-                _available_models_cache_ts = published_at
-                _available_models_live_rebuild_ts = published_at
-                _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
-                _sync_models_cache_provenance()
+                _authority_matches = _provider_publication_tuple() == _build_authority.get("value")
+                if _authority_matches:
+                    published_at = time.monotonic()
+                    _available_models_cache = result
+                    _available_models_cache_ts = published_at
+                    _available_models_live_rebuild_ts = published_at
+                    _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
+                    _sync_models_cache_provenance()
             try:
-                _save_models_cache_to_disk(result)
+                if _authority_matches:
+                    _save_models_cache_to_disk(result)
             finally:
                 with _cache_build_cv:
                     _cache_build_in_progress = False
                     _cache_build_cv.notify_all()
-            return copy.deepcopy(result)
+            return copy.deepcopy(result if _authority_matches else _minimal_static_models_catalog())
 
         # ── Bounded rebuild (defense-in-depth) ───────────────────────────────
         # The live rebuild does a network probe per provider (Copilot token
@@ -8341,6 +8499,13 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             global _cache_build_in_progress, _available_models_cache
             global _available_models_cache_ts, _available_models_live_rebuild_ts
             global _available_models_cache_source_fingerprint
+            if (
+                _build_authority.get("value") is not None
+                and _provider_publication_tuple() != _build_authority["value"]
+            ):
+                logger.info("discarding provider catalog with stale publication authority")
+                _clear_build_in_progress()
+                return False
             with _cache_build_cv:
                 published_at = time.monotonic()
                 _available_models_cache = result
@@ -8358,6 +8523,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 with _cache_build_cv:
                     _cache_build_in_progress = False
                     _cache_build_cv.notify_all()
+            return True
 
         def _clear_build_in_progress():
             global _cache_build_in_progress
@@ -8416,9 +8582,10 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             if "error" in box:
                 _clear_build_in_progress()
                 raise box["error"]
+            _published = False
             if _claim_publish():
-                _publish_models_result(box["result"])
-            return copy.deepcopy(box["result"])
+                _published = _publish_models_result(box["result"])
+            return copy.deepcopy(box["result"] if _published else _minimal_static_models_catalog())
 
         # Budget elapsed. Mark it so the worker knows it owns out-of-band
         # publication. Handle the tiny race where the build completed between
@@ -8426,9 +8593,10 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         # so this caller honours the cache contract.
         budget_exceeded.set()
         if build_done.is_set() and "error" not in box and "result" in box:
+            _published = False
             if _claim_publish():
-                _publish_models_result(box["result"])
-            return copy.deepcopy(box["result"])
+                _published = _publish_models_result(box["result"])
+            return copy.deepcopy(box["result"] if _published else _minimal_static_models_catalog())
 
         # Genuinely slow/hung probe: serve the best fallback now; the worker
         # keeps going and refreshes the cache for the next caller.
