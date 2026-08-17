@@ -9944,10 +9944,12 @@ from api.route_approvals import (  # noqa: F401 — re-exports for backward comp
     claim_gateway_approval_relay_owner,
     finish_session_yolo_transition,
     gateway_pending_mirror,
+    gateway_pending_mirrors,
     release_gateway_approval_relay_owner,
     retire_gateway_pending_mirror,
     reconcile_gateway_pending_mirror_locked,
     resolve_gateway_pending_local,
+    resolve_gateway_pending_local_all,
     resolve_gateway_pending_local_no_run_mirror,
     set_session_yolo_enabled,
     submit_gateway_pending_mirror,
@@ -15606,59 +15608,8 @@ def handle_post(handler, parsed) -> bool:
                 set_session_yolo_enabled(sid, False)
                 return j(handler, {"ok": True, "yolo_enabled": bool(is_session_yolo_enabled(sid))})
 
-        # Hold one tentative transition and one per-session gateway handoff from
-        # authoritative mirror discovery through relay/commit. A later approval
-        # therefore either becomes the relayed current prompt or observes the
-        # committed YOLO state after this request finishes.
-        yolo_transition = begin_session_yolo_transition(sid)
-        try:
-            with gateway_yolo_handoff(sid):
-                run_mirror = gateway_pending_mirror(sid)
-                if run_mirror is None:
-                    with _lock:
-                        reconcile_gateway_pending_mirror_locked(sid)
-                        queue = _pending.get(sid)
-                        entries = queue if isinstance(queue, list) else [queue] if queue else []
-                        run_mirror = next(
-                            (
-                                dict(entry)
-                                for entry in entries
-                                if isinstance(entry, dict)
-                                and entry.get(_GATEWAY_MIRROR_FLAG)
-                                and str(entry.get("run_id") or "").strip()
-                            ),
-                            None,
-                        )
-                        if run_mirror is None:
-                            _pending.pop(sid, None)
-
-                if run_mirror:
-                    relay_payload, relay_status = _relay_gateway_run_approval(
-                        sid,
-                        run_mirror,
-                        "once",
-                        enable_yolo=True,
-                    )
-                    relay_succeeded = bool(relay_status == 200 and relay_payload.get("ok"))
-                    finish_session_yolo_transition(
-                        sid,
-                        yolo_transition,
-                        succeeded=relay_succeeded,
-                    )
-                    yolo_transition = None
-                    relay_payload = {
-                        **relay_payload,
-                        "yolo_enabled": bool(is_session_yolo_enabled(sid)),
-                    }
-                    return j(handler, relay_payload, status=relay_status)
-
-                finish_session_yolo_transition(sid, yolo_transition, succeeded=True)
-                yolo_transition = None
-                resolve_gateway_approval(sid, "once", resolve_all=True)
-                return j(handler, {"ok": True, "yolo_enabled": bool(is_session_yolo_enabled(sid))})
-        finally:
-            if yolo_transition is not None:
-                finish_session_yolo_transition(sid, yolo_transition, succeeded=False)
+        payload, status = _enable_session_yolo_and_release_pending(sid, choice="once")
+        return j(handler, payload, status=status)
 
     if parsed.path == "/api/btw":
         return _handle_btw(handler, body)
@@ -24741,6 +24692,7 @@ def _relay_gateway_run_approval(
 
     run_id = str(mirror.get("run_id") or "").strip()
     approval_id = str(mirror.get("approval_id") or "").strip()
+    mirror_token = str(mirror.get(_GATEWAY_MIRROR_TOKEN) or "").strip()
     if not run_id or not approval_id:
         return _gateway_approval_failure(
             sid,
@@ -24765,6 +24717,7 @@ def _relay_gateway_run_approval(
             sid,
             approval_id=approval_id,
             run_id=run_id,
+            mirror_token=mirror_token,
         )
         if not current_mirror:
             return _gateway_approval_failure(
@@ -24822,7 +24775,12 @@ def _relay_gateway_run_approval(
         # The outbound relay resumes the remote run. Retire the local projection
         # only after that succeeds, then settle any matching in-process mirror.
         _resolve_approval_legacy(sid, approval_id, choice, run_id=run_id)
-        retire_gateway_pending_mirror(sid, approval_id=approval_id, run_id=run_id)
+        retire_gateway_pending_mirror(
+            sid,
+            approval_id=approval_id,
+            run_id=run_id,
+            mirror_token=mirror_token,
+        )
         return {
             "ok": True,
             "choice": choice,
@@ -24835,6 +24793,123 @@ def _relay_gateway_run_approval(
         }, 200
     finally:
         release_gateway_approval_relay_owner(sid, run_id, approval_id)
+
+
+def _pending_approval_owner_state(
+    sid: str,
+    approval_id: str,
+    run_id: str = "",
+    mirror_token: str = "",
+) -> tuple[bool, bool]:
+    """Return `(exact_owner_exists, any_pending_exists)` under queue authority."""
+    approval_id = str(approval_id or "").strip()
+    run_id = str(run_id or "").strip()
+    mirror_token = str(mirror_token or "").strip()
+    with _lock:
+        reconcile_gateway_pending_mirror_locked(sid)
+        queue = _pending.get(sid)
+        entries = queue if isinstance(queue, list) else [queue] if queue else []
+        exact = False
+        for entry in entries:
+            if not isinstance(entry, dict) or str(entry.get("approval_id") or "") != approval_id:
+                continue
+            entry_run_id = str(entry.get("run_id") or "").strip()
+            entry_mirror_token = str(entry.get(_GATEWAY_MIRROR_TOKEN) or "").strip()
+            if run_id and entry_run_id != run_id:
+                continue
+            if mirror_token and entry_mirror_token != mirror_token:
+                continue
+            if (run_id or mirror_token) and not entry.get(_GATEWAY_MIRROR_FLAG):
+                continue
+            exact = True
+            break
+        return exact, bool(entries or _gateway_queues.get(sid))
+
+
+def _enable_session_yolo_and_release_pending(
+    sid: str,
+    *,
+    choice: str,
+    approval_id: str = "",
+    run_id: str = "",
+    mirror_token: str = "",
+    include_choice: bool = False,
+) -> tuple[dict, int]:
+    """Relay every parked remote approval, drain local waiters, then commit YOLO."""
+    approval_id = str(approval_id or "").strip()
+    run_id = str(run_id or "").strip()
+    mirror_token = str(mirror_token or "").strip()
+    has_exact_remote_owner = bool(run_id or mirror_token)
+    if has_exact_remote_owner and (not approval_id or not run_id or not mirror_token):
+        return _gateway_approval_failure(
+            sid,
+            choice,
+            code="gateway_run_unavailable",
+            error=_GATEWAY_APPROVAL_RELAY_UNAVAILABLE,
+            status=409,
+            enable_yolo=True,
+        )
+
+    yolo_transition = begin_session_yolo_transition(sid)
+    try:
+        with gateway_yolo_handoff(sid):
+            stale_cleared = False
+            if approval_id:
+                exact_owner, any_pending = _pending_approval_owner_state(
+                    sid,
+                    approval_id,
+                    run_id,
+                    mirror_token,
+                )
+                if not exact_owner and (has_exact_remote_owner or any_pending):
+                    return _gateway_approval_failure(
+                        sid,
+                        choice,
+                        code="gateway_run_unavailable",
+                        error=_GATEWAY_APPROVAL_RELAY_UNAVAILABLE,
+                        status=409,
+                        enable_yolo=True,
+                    )
+                stale_cleared = not exact_owner
+
+            run_mirrors = gateway_pending_mirrors(sid)
+            relayed = 0
+            for mirror in run_mirrors:
+                relay_payload, relay_status = _relay_gateway_run_approval(
+                    sid,
+                    mirror,
+                    choice,
+                    enable_yolo=False,
+                )
+                if relay_status != 200 or not relay_payload.get("ok"):
+                    finish_session_yolo_transition(
+                        sid,
+                        yolo_transition,
+                        succeeded=False,
+                    )
+                    yolo_transition = None
+                    return {
+                        **relay_payload,
+                        "yolo_enabled": bool(is_session_yolo_enabled(sid)),
+                    }, relay_status
+                relayed += 1
+
+            resolve_gateway_pending_local_all(
+                sid,
+                choice,
+            )
+            finish_session_yolo_transition(sid, yolo_transition, succeeded=True)
+            yolo_transition = None
+            return {
+                "ok": True,
+                "yolo_enabled": bool(is_session_yolo_enabled(sid)),
+                **({"choice": choice} if include_choice or relayed else {}),
+                **({"relayed": True} if relayed else {}),
+                **({"stale_cleared": True} if stale_cleared else {}),
+            }, 200
+    finally:
+        if yolo_transition is not None:
+            finish_session_yolo_transition(sid, yolo_transition, succeeded=False)
 
 
 def _gateway_pending_approval_without_run_id(sid: str, approval_id: str) -> bool:
@@ -24887,6 +24962,54 @@ def _handle_approval_respond(handler, body):
         return bad(handler, f"Invalid choice: {choice}")
     approval_id = body.get("approval_id", "")
     enable_yolo = body.get("yolo") is True
+    requested_run_id = str(body.get("run_id") or "").strip()
+    requested_mirror_token = str(body.get("mirror_token") or "").strip()
+
+    if enable_yolo:
+        payload, status = _enable_session_yolo_and_release_pending(
+            sid,
+            choice=choice,
+            approval_id=approval_id,
+            run_id=requested_run_id,
+            mirror_token=requested_mirror_token,
+            include_choice=True,
+        )
+        return j(handler, payload, status=status)
+
+    if requested_run_id or requested_mirror_token:
+        if not approval_id or not requested_run_id or not requested_mirror_token:
+            relay_payload, relay_status = _gateway_approval_failure(
+                sid,
+                choice,
+                code="gateway_run_unavailable",
+                error=_GATEWAY_APPROVAL_RELAY_UNAVAILABLE,
+                status=409,
+                enable_yolo=False,
+            )
+            return j(handler, relay_payload, status=relay_status)
+        exact_mirror = gateway_pending_mirror(
+            sid,
+            approval_id=approval_id,
+            run_id=requested_run_id,
+            mirror_token=requested_mirror_token,
+        )
+        if exact_mirror is None:
+            relay_payload, relay_status = _gateway_approval_failure(
+                sid,
+                choice,
+                code="gateway_run_unavailable",
+                error=_GATEWAY_APPROVAL_RELAY_UNAVAILABLE,
+                status=409,
+                enable_yolo=False,
+            )
+            return j(handler, relay_payload, status=relay_status)
+        relay_payload, relay_status = _relay_gateway_run_approval(
+            sid,
+            exact_mirror,
+            choice,
+            enable_yolo=False,
+        )
+        return j(handler, relay_payload, status=relay_status)
 
     # Gateway relay: forward choice to the runs API when session has an active run,
     # or recover the run_id from the mirrored gateway approval entry if the

@@ -7432,37 +7432,56 @@ function _renderPendingApprovalForActiveSession() {
   if (entry) showApprovalCard(entry.pending, entry.pendingCount);
 }
 
+function _approvalMirrorOwnerFor(sid, approvalId) {
+  const entry = _approvalPendingBySession.get(sid);
+  const pending = entry && entry.pending;
+  if (!pending || pending.approval_id !== approvalId) return {runId: '', mirrorToken: ''};
+  const runId = String(pending.run_id || '').trim();
+  const mirrorToken = String(pending._gateway_mirror_token || '').trim();
+  return runId && mirrorToken ? {runId, mirrorToken} : {runId: '', mirrorToken: ''};
+}
+
 function _captureApprovalResponseOwner() {
   const card = $("approvalCard");
   const sid = _approvalSessionId;
   const approvalId = _approvalCurrentId;
   if (!card || !card.classList.contains("visible") || !sid || !approvalId) return null;
   if (!S.session || S.session.session_id !== sid) return null;
-  return {sid, generation: _loadSessionGeneration, approvalId};
+  return {sid, generation: _loadSessionGeneration, approvalId, ..._approvalMirrorOwnerFor(sid, approvalId)};
 }
 
 function _approvalResponseOwnerIsCurrent(owner) {
+  const mirrorOwner = owner ? _approvalMirrorOwnerFor(owner.sid, owner.approvalId) : null;
   return !!(
     owner &&
     S.session &&
     S.session.session_id === owner.sid &&
     _loadSessionGeneration === owner.generation &&
     _approvalSessionId === owner.sid &&
-    _approvalCurrentId === owner.approvalId
+    _approvalCurrentId === owner.approvalId &&
+    mirrorOwner.runId === owner.runId &&
+    mirrorOwner.mirrorToken === owner.mirrorToken
   );
 }
 
-function _approvalResponseMatches(sid, approvalId, generation = _loadSessionGeneration) {
+function _approvalResponseMatches(
+  sid,
+  approvalId,
+  generation = _loadSessionGeneration,
+  mirrorOwner = _approvalMirrorOwnerFor(sid, approvalId),
+) {
   return !!(
     _approvalResponding &&
     _approvalResponding.sid === sid &&
     _approvalResponding.generation === generation &&
-    _approvalResponding.approvalId === approvalId
+    _approvalResponding.approvalId === approvalId &&
+    _approvalResponding.runId === mirrorOwner.runId &&
+    _approvalResponding.mirrorToken === mirrorOwner.mirrorToken
   );
 }
 
 function _releaseApprovalResponseOwner(owner) {
-  if (_approvalResponseMatches(owner.sid, owner.approvalId, owner.generation)) {
+  if (_approvalResponseMatches(owner.sid, owner.approvalId, owner.generation, owner)) {
     _approvalResponding = null;
   }
 }
@@ -7505,7 +7524,14 @@ function showApprovalCard(pending, pendingCount) {
   const keys = pending.pattern_keys || (pending.pattern_key ? [pending.pattern_key] : []);
   const desc = (pending.description || "") + (keys.length ? " [" + keys.join(", ") + "]" : "");
   const cmd = pending.command || "";
-  const sig = JSON.stringify({desc, cmd, sid: pending._session_id || (S.session && S.session.session_id) || null, approval_id: pending.approval_id || null});
+  const sig = JSON.stringify({
+    desc,
+    cmd,
+    sid: pending._session_id || (S.session && S.session.session_id) || null,
+    approval_id: pending.approval_id || null,
+    run_id: pending.run_id || null,
+    mirror_token: pending._gateway_mirror_token || null,
+  });
   const card = $("approvalCard");
   const sameApproval = card.classList.contains("visible") && _approvalSignature === sig;
   $("approvalDesc").textContent = desc;
@@ -7635,7 +7661,7 @@ async function respondApproval(choice, options = {}) {
   const owner = options.owner || _captureApprovalResponseOwner();
   if (!_approvalResponseOwnerIsCurrent(owner)) return false;
   const {sid, approvalId} = owner;
-  if (_approvalResponseMatches(sid, approvalId, owner.generation)) return false;
+  if (_approvalResponseMatches(sid, approvalId, owner.generation, owner)) return false;
   _approvalClearedOwner = null;
   _unmarkApprovalDismissed(sid, approvalId);
   _approvalResponding = {...owner, choice};
@@ -7647,6 +7673,8 @@ async function respondApproval(choice, options = {}) {
         session_id: sid,
         choice,
         approval_id: approvalId,
+        ...(owner.runId ? {run_id: owner.runId} : {}),
+        ...(owner.mirrorToken ? {mirror_token: owner.mirrorToken} : {}),
         ...(options.yolo ? {yolo: true} : {}),
       })
     });
@@ -7658,7 +7686,14 @@ async function respondApproval(choice, options = {}) {
       _releaseApprovalResponseOwner(owner);
       if (options.yolo) _applyApprovalYoloProjection(result);
       const pendingEntry = _approvalPendingBySession.get(sid);
-      const samePending = !!(pendingEntry && pendingEntry.pending && pendingEntry.pending.approval_id === approvalId);
+      const pendingOwner = _approvalMirrorOwnerFor(sid, approvalId);
+      const samePending = !!(
+        pendingEntry &&
+        pendingEntry.pending &&
+        pendingEntry.pending.approval_id === approvalId &&
+        pendingOwner.runId === owner.runId &&
+        pendingOwner.mirrorToken === owner.mirrorToken
+      );
       if (samePending) _clearApprovalPendingForSession(sid);
       _approvalSessionId = null;
       _approvalCurrentId = null;

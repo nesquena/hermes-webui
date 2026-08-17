@@ -300,12 +300,15 @@ def reconcile_gateway_pending_mirror_locked(session_key: str) -> tuple[dict | No
                 live_mirror_present = True
                 continue
             if live_token:
+                if entry.get(_GATEWAY_MIRROR_RETAINED):
+                    rebuilt.append(entry)
+                    continue
                 if entry_token:
                     changed = True
                     continue
                 deferred_run_entries.append(entry)
                 continue
-            if not entry_token:
+            if entry.get(_GATEWAY_MIRROR_RETAINED) or not entry_token:
                 rebuilt.append(entry)
                 continue
             changed = True
@@ -366,10 +369,16 @@ def reconcile_gateway_pending_mirror_locked(session_key: str) -> tuple[dict | No
     return head, total, changed
 
 
-def _gateway_pending_mirror_locked(session_key: str, approval_id: str = "", run_id: str = "") -> dict | None:
+def _gateway_pending_mirror_locked(
+    session_key: str,
+    approval_id: str = "",
+    run_id: str = "",
+    mirror_token: str = "",
+) -> dict | None:
     """Return the exact live run-backed mirror under `_lock`."""
     approval_id = str(approval_id or "").strip()
     run_id = str(run_id or "").strip()
+    mirror_token = str(mirror_token or "").strip()
     queue = _pending.get(session_key)
     entries = queue if isinstance(queue, list) else [queue] if queue else []
     if approval_id:
@@ -386,6 +395,8 @@ def _gateway_pending_mirror_locked(session_key: str, approval_id: str = "", run_
                 continue
             if run_id and entry_run_id != run_id:
                 continue
+            if mirror_token and str(entry.get(_GATEWAY_MIRROR_TOKEN) or "").strip() != mirror_token:
+                continue
             if run_id:
                 return entry
             if matched_entry is not None:
@@ -394,6 +405,8 @@ def _gateway_pending_mirror_locked(session_key: str, approval_id: str = "", run_
         return matched_entry
     for entry in entries:
         if not _is_gateway_mirror_entry(entry) or not str(entry.get("run_id") or "").strip():
+            continue
+        if mirror_token and str(entry.get(_GATEWAY_MIRROR_TOKEN) or "").strip() != mirror_token:
             continue
         if run_id:
             if entry.get("run_id") == run_id:
@@ -406,12 +419,31 @@ def _gateway_pending_mirror_locked(session_key: str, approval_id: str = "", run_
     return None
 
 
-def gateway_pending_mirror(session_key: str, approval_id: str = "", run_id: str = "") -> dict | None:
+def gateway_pending_mirror(
+    session_key: str,
+    approval_id: str = "",
+    run_id: str = "",
+    mirror_token: str = "",
+) -> dict | None:
     """Return an exact live run-backed mirror for this session."""
     with _lock:
         reconcile_gateway_pending_mirror_locked(session_key)
-        entry = _gateway_pending_mirror_locked(session_key, approval_id, run_id)
+        entry = _gateway_pending_mirror_locked(session_key, approval_id, run_id, mirror_token)
         return dict(entry) if entry else None
+
+
+def gateway_pending_mirrors(session_key: str) -> list[dict]:
+    """Return every currently parked run-backed mirror in queue order."""
+    with _lock:
+        reconcile_gateway_pending_mirror_locked(session_key)
+        queue = _pending.get(session_key)
+        entries = queue if isinstance(queue, list) else [queue] if queue else []
+        return [
+            dict(entry)
+            for entry in entries
+            if _is_gateway_mirror_entry(entry)
+            and str(entry.get("run_id") or "").strip()
+        ]
 
 
 def claim_gateway_approval_relay_owner(session_key: str, run_id: str, approval_id: str) -> bool:
@@ -444,7 +476,12 @@ def release_gateway_approval_relay_owner(session_key: str, run_id: str, approval
         _gateway_relay_owners.pop(key, None)
 
 
-def retire_gateway_pending_mirror(session_key: str, approval_id: str = "", run_id: str = "") -> bool:
+def retire_gateway_pending_mirror(
+    session_key: str,
+    approval_id: str = "",
+    run_id: str = "",
+    mirror_token: str = "",
+) -> bool:
     """Retire one approval, or every mirror for a terminal run."""
     with _lock:
         reconcile_gateway_pending_mirror_locked(session_key)
@@ -455,7 +492,12 @@ def retire_gateway_pending_mirror(session_key: str, approval_id: str = "", run_i
         retained_gateway_queue = gateway_queue
         gateway_queue_changed = False
         if approval_id:
-            match = _gateway_pending_mirror_locked(session_key, approval_id, run_id)
+            match = _gateway_pending_mirror_locked(
+                session_key,
+                approval_id,
+                run_id,
+                mirror_token,
+            )
             if match is None and not normalized_run_id:
                 match = next((entry for entry in entries if _is_gateway_mirror_entry(entry)
                               and not str(entry.get("run_id") or "").strip()
@@ -619,6 +661,8 @@ def submit_gateway_pending_mirror(session_key: str, approval: dict) -> tuple[dic
                 mirror_entry["run_id"] = run_id
                 mirror_entry["approval_id"] = approval_id
                 mirror_entry[_GATEWAY_MIRROR_FLAG] = True
+                mirror_entry[_GATEWAY_MIRROR_TOKEN] = uuid.uuid4().hex
+                mirror_entry[_GATEWAY_MIRROR_RETAINED] = True
                 if not _gateway_pending_mirror_locked(session_key, approval_id=approval_id, run_id=run_id):
                     _normalize_pending_queue_locked(session_key).append(mirror_entry)
         elif not exact_local_entry:
@@ -726,6 +770,57 @@ def resolve_gateway_pending_local_no_run_mirror(
     target.event.set()
     publish_session_list_changed("attention_resolved")
     return True, 1, head, total
+
+
+def resolve_gateway_pending_local_all(
+    session_key: str,
+    choice: str,
+    reason: str | None = None,
+) -> tuple[int, dict | None, int]:
+    """Resolve every parked local/no-run approval without touching remote runs."""
+    targets = []
+    removed_pending = False
+    with _lock:
+        reconcile_gateway_pending_mirror_locked(session_key)
+
+        gateway_queue = _gateway_queues.get(session_key) or []
+        retained_gateway_queue = []
+        for entry in gateway_queue:
+            data = getattr(entry, "data", None) or {}
+            if str(data.get("run_id") or "").strip():
+                retained_gateway_queue.append(entry)
+            else:
+                targets.append(entry)
+        if retained_gateway_queue:
+            _gateway_queues[session_key] = retained_gateway_queue
+        else:
+            _gateway_queues.pop(session_key, None)
+
+        queue = _pending.get(session_key)
+        entries = queue if isinstance(queue, list) else [queue] if queue else []
+        retained_pending = [
+            entry
+            for entry in entries
+            if _is_gateway_mirror_entry(entry)
+            and str(entry.get("run_id") or "").strip()
+        ]
+        removed_pending = len(retained_pending) != len(entries)
+        if retained_pending:
+            _pending[session_key] = retained_pending
+        else:
+            _pending.pop(session_key, None)
+
+        head, total, _changed = reconcile_gateway_pending_mirror_locked(session_key)
+        _approval_sse_notify_locked(session_key, head, total)
+
+    for entry in targets:
+        entry.result = choice
+        if reason:
+            entry.reason = reason
+        entry.event.set()
+    if targets or removed_pending:
+        publish_session_list_changed("attention_resolved")
+    return len(targets), head, total
 
 
 def submit_pending(session_key: str, approval: dict) -> None:
