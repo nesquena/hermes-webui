@@ -1001,9 +1001,12 @@ async function loadCronGatewayNotice() {
   }
 }
 
+let _cronLoadToken = 0;
+
 async function loadCrons(animate, useCached = false) {
   const box = $('cronList');
   const refreshBtn = $('cronRefreshBtn');
+  const myToken = ++_cronLoadToken;
   if (!useCached) loadCronGatewayNotice();
   if (animate && refreshBtn) {
     refreshBtn.style.opacity = '0.5';
@@ -1014,12 +1017,15 @@ async function loadCrons(animate, useCached = false) {
       await loadCronProfiles();
       const allProfilesQS = _showAllCronProfiles ? '?all_profiles=1' : '';
       const data = await api('/api/crons' + allProfilesQS);
+      if (myToken !== _cronLoadToken) return;
       _cronList = data.jobs || [];
       _cronOtherProfileCount = Number(data.other_profile_count || 0);
       if (_showAllCronProfiles && !_cronList.some(job => job && job.read_only)) {
         _showAllCronProfiles = false;
         _cronOtherProfileCount = 0;
       }
+    } else if (myToken !== _cronLoadToken) {
+      return;
     }
     const query = ($('cronSearch')?.value || '').trim().toLowerCase();
     box.innerHTML = '';

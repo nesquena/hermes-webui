@@ -90,6 +90,38 @@ def test_cron_filter_is_case_insensitive_name_only_locale_safe_and_uses_cached_j
     )
 
 
+def test_cron_load_uses_a_token_to_resolve_deferred_first_load_ordering():
+    """A stale in-flight request must never overwrite a newer one's result.
+
+    Scenario: the initial (useCached=false) /api/crons fetch is still in flight
+    when the user types and then clears the search box before it resolves. Both
+    the type and the clear trigger their own loadCrons(false, true) calls, which
+    run synchronously against whatever _cronList currently holds. Without an
+    ownership check, the initial fetch could resolve afterward and either get
+    silently discarded by a later synchronous render, or (worse) each call could
+    stomp on the others' render in an order that leaves the sidebar showing a
+    stale or incomplete job list instead of the just-fetched one.
+    """
+    assert "let _cronLoadToken = 0;" in PANELS_JS, (
+        "missing the load-ordering token -> nothing distinguishes a stale, "
+        "still-in-flight loadCrons() call from the most recent one"
+    )
+    assert "const myToken = ++_cronLoadToken;" in PANELS_JS, (
+        "loadCrons must claim a token at the start of every call (cached or not) "
+        "-> without this, concurrent calls can't tell which one is newest"
+    )
+    assert "if (myToken !== _cronLoadToken) return;" in PANELS_JS, (
+        "the awaited /api/crons response must check it's still the newest call "
+        "before writing to _cronList or rendering -> otherwise a slow initial "
+        "fetch can overwrite state that a later type/clear already rendered"
+    )
+    assert "} else if (myToken !== _cronLoadToken) {" in PANELS_JS, (
+        "cached (useCached=true) calls -- the type/clear path -- must also bail "
+        "out if a newer call has since claimed the token, so a burst of rapid "
+        "typing and clearing can't render out of order"
+    )
+
+
 def test_cron_filter_preserves_active_paused_partition_and_matched_count():
     """Filtering must not break the active/paused split or the paused count from #4026."""
     assert "status.state === 'paused' ? _pausedJobs : _activeJobs" in PANELS_JS, (
