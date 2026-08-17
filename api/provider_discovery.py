@@ -82,6 +82,9 @@ def resolve_credential(
                     return resolved
                 # An unresolved template can still use the explicitly declared
                 # key_env source; only source-absent entries reach ambient fallback.
+            elif value_text.startswith("${"):
+                if not has_key_env:
+                    return ProviderCredential("declared_unavailable", "api_key:${...}")
             else:
                 return ProviderCredential("resolved", "api_key", value_text)
     if has_key_env:
@@ -89,6 +92,8 @@ def resolve_credential(
         if name:
             return _from_env(name, "key_env", env_value)
         return ProviderCredential("declared_unavailable", "key_env")
+    if has_api_key:
+        return ProviderCredential("declared_unavailable", "api_key")
     if (provider_hint == "custom" or provider_hint.startswith("custom:")) and fallback_value is not None:
         value = fallback_value(provider_hint)
         if value and str(value).strip():
@@ -230,7 +235,8 @@ def fetch_models(
 ) -> list[dict[str, str]]:
     """Fetch a catalog after exactly one DNS resolution and with no redirects."""
     prepared = connection if connection.vetted_addresses else prepare_connection(connection, resolver=resolver)
-    endpoint = prepared.base_url.rstrip("/") + "/models"
+    endpoint = prepared.base_url.rstrip("/")
+    endpoint = endpoint + ("/models" if endpoint.endswith("/v1") else "/v1/models")
     request = urllib.request.Request(endpoint, method="GET")
     request.add_header("User-Agent", "OpenAI/Python 1.0")
     if prepared.credential.value:
@@ -250,10 +256,29 @@ def fetch_models(
         if len(payload) > max_bytes:
             raise ProviderDiscoveryError("response_too_large")
         decoded = json.loads(payload.decode("utf-8"))
-        rows = decoded.get("data") if isinstance(decoded, dict) else decoded
+        if isinstance(decoded, dict):
+            rows = decoded.get("data")
+            if not isinstance(rows, list):
+                rows = decoded.get("models")
+        else:
+            rows = decoded
         if not isinstance(rows, list):
             raise ProviderDiscoveryError("invalid_payload")
-        return [{"id": str(row["id"]), "label": str(row.get("name") or row["id"])} for row in rows if isinstance(row, dict) and row.get("id")]
+        result = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            model_id = row.get("id") or row.get("name") or row.get("model")
+            if not model_id:
+                continue
+            model_id = str(model_id)
+            result.append(
+                {
+                    "id": model_id,
+                    "label": str(row.get("name") or row.get("model") or model_id),
+                }
+            )
+        return result
     except ProviderDiscoveryError:
         raise
     except urllib.error.HTTPError as exc:

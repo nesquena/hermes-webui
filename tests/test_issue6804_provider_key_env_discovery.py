@@ -129,6 +129,19 @@ def test_provider_credential_contract_and_custom_delegate(monkeypatch, tmp_path)
     assert demo["has_key"] is True
 
 
+def test_declared_empty_and_malformed_sources_fail_closed():
+    fallback = lambda _hint: "ambient-secret"
+    for entry in ({"api_key": None}, {"api_key": ""}, {"api_key": "${BROKEN"}):
+        resolved = resolve_credential(
+            entry,
+            provider_hint="custom:demo",
+            env_value=lambda _name: "",
+            fallback_value=fallback,
+        )
+        assert resolved.state == "declared_unavailable"
+        assert config.resolve_provider_credential_entry(entry, "custom:demo") is None
+
+
 def test_key_env_does_not_cross_profile_boundary(monkeypatch):
     values = {"PROFILE_KEY": "profile-secret"}
     monkeypatch.setattr(config, "_thread_local_env_value", lambda name: values.get(name, ""))
@@ -275,6 +288,16 @@ def test_provider_card_declared_source_masks_ambient_alias(monkeypatch):
     assert providers._get_provider_api_key("synthetic") is None
 
 
+def test_named_custom_provider_card_does_not_reopen_pool_fallback(monkeypatch, tmp_path):
+    custom = {"name": "demo", "key_env": "MISSING"}
+    monkeypatch.setattr(providers, "get_config", lambda: {"custom_providers": [custom]})
+    monkeypatch.setattr(providers, "_get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(config, "_has_explicit_pool_credentials", lambda _provider: True)
+    providers.invalidate_providers_cache()
+    demo = next(item for item in providers.get_providers()["providers"] if item["id"] == "custom:demo")
+    assert demo["has_key"] is False
+
+
 def test_stale_publication_is_not_returned_to_foreground(monkeypatch, tmp_path):
     old_cfg, old_mtime = _configure(monkeypatch, tmp_path)
     changed = False
@@ -301,6 +324,35 @@ def test_stale_publication_is_not_returned_to_foreground(monkeypatch, tmp_path):
     finally:
         _restore(old_cfg, old_mtime)
     assert not any(group.get("provider_id") == "synthetic" for group in result["groups"])
+
+
+def test_stale_publication_after_disk_save_is_discarded(monkeypatch, tmp_path):
+    old_cfg, old_mtime = _configure(monkeypatch, tmp_path)
+    changed = False
+    deleted = []
+
+    def authority():
+        return ("alpha", "changed", "env") if changed else ("alpha", "raw", "env")
+
+    def save(_result):
+        nonlocal changed
+        changed = True
+
+    monkeypatch.setattr(config, "_LIVE_REBUILD_BUDGET_SECONDS", 0.0)
+    monkeypatch.setattr(config, "_provider_publication_tuple", authority)
+    monkeypatch.setattr(config, "_save_models_cache_to_disk", save)
+    monkeypatch.setattr(config, "_delete_models_cache_on_disk", lambda: deleted.append(True))
+    monkeypatch.setattr(
+        provider_discovery,
+        "fetch_models",
+        lambda _connection: [{"id": "syn:stale", "label": "syn:stale"}],
+    )
+    try:
+        result = config.get_available_models(force_refresh=True)
+    finally:
+        _restore(old_cfg, old_mtime)
+    assert not any(group.get("provider_id") == "synthetic" for group in result["groups"])
+    assert deleted
 
 
 def test_pinned_fetch_resolves_once_and_uses_vetted_addresses():
@@ -559,6 +611,161 @@ def test_profile_snapshot_authority_pairs_endpoint_and_credential():
         ("alpha", "https://alpha.synthetic.test/v1", "alpha-secret"),
         ("beta", "https://beta.synthetic.test/v1", "beta-secret"),
     }
+
+
+def test_profile_scope_catalog_keeps_endpoint_and_bearer_together(monkeypatch, tmp_path):
+    base = tmp_path / ".hermes"
+    profiles_home = base / "profiles"
+    for profile, host, secret in (
+        ("alpha", "alpha.synthetic.test", "alpha-secret"),
+        ("beta", "beta.synthetic.test", "beta-secret"),
+    ):
+        home = profiles_home / profile
+        home.mkdir(parents=True)
+        (home / "config.yaml").write_text(
+            f"""model:\n  provider: openai\nproviders:\n  synthetic:\n    name: synthetic\n    base_url: https://{host}/v1\n    key_env: SYNTHETIC_API_KEY\n""",
+            encoding="utf-8",
+        )
+        (home / ".env").write_text(f"SYNTHETIC_API_KEY={secret}\n", encoding="utf-8")
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setenv("HERMES_HOME", str(base))
+    monkeypatch.setenv("HERMES_BASE_HOME", str(base))
+    monkeypatch.setattr(
+        profiles,
+        "get_active_hermes_home",
+        lambda: base / "profiles" / profiles.get_active_profile_name(),
+    )
+    monkeypatch.setattr(
+        profiles,
+        "get_hermes_home_for_profile",
+        lambda name: base / "profiles" / name,
+    )
+    monkeypatch.setattr(config, "_LIVE_REBUILD_BUDGET_SECONDS", 0.0)
+    real_fetch = provider_discovery.fetch_models
+    captured = []
+    results = []
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit):
+            return b'{"data":[{"id":"syn:profile"}]}'
+
+    def fetch_in_scope(connection):
+        prepared = prepare_connection(
+            connection,
+            resolver=lambda *_args, **_kwargs: [(2, 1, 6, "", ("93.184.216.34", 443))],
+        )
+
+        def opener(request, **_kwargs):
+            captured.append(
+                {
+                    "profile": connection.profile,
+                    "base_url": connection.base_url,
+                    "address": prepared.vetted_addresses[0],
+                    "url": request.full_url,
+                    "authorization": request.get_header("Authorization"),
+                }
+            )
+            return Response()
+
+        return real_fetch(prepared, opener=opener)
+
+    monkeypatch.setattr(provider_discovery, "fetch_models", fetch_in_scope)
+    old_state = {
+        "cfg": config.cfg,
+        "cfg_cache": config._cfg_cache,
+        "cfg_path": config._cfg_path,
+        "cfg_mtime": config._cfg_mtime,
+        "cfg_fingerprint": config._cfg_fingerprint,
+    }
+    try:
+        for profile in ("alpha", "beta"):
+            profiles.set_request_profile(profile)
+            try:
+                config.cfg = {
+                    "model": {"provider": "openai"},
+                    "providers": {
+                        "synthetic": {
+                            "name": "synthetic",
+                            "base_url": f"https://{profile}.synthetic.test/v1",
+                            "key_env": "SYNTHETIC_API_KEY",
+                        }
+                    },
+                }
+                config.invalidate_models_cache()
+                with profiles.profile_env_for_active_request("issue 6804"):
+                    results.append(config.get_available_models(force_refresh=True))
+            finally:
+                profiles.clear_request_profile()
+    finally:
+        config.cfg = old_state["cfg"]
+        config._cfg_cache = old_state["cfg_cache"]
+        config._cfg_path = old_state["cfg_path"]
+        config._cfg_mtime = old_state["cfg_mtime"]
+        config._cfg_fingerprint = old_state["cfg_fingerprint"]
+        config.invalidate_models_cache()
+
+    assert results and captured == [
+        {
+            "profile": "alpha",
+            "base_url": "https://alpha.synthetic.test/v1",
+            "address": "93.184.216.34",
+            "url": "https://alpha.synthetic.test/v1/models",
+            "authorization": "Bearer alpha-secret",
+        },
+        {
+            "profile": "beta",
+            "base_url": "https://beta.synthetic.test/v1",
+            "address": "93.184.216.34",
+            "url": "https://beta.synthetic.test/v1/models",
+            "authorization": "Bearer beta-secret",
+        },
+    ], results
+
+
+def test_fetch_models_preserves_legacy_endpoint_and_payload_shapes():
+    connection = build_connection(
+        profile="alpha",
+        provider_id="synthetic",
+        raw_config_key="synthetic",
+        raw={"base_url": "https://api.synthetic.test", "api_key": "secret"},
+    )
+    prepared = prepare_connection(
+        connection,
+        resolver=lambda *_args, **_kwargs: [(2, 1, 6, "", ("93.184.216.34", 443))],
+    )
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit):
+            return b'{"models": [{"name": "legacy-model"}, {"model": "other-model"}]}'
+
+    captured = {}
+
+    def opener(request, **_kwargs):
+        captured["url"] = request.full_url
+        return Response()
+
+    assert fetch_models(prepared, opener=opener) == [
+        {"id": "legacy-model", "label": "legacy-model"},
+        {"id": "other-model", "label": "other-model"},
+    ]
+    assert captured["url"] == "https://api.synthetic.test/v1/models"
 
 
 def test_registered_provider_does_not_enter_strict_probe_lane(monkeypatch, tmp_path):

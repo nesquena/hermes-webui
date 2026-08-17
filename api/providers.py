@@ -1377,11 +1377,9 @@ def _provider_has_key(provider_id: str, *, _declared_snapshot: dict | None = Non
         if isinstance(provider_cfg, dict) and (
             provider_cfg.get("api_key") or provider_cfg.get("key_env")
         ):
-            from api.config import resolve_provider_credential
+            from api.config import resolve_provider_credential_entry
 
-            provider_key = resolve_provider_credential(
-                provider_cfg.get("api_key"), provider_cfg.get("key_env"), provider_id
-            )
+            provider_key = resolve_provider_credential_entry(provider_cfg, provider_id)
             if _provider_value_counts_as_api_key(provider_id, provider_key):
                 return True
     # Check custom_providers
@@ -1390,11 +1388,9 @@ def _provider_has_key(provider_id: str, *, _declared_snapshot: dict | None = Non
         for cp in custom_providers:
             if isinstance(cp, dict):
                 if _custom_provider_name_matches(provider_id, cp.get("name")):
-                    from api.config import resolve_provider_credential
+                    from api.config import resolve_provider_credential_entry
 
-                    provider_key = resolve_provider_credential(
-                        cp.get("api_key"), cp.get("key_env"), provider_id
-                    )
+                    provider_key = resolve_provider_credential_entry(cp, provider_id)
                     if _provider_value_counts_as_api_key(provider_id, provider_key):
                         return True
     return False
@@ -1442,11 +1438,9 @@ def _get_provider_api_key(provider_id: str, *, _declared_snapshot: dict | None =
         if isinstance(provider_cfg, dict) and (
             provider_cfg.get("api_key") or provider_cfg.get("key_env")
         ):
-            from api.config import resolve_provider_credential
+            from api.config import resolve_provider_credential_entry
 
-            provider_key = resolve_provider_credential(
-                provider_cfg.get("api_key"), provider_cfg.get("key_env"), provider_id
-            )
+            provider_key = resolve_provider_credential_entry(provider_cfg, provider_id)
             if _provider_value_counts_as_api_key(provider_id, provider_key):
                 return provider_key
 
@@ -1456,11 +1450,9 @@ def _get_provider_api_key(provider_id: str, *, _declared_snapshot: dict | None =
             if not isinstance(cp, dict):
                 continue
             if _custom_provider_name_matches(provider_id, cp.get("name")):
-                from api.config import resolve_provider_credential
+                from api.config import resolve_provider_credential_entry
 
-                provider_key = resolve_provider_credential(
-                    cp.get("api_key"), cp.get("key_env"), provider_id
-                )
+                provider_key = resolve_provider_credential_entry(cp, provider_id)
                 if _provider_value_counts_as_api_key(provider_id, provider_key):
                     return provider_key
     # Fallback: try credential pool (e.g. bothub key stored via auth.json)
@@ -2929,14 +2921,19 @@ def get_providers() -> dict[str, Any]:
                 if _mid not in cp_model_ids:
                     cp_model_ids.append(_mid)
             cp_models = [{"id": mid, "label": mid} for mid in cp_model_ids]
-            from api.config import resolve_provider_credential
+            from api import config as _config_module
+            from api.provider_discovery import resolve_credential
 
-            cp_api_key = resolve_provider_credential(
-                cp.get("api_key"), cp.get("key_env"), f"custom:{cp_id}"
+            cp_credential = resolve_credential(
+                cp,
+                provider_hint=f"custom:{cp_id}",
+                env_value=_config_module._thread_local_env_value,
+                fallback_value=_config_module._lookup_custom_api_key_env,
             )
+            cp_api_key = cp_credential.value if cp_credential.state == "resolved" else None
             cp_has_key = _provider_value_counts_as_api_key(f"custom:{cp_id}", cp_api_key)
             # Fallback: check credential pool (key added via hermes auth add)
-            if not cp_has_key:
+            if not cp_has_key and not ("api_key" in cp or "key_env" in cp):
                 try:
                     from api.config import _has_explicit_pool_credentials
                     if _has_explicit_pool_credentials(cp_id):

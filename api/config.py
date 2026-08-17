@@ -3016,6 +3016,20 @@ def resolve_provider_credential(raw_api_key, raw_key_env, provider_hint=None) ->
     return resolved.value if resolved.state == "resolved" else None
 
 
+def resolve_provider_credential_entry(raw_entry: dict | None, provider_hint=None) -> str | None:
+    """Resolve a provider mapping while preserving declared key presence."""
+    from api.provider_discovery import resolve_credential
+
+    entry = raw_entry if isinstance(raw_entry, dict) else {}
+    resolved = resolve_credential(
+        entry,
+        provider_hint=str(provider_hint or ""),
+        env_value=_thread_local_env_value,
+        fallback_value=_lookup_custom_api_key_env,
+    )
+    return resolved.value if resolved.state == "resolved" else None
+
+
 def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, str | None]:
     """Return (api_key, base_url) for a named ``custom:*`` provider.
 
@@ -3056,7 +3070,7 @@ def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, st
             continue
 
         base_url = str(entry.get("base_url") or "").strip() or None
-        api_key = resolve_provider_credential(entry.get("api_key"), entry.get("key_env"), pid)
+        api_key = resolve_provider_credential_entry(entry, pid)
         return api_key, base_url
 
     # If exactly one custom provider is configured, use it as a pragmatic
@@ -3064,7 +3078,7 @@ def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, st
     if len(custom_providers) == 1 and isinstance(custom_providers[0], dict):
         entry = custom_providers[0]
         return (
-            resolve_provider_credential(entry.get("api_key"), entry.get("key_env"), pid),
+            resolve_provider_credential_entry(entry, pid),
             str(entry.get("base_url") or "").strip() or None,
         )
 
@@ -3086,11 +3100,11 @@ def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, st
 
     fallback_key = None
     if isinstance(provider_specific, dict):
-        fallback_key = resolve_provider_credential(provider_specific.get("api_key"), provider_specific.get("key_env"), pid)
+        fallback_key = resolve_provider_credential_entry(provider_specific, pid)
     if not fallback_key and isinstance(provider_custom, dict):
-        fallback_key = resolve_provider_credential(provider_custom.get("api_key"), provider_custom.get("key_env"), pid)
+        fallback_key = resolve_provider_credential_entry(provider_custom, pid)
     if not fallback_key and isinstance(model_cfg, dict) and model_provider in {"custom", pid, slug}:
-        fallback_key = resolve_provider_credential(model_cfg.get("api_key"), model_cfg.get("key_env"), pid)
+        fallback_key = resolve_provider_credential_entry(model_cfg, pid)
 
     if fallback_key or fallback_base:
         return fallback_key, fallback_base or None
@@ -6013,24 +6027,50 @@ def _provider_publication_tuple() -> tuple[str, str, str]:
         raw = capture_raw_profile_snapshot(sys.modules[__name__])
     except Exception:
         raw = copy.deepcopy(cfg)
+    # Preserve YAML mapping order for fingerprint stability without sorting
+    # incomparable YAML keys such as integer and string model IDs.
     raw_fingerprint = hashlib.sha256(
-        json.dumps(raw, sort_keys=True, default=str, separators=(",", ":")).encode()
+        json.dumps(raw, sort_keys=False, default=str, separators=(",", ":")).encode()
     ).hexdigest()
-    env_names = []
+    env_names: list[str] = []
+
+    def _add_credential_entry(entry: object) -> None:
+        if not isinstance(entry, dict):
+            return
+        name = str(entry.get("key_env") or "").strip()
+        if name:
+            env_names.append(name)
+        literal = entry.get("api_key")
+        literal_text = literal.strip() if isinstance(literal, str) else ""
+        if literal_text.startswith("${") and literal_text.endswith("}"):
+            env_names.append(literal_text[2:-1].strip())
+
     providers_cfg = raw.get("providers", {}) if isinstance(raw, dict) else {}
     if isinstance(providers_cfg, dict):
-        for entry in providers_cfg.values():
+        for raw_provider, entry in providers_cfg.items():
+            _add_credential_entry(entry)
+            if str(raw_provider).strip().lower().startswith("custom"):
+                env_names.extend(
+                    (
+                        _api_key_env_name(raw_provider),
+                        _legacy_custom_api_key_env_name(raw_provider),
+                    )
+                )
+    custom_cfg = raw.get("custom_providers", []) if isinstance(raw, dict) else []
+    if isinstance(custom_cfg, list):
+        for entry in custom_cfg:
+            _add_credential_entry(entry)
             if isinstance(entry, dict):
-                name = str(entry.get("key_env") or "").strip()
-                if name:
-                    env_names.append(name)
-                literal = entry.get("api_key")
-                if (
-                    isinstance(literal, str)
-                    and literal.strip().startswith("${")
-                    and literal.strip().endswith("}")
-                ):
-                    env_names.append(literal.strip()[2:-1])
+                slug = _custom_provider_slug_from_name(entry.get("name"))
+                if slug:
+                    env_names.extend(
+                        (
+                            _api_key_env_name(slug),
+                            _legacy_custom_api_key_env_name(slug),
+                        )
+                    )
+    if isinstance(raw, dict):
+        _add_credential_entry(raw.get("model"))
     env_fingerprint = hashlib.sha256(
         json.dumps(sorted((name, _thread_local_env_value(name)) for name in set(env_names)), separators=(",", ":")).encode()
     ).hexdigest()
@@ -6633,9 +6673,15 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 build_connection,
                 fetch_models,
             )
+            try:
+                from api.profiles import get_active_profile_name
+
+                profile_name = str(get_active_profile_name() or "")
+            except Exception:
+                profile_name = ""
 
             connection = build_connection(
-                profile=str(_raw_profile_cfg.get("profile") or ""),
+                profile=profile_name,
                 provider_id=provider_id,
                 raw_config_key=raw_key,
                 raw=raw_entry,
@@ -7327,20 +7373,14 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
 
             api_key = ""
             if isinstance(model_cfg, dict):
-                api_key = resolve_provider_credential(
-                    model_cfg.get("api_key"), model_cfg.get("key_env"), provider
-                ) or ""
+                api_key = resolve_provider_credential_entry(model_cfg, provider) or ""
             if not api_key:
                 providers_cfg = cfg.get("providers", {})
                 if isinstance(providers_cfg, dict):
                     for provider_key in filter(None, [active_provider, "custom"]):
                         provider_cfg = providers_cfg.get(provider_key, {})
                         if isinstance(provider_cfg, dict):
-                            api_key = resolve_provider_credential(
-                                provider_cfg.get("api_key"),
-                                provider_cfg.get("key_env"),
-                                provider_key,
-                            ) or ""
+                            api_key = resolve_provider_credential_entry(provider_cfg, provider_key) or ""
                             if api_key:
                                 break
             if not api_key:
@@ -7391,9 +7431,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     _named_custom_groups[_slug] = (_cp_name, [])
 
                 _cp_base_url = str(_cp.get("base_url") or "").strip()
-                _cp_api_key = resolve_provider_credential(
-                    _cp.get("api_key"), _cp.get("key_env"), _slug or "custom"
-                ) or ""
+                _cp_api_key = resolve_provider_credential_entry(_cp, _slug or "custom") or ""
                 # Fallback: check credential pool for both api_key and base_url
                 if (not _cp_api_key or not _cp_base_url) and _slug:
                     try:
@@ -8060,9 +8098,8 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
 
                     models_endpoint_error = None
                     provider_cfg = _get_provider_cfg(_canonical_to_raw_provider_key.get(pid, pid))
-                    resolved_key = resolve_provider_credential(
-                        provider_cfg.get("api_key") if isinstance(provider_cfg, dict) else None,
-                        provider_cfg.get("key_env") if isinstance(provider_cfg, dict) else None,
+                    resolved_key = resolve_provider_credential_entry(
+                        provider_cfg if isinstance(provider_cfg, dict) else None,
                         pid,
                     )
                     provider_base_url = (
@@ -8090,7 +8127,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                             provider_base_url,
                             pid,
                             api_key=resolved_key,
-                            allow_private_base_url=False,
+                            allow_private_base_url=True,
                         )
                     if models_for_group or models_endpoint_error:
                         # Per-group deep copy so subsequent mutation by
@@ -8446,10 +8483,23 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                             _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
                             _sync_models_cache_provenance()
                     if _authority_matches:
+                        _authority_matches = _provider_publication_tuple() == _build_authority.get("value")
+                    if not _authority_matches:
+                        with _cache_build_cv:
+                            if _available_models_cache is result:
+                                _available_models_cache = None
+                                _available_models_cache_ts = 0.0
+                                _available_models_live_rebuild_ts = 0.0
+                                _available_models_cache_source_fingerprint = None
+                                _sync_models_cache_provenance()
+                    if _authority_matches:
                         try:
                             _save_models_cache_to_disk(result)
                         except Exception:
                             logger.debug("models cache disk save failed", exc_info=True)
+                        _authority_matches = _provider_publication_tuple() == _build_authority.get("value")
+                        if not _authority_matches:
+                            _delete_models_cache_on_disk()
             except BaseException:
                 # Always reset the flag so waiting threads don't block for 60s
                 with _cache_build_cv:
@@ -8501,7 +8551,26 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 logger.info("discarding provider catalog with stale publication authority")
                 _clear_build_in_progress()
                 return False
+            previous_cache = _available_models_cache
+            previous_cache_ts = _available_models_cache_ts
+            previous_live_ts = _available_models_live_rebuild_ts
+            previous_fingerprint = _available_models_cache_source_fingerprint
+
+            def _discard_memory_publication() -> None:
+                global _available_models_cache, _available_models_cache_ts
+                global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint
+                with _cache_build_cv:
+                    _available_models_cache = previous_cache
+                    _available_models_cache_ts = previous_cache_ts
+                    _available_models_live_rebuild_ts = previous_live_ts
+                    _available_models_cache_source_fingerprint = previous_fingerprint
+                    _sync_models_cache_provenance()
+                _clear_build_in_progress()
+
             with _cache_build_cv:
+                if _provider_publication_tuple() != _build_authority.get("value"):
+                    _clear_build_in_progress()
+                    return False
                 published_at = time.monotonic()
                 _available_models_cache = result
                 _available_models_cache_ts = published_at
@@ -8510,10 +8579,21 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     _models_cache_source_fingerprint()
                 )
                 _sync_models_cache_provenance()
+            if _provider_publication_tuple() != _build_authority.get("value"):
+                _discard_memory_publication()
+                return False
+            if _provider_publication_tuple() != _build_authority.get("value"):
+                _discard_memory_publication()
+                return False
             try:
-                _save_models_cache_to_disk(result)
-            except Exception:
-                logger.debug("models cache disk save failed", exc_info=True)
+                try:
+                    _save_models_cache_to_disk(result)
+                except Exception:
+                    logger.debug("models cache disk save failed", exc_info=True)
+                if _provider_publication_tuple() != _build_authority.get("value"):
+                    _delete_models_cache_on_disk()
+                    _discard_memory_publication()
+                    return False
             finally:
                 with _cache_build_cv:
                     _cache_build_in_progress = False

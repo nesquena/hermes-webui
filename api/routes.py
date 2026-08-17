@@ -6754,7 +6754,7 @@ def _custom_provider_api_key_for_context(entry: dict, provider: str) -> str:
     sanitized-env shapes used by streaming/provider resolution.
     """
     try:
-        from api.config import resolve_provider_credential
+        from api.config import resolve_provider_credential_entry
         from api import config as _config_module
 
         raw_text = str(entry.get("api_key") or "").strip()
@@ -6769,9 +6769,7 @@ def _custom_provider_api_key_for_context(entry: dict, provider: str) -> str:
                 raw_text,
             )
 
-        return resolve_provider_credential(
-            entry.get("api_key"), entry.get("key_env"), provider
-        ) or ""
+        return resolve_provider_credential_entry(entry, provider) or ""
     except Exception:
         return ""
 
@@ -6786,7 +6784,7 @@ def _context_length_config_api_key_for_provider(
 
     def _resolve_key(raw_api_key, raw_key_env=None) -> str:
         try:
-            from api.config import resolve_provider_credential
+            from api.config import resolve_provider_credential_entry
             from api import config as _config_module
 
             raw_text = str(raw_api_key or "").strip()
@@ -6801,7 +6799,12 @@ def _context_length_config_api_key_for_provider(
                     provider,
                 )
 
-            return resolve_provider_credential(raw_api_key, raw_key_env, provider) or ""
+            raw_entry = {}
+            if raw_api_key is not None:
+                raw_entry["api_key"] = raw_api_key
+            if raw_key_env is not None:
+                raw_entry["key_env"] = raw_key_env
+            return resolve_provider_credential_entry(raw_entry, provider) or ""
         except Exception:
             return ""
 
