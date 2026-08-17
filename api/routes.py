@@ -1827,7 +1827,7 @@ _PROVIDER_ALIASES = {
 _OPENAI_COMPAT_ENDPOINTS = {
     "zai": "https://api.z.ai/v1",
     "minimax": "https://api.minimax.chat/v1",
-    "mistralai": "https://api.mistral.ai/v1",
+    "mistral": "https://api.mistral.ai/v1",
     "xai": "https://api.x.ai/v1",
     "deepseek": "https://api.deepseek.com",
     "gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
@@ -6552,7 +6552,8 @@ def _clean_session_model_provider(value: str | None) -> str | None:
     if provider.startswith("@"):
         parsed = _parse_provider_qualified_model_id(provider)
         provider = parsed[1].strip() if parsed else provider[1:]
-    return provider or None
+    from api.config import _canonicalise_provider_id
+    return _canonicalise_provider_id(provider) or None
 
 
 def _split_provider_qualified_model(model: str) -> tuple[str, str | None]:
@@ -20415,8 +20416,9 @@ def _handle_live_models(handler, parsed):
         # without normalization, provider_model_ids() misses the alias and returns [].
         # Uses the WebUI-owned table (api/config._resolve_provider_alias) which
         # works even when hermes_cli is not on sys.path.
-        from api.config import _resolve_provider_alias
-        provider = _resolve_provider_alias(provider)
+        from api.config import _canonicalise_provider_id, _resolve_provider_alias
+        provider = _canonicalise_provider_id(provider)
+        agent_provider = _resolve_provider_alias(provider)
 
         cache_key = _live_models_cache_key(provider)
         cached = _get_cached_live_models(cache_key)
@@ -20439,7 +20441,7 @@ def _handle_live_models(handler, parsed):
             if _agent_dir not in _sys.path:
                 _sys.path.insert(0, _agent_dir)
             from hermes_cli.models import provider_model_ids as _pmi
-            ids = _pmi(provider)
+            ids = _pmi(agent_provider)
         except Exception as _import_err:
             logger.debug("provider_model_ids import failed for %s: %s", provider, _import_err)
             ids = []
@@ -20607,7 +20609,7 @@ def _handle_live_models(handler, parsed):
         #  (b) the frontend shows the static list immediately and enriches in
         #      the background via _fetchLiveModels(), so the user never waits.
         if not ids:
-            _ep = _OPENAI_COMPAT_ENDPOINTS.get(provider)
+            _ep = _OPENAI_COMPAT_ENDPOINTS.get(agent_provider) or _OPENAI_COMPAT_ENDPOINTS.get(provider)
             if _ep:
                 try:
                     import urllib.request
@@ -20621,9 +20623,7 @@ def _handle_live_models(handler, parsed):
                     if not _key:
                         _model_cfg = cfg.get("model", {})
                         if isinstance(_model_cfg, dict):
-                            _active_provider = _resolve_provider_alias(
-                                (_model_cfg.get("provider") or "").strip().lower()
-                            )
+                            _active_provider = _canonicalise_provider_id(_model_cfg.get("provider"))
                             if _active_provider == provider:
                                 _key = _model_cfg.get("api_key")
                     if _key:
