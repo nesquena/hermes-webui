@@ -1605,7 +1605,7 @@ async function newSession(flash, options={}){
  */
 function _clearStuckSessionOnBoot(sid, currentSid){
   if(!currentSid){
-    try{ _forgetActiveSession(); }catch(_){ }
+    try{ _forgetActiveSession(sid); }catch(_){ }
     try{ history.replaceState(null,'',_appRootPath()); }catch(_){ }
   }
 }
@@ -1900,7 +1900,7 @@ async function loadSession(sid){
         // Only the rethrow stays gated on !currentSid: boot rethrows to fall
         // through to empty-state; mid-session there is no boot path to reach.
         if(!currentSid || currentSid===sid){
-          try{ _forgetActiveSession(); }catch(_){ }
+          try{ _forgetActiveSession(sid); }catch(_){ }
           try{ history.replaceState(null,'',_appRootPath()); }catch(_){ }
           if (_isCurrentLoad()) _loadingSessionId = null;
           if(!currentSid){
@@ -9170,7 +9170,7 @@ async function deleteSession(sid, beforeDelete=null){
   if(S.session&&S.session.session_id===sid){
     S.session=null;S.messages=[];S.entries=[];_messagesOwnerSid=null;
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
-    _forgetActiveSession();
+    _forgetActiveSession(sid);
     // load the most recent remaining session, or show blank if none left
     const remaining=await api('/api/sessions'+_sessionListQueryString());
     if(remaining.sessions&&remaining.sessions.length){

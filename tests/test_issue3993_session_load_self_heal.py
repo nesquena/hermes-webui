@@ -35,7 +35,9 @@ def test_clear_stuck_session_helper_exists_and_is_wired():
     # Guarded on the boot condition (no active session on screen).
     helper = js[js.index(marker): js.index(marker) + 260]
     assert "if(!currentSid){" in helper
-    assert "_forgetActiveSession()" in helper
+    # The dead sid is passed explicitly so a legacy-only (never adopted into
+    # scoped storage) saved session is still cleared on upgrade (PR #7084).
+    assert "_forgetActiveSession(sid)" in helper
     assert "history.replaceState" in helper
 
 
@@ -100,7 +102,7 @@ def test_stale_load_guard_present_before_self_heal():
     assert block.index(guard) < block.index("_clearStuckSessionOnBoot(sid, currentSid);"), \
         "stale-load guard must precede _clearStuckSessionOnBoot"
     # And before the 404 inline clear too.
-    assert block.index(guard) < block.index("_forgetActiveSession()"), \
+    assert block.index(guard) < block.index("_forgetActiveSession(sid)"), \
         "stale-load guard must precede the 404 inline self-heal"
     # It re-arms the active stream rather than leaving it torn down.
     guard_tail = block[block.index(guard): block.index(guard) + 120]

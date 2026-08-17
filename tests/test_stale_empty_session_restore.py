@@ -94,7 +94,7 @@ def test_load_session_clears_saved_stale_404_and_rethrows_to_boot():
     """A missing saved session should be removed and let boot show the empty state."""
     block = _load_session_error_block()
     assert "e.status===404" in block, "loadSession must keep a 404-specific branch"
-    assert "_forgetActiveSession()" in block, (
+    assert "_forgetActiveSession(sid)" in block, (
         "loadSession must clear stale saved session IDs on 404"
     )
     assert "history.replaceState" in block, (
@@ -126,7 +126,7 @@ def test_load_session_404_self_heal_gated_to_active_or_boot():
         "self-heal must be gated to boot or the active session, not unconditional"
     )
     heal_idx = arm.find(self_heal)
-    clear_idx = arm.find("_forgetActiveSession()")
+    clear_idx = arm.find("_forgetActiveSession(sid)")
     strip_idx = arm.find("history.replaceState")
     assert clear_idx > heal_idx, "localStorage clear must run inside the self-heal gate"
     assert strip_idx > heal_idx, "URL strip must run inside the self-heal gate"
@@ -146,7 +146,7 @@ def test_send_chat_start_404_self_heals_instead_of_error_bubble():
     assert "e.status===404" in block, (
         "send() must branch on a 404 from /api/chat/start before the generic path"
     )
-    assert "_forgetActiveSession()" in block, (
+    assert "_forgetActiveSession(activeSid)" in block, (
         "send() 404 branch must clear the saved session key"
     )
     assert "history.replaceState" in block, (
