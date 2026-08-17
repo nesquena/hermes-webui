@@ -15,7 +15,10 @@ from pathlib import Path
 import pytest
 
 from api.models import Session
-from api.streaming import _effective_reasoning_effort_label
+from api.streaming import (
+    _bridge_fallback_lifecycle_status,
+    _effective_reasoning_effort_label,
+)
 from api.gateway_chat import _gateway_reasoning_effort_label
 
 
@@ -31,9 +34,10 @@ I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
 
 
 class _FakeAgent:
-    def __init__(self, reasoning_config=None, model="gpt-5-mini"):
+    def __init__(self, reasoning_config=None, model="gpt-5-mini", provider="openai"):
         self.reasoning_config = reasoning_config
         self.model = model
+        self.provider = provider
 
 
 class TestEffectiveReasoningEffortLabel:
@@ -76,17 +80,74 @@ class TestBackendEmission:
             "_emit_effective_run_meta()", registration
         )
         assert registration < initial_emission
-        assert "'reasoning_effort': _effective_effort" in STREAMING_PY
-        assert "'model': _effective_model" in STREAMING_PY
+        assert "put('run_meta', _effective_run_meta_payload(agent, session_id))" in STREAMING_PY
 
     def test_fallback_reemits_effective_run_meta_after_notice(self):
-        callback = STREAMING_PY.split("def _agent_status_callback", 1)[1].split(
-            "# xsession wakeup", 1
+        bridge = STREAMING_PY.split("def _bridge_fallback_lifecycle_status", 1)[1].split(
+            "def _extract_gateway_routing_metadata", 1
         )[0]
-        warning = callback.index("put('warning'")
-        refresh = callback.index("_emit_effective_run_meta()")
+        warning = bridge.index("put('warning'")
+        refresh = bridge.index("emit_effective_run_meta()")
         assert warning < refresh
         assert "_effective_reasoning_effort_label(agent)" in STREAMING_PY
+
+    def test_successful_native_fallback_bridges_exact_runtime_notice(self):
+        """Compose the installed Hermes one-shot notice with the production bridge."""
+        agent = _FakeAgent(
+            {"enabled": True, "effort": "high"},
+            model="primary",
+            provider="p1",
+        )
+        # Hermes installs all three runtime fields before emitting this exact
+        # successful-recovery lifecycle line.
+        agent.model = "fallback"
+        agent.provider = "p2"
+        agent.reasoning_config = {"enabled": False}
+        events = []
+
+        handled = _bridge_fallback_lifecycle_status(
+            "lifecycle",
+            "Switched to fallback model: primary via p1 → fallback via p2",
+            agent=agent,
+            session_id="fallback-live",
+            put=lambda event, data: events.append((event, data)),
+        )
+
+        assert handled is True
+        assert events == [
+            (
+                "warning",
+                {
+                    "type": "fallback",
+                    "message": "Switched to fallback model: primary via p1 → fallback via p2",
+                },
+            ),
+            (
+                "run_meta",
+                {
+                    "session_id": "fallback-live",
+                    "model": "fallback",
+                    "provider": "p2",
+                    "reasoning_effort": "off",
+                },
+            ),
+        ]
+
+    def test_pre_activation_retry_warns_without_replacing_run_meta(self):
+        agent = _FakeAgent(
+            {"enabled": True, "effort": "high"},
+            model="primary",
+            provider="p1",
+        )
+        events = []
+        _bridge_fallback_lifecycle_status(
+            "lifecycle",
+            "Rate limited — switching to fallback provider...",
+            agent=agent,
+            session_id="retry-live",
+            put=lambda event, data: events.append((event, data)),
+        )
+        assert [event for event, _ in events] == ["warning"]
 
     def test_done_payload_carries_reasoning_effort(self):
         assert "usage['reasoning_effort'] = _effort_label_done" in STREAMING_PY
@@ -160,6 +221,70 @@ console.log(JSON.stringify(cases));
     return json.loads(_run_node(source))
 
 
+def _eval_transparent_multi_segment_effort_ownership() -> dict:
+    """Compose final-segment metadata, ownership guard and transparent footer."""
+    ui_js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {ui_js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+function esc(value) {{ return String(value == null ? '' : value); }}
+function t() {{ return ''; }}
+function isTransparentStream() {{ return true; }}
+function FakeSeg(idx) {{
+  return {{ getAttribute(name) {{ return name === 'data-msg-idx' ? String(idx) : null; }} }};
+}}
+const S = {{ messages: [
+  {{ role: 'user', content: 'run' }},
+  {{ role: 'assistant', content: '', _toolCalls: [{{ name: 'terminal' }}] }},
+  {{ role: 'assistant', content: 'done', _reasoningEffort: 'high' }},
+] }};
+const blocks = {{
+  querySelector(selector) {{
+    return selector === ':scope > .transparent-event-row' ? {{ className: 'transparent-event-row' }} : null;
+  }},
+}};
+const turn = {{
+  querySelectorAll(selector) {{
+    return selector === '.assistant-segment[data-msg-idx]' ? [FakeSeg(1), FakeSeg(2)] : [];
+  }},
+}};
+function _assistantTurnBlocks(candidate) {{ return candidate === turn ? blocks : null; }}
+eval(extractFunc('_reasoningEffortChipLabel'));
+eval(extractFunc('_transparentTurnMetaMessage'));
+eval(extractFunc('_transparentTurnFooterOwnsSettledMeta'));
+eval(extractFunc('_transparentTurnFooterHtml'));
+const picked = _transparentTurnMetaMessage(turn);
+const effortText = _reasoningEffortChipLabel(picked);
+const ownsEffort = effortText && _transparentTurnFooterOwnsSettledMeta(turn);
+const genericDom = ownsEffort ? '' : `<span class="msg-reasoning-inline">${{effortText}}</span>`;
+const transparentDom = _transparentTurnFooterHtml('', '', '', '', 'Done', '', effortText);
+const composedDom = genericDom + transparentDom;
+const genericCount = (composedDom.match(/class="msg-reasoning-inline"/g) || []).length;
+const transparentCount = (composedDom.match(/class="lf-effort"/g) || []).length;
+console.log(JSON.stringify({{
+  pickedContent: picked && picked.content,
+  effortText,
+  ownsEffort: !!ownsEffort,
+  genericCount,
+  transparentCount,
+  totalEffortLabels: genericCount + transparentCount,
+}}));
+"""
+    return json.loads(_run_node(source))
+
+
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_reasoning_effort_chip_label_cases():
     cases = _eval_reasoning_effort_chip_cases()
@@ -199,3 +324,16 @@ class TestFrontendWiring:
         assert "reasoning_off: 'reasoning off'" in I18N_JS
         assert "reasoning_effort: 'Effort de raisonnement effectif'" in I18N_JS
         assert "reasoning_off: 'raisonnement désactivé'" in I18N_JS
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_transparent_multi_segment_turn_renders_effort_exactly_once():
+    result = _eval_transparent_multi_segment_effort_ownership()
+    assert result == {
+        "pickedContent": "done",
+        "effortText": "high",
+        "ownsEffort": True,
+        "genericCount": 0,
+        "transparentCount": 1,
+        "totalEffortLabels": 1,
+    }
