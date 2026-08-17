@@ -12058,6 +12058,7 @@ async function _saveSelfHostedProvider(providerId){
     if(res&&res.ok){
       showToast(`${res.provider} configured`);
       if(els.apiKeyInput) els.apiKeyInput.value='';
+      _invalidateLiveModelCacheForProvider(providerId,res.provider);
       _refreshModelDropdownsAfterProviderChange();
       await loadProvidersPanel();
     }else{
