@@ -574,7 +574,9 @@ def _provider_api_key_present(
 
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, dict) and str(model_cfg.get("api_key") or "").strip():
-        return True
+        active_provider = _canonicalise_provider_id(model_cfg.get("provider"))
+        if active_provider == provider:
+            return True
 
     # ``cfg.get("providers", {})`` only returns the default when the key is
     # absent; an explicit ``providers:`` (null) in config.yaml yields ``None``.

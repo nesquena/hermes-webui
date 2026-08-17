@@ -44,8 +44,10 @@ class TestProviderDetectionEnvVars:
     def test_mistral_env_maps_to_mistral_provider(self):
         """MISTRAL_API_KEY should add 'mistral'."""
         src = _src()
-        assert re.search(r'MISTRAL_API_KEY.*?add\("mistral"\)', src, re.DOTALL), \
-            "MISTRAL_API_KEY must map to provider 'mistral'"
+        fn = re.search(r'def _build_available_models_uncached.*?(?=^def |\Z)', src, re.DOTALL | re.MULTILINE)
+        assert fn, "_build_available_models_uncached must exist"
+        assert re.search(r'^\s*_add_env_detected\("mistral"\)\s*$', fn.group(0), re.MULTILINE), \
+            "MISTRAL_API_KEY must map to provider 'mistral' through the runtime env sink"
 
     def test_all_provider_env_vars_map_to_known_providers(self):
         """Every detected_provider.add() call should reference a known provider."""

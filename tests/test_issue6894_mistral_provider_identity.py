@@ -114,6 +114,15 @@ def test_mistral_partial_config_merge_precedence_and_cleanup():
     assert set(config._canonical_provider_config_keys(cfg, "mistral")) == {"mistralai", "mistral"}
 
 
+def test_canonical_provider_model_metadata_wins_alias_duplicate():
+    cfg = {"providers": {
+        "mistralai": {"models": [{"id": "shared-model", "label": "Legacy label"}]},
+        "mistral": {"models": [{"id": "shared-model", "label": "Canonical label"}]},
+    }}
+    merged = config._canonical_provider_config(cfg, "mistral")
+    assert merged["models"] == [{"id": "shared-model", "label": "Canonical label"}]
+
+
 def test_equivalent_mistral_default_save_preserves_custom_base_url(monkeypatch, tmp_path):
     saved = {}
     cfg = {"model": {"provider": "mistralai", "base_url": "https://proxy.example/v1"}}
@@ -200,6 +209,11 @@ def test_onboarding_reads_legacy_mistral_and_writes_canonical_provider(monkeypat
     cfg = {"model": {"provider": "mistralai", "default": "mistral-large-latest"},
            "providers": {"mistralai": {"api_key": "legacy-key"}}}
     assert onboarding._extract_current_provider(cfg) == "mistral"
+    assert not onboarding._provider_api_key_present(
+        "mistralai",
+        {"model": {"provider": "google", "api_key": "google-key"}},
+        {},
+    )
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "model:\n  provider: mistralai\n  default: mistral-large-latest\n"
@@ -272,6 +286,50 @@ def test_live_models_uses_legacy_provider_credentials(monkeypatch):
     }]
     assert payload["provider"] == "mistral"
     assert "mistral-live-model" in {model["id"] for model in payload["models"]}
+
+
+def test_catalog_endpoint_uses_canonical_equivalent_key_not_custom_key(monkeypatch, tmp_path):
+    import json
+    import urllib.request
+
+    cfgfile = tmp_path / "config.yaml"
+    cfgfile.write_text(
+        "model:\n  provider: mistralai\n  default: mistral-large-latest\n"
+        "  base_url: https://proxy.example/v1\n"
+        "providers:\n  mistralai:\n    api_key: legacy-mistral-key\n"
+        "  custom:\n    api_key: wrong-custom-key\n",
+        encoding="utf-8",
+    )
+    calls = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps({"data": []}).encode("utf-8")
+
+    def fake_urlopen(req, timeout=None):
+        calls.append((req.full_url, req.headers.get("Authorization"), timeout))
+        return Response()
+
+    monkeypatch.setattr(config, "_get_config_path", lambda: cfgfile)
+    monkeypatch.setattr(config, "_get_auth_store_path", lambda: tmp_path / "auth.json")
+    monkeypatch.setattr(config, "_read_live_provider_model_ids", lambda _pid: [])
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    _install_hermes_modules(monkeypatch)
+    config.reload_config()
+    config.invalidate_models_cache()
+
+    config.get_available_models(force_refresh=True)
+    assert calls == [(
+        "https://proxy.example/v1/models",
+        "Bearer legacy-mistral-key",
+        5.0,
+    )]
 
 
 def test_live_models_never_forwards_another_provider_key(monkeypatch):

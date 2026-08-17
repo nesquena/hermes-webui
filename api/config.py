@@ -6666,7 +6666,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 for idx, entry in enumerate(fallback_cfg, start=1):
                     if not isinstance(entry, dict):
                         continue
-                    provider = _resolve_provider_alias(entry.get("provider"))
+                    provider = _canonicalise_provider_id(entry.get("provider"))
                     model = str(entry.get("model") or "").strip()
                     if not provider or not model:
                         continue
@@ -7074,12 +7074,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 # canonical form in detected_providers (e.g. ``x-ai`` added
                 # by a prior loop iteration) also matches (#6338).
                 _resolved_detected = {
-                    _resolve_provider_alias(_pid) for _pid in detected_providers
+                    _canonicalise_provider_id(_pid) for _pid in detected_providers
                 }
-                _already_credentialed = (
-                    _resolve_provider_alias(_canonical) in _resolved_detected
-                    or _canonical in _resolved_detected
-                )
+                _already_credentialed = _canonical in _resolved_detected
                 _admit_as_known = _is_known_provider and _already_credentialed
                 if not (_admit_as_known or _has_provider_route or _has_models_only_active_route):
                     continue
@@ -7095,11 +7092,14 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             if isinstance(model_cfg, dict):
                 model_base_url = _normalize_base_url_for_match(model_cfg.get("base_url"))
                 if model_base_url == target:
-                    provider_hint = _resolve_configured_provider_id(
-                        model_cfg.get("provider"),
-                        cfg,
-                        base_url=base_url,
-                    )
+                    provider_hint = _named_custom_provider_slug_for_provider(
+                        model_cfg.get("provider"), cfg
+                    ) or _canonicalise_provider_id(model_cfg.get("provider"))
+                    if provider_hint == "custom":
+                        provider_hint = (
+                            _named_custom_provider_slug_for_base_url(base_url, cfg)
+                            or provider_hint
+                        )
                     if provider_hint:
                         return str(provider_hint).strip().lower()
 
@@ -7112,7 +7112,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         provider_cfg.get("base_url")
                     )
                     if provider_base_url == target:
-                        provider_hint = _resolve_provider_alias(provider_key)
+                        provider_hint = _canonicalise_provider_id(provider_key)
                         if provider_hint:
                             return str(provider_hint).strip().lower()
 
@@ -7297,14 +7297,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             if isinstance(model_cfg, dict):
                 api_key = (model_cfg.get("api_key") or "").strip()
             if not api_key:
-                providers_cfg = cfg.get("providers", {})
-                if isinstance(providers_cfg, dict):
-                    for provider_key in filter(None, [active_provider, "custom"]):
-                        provider_cfg = providers_cfg.get(provider_key, {})
-                        if isinstance(provider_cfg, dict):
-                            api_key = (provider_cfg.get("api_key") or "").strip()
-                            if api_key:
-                                break
+                provider_cfg = _canonical_provider_config(cfg, provider)
+                if isinstance(provider_cfg, dict):
+                    api_key = (provider_cfg.get("api_key") or "").strip()
             if not api_key:
                 api_key_vars = (
                     "HERMES_API_KEY",
@@ -8068,7 +8063,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             _pool = auth_store.get("credential_pool", {}) if isinstance(auth_store, dict) else {}
             if isinstance(_pool, dict):
                 for _pid in _pool:
-                    _providers_with_keys.add(_resolve_provider_alias(str(_pid)))
+                    _providers_with_keys.add(_canonicalise_provider_id(str(_pid)))
         except Exception:
             pass
         try:
@@ -8076,7 +8071,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             if isinstance(_cfg_providers, dict):
                 for _pk, _pv in _cfg_providers.items():
                     if isinstance(_pv, dict) and (_pv.get("api_key") or _pv.get("key_env")):
-                        _providers_with_keys.add(_resolve_provider_alias(str(_pk)))
+                        _providers_with_keys.add(_canonicalise_provider_id(str(_pk)))
         except Exception:
             pass
 
