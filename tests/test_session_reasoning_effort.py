@@ -80,11 +80,19 @@ def test_ultra_is_valid_and_gateway_uses_session_aware_resolution(monkeypatch):
 
     assert config.parse_reasoning_effort("ultra") == {"enabled": True, "effort": "ultra"}
     assert 'data-effort="ultra"' in INDEX
+    # Post-#7083 master: GPT-5.6 (and its Sol/Terra/Luna variants) natively
+    # accepts ``max`` on OpenAI-family lanes; only Agent's ``ultra`` extension
+    # is still unsupported there. A session ``ultra`` therefore degrades to the
+    # highest provider-supported level — ``max`` — not all the way to xhigh.
     assert _gateway_reasoning_effort_for_request(
         cfg, model="gpt-5.6-sol", model_provider="openai-codex", session_effort="ultra"
-    ) == "xhigh"
+    ) == "max"
     assert _gateway_reasoning_effort_for_request(
         cfg, model="gpt-5.6-sol", model_provider="openai-codex"
+    ) == "xhigh"
+    # Pre-5.6 GPT-5 keeps the xhigh ceiling: neither max nor ultra is accepted.
+    assert _gateway_reasoning_effort_for_request(
+        cfg, model="gpt-5.2", model_provider="openai-codex", session_effort="ultra"
     ) == "xhigh"
 
 
