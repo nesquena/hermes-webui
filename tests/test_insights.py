@@ -717,6 +717,40 @@ def test_insights_absolute_range_invalid_start_with_valid_end_falls_back(monkeyp
     assert data["total_tokens"] > 0
 
 
+def test_insights_absolute_range_valid_start_with_invalid_end_falls_back(monkeypatch, tmp_path):
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    entries = [
+        {
+            "session_id": "today", "updated_at": now, "created_at": now,
+            "message_count": 1, "input_tokens": 10, "output_tokens": 5,
+            "estimated_cost": "0.0001", "model": "gpt-x",
+        },
+    ]
+    # Regression for the 2026-08-17 Greptile re-review: a SUPPLIED-but-
+    # invalid end (2026-02-31 does not exist) with a VALID start used to be
+    # conflated with an omitted end, so the handler widened the valid start
+    # through the current server time into a fabricated [start, now] custom
+    # interval the caller never requested.  It must fail closed to the
+    # trailing window and report mode="trailing" so the client renders what
+    # was actually served.
+    data = _call_insights(monkeypatch, tmp_path, entries,
+                          query="start=2026-05-01&end=2026-02-31", now=now)
+    assert data["total_sessions"] == 1
+    assert data["mode"] == "trailing"
+    assert data["effective_start"] is None
+    assert data["effective_end"] is None
+    assert len(data["daily_tokens"]) == 30
+    assert data["period_days"] == len(data["daily_tokens"])
+
+    # Same fail-closed rule for a non-finite numeric end beside a valid start.
+    data = _call_insights(monkeypatch, tmp_path, entries,
+                          query="start=2026-05-01&end=nan", now=now)
+    assert data["mode"] == "trailing"
+    assert data["effective_start"] is None
+    assert data["effective_end"] is None
+    assert len(data["daily_tokens"]) == 30
+
+
 def test_insights_absolute_range_nonfinite_timestamps_do_not_500(monkeypatch, tmp_path):
     now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
     entries = [
@@ -733,9 +767,11 @@ def test_insights_absolute_range_nonfinite_timestamps_do_not_500(monkeypatch, tm
     assert len(data["daily_tokens"]) == 30
 
     data = _call_insights(monkeypatch, tmp_path, entries, query="start=1640995200&end=nan", now=now)
-    # `end=nan` is rejected, so the range defaults to start..now (== 1585 days).
+    # `end=nan` is rejected; a SUPPLIED-but-invalid end must fail closed to
+    # the trailing window (2026-08-17 Greptile re-review), never widen a
+    # valid start to start..now.
     assert data["total_sessions"] == 1
-    assert len(data["daily_tokens"]) == 1585
+    assert len(data["daily_tokens"]) == 30
 
 
 def test_insights_absolute_range_finite_out_of_range_falls_back_to_trailing(monkeypatch, tmp_path):
