@@ -15248,6 +15248,12 @@ def handle_post(handler, parsed) -> bool:
         # session_id is passed as all three selectors (OR semantics) because
         # delegate_task captures HERMES_UI_SESSION_ID as origin_ui_session_id
         # and also populates session_key/parent_session_id with the same value.
+        # The owner_profile is passed to scope the interrupt to this profile only,
+        # preventing cross-profile interruption when different profiles share the
+        # same session ID (profiles are islands — session IDs are not globally
+        # unique across profiles). The agent-side interrupt_for_session contract
+        # requires owner_profile AND (session_key OR origin_ui_session_id OR
+        # parent_session_id) for profile-scoped interruption.
         # Done after the mutation lock (never holds a per-session lock during
         # the interrupt call) but before the session agent is evicted below.
         interrupted_count = 0
@@ -15258,6 +15264,7 @@ def handle_post(handler, parsed) -> bool:
                 session_key=sid,
                 origin_ui_session_id=sid,
                 parent_session_id=sid,
+                owner_profile=event_profile,
                 reason="session_deleted",
             )
         except Exception:

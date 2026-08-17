@@ -53,6 +53,7 @@ def _install_fake_async_delegation(monkeypatch):
         session_key: str = "",
         origin_ui_session_id: str = "",
         parent_session_id: str = "",
+        owner_profile: str | None = None,
         reason: str = "session_end",
     ) -> int:
         calls["interrupt_for_session"].append(
@@ -60,6 +61,7 @@ def _install_fake_async_delegation(monkeypatch):
                 "session_key": session_key,
                 "origin_ui_session_id": origin_ui_session_id,
                 "parent_session_id": parent_session_id,
+                "owner_profile": owner_profile,
                 "reason": reason,
             }
         )
@@ -103,6 +105,7 @@ def test_delete_session_interrupts_live_async_delegations(tmp_path, monkeypatch)
     assert call["session_key"] == sid
     assert call["origin_ui_session_id"] == sid
     assert call["parent_session_id"] == sid
+    assert call["owner_profile"] is None  # event_profile is None in test (no profile set on session)
     assert call["reason"] == "session_deleted"
     # Sidecar should be deleted
     assert not (session_dir / f"{sid}.json").exists()
@@ -124,8 +127,22 @@ def test_delete_session_interrupt_failure_does_not_block_deletion(tmp_path, monk
     calls = {"interrupt_for_session": []}
     fake_mod = types.ModuleType("tools.async_delegation")
 
-    def _interrupt_for_session(**kwargs):
-        calls["interrupt_for_session"].append(kwargs)
+    def _interrupt_for_session(
+        session_key: str = "",
+        origin_ui_session_id: str = "",
+        parent_session_id: str = "",
+        owner_profile: str | None = None,
+        reason: str = "session_end",
+    ):
+        calls["interrupt_for_session"].append(
+            {
+                "session_key": session_key,
+                "origin_ui_session_id": origin_ui_session_id,
+                "parent_session_id": parent_session_id,
+                "owner_profile": owner_profile,
+                "reason": reason,
+            }
+        )
         raise RuntimeError("interrupt failed")
 
     fake_mod.interrupt_for_session = _interrupt_for_session
@@ -170,8 +187,20 @@ def test_delete_session_interrupt_before_runtime_teardown(tmp_path, monkeypatch)
     # Install fake async_delegation that tracks when it's called
     fake_mod = types.ModuleType("tools.async_delegation")
 
-    def _interrupt_for_session(**kwargs):
-        call_order.append(("interrupt_for_session", kwargs))
+    def _interrupt_for_session(
+        session_key: str = "",
+        origin_ui_session_id: str = "",
+        parent_session_id: str = "",
+        owner_profile: str | None = None,
+        reason: str = "session_end",
+    ):
+        call_order.append(("interrupt_for_session", {
+            "session_key": session_key,
+            "origin_ui_session_id": origin_ui_session_id,
+            "parent_session_id": parent_session_id,
+            "owner_profile": owner_profile,
+            "reason": reason,
+        }))
         return 1
 
     fake_mod.interrupt_for_session = _interrupt_for_session
@@ -194,6 +223,46 @@ def test_delete_session_interrupt_before_runtime_teardown(tmp_path, monkeypatch)
     # Deletion still succeeds and the interrupted count is reported.
     assert captured["status"] == 200
     assert captured["payload"]["interrupted"] == 1
+
+
+def test_delete_session_scopes_interrupt_by_owner_profile(tmp_path, monkeypatch):
+    """Deleting a session passes the session's profile as owner_profile to
+    interrupt_for_session, so the interrupt cannot cross profile boundaries.
+
+    Regression for the CHANGES_REQUESTED gate: session IDs are not globally
+    unique across profiles, so a profile-scoped owner is required to avoid
+    interrupting an unrelated profile's live delegations.
+    """
+    session_dir = _isolate_session_store(tmp_path, monkeypatch)
+    sid = "test-session-delete-owner-profile"
+    session = Session(
+        session_id=sid,
+        title="Test Session",
+        messages=[{"role": "user", "content": "hi"}],
+        profile="work",
+    )
+    session.save()
+
+    captured = _capture_post(monkeypatch, {"session_id": sid})
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda sid: {})
+    monkeypatch.setattr(routes, "_is_messaging_session_id", lambda sid: False)
+    monkeypatch.setattr(models, "delete_cli_session", lambda sid: True)
+    # The delete route guards session visibility by active profile; match the
+    # session's profile so the request reaches the delete handler.
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "work")
+
+    calls = _install_fake_async_delegation(monkeypatch)
+
+    assert routes.handle_post(object(), SimpleNamespace(path="/api/session/delete")) is True
+
+    assert captured["status"] == 200
+    assert len(calls["interrupt_for_session"]) == 1
+    call = calls["interrupt_for_session"][0]
+    assert call["session_key"] == sid
+    assert call["origin_ui_session_id"] == sid
+    assert call["parent_session_id"] == sid
+    assert call["owner_profile"] == "work"
+    assert call["reason"] == "session_deleted"
 
 
 if __name__ == "__main__":

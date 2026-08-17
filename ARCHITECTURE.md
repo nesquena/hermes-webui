@@ -1366,7 +1366,16 @@ Complete list of all HTTP endpoints as of Sprint 1 (v0.3).
     /api/upload                multipart/form-data. Fields: session_id, file. Returns filename.
     /api/session/new           {"model"?, "workspace"?} -> new session
     /api/session/update        {"session_id", "workspace"?, "model"?} -> updated session
-    /api/session/delete        {"session_id"} -> {"ok": true}
+    /api/session/delete        {"session_id"} -> {"ok": true, "interrupted": N}
+                               Deletes the session and interrupts any live async
+                               delegations owned by it (background delegate_task
+                               runs). The interrupt is scoped to the session's
+                               profile (owner_profile) so deleting a session in
+                               one profile can never stop a delegation running in
+                               another profile that happens to share the same
+                               session id. N is the number of delegations
+                               cooperatively stopped; interruption failures never
+                               block deletion.
     /api/chat/start            {"session_id", "message", "model"?, "workspace"?}
                                -> {"stream_id", "session_id"}. Starts agent daemon thread.
     /api/chat                  (fallback, sync) {"session_id", "message", "model"?, "workspace"?}
