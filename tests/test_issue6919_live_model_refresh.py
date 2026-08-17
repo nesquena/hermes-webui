@@ -171,6 +171,72 @@ def test_forced_lookup_exception_stays_required(monkeypatch):
     assert key in routes._LIVE_MODELS_REFRESH_REQUIRED
 
 
+def test_forced_lookup_exception_uses_custom_live_fallback(monkeypatch):
+    import urllib.request
+
+    import api.config as config
+    import api.routes as routes
+
+    def provider_model_ids(provider, *, force_refresh=False):
+        raise RuntimeError("provider unavailable")
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps({"data": [{"id": "upstream-model"}]}).encode()
+
+    requested_urls = []
+
+    def fake_urlopen(request, timeout):
+        requested_urls.append(request.full_url)
+        return FakeResponse()
+
+    _install_provider_model_ids(monkeypatch, provider_model_ids)
+    _prepare(monkeypatch, routes)
+    monkeypatch.setattr(
+        config,
+        "get_config",
+        lambda: {
+            "model": {"provider": "openai"},
+            "custom_providers": [
+                {
+                    "name": "custom:relay",
+                    "api_key": "relay-key",
+                    "base_url": "https://relay.example/v1",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    routes._invalidate_live_models_for_provider("custom:relay")
+    key = routes._live_models_cache_key("custom:relay")
+
+    publication_states = []
+    original_set_cached = routes._set_cached_live_models
+
+    def recording_set_cached(cache_key, payload, expected_generation=None):
+        publication_states.append((bool(payload.get("models")), cache_key in routes._LIVE_MODELS_REFRESH_REQUIRED))
+        result = original_set_cached(cache_key, payload, expected_generation)
+        publication_states.append((bool(payload.get("models")), cache_key in routes._LIVE_MODELS_REFRESH_REQUIRED))
+        return result
+
+    monkeypatch.setattr(routes, "_set_cached_live_models", recording_set_cached)
+    result = routes._handle_live_models(
+        object(), urlparse("/api/models/live?provider=custom%3Arelay")
+    )
+
+    assert requested_urls == ["https://relay.example/v1/models"]
+    assert result["models"] == [{"id": "upstream-model", "label": "Upstream Model"}]
+    assert "error" not in result
+    assert publication_states == [(True, True), (True, False)]
+    assert key not in routes._LIVE_MODELS_REFRESH_REQUIRED
+
+
 def test_post_refresh_lookup_forces_agent_until_current_generation_publishes(monkeypatch):
     import api.routes as routes
 

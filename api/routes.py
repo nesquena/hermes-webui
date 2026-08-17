@@ -20472,7 +20472,6 @@ def _handle_live_models(handler, parsed):
         # Delegate to the agent's live-fetch + fallback resolver.
         # provider_model_ids() tries live endpoints first and falls back to
         # the static _PROVIDER_MODELS list — it never raises.
-        _lookup_failed = False
         try:
             import sys as _sys
             import os as _os
@@ -20496,11 +20495,7 @@ def _handle_live_models(handler, parsed):
                 ids = _pmi(provider)
         except Exception as _import_err:
             logger.debug("provider_model_ids import failed for %s: %s", provider, _import_err)
-            _lookup_failed = True
             ids = []
-
-        if refresh_required and _lookup_failed:
-            return _finish({"error": "live_models_unavailable", "models": []})
 
         if not ids:
             custom_provider_entry = None
