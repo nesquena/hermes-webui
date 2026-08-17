@@ -62,6 +62,8 @@ def _helpers() -> str:
         _function_body(UI_SRC, "function msgContent"),
         _function_body(UI_SRC, "function _isContextCompactionText"),
         _function_body(UI_SRC, "function _isContextCompactionMessage"),
+        _function_body(UI_SRC, "function _timestampSeconds"),
+        _function_body(UI_SRC, "function _firstValidTimestampSeconds"),
         _function_body(UI_SRC, "function _messageTimestampSeconds"),
         _function_body(UI_SRC, "function _activeTurnTokenMatches"),
         _function_body(UI_SRC, "function _pendingCurrentTailUserMessage"),
@@ -213,15 +215,27 @@ def test_unmatched_transcript_row_does_not_duplicate_below_its_own_output():
     )
 
 
-def test_timestampless_transcript_row_does_not_duplicate_below_its_own_output():
-    """Same class, with a transcript row carrying no timestamp at all."""
+def test_timestampless_transcript_row_fails_closed_to_prior_merge_behavior():
+    """Same class, with a transcript row carrying no timestamp at all.
+
+    Review 2026-08-17 (CHANGES_REQUESTED): a settled row without a comparable
+    timestamp is indistinguishable from history, so the classifier must fail
+    closed (-1) and keep the prior merge behaviour (no live row -> append)
+    instead of declaring the whole window active and adopting an ambiguous row.
+    The transient duplicate bubble is recoverable at settle; swallowing a real
+    turn is not.
+    """
     untimed = {"role": "user", "content": _PROMPT}
     result = _probe(untimed, with_live=False)
-    assert not result["duplicated"], (
-        f"the pending prompt was rendered twice: {result['order']}"
+    assert result["merged"] is True, (
+        f"fail-closed must keep the prior append behaviour: {result['order']}"
     )
-    assert not result["belowOwnOutput"], (
-        f"the duplicated bubble landed below its own turn output: {result['order']}"
+    # The untimed row keeps its place; the pending prompt is appended at the
+    # tail exactly as before the boundary classifier existed. Nothing is
+    # re-ordered, adopted, or dropped.
+    assert result["promptIdxs"] == [2, 7], (
+        "an untimed settled row must not be adopted nor re-ordered; the prompt "
+        f"must be appended (prior behaviour): {result['order']}"
     )
 
 
@@ -321,3 +335,150 @@ process.stdout.write(JSON.stringify({{
         "the prompt must land at the active turn boundary, not inside the "
         f"previous settled turn: {result['order']}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Review 2026-08-17 (CHANGES_REQUESTED): timestamp unit/format mishandling.
+#
+# The first classifier skipped untimed and ISO-string timestamps and read
+# millisecond epochs as seconds. `sawTimestampedRow ? 0 : -1` then declared the
+# entire window active, inserting the current prompt at index 0 above real
+# history — or adopting an earlier same-text row, swallowing a turn and losing
+# the current attachment. Such transcripts are reachable in production:
+# /api/session/import preserves supplied message timestamps and creates an
+# ordinary writable session.
+#
+# Contract pinned here: normalize every compared timestamp through
+# _timestampSeconds/_firstValidTimestampSeconds; fail closed (-1 -> prior merge
+# behaviour) when any crossed settled row lacks a comparable timestamp; return
+# index 0 only when every settled row is demonstrably at/after the boundary.
+# ---------------------------------------------------------------------------
+
+# A realistic epoch: ISO strings must round-trip through Date.parse.
+_EPOCH = 1755424800.0  # 2025-08-17T10:00:00Z
+
+
+def _epoch_session(attachments: list | None = None) -> str:
+    return json.dumps(
+        {
+            "session_id": "s1",
+            "active_stream_id": "stream-1",
+            "pending_user_message": _PROMPT,
+            "pending_started_at": _EPOCH,
+            "pending_attachments": attachments or [],
+        }
+    )
+
+
+def _run_epoch_probe(history_rows_js: str, attachments: list | None = None) -> dict:
+    body = f"""
+const session={_epoch_session(attachments)};
+const messages=[
+{history_rows_js}
+  {{role:'assistant', content:'je verifie X', timestamp:{_EPOCH + 10}}},
+  {{role:'tool', content:'{{}}', timestamp:{_EPOCH + 11}}},
+];
+const merged=_mergePendingSessionMessage(session, messages);
+process.stdout.write(JSON.stringify({{
+  merged,
+  promptIdxs: messages.reduce((out,m,i)=>{{ if(m&&m.role==='user'&&String(m.content||'')==={json.dumps(_PROMPT)}) out.push(i); return out; }}, []),
+  attachmentsByIdx: messages.map(m=>Array.isArray(m&&m.attachments)?m.attachments.map(a=>a&&a.name):null),
+  order: messages.map(m=>`${{m.role}}@${{m.timestamp!==undefined?m.timestamp:(m._ts!==undefined?m._ts:'untimed')}}`),
+}}));
+"""
+    return _run_probe(body)
+
+
+def test_untimed_history_rows_are_never_displaced_below_current_prompt():
+    """Untimed settled HISTORY (different text) must stay first.
+
+    The first classifier skipped untimed rows, saw only the timestamped turn
+    output at/after the boundary, and returned 0 — inserting the current prompt
+    at index 0, above real history. Master kept history first (append). The
+    classifier must fail closed to that prior behaviour.
+    """
+    result = _run_epoch_probe(
+        """  {role:'user', content:'prompt precedent'},
+  {role:'assistant', content:'reponse precedente'},
+"""
+    )
+    assert result["merged"] is True
+    assert result["promptIdxs"] == [4], (
+        "with untimed settled history the classifier must fall back to the "
+        f"prior append behaviour, never index 0: {result['order']}"
+    )
+    assert result["order"][0].startswith("user@"), result["order"]
+
+
+def test_iso_string_history_rows_stay_above_current_prompt():
+    """ISO-8601 string timestamps are comparable after normalization.
+
+    The first classifier read them through Number() -> NaN and skipped them like
+    untimed rows, so the prompt landed at index 0 above ISO-timestamped history.
+    Normalized, they are strictly older than the boundary and history stays
+    first, with the prompt at the turn boundary.
+    """
+    result = _run_epoch_probe(
+        """  {role:'user', content:'prompt precedent', timestamp:'2025-08-17T09:00:00Z'},
+  {role:'assistant', content:'reponse precedente', timestamp:'2025-08-17T09:01:00Z'},
+"""
+    )
+    assert result["merged"] is True
+    assert result["promptIdxs"] == [2], (
+        "ISO-timestamped history must stay above the current prompt, which "
+        f"belongs at the turn boundary: {result['order']}"
+    )
+
+
+def test_millisecond_history_rows_stay_above_current_prompt():
+    """Millisecond epochs are comparable after normalization.
+
+    The first classifier compared raw ms against a seconds boundary, so history
+    looked newer than `pending_started_at` and the whole window was declared
+    active (index 0). Normalized, ms history is strictly older and stays first.
+    """
+    result = _run_epoch_probe(
+        f"""  {{role:'user', content:'prompt precedent', timestamp:{(_EPOCH - 3600) * 1000}}},
+  {{role:'assistant', content:'reponse precedente', timestamp:{(_EPOCH - 3540) * 1000}}},
+"""
+    )
+    assert result["merged"] is True
+    assert result["promptIdxs"] == [2], (
+        "millisecond-timestamped history must stay above the current prompt: "
+        f"{result['order']}"
+    )
+
+
+def test_earlier_identical_prompt_with_different_attachments_is_not_swallowed():
+    """An earlier turn with the SAME text but different attachments must keep
+    its own bubble AND its own attachments, and the current turn must keep its.
+
+    Reproduced by review on the first classifier: the ms-timestamped history was
+    misread as at/after the boundary, index 0 was declared the turn start, and
+    sessions.js adopted the earlier same-text row — two turns rendered as one
+    and the current attachment was lost (the earlier row already had one, so the
+    adoption branch dropped the pending attachment on the floor).
+    """
+    for label, earlier_ts in (
+        ("milliseconds", json.dumps((_EPOCH - 3600) * 1000)),
+        ("ISO string", json.dumps("2025-08-17T09:00:00Z")),
+    ):
+        result = _run_epoch_probe(
+            f"""  {{role:'user', content:{json.dumps(_PROMPT)}, timestamp:{earlier_ts}, attachments:[{{name:'ancien.png'}}]}},
+  {{role:'assistant', content:'reponse precedente', timestamp:{earlier_ts}}},
+""",
+            attachments=[{"name": "nouveau.pdf"}],
+        )
+        assert result["merged"] is True, (label, result["order"])
+        assert result["promptIdxs"] == [0, 2], (
+            f"[{label}] both the earlier identical prompt and the current one "
+            f"must keep their own bubbles: {result['order']}"
+        )
+        assert result["attachmentsByIdx"][0] == ["ancien.png"], (
+            f"[{label}] the earlier turn's attachment must survive untouched: "
+            f"{result['attachmentsByIdx']}"
+        )
+        assert result["attachmentsByIdx"][2] == ["nouveau.pdf"], (
+            f"[{label}] the current turn's attachment must not be lost: "
+            f"{result['attachmentsByIdx']}"
+        )
