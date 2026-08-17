@@ -105,16 +105,20 @@ actions. The topbar remains focused on conversation context and the workspace/fi
 
 Browser notification ownership:
 
-    api/streaming.py    Emits only journal-provided SSE ids.
-    api/gateway_chat.py Emits only journal-provided SSE ids.
-    static/messages.js  Owns eligibility, canonical SSE identity capture, payload
-                        construction, and registration/direct delivery fallback.
+    api/streaming.py    Emits journal-provided SSE ids and a delivery-only
+                        notification identity when journal persistence fails.
+    api/gateway_chat.py Mirrors the streaming delivery-only identity contract.
+    static/messages.js  Owns eligibility, canonical or delivery-only identity
+                        capture, payload construction, and registration/direct
+                        delivery fallback.
     static/sw.js        Owns displayed-record duplicate suppression for the
                         versioned presentation protocol.
 
 Identity-bearing approval, clarification, and completion notifications use the
-canonical `(streamId, lastEventId)` tuple only when the journal provides a
-positive sequence id. The worker queries browser-owned displayed records for the
+canonical `(streamId, lastEventId)` tuple when the journal provides a positive
+sequence id. Journal-less notification payloads carry a bounded
+`notification_event_id` for cross-tab coordination; it never becomes the SSE id
+or replay cursor. The worker queries browser-owned displayed records for the
 same tag and exact event id, then calls `showNotification()` only when no exact
 displayed duplicate exists. Unsupported, stale, timed-out, rejected, or failed
 coordination returns to delivery and may duplicate; it cannot create suppression

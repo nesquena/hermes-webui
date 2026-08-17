@@ -954,8 +954,10 @@ def _run_gateway_chat_streaming(
 
     success_writeback_committed = False
     runs_api_pending_marked = True
+    delivery_event_seq = 0
 
     def put_gateway_event(event, data):
+        nonlocal delivery_event_seq
         if cancel_event.is_set() and not success_writeback_committed and event not in ("cancel", "error", "apperror"):
             return
         if event == "apperror" and isinstance(data, dict):
@@ -970,6 +972,10 @@ def _run_gateway_chat_streaming(
                     STREAM_LAST_EVENT_ID[stream_id] = event_id
             except Exception:
                 logger.debug("Failed to append gateway event %s for stream %s", event, stream_id, exc_info=True)
+        if not event_id and event in ("approval", "clarify", "done") and isinstance(data, dict):
+            delivery_event_seq += 1
+            data = dict(data)
+            data["notification_event_id"] = f"{stream_id}:delivery:{delivery_event_seq}"
         if event_id and hasattr(q, "note_last_event_id"):
             try:
                 q.note_last_event_id(event_id)

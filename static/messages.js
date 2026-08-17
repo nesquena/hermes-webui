@@ -5926,7 +5926,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _sendStreamNotification(
         'Approval required',
         d.description||'Tool approval needed',
-        _captureNotificationEventIdentity(streamId,e),
+        _captureNotificationEventIdentity(streamId,e,d),
         {sid:activeSid},
       );
     });
@@ -5939,7 +5939,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _sendStreamNotification(
         'Clarification needed',
         d.question||'Tool clarification needed',
-        _captureNotificationEventIdentity(streamId,e),
+        _captureNotificationEventIdentity(streamId,e,d),
         {sid:activeSid},
       );
     });
@@ -6079,7 +6079,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _cancelThrottledSnapshotTimer();
       const _doneData=JSON.parse(e.data);
       const _doneEvent=e;
-      const _doneNotificationIdentity=_captureNotificationEventIdentity(streamId,_doneEvent);
+      const _doneNotificationIdentity=_captureNotificationEventIdentity(streamId,_doneEvent,_doneData);
       const _finishDone=()=>{
         // Bug A fix: cancel any pending rAF and mark stream finalized before
         // the DOM is settled by renderMessages, so no trailing token/reasoning rAF
@@ -9120,10 +9120,12 @@ function _notificationOptions(body,options={}){
   return {body:body||'',tag:sid?`hermes-${sid}`:'hermes-webui',renotify:true,icon:'static/favicon-192.png',badge:'static/favicon-32.png',data:{url}};
 }
 const _NOTIFICATION_IDENTITY_MAX_LENGTH=512;
-function _captureNotificationEventIdentity(streamId,event){
+function _captureNotificationEventIdentity(streamId,event,payload){
   const lastEventId=String(event&&event.lastEventId||'');
-  if(!streamId||!lastEventId.trim()||lastEventId.length>_NOTIFICATION_IDENTITY_MAX_LENGTH) return null;
-  return {streamId:String(streamId),lastEventId};
+  const deliveryEventId=String(payload&&payload.notification_event_id||'');
+  const identity=lastEventId.trim()?lastEventId:deliveryEventId;
+  if(!streamId||!identity.trim()||identity.length>_NOTIFICATION_IDENTITY_MAX_LENGTH) return null;
+  return {streamId:String(streamId),lastEventId:identity};
 }
 function _sendStreamNotification(title,body,eventIdentity,options={}){
   return eventIdentity

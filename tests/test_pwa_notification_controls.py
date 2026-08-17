@@ -39,14 +39,14 @@ def test_notification_payload_uses_completion_session_when_provided():
     assert "tag:sid?`hermes-${sid}`" in MESSAGES_JS
     assert "function _completionNotificationPreviewText" in MESSAGES_JS
     assert "_completionNotificationPreviewText(lastAsst," in MESSAGES_JS
-    assert "function _captureNotificationEventIdentity(streamId,event)" in MESSAGES_JS
+    assert "function _captureNotificationEventIdentity(streamId,event,payload)" in MESSAGES_JS
     assert "function _sendStreamNotification(title,body,eventIdentity,options={})" in MESSAGES_JS
     approval = _source_between("source.addEventListener('approval'", "source.addEventListener('clarify'")
     clarify = _source_between("source.addEventListener('clarify'", "source.addEventListener('state_saved'")
     done = _source_between("source.addEventListener('done'", "source.addEventListener('stream_end'")
-    assert "_captureNotificationEventIdentity(streamId,e)" in approval
-    assert "_captureNotificationEventIdentity(streamId,e)" in clarify
-    assert "const _doneNotificationIdentity=_captureNotificationEventIdentity(streamId,_doneEvent);" in done
+    assert "_captureNotificationEventIdentity(streamId,e,d)" in approval
+    assert "_captureNotificationEventIdentity(streamId,e,d)" in clarify
+    assert "const _doneNotificationIdentity=_captureNotificationEventIdentity(streamId,_doneEvent,_doneData);" in done
     assert "_sendStreamNotification(" in done
     assert "_doneNotificationIdentity" in done
     assert "assistantText?assistantText.slice(0,100)" not in MESSAGES_JS

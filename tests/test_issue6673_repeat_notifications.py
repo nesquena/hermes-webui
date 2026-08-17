@@ -18,7 +18,7 @@ def test_identity_capture_uses_only_canonical_journal_ids():
     assert "return null" in capture
     assert "_notificationEventFallbackId" not in MESSAGES_JS
     assert "event.lastEventId" in capture
-    assert "lastEventId.length>_NOTIFICATION_IDENTITY_MAX_LENGTH" in capture
+    assert "identity.length>_NOTIFICATION_IDENTITY_MAX_LENGTH" in capture
 
 
 def test_identity_capture_preserves_opaque_event_id_bytes():
@@ -29,13 +29,16 @@ def test_identity_capture_preserves_opaque_event_id_bytes():
     script = f"""
 const _NOTIFICATION_IDENTITY_MAX_LENGTH = 512;
 const capture = {capture};
-console.log(JSON.stringify(capture('stream-6673', {{lastEventId:' opaque-event '}})));
+console.log(JSON.stringify({{
+  raw: capture('stream-6673', {{lastEventId:' opaque-event '}}),
+  delivery: capture('stream-6673', {{lastEventId:''}}, {{notification_event_id:'stream-6673:delivery:1'}}),
+}}));
 """
     result = subprocess.run([node, "-e", script], cwd=ROOT, text=True, capture_output=True, check=False)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == {
-        "streamId": "stream-6673",
-        "lastEventId": " opaque-event ",
+        "raw": {"streamId": "stream-6673", "lastEventId": " opaque-event "},
+        "delivery": {"streamId": "stream-6673", "lastEventId": "stream-6673:delivery:1"},
     }
 
 
@@ -55,6 +58,17 @@ def test_producers_leave_delivery_frames_without_journal_ids_unkeyed():
     assert ":fallback:" not in gateway
     assert "queue_item = (event, data, event_id) if hasattr(q, \"subscribe_with_snapshot\")" in streaming
     assert "queue_item = (event, data, event_id) if hasattr(q, \"subscribe_with_snapshot\")" in gateway
+
+
+def test_journal_failure_keeps_notification_delivery_identity_out_of_sse_cursor():
+    streaming = (ROOT / "api" / "streaming.py").read_text(encoding="utf-8")
+    gateway = (ROOT / "api" / "gateway_chat.py").read_text(encoding="utf-8")
+    assert 'data["notification_event_id"]' in streaming
+    assert 'data["notification_event_id"]' in gateway
+    assert 'f"{stream_id}:delivery:{_delivery_event_seq}"' in streaming
+    assert 'f"{stream_id}:delivery:{delivery_event_seq}"' in gateway
+    assert "notification_event_id" in MESSAGES_JS
+    assert "_captureNotificationEventIdentity(streamId,e,d)" in MESSAGES_JS
 
 
 def test_notification_present_protocol_carries_canonical_event_data():
