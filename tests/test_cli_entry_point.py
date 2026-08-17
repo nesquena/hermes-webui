@@ -1,12 +1,14 @@
 """Smoke tests for the packaged ``hermes-webui`` CLI entry point (#6739).
 
 The console script is declared in ``pyproject.toml`` under
-``[project.scripts]`` and must keep resolving to ``server.main`` — the same
-startup path used by ``python server.py`` / ``python -m server``. These tests
+``[project.scripts]`` and must keep resolving to ``bootstrap.main`` — the
+bootstrap entry point runs launcher-python discovery and dep-ensure before
+launching the server, matching the effective behavior of
+``python server.py`` / ``python -m server``. These tests
 guard the wiring without booting a real server:
 
 1. The console script is declared in the packaging metadata.
-2. The declared target (``server:main``) actually resolves to a callable.
+2. The declared target (``bootstrap:main``) actually resolves to a callable.
 3. When the package is installed in the test environment (e.g. CI editable
    install), the real ``importlib.metadata`` entry point resolves end-to-end.
 """
@@ -21,7 +23,7 @@ import pytest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EXPECTED_SCRIPT = "hermes-webui"
-EXPECTED_TARGET = "server:main"
+EXPECTED_TARGET = "bootstrap:main"
 
 
 def _pyproject_scripts() -> dict:
@@ -32,7 +34,7 @@ def _pyproject_scripts() -> dict:
 
 
 def test_console_script_declared_in_pyproject():
-    """The packaged CLI entry point is declared and maps to server.main."""
+    """The packaged CLI entry point is declared and maps to bootstrap.main."""
     scripts = _pyproject_scripts()
     assert scripts.get(EXPECTED_SCRIPT) == EXPECTED_TARGET
 
@@ -54,7 +56,7 @@ def _installed_entry_point():
 
 
 def test_installed_entry_point_wiring():
-    """When installed, the console script must resolve to server.main."""
+    """When installed, the console script must resolve to bootstrap.main."""
     ep = _installed_entry_point()
     if ep is None:
         pytest.skip("hermes-webui not installed in this test environment")
