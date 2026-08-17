@@ -326,3 +326,119 @@ def test_importable_agent_rows_zero_limit_skips_query_work(tmp_path):
     _make_state_db(db, sessions=5, messages_per_session=1)
 
     assert agent_sessions.read_importable_agent_session_rows(db, limit=0, exclude_sources=("webui",)) == []
+
+
+def _lineage_and_subagent_db(path):
+    """Two 12-segment compression lineages own the 24 newest raw rows.
+
+    They collapse to 2 logical conversations, so a ``limit=3`` request consumes
+    the whole ``limit * 8`` window and still under-delivers. A hot subagent leaf
+    and its quiet subagent parent sit BELOW that window, reachable only once
+    ``CANDIDATE_WINDOW_MULTIPLIERS`` re-widens it.
+    """
+    conn = sqlite3.connect(str(path))
+    conn.executescript(
+        """
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            source TEXT,
+            title TEXT,
+            model TEXT,
+            started_at REAL NOT NULL,
+            message_count INTEGER DEFAULT 0,
+            parent_session_id TEXT,
+            ended_at REAL,
+            end_reason TEXT
+        );
+        CREATE TABLE messages (
+            id TEXT PRIMARY KEY,
+            session_id TEXT,
+            role TEXT,
+            content TEXT,
+            timestamp REAL
+        );
+        """
+    )
+
+    def add(sid, title, started, source, parent=None, ended_at=None, end_reason=None):
+        conn.execute(
+            "INSERT INTO sessions (id, source, title, model, started_at, message_count, "
+            "parent_session_id, ended_at, end_reason) VALUES (?, ?, ?, 'openai/gpt-5', ?, 2, ?, ?, ?)",
+            (sid, source, title, started, parent, ended_at, end_reason),
+        )
+        for index, role in enumerate(("user", "assistant")):
+            conn.execute(
+                "INSERT INTO messages (id, session_id, role, content, timestamp) VALUES (?, ?, ?, 'hi', ?)",
+                (f"{sid}_m{index}", sid, role, started + (index + 4) / 10),
+            )
+
+    for name, base in (("a", 9000.0), ("b", 8000.0)):
+        for index in range(12):
+            last = index == 11
+            started = base + index
+            add(
+                f"lin{name}_seg{index}",
+                f"Lineage {name} part {index}",
+                started,
+                "cli",
+                parent=None if index == 0 else f"lin{name}_seg{index - 1}",
+                ended_at=None if last else started + 0.9,
+                end_reason=None if last else "compression",
+            )
+    add("hot_leaf", "Hot leaf", 7000.0, "subagent", parent="quiet_orch")
+    add("quiet_orch", "Quiet orchestrator", 100.0, "subagent")
+    conn.commit()
+    conn.close()
+
+
+def test_rewidened_candidate_window_still_recovers_subagent_parents(tmp_path):
+    """The parent-recovery walk must run on the window that ACTUALLY executed.
+
+    ``read_importable_agent_session_rows`` re-adds subagent parents that the
+    oversampled candidate set already projected, so a frozen orchestrator is not
+    evicted while its streaming leaves stay (upstream #7089 / supersedes #7031).
+    That walk reads the projection of the candidate window, and #6659 turned the
+    single window into a re-widening loop. This pins that the walk consumes the
+    LAST window rather than a stale first pass: on the 8x window neither the leaf
+    nor its parent is even fetched, and only the widened window can anchor them.
+    """
+    db = tmp_path / "state.db"
+    _lineage_and_subagent_db(db)
+
+    rows = agent_sessions.read_importable_agent_session_rows(db, limit=3, exclude_sources=None)
+    ids = [row["id"] for row in rows]
+
+    # The 8x window (24 raw rows) is exactly the two lineages: under-delivered.
+    assert ids[:2] == ["lina_seg11", "linb_seg11"]
+    # The widened window reaches the leaf...
+    assert "hot_leaf" in ids
+    # ...and the walk re-adds its quiet parent even though the recency slice
+    # (limit=3) had already dropped it, so the leaf still renders as a child.
+    assert "quiet_orch" in ids
+    assert next(row for row in rows if row["id"] == "hot_leaf")["parent_session_id"] == "quiet_orch"
+    # Contract from the docstring: the anchor pushes the result past ``limit``.
+    assert len(rows) == 4
+
+
+def test_first_candidate_window_alone_cannot_anchor_the_subagent_parent(tmp_path):
+    """Negative control: without the re-widening pass the same db under-delivers.
+
+    Pins that the previous test is not vacuous — the 8x window really does stop
+    at the two lineages, so the parent recovery above is attributable to the
+    widened window and not to the first one.
+    """
+    db = tmp_path / "state.db"
+    _lineage_and_subagent_db(db)
+
+    single_window = agent_sessions.CANDIDATE_WINDOW_MULTIPLIERS[:1]
+    original = agent_sessions.CANDIDATE_WINDOW_MULTIPLIERS
+    agent_sessions.CANDIDATE_WINDOW_MULTIPLIERS = single_window
+    try:
+        rows = agent_sessions.read_importable_agent_session_rows(db, limit=3, exclude_sources=None)
+    finally:
+        agent_sessions.CANDIDATE_WINDOW_MULTIPLIERS = original
+
+    ids = [row["id"] for row in rows]
+    assert ids == ["lina_seg11", "linb_seg11"]
+    assert "hot_leaf" not in ids
+    assert "quiet_orch" not in ids
