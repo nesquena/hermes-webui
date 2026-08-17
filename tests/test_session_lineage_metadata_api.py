@@ -64,6 +64,7 @@ def _ensure_messages_table(conn):
     conn.execute(
         """
         CREATE TABLE messages (
+            id INTEGER PRIMARY KEY,
             session_id TEXT,
             role TEXT,
             content TEXT,
@@ -977,3 +978,173 @@ def test_continuation_classification_timestamp_tolerance_and_guards():
     # Missing/unparsable boundary timestamps degrade to False (no crash).
     assert not _is_continuation_session(make_parent(ended_at='not-a-number'), make_child())
     assert not _is_continuation_session(make_parent(), make_child(started_at='not-a-number'))
+
+
+def test_state_db_stitch_keeps_branched_child_out_of_parent_transcript(_isolate):
+    """#7021 r2: the open/import transcript stitcher (get_state_db_session_messages
+    with stitch_continuations=True) must apply the same model_config branch-marker
+    guard as the listing classifier. A child whose model_config._branched_from /
+    _delegate_from points at the parent must NOT have its messages stitched into
+    the parent transcript even when it starts inside the tolerance window.
+    """
+    conn = _ensure_state_db(_isolate)
+    _ensure_messages_table(conn)
+    t0 = time.time() - 100
+    try:
+        # Compression parent whose child starts INSIDE the 2s tolerance window.
+        _insert_state_row(
+            conn,
+            "stitch_branch_parent",
+            started_at=t0,
+            ended_at=t0 + 5,
+            end_reason="compression",
+        )
+        _insert_state_message(
+            conn, "stitch_branch_parent", role="user", content="parent turn", timestamp=t0 + 1
+        )
+        # Explicit Agent branch: fork identity lives in model_config, not
+        # session_source. Starting 1.5s before the parent's ended_at — inside
+        # the tolerance — it must still stay out of the parent's transcript.
+        _insert_state_row(
+            conn,
+            "stitch_branch_child",
+            parent="stitch_branch_parent",
+            started_at=t0 + 5 - 1.5,
+            model_config=json.dumps({"_branched_from": "stitch_branch_parent"}),
+        )
+        _insert_state_message(
+            conn, "stitch_branch_child", role="user", content="branch turn", timestamp=t0 + 6
+        )
+
+        msgs = models.get_state_db_session_messages(
+            "stitch_branch_child", stitch_continuations=True
+        )
+        contents = [m["content"] for m in msgs]
+        assert "branch turn" in contents
+        assert "parent turn" not in contents
+
+        # Control: a genuine compression continuation (no branch marker) starting
+        # inside the same window IS stitched into the parent transcript.
+        _insert_state_row(
+            conn,
+            "stitch_continuation_child",
+            parent="stitch_branch_parent",
+            started_at=t0 + 5 - 0.5,
+        )
+        _insert_state_message(
+            conn,
+            "stitch_continuation_child",
+            role="user",
+            content="continuation turn",
+            timestamp=t0 + 7,
+        )
+        msgs = models.get_state_db_session_messages(
+            "stitch_continuation_child", stitch_continuations=True
+        )
+        contents = [m["content"] for m in msgs]
+        assert "continuation turn" in contents
+        assert "parent turn" in contents
+    finally:
+        conn.close()
+
+
+def test_state_db_stitch_keeps_delegate_child_out_of_parent_transcript(_isolate):
+    """#7021 r2: same guard for model_config._delegate_from (subagent runs) in
+    the open/import transcript stitcher."""
+    conn = _ensure_state_db(_isolate)
+    _ensure_messages_table(conn)
+    t0 = time.time() - 100
+    try:
+        _insert_state_row(
+            conn,
+            "stitch_delegate_parent",
+            started_at=t0,
+            ended_at=t0 + 5,
+            end_reason="compression",
+        )
+        _insert_state_message(
+            conn, "stitch_delegate_parent", role="user", content="parent turn", timestamp=t0 + 1
+        )
+        _insert_state_row(
+            conn,
+            "stitch_delegate_child",
+            parent="stitch_delegate_parent",
+            started_at=t0 + 5 - 1.0,
+            model_config=json.dumps({"_delegate_from": "stitch_delegate_parent"}),
+        )
+        _insert_state_message(
+            conn, "stitch_delegate_child", role="user", content="delegate turn", timestamp=t0 + 6
+        )
+
+        msgs = models.get_state_db_session_messages(
+            "stitch_delegate_child", stitch_continuations=True
+        )
+        contents = [m["content"] for m in msgs]
+        assert "delegate turn" in contents
+        assert "parent turn" not in contents
+    finally:
+        conn.close()
+
+
+def test_state_db_stitch_old_schema_without_identity_columns_still_stitches(_isolate):
+    """#7021 r2: older state.db schemas lacking session_source/model_config degrade
+    to NULL and keep the pre-fix behavior — a genuine compression continuation
+    within the tolerance is still stitched, without crashing."""
+    conn = sqlite3.connect(str(_isolate))
+    conn.executescript(
+        """
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            source TEXT,
+            title TEXT,
+            started_at REAL NOT NULL,
+            message_count INTEGER DEFAULT 0,
+            parent_session_id TEXT,
+            ended_at REAL,
+            end_reason TEXT
+        );
+        """
+    )
+    _ensure_messages_table(conn)
+    t0 = time.time() - 100
+    try:
+        conn.execute(
+            """
+            INSERT INTO sessions
+            (id, source, title, started_at, message_count, parent_session_id, ended_at, end_reason)
+            VALUES (?, ?, ?, ?, 2, ?, ?, ?)
+            """,
+            (
+                "stitch_old_parent",
+                "webui",
+                "stitch_old_parent",
+                t0,
+                None,
+                t0 + 5,
+                "compression",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO sessions
+            (id, source, title, started_at, message_count, parent_session_id, ended_at, end_reason)
+            VALUES (?, ?, ?, ?, 2, ?, NULL, NULL)
+            """,
+            ("stitch_old_child", "webui", "stitch_old_child", t0 + 4.5, "stitch_old_parent"),
+        )
+        conn.commit()
+        _insert_state_message(
+            conn, "stitch_old_parent", role="user", content="parent turn", timestamp=t0 + 1
+        )
+        _insert_state_message(
+            conn, "stitch_old_child", role="user", content="old child turn", timestamp=t0 + 6
+        )
+
+        msgs = models.get_state_db_session_messages(
+            "stitch_old_child", stitch_continuations=True
+        )
+        contents = [m["content"] for m in msgs]
+        assert "old child turn" in contents
+        assert "parent turn" in contents
+    finally:
+        conn.close()
