@@ -688,6 +688,35 @@ def test_insights_absolute_range_impossible_calendar_date_falls_back(monkeypatch
     assert data["period_days"] == len(data["daily_tokens"])
 
 
+def test_insights_absolute_range_invalid_start_with_valid_end_falls_back(monkeypatch, tmp_path):
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    entries = [
+        {
+            "session_id": "today", "updated_at": now, "created_at": now,
+            "message_count": 1, "input_tokens": 10, "output_tokens": 5,
+            "estimated_cost": "0.0001", "model": "gpt-x",
+        },
+    ]
+    # Regression for Greptile P1 "Invalid start invents custom range": a
+    # SUPPLIED-but-invalid start (2026-02-31 does not exist) with a VALID
+    # end used to be conflated with an omitted start, so the handler
+    # fabricated a custom window of 30 days before end that the caller
+    # never requested.  It must fail closed to the trailing window and
+    # report mode="trailing" so the client renders what was actually
+    # served.
+    data = _call_insights(monkeypatch, tmp_path, entries,
+                          query="start=2026-02-31&end=2026-05-04", now=now)
+    assert data["total_sessions"] == 1
+    assert data["mode"] == "trailing"
+    assert data["effective_start"] is None
+    assert data["effective_end"] is None
+    assert len(data["daily_tokens"]) == 30
+    assert data["period_days"] == len(data["daily_tokens"])
+
+    # The crafted window the caller never asked for must NOT be reported.
+    assert data["total_tokens"] > 0
+
+
 def test_insights_absolute_range_nonfinite_timestamps_do_not_500(monkeypatch, tmp_path):
     now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
     entries = [

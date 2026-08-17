@@ -11110,6 +11110,18 @@ def _handle_insights(handler, parsed) -> bool:
     # is present.
     start_meta = _window_ts(query.get("start", []))
     end_meta = _window_ts(query.get("end", []))
+    # A SUPPLIED-but-invalid start must fail closed to the trailing window,
+    # not masquerade as an OMITTED start: `_window_ts` returns None for
+    # both absent and unparseable values, and the omitted-start default
+    # (30 days before end) would fabricate a custom interval the caller
+    # never requested when `start` was actually supplied but unparseable
+    # (e.g. 2026-02-31, rejected by the calendar round-trip check).  The
+    # invalid supplied value is rejected wholesale so the response reports
+    # the trailing window actually served (Greptile P1: "Invalid start
+    # invents custom range").
+    if "start" in query and start_meta is None:
+        start_meta = None
+        end_meta = None
     start_kind = start_meta[0] if start_meta else None
     end_kind = end_meta[0] if end_meta else None
     start_ts_v = start_meta[1] if start_meta else None
