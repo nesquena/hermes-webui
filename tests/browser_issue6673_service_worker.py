@@ -61,20 +61,30 @@ def _records(page):
     return page.evaluate("""async () => (await (await navigator.serviceWorker.ready).getNotifications({tag:'hermes-session-6673'})).map(n => ({id:n.data.eventId, tag:n.tag, renotify:n.renotify, url:n.data.url}))""")
 
 
-def _observe_direct_notifications(page) -> None:
+def _observe_fallback_notifications(page) -> None:
     page.evaluate("""
-      () => {
+      async () => {
         const NativeNotification = window.Notification;
-        let count = 0;
+        let directCount = 0;
         function ObservedNotification(...args) {
-          count += 1;
-          window.__issue6673DirectCount = count;
+          directCount += 1;
+          window.__issue6673DirectCount = directCount;
           return new NativeNotification(...args);
         }
         Object.setPrototypeOf(ObservedNotification, NativeNotification);
         ObservedNotification.prototype = NativeNotification.prototype;
         window.Notification = ObservedNotification;
+        const registration = await navigator.serviceWorker.ready;
+        const nativeShowNotification = registration.showNotification.bind(registration);
+        let registrationShowCount = 0;
+        registration.showNotification = (...args) => {
+          registrationShowCount += 1;
+          window.__issue6673RegistrationShowCount = registrationShowCount;
+          return nativeShowNotification(...args);
+        };
         window.__issue6673DirectCount = 0;
+        window.__issue6673RegistrationShowCount = 0;
+        window.__issue6673FallbackCount = 0;
       }
     """)
 
@@ -135,13 +145,13 @@ def main() -> int:
         if permission != "granted":
             print(json.dumps({"status":"unreached", "reason":"headless Notification permission is not granted", "permission":permission}))
             return 2
-        _observe_direct_notifications(page_a)
+        _observe_fallback_notifications(page_a)
         _listen(page_a)
         _emit(page_a, "stream-6673:1")
-        page_a.wait_for_function("() => window.__issue6673DirectCount >= 1", timeout=10000)
-        direct_before_no_id = page_a.evaluate("() => window.__issue6673DirectCount")
+        page_a.wait_for_function("() => window.__issue6673DirectCount + window.__issue6673RegistrationShowCount >= 1", timeout=10000)
+        fallback_before_no_id = page_a.evaluate("() => window.__issue6673DirectCount + window.__issue6673RegistrationShowCount")
         _emit(page_a, None)
-        page_a.wait_for_function("count => window.__issue6673DirectCount > count", arg=direct_before_no_id, timeout=10000)
+        page_a.wait_for_function("count => window.__issue6673DirectCount + window.__issue6673RegistrationShowCount > count", arg=fallback_before_no_id, timeout=10000)
         if page_a.evaluate("() => window.__issue6673IdentityObservations.at(-1)") is not None:
             raise AssertionError(page_a.evaluate("() => window.__issue6673IdentityObservations"))
         context.unroute("**/sw.js")
@@ -171,7 +181,7 @@ def main() -> int:
         page_b.reload(wait_until="domcontentloaded")
         for page in (page_a, page_b):
             page.wait_for_function("async () => Boolean((await navigator.serviceWorker.ready).active && navigator.serviceWorker.controller)", timeout=15000)
-            _observe_direct_notifications(page)
+            _observe_fallback_notifications(page)
             _listen(page)
         _emit(page_a, "stream-6673:3")
         _emit(page_b, "stream-6673:3")
