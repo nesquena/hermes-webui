@@ -28,7 +28,7 @@ import time
 import uuid
 import http.client
 import socket as _socket
-from collections import defaultdict, deque
+from collections import defaultdict, deque, OrderedDict
 from pathlib import Path
 from contextlib import closing
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
@@ -9059,6 +9059,16 @@ def _messages_start_with_visible_prefix(messages, prefix) -> bool:
         return False
 
 
+# perf: memoized lineage-stitch results for GET /api/session. Keyed by session
+# id; validity = exact stat signature of the child sidecar AND every snapshot
+# parent involved in the stitch. Any write to any involved sidecar changes its
+# signature and invalidates the entry. Bounded LRU — historical lineages are
+# few but their merges cost seconds each.
+_LINEAGE_DISPLAY_CACHE_MAX = 16
+_lineage_display_cache: "OrderedDict[str, dict]" = OrderedDict()
+_lineage_display_cache_lock = threading.Lock()
+
+
 def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) -> list:
     """Return WebUI sidecar messages stitched across compression snapshots.
 
@@ -9067,13 +9077,43 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
     child sidecar. Opening the child alone makes older turns look lost. Stitch
     only those snapshot parents for display; ordinary forks also carry
     ``parent_session_id`` but must remain independent conversations.
+
+    perf: the stitched merge is O(total messages) with expensive per-row keys
+    (json.dumps of tool_calls, loose-content regex). For multi-thousand-message
+    lineages it costs seconds per request, and GET /api/session re-runs it on
+    every open/poll. The result is cached per session id, keyed by the stat
+    signature of every sidecar involved (child + each snapshot parent), so an
+    idle historical lineage merges once and any write to any involved sidecar
+    invalidates naturally. Cache hits return shallow-copied rows so callers can
+    attach display metadata without corrupting the cache.
     """
+    from api.models import _sidecar_stat_signature
+
+    sid = str(getattr(session, "session_id", "") or "")
+    self_sig = None
+    if sid and is_safe_session_id(sid):
+        self_sig = _sidecar_stat_signature(SESSION_DIR / f"{sid}.json")
+    if self_sig is not None:
+        with _lineage_display_cache_lock:
+            entry = _lineage_display_cache.get(sid)
+        if entry is not None and entry.get("self_sig") == self_sig:
+            stale = False
+            for parent_path, parent_sig in entry.get("parent_sigs") or []:
+                if _sidecar_stat_signature(Path(parent_path)) != parent_sig:
+                    stale = True
+                    break
+            if not stale:
+                with _lineage_display_cache_lock:
+                    _lineage_display_cache.move_to_end(sid, last=True)
+                return [dict(m) if isinstance(m, dict) else m for m in entry["messages"]]
+
     segments = []
     current = session
     session_messages = list(getattr(session, "messages", []) or [])
     source = str(getattr(session, "session_source", "") or "").strip().lower()
     root_is_fork = source == "fork"
     seen = {str(getattr(session, "session_id", "") or "")}
+    parent_sigs: list[tuple[str, tuple]] = []
     for _ in range(max(0, int(max_hops))):
         parent_id = str(getattr(current, "parent_session_id", "") or "").strip()
         if not parent_id or parent_id in seen or not is_safe_session_id(parent_id):
@@ -9081,6 +9121,10 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
         parent = Session.load(parent_id)
         if not parent or not getattr(parent, "pre_compression_snapshot", False):
             break
+        parent_path = SESSION_DIR / f"{parent_id}.json"
+        parent_sig = _sidecar_stat_signature(parent_path)
+        if parent_sig is not None:
+            parent_sigs.append((str(parent_path), parent_sig))
         parent_source = str(getattr(parent, "session_source", "") or "").strip().lower()
         if root_is_fork and parent_source != "fork":
             break
@@ -9104,11 +9148,25 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
             truncation_watermark=getattr(segment, "truncation_watermark", None),
             truncation_boundary=getattr(segment, "truncation_boundary", None),
         )
-    return merge_session_messages_append_only(
+    merged = merge_session_messages_append_only(
         merged,
         getattr(session, "messages", []) or [],
         truncation_watermark=None,
     )
+    if self_sig is not None and parent_sigs:
+        with _lineage_display_cache_lock:
+            _lineage_display_cache[sid] = {
+                "self_sig": self_sig,
+                "parent_sigs": parent_sigs,
+                "messages": merged,
+            }
+            _lineage_display_cache.move_to_end(sid, last=True)
+            while len(_lineage_display_cache) > _LINEAGE_DISPLAY_CACHE_MAX:
+                _lineage_display_cache.popitem(last=False)
+        # Hand out copies so caller-side metadata mutation cannot corrupt
+        # the cached rows (same contract as the cache-hit path).
+        return [dict(m) if isinstance(m, dict) else m for m in merged]
+    return merged
 
 
 def _merged_session_messages_for_display(session, cli_messages=None) -> list:
