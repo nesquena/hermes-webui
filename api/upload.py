@@ -9,7 +9,7 @@ from pathlib import Path
 
 from api.config import MAX_UPLOAD_BYTES, STATE_DIR
 from api.helpers import (
-    arm_connection_close,
+    arm_connection_close_if_body_pending,
     j,
     unreadable_content_length,
     unsupported_transfer_encoding,
@@ -51,8 +51,19 @@ _MAX_EXTRACTED_BYTES = 10 * MAX_UPLOAD_BYTES
 
 
 def _reject_before_read(handler, message, status):
-    """Reject without reading the body; close so unread bytes can't poison HTTP/1.1 reuse."""
-    arm_connection_close(handler)
+    """Reject without reading the body; close so unread bytes can't poison HTTP/1.1 reuse.
+
+    Framing decides, exactly as at the other reject-before-read sites: every
+    rejection raised by the preflight above (any ``Transfer-Encoding``, an
+    unreadable or conflicting ``Content-Length``, an over-cap length) already
+    declares a body and still closes. Only the boundary/`parse_multipart` rejection
+    can fire on a request that declares none, and closing there dropped a healthy
+    pooled connection -- on the wire, ``POST /api/upload`` with
+    ``Content-Type: application/json`` and no ``Content-Length`` answered 400
+    "No boundary in Content-Type" WITH ``Connection: close`` and the pipelined
+    ``GET /api/health/agent`` was never served.
+    """
+    arm_connection_close_if_body_pending(handler)
     return j(handler, {'error': message}, status=status)
 
 
