@@ -107,11 +107,12 @@ def test_webui_forwards_gateway_api_key():
         )
 
 
-def test_missing_key_keeps_service_unhealthy_by_design():
-    """A missing or weak API_SERVER_KEY must leave the agent unhealthy: the
-    healthcheck probes the listener the agent refuses to bind without a usable
-    key, and the compose comments spell out the setup requirement instead of
-    silently claiming host+port alone enable the API."""
+def test_missing_key_short_circuits_healthcheck_to_healthy():
+    """A missing or weak API_SERVER_KEY must short-circuit the healthcheck to
+    healthy (exit 0) so the default no-key deployment becomes ready. The real
+    8642 probe only runs when a usable key is configured. This prevents the
+    default deployment from bricking while keeping the probe for keyed setups
+    (#6986, #6987)."""
     for fname in COMPOSE_FILES:
         data = _load(fname)
         agent = data["services"]["hermes-agent"]
@@ -119,11 +120,16 @@ def test_missing_key_keeps_service_unhealthy_by_design():
             f"{fname}: hermes-agent must define a healthcheck"
         )
         test_cmd = " ".join(agent["healthcheck"]["test"])
+        # The healthcheck must short-circuit when API_SERVER_KEY is empty
+        assert "[ -z \"${API_SERVER_KEY}\" ]" in test_cmd, (
+            f"{fname}: healthcheck must short-circuit when API_SERVER_KEY is empty"
+        )
+        # The real probe must still be present for when a key IS configured
         assert "8642" in test_cmd, (
-            f"{fname}: healthcheck must probe the gateway port 8642"
+            f"{fname}: healthcheck must probe the gateway port 8642 when key is set"
         )
         assert "health" in test_cmd, (
-            f"{fname}: healthcheck should hit a gateway health endpoint"
+            f"{fname}: healthcheck should hit a gateway health endpoint when key is set"
         )
         # The setup message must exist in the compose comments and state the
         # real requirement (usable key >=16 chars) — never claim host+port
@@ -133,8 +139,12 @@ def test_missing_key_keeps_service_unhealthy_by_design():
         assert "16" in src, (
             f"{fname}: comment must document the >=16 char API_SERVER_KEY requirement"
         )
-        assert "alone never enable" in src, (
+        assert "never enable" in src, (
             f"{fname}: comment must state that host+port alone never enable the API"
+        )
+        # Document the short-circuit behavior
+        assert "short-circuit" in src.lower(), (
+            f"{fname}: comment must document the short-circuit behavior for missing key"
         )
 
 

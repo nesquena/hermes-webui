@@ -92,9 +92,10 @@ services:
       # Gateway must actually be listening on 8642 before the WebUI starts,
       # otherwise the WebUI's agent health probe races the agent boot and
       # reports "can't reach hermes-agent". Without a usable API_SERVER_KEY
-      # the listener never binds and this healthcheck keeps the service
-      # unhealthy on purpose (#6986).
-      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8642/health', timeout=3)\" || exit 1"]
+      # the listener never binds — short-circuit to healthy so the default
+      # (no-key) deployment still becomes ready. When a key IS configured,
+      # probe the real gateway health endpoint (#6986, #6987).
+      test: ["CMD-SHELL", "[ -z \"${API_SERVER_KEY}\" ] || python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8642/health', timeout=3)\" || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 12
