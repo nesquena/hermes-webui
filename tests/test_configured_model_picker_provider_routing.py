@@ -218,9 +218,20 @@ const sol = {
   dataset: {},  // no data-model — normal catalog render path
   parentElement: group,
 };
+// Colon-bearing model id on the SAME normal catalog render path (no
+// data-model). Regression for the #6884 re-gate: the prefix to strip must
+// come from the option metadata's authoritative provider (custom:hetmer.net),
+// NOT from the last-colon value reparse (which would yield the malformed
+// "custom:hetmer.net:model-a" prefix and truncate the model to "free").
+const modelAFree = {
+  value: '@custom:hetmer.net:model-a:free',
+  textContent: 'model-a:free',
+  dataset: {},  // no data-model — normal catalog render path
+  parentElement: group,
+};
 const select = {
   id: 'modelSelect',
-  options: [luna, sol],
+  options: [luna, sol, modelAFree],
   querySelectorAll() { return []; },
   get selectedOptions() { return [sol]; },
   get value() { return sol.value; },
@@ -230,6 +241,7 @@ const select = {
 process.stdout.write(JSON.stringify({
   nonDefault: _modelStateForSelect(select, '@custom:hetmer.net:sol'),
   defaultUnprefixed: _modelStateForSelect(select, 'luna'),
+  colonBearingModel: _modelStateForSelect(select, '@custom:hetmer.net:model-a:free'),
 }));
 """
 
@@ -255,6 +267,13 @@ def test_non_default_named_custom_provider_model_strips_qualified_prefix():
     # Sanity: the unprefixed default option still returns its value as-is.
     assert payload["defaultUnprefixed"] == {
         "model": "luna",
+        "model_provider": "custom:hetmer.net",
+    }
+    # Colon-bearing model id on the same normal catalog render path: the strip
+    # prefix comes from the option metadata provider (custom:hetmer.net), so
+    # the full "model-a:free" survives — not just the "free" suffix (re-gate).
+    assert payload["colonBearingModel"] == {
+        "model": "model-a:free",
         "model_provider": "custom:hetmer.net",
     }
 

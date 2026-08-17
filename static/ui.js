@@ -2911,17 +2911,22 @@ function _modelStateForSelect(sel, modelId){
     // Normally-rendered catalog options only carry the qualified
     // @custom:<slug>:<model> value — data-model is set solely by the fallback
     // injection path (_ensureModelOptionInDropdown). When it is missing, strip
-    // the @custom:<slug>: prefix already parsed as explicitProvider instead
-    // of sending the raw dropdown value as the model id (#6884). Only custom
-    // providers are affected: a non-custom qualified id like @safe:gpt-4o-mini
-    // is a real provider namespace and must be preserved (#1771).
-    const explicitProviderLc=explicitProvider.toLowerCase();
-    const isCustomProvider=explicitProviderLc==='custom'||explicitProviderLc.startsWith('custom:');
-    const explicitPrefix=`@${explicitProvider}:`;
+    // the @custom:<slug>: prefix instead of sending the raw dropdown value as
+    // the model id (#6884). The prefix must come from the option metadata's
+    // authoritative provider (routedProvider), NOT from explicitProvider: the
+    // latter re-parses the value at its LAST colon, so a colon-bearing model
+    // id like @custom:backup:model-a:free would otherwise strip to just
+    // "free" (re-gate on the #6221 family). Only custom providers are
+    // stripped: a non-custom qualified id like @safe:gpt-4o-mini is a real
+    // provider namespace and must be preserved (#1771).
+    const effectiveProvider=routedProvider||explicitProvider;
+    const effectiveProviderLc=effectiveProvider.toLowerCase();
+    const isCustomProvider=effectiveProviderLc==='custom'||effectiveProviderLc.startsWith('custom:');
+    const explicitPrefix=`@${effectiveProvider}:`;
     const strippedModel=isCustomProvider&&value.toLowerCase().startsWith(explicitPrefix.toLowerCase())
       ?value.slice(explicitPrefix.length)
       :value;
-    return {model:routedModel||strippedModel||value,model_provider:routedProvider||explicitProvider};
+    return {model:routedModel||strippedModel||value,model_provider:effectiveProvider};
   }
   // Resolve the provider from the option whose VALUE matches the requested
   // model — never blindly from sel.selectedOptions[0] (#5567). During a profile
