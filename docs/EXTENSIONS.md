@@ -300,6 +300,48 @@ sandbox, isolation mechanism, capability or permission system, or security
 boundary. Extensions still execute with the full WebUI session authority
 described above.
 
+### Custom Configure editors
+
+Extensions with structured configuration that does not fit scalar
+`settings_schema` fields can register one custom editor entry point on their
+scoped E0 settings handle:
+
+```js
+const ext = window.hermesExt.register("dictionary-manager");
+const unregister = ext?.settings.registerConfigure(({ opener, restoreFocus }) => {
+  openDictionaryManager({ opener, restoreFocus });
+});
+```
+
+`registerConfigure(handler)` is available only through a valid boot-trusted E0
+handle. It does not require `settings_schema` or extension-owned storage. The
+first handler registered for an extension wins; duplicates return `null` and do
+not replace it. A successful registration returns an idempotent unregister
+function.
+
+Core shows one **Configure** button only for the extension's current
+effective-enabled row under **Settings → Extensions → Installed**. Diagnostics
+never shows the button. Late registration updates an already-mounted Installed
+row. Disable or uninstall status removes the entry point immediately; uninstall
+followed by a same-ID reinstall cannot revive the old page-local handler until a
+full WebUI reload injects and registers the new extension script.
+
+Core enters a pending state before invoking the handler and passes the activated
+button as `opener` plus a one-shot `restoreFocus()` callback. The extension owns
+its dialog, validation, persistence, and close lifecycle. It must either call
+`restoreFocus()` when its UI closes or return a thenable whose settlement means
+the Configure UI is closed. Both paths end pending and converge on Core's
+one-shot focus restoration. A synchronous non-thenable handler remains disabled
+while unsettled. If it never calls `restoreFocus()`, it remains disabled until reload.
+Core does not guess dialog lifetime with a timeout.
+
+Synchronous throws, thenable-access failures, and asynchronous rejections are
+isolated, logged with the extension ID, and surfaced as a generic failure. Focus
+returns to the connected opener when possible, otherwise to the current visible
+Configure button or the Installed tab without forcing navigation. The hook does
+not let an extension return DOM for Core to render, add a backend settings route,
+or change the trusted same-origin extension model.
+
 ### Turn lifecycle events
 
 A registered extension can react when a session turn observed by the current page

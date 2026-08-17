@@ -275,3 +275,209 @@ def test_hermes_ext_register_runtime_identity_and_reload_lifecycle():
         """
     )
     _run_node(script)
+
+
+def test_hermes_ext_configure_registration_invocation_and_quarantine():
+    script = textwrap.dedent(
+        f"""
+        const fs = require('fs');
+        const assert = require('assert');
+        const store = new Map();
+        const diagnostics = [];
+        const changes = [];
+        const replacementButton = {{
+          dataset: {{extensionConfigureId: 'alpha.ext'}},
+          isConnected: true,
+          disabled: false,
+          hidden: false,
+          focusCount: 0,
+          getAttribute(name) {{ return name === 'aria-disabled' ? 'false' : null; }},
+          closest() {{ return null; }},
+          focus() {{ this.focusCount += 1; }},
+        }};
+        const installedTab = {{
+          isConnected: true,
+          disabled: false,
+          hidden: false,
+          focusCount: 0,
+          getAttribute() {{ return null; }},
+          closest() {{ return null; }},
+          focus() {{ this.focusCount += 1; }},
+        }};
+        global.document = {{
+          querySelectorAll(selector) {{
+            return selector === '[data-extension-configure-id]' ? [replacementButton] : [];
+          }},
+          querySelector(selector) {{
+            return selector === '[data-extensions-tab="installed"]' ? installedTab : null;
+          }},
+        }};
+        global.window = {{
+          __HERMES_EXTENSION_CONFIG__: {{
+            extensions: [{{id: 'alpha.ext', name: 'Alpha'}}, {{id: 'beta.ext', name: 'Beta'}}]
+          }},
+          localStorage: {{
+            getItem(key) {{ return store.has(key) ? store.get(key) : null; }},
+            setItem(key, value) {{ store.set(key, String(value)); }},
+            removeItem(key) {{ store.delete(key); }}
+          }}
+        }};
+        const originalConsoleError = console.error;
+        console.error = (...args) => diagnostics.push(args);
+
+        (async () => {{
+          eval(fs.readFileSync({str(EXTENSION_SETTINGS_JS)!r}, 'utf8'));
+          const runtime = window.HermesExtensionSettings;
+          const alpha = window.hermesExt.register('alpha.ext');
+          const beta = window.hermesExt.register('beta.ext');
+          assert.ok(alpha);
+          assert.ok(beta);
+          assert.strictEqual(typeof alpha.settings.registerConfigure, 'function');
+          assert.strictEqual(
+            window.HermesExtensionSettings.settingsForExtension('alpha.ext').registerConfigure,
+            undefined,
+            'legacy global accessors must not gain registration authority'
+          );
+          assert.strictEqual(window.hermesExt.register('unknown.ext'), null);
+
+          const stopChanges = runtime._onConfigureChange(change => changes.push(change));
+          let alphaCalls = 0;
+          let pendingInsideHandler = false;
+          const unregisterAlpha = alpha.settings.registerConfigure(({{opener, restoreFocus}}) => {{
+            alphaCalls += 1;
+            pendingInsideHandler = runtime._configureStateForExtension('alpha.ext').pending;
+            assert.strictEqual(opener.extensionId, 'alpha.ext');
+            restoreFocus();
+            restoreFocus();
+          }});
+          assert.strictEqual(typeof unregisterAlpha, 'function');
+          assert.strictEqual(alpha.settings.registerConfigure(() => {{}}), null);
+          assert.deepStrictEqual(runtime._configureStateForExtension('alpha.ext'), {{available: true, pending: false}});
+          assert.ok(changes.some(change => change.id === 'alpha.ext' && change.reason === 'registration'));
+
+          const connectedOpener = {{
+            extensionId: 'alpha.ext',
+            isConnected: true,
+            disabled: false,
+            hidden: false,
+            focusCount: 0,
+            getAttribute() {{ return null; }},
+            closest() {{ return null; }},
+            focus() {{ this.focusCount += 1; }},
+          }};
+          assert.strictEqual(runtime._invokeConfigure('alpha.ext', {{opener: connectedOpener}}), true);
+          assert.strictEqual(alphaCalls, 1);
+          assert.strictEqual(pendingInsideHandler, true);
+          assert.strictEqual(connectedOpener.focusCount, 1);
+          assert.deepStrictEqual(runtime._configureStateForExtension('alpha.ext'), {{available: true, pending: false}});
+
+          assert.strictEqual(unregisterAlpha(), true);
+          assert.strictEqual(unregisterAlpha(), false);
+          assert.deepStrictEqual(runtime._configureStateForExtension('alpha.ext'), {{available: false, pending: false}});
+
+          let releasePending;
+          const unregisterPending = alpha.settings.registerConfigure(() => new Promise(resolve => {{ releasePending = resolve; }}));
+          assert.strictEqual(runtime._invokeConfigure('alpha.ext', {{opener: connectedOpener}}), true);
+          assert.strictEqual(runtime._invokeConfigure('alpha.ext', {{opener: connectedOpener}}), false);
+          assert.strictEqual(runtime._configureStateForExtension('alpha.ext').pending, true);
+          releasePending();
+          await Promise.resolve();
+          await Promise.resolve();
+          assert.strictEqual(runtime._configureStateForExtension('alpha.ext').pending, false);
+          assert.strictEqual(connectedOpener.focusCount, 2);
+          assert.strictEqual(unregisterPending(), true);
+
+          let restoreExplicit;
+          const unregisterExplicit = alpha.settings.registerConfigure(({{restoreFocus}}) => {{
+            restoreExplicit = restoreFocus;
+          }});
+          assert.strictEqual(runtime._invokeConfigure('alpha.ext', {{opener: connectedOpener}}), true);
+          assert.strictEqual(runtime._configureStateForExtension('alpha.ext').pending, true);
+          assert.strictEqual(restoreExplicit(), true);
+          assert.strictEqual(restoreExplicit(), false);
+          assert.strictEqual(runtime._configureStateForExtension('alpha.ext').pending, false);
+          assert.strictEqual(connectedOpener.focusCount, 3);
+          assert.strictEqual(unregisterExplicit(), true);
+
+          const unregisterMissing = alpha.settings.registerConfigure(() => undefined);
+          assert.strictEqual(runtime._invokeConfigure('alpha.ext', {{opener: connectedOpener}}), true);
+          assert.strictEqual(runtime._configureStateForExtension('alpha.ext').pending, true);
+          assert.strictEqual(runtime._invokeConfigure('alpha.ext', {{opener: connectedOpener}}), false);
+          assert.strictEqual(connectedOpener.focusCount, 3);
+          assert.strictEqual(unregisterMissing(), true);
+
+          const reported = [];
+          const unregisterThrowing = alpha.settings.registerConfigure(() => {{ throw new Error('sync boom'); }});
+          assert.strictEqual(runtime._invokeConfigure('alpha.ext', {{opener: connectedOpener, onError: error => reported.push(error.message)}}), true);
+          assert.deepStrictEqual(reported, ['sync boom']);
+          assert.strictEqual(runtime._configureStateForExtension('alpha.ext').pending, false);
+          assert.ok(diagnostics.some(args => String(args[0]).includes('alpha.ext') && String(args[0]).includes('Configure handler failed')));
+          assert.strictEqual(unregisterThrowing(), true);
+
+          const rejected = [];
+          const unregisterRejected = alpha.settings.registerConfigure(() => Promise.reject(new Error('async boom')));
+          assert.strictEqual(runtime._invokeConfigure('alpha.ext', {{opener: connectedOpener, onError: error => rejected.push(error.message)}}), true);
+          await Promise.resolve();
+          await Promise.resolve();
+          assert.deepStrictEqual(rejected, ['async boom']);
+          assert.strictEqual(runtime._configureStateForExtension('alpha.ext').pending, false);
+          assert.strictEqual(unregisterRejected(), true);
+
+          const assimilated = [];
+          const unregisterBadThenable = alpha.settings.registerConfigure(() => Object.defineProperty({{}}, 'then', {{
+            get() {{ throw new Error('then getter boom'); }}
+          }}));
+          assert.strictEqual(runtime._invokeConfigure('alpha.ext', {{opener: connectedOpener, onError: error => assimilated.push(error.message)}}), true);
+          assert.deepStrictEqual(assimilated, ['then getter boom']);
+          assert.strictEqual(runtime._configureStateForExtension('alpha.ext').pending, false);
+          assert.strictEqual(unregisterBadThenable(), true);
+
+          const detachedOpener = {{
+            extensionId: 'alpha.ext',
+            isConnected: false,
+            disabled: false,
+            hidden: false,
+            focusCount: 0,
+            getAttribute() {{ return null; }},
+            closest() {{ return null; }},
+            focus() {{ this.focusCount += 1; }},
+          }};
+          const unregisterDetached = alpha.settings.registerConfigure(({{restoreFocus}}) => restoreFocus());
+          assert.strictEqual(runtime._invokeConfigure('alpha.ext', {{opener: detachedOpener}}), true);
+          assert.strictEqual(detachedOpener.focusCount, 0);
+          assert.strictEqual(replacementButton.focusCount, 1);
+          assert.strictEqual(installedTab.focusCount, 0);
+
+          let betaCalls = 0;
+          const unregisterBeta = beta.settings.registerConfigure(({{restoreFocus}}) => {{ betaCalls += 1; restoreFocus(); }});
+          runtime.primeFromStatus({{extensions: [
+            {{id: 'alpha.ext', name: 'Alpha', effective_enabled: false}},
+            {{id: 'beta.ext', name: 'Beta', effective_enabled: true}}
+          ]}});
+          assert.deepStrictEqual(runtime._configureStateForExtension('alpha.ext'), {{available: false, pending: false}});
+          assert.strictEqual(runtime._invokeConfigure('alpha.ext', {{opener: connectedOpener}}), false);
+          assert.strictEqual(runtime._invokeConfigure('beta.ext', {{opener: connectedOpener}}), true);
+          assert.strictEqual(betaCalls, 1, 'another extension remains usable after alpha failures');
+
+          runtime.primeFromStatus({{extensions: [{{id: 'beta.ext', name: 'Beta', effective_enabled: true}}]}});
+          assert.deepStrictEqual(runtime._configureStateForExtension('alpha.ext'), {{available: false, pending: false}});
+          assert.strictEqual(runtime._invokeConfigure('alpha.ext', {{opener: connectedOpener}}), false);
+          assert.strictEqual(unregisterDetached(), true);
+          assert.strictEqual(alpha.settings.registerConfigure(() => {{}}), null, 'uninstalled IDs stay quarantined');
+
+          runtime.primeFromStatus({{extensions: [
+            {{id: 'alpha.ext', name: 'Alpha reinstalled', effective_enabled: true}},
+            {{id: 'beta.ext', name: 'Beta', effective_enabled: true}}
+          ]}});
+          assert.deepStrictEqual(runtime._configureStateForExtension('alpha.ext'), {{available: false, pending: false}});
+          assert.strictEqual(runtime._invokeConfigure('alpha.ext', {{opener: connectedOpener}}), false);
+          assert.strictEqual(unregisterBeta(), true);
+          assert.strictEqual(stopChanges(), true);
+          assert.strictEqual(stopChanges(), false);
+        }})().then(
+          () => {{ console.error = originalConsoleError; }},
+          error => {{ console.error = originalConsoleError; throw error; }}
+        );
+        """
+    )
+    _run_node(script)

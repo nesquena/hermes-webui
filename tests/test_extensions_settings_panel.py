@@ -1,6 +1,10 @@
 """Regression tests for the Settings → Extensions diagnostics and toggles."""
 from pathlib import Path
 import re
+import shutil
+import subprocess
+
+import pytest
 
 
 ROOT = Path(__file__).parent.parent
@@ -48,6 +52,21 @@ def _locale_string(block: str, key: str) -> str:
 def _contains_post_method(block: str) -> bool:
     """Return True when a JS block contains a method: 'POST' style mutation."""
     return bool(re.search(r"\bmethod\s*:\s*([\"'`])POST\1", block))
+
+
+def _run_node(script: str):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for extension settings panel runtime tests")
+    result = subprocess.run(
+        [node, "-e", script],
+        cwd=ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=20,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
 
 
 def test_settings_sidebar_has_extensions_section_and_pane():
@@ -138,7 +157,7 @@ def test_extensions_panel_renders_sanitized_status_payload():
     assert "data&&data.extensions" in render_block
     assert "counts,'manifest_extensions'" in render_block
     assert "counts,'user_disabled'" in render_block
-    assert "_extensionInstalledList(extensions,!!(data&&data.extension_dir_configured))" in render_block
+    assert "_extensionInstalledList(extensions,!!(data&&data.extension_dir_configured),'diagnostics')" in render_block
     assert "_extensionSidecarCard(sidecars)" in render_block
     assert "data&&data.warnings" in render_block
     assert "esc(url)" in asset_block
@@ -251,6 +270,7 @@ def test_extensions_installed_settings_route_through_shared_accessor():
     settings_block = _between("function _configureExtensionSettingsFromStatus", "function _extensionInstalledList")
     bind_block = _between("function _bindExtensionSettingsButtons", "async function loadExtensionsPanel")
     gallery_block = _between("function _renderExtensionsGallery", "function _bindExtensionGalleryButtons")
+    installed_surface_block = _between("function _renderInstalledExtensionsSurface", "async function loadExtensionsGallery")
 
     assert "entry&&entry.storage_owned" in settings_block
     assert "window.HermesExtensionSettings.settingsForExtension(id)" in settings_block
@@ -268,8 +288,81 @@ def test_extensions_installed_settings_route_through_shared_accessor():
     assert "api('/api/extensions/status')" not in bind_block
     assert "api('/api/settings'" not in bind_block
     assert "localStorage" not in bind_block
-    assert "_extensionInstalledList(statusData&&statusData.extensions" in gallery_block
-    assert "_bindExtensionSettingsButtons(installedEl)" in gallery_block
+    assert "_renderInstalledExtensionsSurface(statusData)" in gallery_block
+    assert "_bindExtensionSettingsButtons(installedEl)" in installed_surface_block
+
+
+def test_extension_configure_hook_is_scoped_to_installed_rows_and_current_status():
+    installed_block = _between("function _extensionInstalledList", "function _extensionSidecarHealthBadge")
+    configure_block = _between("function _extensionConfigureButton", "function _extensionInstalledList")
+    bind_block = _between("function _bindExtensionConfigureButtons", "async function handleExtensionToggle")
+    diagnostics_block = _between("function _renderExtensionsPanel", "function _bindExtensionToggleButtons")
+    gallery_block = _between("function _renderInstalledExtensionsSurface", "function _bindExtensionGalleryButtons")
+
+    assert "surface!=='installed'" in configure_block
+    assert "entry&&entry.effective_enabled" in configure_block
+    assert "_configureStateForExtension(id)" in configure_block
+    assert "state.available" in configure_block
+    assert "data-extension-configure-id" in configure_block
+    assert "aria-busy" in configure_block
+    assert "_extensionConfigureButton(entry,surface)" in installed_block
+    assert "_extensionInstalledList(extensions,!!(data&&data.extension_dir_configured),'diagnostics')" in diagnostics_block
+    assert "statusData&&statusData.extensions" in gallery_block
+    assert "'installed'" in gallery_block
+    assert "_bindExtensionConfigureButtons(installedEl)" in gallery_block
+    assert "_invokeConfigure(id,{" in bind_block
+    assert "opener:btn" in bind_block
+    assert "Extension configuration failed." in bind_block
+    assert "showToast" in bind_block
+    assert "data-extension-configure-id" in bind_block
+
+
+def test_extension_configure_rendered_surface_runtime():
+    configure_block = _between("function _extensionConfigureButton", "function _extensionInstalledList")
+    installed_block = _between("function _extensionInstalledList", "function _extensionSidecarHealthBadge")
+    script = "\n".join(
+        [
+            "const assert = require('assert');",
+            "const states = new Map([['alpha.ext', {available:true,pending:false}], ['beta.ext', {available:true,pending:false}], ['gamma.ext', {available:false,pending:false}]]);",
+            "const window = {HermesExtensionSettings:{_configureStateForExtension(id){return states.get(id)||{available:false,pending:false};}}};",
+            "function esc(value){return String(value??'');}",
+            "function _extensionEntryBadge(){return '';}",
+            "function _extensionSettingsControls(){return '';}",
+            configure_block,
+            installed_block,
+            "const entries=[",
+            "  {id:'alpha.ext',name:'Alpha',effective_enabled:true,can_toggle:true,user_enabled:true},",
+            "  {id:'beta.ext',name:'Beta',effective_enabled:false,can_toggle:true,user_enabled:false},",
+            "  {id:'gamma.ext',name:'Gamma',effective_enabled:true,can_toggle:true,user_enabled:true},",
+            "];",
+            "const installed=_extensionInstalledList(entries,true,'installed');",
+            "const diagnostics=_extensionInstalledList(entries,true,'diagnostics');",
+            "assert.strictEqual((installed.match(/data-extension-configure-id=/g)||[]).length,1);",
+            "assert.ok(installed.includes('data-extension-configure-id=\"alpha.ext\"'));",
+            "assert.strictEqual((diagnostics.match(/data-extension-configure-id=/g)||[]).length,0);",
+            "states.set('alpha.ext',{available:true,pending:true});",
+            "const pending=_extensionInstalledList(entries,true,'installed');",
+            "assert.ok(pending.includes('aria-busy=\"true\" disabled'));",
+            "assert.ok(pending.includes('Opening…'));",
+            "states.set('alpha.ext',{available:false,pending:false});",
+            "assert.strictEqual((_extensionInstalledList(entries,true,'installed').match(/data-extension-configure-id=/g)||[]).length,0);",
+            "states.set('alpha.ext',{available:true,pending:false});",
+            "assert.strictEqual((_extensionInstalledList(entries,true,'installed').match(/data-extension-configure-id=/g)||[]).length,1);",
+        ]
+    )
+    _run_node(script)
+
+
+def test_extension_configure_late_registration_rerenders_only_installed_surface():
+    listener_block = _between("function _handleExtensionConfigureChange", "function _extensionSafeHttpUrl")
+    diagnostics_block = _between("function _renderExtensionsPanel", "function _bindExtensionToggleButtons")
+
+    assert "_onConfigureChange(_handleExtensionConfigureChange)" in listener_block
+    assert "change.reason==='pending'" in listener_block
+    assert "_syncExtensionConfigureButtonState(change.id)" in listener_block
+    assert "_renderInstalledExtensionsSurface" in listener_block
+    assert "extensionsDiagnostics" not in listener_block
+    assert "_extensionsGalleryData.statusData=data||null" in diagnostics_block
 
 
 def test_extensions_gallery_renders_post_install_guidance():
@@ -353,6 +446,8 @@ def test_extensions_styles_are_scoped_to_extensions_panel():
     assert ".extension-toggle-btn" in STYLE_CSS
     assert ".extension-settings-box" in STYLE_CSS
     assert ".extension-settings-actions" in STYLE_CSS
+    assert ".extension-installed-actions" in STYLE_CSS
+    assert ".extension-configure-btn" in STYLE_CSS
     assert ".extension-sidecar-list" in STYLE_CSS
     assert ".extension-sidecar-runtime" in STYLE_CSS
     assert ".extension-sidecar-status-badge" in STYLE_CSS
@@ -453,3 +548,22 @@ def test_extensions_docs_mentions_settings_panel_without_install_or_proxy_claims
     assert "do **not**" in diagnostics_section
     assert "return `HERMES_WEBUI_EXTENSION_DIR`" in diagnostics_section
     assert "override state-file path" in diagnostics_section
+
+
+def test_extensions_docs_define_scoped_configure_editor_contract():
+    configure_section = DOCS_EXTENSIONS[
+        DOCS_EXTENSIONS.index("### Custom Configure editors"):
+        DOCS_EXTENSIONS.index("### Turn lifecycle events")
+    ]
+
+    assert "ext?.settings.registerConfigure" in configure_section
+    assert "does not require `settings_schema` or extension-owned storage" in configure_section
+    assert "Settings → Extensions → Installed" in configure_section
+    assert "Diagnostics" in configure_section
+    assert "Late registration" in configure_section
+    assert "same-ID reinstall" in configure_section
+    assert "one-shot `restoreFocus()`" in configure_section
+    assert "return a thenable" in configure_section
+    assert "remains disabled until reload" in configure_section
+    assert "Synchronous throws" in configure_section
+    assert "generic failure" in configure_section
