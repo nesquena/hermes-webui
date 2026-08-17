@@ -24585,10 +24585,25 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: st
                 if gw_approval_id == approval_id and (not run_id or gw_run_id == run_id):
                     local_gateway_approval_id = approval_id
                 elif not run_id and found_target and pending:
+                    # The no-run mirror may belong to a NON-head producer
+                    # (multiple parked entries, #7093). The queue head's own
+                    # token won't match a non-head mirror, so scan every live
+                    # producer for a token/approval_id match instead of only
+                    # comparing against `_gateway_queues[0]`.
                     pending_token = str(pending.get(_GATEWAY_MIRROR_TOKEN) or "").strip()
-                    gateway_token = str(gw_data.get("_webui_mirror_token") or "").strip()
-                    if pending_token and pending_token == gateway_token:
-                        gw_data["approval_id"] = approval_id
+                    matched_data = None
+                    for _cand in gw_queue:
+                        _cand_data = getattr(_cand, "data", None) or {}
+                        _cand_token = str(_cand_data.get("_webui_mirror_token") or "").strip()
+                        if pending_token and _cand_token == pending_token:
+                            matched_data = _cand_data
+                            break
+                        if (str(_cand_data.get("approval_id") or "").strip() == approval_id
+                                and not str(_cand_data.get("run_id") or "").strip()):
+                            matched_data = _cand_data
+                            break
+                    if matched_data is not None:
+                        matched_data["approval_id"] = approval_id
                         local_gateway_approval_id = approval_id
         # Notify SSE subscribers of the new head (or empty state) so the UI
         # surfaces any trailing approvals that were queued behind this one

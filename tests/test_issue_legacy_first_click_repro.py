@@ -86,3 +86,72 @@ def test_legacy_no_run_mirror_first_click_unblocks_agent():
         with ra._lock:
             ra._gateway_queues.pop(sid, None)
             ra._pending.pop(sid, None)
+
+
+def test_legacy_non_head_producer_unblocks_only_its_producer():
+    """A no-run mirror for a NON-head producer must unblock that producer, not the head."""
+    from api import routes
+    from api import route_approvals as ra
+
+    sid = "sess-first-click-nonhead-" + uuid.uuid4().hex[:8]
+
+    head = SimpleNamespace(
+        data=_live_head_data(approval_id="", run_id=""),
+        event=threading.Event(),
+        result=None,
+    )
+    non_head = SimpleNamespace(
+        data=_live_head_data(approval_id="", run_id=""),
+        event=threading.Event(),
+        result=None,
+    )
+    # _ApprovalEntry.__init__ stamps a request_id; copy that contract so the
+    # request_id fallback (#7093) links the mirror to its own producer.
+    head.data["request_id"] = "req-head-" + uuid.uuid4().hex[:8]
+    non_head.data["request_id"] = "req-nonhead-" + uuid.uuid4().hex[:8]
+    assert non_head.data["request_id"] != head.data["request_id"]
+
+    with ra._lock:
+        ra._gateway_queues.pop(sid, None)
+        ra._pending.pop(sid, None)
+        ra._gateway_queues.setdefault(sid, []).extend([head, non_head])
+
+    try:
+        # Mirror the NON-head producer (it is not the queue head).
+        mirror_approval = copy.deepcopy(non_head.data)
+        ra.submit_gateway_pending_mirror(sid, mirror_approval)
+
+        with ra._lock:
+            # The head is mirrored too; pick the mirror bound to the NON-head
+            # producer by its token.
+            non_head_token = str(non_head.data.get("_webui_mirror_token") or "").strip()
+            matches = [
+                m for m in ra._pending[sid]
+                if m.get(ra._GATEWAY_MIRROR_FLAG)
+                and not str(m.get("run_id") or "").strip()
+                and str(m.get(ra._GATEWAY_MIRROR_TOKEN) or "").strip() == non_head_token
+            ]
+        assert len(matches) == 1, f"expected exactly one non-head mirror, got {len(matches)}"
+        non_head_mirror = matches[0]
+        approval_id = non_head_mirror["approval_id"]
+        assert str(non_head_mirror.get(ra._GATEWAY_MIRROR_TOKEN) or "").strip(), (
+            "no-run mirror must carry a token to be resolvable on the first click"
+        )
+
+        ok = routes._resolve_approval_legacy(sid, approval_id, "once")
+
+        assert ok is True
+        # The NON-HEAD producer must be the one unblocked.
+        assert non_head.event.is_set(), (
+            "BUG: click on a non-head mirror did not unblock its own producer. "
+            "_resolve_approval_legacy must match the mirror token against every "
+            "live producer, not only the queue head."
+        )
+        assert non_head.result == "once"
+        # The HEAD producer must remain untouched.
+        assert not head.event.is_set()
+        assert head.result is None
+    finally:
+        with ra._lock:
+            ra._gateway_queues.pop(sid, None)
+            ra._pending.pop(sid, None)
