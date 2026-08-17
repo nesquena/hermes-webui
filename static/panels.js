@@ -1006,7 +1006,7 @@ let _cronLoadToken = 0;
 async function loadCrons(animate, useCached = false) {
   const box = $('cronList');
   const refreshBtn = $('cronRefreshBtn');
-  const myToken = ++_cronLoadToken;
+  const myToken = useCached ? _cronLoadToken : ++_cronLoadToken;
   if (!useCached) loadCronGatewayNotice();
   if (animate && refreshBtn) {
     refreshBtn.style.opacity = '0.5';

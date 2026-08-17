@@ -106,9 +106,11 @@ def test_cron_load_uses_a_token_to_resolve_deferred_first_load_ordering():
         "missing the load-ordering token -> nothing distinguishes a stale, "
         "still-in-flight loadCrons() call from the most recent one"
     )
-    assert "const myToken = ++_cronLoadToken;" in PANELS_JS, (
-        "loadCrons must claim a token at the start of every call (cached or not) "
-        "-> without this, concurrent calls can't tell which one is newest"
+    assert "const myToken = useCached ? _cronLoadToken : ++_cronLoadToken;" in PANELS_JS, (
+            "only network fetches (useCached=false) may claim a new token -> if cached "
+            "filter/clear calls also incremented it, a keystroke during an in-flight "
+            "refresh would outrank that refresh's own token, causing its fresh response "
+            "to be discarded as 'stale' even though it's the most recent legitimate fetch"
     )
     assert "if (myToken !== _cronLoadToken) return;" in PANELS_JS, (
         "the awaited /api/crons response must check it's still the newest call "
