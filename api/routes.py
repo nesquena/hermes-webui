@@ -5211,7 +5211,12 @@ def _handle_session_anchor_scene(handler, body):
     return j(handler, {"ok": True, "message_index": idx, "message_ref": ref})
 
 
-def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False):
+def _get_or_materialize_session(
+    sid: str,
+    *,
+    refresh_cli_messages: bool = False,
+    persist: bool = True,
+):
     """Get a session, materializing from CLI/agent metadata if not in WebUI store.
 
     Mirrors the fallback logic in /api/session/archive (routes.py:~8530).
@@ -5325,6 +5330,7 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False)
             profile=cli_meta.get("profile"),
             created_at=cli_meta.get("created_at"),
             updated_at=cli_meta.get("updated_at"),
+            **({"persist": False} if not persist else {}),
         )
         _apply_source_meta(s)
 
@@ -9696,6 +9702,10 @@ from api.models import (
     process_wakeup_credential_state_fingerprint,
     process_wakeup_pause_credential_state_changed,
     suppress_process_wakeup_for_provider_pause,
+)
+from api.session_batch_transaction import (
+    SessionBatchTransactionError,
+    commit_session_archive_batch,
 )
 
 
@@ -16374,27 +16384,18 @@ def handle_post(handler, parsed) -> bool:
                         for lineage_sid in lineage_ids:
                             if _session_is_subagent_view_only(lineage_sid):
                                 raise PermissionError("Subagent sessions are view-only")
-                            session = _get_or_materialize_session(lineage_sid)
+                            # Missing CLI sidecars must be staged with the rest
+                            # of the lineage, not published during prevalidation.
+                            session = _get_or_materialize_session(lineage_sid, persist=False)
                             if not _session_visible_to_active_profile(getattr(session, "profile", None), handler):
                                 raise PermissionError("Session not found")
                             sessions.append(session)
                     except (KeyError, PermissionError) as exc:
                         return bad(handler, str(exc), 400)
-                    previous = [bool(getattr(session, "archived", False)) for session in sessions]
-                    saved = []
                     try:
-                        for session in sessions:
-                            session.archived = archived
-                            session.save(touch_updated_at=False)
-                            saved.append(session)
-                    except Exception:
-                        for session, old_archived in zip(saved, previous, strict=False):
-                            try:
-                                session.archived = old_archived
-                                session.save(touch_updated_at=False)
-                            except Exception:
-                                logger.exception("Failed to roll back lineage archive for %s", session.session_id)
-                        raise
+                        commit_session_archive_batch(sessions, archived)
+                    except SessionBatchTransactionError as exc:
+                        return j(handler, exc.response(), status=503)
                     break
             else:
                 return bad(handler, "Session lineage changed during archive; retry", 409)

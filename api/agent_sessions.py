@@ -4,6 +4,8 @@ import sqlite3
 from contextlib import closing
 from pathlib import Path
 
+from api.profiles import _profiles_match
+
 logger = logging.getLogger(__name__)
 
 
@@ -1005,11 +1007,14 @@ def read_session_lineage_ids(
         rows = [dict(row) for row in conn.execute(
             f"SELECT id, parent_session_id, end_reason, started_at, ended_at, source, session_source{profile_projection} FROM sessions"
         )]
-    if profile_projection:
+    if profile is not None:
         requested_profile = str(profile or "default").strip() or "default"
         rows = [
             row for row in rows
-            if (str(row.get("profile") or "default").strip() or "default") == requested_profile
+            if _profiles_match(
+                (str(row.get("profile") or "").strip() or None),
+                requested_profile,
+            )
         ]
     rows_by_id = {row['id']: row for row in rows}
     if sid not in rows_by_id:
