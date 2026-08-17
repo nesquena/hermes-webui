@@ -11040,6 +11040,7 @@ def _limited_webui_messages_for_display_with_sidecar(
     state_db_signature=_DISPLAY_STATE_SIGNATURE_UNSET,
     msg_before=None,
     owner_positions=None,
+    merge_parent_lineage=False,
 ) -> list:
     sidecar_owners = dict(owner_positions or {})
     if sidecar_messages is None:
@@ -11056,6 +11057,8 @@ def _limited_webui_messages_for_display_with_sidecar(
         if owner_positions is not None:
             owner_positions.clear()
             owner_positions.update(sidecar_owners)
+        if merge_parent_lineage:
+            return _merged_webui_lineage_messages_for_display(session, sidecar_messages)
         return sidecar_messages
     state_db_messages = _suppress_native_image_display_mirrors(
         session,
@@ -11072,6 +11075,8 @@ def _limited_webui_messages_for_display_with_sidecar(
         if owner_positions is not None:
             owner_positions.clear()
             owner_positions.update(sidecar_owners)
+        if merge_parent_lineage:
+            return _merged_webui_lineage_messages_for_display(session, sidecar_messages)
         return sidecar_messages
 
     # NOTE: do not short-circuit to the sidecar when state.db has no strictly
@@ -11130,7 +11135,10 @@ def _limited_webui_messages_for_display_with_sidecar(
                     owner_positions.clear()
                     owner_positions.update(entry["owner_positions"])
                 _display_merge_cache.move_to_end(sid, last=True)
-                return [dict(m) if isinstance(m, dict) else m for m in entry["messages"]]
+                cached_messages = [dict(m) if isinstance(m, dict) else m for m in entry["messages"]]
+                if merge_parent_lineage:
+                    return _merged_webui_lineage_messages_for_display(session, cached_messages)
+                return cached_messages
     merged = merge_session_messages_append_only(
         sidecar_messages,
         state_db_messages,
@@ -11179,7 +11187,11 @@ def _limited_webui_messages_for_display_with_sidecar(
                 _display_merge_cache.popitem(last=False)
         # Same shallow-copy contract as the cache-hit path (and as the lineage
         # cache): callers may attach display metadata to the returned rows.
+        if merge_parent_lineage:
+            return _merged_webui_lineage_messages_for_display(session, merged)
         return [dict(m) if isinstance(m, dict) else m for m in merged]
+    if merge_parent_lineage:
+        return _merged_webui_lineage_messages_for_display(session, merged)
     return merged
 
 
@@ -15856,6 +15868,11 @@ def _handle_session_get(handler, parsed) -> bool:
             key: getattr(s, key, None)
             for key in ("source_tag", "raw_source", "session_source", "source")
         }
+        merge_parent_lineage = (
+            is_cli_session
+            and not is_messaging_session
+            and not _session_source_is_webui(foreign_source)
+        )
         cli_messages = []
         state_db_messages = []
         metadata_summary = None
@@ -15980,7 +15997,11 @@ def _handle_session_get(handler, parsed) -> bool:
                 _all_msgs = _merged_session_messages_for_display(s, cli_messages)
             elif msg_limit is not None:
                 if _display_cache_hit is not None:
-                    _all_msgs = _display_cache_hit
+                    _all_msgs = (
+                        _merged_webui_lineage_messages_for_display(s, _display_cache_hit)
+                        if merge_parent_lineage
+                        else _display_cache_hit
+                    )
                 else:
                     _all_msgs = _limited_webui_messages_for_display_with_sidecar(
                         s,
@@ -15989,6 +16010,7 @@ def _handle_session_get(handler, parsed) -> bool:
                         state_db_signature=_display_state_db_signature,
                         msg_before=msg_before,
                         owner_positions=_display_owner_positions,
+                        merge_parent_lineage=merge_parent_lineage,
                     )
             else:
                 _all_msgs = _display_coordinate_messages(
