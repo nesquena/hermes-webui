@@ -105,24 +105,22 @@ actions. The topbar remains focused on conversation context and the workspace/fi
 
 Browser notification ownership:
 
-    api/streaming.py    Emits a per-stream fallback SSE id when journal setup or
-    api/gateway_chat.py append fails, preserving identity for live subscribers.
-    static/messages.js  Owns eligibility, exact SSE identity capture, normalized
-                        presentation options, and the page-side claim when no
-                        active worker can coordinate delivery.
-    static/sw.js        Owns identity-bearing claims and delivery when active;
-                        both contexts use the same IndexedDB claim store.
+    api/streaming.py    Emits only journal-provided SSE ids.
+    api/gateway_chat.py Emits only journal-provided SSE ids.
+    static/messages.js  Owns eligibility, canonical SSE identity capture, payload
+                        construction, and registration/direct delivery fallback.
+    static/sw.js        Owns displayed-record duplicate suppression for the
+                        versioned presentation protocol.
 
 Identity-bearing approval, clarification, and completion notifications use the
-opaque `(streamId, lastEventId)` tuple as their claim key. Live producers retain
-that tuple even when run-journal persistence is unavailable by issuing a bounded
-per-stream fallback SSE id. An active worker is the
-preferred owner; a page atomically claims the same key before direct delivery when
-registration is missing, inactive, rejected, or delayed during activation. Site-data
-clearing is the reset boundary because the replay contract does not define a safe
-retention horizon. Unkeyed manual test notifications retain the existing
-service-worker-first path and direct fallback. Notification-click routing remains
-owned by the existing `notificationclick` handler.
+canonical `(streamId, lastEventId)` tuple only when the journal provides a
+positive sequence id. The worker queries browser-owned displayed records for the
+same tag and exact event id, then calls `showNotification()` only when no exact
+displayed duplicate exists. Unsupported, stale, timed-out, rejected, or failed
+coordination returns to delivery and may duplicate; it cannot create suppression
+state. Journal-less frames carry no durable SSE id. Unkeyed manual notifications
+retain the existing service-worker-first path and direct fallback. Notification
+click routing remains owned by the existing `notificationclick` handler.
 
 State directory (runtime data, separate from source):
 

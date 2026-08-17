@@ -125,23 +125,21 @@ def test_service_worker_handles_notification_clicks_without_hijacking_other_sess
     assert exact_idx < open_idx < navigate_idx
 
 
-def test_claim_options_are_same_origin_and_in_scope_without_changing_click_routing():
-    assert "function normalizeClaimUrl(value)" in SW_JS
+def test_presenter_options_are_same_origin_and_in_scope_without_changing_click_routing():
+    assert "function normalizeNotificationUrl(value)" in SW_JS
     assert "targetUrl.origin !== self.location.origin" in SW_JS
     assert "!targetUrl.pathname.startsWith(scopePath)" in SW_JS
-    assert "data: {url}" in SW_JS
+    assert "data: {url, eventId}" in SW_JS
     assert "self.addEventListener('notificationclick'" in SW_JS
     assert "samePath(client.url)" in SW_JS
 
 
-def test_page_and_worker_share_the_notification_claim_store():
-    assert "const _NOTIFICATION_CLAIM_DB='hermes-webui-notification-claims-v1';" in MESSAGES_JS
-    assert "const _NOTIFICATION_CLAIM_STORE='event-identities';" in MESSAGES_JS
-    assert "function _claimAndShowPage(" in MESSAGES_JS
-    assert "keyPath:['streamId','lastEventId']" in MESSAGES_JS
-    assert "const NOTIFICATION_CLAIM_DB = 'hermes-webui-notification-claims-v1';" in SW_JS
-    assert "const NOTIFICATION_CLAIM_STORE = 'event-identities';" in SW_JS
-    assert "keyPath: ['streamId', 'lastEventId']" in SW_JS
+def test_page_and_worker_use_displayed_record_presenter_without_claim_store():
+    assert "indexedDB.open(" not in MESSAGES_JS
+    assert "indexedDB.open(" not in SW_JS
+    assert "hermes.notification.present" in MESSAGES_JS
+    assert "hermes.notification.present" in SW_JS
+    assert "getNotifications({tag})" in SW_JS
 
 
 def test_settings_expose_permission_and_test_controls():

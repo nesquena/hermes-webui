@@ -5267,8 +5267,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _rememberRunJournalCursor(e){
     const raw=String(e&&e.lastEventId||'').trim();
     if(!raw) return;
-    const tail=raw.includes(':')?raw.slice(raw.lastIndexOf(':')+1):raw;
-    const seq=Number.parseInt(tail,10);
+    const prefix=`${String(streamId||'')}:`;
+    if(!streamId||!raw.startsWith(prefix)) return;
+    const tail=raw.slice(prefix.length);
+    if(!/^[1-9]\d*$/.test(tail)) return;
+    const seq=Number(tail);
     if(Number.isFinite(seq)&&seq>_lastRunJournalSeq){
       _lastRunJournalSeq=seq;
       _lastRunJournalEventId=raw;
@@ -9117,30 +9120,16 @@ function _notificationOptions(body,options={}){
   return {body:body||'',tag:sid?`hermes-${sid}`:'hermes-webui',renotify:true,icon:'static/favicon-192.png',badge:'static/favicon-32.png',data:{url}};
 }
 const _NOTIFICATION_IDENTITY_MAX_LENGTH=512;
-const _NOTIFICATION_CLAIM_DB='hermes-webui-notification-claims-v1';
-const _NOTIFICATION_CLAIM_STORE='event-identities';
-const _NOTIFICATION_FALLBACK_ORDINALS=Object.create(null);
-function _notificationEventFallbackId(streamId,event){
-  const source=`${String(event&&event.type||'event')}\n${String(event&&event.data||'')}`;
-  let first=2166136261;
-  let second=16777619;
-  for(let i=0;i<source.length;i++){
-    const code=source.charCodeAt(i);
-    first=Math.imul(first^code,16777619);
-    second=Math.imul(second^code,2246822519);
-  }
-  const fingerprint=`${(first>>>0).toString(16)}${(second>>>0).toString(16)}`;
-  const counterKey=`${String(streamId||'')}\u0000${fingerprint}`;
-  const ordinal=(_NOTIFICATION_FALLBACK_ORDINALS[counterKey]||0)+1;
-  _NOTIFICATION_FALLBACK_ORDINALS[counterKey]=ordinal;
-  return `legacy:${fingerprint}:${ordinal}`;
-}
 function _captureNotificationEventIdentity(streamId,event){
-  const lastEventId=String(event&&event.lastEventId||'').trim()||_notificationEventFallbackId(streamId,event);
-  return {streamId,lastEventId};
+  const lastEventId=String(event&&event.lastEventId||'').trim();
+  const prefix=`${String(streamId||'')}:`;
+  if(!streamId||!lastEventId.startsWith(prefix)||!/^[1-9]\d*$/.test(lastEventId.slice(prefix.length))) return null;
+  return {streamId:String(streamId),lastEventId};
 }
 function _sendStreamNotification(title,body,eventIdentity,options={}){
-  return sendBrowserNotification(title,body,{...options,eventIdentity});
+  return eventIdentity
+    ? sendBrowserNotification(title,body,{...options,eventIdentity})
+    : sendBrowserNotification(title,body,options);
 }
 function _hasNotificationIdentity(options){
   return !!options&&Object.prototype.hasOwnProperty.call(options,'eventIdentity');
@@ -9152,59 +9141,7 @@ function _isValidNotificationIdentity(identity){
     typeof identity.lastEventId==='string'&&identity.lastEventId.length>0&&
     identity.lastEventId.length<=_NOTIFICATION_IDENTITY_MAX_LENGTH;
 }
-function _openNotificationClaimDb(){
-  return new Promise((resolve,reject)=>{
-    let request;
-    try{request=indexedDB.open(_NOTIFICATION_CLAIM_DB,1);}catch(e){reject(e);return;}
-    request.onupgradeneeded=event=>{
-      const db=event.target.result;
-      if(!db.objectStoreNames.contains(_NOTIFICATION_CLAIM_STORE)){
-        db.createObjectStore(_NOTIFICATION_CLAIM_STORE,{keyPath:['streamId','lastEventId']});
-      }
-    };
-    request.onsuccess=()=>resolve(request.result);
-    request.onerror=()=>reject(request.error||new Error('notification claim database open failed'));
-    request.onblocked=()=>reject(new Error('notification claim database open blocked'));
-  });
-}
-function _claimNotificationIdentity(db,identity){
-  return new Promise((resolve,reject)=>{
-    let transaction;
-    let outcome='claimed';
-    let settled=false;
-    const resolveOnce=value=>{if(settled)return;settled=true;resolve(value);};
-    const rejectOnce=error=>{if(settled)return;settled=true;reject(error);};
-    try{
-      transaction=db.transaction(_NOTIFICATION_CLAIM_STORE,'readwrite');
-      const request=transaction.objectStore(_NOTIFICATION_CLAIM_STORE).add(identity);
-      request.onerror=event=>{
-        if(request.error&&request.error.name==='ConstraintError'){
-          event.preventDefault();outcome='duplicate';return;
-        }
-        rejectOnce(request.error||new Error('notification claim failed'));
-      };
-      transaction.oncomplete=()=>resolveOnce(outcome);
-      transaction.onerror=event=>{
-        if(outcome==='duplicate'){event.preventDefault();return;}
-        rejectOnce(transaction.error||new Error('notification claim transaction failed'));
-      };
-      transaction.onabort=()=>{
-        if(outcome==='duplicate'&&!transaction.error){resolveOnce('duplicate');return;}
-        rejectOnce(transaction.error||new Error('notification claim transaction aborted'));
-      };
-    }catch(e){rejectOnce(e);}
-  });
-}
-function _claimAndShowPage(title,opts,identity,direct){
-  if(typeof indexedDB==='undefined'||!indexedDB||typeof indexedDB.open!=='function') return Promise.resolve('unavailable');
-  return _openNotificationClaimDb().then(db=>
-    _claimNotificationIdentity(db,identity).then(status=>{
-      if(status!=='claimed')return status;
-      try{direct();return 'shown';}catch(_){return 'ambiguous';}
-    }).catch(()=> 'unavailable').finally(()=>{try{db.close();}catch(_){ }}
-  )).catch(()=> 'unavailable');
-}
-function _claimAndShowNotification(active,title,opts,identity,direct){
+function _presentNotification(active,title,opts,identity){
   if(typeof MessageChannel!=='function') return Promise.resolve('unavailable');
   return new Promise(resolve=>{
     let settled=false;
@@ -9229,19 +9166,16 @@ function _claimAndShowNotification(active,title,opts,identity,direct){
           finish(status);
           return;
         }
-        if(status==='fallback-owner'){
-          try{direct();finish(status);}catch(_){finish('ambiguous');}
-          return;
-        }
-        finish('ambiguous');
+        finish(status||'unavailable');
       };
       if(typeof channel.port1.start==='function')channel.port1.start();
       timer=setTimeout(()=>finish('ambiguous'),2000);
       active.postMessage({
-        type:'hermes.notification.claim',
+        type:'hermes.notification.present',
+        protocolVersion:1,
+        eventId:identity.lastEventId,
         title,
         options:opts,
-        identity,
       },[channel.port2]);
     }catch(_){
       finish('ambiguous');
@@ -9255,6 +9189,7 @@ function _showPwaNotification(title,body,options={}){
   const identityBearing=_hasNotificationIdentity(options);
   const identity=options&&options.eventIdentity;
   if(identityBearing&&!_isValidNotificationIdentity(identity)) return Promise.resolve('invalid');
+  const deliverDirect=()=>{try{return Promise.resolve(direct());}catch(error){return Promise.reject(error);}};
   // Prefer the service worker (the only path that works in a standalone PWA,
   // notably iOS). Use getRegistration() + a short timeout race rather than
   // navigator.serviceWorker.ready, because `.ready` NEVER settles when no
@@ -9265,24 +9200,20 @@ function _showPwaNotification(title,body,options={}){
     const reg$=Promise.race([
       navigator.serviceWorker.getRegistration().catch(()=>null),
       new Promise(res=>setTimeout(()=>res(null),2000))
-    ]);
+      ]);
     return reg$.then(reg=>{
       if(identityBearing){
-        if(!reg||!reg.active)return _claimAndShowPage(title||botName,opts,identity,direct);
-        return _claimAndShowNotification(reg.active,title||botName,opts,identity,direct).then(status=>
-          status==='unavailable'
-            ? _claimAndShowPage(title||botName,opts,identity,direct)
-            : status
+        if(!reg||!reg.active)return deliverDirect();
+        return _presentNotification(reg.active,title||botName,opts,identity).then(status=>
+          status==='shown'||status==='duplicate'?status:deliverDirect()
         );
       }
       return (reg&&reg.active&&reg.showNotification)
         ? reg.showNotification(title||botName,opts)
         : direct();
-    }).catch(()=>identityBearing?_claimAndShowPage(title||botName,opts,identity,direct):direct());
+    }).catch(()=>identityBearing?deliverDirect():direct());
   }
-  return identityBearing
-    ? _claimAndShowPage(title||botName,opts,identity,direct)
-    : Promise.resolve(direct());
+  return Promise.resolve(direct());
 }
 function requestNotificationPermission(){
   if(!('Notification' in window)){

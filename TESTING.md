@@ -93,25 +93,24 @@ that breaks the page for everyone).
 
 ## Repeat notification ownership gate (#6673)
 
-`tests/browser_issue6673_service_worker.py` serves the real build, waits for the
-service worker to activate, and uses two controlled pages. The pages invoke the
-production `attachLiveStream()` listener with a boundary EventSource, so the gate
-covers listener, sender, claim, and display composition. Submit one
-`(streamId, lastEventId)` from both pages, then submit the next distinct identity.
-Reload one page and replay the first identity; the first two identities must each
-have one owner, the replay must not create another notification, and the
-notification data URL must remain same-origin and in scope. The focused model also
-covers missing, inactive, rejected, and activation-delay registrations through a
-shared page-side IndexedDB claim. Live streaming and gateway producers also emit
-per-stream fallback SSE ids when run-journal initialization or append fails, so
-the production path retains an exact identity for the claim.
+`tests/browser_issue6673_service_worker.py` serves the real build, exercises a
+handler-less worker update window, and uses two controlled pages. The pages invoke
+the production `attachLiveStream()` listener with a boundary EventSource, so the
+gate covers listener, sender, versioned worker presenter, displayed-record lookup,
+and click-data composition. Submit one canonical event from both pages, then the
+next event under the same stable tag; the first event must have one displayed
+record and the next event must create a new record with its event id and
+`renotify:true`. A worker display rejection must remain retryable. The served
+notification path must contain no IndexedDB claim database. Journal-less frames
+carry no durable SSE id and use the existing delivery fallback.
 
 ```bash
 python tests/browser_issue6673_service_worker.py
 ```
 
-The test requires Playwright and Chromium. An unavailable browser environment is
-an un-reached proof gate, not a passing result. The visible Windows toast and
+The test requires Playwright, Chromium, granted notification permission, and a
+served service-worker lifecycle. An unavailable browser environment exits 2 and
+is an un-reached proof gate, not a passing result. The visible Windows toast and
 Action Center presentation remain manual browser-owner checks.
 
 ## Public conversation lifecycle gate

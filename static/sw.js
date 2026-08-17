@@ -173,9 +173,8 @@ self.addEventListener('fetch', (event) => {
   );
 });
 
-const NOTIFICATION_CLAIM_MESSAGE = 'hermes.notification.claim';
-const NOTIFICATION_CLAIM_DB = 'hermes-webui-notification-claims-v1';
-const NOTIFICATION_CLAIM_STORE = 'event-identities';
+const NOTIFICATION_PRESENT_MESSAGE = 'hermes.notification.present';
+const NOTIFICATION_PRESENT_PROTOCOL_VERSION = 1;
 const MAX_NOTIFICATION_IDENTITY_LENGTH = 512;
 const MAX_NOTIFICATION_TITLE_LENGTH = 256;
 const MAX_NOTIFICATION_BODY_LENGTH = 4096;
@@ -185,7 +184,7 @@ function isBoundedString(value, maxLength, allowEmpty = false) {
     (allowEmpty || value.length > 0) && value.length <= maxLength;
 }
 
-function normalizeClaimUrl(value) {
+function normalizeNotificationUrl(value) {
   if (!isBoundedString(value, 4096)) return null;
   try {
     const scopeUrl = new URL(self.registration.scope || `${self.location.origin}/`);
@@ -204,7 +203,7 @@ function normalizeClaimUrl(value) {
   }
 }
 
-function normalizeClaimOptions(options) {
+function normalizeNotificationOptions(options, eventId) {
   if (!options || typeof options !== 'object' || Array.isArray(options)) return null;
   const allowed = new Set(['body', 'tag', 'renotify', 'icon', 'badge', 'data']);
   if (Object.keys(options).some((key) => !allowed.has(key))) return null;
@@ -216,7 +215,7 @@ function normalizeClaimOptions(options) {
     return null;
   }
   if (!options.data || typeof options.data !== 'object' || Array.isArray(options.data)) return null;
-  const url = normalizeClaimUrl(options.data.url);
+  const url = normalizeNotificationUrl(options.data.url);
   if (!url) return null;
   return {
     body: options.body,
@@ -224,111 +223,40 @@ function normalizeClaimOptions(options) {
     renotify: true,
     icon: options.icon,
     badge: options.badge,
-    data: {url},
+    data: {url, eventId},
   };
 }
 
-function validateClaimMessage(event) {
+function validateNotificationMessage(event) {
   if (!event || !Array.isArray(event.ports) || event.ports.length !== 1) return null;
   const port = event.ports[0];
   if (!port || typeof port.postMessage !== 'function') return null;
   const source = event.source;
   if (!source || !isBoundedString(source.id, 256)) return null;
   if (source.url) {
-    if (!normalizeClaimUrl(source.url)) return null;
+    if (!normalizeNotificationUrl(source.url)) return null;
   }
   const data = event.data;
   if (!data || typeof data !== 'object' || Array.isArray(data) ||
-      data.type !== NOTIFICATION_CLAIM_MESSAGE) return null;
-  const identity = data.identity;
-  if (!identity || typeof identity !== 'object' || Array.isArray(identity) ||
-      !isBoundedString(identity.streamId, MAX_NOTIFICATION_IDENTITY_LENGTH) ||
-      !isBoundedString(identity.lastEventId, MAX_NOTIFICATION_IDENTITY_LENGTH)) {
-    return null;
-  }
+      data.type !== NOTIFICATION_PRESENT_MESSAGE ||
+      data.protocolVersion !== NOTIFICATION_PRESENT_PROTOCOL_VERSION ||
+      !isBoundedString(data.eventId, MAX_NOTIFICATION_IDENTITY_LENGTH) ||
+      !/^[^:]+:[1-9]\d*$/.test(data.eventId)) return null;
   if (!isBoundedString(data.title, MAX_NOTIFICATION_TITLE_LENGTH)) return null;
-  const options = normalizeClaimOptions(data.options);
+  const options = normalizeNotificationOptions(data.options, data.eventId);
   if (!options) return null;
   return {
     port,
-    identity: {streamId: identity.streamId, lastEventId: identity.lastEventId},
+    eventId: data.eventId,
     title: data.title,
     options,
   };
 }
 
-function openNotificationClaimDb() {
-  return new Promise((resolve, reject) => {
-    let request;
-    try {
-      request = indexedDB.open(NOTIFICATION_CLAIM_DB, 1);
-    } catch (error) {
-      reject(error);
-      return;
-    }
-    request.onupgradeneeded = (event) => {
-      const db = event.target.result;
-      if (!db.objectStoreNames.contains(NOTIFICATION_CLAIM_STORE)) {
-        db.createObjectStore(NOTIFICATION_CLAIM_STORE, {
-          keyPath: ['streamId', 'lastEventId'],
-        });
-      }
-    };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error || new Error('notification claim database open failed'));
-    request.onblocked = () => reject(new Error('notification claim database open blocked'));
-  });
-}
+const notificationPresentationByTag = new Map();
 
-function claimNotificationIdentity(db, identity) {
-  return new Promise((resolve, reject) => {
-    let transaction;
-    let outcome = 'claimed';
-    let settled = false;
-    const resolveOnce = (value) => {
-      if (settled) return;
-      settled = true;
-      resolve(value);
-    };
-    const rejectOnce = (error) => {
-      if (settled) return;
-      settled = true;
-      reject(error);
-    };
-    try {
-      transaction = db.transaction(NOTIFICATION_CLAIM_STORE, 'readwrite');
-      const request = transaction.objectStore(NOTIFICATION_CLAIM_STORE).add(identity);
-      request.onerror = (event) => {
-        if (request.error && request.error.name === 'ConstraintError') {
-          event.preventDefault();
-          outcome = 'duplicate';
-          return;
-        }
-        rejectOnce(request.error || new Error('notification claim failed'));
-      };
-      transaction.oncomplete = () => resolveOnce(outcome);
-      transaction.onerror = (event) => {
-        if (outcome === 'duplicate') {
-          event.preventDefault();
-          return;
-        }
-        rejectOnce(transaction.error || new Error('notification claim transaction failed'));
-      };
-      transaction.onabort = () => {
-        if (outcome === 'duplicate' && !transaction.error) {
-          resolveOnce('duplicate');
-          return;
-        }
-        rejectOnce(transaction.error || new Error('notification claim transaction aborted'));
-      };
-    } catch (error) {
-      rejectOnce(error);
-    }
-  });
-}
-
-async function handleNotificationClaim(event) {
-  const request = validateClaimMessage(event);
+async function handleNotificationPresentation(event) {
+  const request = validateNotificationMessage(event);
   if (!request) {
     if (event && event.ports && event.ports.length === 1 && event.ports[0] &&
         typeof event.ports[0].postMessage === 'function') {
@@ -336,32 +264,30 @@ async function handleNotificationClaim(event) {
     }
     return;
   }
-  let db;
+  const tag = request.options.tag;
+  const previous = notificationPresentationByTag.get(tag) || Promise.resolve();
+  const operation = previous.then(async () => {
+    const displayed = await self.registration.getNotifications({tag});
+    if (displayed.some((notification) => notification && notification.data &&
+        notification.data.eventId === request.eventId)) return 'duplicate';
+    await self.registration.showNotification(request.title, request.options);
+    return 'shown';
+  });
+  const trackedOperation = operation.catch(() => {});
+  notificationPresentationByTag.set(tag, trackedOperation);
   try {
-    db = await openNotificationClaimDb();
-    const outcome = await claimNotificationIdentity(db, request.identity);
-    db.close();
-    db = null;
-    if (outcome === 'duplicate') {
-      request.port.postMessage({status: 'duplicate'});
-      return;
-    }
-    try {
-      await self.registration.showNotification(request.title, request.options);
-      request.port.postMessage({status: 'shown'});
-    } catch (_error) {
-      request.port.postMessage({status: 'fallback-owner'});
-    }
+    request.port.postMessage({status: await operation});
   } catch (_error) {
-    if (db) {
-      try { db.close(); } catch (_closeError) { /* fail closed */ }
+    try { request.port.postMessage({status: 'unavailable'}); } catch (_replyError) { /* best effort */ }
+  } finally {
+    if (notificationPresentationByTag.get(tag) === trackedOperation) {
+      notificationPresentationByTag.delete(tag);
     }
-    try { request.port.postMessage({status: 'ambiguous'}); } catch (_replyError) { /* fail closed */ }
   }
 }
 
 self.addEventListener('message', (event) => {
-  const operation = handleNotificationClaim(event);
+  const operation = handleNotificationPresentation(event);
   if (event && typeof event.waitUntil === 'function') event.waitUntil(operation);
 });
 

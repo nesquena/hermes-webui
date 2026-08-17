@@ -13,8 +13,9 @@ Implementation:
   - api/streaming.py `put()` captures `journaled["event_id"]` from
     `RunJournalWriter.append_sse_event()` return and writes it to
     `STREAM_LAST_EVENT_ID[stream_id]`.
-  - StreamChannel queue items carry `(event, data, event_id)` so active
-    subscribers emit each frame with its own id instead of the latest global id.
+  - StreamChannel queue items carry `(event, data, event_id)` even when the
+    journal has no id, so active subscribers can clear EventSource state instead
+    of inheriting the latest global id.
   - Legacy plain queues keep `(event, data)` and use `STREAM_LAST_EVENT_ID` as a
     compatibility fallback.
   - api/streaming.py finally-block cleanup pops STREAM_LAST_EVENT_ID.
@@ -51,31 +52,31 @@ def test_put_writes_event_id_to_side_channel_dict():
         "put() must write event_id to STREAM_LAST_EVENT_ID[stream_id] — "
         "this is the side-channel the SSE consumer reads at emit time"
     )
-    assert 'event_id = f"{stream_id}:fallback:{fallback_event_seq[0]}"' in put_body
+    assert "fallback_event_seq" not in put_body
 
 
-def test_stream_channel_queue_item_carries_per_event_id_with_legacy_fallback():
-    """StreamChannel queue items need per-frame ids; legacy queues stay 2-tuples."""
+def test_stream_channel_queue_item_carries_explicit_journal_identity():
+    """StreamChannel queue items distinguish journal-less frames from legacy queues."""
     put_def_idx = STREAMING_PY.find("def put(event, data):")
     put_body = STREAMING_PY[put_def_idx:put_def_idx + 2500]
-    assert 'queue_item = (event, data, event_id) if event_id and hasattr(q, "subscribe_with_snapshot") else (event, data)' in put_body, (
-        "StreamChannel events must carry their own event_id while legacy queue "
-        "consumers retain the 2-tuple shape"
+    assert 'queue_item = (event, data, event_id) if hasattr(q, "subscribe_with_snapshot") else (event, data)' in put_body, (
+        "StreamChannel events must carry an explicit event_id, including None, "
+        "while legacy queue consumers retain the 2-tuple shape"
     )
     assert "q.put_nowait(queue_item)" in put_body
 
 
-def test_gateway_queue_item_carries_per_event_id_with_legacy_fallback():
+def test_gateway_queue_item_carries_explicit_journal_identity():
     """Gateway-backed WebUI chat must preserve the same live cursor invariant."""
     put_def_idx = GATEWAY_CHAT_PY.find("def put_gateway_event(event, data):")
     assert put_def_idx != -1, "put_gateway_event(event, data) not found"
     put_body = GATEWAY_CHAT_PY[put_def_idx:put_def_idx + 1800]
-    assert 'queue_item = (event, data, event_id) if event_id and hasattr(q, "subscribe_with_snapshot") else (event, data)' in put_body, (
-        "Gateway live events must carry their own event_id for StreamChannel "
+    assert 'queue_item = (event, data, event_id) if hasattr(q, "subscribe_with_snapshot") else (event, data)' in put_body, (
+        "Gateway live events must carry an explicit event_id for StreamChannel "
         "subscribers while preserving legacy queue compatibility"
     )
     assert "q.put_nowait(queue_item)" in put_body
-    assert 'event_id = f"{stream_id}:fallback:{fallback_event_seq[0]}"' in put_body
+    assert "fallback_event_seq" not in put_body
 
 
 def test_sse_handler_reads_event_id_from_side_channel():
@@ -90,6 +91,9 @@ def test_sse_handler_reads_event_id_from_side_channel():
     )
     assert "_sse_with_id(handler, event, data, event_id)" in handler_body, (
         "_handle_sse_stream must call _sse_with_id when event_id is set"
+    )
+    assert "_sse_with_reset_id(handler, event, data)" in handler_body, (
+        "_handle_sse_stream must reset EventSource state for journal-less frames"
     )
 
 

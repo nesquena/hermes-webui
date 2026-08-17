@@ -17433,6 +17433,11 @@ def _sse_with_id(handler, event, data, event_id=None):
     _sse(handler, event, data)
 
 
+def _sse_with_reset_id(handler, event, data):
+    handler.wfile.write(b"id:\n")
+    _sse(handler, event, data)
+
+
 def _session_events_path_session_id(path: str | None) -> str | None:
     path = str(path or "")
     parts = path.strip("/").split("/")
@@ -18079,7 +18084,8 @@ def _handle_sse_stream(handler, parsed):
                 handler.wfile.write(b": heartbeat\n\n")
                 handler.wfile.flush()
                 continue
-            if len(item) >= 3:
+            has_queued_event_id = len(item) >= 3
+            if has_queued_event_id:
                 event, data, queued_event_id = item[0], item[1], item[2]
             else:
                 event, data = item
@@ -18088,14 +18094,14 @@ def _handle_sse_stream(handler, parsed):
             # the frontend's `_lastRunJournalSeq` cursor advances during live
             # streaming. Without this, mid-stream error→replay would arrive
             # with after_seq=0 and double-render every journaled event.
-            event_id = queued_event_id or STREAM_LAST_EVENT_ID.get(stream_id)
+            event_id = queued_event_id if has_queued_event_id else STREAM_LAST_EVENT_ID.get(stream_id)
             event_seq = _run_journal_same_run_seq(event_id, stream_id)
             if replay_cutoff_seq is not None and event_seq is not None and event_seq <= replay_cutoff_seq:
                 continue
             if event_id:
                 _sse_with_id(handler, event, data, event_id)
             else:
-                _sse(handler, event, data)
+                _sse_with_reset_id(handler, event, data)
             if event in SSE_RELAY_CLOSE_EVENTS:
                 break
     except _CLIENT_DISCONNECT_ERRORS:
@@ -18227,12 +18233,13 @@ def _handle_session_run_journal_stream_for_session(handler, parsed, session_id):
                     handler.wfile.write(b": keepalive\n\n")
                     handler.wfile.flush()
                     continue
-                if len(item) >= 3:
+                has_queued_event_id = len(item) >= 3
+                if has_queued_event_id:
                     event, data, queued_event_id = item[0], item[1], item[2]
                 else:
                     event, data = item
                     queued_event_id = STREAM_LAST_EVENT_ID.get(active_stream_id)
-                event_id = queued_event_id or STREAM_LAST_EVENT_ID.get(active_stream_id)
+                event_id = queued_event_id if has_queued_event_id else STREAM_LAST_EVENT_ID.get(active_stream_id)
                 event_seq = _run_journal_same_run_seq(event_id, active_stream_id)
                 _is_terminal = event in SSE_RELAY_CLOSE_EVENTS
                 _already_sent = (
@@ -18252,7 +18259,7 @@ def _handle_session_run_journal_stream_for_session(handler, parsed, session_id):
                     _sse_with_id(handler, event, data, event_id)
                     note_sent_event_id(event_id)
                 else:
-                    _sse(handler, event, data)
+                    _sse_with_reset_id(handler, event, data)
                 if _is_terminal:
                     break
         except _CLIENT_DISCONNECT_ERRORS:
