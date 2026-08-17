@@ -10244,6 +10244,7 @@ def _foreign_display_coordinate_summary(sid: str, profile=None):
         state_summary = get_state_db_session_summary(sid, profile=profile)
         cache_key = (
             _foreign_display_coordinate_cache_scope(profile),
+            _foreign_display_coordinate_state_db_identity(profile),
             _foreign_display_coordinate_sidecar_identity(session),
             _numeric_count(state_summary.get("message_count")),
             float(state_summary.get("last_message_at") or 0.0),
@@ -10257,6 +10258,8 @@ def _foreign_display_coordinate_summary(sid: str, profile=None):
         if backstop is not None:
             reader_kwargs["limit"] = backstop
         state_db_messages = get_state_db_session_messages(sid, **reader_kwargs)
+        if not state_db_messages and _numeric_count(state_summary.get("message_count")):
+            return None
         summary = _message_summary(_display_coordinate_messages(session, state_db_messages))
         with _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE_LOCK:
             _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE[cache_key] = dict(summary)
@@ -10311,6 +10314,22 @@ def _foreign_display_coordinate_cache_scope(profile) -> str:
         return str(_active_state_db_path())
     except Exception:
         return "<active-state-db>"
+
+
+def _foreign_display_coordinate_state_db_identity(profile):
+    """Return the cheap commit-aware identity for the selected state.db."""
+    try:
+        from api.models import _get_profile_home, _sqlite_file_stat_cache_key
+
+        if isinstance(profile, str) and profile.strip():
+            db_path = _get_profile_home(profile) / "state.db"
+            if not db_path.exists():
+                db_path = _active_state_db_path()
+        else:
+            db_path = _active_state_db_path()
+        return _sqlite_file_stat_cache_key(db_path)
+    except Exception:
+        return None
 
 
 def _clear_foreign_display_coordinate_summary_cache() -> None:
