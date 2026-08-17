@@ -3359,28 +3359,38 @@ function _hasCurrentTailUserDuplicate(messages,candidate){
 // The authoritative boundary is `pending_started_at`: every row belonging to a
 // PREVIOUS turn carries a timestamp strictly older than it. So scan backwards
 // for the newest definitively-older row; the active turn starts right after it.
-// Untimed rows (optimistic/live rows) cannot close the scan — they carry no
-// evidence of belonging to an older turn.
 //
-// Fails closed: without a usable `pending_started_at`, or when the window holds
-// no timestamped row at all to anchor against, return -1 so the caller keeps the
-// previous live-row/append behaviour rather than guessing a position.
+// Every compared timestamp is normalized through _timestampSeconds /
+// _firstValidTimestampSeconds (static/ui.js), so ISO-string and millisecond
+// epochs compare correctly against the seconds-based boundary. Sessions with
+// such rows are reachable in production: /api/session/import preserves the
+// supplied message timestamps verbatim in a writable session.
+//
+// Fails closed: a SETTLED row the scan crosses without a comparable timestamp
+// is indistinguishable from history, so return -1 and let the caller keep the
+// previous live-row/append behaviour rather than guess — a transient duplicate
+// bubble is recoverable, re-ordering history or swallowing a turn is not. Only
+// `_live` rows (this turn's own streaming placeholders) are skippable. Index 0
+// is returned only when EVERY settled row is demonstrably at/after the
+// boundary; an empty or live-only window proves nothing and also returns -1.
 function _activeTurnInsertionIndex(messages,session){
+  if(typeof _timestampSeconds!=='function'||typeof _firstValidTimestampSeconds!=='function') return -1;
+  const startedAt=_timestampSeconds(session&&session.pending_started_at);
+  if(startedAt===null) return -1;
   const list=Array.isArray(messages)?messages:[];
-  const startedAt=Number(session&&session.pending_started_at);
-  if(!Number.isFinite(startedAt)||startedAt<=0) return -1;
-  let sawTimestampedRow=false;
+  let sawSettledRow=false;
   for(let i=list.length-1;i>=0;i--){
     const msg=list[i];
     if(!msg) continue;
-    const ts=typeof _messageTimestampSeconds==='function'?_messageTimestampSeconds(msg):null;
-    if(ts===null) continue;
-    sawTimestampedRow=true;
+    if(msg._live) continue;
+    const ts=_firstValidTimestampSeconds(msg._ts,msg.timestamp,msg.created_at);
+    if(ts===null) return -1;
+    sawSettledRow=true;
     if(ts<startedAt) return i+1;
   }
-  // Every timestamped row is at/after the boundary: the whole visible window
-  // belongs to the active turn, so the prompt precedes all of it.
-  return sawTimestampedRow?0:-1;
+  // Every settled row is demonstrably at/after the boundary: the whole visible
+  // window belongs to the active turn, so the prompt precedes all of it.
+  return sawSettledRow?0:-1;
 }
 
 // Keep pending-user recovery ordering identical across load, reconnect, and
