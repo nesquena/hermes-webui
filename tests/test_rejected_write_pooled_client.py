@@ -18,9 +18,12 @@ before reading its JSON body, by design (it runs ahead of the CSRF gate so a
 stale tab gets 410, not 403).
 """
 
+import contextlib
 import http.client
 import socket
+import threading
 import urllib.parse
+from http.server import ThreadingHTTPServer
 
 import pytest
 
@@ -91,17 +94,26 @@ _CHUNKED_MULTIPART_BODY = (
 )
 
 
-def _pipelined_after(request: bytes, *, stop_after: int | None = None) -> bytes:
+def _pipelined_after(
+    request: bytes,
+    *,
+    stop_after: int | None = None,
+    port: int | None = None,
+    follow: bytes = _FOLLOWING_GET,
+) -> bytes:
     """Send *request* and a plain GET in one write; return every byte answered.
 
     Reads to EOF by default, which is the whole point of the closing cases: the
     proof is that NOTHING follows the single response. `stop_after` bounds the
     read for the keep-alive cases, where the socket stays open by design and
     reading to EOF would only burn the timeout.
+
+    `port`/`follow` exist for the auth-enabled cases below, which need their own
+    server instance and a PUBLIC follow-up path.
     """
-    sock = socket.create_connection(("127.0.0.1", _PORT), timeout=10)
+    sock = socket.create_connection(("127.0.0.1", port or _PORT), timeout=10)
     try:
-        sock.sendall(request + _FOLLOWING_GET)
+        sock.sendall(request + follow)
         received = b""
         while stop_after is None or received.count(b"HTTP/1.1 ") < stop_after:
             try:
@@ -440,3 +452,308 @@ def test_bodyless_framing_keeps_the_pooled_socket_alive(framing):
         f"healthy pooled connection: {text}"
     )
     assert b"Connection: close" not in answered, text
+
+
+# ── Every reject-before-read site, in BOTH directions, on the wire ─────────────
+#
+# The sidecar path above was the first site routed through the framing-aware
+# helper; the sibling sites kept the unconditional `arm_connection_close()` and
+# so were the mirror image of the same bug -- a body-less rejection answered with
+# `Connection: close` and dropped the client's pipelined follow-up, killing a
+# healthy keep-alive connection for no framing reason. Each pair below is the
+# reproduction (body-less -> must stay alive) beside its close half (a declared
+# body -> must still close), pipelined down one socket against the production
+# handler. Reproduced on the pre-fix head, all seven sites, `responses seen: 1`:
+#
+#   POST /api/session/new        (auth off-session)  -> 401 + Connection: close
+#   POST /api/session/new        (bad Origin)        -> 403 + Connection: close
+#   POST /api/session/new        (no CSRF token)     -> 403 + Connection: close
+#   POST /api/csp-report         (limiter tripped)   -> 204 + Connection: close
+#   POST /api/health/restart     (success)           -> 200 + Connection: close
+#   POST /api/process-complete-ack                   -> 410 + Connection: close
+#   POST /api/upload             (no boundary)       -> 400 + Connection: close
+
+_BODYLESS_FRAMING = [b"", b"Content-Length: 0\r\n"]
+_BODYLESS_IDS = ["no-content-length", "zero-content-length"]
+# A PUBLIC path, so the follow-up is a genuine 200 even with auth enabled.
+_PUBLIC_FOLLOWING_GET = (
+    b"GET /api/auth/status HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: */*\r\n\r\n"
+)
+
+
+@contextlib.contextmanager
+def _own_server():
+    """The production Handler on a private port.
+
+    The shared test server runs with auth disabled and out of process, so the
+    auth/CSRF-token rejections and the deterministic restart/limiter outcomes need
+    an instance this process can configure. It is the same `server.Handler` class
+    the real server binds, driven over a real socket.
+    """
+    import server
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield httpd.server_address[1]
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=10)
+
+
+@pytest.fixture
+def auth_on(monkeypatch):
+    """Turn password auth on for this test (conftest resets the hash cache)."""
+    import api.auth as auth
+
+    monkeypatch.setenv("HERMES_WEBUI_PASSWORD", "pooled-client-regression")
+    auth._invalidate_password_hash_cache()
+    assert auth.is_auth_enabled(), "the auth-path regression needs auth enabled"
+    return auth
+
+
+def _assert_kept_alive(answered: bytes, status: bytes) -> None:
+    text = answered.decode("latin-1", errors="replace")
+    assert answered.startswith(b"HTTP/1.1 " + status), text
+    assert b"Connection: close" not in answered, (
+        f"a body-less rejection advertised close, so a pooled client's healthy "
+        f"connection was dropped: {text}"
+    )
+    assert b"HTTP/1.1 200 OK" in answered, (
+        f"the pipelined follow-up was not served on the same socket: {text}"
+    )
+
+
+def _assert_closed(answered: bytes, status: bytes) -> None:
+    text = answered.decode("latin-1", errors="replace")
+    assert answered.startswith(b"HTTP/1.1 " + status), text
+    assert b"Connection: close" in answered, text
+    assert answered.count(b"HTTP/1.1 ") == 1, (
+        f"the pipelined GET was answered, so the socket stayed open: {text}"
+    )
+
+
+@pytest.mark.parametrize("framing", _BODYLESS_FRAMING, ids=_BODYLESS_IDS)
+def test_bodyless_auth_rejection_keeps_the_pooled_socket_alive(framing, auth_on):
+    """A body-less POST that fails auth must not cost the client its connection."""
+    with _own_server() as port:
+        answered = _pipelined_after(
+            b"POST /api/session/new HTTP/1.1\r\nHost: 127.0.0.1\r\n" + framing + b"\r\n",
+            stop_after=2,
+            port=port,
+            follow=_PUBLIC_FOLLOWING_GET,
+        )
+
+    _assert_kept_alive(answered, b"401")
+
+
+def test_auth_rejection_with_a_body_still_closes_the_pooled_socket(auth_on):
+    """The close half at the auth gate: those bytes are still queued in rfile."""
+    with _own_server() as port:
+        answered = _pipelined_after(
+            b"POST /api/session/new HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+            b"Content-Type: application/json\r\n"
+            b"Content-Length: " + str(len(_BODY)).encode() + b"\r\n\r\n" + _BODY,
+            port=port,
+            follow=_PUBLIC_FOLLOWING_GET,
+        )
+
+    _assert_closed(answered, b"401")
+    assert _BODY not in answered, answered.decode("latin-1", errors="replace")
+
+
+@pytest.mark.parametrize("framing", _BODYLESS_FRAMING, ids=_BODYLESS_IDS)
+def test_bodyless_csrf_origin_rejection_keeps_the_pooled_socket_alive(framing):
+    """`_check_csrf()` origin mismatch, on the shared server (auth off)."""
+    answered = _pipelined_after(
+        b"POST /api/session/new HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+        b"Origin: http://evil.invalid\r\n" + framing + b"\r\n",
+        stop_after=2,
+    )
+
+    _assert_kept_alive(answered, b"403")
+
+
+def test_csrf_origin_rejection_with_a_body_still_closes_the_pooled_socket():
+    answered = _pipelined_after(
+        b"POST /api/session/new HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+        b"Origin: http://evil.invalid\r\nContent-Type: application/json\r\n"
+        b"Content-Length: " + str(len(_BODY)).encode() + b"\r\n\r\n" + _BODY
+    )
+
+    _assert_closed(answered, b"403")
+    assert _BODY not in answered, answered.decode("latin-1", errors="replace")
+
+
+def _authenticated_same_origin_post(port, cookie_name, cookie, framing, body=b""):
+    return (
+        f"POST /api/session/new HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n"
+        f"Origin: http://127.0.0.1:{port}\r\n"
+        f"Cookie: {cookie_name}={cookie}\r\n".encode() + framing + b"\r\n" + body
+    )
+
+
+@pytest.mark.parametrize("framing", _BODYLESS_FRAMING, ids=_BODYLESS_IDS)
+def test_bodyless_csrf_token_rejection_keeps_the_pooled_socket_alive(framing, auth_on):
+    """A real session, a same-origin POST, and no CSRF token -> token_mismatch."""
+    cookie = auth_on.create_session()
+    try:
+        with _own_server() as port:
+            answered = _pipelined_after(
+                _authenticated_same_origin_post(
+                    port, auth_on._resolve_cookie_name(), cookie, framing
+                ),
+                stop_after=2,
+                port=port,
+                follow=_PUBLIC_FOLLOWING_GET,
+            )
+    finally:
+        auth_on.invalidate_session(cookie)
+
+    _assert_kept_alive(answered, b"403")
+
+
+def test_csrf_token_rejection_with_a_body_still_closes_the_pooled_socket(auth_on):
+    cookie = auth_on.create_session()
+    try:
+        with _own_server() as port:
+            answered = _pipelined_after(
+                _authenticated_same_origin_post(
+                    port,
+                    auth_on._resolve_cookie_name(),
+                    cookie,
+                    b"Content-Type: application/json\r\nContent-Length: "
+                    + str(len(_BODY)).encode()
+                    + b"\r\n",
+                    body=_BODY,
+                ),
+                port=port,
+                follow=_PUBLIC_FOLLOWING_GET,
+            )
+    finally:
+        auth_on.invalidate_session(cookie)
+
+    _assert_closed(answered, b"403")
+    assert _BODY not in answered, answered.decode("latin-1", errors="replace")
+
+
+@pytest.fixture
+def csp_limiter_tripped(monkeypatch):
+    """Force the CSP-report limiter, instead of sending 101 reports in 60s."""
+    import api.routes as routes
+
+    monkeypatch.setattr(routes, "_csp_report_rate_limited", lambda _handler: True)
+
+
+@pytest.mark.parametrize("framing", _BODYLESS_FRAMING, ids=_BODYLESS_IDS)
+def test_bodyless_rate_limited_csp_report_keeps_the_pooled_socket_alive(
+    framing, csp_limiter_tripped
+):
+    """A dropped 204 must not hang up on a browser that is still reporting."""
+    with _own_server() as port:
+        answered = _pipelined_after(
+            b"POST /api/csp-report HTTP/1.1\r\nHost: 127.0.0.1\r\n" + framing + b"\r\n",
+            stop_after=2,
+            port=port,
+            follow=_PUBLIC_FOLLOWING_GET,
+        )
+
+    _assert_kept_alive(answered, b"204")
+
+
+def test_rate_limited_csp_report_with_a_body_still_closes(csp_limiter_tripped):
+    """The limiter answers without reading the report, so a declared body closes."""
+    with _own_server() as port:
+        answered = _pipelined_after(
+            b"POST /api/csp-report HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+            b"Content-Type: application/csp-report\r\n"
+            b"Content-Length: " + str(len(_BODY)).encode() + b"\r\n\r\n" + _BODY,
+            port=port,
+            follow=_PUBLIC_FOLLOWING_GET,
+        )
+
+    _assert_closed(answered, b"204")
+
+
+@pytest.fixture
+def restart_succeeds(monkeypatch):
+    """Pin the SUCCESS outcome -- the one that closed a healthy socket every call."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes, "restart_active_profile_gateway", lambda: {"status": "completed"}
+    )
+
+
+@pytest.mark.parametrize("framing", _BODYLESS_FRAMING, ids=_BODYLESS_IDS)
+def test_bodyless_successful_restart_keeps_the_pooled_socket_alive(framing, restart_succeeds):
+    """`/api/health/restart` closed on success too; the WebUI sends no body."""
+    with _own_server() as port:
+        answered = _pipelined_after(
+            b"POST /api/health/restart HTTP/1.1\r\nHost: 127.0.0.1\r\n" + framing + b"\r\n",
+            stop_after=2,
+            port=port,
+            follow=_PUBLIC_FOLLOWING_GET,
+        )
+
+    _assert_kept_alive(answered, b"200")
+
+
+def test_restart_with_a_body_still_closes_the_pooled_socket(restart_succeeds):
+    """The endpoint consumes its body on no outcome, so a declared one closes."""
+    with _own_server() as port:
+        answered = _pipelined_after(
+            b"POST /api/health/restart HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+            b"Content-Type: application/json\r\n"
+            b"Content-Length: " + str(len(_BODY)).encode() + b"\r\n\r\n" + _BODY,
+            port=port,
+            follow=_PUBLIC_FOLLOWING_GET,
+        )
+
+    _assert_closed(answered, b"200")
+    assert _BODY not in answered, answered.decode("latin-1", errors="replace")
+
+
+@pytest.mark.parametrize("framing", _BODYLESS_FRAMING, ids=_BODYLESS_IDS)
+def test_bodyless_deprecated_ack_keeps_the_pooled_socket_alive(framing):
+    """The 410 alias, which the body-bearing test at the top of this file pins closed."""
+    answered = _pipelined_after(
+        b"POST /api/process-complete-ack HTTP/1.1\r\nHost: 127.0.0.1\r\n" + framing + b"\r\n",
+        stop_after=2,
+    )
+
+    _assert_kept_alive(answered, b"410")
+
+
+@pytest.mark.parametrize("path", _MULTIPART_UPLOAD_PATHS)
+@pytest.mark.parametrize(
+    "framing",
+    [
+        b"Content-Type: application/json\r\n",
+        b"Content-Type: application/json\r\nContent-Length: 0\r\n",
+        b"Content-Type: multipart/form-data\r\n",  # multipart, but no boundary=
+    ],
+    ids=["json-no-length", "json-zero-length", "multipart-without-boundary"],
+)
+def test_bodyless_upload_boundary_rejection_keeps_the_pooled_socket_alive(path, framing):
+    """`_reject_before_read()`'s one body-less reachable rejection: the boundary check."""
+    answered = _pipelined_after(
+        f"POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n".encode() + framing + b"\r\n",
+        stop_after=2,
+    )
+
+    _assert_kept_alive(answered, b"400")
+
+
+@pytest.mark.parametrize("path", _MULTIPART_UPLOAD_PATHS)
+def test_upload_boundary_rejection_with_a_body_still_closes(path):
+    answered = _pipelined_after(
+        f"POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+        "Content-Type: application/json\r\n"
+        f"Content-Length: {len(_BODY)}\r\n\r\n".encode() + _BODY
+    )
+
+    _assert_closed(answered, b"400")
+    assert _BODY not in answered, answered.decode("latin-1", errors="replace")
