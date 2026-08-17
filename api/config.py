@@ -6393,6 +6393,51 @@ def _get_label_for_model(model_id: str, existing_groups: list) -> str:
     # preserving vendor hierarchy for multi-slash IDs (#3360).
     # Skip for URI-scheme IDs whose slashes are path separators (#3429).
     bare = lookup_id.split("/", 1)[1] if ("/" in lookup_id and not _has_scheme(lookup_id)) else lookup_id
+    # Bedrock/Vertex IDs carry a dotted cross-region routing prefix and a vendor
+    # namespace -- ``us.anthropic.claude-opus-5``,
+    # ``mistral.mistral-large-2407-v1:0`` -- plus sometimes a trailing ``:<n>``
+    # provisioned-revision suffix. None of that belongs in a human label, which
+    # otherwise reads "Us.anthropic.claude Opus 5" in the turn footer.
+    #
+    # Only the two documented shapes are stripped, against a CLOSED allow-list.
+    # A generic "drop leading letters-only dot segments" loop rewrites any
+    # uncatalogued dotted ID: ``deepseek.v3`` renders as "V3" (vendor silently
+    # deleted) and ``foo.bar.baz`` as "BAZ".
+    #
+    # Inlined rather than factored into a module-level helper because the
+    # regression harnesses in tests/test_issue3429_* extract this function's
+    # source and eval it in isolation; a module-level call would NameError there.
+    # Kept in lockstep with ``_stripDottedModelPrefix()`` in static/ui.js --
+    # tests/test_dotted_model_label.py drives both from one table.
+    if bare and "." in bare and not _has_scheme(bare):
+        # ``global`` is a real Bedrock routing head, not just a region code --
+        # the catalog at api/config.py:1901-1909 ships six
+        # ``global.anthropic.claude-*`` IDs and the routing notes below use that
+        # as the canonical Bedrock shape. Omitting it left those labels reading
+        # "Global.anthropic.claude Opus 4 7".
+        _regions = {"us", "eu", "apac", "global", "us-gov"}
+        _vendors = {
+            "anthropic", "amazon", "meta", "mistral", "cohere", "ai21",
+            "stability", "writer", "deepseek", "qwen", "openai", "google",
+            # Bedrock foundation-model vendors added after the first pass. Without
+            # these, real IDs rendered with the namespace intact -- "Us.luma.ray 2",
+            # "Twelvelabs.marengo Embed 2 7", "Ibm.granite 3 8B Instruct".
+            "luma", "twelvelabs", "ibm", "nvidia", "snowflake",
+        }
+        _segs = bare.split(".")
+        _i = 0
+        if (len(_segs) - _i >= 3 and _segs[_i].lower() in _regions
+                and _segs[_i + 1].lower() in _vendors):
+            _i += 1
+        if len(_segs) - _i >= 2 and _segs[_i].lower() in _vendors:
+            # Dropping the vendor is only safe when what remains still names the
+            # model. A bare version remainder (``deepseek.v3``) means the vendor
+            # WAS the name.
+            _rest = ".".join(_segs[_i + 1:])
+            if not re.fullmatch(r"v?\d+(?:[.\-]\d+)*", _rest, re.IGNORECASE):
+                _i += 1
+        if _i > 0:
+            bare = re.sub(r":\d+$", "", ".".join(_segs[_i:]))
     return " ".join(
         w.upper() if (len(w) <= 3 and w.replace(".", "").isalnum() and not w.isdigit()) else w.capitalize()
         for w in bare.replace("_", "-").split("-")
