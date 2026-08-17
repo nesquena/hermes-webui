@@ -5,6 +5,10 @@
 
 ### Fixed
 
+- **Profile goal contract no longer drifts across profiles on older agent builds.** On Hermes Agent builds where the context-override API was exposed but `SessionDB()` still used the import-time default DB path (v2026.5.28–v2026.7.20), a goal mutation in one profile could overwrite another profile's goal. Native profile-goal persistence is now gated on the agent supporting *both* context-home resolution *and* call-time DB-path selection; otherwise it falls back to the legacy per-profile manager. Profiles stay isolated. Thanks @ticketclosed-won. (#6899)
+
+- **Packaged `hermes-webui` console entry point.** `pip install`-style wheel installs now expose a `hermes-webui` command that boots the WebUI through `bootstrap:main` — the same launcher path as `python server.py`, so agent-interpreter discovery and dependency validation run before the server starts (a direct `server:main` entry started the UI but broke every chat with a missing-dependency error). Thanks @webtecnica. (#6742)
+
 - **Dotted Bedrock/Vertex model IDs get clean labels in the model picker.** Model IDs with dotted vendor prefixes (e.g. `anthropic.claude-*`) rendered awkwardly in the picker. They now get normalized display labels while the exact model IDs and provider grouping stay authoritative — distinct regional/vendor models remain separate entries, and live discovery still precedes the static fallback. Thanks @samfoy. (#6628)
 
 - **MCP dev dependency pinned to a compatible range.** The MCP SDK dev dependency was unpinned, so an incompatible 2.x install broke `mcp_server.py` with an `AttributeError`. It is now pinned to a compatible 1.x range with a bootstrap guard that exits with an actionable message on an incompatible version; the SDK remains optional (imports degrade gracefully when it is absent). Thanks @webtecnica. (#6616)
