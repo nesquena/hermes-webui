@@ -4889,7 +4889,11 @@ async function squashConversation() {
       if(r.summary_source === 'fallback-template') note = ' — ' + t('squash_fallback_note');
       showToast(t('squash_done', (r.before && r.before.message_count) || 0, (r.after && r.after.message_count) || 1) + note, 7000);
     }
-    await loadSession(sid, {force: true});
+    // P1 (#6704): only reload if the user is still viewing the squashed
+    // conversation. The job can run for minutes; if the user switched
+    // sessions meanwhile, forcing a reload of the original sid would
+    // navigate them away from what they are currently viewing.
+    if(S.session && S.session.session_id === sid) await loadSession(sid, {force: true});
   } catch(e) {
     showToast(t('squash_failed') + e.message, 7000, 'error');
   } finally {

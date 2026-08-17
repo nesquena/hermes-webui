@@ -260,3 +260,121 @@ def test_mobile_context_panel_contains_squash_action():
     assert 'onclick="closeMobileComposerConfig();squashConversation()"' in html
     assert "composer-mobile-config-panel .composer-mobile-squash-action{flex:1 0 100%;width:100%" in css
     assert "$('composerMobileSquashBtn')" in js
+
+
+# ── #6704 P1 focused regressions ─────────────────────────────────────────
+
+def test_cancelled_writeback_cannot_survive_squash(tmp_path):
+    """Focused regression for the failing production ordering (#6704 P1):
+
+    turn admitted (writeback ownership registered) → operator stops it →
+    cancel_stream() clears the live/busy indicators eagerly while the worker
+    is still unwinding (ownership NOT yet released) → operator starts squash.
+
+    Admission must fail closed on the surviving ownership record: while it
+    exists the old worker may still save its pre-squash snapshot, silently
+    restoring the archived transcript after the squash reported success.
+    Once the worker's own ``finally`` releases ownership, squash must
+    proceed — and during the mutation the ownership slot must hold the
+    squash tombstone, so a late ownership-gated finalizer from the old
+    stream compares against it and fails closed instead of matching an
+    empty slot.
+    """
+    from api import config as api_config
+
+    sess = _make_session(tmp_path)  # cancel already cleared the busy indicators
+    original = sess.path.read_bytes()
+
+    # The cancelled worker still owns the writeback (its finally has not run).
+    api_config.register_session_writeback_owner(SID, "stream-old")
+    try:
+        with patch.object(api.models, "get_session", lambda sid, metadata_only=False: sess):
+            with pytest.raises(session_squash.SquashError) as excinfo:
+                session_squash.start_squash_job(SID, confirm_session_id=SID, summary=None)
+        assert excinfo.value.status == 409
+        assert "writeback" in str(excinfo.value)
+        # Fail-closed means NO mutation and NO archive: the transcript on disk
+        # is byte-identical and nothing was archived.
+        assert sess.path.read_bytes() == original
+        assert not (sess.path.parent.parent / "session-squash-archives").exists()
+    finally:
+        # The worker's own finally releases ownership — only now may squash run.
+        api_config.clear_session_writeback_owner_if_owned(SID, "stream-old")
+
+    owners_seen = []
+    real_save = sess.save
+
+    def _spy_save(**kwargs):
+        owners_seen.append(api_config.session_writeback_owner(SID))
+        real_save(**kwargs)
+
+    sess.save = _spy_save
+    snap = _run_job(sess)
+    assert snap["status"] == "done", snap.get("error")
+    assert snap["result"]["already_squashed"] is False
+    # During the squash save the ownership slot held the squash tombstone: an
+    # ownership-gated finalizer from the cancelled stream ("stream-old") would
+    # see owner != its stream_id and skip its writeback (fail closed).
+    assert owners_seen, "squash never saved"
+    assert all(owner and owner.startswith("squash-") for owner in owners_seen), owners_seen
+    # The tombstone is released afterwards (conditionally: a successor turn's
+    # own entry would never be clobbered).
+    assert api_config.session_writeback_owner(SID) is None
+    persisted = json.loads(sess.path.read_text(encoding="utf-8"))
+    assert len(persisted["messages"]) == 1
+    assert persisted["messages"][0]["_squash_summary"] is True
+
+
+def test_squash_job_recheck_refuses_ownership_registered_after_admission(tmp_path):
+    """The admission pre-check runs without the per-session agent lock, so a
+    turn admitted-and-cancelled in that window leaves a surviving ownership
+    record the pre-check never saw. The under-lock re-check inside the job
+    worker must fail closed on it — busy indicators alone are not evidence
+    of idleness."""
+    from api import config as api_config
+
+    sess = _make_session(tmp_path)
+    original = sess.path.read_bytes()
+    api_config.register_session_writeback_owner(SID, "stream-old")
+    job = {
+        "job_id": "recheck-test-job",
+        "session_id": SID,
+        "title": "session de test",
+        "status": "running",
+        "started_at": time.time(),
+        "finished_at": None,
+        "result": None,
+        "error": None,
+    }
+    try:
+        with patch.object(api.models, "get_session", lambda sid, metadata_only=False: sess), \
+             patch.object(api.session_ops, "_live_active_stream_id", lambda _s: None), \
+             patch.object(api.routes, "_get_session_agent_lock", _dummy_lock), \
+             patch.object(api.routes, "_publish_session_list_changed", lambda *a, **k: None), \
+             patch("api.config._evict_session_agent", lambda _sid: None):
+            session_squash._run_squash_job(job, "synthèse fournie " * 40)
+        assert job["status"] == "error", job
+        assert "writeback" in (job["error"] or "")
+        assert sess.path.read_bytes() == original
+        assert not (sess.path.parent.parent / "session-squash-archives").exists()
+        # The refusal must not release the old worker's ownership entry.
+        assert api_config.session_writeback_owner(SID) == "stream-old"
+    finally:
+        api_config.clear_session_writeback_owner_if_owned(SID, "stream-old")
+
+
+def test_squash_completion_reload_is_conditional_on_current_session():
+    """Focused regression (#6704 P1): switching conversations while the squash
+    job runs must not force-navigate the browser back to the squashed sid —
+    completion may only reload when the user is still viewing it."""
+    repo = Path(__file__).resolve().parent.parent
+    js = (repo / "static" / "panels.js").read_text(encoding="utf-8")
+    fn_start = js.index("async function squashConversation")
+    fn_end = js.index("function _pollSquashJob")
+    body = js[fn_start:fn_end]
+    assert "if(S.session && S.session.session_id === sid) await loadSession(sid, {force: true});" in body
+    # Every completion reload of the squashed sid must be guarded — no
+    # unconditional loadSession(sid) may remain in the squash flow.
+    for line in body.splitlines():
+        if "loadSession(sid" in line:
+            assert "S.session.session_id === sid" in line, line

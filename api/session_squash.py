@@ -317,6 +317,24 @@ def _busy_fields(session) -> dict:
     return busy
 
 
+def _unreleased_writeback_owner(sid: str) -> str | None:
+    """Return the stream that still OWNS the session's writeback, if any.
+
+    Busy indicators are not sufficient admission evidence: cancel_stream()
+    eagerly clears ``active_stream_id`` and the pending_* fields so the UI can
+    accept a follow-up turn while the cancelled worker is still unwinding. The
+    ``SESSION_WRITEBACK_OWNERS`` record (#6623 re-gate) deliberately survives
+    that cleanup — it is released only by the owning worker's own ``finally``,
+    after its last possible save. While the record exists, the old worker may
+    still persist its pre-squash snapshot, which would silently restore the
+    archived transcript after the squash reported success. Squash admission
+    must therefore fail closed on the ownership record, not on busy fields.
+    """
+    from api.config import session_writeback_owner  # late import: tests patch module attrs
+
+    return session_writeback_owner(sid)
+
+
 def _apply_squash(session, sid: str, summary: str) -> dict:
     """Archive, mutate, save, verify. Caller holds the per-session agent lock."""
     session_path = session.path
@@ -429,6 +447,11 @@ def start_squash_job(sid: str, *, confirm_session_id: str | None, summary: str |
         raise SquashError("read-only sessions cannot be squashed", 400)
     if _busy_fields(meta):
         raise SquashError("session is active (stream or pending turn) — stop it before squashing", 409)
+    if _unreleased_writeback_owner(sid):
+        raise SquashError(
+            "session writeback is still owned by a finishing turn — retry once it has unwound",
+            409,
+        )
 
     job_id = uuid.uuid4().hex[:16]
     job = {
@@ -471,10 +494,28 @@ def _run_squash_job(job: dict, provided_summary: str | None) -> None:
         acquired = lock.acquire(timeout=0.5)
         if not acquired:
             raise SquashError("session is busy (a turn is running) — retry once it is idle", 409)
+        squash_owner_token = f"squash-{job['job_id']}"
         try:
             session = get_session(sid)
             if _live_active_stream_id(session) or _busy_fields(session):
                 raise SquashError("session is active (stream or pending turn) — stop it before squashing", 409)
+            # P1 (Greptile, #6704): cancelled writeback must NOT survive squash.
+            # cancel_stream() clears the live/busy indicators above eagerly,
+            # BEFORE the cancelled worker relinquishes writeback ownership. If
+            # the squash were admitted on those indicators alone, the old
+            # worker could later save its pre-squash snapshot and silently
+            # restore the archived transcript. The ownership record is released
+            # only by the owning worker's own ``finally`` — after its last
+            # possible save — so a present record means a writer may still
+            # save, and admission must fail closed (re-checked here under the
+            # per-session agent lock; the start_squash_job pre-check is only a
+            # fast path).
+            owner = _unreleased_writeback_owner(sid)
+            if owner:
+                raise SquashError(
+                    "session writeback is still owned by a finishing turn — retry once it has unwound",
+                    409,
+                )
             messages = session.messages or []
             if len(messages) == 1 and isinstance(messages[0], dict) and messages[0].get("_squash_summary") is True:
                 _finish_job(job, result={"session_id": sid, "already_squashed": True})
@@ -482,8 +523,21 @@ def _run_squash_job(job: dict, provided_summary: str | None) -> None:
             if not messages:
                 raise SquashError("nothing to squash (session has no messages)")
             summary, summary_source = _generate_summary(session, sid, provided_summary)
+            # Tombstone (in-process exclusion): take the writeback-ownership
+            # slot for the duration of the mutation, so any ownership-gated
+            # finalizer that fires concurrently fails closed against the
+            # squash token instead of matching a stale/absent record. A
+            # successor turn admitted after the squash simply replaces the
+            # entry; our release below is conditional and never clobbers it.
+            from api.config import register_session_writeback_owner
+            register_session_writeback_owner(sid, squash_owner_token)
             stats = _apply_squash(session, sid, summary)
         finally:
+            try:
+                from api.config import clear_session_writeback_owner_if_owned
+                clear_session_writeback_owner_if_owned(sid, squash_owner_token)
+            except Exception:
+                logger.warning("squash: writeback-owner release failed for %s", sid, exc_info=True)
             try:
                 lock.release()
             except RuntimeError:
