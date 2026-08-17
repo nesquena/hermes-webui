@@ -5,6 +5,10 @@
 
 ### Fixed
 
+- **Dotted Bedrock/Vertex model IDs get clean labels in the model picker.** Model IDs with dotted vendor prefixes (e.g. `anthropic.claude-*`) rendered awkwardly in the picker. They now get normalized display labels while the exact model IDs and provider grouping stay authoritative — distinct regional/vendor models remain separate entries, and live discovery still precedes the static fallback. Thanks @samfoy. (#6628)
+
+- **MCP dev dependency pinned to a compatible range.** The MCP SDK dev dependency was unpinned, so an incompatible 2.x install broke `mcp_server.py` with an `AttributeError`. It is now pinned to a compatible 1.x range with a bootstrap guard that exits with an actionable message on an incompatible version; the SDK remains optional (imports degrade gracefully when it is absent). Thanks @webtecnica. (#6616)
+
 - **Cancelling runs are no longer reattached on recovery.** A background run in the middle of cancellation could be resurrected by a reconnect/recovery reattach, producing a dying run that could double-deliver or churn. Recovery paths now exclude runs whose phase is `cancelling` (they stay busy but are not reattached), while genuinely-live runs still reattach; stale-cancelling reclamation is bounded (age ≥ 180s and absent from active streams) and idempotent. Thanks @allenliang2022. (#7096)
 
 - **GPT-5.6 models expose their full reasoning range.** The four GPT-5.6 model IDs support the `max` reasoning-effort level, but the capability filter capped them below that. The ceiling is now lifted for exactly those IDs on the OpenAI-family lanes (older GPT-5 and o-series ceilings unchanged), and `max` is offered only when the authoritative configured/live catalog includes it. Thanks @boudywho. (#7083)
