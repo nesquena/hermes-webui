@@ -439,7 +439,10 @@ def _mcp_wait_readiness(readiness):
     token set) so a late-finishing thread can never publish terminal
     state over the caller's outcome — but the thread POINTER is NOT
     cleared while execution continues, and a not-yet-started body sees
-    the cancel token and performs no discovery side effects.  If a retry
+    the cancel token and performs no discovery side effects.  The
+    retired generation's EVENT is signalled after publishing so peer
+    waiters subscribed to that generation observe the terminal 'failed'
+    promptly instead of sleeping out their own full cap.  If a retry
     started a newer generation mid-wait, the wait rides the newer run.
     """
     if readiness.status == "pending":
@@ -455,12 +458,21 @@ def _mcp_wait_readiness(readiness):
                 # Event fired but nothing published for this generation:
                 # the owner died mid-run or discovery outlived its bounds.
                 break
+        _retired_event = None
         if readiness.status == "pending" and readiness.gen == _gen:
             with _MCP_READINESS_LOCK:
                 if readiness.gen == _gen and readiness.status == "pending":
                     readiness.gen += 1
                     readiness.status = "failed"
                     readiness.cancel.set()
+                    _retired_event = readiness.event
+            if _retired_event is not None:
+                # Wake peer waiters subscribed to the retired generation
+                # (maintainer round 14): without this, a second
+                # same-profile turn already blocked on the event sleeps
+                # out its own full cap even though the shared result is
+                # terminal.
+                _retired_event.set()
     return readiness.status
 
 

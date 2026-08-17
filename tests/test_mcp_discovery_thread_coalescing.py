@@ -223,6 +223,58 @@ class TestGenerations:
         finally:
             streaming._MCP_READINESS_WAIT_CAP_S = _old_cap
 
+    def test_timeout_retirement_wakes_peer_waiters(self):
+        """A timeout retire must wake OTHER same-profile waiters promptly.
+
+        Regression (maintainer round 14): the first waiter that retires a
+        timed-out generation published 'failed' but never set the retired
+        generation's event, so a second same-profile waiter already
+        blocked on that event slept out its own full cap even though the
+        shared result was already terminal.
+        """
+        _old_cap = streaming._MCP_READINESS_WAIT_CAP_S
+        streaming._MCP_READINESS_WAIT_CAP_S = 0.4
+        try:
+            discover, started = _make_discover(2.0)  # finishes AFTER the cap
+            readiness = streaming._ensure_mcp_discovery(
+                "profile-h", discover, "th"
+            )
+
+            results = {}
+            t1 = threading.Thread(
+                target=lambda: results.setdefault(
+                    "w1", streaming._mcp_wait_readiness(readiness)
+                ),
+                name="w1",
+            )
+            t1.start()
+            time.sleep(0.25)  # stagger: w2 starts while w1 is still waiting
+
+            t0 = time.monotonic()
+            t2 = threading.Thread(
+                target=lambda: results.setdefault(
+                    "w2", streaming._mcp_wait_readiness(readiness)
+                ),
+                name="w2",
+            )
+            t2.start()
+            t1.join(timeout=5)
+            t2.join(timeout=5)
+            w2_elapsed = time.monotonic() - t0
+
+            assert results.get("w1") == "failed"
+            assert results.get("w2") == "failed"
+            assert w2_elapsed < 0.30, (
+                "the second waiter must wake from the retired generation's "
+                f"signal, not sleep out its own cap ({w2_elapsed:.2f}s)"
+            )
+            # Live owner pointer retained; a late finish cannot overwrite.
+            assert readiness.thread is not None
+            time.sleep(0.4)
+            assert readiness.status == "failed"
+        finally:
+            streaming._MCP_READINESS_WAIT_CAP_S = _old_cap
+
     def test_runner_skips_discovery_when_cancelled(self):
         """A cancelled runner performs NO discovery side effects.
 
