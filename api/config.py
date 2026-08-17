@@ -8473,6 +8473,8 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 )
                 with _sync_scope:
                     result = _invoke_models_rebuild(_build_available_models_uncached)
+                    if _build_authority.get("value") is None:
+                        _build_authority["value"] = _provider_publication_tuple()
                     with _cache_build_cv:
                         _authority_matches = _provider_publication_tuple() == _build_authority.get("value")
                         if _authority_matches:
@@ -8551,6 +8553,8 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             global _cache_build_in_progress, _available_models_cache
             global _available_models_cache_ts, _available_models_live_rebuild_ts
             global _available_models_cache_source_fingerprint
+            if _build_authority.get("value") is None:
+                _build_authority["value"] = _provider_publication_tuple()
             if (
                 _build_authority.get("value") is not None
                 and _provider_publication_tuple() != _build_authority["value"]
