@@ -222,6 +222,29 @@ def recover_pending_session_batch(session_dir: Path) -> dict:
         return _recover_pending_locked(session_dir)
 
 
+def run_startup_batch_recovery(session_dir: Path) -> dict:
+    """Replay the durable batch journal at boot, failing startup closed.
+
+    Unlike ordinary best-effort .bak repair, the batch journal is the authority
+    for resolving a possibly mixed lineage publication.  Serving the mixed
+    images would violate the archive endpoint's all-or-none contract, so an
+    unrecoverable journal aborts startup instead of merely being logged.
+    """
+    result = recover_pending_session_batch(session_dir)
+    if result.get("found"):
+        if not result.get("recovered"):
+            raise RuntimeError(
+                "session batch recovery remains incomplete: "
+                + ", ".join(result.get("errors") or ["unknown error"])
+            )
+        print(
+            f"[recovery] Recovered session batch {result.get('transaction_id')} "
+            f"via {result.get('decision')}.",
+            flush=True,
+        )
+    return result
+
+
 def _full_index_entries(session_dir: Path, update_map: dict[str, object]) -> list[dict]:
     import api.models as models
 

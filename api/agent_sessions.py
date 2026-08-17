@@ -1007,7 +1007,13 @@ def read_session_lineage_ids(
         rows = [dict(row) for row in conn.execute(
             f"SELECT id, parent_session_id, end_reason, started_at, ended_at, source, session_source{profile_projection} FROM sessions"
         )]
-    if profile is not None:
+    # Canonical profile equivalence (_profiles_match): missing/'default' rows
+    # and a renamed root profile are the same identity. A profile-local
+    # state.db may predate the optional sessions.profile column entirely; its
+    # rows all belong to the requesting profile, so no row-level filter can
+    # apply — the route's per-materialized-session visibility prevalidation
+    # remains the authority there.
+    if profile is not None and profile_projection:
         requested_profile = str(profile or "default").strip() or "default"
         rows = [
             row for row in rows

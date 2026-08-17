@@ -93,6 +93,33 @@ def test_lineage_ids_uses_renamed_root_profile_aliases(tmp_path, monkeypatch):
         profiles._invalidate_root_profile_cache()
 
 
+def test_lineage_ids_without_profile_column_stay_reachable_for_named_profiles(tmp_path):
+    """A profile-local state.db without sessions.profile must not 404 lineages.
+
+    Every row in such a database belongs to the requesting profile, so the
+    row-level profile filter cannot apply; the route's per-materialized-session
+    visibility prevalidation remains the profile authority.
+    """
+    db = tmp_path / "state.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE sessions (id TEXT, parent_session_id TEXT, end_reason TEXT, "
+        "started_at REAL, ended_at REAL, source TEXT, session_source TEXT)"
+    )
+    conn.executemany(
+        "INSERT INTO sessions VALUES (?,?,?,?,?,?,?)",
+        [
+            ("root", None, "compression", 1, 2, "cli", None),
+            ("tip", "root", None, 3, None, "cli", None),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    assert set(read_session_lineage_ids(db, "tip", "research")) == {"root", "tip"}
+    assert set(read_session_lineage_ids(db, "tip", "default")) == {"root", "tip"}
+
+
 @pytest.fixture
 def lineage_session_store(tmp_path, monkeypatch):
     import api.models as models
@@ -269,6 +296,71 @@ def test_committed_lineage_batch_journal_rolls_forward_on_recovery(
     assert recovered["decision"] == "commit"
     assert not journal.exists()
     _assert_cold_archive_parity(lineage_session_store, True)
+
+
+def test_startup_recovery_replays_batch_journal_through_production_wiring(
+    lineage_session_store,
+    monkeypatch,
+):
+    """server.py's recovery entrypoint replays a stale rollback journal itself."""
+    import api.session_batch_transaction as transaction
+    from api.session_recovery import run_startup_session_recovery
+
+    sessions = _lineage_sessions(lineage_session_store, archived=False)
+    before = _durable_images(lineage_session_store)
+    original_replace = transaction._replace_bytes
+    state = {"index_failed": False, "allow_recovery": False}
+
+    def fail_publish_and_compensation(path, payload):
+        if path.name == "_index.json" and not state["index_failed"]:
+            state["index_failed"] = True
+            raise OSError("injected index publication failure")
+        if state["index_failed"] and not state["allow_recovery"] and path.name == "lineage-root.json":
+            raise OSError("injected compensation failure")
+        return original_replace(path, payload)
+
+    monkeypatch.setattr(transaction, "_replace_bytes", fail_publish_and_compensation)
+    with pytest.raises(transaction.SessionBatchTransactionError):
+        transaction.commit_session_archive_batch(sessions, True)
+    assert (lineage_session_store / transaction._JOURNAL_NAME).exists()
+
+    state["allow_recovery"] = True
+    run_startup_session_recovery(lineage_session_store)
+
+    assert not (lineage_session_store / transaction._JOURNAL_NAME).exists()
+    assert _durable_images(lineage_session_store) == before
+    _assert_cold_archive_parity(lineage_session_store, False)
+
+
+def test_startup_recovery_fails_closed_on_unrecoverable_batch_journal(
+    lineage_session_store,
+    monkeypatch,
+):
+    """An unreplayable batch journal aborts startup before best-effort repair."""
+    import api.session_batch_transaction as transaction
+    import api.session_recovery as session_recovery
+
+    _lineage_sessions(lineage_session_store, archived=False)
+    (lineage_session_store / transaction._JOURNAL_NAME).write_text(
+        "{not json", encoding="utf-8"
+    )
+    legacy_calls = []
+    monkeypatch.setattr(
+        session_recovery,
+        "recover_all_sessions_on_startup",
+        lambda *args, **kwargs: legacy_calls.append((args, kwargs)) or {},
+    )
+
+    with pytest.raises(RuntimeError, match="session batch recovery remains incomplete"):
+        session_recovery.run_startup_session_recovery(lineage_session_store)
+
+    assert legacy_calls == []
+
+
+def test_server_startup_uses_fail_closed_recovery_entrypoint():
+    server_src = (ROOT / "server.py").read_text(encoding="utf-8")
+    assert "from api.session_recovery import run_startup_session_recovery" in server_src
+    assert "run_startup_session_recovery(SESSION_DIR)" in server_src
 
 
 @pytest.mark.parametrize(("initial", "target"), [(False, True), (True, False)])

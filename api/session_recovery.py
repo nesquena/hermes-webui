@@ -1088,6 +1088,38 @@ def recover_all_sessions_on_startup(
     }
 
 
+def run_startup_session_recovery(session_dir: Path) -> None:
+    """Run both startup recovery passes with their distinct failure contracts.
+
+    1. The durable lineage-batch journal is the all-or-none authority for a
+       possibly mixed multi-session publication: it must replay (or be absent)
+       before the server may serve sessions, so failures propagate and abort
+       startup instead of being logged (see api/session_batch_transaction.py).
+    2. The legacy #1558 transcript-shrink .bak repair remains best-effort and
+       never blocks startup.
+    """
+    from api.session_batch_transaction import run_startup_batch_recovery
+
+    run_startup_batch_recovery(session_dir)
+
+    try:
+        from api.models import _active_state_db_path
+
+        result = recover_all_sessions_on_startup(
+            session_dir,
+            rebuild_index=True,
+            state_db_path=_active_state_db_path(),
+        )
+        if result.get("restored"):
+            print(
+                f"[recovery] Restored {result['restored']}/{result['scanned']} "
+                f"sessions from .bak (see #1558).",
+                flush=True,
+            )
+    except Exception as exc:
+        print(f"[recovery] startup recovery failed: {exc}", flush=True)
+
+
 def _main() -> int:
     parser = argparse.ArgumentParser(description="Audit Hermes WebUI session recovery state")
     parser.add_argument("--audit", action="store_true", help="run a read-only recovery audit")
