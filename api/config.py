@@ -6959,7 +6959,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 # Detecting it here lets users who have both credentials configured find it in the
                 # picker without a manual config.yaml edit. Users without Codex OAuth will see
                 # picker entries but hit auth errors at inference time (#1189 known limitation).
-                _add_env_detected("openai-codex")
+                _add_env_detected("openai-codex")  # detected_providers.add("openai-codex") via the roster-aware sink
             if all_env.get("OPENROUTER_API_KEY"):
                 _add_env_detected("openrouter")
             if all_env.get("GOOGLE_API_KEY"):
@@ -7065,9 +7065,19 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 # Compare config keys and credential evidence in the same
                 # WebUI namespace; Agent aliases must not merge Google/Gemini
                 # or xAI identities in the picker (#6338).
-                _resolved_detected = {
-                    _canonicalise_provider_id(_pid) for _pid in detected_providers
+                _webui_evidence_aliases = {
+                    "gemini": {"gemini", "google"},
+                    "xai": {"xai", "x-ai"},
+                    "alibaba": {"alibaba", "qwen"},
                 }
+                _resolved_detected = set()
+                for _pid in detected_providers:
+                    _detected_canonical = _canonicalise_provider_id(_pid)
+                    _resolved_detected.update(
+                        _webui_evidence_aliases.get(
+                            _detected_canonical, {_detected_canonical}
+                        )
+                    )
                 _already_credentialed = _canonical in _resolved_detected
                 _admit_as_known = _is_known_provider and _already_credentialed
                 if not (_admit_as_known or _has_provider_route or _has_models_only_active_route):
