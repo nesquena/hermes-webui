@@ -8903,14 +8903,22 @@ def _limited_webui_messages_for_display(session, state_db_messages) -> list:
     )
 
 
-def _limited_webui_messages_for_display_with_sidecar(session, sidecar_messages, state_db_messages) -> list:
+def _limited_webui_messages_for_display_with_sidecar(
+    session,
+    sidecar_messages,
+    state_db_messages,
+    *,
+    merge_parent_lineage=False,
+) -> list:
     if sidecar_messages is None:
         sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)
     else:
         sidecar_messages = list(sidecar_messages or [])
     state_db_messages = list(state_db_messages or [])
     if not state_db_messages:
-        return _merged_webui_lineage_messages_for_display(session, sidecar_messages)
+        if merge_parent_lineage:
+            return _merged_webui_lineage_messages_for_display(session, sidecar_messages)
+        return sidecar_messages
     # NOTE: do not short-circuit to the sidecar when state.db has no strictly
     # newer rows. A state.db row whose timestamp is at-or-before the sidecar's
     # newest (recovery / edited-in-place / missing-timestamp cases) is still
@@ -8925,7 +8933,9 @@ def _limited_webui_messages_for_display_with_sidecar(session, sidecar_messages, 
         truncation_watermark=getattr(session, "truncation_watermark", None),
         truncation_boundary=getattr(session, "truncation_boundary", None),
     )
-    return _merged_webui_lineage_messages_for_display(session, merged_messages)
+    if merge_parent_lineage:
+        return _merged_webui_lineage_messages_for_display(session, merged_messages)
+    return merged_messages
 
 
 def _sidecar_file_exceeds_threshold(session_id, threshold_bytes) -> bool:
@@ -12990,6 +13000,10 @@ def handle_get(handler, parsed) -> bool:
             if is_messaging_session:
                 cli_messages = get_cli_session_messages(sid)
             elif load_messages:
+                foreign_source = cli_meta or {
+                    key: getattr(s, key, None)
+                    for key in ("source_tag", "raw_source", "session_source", "source")
+                }
                 if msg_limit is not None:
                     (
                         state_db_since_timestamp,
@@ -13062,6 +13076,9 @@ def handle_get(handler, parsed) -> bool:
                         s,
                         limited_sidecar_messages,
                         state_db_messages,
+                        merge_parent_lineage=(
+                            is_cli_session and not _session_source_is_webui(foreign_source)
+                        ),
                     )
                 else:
                     _all_msgs = _display_coordinate_messages(s, state_db_messages)
