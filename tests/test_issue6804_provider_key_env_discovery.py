@@ -190,6 +190,27 @@ def test_allowlist_priority_and_invalid_models_fall_through(monkeypatch, tmp_pat
     synthetic = next(group for group in result["groups"] if group["provider_id"] == "synthetic")
     assert any(model["id"].endswith("syn:large:text") for model in synthetic["models"]), synthetic
 
+
+def test_mapping_model_allowlist_stays_authoritative(monkeypatch, tmp_path):
+    old_cfg, old_mtime = _configure(
+        monkeypatch,
+        tmp_path,
+        models_marker={"syn:listed": {"label": "Synthetic listed"}},
+    )
+    calls = []
+    monkeypatch.setattr(
+        provider_discovery,
+        "fetch_models",
+        lambda connection: calls.append(connection.base_url) or [],
+    )
+    try:
+        result = config.get_available_models(force_refresh=True)
+    finally:
+        _restore(old_cfg, old_mtime)
+    synthetic = next(group for group in result["groups"] if group["provider_id"] == "synthetic")
+    assert [model["id"] for model in synthetic["models"]] == ["syn:listed"]
+    assert calls == []
+
     old_cfg, old_mtime = _configure(monkeypatch, tmp_path, models_marker=["syn:listed"])
     config.cfg["providers"]["synthetic"]["discover_models"] = False
     calls = []
