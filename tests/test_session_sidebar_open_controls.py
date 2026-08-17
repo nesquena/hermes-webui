@@ -301,3 +301,79 @@ def test_tagged_titles_and_focus_ring_fit_narrow_sidebar_in_browser():
         assert "inset" in result["rowBoxShadow"]
         assert re.search(r"\b2px\b", result["rowBoxShadow"])
         assert result["buttonOutlineStyle"] == "none"
+
+
+def test_tagged_inline_rename_preserves_input_width_in_narrow_sidebar():
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:  # pragma: no cover - dependency missing path
+        pytest.skip("playwright is unavailable; run the sidebar rename layout browser test")
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        page = browser.new_page(viewport={"width": 1024, "height": 240})
+        page.set_content(
+            """
+            <!doctype html>
+            <html class="dark">
+              <body>
+                <div class="probe">
+                  <div class="session-item active" data-sid="session-a">
+                    <div class="session-text">
+                      <div class="session-title-row">
+                        <div class="session-title-group">
+                          <input class="session-title-input" value="Visible conversation title">
+                          <span class="session-tag">#alpha</span>
+                          <span class="session-tag">#hyphenated-long-tag</span>
+                          <span class="session-tag">#gamma</span>
+                          <span class="session-tag">#delta</span>
+                        </div>
+                        <span class="session-time">now</span>
+                      </div>
+                    </div>
+                    <div class="session-actions"></div>
+                  </div>
+                </div>
+              </body>
+            </html>
+            """
+        )
+        page.add_style_tag(path=str(ROOT / "static" / "style.css"))
+        page.add_style_tag(content="body{margin:0}.probe{margin:8px}")
+
+        rename_input = page.locator(".session-title-input")
+        rename_input.focus()
+        page.wait_for_timeout(100)
+
+        metrics = []
+        for viewport_width, sidebar_width in ((1024, 180), (420, 280)):
+            page.set_viewport_size({"width": viewport_width, "height": 240})
+            page.locator(".probe").evaluate(
+                "(el, width) => { el.style.width = width + 'px'; }", sidebar_width
+            )
+            metrics.append(
+                page.locator(".session-item").evaluate(
+                    """
+                    row => {
+                      const titleRow = row.querySelector('.session-title-row');
+                      const input = row.querySelector('.session-title-input');
+                      const tags = Array.from(row.querySelectorAll('.session-tag'));
+                      return {
+                        inputWidth: input.getBoundingClientRect().width,
+                        rowClientWidth: titleRow.clientWidth,
+                        rowScrollWidth: titleRow.scrollWidth,
+                        tagsHidden: tags.every(tag => getComputedStyle(tag).display === 'none'),
+                      };
+                    }
+                    """
+                )
+            )
+        browser.close()
+
+    for result in metrics:
+        assert result["tagsHidden"] is True
+        assert result["inputWidth"] >= 80
+        assert result["rowScrollWidth"] <= result["rowClientWidth"] + 1
