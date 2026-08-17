@@ -244,6 +244,42 @@ def test_profile_goal_context_isolated_across_threads(monkeypatch, tmp_path):
     assert get_hermes_home() == original_home
 
 
+def test_profile_goal_falls_back_when_session_db_path_is_frozen(monkeypatch, tmp_path):
+    """A context API alone cannot make an import-time SessionDB path profile-safe."""
+    from api import goals as webui_goals
+    from hermes_cli import goals as native_goals
+    import hermes_state
+
+    frozen_db_path = tmp_path / "frozen-home" / "state.db"
+    monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", frozen_db_path)
+    webui_goals._DB_CACHE.clear()
+    native_goals._DB_CACHE.clear()
+
+    profile_a = tmp_path / "profile-a"
+    profile_b = tmp_path / "profile-b"
+    try:
+        assert webui_goals.goal_command_payload(
+            "shared-session", "goal-a", profile_home=profile_a
+        )["ok"] is True
+        assert webui_goals.goal_command_payload(
+            "shared-session", "goal-b", profile_home=profile_b
+        )["ok"] is True
+
+        assert webui_goals.goal_state_snapshot(
+            "shared-session", profile_home=profile_a
+        ).goal == "goal-a"
+        assert webui_goals.goal_state_snapshot(
+            "shared-session", profile_home=profile_b
+        ).goal == "goal-b"
+    finally:
+        for cache in (webui_goals._DB_CACHE, native_goals._DB_CACHE):
+            for db in cache.values():
+                close = getattr(db, "close", None)
+                if close is not None:
+                    close()
+            cache.clear()
+
+
 def test_profile_goal_context_resets_when_native_call_raises(monkeypatch, tmp_path):
     """A failed delegated call cannot leak its profile into the next task."""
     from api import goals as webui_goals

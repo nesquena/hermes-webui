@@ -82,6 +82,35 @@ def _profile_home_context_api():
     return set_hermes_home_override, reset_hermes_home_override
 
 
+def _native_profile_context_api(profile_home: str | Path):
+    """Return context setters only when SessionDB resolves that context at call time."""
+    context_api = _profile_home_context_api()
+    if context_api is None:
+        return None
+    try:
+        from hermes_state import _default_db_path  # type: ignore
+    except Exception:  # pragma: no cover - depends on installed hermes-agent
+        return None
+    if not callable(_default_db_path):
+        return None
+
+    home = Path(profile_home).expanduser().resolve()
+    set_home, reset_home = context_api
+    try:
+        token = set_home(home)
+    except Exception:  # pragma: no cover - depends on installed hermes-agent
+        return None
+    try:
+        resolved_db_path = Path(_default_db_path()).expanduser().resolve()
+    except Exception:  # pragma: no cover - depends on installed hermes-agent
+        return None
+    finally:
+        reset_home(token)
+    if resolved_db_path != home / "state.db":
+        return None
+    return context_api
+
+
 class _ProfileGoalManager:
     """Run the native GoalManager under a context-local profile home."""
 
@@ -307,8 +336,8 @@ def _manager(session_id: str, *, profile_home: str | Path | None = None):
     if GoalManager is None:
         return None
     if profile_home and GoalManager is _NativeGoalManager and GoalState is not None:
-        context_api = _profile_home_context_api()
         try:
+            context_api = _native_profile_context_api(profile_home)
             if context_api is not None:
                 return _ProfileGoalManager(
                     session_id=session_id,

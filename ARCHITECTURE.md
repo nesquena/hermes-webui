@@ -402,17 +402,21 @@ Hermes Agent's native `GoalManager` is the authoritative owner of goal evaluatio
 continuation decisions, wait barriers, failure counters, contracts, subgoals, and
 `state.db` persistence.
 
-For a profile-scoped WebUI session, the bridge binds that profile's Hermes home with
-the Agent's context-local `set_hermes_home_override()` API before constructing or
-calling the native manager. The override is reset in a `finally` block after every
-operation, so concurrent sessions using the same session ID under different profiles
-cannot cross-read or cross-write goal state. Goal snapshot rollback uses the same
-scoped native persistence path.
+For a profile-scoped WebUI session, the bridge delegates only when the Agent exposes
+both the context-local `set_hermes_home_override()` API and call-time default
+`SessionDB` path resolution. The bridge probes the resolved default path under the
+selected context before constructing the native manager, then binds that profile's
+Hermes home before every native call. The override is reset in a `finally` block after
+every operation, so concurrent sessions using the same session ID under different
+profiles cannot cross-read or cross-write goal state. Goal snapshot rollback uses the
+same scoped native persistence path.
 
-Older Hermes Agent versions that do not expose the context-local home API continue
-through `_LegacyProfileGoalManager`, which pins persistence to the selected profile's
-explicit `state.db` path. Keep this fallback compatibility-only: new goal semantics
-belong in Hermes Agent's native manager rather than a second WebUI implementation.
+Older Hermes Agent versions that lack either capability continue through
+`_LegacyProfileGoalManager`, which pins persistence to the selected profile's explicit
+`state.db` path. This includes intermediate versions whose context API is present but
+whose default `SessionDB()` path remains frozen at module import. Keep this fallback
+compatibility-only: new goal semantics belong in Hermes Agent's native manager rather
+than a second WebUI implementation.
 
 ---
 
