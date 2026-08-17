@@ -2732,6 +2732,38 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
     )
     custom_providers = cfg.get('custom_providers', [])
     if isinstance(custom_providers, list) and not _skip_custom_providers:
+        # Disambiguation guard: when two custom_providers[] entries both list the
+        # same bare model id (e.g. dogapi and packyapi both advertise
+        # 'claude-sonnet-5'), a plain first-match scan routes on config WRITE
+        # ORDER — silently hijacking the model to whichever entry appears first,
+        # regardless of the active provider/base_url the user actually configured.
+        # If the ACTIVE provider is itself a named custom provider (config_provider
+        # resolved to 'custom:<slug>', including via model.base_url → named-slug
+        # matching), prefer THAT entry when it also owns the model, so an explicit
+        # active endpoint wins over an overlapping earlier entry. Falls through to
+        # the ordered scan below when the active provider is bare 'custom' / not a
+        # named custom entry, or when it doesn't list this model.
+        _active_custom_slug = ''
+        if isinstance(config_provider, str) and config_provider.startswith('custom:'):
+            _active_custom_slug = config_provider
+        if _active_custom_slug:
+            for entry in custom_providers:
+                if not isinstance(entry, dict):
+                    continue
+                entry_name = (entry.get('name') or '').strip()
+                if not entry_name:
+                    continue
+                if _custom_provider_slug_from_name(entry_name) != _active_custom_slug:
+                    continue
+                entry_model = (entry.get('model') or '').strip()
+                entry_base_url = (entry.get('base_url') or '').strip()
+                entry_model_ids = set()
+                if entry_model:
+                    entry_model_ids.add(entry_model)
+                entry_model_ids.update(_configured_model_ids(entry.get('models')))
+                if model_id in entry_model_ids:
+                    return model_id, _active_custom_slug, entry_base_url or None
+                break
         for entry in custom_providers:
             if not isinstance(entry, dict):
                 continue

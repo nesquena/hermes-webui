@@ -253,6 +253,83 @@ def test_custom_provider_model_with_slash_routes_to_named_custom_provider():
     assert base_url == 'http://lmstudio.local:1234/v1'
 
 
+# ── Overlapping custom_providers[] model ids — active endpoint wins ─────────
+
+def test_overlapping_custom_providers_active_base_url_wins_not_config_order():
+    """When two custom_providers[] list the SAME bare model id, routing must
+    follow the ACTIVE provider (resolved from model.base_url → named slug), NOT
+    config write order.
+
+    Real-world repro: dogapi and packyapi both advertise 'claude-sonnet-5';
+    dogapi is written FIRST in config. A plain first-match scan hijacked the
+    model to dogapi even though model.base_url pointed at packyapi. The active
+    endpoint the user configured must win.
+    """
+    custom_providers = [
+        {'name': 'dogapi', 'base_url': 'https://www.dogapi.cc/v1',
+         'models': ['claude-sonnet-5', 'gpt-5.6-sol', 'musk-4.5']},
+        {'name': 'packyapi', 'base_url': 'https://www.packyapi.ai/v1',
+         'models': ['claude-sonnet-5', 'claude-opus-5']},
+    ]
+    # Active endpoint is packyapi (bare 'custom' + base_url resolves to the slug).
+    model, provider, base_url = _resolve_with_config(
+        'claude-sonnet-5',
+        provider='custom',
+        base_url='https://www.packyapi.ai/v1',
+        custom_providers=custom_providers,
+    )
+    assert provider == 'custom:packyapi', (
+        f"shared model must route to the ACTIVE packyapi endpoint, got {provider!r}"
+    )
+    assert base_url == 'https://www.packyapi.ai/v1'
+
+
+def test_overlapping_custom_providers_unique_model_still_routes_by_ownership():
+    """A model that only ONE overlapping provider lists still routes to that
+    provider even when the active endpoint is the other one — the active-slug
+    guard only claims models the active provider actually owns, then falls
+    through to the ordered ownership scan.
+    """
+    custom_providers = [
+        {'name': 'dogapi', 'base_url': 'https://www.dogapi.cc/v1',
+         'models': ['claude-sonnet-5', 'gpt-5.6-sol', 'musk-4.5']},
+        {'name': 'packyapi', 'base_url': 'https://www.packyapi.ai/v1',
+         'models': ['claude-sonnet-5', 'claude-opus-5']},
+    ]
+    # Active endpoint packyapi, but 'gpt-5.6-sol' is dogapi-only → must go dogapi.
+    model, provider, base_url = _resolve_with_config(
+        'gpt-5.6-sol',
+        provider='custom',
+        base_url='https://www.packyapi.ai/v1',
+        custom_providers=custom_providers,
+    )
+    assert provider == 'custom:dogapi', (
+        f"dogapi-only model must still route to dogapi, got {provider!r}"
+    )
+    assert base_url == 'https://www.dogapi.cc/v1'
+
+
+def test_overlapping_custom_providers_bare_custom_no_base_url_keeps_order():
+    """With a bare 'custom' provider and NO base_url to disambiguate, the active
+    slug can't be resolved, so the legacy config-order first-match behaviour is
+    preserved (no regression for users who never set a base_url).
+    """
+    custom_providers = [
+        {'name': 'dogapi', 'base_url': 'https://www.dogapi.cc/v1',
+         'models': ['claude-sonnet-5']},
+        {'name': 'packyapi', 'base_url': 'https://www.packyapi.ai/v1',
+         'models': ['claude-sonnet-5']},
+    ]
+    model, provider, base_url = _resolve_with_config(
+        'claude-sonnet-5',
+        provider='custom',
+        custom_providers=custom_providers,
+    )
+    assert provider == 'custom:dogapi', (
+        f"with no base_url to disambiguate, first-match order is preserved, got {provider!r}"
+    )
+
+
 # ── #3872: bare ``custom`` provider is a vendor-routing proxy — preserve the
 #    full model id (the prefix is intrinsic). #433's redundant-prefix strip is
 #    scoped to real first-party providers (provider=openai + proxy base_url),
