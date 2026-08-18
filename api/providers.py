@@ -43,6 +43,7 @@ from api.config import (
     _pool_entry_payloads,
     _read_live_provider_model_ids,
     _read_visible_codex_cache_model_ids,
+    _resolve_config_ref_value,
     _save_yaml_config_file,
     _thread_local_env_value,
     get_config,
@@ -1162,7 +1163,7 @@ def _provider_has_shadowed_codex_oauth_value(provider_id: str) -> bool:
             if isinstance(cp, dict) and _custom_provider_name_matches(provider_id, cp.get("name")):
                 cp_key = cp.get("api_key")
                 if isinstance(cp_key, str) and cp_key.startswith("${") and cp_key.endswith("}"):
-                    values.append(_thread_local_env_value(cp_key[2:-1]))
+                    values.append(_resolve_config_ref_value(cp_key))
                 else:
                     values.append(cp_key)
     return any(_looks_like_codex_oauth_token(str(value or "")) for value in values)
@@ -1381,7 +1382,7 @@ def _get_provider_api_key(provider_id: str) -> str | None:
             if _custom_provider_name_matches(provider_id, cp.get("name")):
                 cp_key = str(cp.get("api_key") or "").strip()
                 if cp_key.startswith("${") and cp_key.endswith("}"):
-                    return _thread_local_env_value(cp_key[2:-1]).strip() or None
+                    return _resolve_config_ref_value(cp_key).strip() or None
                 if _provider_value_counts_as_api_key(provider_id, cp_key):
                     return cp_key
     # Fallback: try credential pool (e.g. bothub key stored via auth.json)
@@ -2855,8 +2856,7 @@ def get_providers() -> dict[str, Any]:
             cp_has_key = bool(cp_api_key.strip())
             # Replace env var reference to check actual value
             if cp_api_key.startswith("${") and cp_api_key.endswith("}"):
-                env_var = cp_api_key[2:-1]
-                cp_has_key = bool(_thread_local_env_value(env_var).strip())
+                cp_has_key = bool(_resolve_config_ref_value(cp_api_key).strip())
             # Fallback: check credential pool (key added via hermes auth add)
             if not cp_has_key:
                 try:
