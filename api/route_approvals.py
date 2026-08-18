@@ -823,6 +823,29 @@ def resolve_gateway_pending_local_all(
     return len(targets), head, total
 
 
+def settle_gateway_pending_local_notification(
+    session_key: str,
+    approval: dict,
+) -> tuple[bool, dict | None, int]:
+    """Auto-resolve or publish one local approval at the YOLO handoff boundary.
+
+    The Agent adds its blocking entry before invoking WebUI's notify callback.
+    Serialize that callback with session YOLO commit/disable so a waiter arriving
+    after a drain snapshot cannot be parked behind an already-committed enable.
+    Run-backed approvals stay on the Runs API path and are never resolved here.
+    """
+    with gateway_yolo_handoff(session_key):
+        run_id = str((approval or {}).get("run_id") or "").strip()
+        if not run_id and is_session_yolo_enabled(session_key):
+            _resolved, head, total = resolve_gateway_pending_local_all(
+                session_key,
+                "once",
+            )
+            return True, head, total
+        head, total = submit_gateway_pending_mirror(session_key, approval)
+        return False, head, total
+
+
 def submit_pending(session_key: str, approval: dict) -> None:
     """Append a pending approval to the per-session queue.
 

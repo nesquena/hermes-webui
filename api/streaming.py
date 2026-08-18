@@ -8732,22 +8732,27 @@ def _run_agent_streaming(
         try:
             try:
                 from api.route_approvals import (
-                    submit_gateway_pending_mirror as _submit_pending_for_polling,
+                    settle_gateway_pending_local_notification as _settle_pending_for_polling,
                     retire_gateway_pending_mirror as _retire_gateway_pending_mirror,
                 )
                 def _cleanup_gateway_pending_mirror():
                     _retire_gateway_pending_mirror(session_id)
             except ImportError:
-                _submit_pending_for_polling = None
+                _settle_pending_for_polling = None
                 _cleanup_gateway_pending_mirror = None
             from tools.approval import (
                 register_gateway_notify as _reg_notify,
                 unregister_gateway_notify as _unreg_notify,
             )
             def _approval_notify_cb(approval_data):
-                if _submit_pending_for_polling is not None:
+                if _settle_pending_for_polling is not None:
                     try:
-                        head, total = _submit_pending_for_polling(session_id, approval_data)
+                        auto_resolved, head, total = _settle_pending_for_polling(
+                            session_id,
+                            approval_data,
+                        )
+                        if auto_resolved and head is None:
+                            return
                         approval_data = {**(head or approval_data), "pending_count": total}
                     except Exception:
                         logger.warning("Failed to mirror approval into WebUI polling state", exc_info=True)

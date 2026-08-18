@@ -7328,8 +7328,13 @@ function hideApprovalCard(force=false) {
       return;
     }
   }
+  const preserveDisplayedOwner = _approvalOwnerIdentityMatches(
+    _approvalDisplayedOwner,
+    _approvalResponding,
+  );
   _approvalSessionId = null;
   _resetApprovalCardState();
+  if (!preserveDisplayedOwner) _approvalDisplayedOwner = null;
   card.classList.remove("visible");
   card.classList.remove("collapsed");
   _setPromptFlyoutHidden(card, true);
@@ -7344,6 +7349,7 @@ let _approvalCurrentId = null;  // approval_id of the card currently shown
 let _approvalPendingBySession = new Map();
 let _approvalResponding = null;
 let _approvalClearedOwner = null;
+let _approvalDisplayedOwner = null;
 
 const _DISMISSED_APPROVALS_KEY = 'hermes_dismissed_approvals';
 
@@ -7441,26 +7447,52 @@ function _approvalMirrorOwnerFor(sid, approvalId) {
   return runId && mirrorToken ? {runId, mirrorToken} : {runId: '', mirrorToken: ''};
 }
 
+function _approvalOwnerForPending(sid, pending) {
+  if (!pending) return null;
+  const approvalId = pending.approval_id || null;
+  if (!sid || !approvalId) return null;
+  const runId = String(pending.run_id || '').trim();
+  const mirrorToken = String(pending._gateway_mirror_token || '').trim();
+  return {
+    sid,
+    approvalId,
+    runId: runId && mirrorToken ? runId : '',
+    mirrorToken: runId && mirrorToken ? mirrorToken : '',
+  };
+}
+
+function _approvalOwnerIdentityMatches(left, right) {
+  return !!(
+    left &&
+    right &&
+    left.sid === right.sid &&
+    left.approvalId === right.approvalId &&
+    left.runId === right.runId &&
+    left.mirrorToken === right.mirrorToken
+  );
+}
+
 function _captureApprovalResponseOwner() {
   const card = $("approvalCard");
   const sid = _approvalSessionId;
   const approvalId = _approvalCurrentId;
   if (!card || !card.classList.contains("visible") || !sid || !approvalId) return null;
   if (!S.session || S.session.session_id !== sid) return null;
-  return {sid, generation: _loadSessionGeneration, approvalId, ..._approvalMirrorOwnerFor(sid, approvalId)};
+  if (
+    !_approvalDisplayedOwner ||
+    _approvalDisplayedOwner.sid !== sid ||
+    _approvalDisplayedOwner.approvalId !== approvalId
+  ) return null;
+  return {..._approvalDisplayedOwner, generation: _loadSessionGeneration};
 }
 
 function _approvalResponseOwnerIsCurrent(owner) {
-  const mirrorOwner = owner ? _approvalMirrorOwnerFor(owner.sid, owner.approvalId) : null;
   return !!(
     owner &&
     S.session &&
     S.session.session_id === owner.sid &&
     _loadSessionGeneration === owner.generation &&
-    _approvalSessionId === owner.sid &&
-    _approvalCurrentId === owner.approvalId &&
-    mirrorOwner.runId === owner.runId &&
-    mirrorOwner.mirrorToken === owner.mirrorToken
+    _approvalOwnerIdentityMatches(_approvalDisplayedOwner, owner)
   );
 }
 
@@ -7483,6 +7515,13 @@ function _approvalResponseMatches(
 function _releaseApprovalResponseOwner(owner) {
   if (_approvalResponseMatches(owner.sid, owner.approvalId, owner.generation, owner)) {
     _approvalResponding = null;
+  }
+  const card = $("approvalCard");
+  if (
+    _approvalOwnerIdentityMatches(_approvalDisplayedOwner, owner) &&
+    (!card || !card.classList.contains("visible"))
+  ) {
+    _approvalDisplayedOwner = null;
   }
 }
 
@@ -7541,6 +7580,7 @@ function showApprovalCard(pending, pendingCount) {
   $("approvalCmd").textContent = cmd;
   _approvalSessionId = sid;
   _approvalCurrentId = pending.approval_id || null;
+  _approvalDisplayedOwner = _approvalOwnerForPending(sid, pending);
   _approvalSignature = sig;
   // Show "1 of N" counter when multiple approvals are queued
   const counter = $("approvalCounter");
