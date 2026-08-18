@@ -158,10 +158,13 @@ def reconcile_gateway_pending_mirror_locked(session_key: str) -> tuple[dict | No
     # submit_gateway_pending_mirror leaves deliberately unbound) must never
     # suppress the live producer's token, or A masks the real pending approval
     # B — B never surfaces as the head and can't be actioned, while responding
-    # to A resolves nothing. Only the authoritative head's mirror may survive
-    # while a producer exists; tokenless-orphan retention is reserved for the
-    # genuine no-producer case (#7093), which lands here with an empty
-    # `live_gateway_queue` and therefore a `None` `live_token` anyway.
+    # to A resolves nothing. While any producer is live, a mirror survives only
+    # if it is bound to some live producer's own token — the head's via
+    # `live_token`, a non-head producer's via `live_local_tokens` (which is what
+    # keeps a non-head mirror resolvable) — so unmatched and tokenless copies
+    # are discarded instead of masking a real one. Tokenless-orphan retention is
+    # reserved for the genuine no-producer case (#7093), which lands here with an
+    # empty `live_gateway_queue` and therefore a `None` `live_token` anyway.
     live_local_tokens: set[str] = set()
     for live_entry in live_gateway_queue:
         live_data = getattr(live_entry, "data", None) or {}
