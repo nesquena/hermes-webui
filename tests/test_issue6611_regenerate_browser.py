@@ -93,9 +93,11 @@ def test_reporter_flow_keeps_one_prompt_and_adopts_one_accepted_stream():
 def test_issue_artifact_regeneration_leaves_one_user_row():
     artifact = json.loads(ISSUE_ARTIFACT.read_text(encoding="utf-8"))
     assert artifact["number"] == 6611
+    artifact_rows = _issue_artifact_messages()
     result = _run_node("success")
     assert [row["role"] for row in result["messages"]].count("user") == 1
     assert [row["role"] for row in result["messages"]] == ["user"]
+    assert result["messages"][0]["content"] == artifact_rows[0]["content"]
 
 
 def test_normal_full_load_adopts_and_clears_regeneration_revision():

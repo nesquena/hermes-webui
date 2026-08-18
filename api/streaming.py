@@ -7450,6 +7450,8 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
         'timestamp': recovered_ts,
         '_recovered': True,
     }
+    if str(pending_source or '').strip().lower() == 'fork':
+        recovered['_fork_child_turn'] = True
     stamp_message_source(recovered, pending_source)
     if pending_attachments:
         recovered['attachments'] = pending_attachments

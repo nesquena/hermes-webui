@@ -1,14 +1,37 @@
 import copy
+import json
+import re
+from types import SimpleNamespace
 from pathlib import Path
+
+import pytest
 
 from api.models import Session
 from api.session_ops import (
+    RegenerationUnavailable,
     RegenerationPlan,
     apply_regeneration_plan,
     plan_regeneration,
     restore_regeneration_state,
     snapshot_regeneration_state,
 )
+
+
+ISSUE_ARTIFACT = Path(__file__).parents[1].parent / ".claude" / "pr-sweep" / "bodies" / "hermes-webui-issue-6611.json"
+
+
+def _issue_artifact_messages():
+    artifact = json.loads(ISSUE_ARTIFACT.read_text(encoding="utf-8"))
+    reproduction = artifact["body"].split("## Reproduction on current master", 1)[1]
+    block = reproduction.split("```", 2)[1]
+    rows = [
+        {"role": role, "content": content}
+        for role, content in re.findall(
+            r"\{role:\s*'([^']+)',\s*content:\s*'([^']+)'", block
+        )
+    ]
+    assert [row["role"] for row in rows] == ["user", "assistant"]
+    return rows
 
 
 def _session():
@@ -101,6 +124,191 @@ def test_early_stale_cleanup_mutation_is_restored_before_rejected_start():
     snapshot_offset = source.index("regeneration_snapshot = snapshot_regeneration_state(s)", chat_start)
     cleanup_offset = source.index("_clear_stale_stream_state(s)", snapshot_offset)
     assert snapshot_offset < cleanup_offset
+    assert "regeneration_snapshot = snapshot_regeneration_state(s)" in source[cleanup_offset:]
+    assert "regeneration_persisted_mutation = False" in source[cleanup_offset:]
+
+
+def test_locked_stale_plan_does_not_restore_a_request_time_snapshot(monkeypatch):
+    from api import routes
+
+    session = _session()
+    request_snapshot = copy.deepcopy(session.__dict__)
+    session.active_stream_id = "accepted-after-browser-validation"
+    current_state = copy.deepcopy(session.__dict__)
+
+    def stale_plan(*_args, **_kwargs):
+        raise RegenerationUnavailable("stale_regeneration_revision")
+
+    monkeypatch.setattr("api.session_ops.plan_regeneration", stale_plan)
+    result = routes._start_regeneration_stream_locked(
+        session,
+        turn=SimpleNamespace(revision="old-revision"),
+        workspace="C:/workspace",
+        model="model",
+        model_provider="provider",
+        normalized_model=False,
+        diag=None,
+        goal_related=False,
+        source="webui",
+        moa_config=None,
+        backend_is_gateway=False,
+        transaction_snapshot=request_snapshot,
+    )
+    assert result["code"] == "stale_regeneration_revision"
+    assert result["_regeneration_locked_plan_rejected"] is True
+    assert session.__dict__ == current_state
+
+
+def test_locked_unexpected_plan_error_does_not_restore_a_request_time_snapshot(monkeypatch):
+    from api import routes
+
+    session = _session()
+    request_snapshot = copy.deepcopy(session.__dict__)
+    session.active_stream_id = "accepted-after-browser-validation"
+    current_state = copy.deepcopy(session.__dict__)
+
+    def unexpected_plan(*_args, **_kwargs):
+        raise RuntimeError("plan failed")
+
+    monkeypatch.setattr("api.session_ops.plan_regeneration", unexpected_plan)
+    with pytest.raises(RuntimeError, match="plan failed"):
+        routes._start_regeneration_stream_locked(
+            session,
+            turn=SimpleNamespace(revision="old-revision"),
+            workspace="C:/workspace",
+            model="model",
+            model_provider="provider",
+            normalized_model=False,
+            diag=None,
+            goal_related=False,
+            source="webui",
+            moa_config=None,
+            backend_is_gateway=False,
+            transaction_snapshot=request_snapshot,
+        )
+    assert session.__dict__ == current_state
+
+
+def test_prepare_mirrors_active_turn_token_to_context_before_timestamp_mutation(monkeypatch):
+    from api import routes
+
+    session = _session()
+    retained_user = session.messages[0]
+    retained_user["timestamp"] = 10
+    session.context_messages[0]["timestamp"] = 10
+    monkeypatch.setattr(routes, "register_session_writeback_owner", lambda *_args: None)
+    routes._prepare_chat_start_session_for_stream(
+        session,
+        msg="prompt",
+        attachments=[],
+        workspace="C:/workspace",
+        model="model",
+        model_provider="provider",
+        stream_id="token-parity-stream",
+        started_at=99.0,
+        retained_user=retained_user,
+        defer_save=True,
+    )
+    assert retained_user["timestamp"] == 99.0
+    assert session.context_messages[0]["timestamp"] == 99.0
+    assert session.context_messages[0]["_active_turn_token"] == retained_user["_active_turn_token"]
+
+
+def test_prepare_marks_new_fork_turn_in_eager_materialization(monkeypatch):
+    from api import routes
+    from api.streaming import _materialize_active_turn_user
+
+    session = Session(
+        session_id="fork-prepare-6611",
+        messages=[],
+        context_messages=[],
+        session_source="fork",
+        parent_session_id="parent-6611",
+    )
+    monkeypatch.setattr(routes, "register_session_writeback_owner", lambda *_args: None)
+    monkeypatch.setattr(routes, "get_webui_session_save_mode", lambda: "eager")
+    routes._prepare_chat_start_session_for_stream(
+        session,
+        msg="new fork prompt",
+        attachments=[],
+        workspace="C:/workspace",
+        model="model",
+        model_provider="provider",
+        stream_id="fork-prepare-stream",
+        started_at=99.0,
+        defer_save=True,
+    )
+    assert len(session.messages) == 1
+    assert session.messages[0]["_fork_child_turn"] is True
+
+    deferred = Session(
+        session_id="fork-deferred-6611",
+        messages=[],
+        context_messages=[],
+        session_source="fork",
+        parent_session_id="parent-6611",
+    )
+    routes._prepare_chat_start_session_for_stream(
+        deferred,
+        msg="deferred fork prompt",
+        attachments=[],
+        workspace="C:/workspace",
+        model="model",
+        model_provider="provider",
+        stream_id="fork-deferred-stream",
+        started_at=100.0,
+        defer_save=True,
+    )
+    materialized = _materialize_active_turn_user(
+        {
+            "text": deferred.pending_user_message,
+            "source": deferred.pending_user_source,
+            "timestamp": deferred.pending_started_at,
+        },
+        deferred.pending_user_message,
+        deferred.pending_user_source,
+    )
+    assert materialized["_fork_child_turn"] is True
+
+
+def test_issue_artifact_rows_follow_production_regeneration_and_error_settlement(monkeypatch):
+    from api import routes
+    from api.session_ops import apply_regeneration_plan, plan_regeneration
+    from api.streaming import _materialize_pending_user_turn_before_error
+
+    rows = _issue_artifact_messages()
+    session = Session(
+        session_id="artifact-production-6611",
+        messages=copy.deepcopy(rows),
+        context_messages=copy.deepcopy(rows),
+        workspace="C:/workspace",
+    )
+    plan = plan_regeneration(session)
+    assert apply_regeneration_plan(session, plan)
+    monkeypatch.setattr(routes, "register_session_writeback_owner", lambda *_args: None)
+    routes._prepare_chat_start_session_for_stream(
+        session,
+        msg=rows[0]["content"],
+        attachments=[],
+        workspace="C:/workspace",
+        model="model",
+        model_provider="provider",
+        stream_id="artifact-production-stream",
+        started_at=99.0,
+        retained_user=session.messages[-1],
+        defer_save=True,
+    )
+    assert [row["role"] for row in session.messages].count("user") == 1
+    assert session.messages[0]["content"] == rows[0]["content"]
+    assert _materialize_pending_user_turn_before_error(session) is False
+    session.active_stream_id = None
+    session.pending_user_message = None
+    session.pending_attachments = []
+    session.pending_started_at = None
+    session.pending_user_source = None
+    session.messages.append({"role": "assistant", "content": "provider failed", "_error": True})
+    assert [row["role"] for row in session.messages] == ["user", "assistant"]
+    assert [row["content"] for row in session.messages if row["role"] == "user"] == [rows[0]["content"]]
 
 
 def test_locked_start_always_replans_after_browser_validation():

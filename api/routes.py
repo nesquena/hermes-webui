@@ -21736,6 +21736,8 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
             latest_text = " ".join(str(latest.get("content") or "").split())
             msg_text = " ".join(str(msg or "").split())
             if latest_text == msg_text:
+                if str(source or "").strip().lower() == "fork":
+                    latest["_fork_child_turn"] = True
                 return
     user_msg = {"role": "user", "content": msg}
     from api.process_event_utils import build_active_turn_token, stamp_message_source
@@ -21745,6 +21747,8 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
         source,
         active_turn_token=build_active_turn_token(getattr(s, "active_stream_id", None), started_at),
     )
+    if str(source or "").strip().lower() == "fork":
+        user_msg["_fork_child_turn"] = True
     if isinstance(started_at, (int, float)) and started_at > 0:
         user_msg["timestamp"] = float(started_at)
     if attachments:
@@ -21795,6 +21799,11 @@ def _prepare_chat_start_session_for_stream(
     a normal session message. Empty sessions are never saved here because this
     helper only runs after a non-empty message is validated.
     """
+    effective_source = (
+        "fork"
+        if str(getattr(s, "session_source", None) or "").strip().lower() == "fork"
+        else source
+    )
     s.workspace = workspace
     s.model = model
     s.model_provider = model_provider
@@ -21804,26 +21813,34 @@ def _prepare_chat_start_session_for_stream(
     s.pending_user_message = msg
     s.pending_attachments = attachments
     s.pending_started_at = started_at if started_at is not None else time.time()
-    s.pending_user_source = source
+    s.pending_user_source = effective_source
     if retained_user is not None:
         from api.process_event_utils import build_active_turn_token
 
+        retained_id = retained_user.get("id") or retained_user.get("message_id")
+        retained_old_timestamp = retained_user.get("timestamp")
+        retained_old_content = retained_user.get("content")
         retained_user["timestamp"] = s.pending_started_at
         active_turn_token = build_active_turn_token(stream_id, s.pending_started_at)
         retained_user["_active_turn_token"] = active_turn_token
-        retained_id = retained_user.get("id") or retained_user.get("message_id")
-        retained_timestamp = retained_user.get("timestamp")
+        if str(effective_source or "").strip().lower() == "fork":
+            retained_user["_fork_child_turn"] = True
         for context_row in reversed(list(getattr(s, "context_messages", None) or [])):
             if not isinstance(context_row, dict) or context_row.get("role") != "user":
                 continue
             context_id = context_row.get("id") or context_row.get("message_id")
-            if retained_id is not None and context_id != retained_id:
+            id_match = retained_id is not None and context_id == retained_id
+            old_shape_match = (
+                retained_old_timestamp is not None
+                and context_row.get("timestamp") == retained_old_timestamp
+                and context_row.get("content") == retained_old_content
+            )
+            if not (id_match or old_shape_match):
                 continue
-            if retained_timestamp is not None and context_row.get("timestamp") != retained_timestamp:
-                continue
-            if context_row.get("content") != retained_user.get("content"):
-                continue
+            context_row["timestamp"] = s.pending_started_at
             context_row["_active_turn_token"] = active_turn_token
+            if str(effective_source or "").strip().lower() == "fork":
+                context_row["_fork_child_turn"] = True
             break
     current_title = getattr(s, "title", None)
     if retained_user is None and _is_default_or_empty_session_title(current_title):
@@ -21836,7 +21853,7 @@ def _prepare_chat_start_session_for_stream(
             msg,
             attachments,
             s.pending_started_at,
-            source=source,
+            source=effective_source,
         )
     if not defer_save:
         s.save()
@@ -21911,18 +21928,26 @@ def _start_regeneration_stream_locked(
         snapshot_regeneration_state,
     )
 
-    snapshot = transaction_snapshot if transaction_snapshot is not None else snapshot_regeneration_state(s)
+    # The route-time snapshot protects validation/preparation failures before
+    # this lock. Once the lock is held, it may be stale; locked rollback starts
+    # from the state that produced the locked plan.
     try:
         plan = plan_regeneration(
             s, expected_revision=turn.revision, lock_held=True
         )
         turn = plan.turn
     except RegenerationUnavailable as exc:
-        restore_regeneration_state(s, snapshot)
-        return {"error": str(exc), "code": exc.code, "_status": exc.status}
-    except Exception:
-        restore_regeneration_state(s, snapshot)
-        raise
+        return {
+            "error": str(exc),
+            "code": exc.code,
+            "_status": exc.status,
+            "_regeneration_locked_plan_rejected": True,
+        }
+    # plan_regeneration is read-only. Take the complete rollback snapshot only
+    # after its lock-scoped revision and authority checks have succeeded.
+    snapshot = snapshot_regeneration_state(s)
+    if compression_recovery_payload_for_session(s):
+        clear_compression_recovery(s)
     stream_id = uuid.uuid4().hex
     gateway_starting = False
     thread_started = False
@@ -21989,6 +22014,7 @@ def _start_regeneration_stream_locked(
                 "error": "Session changed while regeneration was being prepared.",
                 "code": "stale_regeneration_revision",
                 "_status": 409,
+                "_regeneration_locked_plan_rejected": True,
             }
         retained_user = s.messages[-1]
         msg = turn.message_text
@@ -22469,6 +22495,7 @@ def _chat_start_response_from_run_start(result):
         "error",
         "code",
         "active_stream_id",
+        "_regeneration_locked_plan_rejected",
         "_status",
     ):
         if key in payload:
@@ -23380,7 +23407,14 @@ def _handle_chat_start(handler, body, diag=None):
                 return _reject_regeneration(j(handler, {"error": "regeneration accepts only regeneration_revision", "code": "invalid_regeneration_request"}, status=400))
             stale_stream_id = getattr(s, "active_stream_id", None)
             if stale_stream_id and not _active_stream_blocks_chat_start(s, stale_stream_id):
-                regeneration_persisted_mutation = bool(_clear_stale_stream_state(s))
+                if _clear_stale_stream_state(s):
+                    # The cleanup is a real persisted repair. A later stale
+                    # rejection must preserve that repair, not restore the
+                    # pre-cleanup request snapshot.
+                    from api.session_ops import snapshot_regeneration_state
+
+                    regeneration_snapshot = snapshot_regeneration_state(s)
+                    regeneration_persisted_mutation = False
             if not isinstance(body.get("regeneration_revision"), str):
                 _restore_regeneration_preacceptance()
                 return j(handler, {"error": "regeneration_revision is required", "code": "stale_regeneration_revision"}, status=409)
@@ -23542,7 +23576,7 @@ def _handle_chat_start(handler, body, diag=None):
                 return restore_err
             return None
 
-        if recovery:
+        if recovery and regeneration is None:
             recovery_cleared_for_start = copy.deepcopy(recovery)
             clear_compression_recovery(s)
             regeneration_persisted_mutation = True
@@ -23557,17 +23591,18 @@ def _handle_chat_start(handler, body, diag=None):
         # Map adapter-selection NotImplementedError (501) onto the legacy
         # bad-request response shape that this route exposed historically
         # before the helper extraction.
+        locked_plan_rejected = bool(response.pop("_regeneration_locked_plan_rejected", False))
         if response.get("_status") == 501 and "error" in response:
-            restore_err = _restore_cleared_recovery()
+            restore_err = None if locked_plan_rejected else _restore_cleared_recovery()
             if restore_err is not None:
                 return bad(handler, f"failed to restore compression recovery: {_sanitize_error(restore_err)}", 500)
             return j(handler, {"error": response["error"]}, status=501)
         status = int(response.pop("_status", 200) or 200)
-        if status >= 400 and recovery_cleared_for_start is not None:
+        if status >= 400 and recovery_cleared_for_start is not None and not locked_plan_rejected:
             restore_err = _restore_cleared_recovery()
             if restore_err is not None:
                 return bad(handler, f"failed to restore compression recovery: {_sanitize_error(restore_err)}", 500)
-        if status >= 400 and regeneration_snapshot is not None:
+        if status >= 400 and regeneration_snapshot is not None and not locked_plan_rejected:
             _restore_regeneration_preacceptance()
         diag.stage("response_write") if diag else None
         return j(handler, response, status=status)
