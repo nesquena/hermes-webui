@@ -3572,3 +3572,367 @@ def test_gateway_chat_completions_path_unchanged():
     assert not apperrors, f"No apperror expected for a normal response, got: {apperrors}"
     tokens = [e for e in events if isinstance(e, tuple) and e[0] == "token"]
     assert tokens, "Expected at least one token event"
+
+
+# ---------------------------------------------------------------------------
+# RAW/agent-only split across alternate backends (round-3 re-gate)
+# ---------------------------------------------------------------------------
+
+
+def test_gateway_runs_api_body_carries_resolved_skill():
+    """RAW/agent-only split: the gateway Runs API body must give the model the
+    resolved skill payload, not the raw slash command (round-3 re-gate)."""
+    from api.config import STREAM_PARTIAL_TEXT, STREAM_REASONING_TEXT
+    from api.gateway_chat import _STREAM_RUN_IDS, _run_gateway_runs_api_streaming
+
+    requests = []
+    stream_id = "stream-runs-resolved-skill"
+
+    class _JsonResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return None
+
+        def read(self, *args):
+            return json.dumps(self.payload).encode("utf-8")
+
+    class _SseResponse:
+        def __init__(self, lines):
+            self._lines = lines
+
+        def __iter__(self):
+            return iter(self._lines)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return None
+
+    def fake_urlopen(req, *, timeout=None):
+        requests.append(req)
+        if req.full_url.endswith("/v1/runs"):
+            return _JsonResponse({"run_id": "run-abc"})
+        return _SseResponse([b'data: {"event":"run.completed","output":"done","usage":{}}\n\n'])
+
+    class _FakeSession:
+        context_messages = []
+
+    raw = "/llm-wiki list pages"
+    expansion = "[IMPORTANT: The user has invoked the llm-wiki skill...]\nfull skill body"
+
+    try:
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            _run_gateway_runs_api_streaming(
+                session_id="sess-resolved",
+                msg_text=raw,
+                model="test-model",
+                workspace="/tmp",
+                stream_id=stream_id,
+                base_url="http://gw:8642",
+                api_key="secret",
+                prefill_messages=[{"role": "system", "content": "sys"}],
+                body_extras={},
+                put_gateway_event=lambda event, data: None,
+                cancel_event=threading.Event(),
+                session=_FakeSession(),
+                agent_message=expansion,
+            )
+    finally:
+        STREAM_PARTIAL_TEXT.pop(stream_id, None)
+        STREAM_REASONING_TEXT.pop(stream_id, None)
+        _STREAM_RUN_IDS.pop(stream_id, None)
+
+    run_body = json.loads(requests[0].data.decode("utf-8"))
+    assert run_body["input"] == expansion
+    assert raw not in run_body["input"]
+
+
+def test_gateway_chat_completions_body_carries_resolved_skill():
+    """RAW/agent-only split: the gateway chat/completions body must give the
+    model the resolved skill payload while the persisted row stays raw."""
+    from api.config import STREAMS, STREAMS_LOCK
+    from api.gateway_chat import _run_gateway_chat_streaming
+
+    captured = {}
+    events = []
+    q = MagicMock()
+    q.put_nowait = lambda item: events.append(item)
+    stream_id = "stream-completions-resolved-skill"
+
+    with STREAMS_LOCK:
+        STREAMS[stream_id] = q
+
+    sse_body = (
+        b'data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n'
+        b"data: [DONE]\n\n"
+    )
+
+    def fake_urlopen(req, timeout=0):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        resp = MagicMock()
+        resp.__iter__ = lambda s: iter(sse_body.split(b"\n"))
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = lambda s, *a: None
+        return resp
+
+    mock_session = MagicMock()
+    mock_session.active_stream_id = stream_id
+    mock_session.workspace = "/tmp"
+    mock_session.model = "test"
+    mock_session.model_provider = None
+    mock_session.profile = None
+    mock_session.context_messages = []
+    mock_session.messages = []
+    mock_session.pending_user_source = "webui"
+    mock_session.process_wakeup_pause = {}
+
+    raw = "/llm-wiki list pages"
+    expansion = "[IMPORTANT: The user has invoked the llm-wiki skill...]\nfull skill body"
+
+    try:
+        with patch("api.gateway_chat.get_session", return_value=mock_session), \
+             patch("api.gateway_chat._stream_writeback_is_current", return_value=True), \
+             patch("api.gateway_chat.merge_session_messages_append_only", return_value=[]), \
+             patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            _run_gateway_chat_streaming(
+                session_id="sess-resolved",
+                msg_text=raw,
+                model="test",
+                workspace="/tmp",
+                stream_id=stream_id,
+                agent_message=expansion,
+            )
+    finally:
+        with STREAMS_LOCK:
+            STREAMS.pop(stream_id, None)
+
+    user_msg = captured["body"]["messages"][-1]
+    assert user_msg["role"] == "user"
+    assert user_msg["content"] == expansion
+    # The persisted display row stays raw (the writeback merged msg_text).
+    saved_context = mock_session.context_messages
+    assert isinstance(saved_context, list) and saved_context
+    context_user_rows = [m for m in saved_context if m.get("role") == "user"]
+    assert context_user_rows
+    assert context_user_rows[-1]["content"] == expansion
+
+
+def _assert_gateway_writeback_split(s, raw_command, expansion):
+    """Shared route-composed writeback assertions: the persisted display row
+    stays the raw command while the model-context user row carries the
+    resolved payload."""
+    user_rows = [m for m in s.messages if isinstance(m, dict) and m.get("role") == "user"]
+    assert user_rows, "expected a persisted user row"
+    assert user_rows[-1].get("content") == raw_command, (
+        "gateway writeback must persist the raw slash command"
+    )
+    context_user_rows = [
+        m for m in s.context_messages
+        if isinstance(m, dict) and m.get("role") == "user"
+    ]
+    assert context_user_rows, (
+        "gateway writeback must keep the resolved payload in model context; "
+        f"context_messages={str(s.context_messages)[:300]!r} "
+        f"messages={str(s.messages)[:300]!r}"
+    )
+    assert expansion in str(context_user_rows[-1].get("content") or ""), (
+        "gateway writeback must keep the resolved payload in model context"
+    )
+
+
+def test_gateway_route_composed_forwarding_carries_resolved_skill(monkeypatch, tmp_path):
+    """Route-composed regression for the gateway seam (round-4 re-gate).
+
+    Enters through _start_chat_stream_for_session with the raw slash command
+    plus its resolved model message, captures the real outbound request for
+    both serializers (Runs API and chat/completions), and proves the persisted
+    display row stays raw while model context is expanded.
+
+    Must fail if api/routes.py stops forwarding agent_message to the gateway
+    worker (revert `if agent_message: worker_kwargs[...]`).
+
+    Session persistence is isolated under tmp_path and owned sessions are
+    dropped from models.SESSIONS in try/finally; the worker is awaited until
+    its stream channel and active-run registry are gone, so no shared state
+    leaks to later tests in the same pytest process (round-5 re-gate).
+
+    Round-6 re-gate: the finalization wait keys on the immutable stream_id
+    returned by the route (never on s.active_stream_id, which the writeback
+    clears before the worker's final cleanup); models.SESSIONS is snapshotted
+    and exactly restored under models.LOCK (new_session may evict a pre-existing
+    LRU entry, so popping owned IDs cannot restore the prior registry); the
+    route's last_workspace.txt write is isolated under tmp_path.
+    """
+    import collections
+    import time as _time
+
+    import api.config as config
+    import api.gateway_chat as gateway_chat
+    import api.models as models
+    import api.routes as routes
+    import api.workspace as workspace
+
+    raw_command = "/llm-wiki list pages"
+    expansion = "[IMPORTANT: The user has invoked the llm-wiki skill...]\nfull skill body"
+
+    # Isolate session persistence under tmp_path: files and the session index
+    # live in tmp_path, so the daemon worker threads cannot touch real state.
+    sessions_dir = tmp_path / "webui-state" / "sessions"
+    sessions_dir.mkdir(parents=True)
+    index_path = sessions_dir / "_index.json"
+    index_path.write_text("[]", encoding="utf-8")
+    monkeypatch.setattr(models, "SESSION_DIR", sessions_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", index_path)
+    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index_path)
+    # Isolate the route's set_last_workspace() write (routes.py:21307).
+    monkeypatch.setattr(
+        workspace, "_last_workspace_file",
+        lambda: tmp_path / "webui-state" / "last_workspace.txt",
+    )
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "secret-token")
+    monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda *a, **k: None)
+    monkeypatch.setattr(
+        gateway_chat, "_gateway_reasoning_effort_for_request", lambda *a, **k: None
+    )
+
+    # Snapshot the exact ordered registry (object identities included) before
+    # new_session() can evict a pre-existing LRU entry.
+    with models.LOCK:
+        pre_sessions = collections.OrderedDict(models.SESSIONS)
+    # Snapshot the gateway capability cache: the real legacy path can probe
+    # and mutate it, so it must be restored exactly (round-7 re-gate).
+    with config._GATEWAY_CAPS_LOCK:
+        pre_gateway_caps = dict(config._GATEWAY_CAPS_CACHE)
+
+    def _wait_for_worker_finalization(stream_id):
+        """Wait until the daemon worker removed its stream channel and its
+        active-run registry row. The stream_id comes from the route result and
+        is immutable; s.active_stream_id alone is cleared by the writeback
+        before the worker's final global cleanup."""
+        deadline = _time.time() + 10
+        while _time.time() < deadline:
+            with config.STREAMS_LOCK:
+                stream_gone = stream_id not in config.STREAMS
+            with config.ACTIVE_RUNS_LOCK:
+                run_gone = stream_id not in config.ACTIVE_RUNS
+            if stream_gone and run_gone:
+                return True
+            _time.sleep(0.05)
+        return False
+
+    def _scenario(*, runs_api: bool):
+        captured = {}
+        sse_body = (
+            b'data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n'
+            b"data: [DONE]\n\n"
+            if not runs_api
+            else b'data: {"event":"run.completed","output":"done","usage":{}}\n\n'
+        )
+
+        class _JsonResponse:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return None
+
+            def read(self, *args):
+                return json.dumps(self.payload).encode("utf-8")
+
+        def fake_urlopen(req, timeout=0):
+            if req.data is not None:
+                captured["body"] = json.loads(req.data.decode("utf-8"))
+            if runs_api and req.full_url.endswith("/v1/runs"):
+                return _JsonResponse({"run_id": "run-route"})
+            resp = MagicMock()
+            resp.__iter__ = lambda s: iter(sse_body.split(b"\n"))
+            resp.__enter__ = lambda s: s
+            resp.__exit__ = lambda s, *a: None
+            return resp
+
+        monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
+        if runs_api:
+            monkeypatch.setattr(gateway_chat, "_gateway_use_runs_api_enabled", lambda cfg: True)
+            monkeypatch.setattr(gateway_chat, "gateway_supports_approval", lambda *a, **k: True)
+        else:
+            monkeypatch.setattr(gateway_chat, "gateway_supports_approval", lambda *a, **k: False)
+            # Deterministic legacy path: never probe the real /v1/capabilities
+            # endpoint or mutate the process-global capability cache.
+            monkeypatch.setattr(
+                gateway_chat, "gateway_approval_unavailable_reason",
+                lambda *a, **k: "approvals unavailable",
+            )
+
+        s = models.new_session(workspace="/tmp", model="test-model")
+        s.save()
+        start_result = routes._start_chat_stream_for_session(
+            s,
+            msg=raw_command,
+            agent_message=expansion,
+            attachments=None,
+            workspace="/tmp",
+            model="test-model",
+            model_provider=None,
+            normalized_model=False,
+            source="webui",
+            external_runtime_owned=True,
+        )
+        stream_id = (start_result or {}).get("stream_id")
+        assert stream_id, "route must return an immutable stream_id"
+        finalized = _wait_for_worker_finalization(stream_id)
+        assert finalized, (
+            f"gateway worker did not finalize stream {stream_id!r} in time"
+        )
+        # Read the persisted session like a reloading client would.
+        try:
+            return models.get_session(s.session_id), captured
+        except Exception:
+            return s, captured
+
+    try:
+        # Runs API serializer.
+        s_runs, body_runs = _scenario(runs_api=True)
+        runs_input = body_runs["body"].get("input")
+        assert runs_input == expansion, (
+            f"Runs API input must be the resolved payload, got {str(runs_input)[:80]!r}"
+        )
+        assert raw_command not in runs_input
+        _assert_gateway_writeback_split(s_runs, raw_command, expansion)
+
+        # chat/completions serializer.
+        s_cc, body_cc = _scenario(runs_api=False)
+        cc_user = body_cc["body"]["messages"][-1]
+        assert cc_user["role"] == "user"
+        assert cc_user["content"] == expansion, (
+            "chat/completions user message must be the resolved payload"
+        )
+        _assert_gateway_writeback_split(s_cc, raw_command, expansion)
+
+        # The acceptance test must leave the capability-cache prestate
+        # unchanged after both scenarios.
+        with config._GATEWAY_CAPS_LOCK:
+            post_gateway_caps = dict(config._GATEWAY_CAPS_CACHE)
+        assert post_gateway_caps == pre_gateway_caps, (
+            "gateway capability cache must be unchanged after both scenarios"
+        )
+    finally:
+        # Restore the exact ordered registry prestate (object identities and
+        # order); files and the last_workspace write live under tmp_path.
+        with models.LOCK:
+            models.SESSIONS.clear()
+            models.SESSIONS.update(pre_sessions)
+        # Restore the gateway capability cache prestate under its lock.
+        with config._GATEWAY_CAPS_LOCK:
+            config._GATEWAY_CAPS_CACHE.clear()
+            config._GATEWAY_CAPS_CACHE.update(pre_gateway_caps)

@@ -7072,6 +7072,11 @@ async function switchToProfile(name) {
     if (_switchGen !== _profileSwitchGeneration) return false;
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
+    // Slash command metadata (skills, agent commands, bundles) is
+    // profile-scoped: drop the previous profile's cached lists so the next
+    // dropdown/autocomplete/send-path lookup rebuilds for the new profile
+    // (#5896 gate-fail #7).
+    if(typeof window!=='undefined'&&typeof window.invalidateSlashSkillCaches==='function') window.invalidateSlashSkillCaches();
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
     }

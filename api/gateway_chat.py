@@ -564,7 +564,7 @@ def _run_gateway_runs_api_streaming(
     session_id, msg_text, model, workspace, stream_id,
     base_url, api_key, prefill_messages, body_extras,
     *, put_gateway_event, cancel_event,
-    attachments=None, cfg=None, session=None,
+    attachments=None, cfg=None, session=None, agent_message=None,
     active_provider: str = "",
 ):
     """Submit via POST /v1/runs and relay SSE events including approval."""
@@ -578,15 +578,16 @@ def _run_gateway_runs_api_streaming(
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
             headers["X-Hermes-Session-Key"] = f"webui:{session_id}"
-        message_content: Any = str(msg_text or "")
+        model_text = str(agent_message or msg_text or "")
+        message_content: Any = model_text
         if attachments:
             try:
                 from api.streaming import _build_native_multimodal_message
 
-                message_content = _build_native_multimodal_message("", str(msg_text or ""), attachments, str(workspace), cfg=cfg, active_provider=active_provider, active_model=(model or ""), requested_provider=active_provider)
+                message_content = _build_native_multimodal_message("", model_text, attachments, str(workspace), cfg=cfg, active_provider=active_provider, active_model=(model or ""), requested_provider=active_provider)
             except Exception:
                 logger.debug("Failed to build runs-API multimodal attachment payload", exc_info=True)
-                message_content = str(msg_text or "")
+                message_content = model_text
         from api.streaming import _strip_oob_blocks
 
         instructions_parts = []
@@ -909,6 +910,7 @@ def _run_gateway_chat_streaming(
     *,
     model_provider=None,
     goal_related=False,
+    agent_message=None,
 ):
     """Bridge a WebUI chat turn through Hermes Gateway's API server.
 
@@ -1067,6 +1069,7 @@ def _run_gateway_chat_streaming(
                     cfg=cfg,
                     session=s,
                     active_provider=(model_provider or ""),
+                    agent_message=agent_message,
                 )
             except Exception as exc:
                 error_payload = _settle_gateway_terminal_error(
@@ -1113,15 +1116,16 @@ def _run_gateway_chat_streaming(
                 # Scope Gateway long-term continuity to this WebUI conversation
                 # without exposing the browser's auth cookie or CSRF material.
                 headers["X-Hermes-Session-Key"] = f"webui:{session_id}"
-            message_content: Any = str(msg_text or "")
+            model_text = str(agent_message or msg_text or "")
+            message_content: Any = model_text
             if attachments:
                 try:
                     from api.streaming import _build_native_multimodal_message
 
-                    message_content = _build_native_multimodal_message("", str(msg_text or ""), attachments, str(workspace), cfg=cfg, active_provider=(model_provider or ""), active_model=(model or ""), requested_provider=(model_provider or ""))
+                    message_content = _build_native_multimodal_message("", model_text, attachments, str(workspace), cfg=cfg, active_provider=(model_provider or ""), active_model=(model or ""), requested_provider=(model_provider or ""))
                 except Exception:
                     logger.debug("Failed to build gateway multimodal attachment payload", exc_info=True)
-                    message_content = str(msg_text or "")
+                    message_content = model_text
             body = {
                 "model": _gateway_model_field(model) or "default",
                 "stream": True,
@@ -1342,6 +1346,16 @@ def _run_gateway_chat_streaming(
                         if latest_text == msg_norm:
                             display = display[:-1]
                 s.messages = display + [user_msg, assistant_msg]
+            if agent_message:
+                # RAW/agent-only split: the display/persisted rows carry the raw
+                # command; keep the model context on the resolved skill payload
+                # so it survives into the next turn (round-3 re-gate).
+                try:
+                    from api.streaming import _rewrite_context_user_turn
+
+                    _rewrite_context_user_turn(s, agent_message, str(msg_text or ""))
+                except Exception:
+                    logger.debug("Failed to rewrite gateway model-context user row", exc_info=True)
             s.active_stream_id = None
             s.pending_user_message = None
             s.pending_attachments = None
