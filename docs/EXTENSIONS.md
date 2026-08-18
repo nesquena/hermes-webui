@@ -307,8 +307,8 @@ Extensions with structured configuration that does not fit scalar
 scoped E0 settings handle:
 
 ```js
-const ext = window.hermesExt.register("dictionary-manager");
-const unregister = ext?.settings.registerConfigure(({ opener, restoreFocus }) => {
+const ext = window.hermesExt?.register?.("dictionary-manager");
+const unregister = ext?.settings?.registerConfigure?.(({ opener, restoreFocus }) => {
   openDictionaryManager({ opener, restoreFocus });
 });
 ```

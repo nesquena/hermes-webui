@@ -556,7 +556,7 @@ def test_extensions_docs_define_scoped_configure_editor_contract():
         DOCS_EXTENSIONS.index("### Turn lifecycle events")
     ]
 
-    assert "ext?.settings.registerConfigure" in configure_section
+    assert "ext?.settings?.registerConfigure?." in configure_section
     assert "does not require `settings_schema` or extension-owned storage" in configure_section
     assert "Settings → Extensions → Installed" in configure_section
     assert "Diagnostics" in configure_section
