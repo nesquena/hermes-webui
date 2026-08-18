@@ -1,15 +1,17 @@
 """
 Hermes Web UI -- File upload: multipart parser and upload handler.
 """
+import json
 import mimetypes
 import os
 import posixpath
 import re as _re
+import shutil
 import tempfile
 from pathlib import Path
 
 from api.config import MAX_UPLOAD_BYTES, STATE_DIR
-from api.helpers import j
+from api.helpers import j, safe_resolve
 from api.models import get_session
 from api.profiles import _profiles_match, get_active_profile_name as _get_active_profile_name
 from api.workspace import (
@@ -111,23 +113,28 @@ def _sanitize_upload_name(filename: str) -> str:
 
 
 def _attachment_root() -> Path:
-    """Return the configured upload inbox root.
+    """Return the configured upload inbox root (the WRITE root).
 
     Plain chat attachments are transient context for the agent, not project
     source files.  Keep them out of the active workspace by default while still
     allowing operators to move the inbox with HERMES_WEBUI_ATTACHMENT_DIR.
 
-    When a remote terminal backend (``terminal.backend: docker``/modal/ssh/...)
-    is active, the default root moves under the active profile's Hermes cache
-    subtree (``cache/documents/webui-attachments``). hermes-agent auto-mounts
-    those cache directories into remote sandboxes, so a file staged there can
-    be translated to its sandbox-visible path (see _agent_visible_attachment_path)
-    instead of dangling as an unreachable host path inside the container.
+    Sandbox staging is scoped to container backends that auto-mount the
+    agent's cache directories at a fixed host path (``terminal.backend:
+    docker``/``modal``): the default root then moves under the active profile's
+    Hermes cache subtree (``cache/documents/webui-attachments``) so a file
+    staged there can be translated to its sandbox-visible path (see
+    _agent_visible_attachment_path). ssh/daytona/vercel sync files under the
+    REMOTE user's home with no fixed mount point — translating to a
+    host-expanded ``~/.hermes`` would point the agent at the WebUI host's home,
+    so those backends keep the legacy ``STATE_DIR/attachments`` root (and the
+    untranslated host path). Reads/cleanup must still consider BOTH roots (see
+    _attachment_read_roots) because switching backends orphans files.
     """
     override = os.getenv('HERMES_WEBUI_ATTACHMENT_DIR', '').strip()
     if override:
         return Path(override).expanduser().resolve()
-    if _remote_terminal_backend_active():
+    if _terminal_backend_name() in ('docker', 'modal'):
         return _sandbox_attachment_root()
     return (STATE_DIR / 'attachments').resolve()
 
@@ -163,7 +170,7 @@ def _terminal_backend_name() -> str:
 
 
 def _sandbox_attachment_root() -> Path:
-    """Return the profile-scoped staging root that remote sandboxes see.
+    """Return the profile-scoped staging root that container sandboxes see.
 
     hermes-agent's remote backends bind-mount (or file-sync) its cache
     directories — ``cache/documents`` among them — into every sandbox it
@@ -173,14 +180,15 @@ def _sandbox_attachment_root() -> Path:
     host path translatable to its sandbox-visible form. ``get_hermes_dir`` is
     used (with an explicit home) so a legacy ``document_cache`` layout is
     honored exactly the way hermes-agent resolves it when building mounts.
-    """
-    try:
-        from api.profiles import get_active_hermes_home
 
-        home = get_active_hermes_home()
-    except Exception:
-        _env_home = os.getenv('HERMES_HOME', '').strip()
-        home = Path(_env_home).expanduser() if _env_home else STATE_DIR.parent
+    FAIL-CLOSED: if the active profile home cannot be resolved, the exception
+    propagates to the caller (the upload fails) instead of silently falling
+    back to the process-global HERMES_HOME / STATE_DIR.parent — a fallback
+    that crossed profile boundaries and staged files inside the wrong profile.
+    """
+    from api.profiles import get_active_hermes_home
+
+    home = get_active_hermes_home()
     try:
         from hermes_constants import get_hermes_dir
 
@@ -193,21 +201,25 @@ def _sandbox_attachment_root() -> Path:
 def _agent_visible_attachment_path(host_path) -> str:
     """Return the form of *host_path* that tool calls inside the sandbox see.
 
-    For remote terminal backends, hermes-agent mounts its cache directories
-    into the sandbox; chat attachments are staged under
-    ``cache/documents/webui-attachments`` (see _attachment_root), so the host
-    path maps to the container path (``/root/.hermes/cache/documents/...`` for
-    docker/modal, ``~/.hermes/cache/documents/...`` for ssh-style backends).
-    Returns the host path unchanged for local backends, paths outside the
-    staged subtree, or when translation is unavailable (older agent builds).
+    Translation is scoped to container backends that auto-mount the agent's
+    cache directories at a fixed path (docker/modal): chat attachments staged
+    under ``cache/documents/webui-attachments`` (see _attachment_root) map to
+    the container path ``/root/.hermes/cache/documents/...``.
+
+    ssh/daytona/vercel deliberately keep the HOST path: those backends sync
+    files under the REMOTE user's home, and the agent's read_file resolver
+    expands ``~`` on the WebUI host before remote dispatch — a translated
+    ``~/.hermes/...`` would resolve to the WebUI host's home, not the remote
+    user's, so no translation is attempted (pre-#6939 behavior).
+
+    Also returns the host path unchanged for local backends, paths outside
+    the staged subtree, or when translation is unavailable (older agent
+    builds).
     """
     backend = _terminal_backend_name()
-    if backend in ('', 'local', 'singularity'):
+    if backend not in ('docker', 'modal'):
         return str(host_path)
-    if backend in ('ssh', 'daytona', 'vercel_sandbox'):
-        container_base = '~/.hermes'
-    else:  # docker, modal, and any other container/remote backend
-        container_base = '/root/.hermes'
+    container_base = '/root/.hermes'
     try:
         from api.profiles import get_active_hermes_home
 
@@ -273,6 +285,139 @@ def _session_attachment_dir(session_id: str, *, root: Path | None = None) -> Pat
     if not dest_dir.is_relative_to(root):
         raise ValueError('Invalid attachment directory')
     return dest_dir
+
+
+def _attachment_metadata_path(session_id: str) -> Path:
+    """Stable per-session metadata sidecar recording where each attachment was written.
+
+    Lives under the legacy STATE_DIR/attachments tree (always present on the
+    WebUI host) so it survives backend switches that move the write root.
+    """
+    safe_sid = _re.sub(r'[^\w.\-]', '_', str(session_id or 'session'))[:120]
+    return (STATE_DIR / 'attachments' / '.meta').resolve() / f'{safe_sid}.json'
+
+
+def _read_attachment_metadata(session_id: str) -> dict:
+    try:
+        data = json.loads(_attachment_metadata_path(session_id).read_text(encoding='utf-8'))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _record_attachment_metadata(session_id: str, filename: str, host_path: Path, agent_path: str) -> None:
+    """Persist write-root provenance for *filename* (best effort).
+
+    Lets later reads disambiguate duplicate filenames that exist in both the
+    legacy STATE_DIR/attachments/<sid> root and the sandbox staging root after
+    a backend switch or an upgrade from a pre-#6939 build. Written atomically
+    via os.replace; failures are swallowed (the attachment itself is already
+    stored — metadata is an index, never the source of truth).
+    """
+    try:
+        meta_path = _attachment_metadata_path(session_id)
+        meta_path.parent.mkdir(parents=True, exist_ok=True)
+        data = _read_attachment_metadata(session_id)
+        data[filename] = {'path': str(host_path), 'agent_path': agent_path}
+        tmp = meta_path.with_name(meta_path.name + '.tmp')
+        tmp.write_text(json.dumps(data, indent=2), encoding='utf-8')
+        os.replace(tmp, meta_path)
+    except Exception:
+        pass
+
+
+def _attachment_read_roots(session_id: str) -> list:
+    """Return the deduplicated set of per-session attachment roots for reads/cleanup.
+
+    The write root follows the active terminal backend. Switching backends (or
+    upgrading from a build that predates sandbox staging) orphans files under
+    the other root, so reads and deletion must consider the legacy
+    STATE_DIR/attachments/<sid> root AND the sandbox
+    cache/documents/webui-attachments/<sid> root in addition to the current
+    write root. Ordered current-write-root first. The sandbox root is included
+    best-effort: if the active-profile resolver is unavailable the sandbox
+    root is skipped rather than aborting the read/cleanup.
+    """
+    roots: list = []
+    seen: set = set()
+
+    def _add(root) -> None:
+        if root is None:
+            return
+        try:
+            resolved = root.resolve()
+        except Exception:
+            return
+        key = str(resolved)
+        if key in seen:
+            return
+        seen.add(key)
+        roots.append(resolved)
+
+    try:
+        _add(_session_attachment_dir(session_id))  # current write root
+    except Exception:
+        pass
+    _add(_session_attachment_dir(session_id, root=STATE_DIR / 'attachments'))  # legacy root
+    try:
+        _add(_session_attachment_dir(session_id, root=_sandbox_attachment_root()))
+    except Exception:
+        pass  # sandbox root unresolvable: skip it, legacy/current roots still serve
+    return roots
+
+
+def resolve_session_attachment(session_id: str, rel: str):
+    """Resolve *rel* inside any compatible session attachment root (read path).
+
+    Returns ``(root, target)`` for the first match, or None. Metadata-recorded
+    provenance (see _record_attachment_metadata) is preferred so duplicate
+    filenames across the legacy and sandbox roots stay unambiguous; otherwise
+    the compatible roots are scanned in write-root-first order (pre-metadata
+    uploads).
+    """
+    roots = _attachment_read_roots(session_id)
+    if not roots:
+        return None
+    recorded = _read_attachment_metadata(session_id).get(rel)
+    if isinstance(recorded, dict):
+        try:
+            recorded_path = Path(str(recorded.get('path') or '')).resolve()
+        except Exception:
+            recorded_path = None
+        if recorded_path is not None:
+            for root in roots:
+                try:
+                    if recorded_path.is_relative_to(root):
+                        if recorded_path.exists() and recorded_path.is_file():
+                            return root, recorded_path
+                        break  # provenance says this root owns the name; file gone = 404
+                except ValueError:
+                    continue
+    for root in roots:
+        try:
+            target = safe_resolve(root, rel)
+        except Exception:
+            continue
+        if target.exists() and target.is_file():
+            return root, target
+    return None
+
+
+def remove_session_attachments(session_id: str) -> None:
+    """Remove every per-session attachment root plus the metadata sidecar.
+
+    Called on session deletion so files staged under the legacy root, the
+    sandbox root, or an operator-override root are all cleaned up.
+    """
+    for root in _attachment_read_roots(session_id):
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+        except Exception:
+            pass
+    try:
+        _attachment_metadata_path(session_id).unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 def _session_visible_to_active_profile(session) -> bool:
@@ -353,6 +498,10 @@ def handle_upload(handler):
         dest = _upload_destination(session_id, safe_name)
         dest.write_bytes(file_bytes)
         mime = mimetypes.guess_type(safe_name)[0] or 'application/octet-stream'
+        # Persist write-root provenance so reads can disambiguate duplicate
+        # filenames across the legacy and sandbox roots after a backend switch
+        # (#7022 re-gate gap 1).
+        _record_attachment_metadata(session_id, dest.name, dest, _agent_visible_attachment_path(dest))
         return j(handler, {
             'filename': dest.name,
             'path': str(dest),
