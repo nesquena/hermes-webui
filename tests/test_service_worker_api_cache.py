@@ -85,21 +85,35 @@ def test_service_worker_navigation_retries_plain_url_fetch_before_offline():
 
 
 def test_service_worker_navigation_offline_html_self_heals_to_login():
-    """Synthetic offline HTML must not trap the tab behind a controlling SW."""
+    """Synthetic offline HTML recovers via scope-relative login after health, not root /login."""
     navigate_idx = SW_SRC.find("event.request.mode === 'navigate'")
     assert navigate_idx != -1
     navigate_end = SW_SRC.find("Shell assets: network-first", navigate_idx)
     navigate_block = SW_SRC[navigate_idx:navigate_end]
     assert "You are offline" in navigate_block
     assert "Hermes requires a server connection" in navigate_block
-    assert 'href="/login"' in navigate_block, (
-        "offline fallback must expose a visible Retry link to /login"
+    assert "new URL('login', self.registration.scope)" in navigate_block, (
+        "offline fallback must resolve login against the SW scope so a /hermes/ "
+        "mount recovers to /hermes/login, never origin /login"
     )
-    assert "unregister" in navigate_block, (
-        "offline fallback must unregister service workers so reload is not trapped"
+    assert "new URL('health', self.registration.scope)" in navigate_block, (
+        "offline fallback must probe health against the SW scope"
     )
-    assert 'location.replace("/login")' in navigate_block, (
-        "offline fallback must navigate to /login after unregistering"
+    assert "getRegistration(" in navigate_block, (
+        "offline fallback must unregister only this SW via getRegistration(scope)"
+    )
+    assert "getRegistrations()" not in navigate_block, (
+        "offline fallback must not iterate every service worker on the origin"
+    )
+    online_idx = navigate_block.find("navigator.onLine")
+    assert online_idx != -1, "auto-recover must consult navigator.onLine"
+    health_fetch_idx = navigate_block.find("fetch(healthUrl")
+    assert health_fetch_idx != -1, "auto-recover must probe fetch(healthUrl)"
+    assert online_idx < health_fetch_idx, (
+        "navigator.onLine must be consulted before the health probe auto-recover"
+    )
+    assert "Retry" in navigate_block, (
+        "offline fallback must keep Retry as a user control"
     )
 
 

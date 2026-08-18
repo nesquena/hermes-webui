@@ -135,14 +135,34 @@ self.addEventListener('fetch', (event) => {
         // tunnels while the origin is healthy. Retry as a plain same-origin GET.
         fetch(event.request.url, { cache: 'no-store', credentials: 'same-origin', redirect: 'follow' })
       ).catch(() => {
+        // Scope-relative recovery URLs: a /hermes/ mount must land on
+        // /hermes/login and probe /hermes/health, never origin /login.
+        const loginUrl = new URL('login', self.registration.scope).href;
+        const healthUrl = new URL('health', self.registration.scope).href;
+        const scopeUrl = self.registration.scope;
         return caches.match('./').then((cached) => cached || new Response(
           '<html><body style="font-family:sans-serif;padding:2rem;background:#1a1a1a;color:#ccc">' +
           '<h2>You are offline</h2>' +
           '<p>Hermes requires a server connection. Please check your network and try again.</p>' +
-          '<p><a href="/login">Retry</a></p>' +
-          '<script>navigator.serviceWorker.getRegistrations().then(function(rs){' +
-          'return Promise.all(rs.map(function(r){return r.unregister();}));' +
-          '}).then(function(){location.replace("/login");});</script>' +
+          '<p><a id="offline-retry" href=' + JSON.stringify(loginUrl) + '>Retry</a></p>' +
+          '<script>(function(){' +
+          'var loginUrl=' + JSON.stringify(loginUrl) + ';' +
+          'var healthUrl=' + JSON.stringify(healthUrl) + ';' +
+          'var scopeUrl=' + JSON.stringify(scopeUrl) + ';' +
+          'function recover(){' +
+          'var go=function(){location.replace(loginUrl);};' +
+          'if(!navigator.serviceWorker||!navigator.serviceWorker.getRegistration){go();return;}' +
+          'navigator.serviceWorker.getRegistration(scopeUrl).then(function(reg){' +
+          'return reg?reg.unregister():undefined;' +
+          '}).then(go,go);' +
+          '}' +
+          'var retry=document.getElementById("offline-retry");' +
+          'if(retry){retry.addEventListener("click",function(e){e.preventDefault();recover();});}' +
+          'if(navigator.onLine===false)return;' +
+          'fetch(healthUrl,{cache:"no-store"}).then(function(res){' +
+          'if(res.ok)recover();' +
+          '}).catch(function(){});' +
+          '})();</script>' +
           '</body></html>',
           { headers: { 'Content-Type': 'text/html' } }
         ));
