@@ -59,6 +59,7 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       auth.py              Optional password authentication, signed cookies, passkeys/WebAuthn
       config.py            Discovery, globals, model detection, reloadable config
       helpers.py           HTTP helpers: j(), bad(), require(), safe_resolve(), security headers
+      goals.py             Persistent-goal commands and profile-scoped native GoalManager bridge
       models.py            Session model + CRUD, per-session profile tracking, CLI/state.db bridge
       profiles.py          Profile state management, hermes_cli wrapper
       onboarding.py        First-run onboarding status, real provider config writes, OAuth linking, readiness detection
@@ -235,6 +236,24 @@ Session is a plain Python class (not a dataclass, not SQLAlchemy):
 title_from(): takes messages list, finds first user message, returns first 64 chars.
 Called after run_conversation() completes to set the session title retroactively.
 
+#### Imported `state.db` sidebar projection
+
+`api.models.get_cli_sessions()` projects conversations from the active Hermes
+profile's `state.db` into sidebar-shaped rows. The default projection keeps
+interactive sources (CLI, TUI, ACP, messaging, and similar user-facing sessions)
+in a bounded 20-row candidate window. Background sources use independent recovery
+passes so a high-volume worker source cannot consume that interactive window:
+
+- Cron: up to `CRON_PROJECT_CHIP_LIMIT` rows.
+- Webhook: up to `WEBHOOK_PROJECT_CHIP_LIMIT` rows.
+- Kanban: up to `KANBAN_PROJECT_CHIP_LIMIT` rows.
+
+Source-specific views still use their dedicated bounds, and the later sidebar
+visibility stage decides whether recovered background rows are shown. In
+`all_profiles=True` mode the per-profile source bounds are disabled before rows
+are merged; cross-profile scoping, visibility, deduplication, and final route
+limits remain downstream responsibilities.
+
 ### 4.3 SSE Streaming Engine
 
 This is the most architecturally interesting part. Two endpoints cooperate:
@@ -375,6 +394,29 @@ read_file_content(workspace, rel):
     - Enforces MAX_FILE_BYTES = 200KB size limit
     - Reads as UTF-8 with errors='replace' (binary files show replacement chars)
     - Returns {path, content, size, lines}
+
+### 4.8 Persistent Goal Profile Boundary
+
+`api/goals.py` exposes the WebUI `/goal` command payloads and post-turn evaluation hook.
+Hermes Agent's native `GoalManager` is the authoritative owner of goal evaluation,
+continuation decisions, wait barriers, failure counters, contracts, subgoals, and
+`state.db` persistence.
+
+For a profile-scoped WebUI session, the bridge delegates only when the Agent exposes
+both the context-local `set_hermes_home_override()` API and call-time default
+`SessionDB` path resolution. The bridge probes the resolved default path under the
+selected context before constructing the native manager, then binds that profile's
+Hermes home before every native call. The override is reset in a `finally` block after
+every operation, so concurrent sessions using the same session ID under different
+profiles cannot cross-read or cross-write goal state. Goal snapshot rollback uses the
+same scoped native persistence path.
+
+Older Hermes Agent versions that lack either capability continue through
+`_LegacyProfileGoalManager`, which pins persistence to the selected profile's explicit
+`state.db` path. This includes intermediate versions whose context API is present but
+whose default `SessionDB()` path remains frozen at module import. Keep this fallback
+compatibility-only: new goal semantics belong in Hermes Agent's native manager rather
+than a second WebUI implementation.
 
 ---
 

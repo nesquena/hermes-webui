@@ -128,6 +128,194 @@ def test_has_active_goal_reports_only_active_state(monkeypatch):
     assert webui_goals.has_active_goal("") is False
 
 
+def test_profile_goal_evaluation_supports_native_judge_contract(monkeypatch, tmp_path):
+    """Profile goals accept the current five-field native judge result."""
+    from api import goals as webui_goals
+    native_goals = pytest.importorskip("hermes_cli.goals", reason="hermes-agent not installed")
+
+    judge = lambda *args, **kwargs: ("continue", "work remains", False, None, False)
+    monkeypatch.setattr(webui_goals, "judge_goal", judge)
+    monkeypatch.setattr(native_goals, "judge_goal", judge)
+    monkeypatch.syspath_prepend(str(Path(native_goals.__file__).resolve().parents[1]))
+    from hermes_constants import get_hermes_home
+
+    original_home = get_hermes_home()
+    webui_goals._DB_CACHE.clear()
+    native_goals._DB_CACHE.clear()
+    __import__("hermes_state")
+
+    home = tmp_path / "profile"
+    webui_goals.goal_command_payload("sid-native-contract", "finish it", profile_home=home)
+    decision = webui_goals.evaluate_goal_after_turn(
+        "sid-native-contract",
+        "not finished",
+        profile_home=home,
+    )
+    state = webui_goals.goal_state_snapshot("sid-native-contract", profile_home=home)
+
+    assert decision["verdict"] == "continue"
+    assert decision["should_continue"] is True
+    assert state.turns_used == 1
+    assert state.last_verdict == "continue"
+
+    snapshot = webui_goals.goal_state_snapshot("sid-native-contract", profile_home=home)
+    webui_goals.goal_command_payload("sid-native-contract", "replacement", profile_home=home)
+    webui_goals.restore_goal_state("sid-native-contract", snapshot, profile_home=home)
+    restored = webui_goals.goal_state_snapshot("sid-native-contract", profile_home=home)
+    assert restored.goal == "finish it"
+    assert restored.turns_used == 1
+    assert get_hermes_home() == original_home
+
+
+def test_profile_goal_evaluation_preserves_native_wait_semantics(monkeypatch, tmp_path):
+    """Profile goals park when the native judge returns a wait directive."""
+    from api import goals as webui_goals
+    native_goals = pytest.importorskip("hermes_cli.goals", reason="hermes-agent not installed")
+
+    judge = lambda *args, **kwargs: (
+        "wait",
+        "rate limited",
+        False,
+        {"seconds": 30},
+        False,
+    )
+    monkeypatch.setattr(webui_goals, "judge_goal", judge)
+    monkeypatch.setattr(native_goals, "judge_goal", judge)
+    monkeypatch.syspath_prepend(str(Path(native_goals.__file__).resolve().parents[1]))
+    webui_goals._DB_CACHE.clear()
+    native_goals._DB_CACHE.clear()
+    __import__("hermes_state")
+
+    home = tmp_path / "profile"
+    webui_goals.goal_command_payload("sid-native-wait", "finish it", profile_home=home)
+    decision = webui_goals.evaluate_goal_after_turn(
+        "sid-native-wait",
+        "rate limited",
+        profile_home=home,
+    )
+    state = webui_goals.goal_state_snapshot("sid-native-wait", profile_home=home)
+
+    assert decision["verdict"] == "wait"
+    assert decision["should_continue"] is False
+    assert state.waiting_until > 0
+    assert state.waiting_reason == "rate limited"
+
+
+def test_profile_goal_context_isolated_across_threads(monkeypatch, tmp_path):
+    """Concurrent profiles with the same session id cannot cross-write goals."""
+    from api import goals as webui_goals
+    native_goals = pytest.importorskip("hermes_cli.goals", reason="hermes-agent not installed")
+
+    monkeypatch.syspath_prepend(str(Path(native_goals.__file__).resolve().parents[1]))
+    from hermes_constants import get_hermes_home
+
+    original_home = get_hermes_home()
+    webui_goals._DB_CACHE.clear()
+    native_goals._DB_CACHE.clear()
+    __import__("hermes_state")
+    barrier = threading.Barrier(2)
+    failures = []
+
+    def set_goal(profile):
+        try:
+            barrier.wait()
+            result = webui_goals.goal_command_payload(
+                "shared-session",
+                f"goal-{profile}",
+                profile_home=tmp_path / profile,
+            )
+            assert result["ok"] is True
+        except Exception as exc:
+            failures.append(exc)
+
+    threads = [threading.Thread(target=set_goal, args=(profile,)) for profile in ("a", "b")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert failures == []
+    assert webui_goals.goal_state_snapshot(
+        "shared-session", profile_home=tmp_path / "a"
+    ).goal == "goal-a"
+    assert webui_goals.goal_state_snapshot(
+        "shared-session", profile_home=tmp_path / "b"
+    ).goal == "goal-b"
+    assert get_hermes_home() == original_home
+
+
+def test_profile_goal_falls_back_when_session_db_path_is_frozen(monkeypatch, tmp_path):
+    """A context API alone cannot make an import-time SessionDB path profile-safe."""
+    from api import goals as webui_goals
+    native_goals = pytest.importorskip("hermes_cli.goals", reason="hermes-agent not installed")
+    import hermes_state
+
+    frozen_db_path = tmp_path / "frozen-home" / "state.db"
+    monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", frozen_db_path)
+    webui_goals._DB_CACHE.clear()
+    native_goals._DB_CACHE.clear()
+
+    profile_a = tmp_path / "profile-a"
+    profile_b = tmp_path / "profile-b"
+    try:
+        assert webui_goals.goal_command_payload(
+            "shared-session", "goal-a", profile_home=profile_a
+        )["ok"] is True
+        assert webui_goals.goal_command_payload(
+            "shared-session", "goal-b", profile_home=profile_b
+        )["ok"] is True
+
+        assert webui_goals.goal_state_snapshot(
+            "shared-session", profile_home=profile_a
+        ).goal == "goal-a"
+        assert webui_goals.goal_state_snapshot(
+            "shared-session", profile_home=profile_b
+        ).goal == "goal-b"
+    finally:
+        for cache in (webui_goals._DB_CACHE, native_goals._DB_CACHE):
+            for db in cache.values():
+                close = getattr(db, "close", None)
+                if close is not None:
+                    close()
+            cache.clear()
+
+
+def test_profile_goal_context_resets_when_native_call_raises(monkeypatch, tmp_path):
+    """A failed delegated call cannot leak its profile into the next task."""
+    from api import goals as webui_goals
+    native_goals = pytest.importorskip("hermes_cli.goals", reason="hermes-agent not installed")
+
+    monkeypatch.syspath_prepend(str(Path(native_goals.__file__).resolve().parents[1]))
+    from hermes_constants import (
+        get_hermes_home,
+        reset_hermes_home_override,
+        set_hermes_home_override,
+    )
+
+    class RaisingGoalManager:
+        state = None
+
+        def __init__(self, session_id, default_max_turns=20):
+            self.session_id = session_id
+            self.default_max_turns = default_max_turns
+
+        def explode(self):
+            raise RuntimeError("boom")
+
+    original_home = get_hermes_home()
+    monkeypatch.setattr(webui_goals, "_NativeGoalManager", RaisingGoalManager)
+    manager = webui_goals._ProfileGoalManager(
+        "sid-context-reset",
+        profile_home=tmp_path / "profile",
+        context_api=(set_hermes_home_override, reset_hermes_home_override),
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        manager.explode()
+
+    assert get_hermes_home() == original_home
+
+
 def test_goal_continuation_decision_emits_status_and_normal_user_prompt(monkeypatch):
     """Post-turn hook returns the visible status event plus a normal continuation prompt."""
     from api import goals as webui_goals

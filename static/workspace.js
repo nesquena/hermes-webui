@@ -609,6 +609,13 @@ function renderSessionArtifacts(){
   }).join('');
 }
 
+function projectSessionArtifactsForOwner(sessionId){
+  if(!sessionId||!S.session||S.session.session_id!==sessionId) return false;
+  if(typeof _isSessionCurrentPane!=='function'||!_isSessionCurrentPane(sessionId)) return false;
+  renderSessionArtifacts();
+  return true;
+}
+
 async function _workspacePathExists(path){
   if(!S.session||!path) return false;
   const parts=String(path).replace(/\\/g,'/').split('/').filter(Boolean);
