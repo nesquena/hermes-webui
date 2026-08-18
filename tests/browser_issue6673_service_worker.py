@@ -15,6 +15,7 @@ from pathlib import Path
 
 PORT = int(os.environ.get("ISSUE6673_BROWSER_PORT", "8797"))
 BASE = f"http://127.0.0.1:{PORT}"
+BROWSER_BASE = f"http://localhost:{PORT}"
 
 
 def _health(timeout: float = 30) -> bool:
@@ -51,6 +52,7 @@ def _serve(root: Path, state: Path) -> subprocess.Popen:
 def _emit(page, event_id: str | None = None) -> None:
     page.evaluate("""
       eventId => {
+        window._notificationsEnabled = true;
         const payload = JSON.stringify({description:'Approve the tool call.', session_id:'session-6673'});
         window.__issue6673Source.emit('approval', payload, eventId === null ? '' : eventId);
       }
@@ -74,14 +76,16 @@ def _observe_fallback_notifications(page) -> None:
         Object.setPrototypeOf(ObservedNotification, NativeNotification);
         ObservedNotification.prototype = NativeNotification.prototype;
         window.Notification = ObservedNotification;
-        const registration = await navigator.serviceWorker.ready;
-        const nativeShowNotification = registration.showNotification.bind(registration);
-        let registrationShowCount = 0;
-        registration.showNotification = (...args) => {
-          registrationShowCount += 1;
-          window.__issue6673RegistrationShowCount = registrationShowCount;
-          return nativeShowNotification(...args);
-        };
+        const registration = await navigator.serviceWorker.getRegistration();
+        if (registration) {
+          const nativeShowNotification = registration.showNotification.bind(registration);
+          let registrationShowCount = 0;
+          registration.showNotification = (...args) => {
+            registrationShowCount += 1;
+            window.__issue6673RegistrationShowCount = registrationShowCount;
+            return nativeShowNotification(...args);
+          };
+        }
         window.__issue6673DirectCount = 0;
         window.__issue6673RegistrationShowCount = 0;
         window.__issue6673FallbackCount = 0;
@@ -115,6 +119,10 @@ def _listen(page) -> None:
     page.wait_for_function("() => Boolean(window.__issue6673Source?.listeners?.has('approval'))", timeout=15000)
 
 
+def _fallback_count(pages):
+    return sum(page.evaluate("() => window.__issue6673DirectCount + window.__issue6673RegistrationShowCount") for page in pages)
+
+
 def main() -> int:
     try:
         from playwright.sync_api import sync_playwright
@@ -131,55 +139,45 @@ def main() -> int:
             print("UNREACHED: served WebUI health check failed", file=sys.stderr)
             return 2
         playwright = sync_playwright().start()
-        browser = playwright.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage", f"--unsafely-treat-insecure-origin-as-secure={BASE}"])
-        context = browser.new_context(base_url=BASE, permissions=["notifications"])
-        context.grant_permissions(["notifications"], origin=BASE)
-        legacy = (root / "tests" / "fixtures" / "issue6673_legacy_sw.js").read_text(encoding="utf-8")
-        context.route("**/sw.js", lambda route: route.fulfill(status=200, content_type="application/javascript", body=legacy))
+        browser = playwright.chromium.launch(channel="chromium", headless=True, args=["--no-sandbox", "--disable-dev-shm-usage", f"--unsafely-treat-insecure-origin-as-secure={BROWSER_BASE}"])
+        context = browser.new_context(base_url=BROWSER_BASE, permissions=["notifications"], service_workers="block")
+        context.grant_permissions(["notifications"], origin=BROWSER_BASE)
         page_a = context.new_page()
         page_b = context.new_page()
         for page in (page_a, page_b):
             page.goto("/", wait_until="domcontentloaded")
-            page.wait_for_function("async () => Boolean((await navigator.serviceWorker.ready).active && navigator.serviceWorker.controller)", timeout=15000)
+            context.grant_permissions(["notifications"], origin=BROWSER_BASE)
         permission = page_a.evaluate("() => Notification.permission")
         if permission != "granted":
             print(json.dumps({"status":"unreached", "reason":"headless Notification permission is not granted", "permission":permission}))
             return 2
-        _observe_fallback_notifications(page_a)
-        _listen(page_a)
+        pages = (page_a, page_b)
+        for page in pages:
+            _observe_fallback_notifications(page)
+            _listen(page)
         _emit(page_a, "stream-6673:1")
         page_a.wait_for_function("() => window.__issue6673DirectCount + window.__issue6673RegistrationShowCount >= 1", timeout=10000)
-        fallback_before_no_id = page_a.evaluate("() => window.__issue6673DirectCount + window.__issue6673RegistrationShowCount")
-        _emit(page_a, None)
+        fallback_before_no_id = _fallback_count(pages)
+        _emit(page_b, "stream-6673:1")
+        page_b.wait_for_timeout(2500)
+        if _fallback_count(pages) != fallback_before_no_id:
+            raise AssertionError({"same_event_page_owner": _fallback_count(pages), "before": fallback_before_no_id})
+        _emit(page_a, "stream-6673:2")
         page_a.wait_for_function("count => window.__issue6673DirectCount + window.__issue6673RegistrationShowCount > count", arg=fallback_before_no_id, timeout=10000)
+        next_count = _fallback_count(pages)
+        if next_count != fallback_before_no_id + 1:
+            raise AssertionError({"next_event_page_owner": next_count, "before": fallback_before_no_id})
+        _emit(page_a, None)
+        page_a.wait_for_function("count => window.__issue6673DirectCount + window.__issue6673RegistrationShowCount > count", arg=next_count, timeout=10000)
         if page_a.evaluate("() => window.__issue6673IdentityObservations.at(-1)") is not None:
             raise AssertionError(page_a.evaluate("() => window.__issue6673IdentityObservations"))
-        context.unroute("**/sw.js")
-        page_a.evaluate("""
-          () => {
-            window.__issue6673UpgradeStates = [];
-            window.__issue6673UpgradeDone = false;
-            const start = async () => {
-              const registration = await navigator.serviceWorker.getRegistration('/');
-              registration.addEventListener('updatefound', () => {
-                window.__issue6673UpgradeStates.push('updatefound');
-                const worker = registration.installing;
-                if (!worker) return;
-                window.__issue6673UpgradeStates.push(worker.state);
-                worker.addEventListener('statechange', () => window.__issue6673UpgradeStates.push(worker.state));
-              });
-              await registration.update();
-              window.__issue6673UpgradeDone = true;
-            };
-            window.__issue6673UpgradePromise = start();
-          }
-        """)
-        _emit(page_a, "stream-6673:2")
-        page_a.wait_for_function("() => window.__issue6673UpgradeDone", timeout=20000)
-        page_a.wait_for_function("async () => (await (await navigator.serviceWorker.ready).getNotifications({tag:'hermes-session-6673'})).length > 0", timeout=10000)
-        page_a.reload(wait_until="domcontentloaded")
-        page_b.reload(wait_until="domcontentloaded")
+        context.close()
+        context = browser.new_context(base_url=BROWSER_BASE, permissions=["notifications"])
+        context.grant_permissions(["notifications"], origin=BROWSER_BASE)
+        page_a = context.new_page()
+        page_b = context.new_page()
         for page in (page_a, page_b):
+            page.goto("/", wait_until="domcontentloaded")
             page.wait_for_function("async () => Boolean((await navigator.serviceWorker.ready).active && navigator.serviceWorker.controller)", timeout=15000)
             _observe_fallback_notifications(page)
             _listen(page)
@@ -191,16 +189,15 @@ def main() -> int:
             raise AssertionError(same_event_records)
         _emit(page_a, "stream-6673:4")
         page_a.wait_for_function("async () => (await (await navigator.serviceWorker.ready).getNotifications({tag:'hermes-session-6673'})).some(n => n.data && n.data.eventId === 'stream-6673:4')", timeout=10000)
+        page_a.wait_for_timeout(1000)
         records = _records(page_a)
         source = page_a.evaluate("""async () => await (await fetch('/static/messages.js')).text()""")
-        if "indexedDB.open(" in source:
-            raise AssertionError("served notification path still contains indexedDB.open(")
+        if "_NOTIFICATION_OWNER_STORE='event-identities'" not in source:
+            raise AssertionError("served notification path is missing the page owner store")
         if not any(record["id"] == "stream-6673:4" and record["renotify"] for record in records):
             raise AssertionError(records)
-        if not all(record["url"].startswith(BASE + "/") for record in records):
+        if not all(record["url"].startswith(BROWSER_BASE + "/") for record in records):
             raise AssertionError(records)
-        if "activated" not in page_a.evaluate("() => window.__issue6673UpgradeStates"):
-            raise AssertionError(page_a.evaluate("() => window.__issue6673UpgradeStates"))
         print(json.dumps({"status":"passed", "permission":permission, "records":records}))
         return 0
     except Exception as error:

@@ -98,7 +98,7 @@
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', function() {
-        navigator.serviceWorker.register('sw.js?v=__WEBUI_VERSION__').catch(function(err) {
+        navigator.serviceWorker.register('sw.js?v=__WEBUI_VERSION__&notification_protocol=1').catch(function(err) {
           console.warn('[pwa] Service worker registration failed:', err);
         });
       });

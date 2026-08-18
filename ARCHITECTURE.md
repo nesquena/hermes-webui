@@ -109,8 +109,8 @@ Browser notification ownership:
                         notification identity when journal persistence fails.
     api/gateway_chat.py Mirrors the streaming delivery-only identity contract.
     static/messages.js  Owns eligibility, canonical or delivery-only identity
-                        capture, payload construction, and registration/direct
-                        delivery fallback.
+                        capture, payload construction, and the shared page owner
+                        used by registration/direct delivery fallback.
     static/sw.js        Owns displayed-record duplicate suppression for the
                         versioned presentation protocol.
 
@@ -120,11 +120,16 @@ sequence id. Journal-less notification payloads carry a bounded
 `notification_event_id` for cross-tab coordination; it never becomes the SSE id
 or replay cursor. The worker queries browser-owned displayed records for the
 same tag and exact event id, then calls `showNotification()` only when no exact
-displayed duplicate exists. Unsupported, stale, timed-out, rejected, or failed
-coordination returns to delivery and may duplicate; it cannot create suppression
-state. Journal-less frames carry no durable SSE id. Unkeyed manual notifications
-retain the existing service-worker-first path and direct fallback. Notification
-click routing remains owned by the existing `notificationclick` handler.
+displayed duplicate exists. When worker coordination is unavailable or its reply
+is lost, the page reconciles that exact displayed record before entering its
+origin-shared owner. The page owner stores `pending` and `delivered` records
+keyed by the same tuple, with an owner token and bounded pending expiry. A
+successful constructor commits `delivered`; a constructor failure releases the
+matching pending record. Open, blocked, transaction, token, and persistence
+ambiguity fail closed and do not call the native constructor. Journal-less
+frames carry no durable SSE id. Unkeyed manual notifications retain the existing
+service-worker-first path and direct fallback. Notification click routing
+remains owned by the existing `notificationclick` handler.
 
 State directory (runtime data, separate from source):
 

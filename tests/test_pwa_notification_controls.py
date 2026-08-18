@@ -35,7 +35,7 @@ def test_notification_payload_uses_completion_session_when_provided():
     assert "function _notificationOptions" in MESSAGES_JS
     assert "const sid=(options&&options.sid)||(S&&S.session&&S.session.session_id);" in MESSAGES_JS
     assert "_sessionUrlForSid(sid)" in MESSAGES_JS
-    assert "data:{url}" in MESSAGES_JS
+    assert "data:{url,..." in MESSAGES_JS
     assert "tag:sid?`hermes-${sid}`" in MESSAGES_JS
     assert "function _completionNotificationPreviewText" in MESSAGES_JS
     assert "_completionNotificationPreviewText(lastAsst," in MESSAGES_JS
@@ -134,8 +134,9 @@ def test_presenter_options_are_same_origin_and_in_scope_without_changing_click_r
     assert "samePath(client.url)" in SW_JS
 
 
-def test_page_and_worker_use_displayed_record_presenter_without_claim_store():
-    assert "indexedDB.open(" not in MESSAGES_JS
+def test_page_and_worker_use_displayed_record_presenter_with_page_owner_store():
+    assert "indexedDB.open(" in MESSAGES_JS
+    assert "_NOTIFICATION_OWNER_STORE='event-identities'" in MESSAGES_JS
     assert "indexedDB.open(" not in SW_JS
     assert "hermes.notification.present" in MESSAGES_JS
     assert "hermes.notification.present" in SW_JS

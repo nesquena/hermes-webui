@@ -9117,9 +9117,30 @@ function playAttentionSound(key){
 function _notificationOptions(body,options={}){
   const sid=(options&&options.sid)||(S&&S.session&&S.session.session_id);
   const url=sid?`${location.origin}${_sessionUrlForSid(sid)}`:location.href;
-  return {body:body||'',tag:sid?`hermes-${sid}`:'hermes-webui',renotify:true,icon:'static/favicon-192.png',badge:'static/favicon-32.png',data:{url}};
+  const identity=options&&options.eventIdentity;
+  const identityValid=!!identity&&typeof identity==='object'&&!Array.isArray(identity)&&
+    typeof identity.streamId==='string'&&identity.streamId.length>0&&
+    identity.streamId.length<=512&&typeof identity.lastEventId==='string'&&
+    identity.lastEventId.length>0&&identity.lastEventId.length<=512;
+  return {body:body||'',tag:sid?`hermes-${sid}`:'hermes-webui',renotify:true,icon:'static/favicon-192.png',badge:'static/favicon-32.png',data:{url,...(identityValid?{eventId:identity.lastEventId}:{})}};
 }
 const _NOTIFICATION_IDENTITY_MAX_LENGTH=512;
+const _NOTIFICATION_OWNER_DB='hermes-notifications';
+const _NOTIFICATION_OWNER_STORE='event-identities';
+const _NOTIFICATION_OWNER_VERSION=1;
+const _NOTIFICATION_OWNER_PENDING_TTL_MS=10000;
+const _notificationFailedPageKeys=new Map();
+let _notificationFailureChannel=null;
+function _ensureNotificationFailureChannel(){
+  if(_notificationFailureChannel||typeof window.BroadcastChannel!=='function')return;
+  try{
+    _notificationFailureChannel=new window.BroadcastChannel('hermes-notification-failures');
+    _notificationFailureChannel.onmessage=event=>{
+      if(event&&event.data&&event.data.type==='failed'&&typeof event.data.key==='string'&&typeof event.data.token==='string') _notificationFailedPageKeys.set(event.data.key,event.data.token);
+    };
+  }catch(_error){ }
+}
+_ensureNotificationFailureChannel();
 function _captureNotificationEventIdentity(streamId,event,payload){
   const lastEventId=String(event&&event.lastEventId||'');
   const deliveryEventId=String(payload&&payload.notification_event_id||'');
@@ -9143,7 +9164,7 @@ function _isValidNotificationIdentity(identity){
     identity.lastEventId.length<=_NOTIFICATION_IDENTITY_MAX_LENGTH;
 }
 function _presentNotification(active,title,opts,identity){
-  if(typeof MessageChannel!=='function') return Promise.resolve('unavailable');
+  if(typeof window.MessageChannel!=='function') return Promise.resolve('unavailable');
   return new Promise(resolve=>{
     let settled=false;
     let timer=null;
@@ -9156,7 +9177,7 @@ function _presentNotification(active,title,opts,identity){
       resolve(status);
     };
     try{
-      channel=new MessageChannel();
+      channel=new window.MessageChannel();
       if(!channel.port1||!channel.port2||typeof active.postMessage!=='function'){
         finish('unavailable');
         return;
@@ -9183,14 +9204,166 @@ function _presentNotification(active,title,opts,identity){
     }
   });
 }
+function _notificationOwnerKey(identity){return [identity.streamId,identity.lastEventId];}
+function _notificationFailedPageKey(identity){return JSON.stringify(_notificationOwnerKey(identity));}
+function _recordFailedPageNotification(identity,token){
+  const key=_notificationFailedPageKey(identity);
+  const failureToken=String(token||'');
+  _notificationFailedPageKeys.set(key,failureToken);
+  try{
+    if(typeof window.BroadcastChannel!=='function')return;
+    _ensureNotificationFailureChannel();
+    _notificationFailureChannel.postMessage({type:'failed',key,token:failureToken});
+  }catch(_error){ }
+}
+function _openNotificationOwnerDb(){
+  if(!window.indexedDB||typeof window.indexedDB.open!=='function') return Promise.reject(new Error('notification owner storage unavailable'));
+  return new Promise((resolve,reject)=>{
+    let request;
+    try{request=window.indexedDB.open(_NOTIFICATION_OWNER_DB,_NOTIFICATION_OWNER_VERSION);}catch(error){reject(error);return;}
+    request.onupgradeneeded=()=>{
+      try{if(!request.result.objectStoreNames.contains(_NOTIFICATION_OWNER_STORE)) request.result.createObjectStore(_NOTIFICATION_OWNER_STORE,{keyPath:['streamId','lastEventId']});}catch(error){reject(error);}
+    };
+    request.onsuccess=()=>resolve(request.result);
+    request.onerror=()=>reject(request.error||new Error('notification owner storage failed'));
+    request.onblocked=()=>reject(new Error('notification owner storage blocked'));
+  });
+}
+function _claimPageNotification(identity){
+  const key=_notificationOwnerKey(identity);
+  const token=`${Date.now()}:${Math.random().toString(36).slice(2)}`;
+  return _openNotificationOwnerDb().then(db=>new Promise(resolve=>{
+    let settled=false;
+    const finish=status=>{if(!settled){settled=true;try{db.close();}catch(_error){ }resolve({status,token});}};
+    let tx;
+    try{
+      tx=db.transaction(_NOTIFICATION_OWNER_STORE,'readwrite');
+      const store=tx.objectStore(_NOTIFICATION_OWNER_STORE);
+      const read=store.get(key);
+      read.onerror=()=>finish('ambiguous');
+      read.onsuccess=()=>{
+        const current=read.result;
+        if(current&&current.state==='delivered'){finish('duplicate');return;}
+        const failedToken=_notificationFailedPageKeys.get(_notificationFailedPageKey(identity));
+        const failed=current&&current.state==='pending'&&current.token===failedToken;
+        if(current&&current.state==='pending'&&!failed&&(
+          current.phase!=='claimed'||Number(current.expiresAt)>Date.now()
+        )){finish('ambiguous');return;}
+        try{store.put({streamId:identity.streamId,lastEventId:identity.lastEventId,state:'pending',phase:'claimed',token,expiresAt:Date.now()+_NOTIFICATION_OWNER_PENDING_TTL_MS});}
+        catch(_error){finish('ambiguous');}
+      };
+      tx.oncomplete=()=>{if(!settled){_notificationFailedPageKeys.delete(_notificationFailedPageKey(identity));finish('claimed');}};
+      tx.onerror=()=>finish('ambiguous');
+      tx.onabort=()=>finish('ambiguous');
+    }catch(_error){finish('ambiguous');}
+  }));
+}
+function _markPageNotificationDisplaying(identity,token){
+  const key=_notificationOwnerKey(identity);
+  return _openNotificationOwnerDb().then(db=>new Promise(resolve=>{
+    let settled=false;
+    const finish=ok=>{if(!settled){settled=true;try{db.close();}catch(_error){ }resolve(!!ok);}};
+    try{
+      const tx=db.transaction(_NOTIFICATION_OWNER_STORE,'readwrite');
+      const store=tx.objectStore(_NOTIFICATION_OWNER_STORE);
+      const read=store.get(key);
+      read.onerror=()=>finish(false);
+      read.onsuccess=()=>{
+        const current=read.result;
+        if(!current||current.state!=='pending'||current.token!==token){finish(false);return;}
+        try{store.put({...current,phase:'displaying',expiresAt:0});}
+        catch(_error){finish(false);}
+      };
+      tx.oncomplete=()=>finish(true);
+      tx.onerror=()=>finish(false);
+      tx.onabort=()=>finish(false);
+    }catch(_error){finish(false);}
+  }));
+}
+function _settlePageNotification(identity,token,state){
+  const key=_notificationOwnerKey(identity);
+  return _openNotificationOwnerDb().then(db=>new Promise(resolve=>{
+    let settled=false;
+    const finish=ok=>{if(!settled){settled=true;try{db.close();}catch(_error){ }resolve(!!ok);}};
+    try{
+      const tx=db.transaction(_NOTIFICATION_OWNER_STORE,'readwrite');
+      const store=tx.objectStore(_NOTIFICATION_OWNER_STORE);
+      const read=store.get(key);
+      read.onerror=()=>finish(false);
+      read.onsuccess=()=>{
+        const current=read.result;
+        if(!current||current.state!=='pending'||current.token!==token){finish(false);return;}
+        try{
+          if(state==='delivered') store.put({...current,state,phase:'delivered',expiresAt:0});
+          else if(state==='failed') store.put({...current,state:'failed',phase:'failed',expiresAt:0});
+          else store.delete(key);
+        }catch(_error){finish(false);}
+      };
+      tx.oncomplete=()=>finish(true);
+      tx.onerror=()=>finish(false);
+      tx.onabort=()=>finish(false);
+    }catch(_error){finish(false);}
+  }));
+}
+function _releasePageNotification(identity,token){
+  let attempts=0;
+  const release=()=>_settlePageNotification(identity,token,'released').catch(()=>false).then(ok=>{
+    if(ok){_notificationFailedPageKeys.delete(_notificationFailedPageKey(identity));return true;}
+    if(attempts>=2){
+      return _settlePageNotification(identity,token,'failed').then(marked=>{
+        if(marked)_notificationFailedPageKeys.delete(_notificationFailedPageKey(identity));
+        return marked;
+      }).catch(()=>false);
+    }
+    attempts+=1;
+    return release();
+  });
+  return release();
+}
+function _displayedNotificationMatches(reg,opts,identity){
+  if(!reg||typeof reg.getNotifications!=='function') return Promise.resolve(false);
+  return Promise.resolve(reg.getNotifications({tag:opts.tag})).then(records=>Array.isArray(records)&&records.some(record=>record&&record.data&&record.data.eventId===identity.lastEventId));
+}
+function _workerSupportsNotificationPresentation(active){
+  if(!active||typeof active.scriptURL!=='string'||!active.scriptURL) return Promise.resolve(false);
+  return Promise.resolve(/[?&]notification_protocol=1(?:&|#|$)/.test(active.scriptURL));
+}
+function _reconcileWorkerTimeout(active,reg,opts,identity,title,body){
+  return _displayedNotificationMatches(reg,opts,identity).then(displayed=>{
+    if(displayed)return 'duplicate';
+    return _workerSupportsNotificationPresentation(active).then(capable=>
+      capable===false?_deliverPageNotification(title,body,opts,identity,reg):'ambiguous'
+    );
+  }).catch(()=> 'ambiguous');
+}
+function _deliverPageNotification(title,body,opts,identity,reg){
+  return _displayedNotificationMatches(reg,opts,identity).then(displayed=>{
+    if(displayed)return 'duplicate';
+    return _claimPageNotification(identity).then(claim=>{
+      if(claim.status!=='claimed')return claim.status;
+      return _markPageNotificationDisplaying(identity,claim.token).then(marked=>{
+        if(!marked)return 'ambiguous';
+        try{
+          const notification=new Notification(title,opts);
+          return _settlePageNotification(identity,claim.token,'delivered').then(ok=>ok?'shown':'ambiguous');
+        }catch(error){
+          _recordFailedPageNotification(identity,claim.token);
+          return _releasePageNotification(identity,claim.token).then(()=>{throw error;});
+        }
+      });
+    });
+  }).catch(()=> 'ambiguous');
+}
 function _showPwaNotification(title,body,options={}){
   const botName=assistantDisplayName();
   const opts=_notificationOptions(body,options);
   const direct=()=>new Notification(title||botName,opts);
   const identityBearing=_hasNotificationIdentity(options);
   const identity=options&&options.eventIdentity;
-  const deliverDirect=()=>{try{return Promise.resolve(direct());}catch(error){return Promise.reject(error);}};
-  if(identityBearing&&!_isValidNotificationIdentity(identity)) return deliverDirect();
+  const deliverDirect=reg=>identityBearing
+    ? _deliverPageNotification(title||botName,body,opts,identity,reg)
+    : (()=>{try{return Promise.resolve(direct());}catch(error){return Promise.reject(error);}})();
+  if(identityBearing&&!_isValidNotificationIdentity(identity)) return direct();
   // Prefer the service worker (the only path that works in a standalone PWA,
   // notably iOS). Use getRegistration() + a short timeout race rather than
   // navigator.serviceWorker.ready, because `.ready` NEVER settles when no
@@ -9204,17 +9377,20 @@ function _showPwaNotification(title,body,options={}){
       ]);
     return reg$.then(reg=>{
       if(identityBearing){
-        if(!reg||!reg.active)return deliverDirect();
+        if(!reg||!reg.active)return deliverDirect(null);
         return _presentNotification(reg.active,title||botName,opts,identity).then(status=>
-          status==='shown'||status==='duplicate'?status:deliverDirect()
+          status==='shown'||status==='duplicate'?status:
+            status==='ambiguous'
+              ? _reconcileWorkerTimeout(reg.active,reg,opts,identity,title||botName,body)
+              : _deliverPageNotification(title||botName,body,opts,identity,reg)
         );
       }
       return (reg&&reg.active&&reg.showNotification)
         ? reg.showNotification(title||botName,opts)
         : direct();
-    }).catch(()=>identityBearing?deliverDirect():direct());
+    }).catch(()=>identityBearing?deliverDirect(null):direct());
   }
-  return Promise.resolve(direct());
+  return identityBearing?deliverDirect(null):Promise.resolve(direct());
 }
 function requestNotificationPermission(){
   if(!('Notification' in window)){

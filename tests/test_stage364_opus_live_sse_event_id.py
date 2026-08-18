@@ -22,6 +22,7 @@ Implementation:
 """
 
 from pathlib import Path
+import ast
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 STREAMING_PY = (REPO_ROOT / "api" / "streaming.py").read_text(encoding="utf-8")
@@ -82,9 +83,11 @@ def test_gateway_queue_item_carries_explicit_journal_identity():
 def test_sse_handler_reads_event_id_from_side_channel():
     """The SSE consumer in _handle_sse_stream must read STREAM_LAST_EVENT_ID
     and pass it to _sse_with_id when present."""
-    handler_idx = ROUTES_PY.find("def _handle_sse_stream(handler, parsed):")
-    assert handler_idx != -1, "_handle_sse_stream not found"
-    handler_body = ROUTES_PY[handler_idx:handler_idx + 5400]
+    tree = ast.parse(ROUTES_PY)
+    handler_node = next((node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "_handle_sse_stream"), None)
+    assert handler_node is not None, "_handle_sse_stream not found"
+    lines = ROUTES_PY.splitlines(keepends=True)
+    handler_body = "".join(lines[handler_node.lineno - 1:handler_node.end_lineno])
     assert "STREAM_LAST_EVENT_ID.get(stream_id)" in handler_body, (
         "_handle_sse_stream must read STREAM_LAST_EVENT_ID[stream_id] to "
         "get the event_id for emit"

@@ -97,14 +97,16 @@ that breaks the page for everyone).
 handler-less worker update window, and uses two controlled pages. The pages invoke
 the production `attachLiveStream()` listener with a boundary EventSource, so the
 gate covers listener, sender, versioned worker presenter, displayed-record lookup,
-and click-data composition. Submit one canonical event from both pages, then the
-next event under the same stable tag; the first event must have one displayed
-record and the next event must create a new record with its event id and
-`renotify:true`. The focused presenter protocol test covers worker display
-rejection and retry. The served notification path must contain no IndexedDB claim
-database. Journal-less frames carry no durable SSE id; notification-producing
-payloads use a bounded delivery-only identity so controlled pages can coordinate
-without advancing replay state.
+and click-data composition. During the legacy-worker window, submit one canonical
+event from both pages and require one page-owner delivery, then submit the next
+identity and require one additional delivery. The page owner records `pending`
+before construction and `delivered` after success, releases on constructor
+failure, expires pending ownership, and fails closed on storage ambiguity. A
+worker timeout or lost reply reconciles the exact displayed tag and event id
+before page fallback. The focused presenter protocol test covers worker display
+rejection and retry. Journal-less frames carry no durable SSE id;
+notification-producing payloads use a bounded delivery-only identity so
+controlled pages can coordinate without advancing replay state.
 
 ```bash
 python tests/browser_issue6673_service_worker.py
