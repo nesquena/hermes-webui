@@ -1495,7 +1495,9 @@ def _read_text_bounded(
     leading bytes — used by cron output reads where the ``## Response`` section
     the UI most wants lives at the END of the file, so a pure head cap would
     drop exactly that section when the preceding prompt/front-matter is large.
-    A line split at the seek boundary is discarded.
+    A line split at the seek boundary is discarded. A first line starting exactly
+    at the boundary (the preceding byte is a newline) is complete and kept.
+    (#6141 r10)
     """
     try:
         fh = open(path, "rb")
@@ -1524,8 +1526,14 @@ def _read_text_bounded(
         # Over cap: read only max_bytes. Head or tail per ``tail``.
         try:
             if tail:
-                fh.seek(max(0, size - max_bytes))
-            raw = fh.read(max_bytes)
+                # Start one byte earlier so the boundary byte itself is in the
+                # window: if it is a newline, the first window line is COMPLETE
+                # (kept — only the boundary byte is stripped); otherwise the
+                # first line is partial and is still dropped below.
+                fh.seek(max(0, size - max_bytes - 1))
+                raw = fh.read(max_bytes + 1)
+            else:
+                raw = fh.read(max_bytes)
         except OSError:
             return "", False, False
     finally:
@@ -1536,7 +1544,9 @@ def _read_text_bounded(
         # leaves something behind. If the whole window is a single line (no
         # newline, or the only newline is the trailing one), the first line is a
         # COMPLETE line (the seek landed on a line boundary) and must be kept;
-        # dropping it would return empty and lose the only content.
+        # dropping it would return empty and lose the only content. With the
+        # one-byte-earlier window, a leading "\n" means the first line is complete
+        # and only that byte is stripped.
         nl = text.find("\n")
         if nl >= 0 and nl + 1 < len(text):
             text = text[nl + 1:]
@@ -1560,11 +1570,19 @@ def _read_cron_output_bounded(
       Head and tail are read from the SAME descriptor against the SAME pinned
       size, so a replacement between two separate opens cannot combine
       frontmatter from inode A with a response body from inode B.
-    - Head and tail byte ranges are DISJOINT: head = ``[0, cap)``, tail starts
-      at ``max(cap, size - cap)``. When ``size <= 2*cap`` the tail begins right
-      where the head ended (no overlap, no body duplication); when
-      ``size > 2*cap`` the middle (the truncated prompt section) is omitted.
-      The returned body therefore never contains more bytes than the source.
+    - Head and tail byte ranges are DISJOINT: head = ``[0, cap)``. When
+      ``size > 2*cap`` the tail starts at ``size - cap - 1`` (the gap case) — the
+      head ends at ``cap-1`` and the tail begins one byte earlier than today so the
+      boundary byte (immediately before the tail) is included in the tail window,
+      making first-line completeness provable; when ``size <= 2*cap`` the tail
+      starts at ``cap`` (the adjacent case) and begins exactly where the head
+      ended. The returned body therefore never contains more bytes than the source.
+    - The first tail line is dropped only when it is PROVEN PARTIAL. When the byte
+      immediately before the tail on this descriptor is a newline (the tail boundary
+      landed exactly on a line boundary), the first tail line is complete and kept:
+      in the gap case that byte is the tail window's own first byte; in the adjacent
+      case it is the head's last byte (when the head read was full — a short read
+      leaves it unproven, so we fail closed and drop). (#6141 r10)
     - Every read is capped (no unbounded ``fh.read()``).
     - The returned ``bytes_read`` is the actual byte count consumed from THIS
       descriptor (the disjoint head + tail windows, derived from the pinned
@@ -1636,11 +1654,24 @@ def _read_cron_output_bounded(
                 return raw.decode("utf-8", errors="replace"), True, True, bytes_read, False
             return raw.decode("utf-8", errors="replace"), False, True, bytes_read, False
         # Over cap: read DISJOINT head + tail from this one descriptor.
-        # Head = [0, cap). Tail starts at max(cap, size-cap) so the two ranges
-        # never overlap (when size <= 2*cap, tail begins right after head; when
-        # size > 2*cap, the middle prompt section is omitted). (#6141 r2 #2)
-        head_len = cap
-        tail_len = min(cap, max(0, size - cap))
+        gap_case = False  # init for safety
+        if size > 2 * cap:
+            # Gap case (middle omitted): shift both windows one byte — the
+            # head gives up its last byte and the tail starts one byte
+            # earlier, INCLUDING the boundary byte — so first-line
+            # completeness at the tail boundary is provable from bytes
+            # already read. Total planned bytes are unchanged (2*cap).
+            gap_case = True
+            head_len = cap - 1
+            tail_start = size - cap - 1
+            tail_len = cap + 1
+        else:
+            # Adjacent case: tail begins exactly where the head ended, so the
+            # byte before the tail IS the head's last byte.
+            gap_case = False
+            head_len = cap
+            tail_start = cap
+            tail_len = min(cap, max(0, size - cap))
         planned = head_len + tail_len
         # Budget enforcement INSIDE the descriptor read: if the disjoint windows
         # would exceed the remaining allowance, decline before reading — do NOT
@@ -1654,7 +1685,6 @@ def _read_cron_output_bounded(
             fh.seek(0)
             head_raw = fh.read(head_len)
             consumed = len(head_raw)
-            tail_start = max(cap, size - cap)
             fh.seek(tail_start)
             tail_raw = fh.read(tail_len)
             consumed = len(head_raw) + len(tail_raw)
@@ -1674,11 +1704,23 @@ def _read_cron_output_bounded(
         fh.close()
     head_text = head_raw.decode("utf-8", errors="replace")
     tail_text = tail_raw.decode("utf-8", errors="replace")
-    # Drop a partial first line at the tail seek boundary (a line split across
-    # the head/tail divide is incomplete) — but only if it leaves content.
-    tnl = tail_text.find("\n")
-    if tnl >= 0 and tnl + 1 < len(tail_text):
-        tail_text = tail_text[tnl + 1:]
+    # Drop the first tail line only when it is a PROVEN partial. The first
+    # tail line is proven COMPLETE when the byte immediately before it on
+    # this descriptor is a newline (the tail boundary landed exactly on a
+    # line boundary): in the gap case that byte is the tail window's own
+    # first byte; in the adjacent case it is the head's last byte (when the
+    # head read was full — a short read leaves it unproven, so we fail
+    # closed and drop). (#6141 r10)
+    if gap_case:
+        boundary_newline = tail_raw[:1] == b"\n"
+        if boundary_newline and tail_text.startswith("\n"):
+            tail_text = tail_text[1:]  # keep the complete first line
+    else:
+        boundary_newline = len(head_raw) == head_len and head_raw[-1:] == b"\n"
+    if not boundary_newline:
+        tnl = tail_text.find("\n")
+        if tnl >= 0 and tnl + 1 < len(tail_text):
+            tail_text = tail_text[tnl + 1:]
     marker_idx = _cron_response_marker_index(head_text)
     marker_in_tail = _cron_response_marker_index(tail_text) >= 0
     if marker_in_tail:

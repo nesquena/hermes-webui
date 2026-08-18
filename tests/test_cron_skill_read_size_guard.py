@@ -1082,7 +1082,10 @@ def test_read_cron_output_bounded_partial_failure_preserves_head_bytes(tmp_path,
             self._real.seek(pos)
         def read(self, n=-1):
             data = self._real.read(n)
-            if n and n >= _FILE_READ_MAX_BYTES:
+            # Gap-case head read is cap-1 since the r10 boundary-byte window
+            # shift (head gives up its last byte to the tail), so arm on the
+            # head-sized request regardless of the ±1 shift.
+            if n and n >= _FILE_READ_MAX_BYTES - 1:
                 self._head_done = True  # head read done; next seek will fail
             return data
         def close(self): return self._real.close()
@@ -1101,8 +1104,9 @@ def test_read_cron_output_bounded_partial_failure_preserves_head_bytes(tmp_path,
         f"consumed head bytes must be preserved on partial failure; got "
         f"bytes_read={bytes_read}"
     )
-    assert bytes_read >= _FILE_READ_MAX_BYTES, (
-        f"head read (~1 cap) must be charged; got {bytes_read}"
+    assert bytes_read >= _FILE_READ_MAX_BYTES - 1, (
+        f"head read (~1 cap; gap-case head is cap-1 since r10) must be charged; "
+        f"got {bytes_read}"
     )
 
 
@@ -1398,4 +1402,254 @@ def test_read_cron_output_bounded_budget_limited_read_never_exceeds_budget(
     assert trunc is True, (
         f"read that fills the budget without a growth probe must be "
         f"conservatively truncated; got trunc={trunc}"
+    )
+
+
+# ── Gate round-10 (2026-08-18): boundary-newline data-loss fix ─────────────────────
+
+
+def test_cron_run_detail_boundary_newline_keeps_first_response_line(monkeypatch, tmp_path):
+    """Round-10: boundary-newline data-loss fix. When the head cap ends EXACTLY at
+    a line boundary (preceded by a newline), the first line after the boundary is
+    COMPLETE and must be kept — the old code unconditionally dropped it. Fixture:
+    head of EXACTLY cap bytes ending with ``\\n## Response\\n``, then two response
+    lines. Assert BOTH lines survive in text, snippet, and handler payload. (#6141 r10)"""
+    from api.routes import _read_cron_output_bounded, _cron_output_snippet
+
+    cap = _FILE_READ_MAX_BYTES
+
+    # Construct a head of EXACTLY cap bytes ending with "\n## Response\n"
+    # The newline before the marker is required so _cron_response_marker_index
+    # recognizes it (it scans for "\n## Response").
+    frontmatter = b"# Cron\n**Model:** gpt-5\n**Tokens:** 1000, 500\n\n"
+    response_prefix = b"\n## Response\n"  # newline before marker for recognition
+
+    # Filler to reach exactly cap bytes (frontmatter + filler + response_prefix)
+    filler_len = cap - len(frontmatter) - len(response_prefix)
+    assert filler_len >= 0, f"frontmatter+response_prefix overflow cap: {len(frontmatter)} + {len(response_prefix)} > {cap}"
+    head = frontmatter + (b"F" * filler_len) + response_prefix
+    assert len(head) == cap, f"head must be exactly {cap} bytes; got {len(head)}"
+
+    # Response body: two complete lines after the boundary
+    line_one = b"RESPONSE_LINE_ONE_ALPHA\n"
+    line_two = b"RESPONSE_LINE_TWO_BETA\n"
+    body = line_one + line_two
+
+    out_dir = tmp_path / "cron-out" / "job1"
+    out_dir.mkdir(parents=True)
+    fpath = out_dir / "run.md"
+    fpath.write_bytes(head + body)
+
+    _stub_cron_jobs(monkeypatch, output_dir=tmp_path / "cron-out")
+
+    # Direct helper check: BOTH lines must survive in text and snippet
+    txt, truncated, _ok, _bytes_read, _declined = _read_cron_output_bounded(fpath)
+    assert truncated is True, "file exceeds cap, must be truncated"
+    assert "RESPONSE_LINE_ONE_ALPHA" in txt, (
+        f"first response line after boundary must be kept; got:\n{txt[:200]}"
+    )
+    assert "RESPONSE_LINE_TWO_BETA" in txt, (
+        f"second response line must be kept; got:\n{txt[:200]}"
+    )
+    snippet = _cron_output_snippet(txt)
+    assert "RESPONSE_LINE_ONE_ALPHA" in snippet, (
+        f"snippet must include first response line; got:\n{snippet[:200]}"
+    )
+    assert "RESPONSE_LINE_TWO_BETA" in snippet, (
+        f"snippet must include second response line; got:\n{snippet[:200]}"
+    )
+    # Marker count sanity: exactly one ## Response (no duplication)
+    assert txt.count("## Response") == 1, (
+        f"marker must appear exactly once; count={txt.count('## Response')}"
+    )
+
+    # End-to-end through the detail handler
+    handler = _JSONHandler()
+    routes._handle_cron_run_detail(
+        handler, SimpleNamespace(query="job_id=job1&filename=run.md")
+    )
+    assert handler.status == 200
+    body_payload = _payload(handler)
+    assert body_payload["truncated"] is True
+    assert "RESPONSE_LINE_ONE_ALPHA" in body_payload["content"], (
+        f"handler payload must include first response line; got:\n{body_payload.get('content', '')[:200]}"
+    )
+    assert "RESPONSE_LINE_TWO_BETA" in body_payload["content"], (
+        f"handler payload must include second response line; got:\n{body_payload.get('content', '')[:200]}"
+    )
+    assert "RESPONSE_LINE_ONE_ALPHA" in body_payload["snippet"], (
+        f"handler snippet must include first response line; got:\n{body_payload.get('snippet', '')[:200]}"
+    )
+    assert "RESPONSE_LINE_TWO_BETA" in body_payload["snippet"], (
+        f"handler snippet must include second response line; got:\n{body_payload.get('snippet', '')[:200]}"
+    )
+
+
+def test_read_cron_output_bounded_gap_boundary_newline_keeps_first_line(tmp_path):
+    """Round-10 gap-case variant: when size > 2*cap and the boundary byte (at
+    ``size - cap - 1``) is a newline, the first line after the gap is COMPLETE
+    and must be kept. Fixtures a gap-case file with a boundary newline and two
+    complete lines; asserts line one AND line two survive and bytes_read <= 2*cap.
+    (#6141 r10)"""
+    from api.routes import _read_cron_output_bounded
+
+    cap = _FILE_READ_MAX_BYTES
+
+    # For gap case, we need size > 2*cap and the boundary byte at size - cap - 1
+    # We want the boundary newline to be at position size - cap - 1
+    # So: head_len + middle_len = size - cap - 1
+    # And: size = head_len + middle_len + len(tail_content)
+    # Therefore: head_len + middle_len + len(tail_content) - cap - 1 = head_len + middle_len
+    # Solving: middle_len = cap + 1 - len(tail_content)
+    frontmatter = b"# Cron\n**Model:** gpt-5\n"
+    head_len = cap - 1
+    head_filler_len = head_len - len(frontmatter)
+    head_portion = frontmatter + (b"H" * head_filler_len)
+    assert len(head_portion) == head_len, f"head portion must be {head_len} bytes; got {len(head_portion)}"
+
+    # Tail content: boundary newline + two complete lines + padding to reach cap + 1 bytes
+    # For gap case, tail_len = cap + 1, so tail_content needs to be cap + 1 bytes
+    boundary_newline = b"\n"
+    line_one = b"GAP_LINE_ONE_EPS\n"
+    line_two = b"GAP_LINE_TWO_ZETA"
+    tail_content_base = boundary_newline + line_one + line_two
+    tail_content_base_len = len(tail_content_base)
+    # Add padding to reach cap + 1 bytes
+    padding_len = (cap + 1) - tail_content_base_len
+    tail_content = tail_content_base + (b"P" * padding_len)
+    tail_content_len = len(tail_content)
+    assert tail_content_len == cap + 1, f"tail_content must be cap + 1 bytes; got {tail_content_len}"
+
+    # For gap case, middle_len can be any value > 0 (just needs size > 2*cap)
+    middle_len = cap  # use cap bytes for middle (same as head length)
+    middle_blob = b"M" * middle_len
+
+    # Calculate expected positions and size
+    # Head: positions 0 to head_len - 1
+    # Middle: positions head_len to head_len + middle_len - 1
+    # Boundary newline: at position head_len + middle_len
+    # This should equal size - cap - 1 for the gap case
+    expected_boundary_pos = head_len + middle_len
+    target_size = head_len + middle_len + tail_content_len
+
+    # Verify the boundary position calculation
+    assert expected_boundary_pos == target_size - cap - 1, (
+        f"boundary position calculation error: expected_boundary_pos={expected_boundary_pos}, "
+        f"size - cap - 1 = {target_size - cap - 1}"
+    )
+    # Verify size > 2*cap for gap case
+    assert target_size > 2 * cap, f"size must be > 2*cap for gap case; got {target_size}"
+
+    # Assemble the file
+    fpath = tmp_path / "gap-boundary.md"
+    content = head_portion + middle_blob + tail_content
+    fpath.write_bytes(content)
+
+    size = fpath.stat().st_size
+    assert size == target_size, f"size mismatch: expected {target_size}, got {size}"
+    assert size > 2 * cap, f"file size must exceed 2*cap ({2*cap}); got {size}"
+
+    # Verify alignment: the byte at size - cap - 1 MUST be "\n"
+    # This is the key invariant for the gap case
+    boundary_pos_check = size - cap - 1
+    actual_boundary_byte = content[boundary_pos_check:boundary_pos_check + 1]
+    assert actual_boundary_byte == b"\n", (
+        f"boundary byte at position {boundary_pos_check} must be newline; "
+        f"got {actual_boundary_byte!r}"
+    )
+    assert boundary_pos_check == expected_boundary_pos, (
+        f"boundary position mismatch: expected {expected_boundary_pos}, got {boundary_pos_check}"
+    )
+
+    # Read via the bounded helper
+    txt, truncated, _ok, bytes_read, _declined = _read_cron_output_bounded(fpath)
+
+    # Both tail lines must survive (they're complete — the boundary proved it)
+    assert "GAP_LINE_ONE_EPS" in txt, (
+        f"first line after gap boundary must be kept; got:\n{txt[:300]}"
+    )
+    assert "GAP_LINE_TWO_ZETA" in txt, (
+        f"second line after gap boundary must be kept; got:\n{txt[:300]}"
+    )
+    # Budget sanity: bytes_read <= 2*cap (gap case total is exactly 2*cap)
+    assert bytes_read <= 2 * cap, (
+        f"bytes_read must stay within 2*cap ({2*cap}); got {bytes_read}"
+    )
+    assert truncated is True, "file exceeds cap, must be truncated"
+
+
+def test_read_cron_output_bounded_partial_first_line_still_dropped(tmp_path):
+    """Round-10 control test: when the boundary byte is NOT a newline (mid-line
+    boundary), the first tail line is PARTIAL and must still be dropped. Fixture:
+    head of exactly cap bytes NOT ending in ``\\n`` (last byte 'Q'), then partial
+    fragment ``PARTIAL_FRAGMENT_ZZZ\\n`` followed by a control line. Assert the
+    partial fragment is NOT in text and the control line IS in text. (#6141 r10)"""
+    from api.routes import _read_cron_output_bounded
+
+    cap = _FILE_READ_MAX_BYTES
+
+    # Construct head of EXACTLY cap bytes NOT ending in newline
+    frontmatter = b"# Cron\n**Model:** gpt-5\n"
+    filler_len = cap - len(frontmatter) - 1  # -1 to leave room for trailing 'Q'
+    head = frontmatter + (b"F" * filler_len) + b"Q"  # 'Q' ensures no trailing newline
+    assert len(head) == cap, f"head must be exactly {cap} bytes; got {len(head)}"
+    assert head[-1:] != b"\n", "head must NOT end with newline"
+
+    # Response body starts mid-line (no leading newline)
+    # PARTIAL_FRAGMENT_ZZZ is a partial line at the boundary (should be dropped)
+    # CONTROL_LINE_KEEP is a complete line after it (should be kept)
+    body = b"PARTIAL_FRAGMENT_ZZZ\nCONTROL_LINE_KEEP\n"
+
+    fpath = tmp_path / "partial-boundary.md"
+    fpath.write_bytes(head + body)
+
+    # Read via the bounded helper
+    txt, truncated, _ok, _bytes_read, _declined = _read_cron_output_bounded(fpath)
+
+    # Partial fragment must be dropped (it was incomplete at the boundary)
+    assert "PARTIAL_FRAGMENT_ZZZ" not in txt, (
+        f"partial first line must be dropped; got:\n{txt[:300]}"
+    )
+    # Control line must survive (it's complete after the dropped partial)
+    assert "CONTROL_LINE_KEEP" in txt, (
+        f"complete line after partial must be kept; got:\n{txt[:300]}"
+    )
+
+
+def test_read_text_bounded_tail_mode_boundary_newline_keeps_first_line(tmp_path):
+    """Round-10: _read_text_bounded(tail=True) must keep a provably-complete first
+    line when the boundary byte (the byte before the tail window) is a newline.
+    Fixture: file ``b\"junk-no-newline-end\" + b\"\\n\" + b\"TAIL_LINE_ONE_EPS\\nTAIL_LINE_TWO_ZETA\"``.
+    The tail seek lands on the boundary newline, so the first tail line is complete
+    and BOTH lines must be in the returned text (old code dropped the first line).
+    (#6141 r10)"""
+    from api.routes import _read_text_bounded
+
+    # Construct: junk prefix (no trailing newline) + boundary newline + two lines
+    junk = b"junk-no-newline-end"  # no trailing newline — the newline we add is the boundary
+    boundary_newline = b"\n"
+    line_one = b"TAIL_LINE_ONE_EPS\n"
+    line_two = b"TAIL_LINE_TWO_ZETA"
+    content = junk + boundary_newline + line_one + line_two
+
+    fpath = tmp_path / "tail-boundary.txt"
+    fpath.write_bytes(content)
+
+    # Read tail with max_bytes covering exactly the two lines — NOT the
+    # boundary byte. (Including the boundary byte in max_bytes would make even
+    # the pre-fix window contain it, so the unconditional drop would strip
+    # only that byte and the fixture could not discriminate the fix.)
+    lines_len = len(line_one) + len(line_two)
+    text, truncated, _ok = _read_text_bounded(fpath, max_bytes=lines_len, tail=True)
+
+    # Both lines must survive (the boundary byte proved the first line was complete)
+    assert "TAIL_LINE_ONE_EPS" in text, (
+        f"first tail line must be kept; got:\n{text[:200]}"
+    )
+    assert "TAIL_LINE_TWO_ZETA" in text, (
+        f"second tail line must be kept; got:\n{text[:200]}"
+    )
+    # The boundary byte (newline) should be stripped, not duplicated
+    assert text.startswith("TAIL_LINE_ONE_EPS"), (
+        f"text should start with first line (boundary byte stripped); got:\n{text[:100]}"
     )
