@@ -1736,17 +1736,20 @@ def _materialize_active_turn_user(identity, msg_text, source):
             message['timestamp'] = identity['timestamp']
         if identity.get('attachments'):
             message['attachments'] = copy.deepcopy(identity['attachments'])
-    if str(source or '').strip().lower() == 'fork':
-        child_session_id = identity.get('session_id') if isinstance(identity, dict) else None
-        if child_session_id:
-            message['_fork_child_turn'] = child_session_id
         stamp_message_source(
             message,
             identity.get('source') or source or 'webui',
             active_turn_token=identity.get('token'),
         )
+        if str(identity.get('source') or source or '').strip().lower() == 'fork':
+            child_session_id = identity.get('session_id')
+            if child_session_id:
+                message['_fork_child_turn'] = child_session_id
     else:
-        stamp_message_source(message, source)
+        stamp_message_source(
+            message,
+            source,
+        )
     return message
 
 

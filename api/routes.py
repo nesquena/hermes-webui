@@ -21962,7 +21962,7 @@ def _start_regeneration_stream_locked(
     except Exception as exc:
         # The plan read is side-effect free. Do not let the route restore its
         # older request snapshot over a concurrent accepted session state.
-        setattr(exc, "_regeneration_skip_outer_rollback", True)
+        exc._regeneration_skip_outer_rollback = True
         raise
     # plan_regeneration is read-only. Take the complete rollback snapshot only
     # after its lock-scoped revision and authority checks have succeeded.
@@ -22123,7 +22123,7 @@ def _start_regeneration_stream_locked(
                     )
                 except Exception:
                     logger.warning("Failed to close accepted regeneration journal", exc_info=True)
-            setattr(exc, "_regeneration_accepted", True)
+            exc._regeneration_accepted = True
             raise
         restore_regeneration_state(s, snapshot)
         if save_attempted:
@@ -22150,7 +22150,7 @@ def _start_regeneration_stream_locked(
                     "Failed to close compensated turn journal event",
                     exc_info=True,
                 )
-        setattr(exc, "_regeneration_preacceptance_restored", True)
+        exc._regeneration_preacceptance_restored = True
         raise
 
     release_worker.set()
