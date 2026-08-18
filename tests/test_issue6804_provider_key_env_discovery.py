@@ -194,6 +194,18 @@ def test_declared_failure_preserves_key_env_source(monkeypatch):
     assert (resolved.state, resolved.source) == ("declared_unavailable", "key_env")
 
 
+def test_context_length_provider_entry_preserves_source_boundary(monkeypatch):
+    monkeypatch.setenv("CUSTOM_API_KEY", "ambient-secret")
+    cfg = {
+        "providers": {"custom": {"base_url": "https://custom.test/v1"}},
+        "model": {"provider": "custom", "api_key": "model-literal"},
+    }
+    assert routes._context_length_config_api_key_for_provider("custom", cfg) == "model-literal"
+
+    cfg["providers"]["custom"] = {"api_key": None}
+    assert routes._context_length_config_api_key_for_provider("custom", cfg) == ""
+
+
 def test_declared_empty_and_malformed_sources_fail_closed():
     fallback = lambda _hint: "ambient-secret"
     for entry in ({"api_key": None}, {"api_key": ""}, {"api_key": "${BROKEN"}):

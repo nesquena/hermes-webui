@@ -6782,11 +6782,13 @@ def _context_length_config_api_key_for_provider(
     cfg = cfg if isinstance(cfg, dict) else {}
     provider = _canonical_context_provider(provider)
 
-    def _resolve_key(raw_api_key, raw_key_env=None) -> str:
+    def _resolve_entry(raw_entry: dict | None) -> str:
         try:
             from api.config import resolve_provider_credential_entry
             from api import config as _config_module
 
+            raw_entry = raw_entry if isinstance(raw_entry, dict) else {}
+            raw_api_key = raw_entry.get("api_key")
             raw_text = str(raw_api_key or "").strip()
             if (
                 raw_text.startswith("${")
@@ -6799,11 +6801,6 @@ def _context_length_config_api_key_for_provider(
                     provider,
                 )
 
-            raw_entry = {}
-            if raw_api_key is not None:
-                raw_entry["api_key"] = raw_api_key
-            if raw_key_env is not None:
-                raw_entry["key_env"] = raw_key_env
             return resolve_provider_credential_entry(raw_entry, provider) or ""
         except Exception:
             return ""
@@ -6815,15 +6812,18 @@ def _context_length_config_api_key_for_provider(
                 continue
             if not _providers_match_for_context(provider_key, provider):
                 continue
-            api_key = _resolve_key(provider_cfg.get("api_key"), provider_cfg.get("key_env"))
+            if "api_key" not in provider_cfg and "key_env" not in provider_cfg:
+                continue
+            api_key = _resolve_entry(provider_cfg)
             if api_key:
                 return api_key
+            return ""
 
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, dict):
         model_provider = _canonical_context_provider(model_cfg.get("provider"))
         if not provider or _providers_match_for_context(model_provider, provider):
-            api_key = _resolve_key(model_cfg.get("api_key"), model_cfg.get("key_env"))
+            api_key = _resolve_entry(model_cfg)
             if api_key:
                 return api_key
     return ""
