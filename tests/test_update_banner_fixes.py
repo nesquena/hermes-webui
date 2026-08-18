@@ -62,6 +62,298 @@ def extract_js_function(src: str, name: str) -> str:
     return src[match.start():end]
 
 
+def test_issue4085_dirty_current_reproduction_is_red_on_base():
+    """The issue fixture must drive the production Settings/banner path."""
+    payload = json.loads(read('tests/fixtures/issue4085dirtyinstallrepro.json'))['payloads']['dirty_current']
+    ui = read('static/ui.js')
+    panels = read('static/panels.js')
+    check_fn = extract_js_function(panels, 'checkUpdatesNow')
+    classifier_fn = extract_js_function(ui, '_updateTargetRecoverableDirty')
+    format_fn = extract_js_function(ui, '_formatUpdateTargetStatus')
+    error_fn = extract_js_function(ui, '_formatUpdateCheckError')
+    instruction_fn = extract_js_function(ui, '_formatManualUpdateInstruction')
+    script = f"""
+const data = {json.dumps(payload)};
+const state = {{btnCheckUpdatesNow: {{disabled:false}}, checkUpdatesLabel: {{textContent:''}}, checkUpdatesSpinner: {{style:{{display:'none'}}}}, checkUpdatesStatus: {{textContent:'', style:{{color:''}}}}}};
+function $(id) {{ return state[id] || null; }}
+function t(key) {{ return {{settings_checking:'Checking',settings_check_now:'Check now',settings_updates_available:'{{count}} update(s) available',settings_update_check_failed:'Update check failed',settings_update_no_git:'Cannot check for updates',settings_up_to_date:'Up to date',update_local_changes:'Local changes detected'}}[key] || key; }}
+async function api() {{ return data; }}
+function _showUpdateBanner() {{}}
+{format_fn}
+{error_fn}
+    {instruction_fn}
+    {classifier_fn}
+{check_fn}
+(async()=>{{ await checkUpdatesNow(); if(state.checkUpdatesStatus.textContent.indexOf('Local changes detected')===-1) throw new Error('dirty/current payload must show Local changes detected: '+state.checkUpdatesStatus.textContent); }})().catch(e=>{{console.error(e.message);process.exit(1);}});
+"""
+    result = subprocess.run(['node', '-e', script], check=False, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_issue4085_stale_error_keeps_force_recovery_in_settings():
+    """A dirty checkout keeps its destructive recovery action after a failed check."""
+    payload = json.loads(read('tests/fixtures/issue4085dirtyinstallrepro.json'))['payloads']['dirty_stale_check']
+    ui = read('static/ui.js')
+    panels = read('static/panels.js')
+    check_fn = extract_js_function(panels, 'checkUpdatesNow')
+    classifier_fn = extract_js_function(ui, '_updateTargetRecoverableDirty')
+    format_fn = extract_js_function(ui, '_formatUpdateTargetStatus')
+    error_fn = extract_js_function(ui, '_formatUpdateCheckError')
+    instruction_fn = extract_js_function(ui, '_formatManualUpdateInstruction')
+    script = f"""
+const data = {json.dumps(payload)};
+const state = {{btnCheckUpdatesNow: {{disabled:false}}, checkUpdatesLabel: {{textContent:''}}, checkUpdatesSpinner: {{style:{{display:'none'}}}}, checkUpdatesStatus: {{textContent:'', style:{{color:''}}}}}};
+let banners = 0;
+function $(id) {{ return state[id] || null; }}
+function t(key) {{ return {{settings_checking:'Checking',settings_check_now:'Check now',settings_updates_available:'{{count}} update(s) available',settings_update_check_failed:'Update check failed',settings_update_no_git:'Cannot check for updates',settings_up_to_date:'Up to date',update_local_changes:'Local changes detected'}}[key] || key; }}
+async function api() {{ return data; }}
+function _showUpdateBanner() {{ banners += 1; }}
+{format_fn}
+{error_fn}
+{instruction_fn}
+{classifier_fn}
+{check_fn}
+(async()=>{{ await checkUpdatesNow(); if(banners!==1) throw new Error('dirty stale/error payload must retain the update banner: '+banners); if(state.checkUpdatesStatus.textContent.indexOf('Update check failed')===-1) throw new Error('Settings must retain error detail: '+state.checkUpdatesStatus.textContent); }})().catch(e=>{{console.error(e.message);process.exit(1);}});
+"""
+    subprocess.run(['node', '-e', script], check=True, capture_output=True, text=True)
+
+
+def test_issue4085_force_terminal_matrix_preserves_sibling_action():
+    """Both terminal Force responses retire only the attempted target."""
+    ui = read('static/ui.js')
+    cases = []
+    for response in ('up_to_date', 'refused_rewind'):
+        for attempted in ('webui', 'agent'):
+            sibling = 'agent' if attempted == 'webui' else 'webui'
+            for sibling_mode in ('dirty_current', 'clean_behind', 'non_actionable'):
+                attempted_info = {'dirty': True, 'behind': 0, 'channel': 'experimental' if attempted == 'webui' else 'stable'}
+                if sibling_mode == 'dirty_current':
+                    sibling_info = {'dirty': True, 'behind': 0, 'channel': 'experimental' if sibling == 'webui' else 'stable'}
+                elif sibling_mode == 'clean_behind':
+                    sibling_info = {'dirty': False, 'behind': 2, 'channel': 'experimental' if sibling == 'webui' else 'stable'}
+                else:
+                    sibling_info = {'dirty': False, 'behind': 2, 'no_git': True, 'channel': 'experimental' if sibling == 'webui' else 'stable'}
+                data = {attempted: attempted_info, sibling: sibling_info}
+                cases.append({'response': response, 'attempted': attempted, 'sibling': sibling, 'mode': sibling_mode, 'data': data})
+    action_model = extract_js_function(ui, '_updateActionModel')
+    dirty_classifier = extract_js_function(ui, '_updateTargetRecoverableDirty')
+    action_applier = extract_js_function(ui, '_applyUpdateActionModel')
+    show_banner = extract_js_function(ui, '_showUpdateBanner')
+    i18n_helper = extract_js_function(ui, '_i18nUpdateText')
+    status_fn = extract_js_function(ui, '_formatUpdateTargetStatus')
+    manual_fn = extract_js_function(ui, '_formatManualUpdateInstruction')
+    force_fn = extract_js_function(ui, 'forceUpdate')
+    script = f"""
+const cases = {json.dumps(cases)};
+const state = {{
+  btnApplyUpdate: {{ disabled:false, textContent:'Update Now', style:{{display:''}} }},
+  btnForceUpdate: {{ disabled:false, textContent:'Force update', style:{{display:'inline-block'}}, dataset:{{target:''}} }},
+  updateMsg: {{ textContent:'' }},
+  updateBanner: {{ classList: {{ add() {{}}, remove() {{}} }} }},
+  updateError: {{ style:{{display:'none'}}, textContent:'' }},
+}};
+global.window = {{ _updateData:null, _updateApplyInFlight:true, _whatsNewSummaryEnabled:false }};
+global.$ = (id) => state[id] || null;
+global.t = (key) => ({{ update_local_changes:'Local changes detected', update_force_target:'Force update {{0}}', update_apply_target:'Update {{0}}', update_force:'Force update', update_no_target:'No update target selected.' }}[key] || key);
+global._renderUpdateWhatsNewLinks = () => {{}};
+global.showConfirmDialog = async () => true;
+global._readHealthServerIdentity = async () => null;
+let calls = 0;
+let restarts = 0;
+let toasts = 0;
+let sessionRemovals = 0;
+let response = null;
+global.api = async (url, opts) => {{
+  calls += 1;
+  const body = JSON.parse(opts.body);
+  if(body.target !== window._expectedTarget) throw new Error('wrong target: '+body.target);
+  return response;
+}};
+global._waitForServerThenReload = () => {{ restarts += 1; }};
+global.showToast = () => {{ toasts += 1; }};
+global.sessionStorage = {{ removeItem: () => {{ sessionRemovals += 1; }} }};
+{status_fn}
+{manual_fn}
+{i18n_helper}
+{dirty_classifier}
+{action_model}
+{action_applier}
+{show_banner}
+{force_fn}
+(async()=>{{
+  for(const test of cases) {{
+    state.btnApplyUpdate.disabled=false;
+    state.btnApplyUpdate.style.display='';
+    state.btnForceUpdate.disabled=false;
+    state.btnForceUpdate.style.display='inline-block';
+    state.btnForceUpdate.textContent='Force update';
+    state.btnForceUpdate.dataset.target=test.attempted;
+    state.updateError.style.display='none';
+    state.updateError.textContent='';
+    calls=0; restarts=0; toasts=0; sessionRemovals=0;
+    window._updateApplyInFlight=true;
+    window._updateData=test.data;
+    window._expectedTarget=test.attempted;
+    const before=JSON.stringify(test.data);
+    response = test.response==='up_to_date' ? {{ok:true,up_to_date:true,message:'{{0}} settled'.replace('{{0}}',test.attempted)}} : {{ok:false,refused_rewind:true,message:'{{0}} refused'.replace('{{0}}',test.attempted)}};
+    await forceUpdate(state.btnForceUpdate);
+    if(calls!==1) throw new Error(test.response+'/'+test.attempted+'/'+test.mode+': expected one request, got '+calls);
+    if(window._updateApplyInFlight!==true) throw new Error(test.response+'/'+test.attempted+'/'+test.mode+': unrelated Apply in-flight state changed');
+    if(JSON.stringify(window._updateData)!==before) throw new Error(test.response+'/'+test.attempted+'/'+test.mode+': payload mutated');
+    if(state.updateError.textContent.indexOf(test.attempted+' ')===-1) throw new Error(test.response+'/'+test.attempted+'/'+test.mode+': response detail missing: '+state.updateError.textContent);
+    if(restarts!==0||toasts!==0||sessionRemovals!==0) throw new Error(test.response+'/'+test.attempted+'/'+test.mode+': terminal no-op restarted or cleaned up');
+    if(test.mode==='dirty_current') {{
+      if(state.btnForceUpdate.style.display!=='inline-block'||state.btnForceUpdate.disabled!==false||state.btnForceUpdate.dataset.target!==test.sibling) throw new Error(test.response+'/'+test.attempted+'/'+test.mode+': sibling Force not retargeted');
+      if(state.updateError.textContent.indexOf('Force update '+test.sibling)===-1) throw new Error(test.response+'/'+test.attempted+'/'+test.mode+': named Force guidance missing: '+state.updateError.textContent);
+      if(state.btnApplyUpdate.style.display!=='none') throw new Error(test.response+'/'+test.attempted+'/'+test.mode+': Apply should stay hidden');
+    }} else if(test.mode==='clean_behind') {{
+      if(state.btnForceUpdate.style.display!=='none') throw new Error(test.response+'/'+test.attempted+'/'+test.mode+': Force should be hidden');
+      if(state.btnApplyUpdate.style.display!==''||state.btnApplyUpdate.disabled!==false) throw new Error(test.response+'/'+test.attempted+'/'+test.mode+': sibling Apply not preserved');
+      if(state.updateError.textContent.indexOf('Update '+test.sibling)===-1) throw new Error(test.response+'/'+test.attempted+'/'+test.mode+': named Apply guidance missing: '+state.updateError.textContent);
+    }} else {{
+      if(state.btnForceUpdate.style.display!=='none'||state.btnApplyUpdate.style.display!=='none'||state.btnForceUpdate.disabled!==true||state.btnApplyUpdate.disabled!==true) throw new Error(test.response+'/'+test.attempted+'/'+test.mode+': non-actionable controls remain '+JSON.stringify({{force:state.btnForceUpdate,apply:state.btnApplyUpdate}}));
+      if(state.updateError.textContent.indexOf('No update target selected.')===-1) throw new Error(test.response+'/'+test.attempted+'/'+test.mode+': no-action guidance missing: '+state.updateError.textContent);
+    }}
+  }}
+}})().catch(e=>{{ console.error(e.message); process.exit(1); }});
+"""
+    result = subprocess.run(['node', '-e', script], check=False, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_issue4085_action_model_fails_closed_for_type_punned_flags():
+    """Unsupported flag types cannot authorize destructive or ordinary update actions."""
+    ui = read('static/ui.js')
+    classifier_fn = extract_js_function(ui, '_updateTargetRecoverableDirty')
+    model_fn = extract_js_function(ui, '_updateActionModel')
+    script = f"""
+{classifier_fn}
+{model_fn}
+const cases = [
+  {{ target:'webui', info:{{dirty:true,no_git:'true',behind:0}} }},
+  {{ target:'webui', info:{{dirty:true,manual_update:'false',behind:0}} }},
+  {{ target:'agent', info:{{dirty:true,ignored:'true',behind:0}} }},
+  {{ target:'agent', info:{{dirty:true,stale_check:'false',behind:2}} }},
+];
+for(const item of cases) {{
+  if(_updateTargetRecoverableDirty(item.info,item.target)!==false) throw new Error('type-punned dirty flag was accepted: '+JSON.stringify(item));
+  const data = {{ [item.target]: item.info }};
+  const model = _updateActionModel(data);
+  if(model.hasForce||model.hasApply||model.forceTarget!==null||model.applyTargets.length!==0) throw new Error('type-punned action was exposed: '+JSON.stringify(item)+' '+JSON.stringify(model));
+}}
+"""
+    subprocess.run(['node', '-e', script], check=True, capture_output=True, text=True)
+
+
+def test_issue4085_apply_noop_retires_completed_targets_for_current_render():
+    """An Apply no-op does not re-offer a target that already completed."""
+    ui = read('static/ui.js')
+    classifier_fn = extract_js_function(ui, '_updateTargetRecoverableDirty')
+    model_fn = extract_js_function(ui, '_updateActionModel')
+    applier_fn = extract_js_function(ui, '_applyUpdateActionModel')
+    show_fn = extract_js_function(ui, '_showUpdateBanner')
+    i18n_fn = extract_js_function(ui, '_i18nUpdateText')
+    status_fn = extract_js_function(ui, '_formatUpdateTargetStatus')
+    manual_fn = extract_js_function(ui, '_formatManualUpdateInstruction')
+    apply_fn = extract_js_function(ui, 'applyUpdates')
+    script = f"""
+const state = {{
+  btnApplyUpdate: {{disabled:false,textContent:'Update Now',style:{{display:''}}}},
+  btnForceUpdate: {{disabled:false,style:{{display:'none'}},dataset:{{target:''}}}},
+  updateBanner: {{classList:{{add(){{}},remove(){{}}}}}},
+  updateMsg: {{textContent:''}},
+  updateError: {{style:{{display:'none'}},textContent:''}},
+}};
+const data = {{agent:{{behind:1,dirty:false,channel:'stable'}},webui:{{behind:1,dirty:false,channel:'experimental'}}}};
+const responses = [{{ok:true}},{{ok:true,up_to_date:true,message:'WebUI is already current'}}];
+const calls=[];
+let waits=0;
+let toasts=0;
+global.window = {{_updateData:data,_updateApplyInFlight:false,_whatsNewSummaryEnabled:false}};
+global.$ = (id) => state[id] || null;
+global.t = (key) => ({{update_now:'Update Now',update_updating:'Updating…',update_local_changes:'Local changes detected',update_force_target:'Force update {{0}}',update_apply_target:'Update {{0}}',update_no_target:'No update target selected.'}}[key] || key);
+global._renderUpdateWhatsNewLinks = () => {{}};
+global._readHealthServerIdentity = async () => null;
+global._showUpdateError = () => {{}};
+global._formatUpdateApplyExceptionMessage = (e) => e.message;
+global._waitForServerThenReload = () => {{waits += 1;}};
+global.showToast = () => {{toasts += 1;}};
+global.api = async (url,opts) => {{ calls.push(JSON.parse(opts.body).target); return responses.shift(); }};
+global.sessionStorage = {{removeItem(){{}}}};
+function setTimeout(cb) {{ cb(); return 1; }}
+function clearTimeout() {{}}
+{status_fn}
+{manual_fn}
+{i18n_fn}
+{classifier_fn}
+{model_fn}
+{applier_fn}
+{show_fn}
+{apply_fn}
+(async()=>{{
+  await applyUpdates();
+  if(JSON.stringify(calls)!=='["agent","webui"]') throw new Error('Apply order changed: '+JSON.stringify(calls));
+  if(window._updateApplyInFlight!==false) throw new Error('Apply no-op did not release its own in-flight state');
+  if(state.btnApplyUpdate.style.display!=='none'||state.btnApplyUpdate.textContent!=='Update Now') throw new Error('completed Agent was re-offered: '+JSON.stringify(state.btnApplyUpdate));
+  if(state.updateError.textContent.indexOf('WebUI is already current')===-1) throw new Error('WebUI detail missing: '+state.updateError.textContent);
+  if(waits!==1||toasts!==0) throw new Error('A prior successful Apply did not schedule its required reload');
+}})().catch(e=>{{console.error(e.message);process.exit(1);}});
+"""
+    subprocess.run(['node', '-e', script], check=True, capture_output=True, text=True)
+
+
+def test_issue4085_clear_lock_non_lock_failure_retires_control():
+    """A clear-lock response that is not lock-held cannot leave stale retry UI."""
+    ui = read('static/ui.js')
+    clear_lock_fn = extract_js_function(ui, 'applyClearUpdateLock')
+    script = f"""
+const state = {{
+  btnClearUpdateLock: {{disabled:false,textContent:'Clear lock and retry update',style:{{display:'inline-block'}},dataset:{{target:'webui'}}}},
+  retryButton: {{disabled:false,textContent:'I removed the lock',style:{{display:'inline-block'}},dataset:{{target:'webui'}}}},
+  updateError: {{style:{{display:'none'}},textContent:''}},
+}};
+global.window = {{_clearLockInFlight:false,_updateData:{{webui:{{behind:0}},agent:{{behind:0}}}}}};
+global.$ = (id) => state[id] || null;
+global.api = async () => ({{ok:false,message:'lock is no longer present'}});
+global._showUpdateBanner = () => {{}};
+global._renderLockManualInstruction = () => {{ throw new Error('lock-held branch was used'); }};
+{clear_lock_fn}
+(async()=>{{
+  await applyClearUpdateLock(state.retryButton);
+  for(const btn of [state.btnClearUpdateLock,state.retryButton]) {{
+    if(btn.style.display!=='none'||btn.dataset.target!==''||btn.disabled!==true) throw new Error('stale clear-lock control remained actionable: '+JSON.stringify(btn));
+  }}
+  if(window._clearLockInFlight!==false) throw new Error('clear-lock in-flight state was not released');
+  if(state.updateError.style.display!=='block'||state.updateError.textContent.indexOf('lock is no longer present')===-1) throw new Error('non-lock error detail missing');
+}})().catch(e=>{{console.error(e.message);process.exit(1);}});
+"""
+    subprocess.run(['node', '-e', script], check=True, capture_output=True, text=True)
+
+
+def test_issue4085_clear_lock_request_exception_restores_retry():
+    """A transient clear-lock request failure leaves an enabled retry action."""
+    ui = read('static/ui.js')
+    clear_lock_fn = extract_js_function(ui, 'applyClearUpdateLock')
+    script = f"""
+const state = {{
+  btnClearUpdateLock: {{disabled:false,textContent:'Clear lock and retry update',style:{{display:'inline-block'}},dataset:{{target:'agent'}}}},
+  updateError: {{style:{{display:'none'}},textContent:''}},
+}};
+global.window = {{_clearLockInFlight:false}};
+global.$ = (id) => state[id] || null;
+global.api = async () => {{ throw new Error('network interrupted'); }};
+{clear_lock_fn}
+(async()=>{{
+  await applyClearUpdateLock(state.btnClearUpdateLock);
+  const btn=state.btnClearUpdateLock;
+  if(btn.style.display!=='inline-block'||btn.dataset.target!=='agent'||btn.disabled!==false) throw new Error('exception path did not restore retry: '+JSON.stringify(btn));
+  if(window._clearLockInFlight!==false) throw new Error('clear-lock exception left in-flight state set');
+  if(state.updateError.style.display!=='block'||state.updateError.textContent.indexOf('network interrupted')===-1) throw new Error('exception detail missing');
+}})().catch(e=>{{console.error(e.message);process.exit(1);}});
+"""
+    subprocess.run(['node', '-e', script], check=True, capture_output=True, text=True)
+
+
 @pytest.fixture(autouse=True)
 def _stub_pycache_purge(monkeypatch):
     """No-op the __pycache__ purge for the update/restart tests in this module.
