@@ -10974,13 +10974,13 @@ function _buildCustomEndpointRow(e){
   const actions=document.createElement('div');
   actions.className='provider-card-row';
   const editBtn=document.createElement('button');
-  editBtn.type='button'; editBtn.className='btn';
+  editBtn.type='button'; editBtn.className='provider-card-btn';
   editBtn.textContent=t('custom_endpoints_edit')||'Edit';
   editBtn.onclick=()=>_openCustomEndpointForm(e);
   actions.appendChild(editBtn);
   if(!e.is_current){
     const useBtn=document.createElement('button');
-    useBtn.type='button'; useBtn.className='btn primary';
+    useBtn.type='button'; useBtn.className='provider-card-btn provider-card-btn-primary';
     useBtn.textContent=t('custom_endpoints_use')||'Use';
     useBtn.onclick=async()=>{
       useBtn.disabled=true;
@@ -10996,7 +10996,7 @@ function _buildCustomEndpointRow(e){
     actions.appendChild(useBtn);
   }
   const delBtn=document.createElement('button');
-  delBtn.type='button'; delBtn.className='btn';
+  delBtn.type='button'; delBtn.className='provider-card-btn provider-card-btn-danger';
   delBtn.textContent=t('custom_endpoints_delete')||'Delete';
   delBtn.onclick=async()=>{
     if(!window.confirm((t('custom_endpoints_delete_confirm')||'Delete custom endpoint ')+e.name+'?')) return;
