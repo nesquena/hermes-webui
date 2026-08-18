@@ -40,6 +40,7 @@ const _DRAFT_SAVE_DELAY_MS = 400;
 const NEW_CHAT_DRAFT_SESSION_KEY = 'hermes-new-chat-draft-session';
 const _composerDraftKnownPayloadSessions = new Set();
 const _composerDraftRestoreSuppressedUntilBySid = new Map();
+const _composerDraftLiveFilesBySid = new Map();
 const _COMPOSER_DRAFT_RESTORE_SUPPRESS_MS = 30000;
 
 function _composerDraftFileSignature(file) {
@@ -50,6 +51,7 @@ function _composerDraftFileSignature(file) {
     path: String(file.path || ''),
     size: Number.isFinite(Number(file.size)) ? Number(file.size) : null,
     type: String(file.type || file.mime || ''),
+    lastModified: Number.isFinite(Number(file.lastModified)) ? Number(file.lastModified) : null,
   };
 }
 
@@ -73,6 +75,13 @@ function _composerDraftFilesForPersist(files) {
     if (Number.isFinite(Number(file.lastModified))) canon.lastModified = Number(file.lastModified);
     return canon;
   });
+}
+
+function _rememberComposerDraftLiveFiles(sid, files) {
+  if (!sid) return;
+  const liveFiles = Array.isArray(files) ? files.filter(Boolean) : [];
+  if (liveFiles.length) _composerDraftLiveFilesBySid.set(sid, [...liveFiles]);
+  else _composerDraftLiveFilesBySid.delete(sid);
 }
 
 function _composerDraftPayloadSignature(text, files) {
@@ -211,6 +220,7 @@ async function _restoreRememberedNewChatDraftSession() {
 function _saveComposerDraft(sid, text, files) {
   if (!sid) return;
   clearTimeout(_draftSaveTimer);
+  _rememberComposerDraftLiveFiles(sid, files);
   const normalizedText = String(text || '');
   const normalizedFiles = _composerDraftFilesForPersist(files);
   if (_composerDraftHasPayload(normalizedText, normalizedFiles)) {
@@ -251,9 +261,10 @@ function _rememberComposerDraftPayloadState(sid, text, files) {
 }
 
 // Immediate save used before session switches.
-function _saveComposerDraftNow(sid, text, files) {
+function _saveComposerDraftNow(sid, text, files, failClosed=false, onlyIfEmpty=false) {
   if (!sid) return Promise.resolve();
-  clearTimeout(_draftSaveTimer);
+  if (!S.session || S.session.session_id === sid) clearTimeout(_draftSaveTimer);
+  _rememberComposerDraftLiveFiles(sid, files);
   const normalizedText = String(text || '');
   const normalizedFiles = _composerDraftFilesForPersist(files);
   if (_composerDraftHasPayload(normalizedText, normalizedFiles)) {
@@ -268,12 +279,18 @@ function _saveComposerDraftNow(sid, text, files) {
       && !_composerDraftKnownPayloadSessions.has(sid)) {
     return Promise.resolve();
   }
+  const body={ session_id: sid, text: normalizedText, files: normalizedFiles };
+  if(onlyIfEmpty) body.if_empty=true;
   return api('/api/session/draft', {
     method: 'POST',
-    body: JSON.stringify({ session_id: sid, text: normalizedText, files: normalizedFiles }),
-  }).then(() => {
+    body: JSON.stringify(body),
+  }).then((response) => {
+    if(failClosed&&!(response&&response.ok===true)) throw new Error('Draft save did not complete');
     _rememberComposerDraftPayloadState(sid, normalizedText, normalizedFiles);
-  }).catch(() => {});
+    return response;
+  }).catch((error) => {
+    if (failClosed) throw error;
+  });
 }
 
 // Restore composer draft from server onto #msg textarea.
@@ -318,13 +335,22 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
     if (typeof autoResize === 'function') autoResize();
     if (typeof updateSendBtn === 'function') updateSendBtn();
   }
-  // Files restoration is skipped for now (requires S.pendingFiles plumbing).
+  const liveFiles = restoreSid ? _composerDraftLiveFilesBySid.get(restoreSid) : null;
+  if (
+    files.length
+    && Array.isArray(liveFiles)
+    && _composerDraftPayloadSignature('', liveFiles) === _composerDraftPayloadSignature('', files)
+  ) {
+    S.pendingFiles = [...liveFiles];
+    if (typeof renderTray === 'function') renderTray();
+  }
 }
 
 // Clear the saved draft for a session (called when message is sent).
 function _clearComposerDraft(sid, text, files) {
   if (!sid) return;
-  clearTimeout(_draftSaveTimer);
+  if (!S.session || S.session.session_id === sid) clearTimeout(_draftSaveTimer);
+  _composerDraftLiveFilesBySid.delete(sid);
   _clearRememberedNewChatDraftSession(sid);
   if (arguments.length >= 2) _suppressComposerDraftRestoreAfterSubmit(sid, text, files);
   else _suppressComposerDraftRestoreAfterSubmit(sid);
@@ -1390,6 +1416,17 @@ async function newSession(flash, options={}){
   }
   _setNewSessionPending(true);
   _newSessionInFlight=(async()=>{
+    const previousSid=S.session&&S.session.session_id;
+    const ownerIsCurrent=()=>((S.session&&S.session.session_id)||null)===(previousSid||null);
+    if(previousSid){
+      try{
+        await _saveComposerDraftNow(previousSid,($('msg')||{}).value||'',S.pendingFiles?[...S.pendingFiles]:[],true);
+      }catch(_){
+        if(typeof showToast==='function') showToast(t('draft_save_new_chat_cancelled'),3000,'error');
+        return;
+      }
+    }
+    if(!ownerIsCurrent()) return;
     // Starting a brand-new chat must not carry named context blocks selected in
     // the previous conversation (#2543). loadSession() clears these on a sidebar
     // switch, but the New Chat path replaces S.session here without going through
@@ -1488,10 +1525,18 @@ async function newSession(flash, options={}){
         ||null;
     }
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
+    if(!data||!data.session||!ownerIsCurrent()) return;
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
       _clearEmptyComposerModelOverride();
     }
+    if(previousSid){
+      const input=$('msg');
+      if(input) input.value='';
+      S.pendingFiles=[];
+      if(typeof renderTray==='function') renderTray();
+    }
     S.session=data.session;S.messages=data.session.messages||[];
+    if(typeof hydrateSessionQueue==='function') hydrateSessionQueue(S.session.session_id,data.session.queue);
     S._pendingSessionToolsets=null;
     if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
@@ -1722,11 +1767,43 @@ async function loadSession(sid){
     }
     return;
   }
+  // Do not let a force reload of the still-visible session tear it down while
+  // another session switch is waiting for its strict draft save.
+  if(currentSid===sid&&_loadingSessionId&&_loadingSessionId!==sid) return;
   // Mark this session as the in-flight load. Subsequent loadSession() calls
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).
   const _loadGeneration = ++_loadSessionGeneration;
   const _isCurrentLoad = () => _loadingSessionId === sid && _loadSessionGeneration === _loadGeneration;
   _loadingSessionId = sid;
+  // Persist before any stream, polling, selection, or pane teardown. A failed
+  // save cancels navigation without disturbing the current session.
+  if(currentSid&&(currentSid!==sid||sameSessionForceReload)){
+    try{
+      await _saveComposerDraftNow(currentSid,($('msg')||{}).value||'',S.pendingFiles?[...S.pendingFiles]:[],true);
+    }catch(_){
+      if(typeof showToast==='function') showToast(t('draft_save_session_switch_cancelled'),3000,'error');
+      if(_isCurrentLoad()) _loadingSessionId=null;
+      return;
+    }
+    if (!_isCurrentLoad()) return;
+    if(currentSid!==sid){
+      if(typeof window._clearPendingSelections==='function') window._clearPendingSelections();
+      if(typeof _clearQueueCardDisplay==='function') _clearQueueCardDisplay(currentSid);
+      if(
+        (S.busy||S.activeStreamId||(INFLIGHT&&INFLIGHT[currentSid]))&&
+        typeof snapshotLiveTurnHtmlForSession==='function'
+      ){
+        if(!INFLIGHT[currentSid]){
+          INFLIGHT[currentSid]={
+            messages:Array.isArray(S.messages)?[...S.messages]:[],
+            uploaded:[],
+            toolCalls:Array.isArray(S.toolCalls)?[...S.toolCalls]:[],
+          };
+        }
+        snapshotLiveTurnHtmlForSession(currentSid);
+      }
+    }
+  }
   if(currentSid!==sid&&typeof _uploadPendingFilesSyncProgressForSession==='function')_uploadPendingFilesSyncProgressForSession(sid);
   // Reset scroll state for fresh session navigation — the reader expects to
   // land at the bottom of the new transcript, not wherever a stale unpin flag
@@ -1747,40 +1824,7 @@ async function loadSession(sid){
   // triggered compression.
   if(typeof clearCompressionUi==='function') clearCompressionUi();
   else window._compressionUi=null;
-  // Show loading indicator immediately for responsiveness.
-  // Cleared by renderMessages() once full session data arrives.
-  // Persist the current composer draft before switching away so it can be
-  // restored when the user switches back (#1060). Save to server now so the
-  // draft survives page refresh and syncs across clients.
-  if (currentSid && currentSid !== sid) {
-    if(typeof window._clearPendingSelections==='function') window._clearPendingSelections();
-    if(typeof _clearQueueCardDisplay==='function') _clearQueueCardDisplay(currentSid);
-    await _saveComposerDraftNow(currentSid, ($('msg') || {}).value || '', S.pendingFiles ? [...S.pendingFiles] : []);
-    // The awaited draft save above yields the event loop. If another
-    // loadSession() started for a different session while we were waiting
-    // (rapid switch B→C), _loadingSessionId now points at that newer load —
-    // bail out before the destructive state-clearing block below so this stale
-    // continuation can't wipe S.messages / write the loading placeholder /
-    // close streams for the session the user actually landed on (#1060 guard,
-    // extended to cover the new pre-switch await).
-    if (!_isCurrentLoad()) return;
-    // Snapshot the live turn before msgInner is replaced. Preserves the activity
-    // timer, partial response, and tool cards so switching back does not rebuild
-    // the stream UI from scratch.
-    if(
-      (S.busy||S.activeStreamId||(INFLIGHT&&INFLIGHT[currentSid]))&&
-      typeof snapshotLiveTurnHtmlForSession==='function'
-    ){
-      if(!INFLIGHT[currentSid]){
-        INFLIGHT[currentSid]={
-          messages:Array.isArray(S.messages)?[...S.messages]:[],
-          uploaded:[],
-          toolCalls:Array.isArray(S.toolCalls)?[...S.toolCalls]:[],
-        };
-      }
-      snapshotLiveTurnHtmlForSession(currentSid);
-    }
-  }
+
   const _keepStaleUntilLoaded = !!opts.keepStaleUntilLoaded && sameSessionForceReload;
   if (currentSid !== sid || forceReload) {
     // #3306: When force-reloading the currently-active session (e.g. external
@@ -1973,7 +2017,12 @@ async function loadSession(sid){
     _loadingSessionId=null;
     return loadSession(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
   }
+  if(currentSid!==sid){
+    S.pendingFiles=[];
+    if(typeof renderTray==='function') renderTray();
+  }
   S.session=data.session;
+  if(typeof hydrateSessionQueue==='function') hydrateSessionQueue(sid,data.session.queue);
   if(typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();
   // Loading a real existing session abandons any pre-session toolset override
   // staged on the empty composer before any deferred refresh work runs.
@@ -3287,17 +3336,40 @@ function _normalizeUserTranscriptText(text){
   return raw.replace(/^\s*\[Workspace:[^\]]+\]\s*/,'').trim();
 }
 
+function _transcriptAttachmentIdentity(message){
+  const files=Array.isArray(message&&message.attachments)?message.attachments:[];
+  return JSON.stringify(files.map(file=>{
+    if(!file||typeof file!=='object') return String(file||'');
+    return {
+      id:String(file.id||''),
+      path:String(file.path||''),
+      name:String(file.name||file.filename||''),
+      mime:String(file.mime||''),
+      size:file.size==null?null:Number(file.size),
+    };
+  }));
+}
+
 function _sameTranscriptMessage(a,b){
   if(!(a&&b)) return false;
   const role=String(a.role||'');
   if(role!==String(b.role||'')) return false;
+  const aQueueId=String(a.queue_item_id||a._queue_item_id||'').trim();
+  const bQueueId=String(b.queue_item_id||b._queue_item_id||'').trim();
+  if(aQueueId||bQueueId) return !!aQueueId&&aQueueId===bQueueId;
   const aText=_messageComparableText(a);
   const bText=_messageComparableText(b);
-  if(aText===bText) return true;
-  if(role==='user'){
-    return _normalizeUserTranscriptText(aText)===_normalizeUserTranscriptText(bText);
-  }
-  return false;
+  const sameText=role==='user'
+    ? (aText===bText||_normalizeUserTranscriptText(aText)===_normalizeUserTranscriptText(bText))
+    : aText===bText;
+  // An absent attachment array is legacy/incomplete metadata. Only compare
+  // attachment identities when both transcript rows carry explicit arrays;
+  // stable queue ids above remain authoritative whenever either row has one.
+  const attachmentMetadataKnown=Array.isArray(a.attachments)&&Array.isArray(b.attachments);
+  return sameText&&(
+    role!=='user'||!attachmentMetadataKnown
+      ||_transcriptAttachmentIdentity(a)===_transcriptAttachmentIdentity(b)
+  );
 }
 
 function _currentTailUserMessage(messages){
@@ -3331,6 +3403,16 @@ function _mergePendingSessionMessage(session,messages){
   const currentTurnMessages=liveAssistantIdx>=0?messages.slice(0,liveAssistantIdx):messages;
   const pendingMsg=typeof getPendingSessionMessage==='function'?getPendingSessionMessage(session,currentTurnMessages):null;
   if(!pendingMsg) return false;
+  const existingIdx=messages.findIndex(m=>m&&m.role==='user'&&m._pending&&_sameTranscriptMessage(m,pendingMsg));
+  if(existingIdx>=0){
+    if(liveAssistantIdx>=0&&existingIdx>liveAssistantIdx){
+      const [existing]=messages.splice(existingIdx,1);
+      const nextLive=messages.findIndex(m=>m&&m.role==='assistant'&&m._live);
+      messages.splice(nextLive<0?messages.length:nextLive,0,existing);
+      return true;
+    }
+    return false;
+  }
   if(_hasCurrentTailUserDuplicate(currentTurnMessages,pendingMsg)) return false;
   if(liveAssistantIdx>=0){
     const misplacedIdx=messages.findIndex((m,idx)=>

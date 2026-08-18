@@ -1529,13 +1529,51 @@ def _clean_synthetic_control_messages_with_provenance(messages):
 
 def _active_turn_authority(session, stream_id, msg_text):
     """Capture the stream-owned pending turn before settlement mutates it."""
+    pending_item = getattr(session, 'pending_queue_item', None)
+    pending_item = pending_item if isinstance(pending_item, dict) else None
+    turn_intent = getattr(session, 'pending_turn_intent', None)
+    turn_intent = turn_intent if isinstance(turn_intent, dict) else None
+    pending_outcome = getattr(session, 'pending_queue_outcome', None)
+    pending_outcome = pending_outcome if isinstance(pending_outcome, dict) else None
     pending_text = getattr(session, 'pending_user_message', None)
+    pending_display = None
+    if pending_item is not None and pending_item.get('display_text') is not None:
+        pending_display = pending_item['display_text']
+    elif turn_intent is not None and turn_intent.get('display_text') is not None:
+        pending_display = turn_intent['display_text']
+    elif pending_item is not None and pending_item.get('text') is not None:
+        pending_display = pending_item['text']
+    elif pending_text is not None:
+        pending_display = pending_text
+    else:
+        pending_display = msg_text
+    queue_item_id = str(
+        (pending_item or {}).get('id')
+        or (turn_intent or {}).get('id')
+        or (pending_outcome or {}).get('item_id')
+        or ''
+    ).strip() or None
     return {
         'token': build_active_turn_token(stream_id, getattr(session, 'pending_started_at', None)),
-        'text': pending_text if pending_text is not None else msg_text,
+        'text': pending_display,
         'timestamp': getattr(session, 'pending_started_at', None),
-        'source': getattr(session, 'pending_user_source', None) or 'webui',
-        'attachments': copy.deepcopy(getattr(session, 'pending_attachments', None) or []),
+        'source': (
+            (pending_item or {}).get('source')
+            or (turn_intent or {}).get('source')
+            or getattr(session, 'pending_user_source', None)
+            or 'webui'
+        ),
+        'attachments': copy.deepcopy(
+            pending_item['files']
+            if pending_item is not None and pending_item.get('files') is not None
+            else (
+                turn_intent['attachments']
+                if turn_intent is not None and turn_intent.get('attachments') is not None
+                else getattr(session, 'pending_attachments', None) or []
+            )
+        ),
+        'queue_item_id': queue_item_id,
+        'turn_intent': copy.deepcopy(turn_intent),
         'current_turn_user_idx': None,
         'turn_id': '',
     }
@@ -1691,6 +1729,9 @@ def _materialize_active_turn_user(identity, msg_text, source):
             message['timestamp'] = identity['timestamp']
         if identity.get('attachments'):
             message['attachments'] = copy.deepcopy(identity['attachments'])
+        if identity.get('queue_item_id'):
+            message['queue_item_id'] = identity['queue_item_id']
+            message['_queue_item_id'] = identity['queue_item_id']
         stamp_message_source(
             message,
             identity.get('source') or source or 'webui',
@@ -2038,12 +2079,20 @@ def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.') -> Non
     later unwind through the silent-failure or exception path. Those paths must
     not append a misleading provider no-response error after an explicit cancel.
     """
+    try:
+        from api.routes import _settle_claimed_queue_item
+
+        _settle_claimed_queue_item(session, outcome='cancelled', stream_id=getattr(session, 'active_stream_id', None))
+    except Exception:
+        logger.debug("Failed to settle claimed queue item on cancellation", exc_info=True)
     _materialize_pending_user_turn_before_error(session)
     session.active_stream_id = None
     session.pending_user_message = None
     session.pending_attachments = []
     session.pending_started_at = None
     session.pending_user_source = None
+    session.pending_queue_item = None
+    session.pending_turn_intent = None
     if not _session_has_cancel_marker(session):
         agent_name = _preferred_agent_display_name_for_session(session)
         session.messages.append({
@@ -2063,6 +2112,8 @@ def _cleanup_ephemeral_cancelled_turn(session) -> None:
     session.pending_attachments = []
     session.pending_started_at = None
     session.pending_user_source = None
+    session.pending_queue_item = None
+    session.pending_turn_intent = None
     try:
         import pathlib
         pathlib.Path(session.path).unlink(missing_ok=True)
@@ -4684,18 +4735,17 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
     old_path = SESSION_DIR / f'{old_sid}.json'
     if not old_path.exists():
         return
+
     try:
         existing_text = old_path.read_text(encoding='utf-8')
         try:
             existing = json.loads(existing_text)
             existing_msgs = len(existing.get('messages') or [])
-            existing_snapshot = bool(existing.get('pre_compression_snapshot'))
         except (json.JSONDecodeError, ValueError):
             # Treat corrupt/malformed old JSON as missing history and rewrite it
             # from the in-memory pre-compression messages below. That is safer
             # than leaving an unreadable recovery snapshot behind.
             existing_msgs = -1
-            existing_snapshot = False
         if len(s.messages) > existing_msgs:
             # In-memory messages are newer than the file; save the full old
             # snapshot from the current session object while preserving its
@@ -4703,7 +4753,6 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
             saved_sid = s.session_id
             saved_snapshot = bool(getattr(s, 'pre_compression_snapshot', False))
             saved_pinned = bool(getattr(s, 'pinned', False))
-            s.session_id = old_sid
             s.pre_compression_snapshot = True
             s.pinned = False
             # Stage-359 / PR #2295: clear runtime stream-state fields on the
@@ -4716,11 +4765,15 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
             saved_pending_attachments = list(getattr(s, 'pending_attachments', []) or [])
             saved_pending_started_at = getattr(s, 'pending_started_at', None)
             saved_pending_user_source = getattr(s, 'pending_user_source', None)
+            saved_pending_queue_item = copy.deepcopy(getattr(s, 'pending_queue_item', None))
+            saved_queue = copy.deepcopy(getattr(s, 'queue', []) or [])
+            s.session_id = old_sid
             s.active_stream_id = None
             s.pending_user_message = None
             s.pending_attachments = []
             s.pending_started_at = None
             s.pending_user_source = None
+            s.pending_queue_item = None
             try:
                 # skip_index=False so the snapshot appears in _index.json with
                 # the pre_compression_snapshot marker. The sidebar projection
@@ -4740,6 +4793,8 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
                 s.pending_attachments = saved_pending_attachments
                 s.pending_started_at = saved_pending_started_at
                 s.pending_user_source = saved_pending_user_source
+                s.pending_queue_item = saved_pending_queue_item
+                s.queue = saved_queue
             return
         # Existing file is already at least as complete as memory; stamp only
         # the snapshot marker so index/sidebar projection can hide it without
@@ -4761,13 +4816,14 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
             snapshot.pending_attachments = []
             snapshot.pending_started_at = None
             snapshot.pending_user_source = None
+            snapshot.pending_queue_item = None
             snapshot.save(touch_updated_at=False, skip_index=False)
             logger.info(
                 "Marked pre-compression session %s as sidebar-hidden snapshot",
                 old_sid,
             )
     except OSError:
-        logger.debug("Could not read old session file before preservation")
+        logger.debug("Could not preserve pre-compression session file", exc_info=True)
     except Exception:
         logger.debug("Failed to preserve pre-compression session file", exc_info=True)
 
@@ -7357,25 +7413,133 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
     bubble disappear on reload/reconcile. Return True when a recovered user turn
     was appended.
     """
-    pending_text = str(getattr(session, 'pending_user_message', None) or '')
-    if not pending_text:
+    identity = _active_turn_authority(
+        session,
+        getattr(session, 'active_stream_id', None),
+        getattr(session, 'pending_user_message', None) or '',
+    )
+    pending_text = str(identity.get('text') if identity.get('text') is not None else '')
+    identity['text'] = pending_text
+    pending_started_at = identity.get('timestamp')
+    recovered_ts = pending_started_at
+    if (
+        not isinstance(recovered_ts, (int, float))
+        or not math.isfinite(recovered_ts)
+        or recovered_ts <= 0
+    ):
+        recovered_ts = time.time()
+        identity['timestamp'] = recovered_ts
+    recovered_ts = int(recovered_ts)
+    pending_source = identity.get('source') or 'webui'
+    pending_attachments = list(identity.get('attachments') or [])
+    queue_item_id = identity.get('queue_item_id')
+    active_turn_token = identity.get('token')
+    if not pending_text and not pending_attachments:
         return False
-    recovered_ts = int(time.time())
-    pending_started_at = getattr(session, 'pending_started_at', None)
-    if isinstance(pending_started_at, (int, float)) and pending_started_at > 0:
-        recovered_ts = int(pending_started_at)
-    pending_source = getattr(session, 'pending_user_source', None) or 'webui'
-    pending_attachments = list(getattr(session, 'pending_attachments', None) or [])
 
-    def is_exact_checkpoint(messages):
-        if not isinstance(messages, list) or not messages:
+    messages = getattr(session, 'messages', None)
+    if not isinstance(messages, list):
+        return False
+
+    # A legacy worker-finalizer may already have persisted the cancellation
+    # marker before this cleanup reacquires the session. With no queue id or
+    # timestamp there is no durable identity to compare, so only suppress the
+    # recovery when that marker is the tail and the user payload immediately
+    # before it is the same turn. A user row after the marker keeps the normal
+    # new-turn path intact.
+    if not queue_item_id and not active_turn_token and not (
+        isinstance(pending_started_at, (int, float))
+        and math.isfinite(pending_started_at)
+        and pending_started_at > 0
+    ) and _session_has_cancel_marker(session):
+        prior_user = next(
+            (
+                message for message in reversed(messages[:-1])
+                if isinstance(message, dict) and message.get('role') == 'user'
+            ),
+            None,
+        )
+        if (
+            isinstance(prior_user, dict)
+            and _normalize_user_text(prior_user.get('content'))
+            == _normalize_user_text(pending_text)
+            and (prior_user.get('_source') or 'webui') == pending_source
+            and list(prior_user.get('attachments') or []) == pending_attachments
+        ):
             return False
-        existing = messages[-1]
+
+    for existing in messages:
+        if not isinstance(existing, dict) or existing.get('role') != 'user':
+            continue
+        if queue_item_id and queue_item_id in {
+            str(existing.get('queue_item_id') or '').strip(),
+            str(existing.get('_queue_item_id') or '').strip(),
+        }:
+            return False
+        if active_turn_token and existing.get('_active_turn_token') == active_turn_token:
+            return False
+
+    # Keep the legacy content/timestamp fallback for older sessions that were
+    # created before queue ids and active-turn tokens were stamped.
+    last_user = next(
+        (message for message in reversed(messages)
+         if isinstance(message, dict) and message.get('role') == 'user'),
+        None,
+    )
+    if last_user is not None and (pending_text or pending_attachments):
+        try:
+            last_ts = float(last_user.get('timestamp'))
+            started_ts = float(pending_started_at)
+        except (TypeError, ValueError):
+            last_ts = started_ts = -1
+        last_content = last_user.get('content')
+        last_source = last_user.get('_source') or 'webui'
+        last_attachments = list(last_user.get('attachments') or [])
+        if (
+            isinstance(last_content, str)
+            and not queue_item_id
+            and not (
+                active_turn_token
+                and last_user.get('_active_turn_token')
+                and last_user.get('_active_turn_token') != active_turn_token
+            )
+            and math.isfinite(started_ts)
+            and started_ts > 0
+            and math.isfinite(last_ts)
+            and last_ts == started_ts
+            and last_source == pending_source
+            and last_attachments == pending_attachments
+            and _normalize_user_text(last_content) == _normalize_user_text(pending_text)
+        ):
+            return False
+
+    identity_for_row = dict(identity)
+    identity_for_row['timestamp'] = recovered_ts
+    recovered = _materialize_active_turn_user(
+        identity_for_row, pending_text, pending_source,
+    )
+    recovered['_recovered'] = True
+    messages.append(recovered)
+
+    def is_exact_checkpoint(messages_to_check):
+        if not isinstance(messages_to_check, list) or not messages_to_check:
+            return False
+        for existing in messages_to_check:
+            if not isinstance(existing, dict) or existing.get('role') != 'user':
+                continue
+            if queue_item_id and queue_item_id in {
+                str(existing.get('queue_item_id') or '').strip(),
+                str(existing.get('_queue_item_id') or '').strip(),
+            }:
+                return True
+            if active_turn_token and existing.get('_active_turn_token') == active_turn_token:
+                return True
+        existing = messages_to_check[-1]
         if not isinstance(existing, dict) or existing.get('role') != 'user':
             return False
         existing_source = existing.get('_source') or 'webui'
         try:
-            existing_ts = int(existing.get('timestamp'))
+            existing_ts = float(existing.get('timestamp'))
         except (TypeError, ValueError):
             return False
         return (
@@ -7385,18 +7549,6 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
             and list(existing.get('attachments') or []) == pending_attachments
         )
 
-    if is_exact_checkpoint(getattr(session, 'messages', None)):
-        return False
-    recovered = {
-        'role': 'user',
-        'content': pending_text,
-        'timestamp': recovered_ts,
-        '_recovered': True,
-    }
-    stamp_message_source(recovered, pending_source)
-    if pending_attachments:
-        recovered['attachments'] = pending_attachments
-    session.messages.append(recovered)
     # Mirror to context_messages so the _recovered flag survives the state.db
     # round-trip (#4283).  state.db has no _recovered column, so without this
     # mirror the next turn's reconciled_state_db_messages_for_session(
@@ -8006,11 +8158,40 @@ def _refresh_cached_agent_primary_runtime_snapshot(agent) -> None:
 
     if getattr(agent, 'api_mode', None) == 'anthropic_messages':
         if hasattr(agent, '_anthropic_api_key'):
-            rt['anthropic_api_key'] = getattr(agent, '_anthropic_api_key')
+            rt['anthropic_api_key'] = agent._anthropic_api_key
         if hasattr(agent, '_anthropic_base_url'):
-            rt['anthropic_base_url'] = getattr(agent, '_anthropic_base_url')
+            rt['anthropic_base_url'] = agent._anthropic_base_url
         if hasattr(agent, '_is_anthropic_oauth'):
-            rt['is_anthropic_oauth'] = getattr(agent, '_is_anthropic_oauth')
+            rt['is_anthropic_oauth'] = agent._is_anthropic_oauth
+
+
+def _drain_queued_session_turn_after_teardown(session_id):
+    try:
+        from api.routes import drain_queued_session_turn
+
+        return drain_queued_session_turn(session_id)
+    except Exception:
+        logger.debug(
+            "turn-teardown durable queue drain failed for session %s",
+            session_id,
+            exc_info=True,
+        )
+        return None
+
+
+def _settle_cancelled_starting_stream(session_id, stream_id):
+    """Close a stream cancelled before its worker acquired the channel."""
+    try:
+        with _get_session_agent_lock(session_id):
+            session = get_session(session_id)
+            if getattr(session, "active_stream_id", None) != stream_id:
+                return False
+            _persist_cancelled_turn(session, message="Task cancelled.")
+            session.save()
+            return True
+    except Exception:
+        logger.debug("Failed to settle pre-worker cancellation for %s", session_id, exc_info=True)
+        return False
 
 
 def _run_agent_streaming(
@@ -8025,6 +8206,7 @@ def _run_agent_streaming(
     model_provider=None,
     goal_related=False,
     moa_config=None,
+    command=None,
 ):
     """Run agent in background thread, writing SSE events to STREAMS[stream_id].
 
@@ -8046,6 +8228,8 @@ def _run_agent_streaming(
                 "Failed to clear session writeback owner for stream %s", stream_id,
                 exc_info=True,
             )
+        _settle_cancelled_starting_stream(session_id, stream_id)
+        _drain_queued_session_turn_after_teardown(session_id)
         return
     register_active_run(
         stream_id,
@@ -10227,6 +10411,10 @@ def _run_agent_streaming(
                     _compression_origin_session_id = old_sid
                     _compression_continuation_session_id = new_sid
                     s.session_id = new_sid
+                    # Alias both IDs before any child save or cache/index
+                    # exposure. Requests that discover the continuation must
+                    # continue using the lock already held by this stream.
+                    _alias_session_agent_lock(old_sid, new_sid, _agent_lock)
                     # Carry profile identity across the compression boundary.
                     # Without this, s.profile stays None on the continuation
                     # session. On the next request, _run_agent_streaming calls
@@ -10275,6 +10463,23 @@ def _run_agent_streaming(
                     # over the just-preserved snapshot back to the original fork
                     # parent, losing access to the recoverable history in old_sid.json.
                     s.parent_session_id = old_sid
+                    queued_item_ids = [
+                        str(item.get('id'))
+                        for item in (getattr(s, 'queue', None) or [])
+                        if isinstance(item, dict) and str(item.get('id') or '')
+                    ]
+                    s.queue_transfer = (
+                        {
+                            'version': 1,
+                            'state': 'pending',
+                            'parent_session_id': old_sid,
+                            'child_session_id': new_sid,
+                            'item_ids': queued_item_ids,
+                            'clear_generation': getattr(s, 'clear_generation', None),
+                        }
+                        if queued_item_ids
+                        else None
+                    )
                     with LOCK:
                         cached_old_session = SESSIONS.pop(old_sid, None)
                         if cached_old_session is not None and cached_old_session is not s:
@@ -10291,11 +10496,6 @@ def _run_agent_streaming(
                         SESSIONS[new_sid] = s
                         SESSIONS.move_to_end(new_sid)
                         _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
-                    # Migrate the per-session lock by aliasing new_sid to the
-                    # held _agent_lock reference directly. Keep old_sid aliased
-                    # too until the weak registry can reclaim both safely after
-                    # all old-ID holders and waiters release the lock.
-                    _alias_session_agent_lock(old_sid, new_sid, _agent_lock)
                     # Migrate cached agent to the new session ID so the turn
                     # count survives context compression.
                     from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
@@ -10613,6 +10813,16 @@ def _run_agent_streaming(
                                     + 'send a message, switch the model/provider, or fix the credentials.'
                                 )
                                 _error_payload['hint'] = _err_hint
+                        try:
+                            from api.routes import _settle_claimed_queue_item
+
+                            _settle_claimed_queue_item(
+                                s,
+                                outcome='cancelled' if _err_type in {'cancelled', 'interrupted'} else 'error',
+                                stream_id=stream_id,
+                            )
+                        except Exception:
+                            logger.debug("Failed to settle queue item on stream error", exc_info=True)
                         _turn_duration = _terminal_turn_duration(s)
                         _materialize_pending_user_turn_before_error(s)
                         s.active_stream_id = None
@@ -10620,6 +10830,8 @@ def _run_agent_streaming(
                         s.pending_attachments = []
                         s.pending_started_at = None
                         s.pending_user_source = None
+                        s.pending_queue_item = None
+                        s.pending_turn_intent = None
                         try:
                             _snapshot_and_append_partial_on_error(s, stream_id)
                         except Exception:
@@ -10816,16 +11028,23 @@ def _run_agent_streaming(
                     live_tool_calls=_live_tool_calls,
                 )
                 s.tool_calls = tool_calls
+                try:
+                    from api.routes import _settle_claimed_queue_item
+
+                    _settle_claimed_queue_item(s, outcome='completed', stream_id=stream_id)
+                except Exception:
+                    logger.debug("Failed to settle completed queue item", exc_info=True)
                 s.active_stream_id = None
                 s.pending_user_message = None
                 s.pending_attachments = []
                 s.pending_started_at = None
                 s.pending_user_source = None
-                # Tag the matching user message with attachment filenames for display on reload
-                # Only tag a user message whose content relates to this turn's text
-                # (msg_text is the full message including the [Attached files: ...] suffix)
+                s.pending_queue_item = None
+                s.pending_turn_intent = None
+                # Preserve the accepted attachment metadata on the matching user
+                # message so strict reload reconciliation sees the same identity.
                 if attachments:
-                    display_attachments = [_attachment_name(a) for a in attachments if _attachment_name(a)]
+                    display_attachments = copy.deepcopy(list(attachments))
                     for m in reversed(s.messages):
                         if m.get('role') == 'user':
                             content = str(m.get('content', ''))
@@ -11855,6 +12074,16 @@ def _run_agent_streaming(
                             + 'send a message, switch the model/provider, or fix the credentials.'
                         )
                         _error_payload['hint'] = _exc_hint
+                try:
+                    from api.routes import _settle_claimed_queue_item
+
+                    _settle_claimed_queue_item(
+                        s,
+                        outcome='cancelled' if _exc_type in {'cancelled', 'interrupted'} else 'error',
+                        stream_id=stream_id,
+                    )
+                except Exception:
+                    logger.debug("Failed to settle queue item on exception", exc_info=True)
                 _turn_duration = _terminal_turn_duration(s)
                 _materialize_pending_user_turn_before_error(s)
                 s.active_stream_id = None
@@ -11862,6 +12091,8 @@ def _run_agent_streaming(
                 s.pending_attachments = []
                 s.pending_started_at = None
                 s.pending_user_source = None
+                s.pending_queue_item = None
+                s.pending_turn_intent = None
                 try:
                     _snapshot_and_append_partial_on_error(s, stream_id)
                 except Exception:
@@ -11994,6 +12225,10 @@ def _run_agent_streaming(
             # POST /api/chat/start round-trip and erase the marker before
             # the next stream can read it, breaking the goal-continuation
             # chain. Stage-326 critical fix per Opus advisor review.
+
+        _drain_queued_session_turn_after_teardown(
+            getattr(s, "session_id", session_id) or session_id
+        )
 
         # ── Defer-path fix: turn-teardown idle-hook ────────────────────────
         # The session has just transitioned active→idle: unregister_active_run
@@ -12388,73 +12623,26 @@ def cancel_stream(stream_id: str) -> bool:
                     )
                     _emit_cancel_event = False
                     return True
-                # ── Preserve the user's typed message before clearing pending state (#1298) ──
-                # The agent's internal messages list (where the user message was appended at
-                # the start of run_conversation()) may not have been merged back into
-                # _cs.messages yet — cancel_stream() races with the streaming thread's final
-                # _merge_display_messages_after_agent_result() call. Without this guard, the
-                # user's message is lost: pending_user_message gets cleared below, and
-                # _cs.messages still only contains messages from prior turns. The reporter
-                # of #1298 sees their typed text vanish from chat after clicking Stop.
-                #
-                # Recovery rule: if pending_user_message is set AND the latest message in
-                # _cs.messages isn't already a matching user turn, synthesize one. The
-                # match check guards against double-append when the streaming thread DID
-                # reach its merge step before cancel_stream() got the session lock.
-                #
-                # Wrapped in its own try/except so an unexpected _cs.messages shape (e.g.
-                # in unit tests using Mock sessions) cannot escape and skip the rest of
-                # the cleanup.
                 try:
-                    _pending_user = getattr(_cs, 'pending_user_message', None)
-                    _pending_source = getattr(_cs, 'pending_user_source', None)
-                    _pending_atts_raw = getattr(_cs, 'pending_attachments', None)
-                    _pending_atts = list(_pending_atts_raw) if isinstance(_pending_atts_raw, (list, tuple)) else []
-                    _pending_started = getattr(_cs, 'pending_started_at', None) or 0
-                    _msgs_for_recovery = _cs.messages if isinstance(_cs.messages, list) else None
-                    if _pending_user and _msgs_for_recovery is not None:
-                        _last_user = None
-                        for _m in reversed(_msgs_for_recovery):
-                            if isinstance(_m, dict) and _m.get('role') == 'user':
-                                _last_user = _m
-                                break
-                        _already_persisted = False
-                        if _last_user is not None:
-                            _last_content = _last_user.get('content')
-                            _last_ts = _last_user.get('timestamp') or 0
-                            # Only treat as already-persisted if the latest user turn
-                            # was created AT OR AFTER the current turn's pending_started_at.
-                            # An earlier turn whose content happens to be a substring
-                            # (e.g. prior reply was "ok", user now types "ok please continue")
-                            # must NOT short-circuit synthesis — that would re-introduce
-                            # the data-loss bug this guard is supposed to prevent.
-                            if isinstance(_last_content, str) and _last_ts >= _pending_started:
-                                # Tolerate the workspace prefix the streaming thread prepends.
-                                if _pending_user == _last_content or _pending_user in _last_content:
-                                    _already_persisted = True
-                        if not _already_persisted:
-                            _recovered_ts = int(time.time())
-                            if isinstance(_pending_started, (int, float)) and _pending_started > 0:
-                                _recovered_ts = int(_pending_started)
-                            _user_turn: dict = {
-                                'role': 'user',
-                                'content': _pending_user,
-                                'timestamp': _recovered_ts,
-                            }
-                            stamp_message_source(_user_turn, _pending_source)
-                            if _pending_atts:
-                                _user_turn['attachments'] = _pending_atts
-                            _msgs_for_recovery.append(_user_turn)
+                    _materialize_pending_user_turn_before_error(_cs)
                 except Exception:
                     logger.debug(
                         "Failed to recover pending user message on cancel for %s",
                         _cancel_session_id,
                     )
                 _cs.active_stream_id = None
+                try:
+                    from api.routes import _settle_claimed_queue_item
+
+                    _settle_claimed_queue_item(_cs, outcome='cancelled', stream_id=stream_id)
+                except Exception:
+                    logger.debug("Failed to settle claimed queue item during cancel", exc_info=True)
                 _cs.pending_user_message = None
                 _cs.pending_attachments = []
                 _cs.pending_started_at = None
                 _cs.pending_user_source = None
+                _cs.pending_queue_item = None
+                _cs.pending_turn_intent = None
                 # Persist any partial assistant text that was streamed before cancel (#893).
                 # Preserving partial content means the user sees what the agent had
                 # produced rather than losing it entirely.  The marker is _partial=True

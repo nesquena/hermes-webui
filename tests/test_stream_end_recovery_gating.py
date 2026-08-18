@@ -119,3 +119,16 @@ def test_stream_end_recovery_state_is_cleared_on_done_and_terminal_events():
     assert "_clearStreamEndRecovery();" in _event_block("stream_end")
     assert "_clearStreamEndRecovery();" in _event_block("cancel")
     assert "_clearStreamEndRecovery();" in _event_block("apperror")
+
+
+def test_sessionless_done_schedules_recovery_before_terminal_flags():
+    body = _event_block("done")
+    guard_start = body.index("const _doneData=JSON.parse(e.data);")
+    guard_end = body.index("// Set _streamFinalized", guard_start)
+    guard = body[guard_start:guard_end]
+    assert "!_doneData.session" in guard
+    assert "typeof _doneData.session!=='object'" in guard
+    assert "Array.isArray(_doneData.session)" in guard
+    assert "_scheduleStreamEndRecovery(source);" in guard
+    assert "_streamFinalized=true" not in guard
+    assert "_terminalStateReached=true" not in guard

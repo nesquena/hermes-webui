@@ -10,8 +10,8 @@ def test_named_context_clear_helper_is_exported_for_session_switches():
     assert "window._clearPendingSelections=_clearPendingSelections;" in MESSAGES_JS
 
 
-def test_loadsession_clears_pending_named_context_before_saving_old_draft():
-    start = SESSIONS_JS.index("if (currentSid && currentSid !== sid) {")
+def test_loadsession_saves_old_draft_before_clearing_named_context():
+    start = SESSIONS_JS.index("if(currentSid&&(currentSid!==sid||sameSessionForceReload)){")
     end = SESSIONS_JS.index("if (currentSid !== sid || forceReload) {", start)
     block = SESSIONS_JS[start:end]
 
@@ -20,7 +20,7 @@ def test_loadsession_clears_pending_named_context_before_saving_old_draft():
 
     assert clear_idx != -1, "loadSession() must clear pending named context blocks on real session switches"
     assert save_idx != -1, "loadSession() switch block must still persist the old draft before leaving"
-    assert clear_idx < save_idx, "pending named context blocks should disappear before the switch draft save yields"
+    assert save_idx < clear_idx, "failed draft persistence must not clear pending named context blocks"
 
 
 def test_newsession_clears_pending_named_context():

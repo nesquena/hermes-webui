@@ -180,6 +180,58 @@ async ({kind}) => {
 """
 
 
+_SESSIONLESS_DONE_SCENARIO = r"""
+async ({withStreamEnd}) => {
+  const activeSid = 'session-a';
+  const streamId = 'stream-sessionless-done';
+  const persisted = {
+    session_id: activeSid,
+    active_stream_id: null,
+    pending_user_message: null,
+    messages: [
+      {role: 'user', content: 'question'},
+      {role: 'assistant', content: 'canonical success'},
+    ],
+    message_count: 2,
+    queue: [],
+    tool_calls: [],
+  };
+  const apiCalls = [];
+  api = async url => {
+    apiCalls.push(String(url));
+    return String(url).includes('/api/session?session_id=')
+      ? {session: persisted}
+      : {};
+  };
+
+  S.session = {session_id: activeSid, messages: [{role: 'user', content: 'question'}]};
+  S.messages = [{role: 'user', content: 'question'}];
+  S.toolCalls = [];
+  S.activeStreamId = streamId;
+  S.busy = true;
+  attachLiveStream(activeSid, streamId, []);
+  const source = MockEventSource.instances.at(-1);
+  if (!source) throw new Error('attachLiveStream did not construct EventSource');
+
+  await source.emit('done', {status: 'completed', stream_id: streamId});
+  if (withStreamEnd) {
+    await source.emit('stream_end', {session_id: activeSid, stream_id: streamId});
+  }
+  await new Promise(resolve => setTimeout(resolve, withStreamEnd ? 0 : 2400));
+
+  return {
+    apiCalls,
+    session: S.session,
+    messages: S.messages,
+    activeStreamId: S.activeStreamId,
+    busy: Boolean(S.busy),
+    sourceState: source.readyState,
+    errorRows: S.messages.filter(message => message && message._error).length,
+  };
+}
+"""
+
+
 def _function_body(source: str, name: str) -> str:
     start = source.index(f"function {name}")
     brace = source.index("){", start) + 1
@@ -417,6 +469,31 @@ def _run_lifecycle_scenario(browser, kind: str) -> list[dict]:
         page.close()
 
 
+def _run_sessionless_done_scenario(browser, *, with_stream_end: bool) -> dict:
+    page = browser.new_page()
+    page.route(
+        "**/*",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="text/html"
+            if route.request.url == "http://harness.test/"
+            else "text/plain",
+            body=HARNESS_HTML if route.request.url == "http://harness.test/" else "",
+        ),
+    )
+    page.add_init_script(_MOCK_EVENT_SOURCE)
+    try:
+        page.goto("http://harness.test/", wait_until="domcontentloaded")
+        for script in SUPPORT_SCRIPTS:
+            page.add_script_tag(content=script)
+        page.add_script_tag(content=UI_JS)
+        page.add_script_tag(content=MESSAGES_JS)
+        page.evaluate(_STABILIZE_UNRELATED_UI)
+        return page.evaluate(_SESSIONLESS_DONE_SCENARIO, {"withStreamEnd": with_stream_end})
+    finally:
+        page.close()
+
+
 @pytest.mark.parametrize(
     ("kind", "terminal_type", "terminal_status", "last_content"),
     [
@@ -455,6 +532,31 @@ def test_real_sse_terminal_callback_observes_settled_core_state(
     assert terminal["busy"] is False
     assert terminal["currentSid"] == "session-a"
     assert terminal["lastContent"] == last_content
+
+
+def test_sessionless_done_restores_canonical_session_on_following_stream_end(lifecycle_browser):
+    result = _run_sessionless_done_scenario(lifecycle_browser, with_stream_end=True)
+
+    assert result["apiCalls"] == ["/api/session?session_id=session-a"]
+    assert result["session"]["session_id"] == "session-a"
+    assert result["messages"] == [
+        {"role": "user", "content": "question"},
+        {"role": "assistant", "content": "canonical success"},
+    ]
+    assert result["activeStreamId"] is None
+    assert result["busy"] is False
+    assert result["sourceState"] == 2
+    assert result["errorRows"] == 0
+
+
+def test_sessionless_done_recovery_is_bounded_without_stream_end(lifecycle_browser):
+    result = _run_sessionless_done_scenario(lifecycle_browser, with_stream_end=False)
+
+    assert result["apiCalls"] == ["/api/session?session_id=session-a"]
+    assert result["activeStreamId"] is None
+    assert result["busy"] is False
+    assert result["sourceState"] == 2
+    assert result["errorRows"] == 0
 
 
 def test_live_stream_terminal_paths_use_original_stream_owner_identity():

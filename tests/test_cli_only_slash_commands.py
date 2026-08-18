@@ -15,6 +15,13 @@ COMMANDS_JS = (REPO_ROOT / "static" / "commands.js").read_text(encoding="utf-8")
 MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 
 
+def _planner_source():
+    start = MESSAGES_JS.find("async function _prepareSlashTurn")
+    end = MESSAGES_JS.find("function _queuePayloadForSlashTurn", start)
+    assert start >= 0 and end > start
+    return MESSAGES_JS[start:end]
+
+
 def test_api_commands_exposes_cli_only_metadata_for_webui_intercept():
     """CLI-only commands must remain visible so the frontend can explain them."""
     registry = [
@@ -533,52 +540,38 @@ def test_bundle_collisions_stay_hidden_until_agent_metadata_is_ready():
 
 
 def test_send_intercepts_cli_only_commands_before_agent_round_trip():
-    intercept_idx = MESSAGES_JS.find("Slash command intercept")
-    assert intercept_idx != -1
-    normal_send_idx = MESSAGES_JS.find("const activeSid=S.session.session_id", intercept_idx)
-    assert normal_send_idx != -1
-    intercept = MESSAGES_JS[intercept_idx:normal_send_idx]
+    intercept = _planner_source()
 
-    assert "await getAgentCommandMetadata(_parsedCmd.name)" in intercept
-    assert "if(_agentCmd&&_agentCmd.cli_only)" in intercept
-    assert "cliOnlyCommandResponse(_parsedCmd.name,_agentCmd)" in intercept
-    assert "return;" in intercept
+    assert "await getAgentCommandMetadata(parsed.name)" in intercept
+    assert "if(agentCmd&&agentCmd.cli_only)" in intercept
+    assert "cliOnlyCommandResponse(parsed.name,agentCmd)" in intercept
+    assert "return {kind:'handled'};" in intercept
 
 
 def test_send_intercepts_bundle_commands_before_agent_round_trip():
-    intercept_idx = MESSAGES_JS.find("Slash command intercept")
-    normal_send_idx = MESSAGES_JS.find("const activeSid=S.session.session_id", intercept_idx)
-    assert normal_send_idx != -1
-    intercept = MESSAGES_JS[intercept_idx:normal_send_idx]
+    intercept = _planner_source()
 
-    assert "const _bundleCmd=!_agentCmd&&typeof getBundleCommandMetadata==='function'" in intercept
-    assert "await resolveBundleCommand(text,_bundleCmd)" in intercept
-    assert "_slashDisplayTextOverride=text;" in intercept
-    assert "text=_bundleMessage;" in intercept
+    assert "const bundleCmd=!agentCmd&&typeof getBundleCommandMetadata==='function'" in intercept
+    assert "await resolveBundleCommand(match.raw,bundleCmd)" in intercept
+    assert "return {kind:'turn',message,displayText:match.raw" in intercept
 
 
 def test_send_consults_agent_metadata_before_bundle_resolution():
-    intercept_idx = MESSAGES_JS.find("Slash command intercept")
-    normal_send_idx = MESSAGES_JS.find("const activeSid=S.session.session_id", intercept_idx)
-    assert normal_send_idx != -1
-    intercept = MESSAGES_JS[intercept_idx:normal_send_idx]
+    intercept = _planner_source()
 
-    agent_idx = intercept.find("await getAgentCommandMetadata(_parsedCmd.name)")
-    bundle_idx = intercept.find("await getBundleCommandMetadata(_parsedCmd.name)")
+    agent_idx = intercept.find("await getAgentCommandMetadata(parsed.name)")
+    bundle_idx = intercept.find("await getBundleCommandMetadata(parsed.name)")
     assert agent_idx != -1
     assert bundle_idx != -1
     assert agent_idx < bundle_idx
 
 
 def test_send_intercepts_reload_mcp_agent_command_before_agent_round_trip():
-    intercept_idx = MESSAGES_JS.find("Slash command intercept")
-    normal_send_idx = MESSAGES_JS.find("const activeSid=S.session.session_id", intercept_idx)
-    assert normal_send_idx != -1
-    intercept = MESSAGES_JS[intercept_idx:normal_send_idx]
+    intercept = _planner_source()
 
-    assert "const _agentCmdName=String(_agentCmd&&_agentCmd.name||_parsedCmd&&_parsedCmd.name||'')" in intercept
-    assert "if(_AGENT_COMMANDS_RUN_ON_WEBUI.has(_agentCmdName))" in intercept
-    assert "executeAgentCommand(text,_agentCmd||{name:_agentCmdName})" in intercept
+    assert "const agentCmdName=String(agentCmd&&agentCmd.name||parsed.name||'')" in intercept
+    assert "_AGENT_COMMANDS_RUN_ON_WEBUI.has(agentCmdName)" in intercept
+    assert "executeAgentCommand(match.raw,agentCmd||{name:agentCmdName})" in intercept
 
 
 def test_reload_mcp_reload_skills_and_codex_runtime_webui_intercept_aliases_are_defined_in_js_whitelist():
@@ -589,7 +582,7 @@ def test_reload_mcp_reload_skills_and_codex_runtime_webui_intercept_aliases_are_
     assert "'codex-runtime'" in MESSAGES_JS
     assert "'codex_runtime'" in MESSAGES_JS
     assert "'credits'" in MESSAGES_JS
-    assert "if(_agentCmd&&_AGENT_COMMANDS_RUN_ON_WEBUI.has(_agentCmdName))" not in MESSAGES_JS
+    assert "_AGENT_COMMANDS_RUN_ON_WEBUI.has(agentCmdName)" in _planner_source()
 
 
 def test_reload_skills_agent_command_metadata_resolves_alias():
@@ -634,28 +627,20 @@ def test_codex_runtime_agent_command_metadata_resolves_alias():
 
 def test_unknown_slash_commands_still_fall_through_to_agent():
     """Only explicitly supported metadata-backed commands should be intercepted."""
-    intercept_idx = MESSAGES_JS.find("Slash command intercept")
-    normal_send_idx = MESSAGES_JS.find("const activeSid=S.session.session_id", intercept_idx)
-    intercept = MESSAGES_JS[intercept_idx:normal_send_idx]
+    intercept = _planner_source()
 
-    assert "if(_bundleCmd){" in intercept
-    assert "if(_agentCmd&&_agentCmd.cli_only)" in intercept
-    assert "if(_AGENT_COMMANDS_RUN_ON_WEBUI.has(_agentCmdName))" in intercept
-    assert "if(_agentCmd&&_agentCmd.category==='Plugin')" in intercept
-    assert "if(_parsedCmd&&!_cmd)" in intercept
-    assert "if(!_agentCmd" not in intercept
-    assert "if(_agentCmd){" not in intercept
-    assert "else" not in intercept[intercept.find("if(_agentCmd&&_agentCmd.cli_only)") :]
+    assert "if(bundleCmd){" in intercept
+    assert "if(agentCmd&&agentCmd.cli_only)" in intercept
+    assert "_AGENT_COMMANDS_RUN_ON_WEBUI.has(agentCmdName)" in intercept
+    assert "if(agentCmd&&agentCmd.category==='Plugin')" in intercept
+    assert "return {kind:'prompt',message:match.raw};" in intercept
 
 
 def test_builtin_command_opt_outs_do_not_hit_agent_metadata_lookup():
     """Built-in fall-through commands like /reasoning high keep their old path."""
-    intercept_idx = MESSAGES_JS.find("Slash command intercept")
-    normal_send_idx = MESSAGES_JS.find("const activeSid=S.session.session_id", intercept_idx)
-    intercept = MESSAGES_JS[intercept_idx:normal_send_idx]
-    optout_idx = intercept.find("if(_cmd.fn(_parsedCmd.args)===false)")
-    metadata_idx = intercept.find("await getAgentCommandMetadata(_parsedCmd.name)")
+    optout_idx = MESSAGES_JS.find("if(result===false)")
+    metadata_idx = MESSAGES_JS.find("await getAgentCommandMetadata(parsed.name)")
 
     assert optout_idx != -1
     assert metadata_idx != -1
-    assert "if(_parsedCmd&&!_cmd)" in intercept[optout_idx:metadata_idx + 120]
+    assert optout_idx < metadata_idx

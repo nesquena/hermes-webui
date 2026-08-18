@@ -43,13 +43,13 @@ def test_frontend_bundle_dispatch_uses_dedicated_metadata_and_resolve_calls():
     assert "api('/api/commands/bundles')" in COMMANDS_JS
     assert "api('/api/commands/bundles/resolve'" in COMMANDS_JS
     assert "await loadAgentCommandMetadata();" in COMMANDS_JS
-    assert "const _bundleCmd=!_agentCmd&&typeof getBundleCommandMetadata==='function'" in MESSAGES_JS
-    assert "await resolveBundleCommand(text,_bundleCmd)" in MESSAGES_JS
+    assert "const bundleCmd=!agentCmd&&typeof getBundleCommandMetadata==='function'" in MESSAGES_JS
+    assert "await resolveBundleCommand(match.raw,bundleCmd)" in MESSAGES_JS
 
 
 def test_frontend_checks_agent_ownership_before_bundle_resolution():
-    agent_idx = MESSAGES_JS.find("await getAgentCommandMetadata(_parsedCmd.name)")
-    bundle_idx = MESSAGES_JS.find("await getBundleCommandMetadata(_parsedCmd.name)")
+    agent_idx = MESSAGES_JS.find("await getAgentCommandMetadata(parsed.name)")
+    bundle_idx = MESSAGES_JS.find("await getBundleCommandMetadata(parsed.name)")
     assert agent_idx != -1
     assert bundle_idx != -1
     assert agent_idx < bundle_idx

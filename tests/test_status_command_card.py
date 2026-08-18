@@ -7,6 +7,7 @@ card.
 """
 import json
 import pathlib
+import re
 import shutil
 import subprocess
 import tempfile
@@ -36,6 +37,34 @@ def _function_body(src: str, name: str) -> str:
             if depth == 0:
                 return src[start:idx + 1]
     raise AssertionError(f"Could not extract {name}()")
+
+
+def _js_function(src: str, name: str) -> str:
+    markers = (f"async function {name}(", f"function {name}(")
+    start = next((src.find(marker) for marker in markers if src.find(marker) >= 0), -1)
+    if start < 0:
+        raise AssertionError(f"Could not extract {name}()")
+    parens = 0
+    brace = -1
+    for idx in range(src.index("(", start), len(src)):
+        if src[idx] == "(":
+            parens += 1
+        elif src[idx] == ")":
+            parens -= 1
+        elif src[idx] == "{" and parens == 0:
+            brace = idx
+            break
+    if brace < 0:
+        raise AssertionError(f"Could not extract {name}() body")
+    depth = 1
+    for idx in range(brace + 1, len(src)):
+        if src[idx] == "{":
+            depth += 1
+        elif src[idx] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start : idx + 1]
+    raise AssertionError(f"Could not close {name}() body")
 
 
 def _run_node(source: str) -> str:
@@ -222,6 +251,81 @@ console.log(JSON.stringify({{
     )
 
 
+def _status_send_probe() -> dict:
+    """Run the real send/planner path with a harmless status command stub."""
+    command_start = COMMANDS_JS.index("const COMMANDS=[")
+    command_end = COMMANDS_JS.index("];", command_start) + 2
+    command_registry = COMMANDS_JS[command_start:command_end]
+    handler_names = sorted(set(re.findall(r"fn:([A-Za-z_$][\w$]*)", command_registry)))
+    handlers = []
+    for name in handler_names:
+        if name == "cmdStatus":
+            handlers.append(
+                "function cmdStatus(args){handled.push({name:'status',args:String(args||'')});return true;}"
+            )
+        else:
+            handlers.append(f"function {name}(){{return true;}}")
+    helpers = "\n".join(
+        _js_function(MESSAGES_JS, name)
+        for name in (
+            "_slashCommandMatch",
+            "_echoSlashUserMessage",
+            "_finishSlashCommand",
+            "_runBuiltinSlashCommand",
+            "_prepareSlashTurn",
+            "send",
+        )
+    )
+    return json.loads(
+        _run_node(
+            f"""
+const handled=[];
+const startCalls=[];
+const input={{value:'/status'}};
+const S={{
+  busy:false,
+  pendingFiles:[],
+  session:{{session_id:'sid',workspace:'workspace-id',read_only:false}},
+  messages:[],
+}};
+const window={{}};
+const document={{querySelector:()=>null}};
+const _pendingSelections=[];
+let _sendInProgress=false;
+let _sendInProgressSid=null;
+function $(id){{return id==='msg'?input:null;}}
+function t(key){{return key;}}
+function parseCommand(text){{
+  if(!text.startsWith('/'))return null;
+  const parts=text.slice(1).split(/\\s+/);
+  return {{name:parts[0].toLowerCase(),args:parts.slice(1).join(' ').trim()}};
+}}
+function api(url){{startCalls.push(String(url));return Promise.resolve({{}});}}
+function renderMessages(){{}}
+function autoResize(){{}}
+function hideCmdDropdown(){{}}
+function _flushSelectionBlocksToComposer(){{}}
+function _clearStaleBusyStateBeforeSend(){{}}
+function isCompressionUiRunning(){{return false;}}
+function _dismissHandoffHint(){{}}
+function _chatPayloadModelState(){{return {{model:'model',model_provider:'provider'}};}}
+{chr(10).join(handlers)}
+{command_registry}
+{helpers}
+(async()=>{{
+  await send();
+  console.log(JSON.stringify({{
+    handled,
+    messages:S.messages,
+    input:input.value,
+    startCalls,
+  }}));
+}})().catch(error=>{{console.error(error.stack||error);process.exit(1);}});
+"""
+        )
+    )
+
+
 def test_status_command_is_registered_with_help_text():
     assert "{name:'status'" in COMMANDS_JS
     assert "desc:t('cmd_status')" in COMMANDS_JS
@@ -316,10 +420,11 @@ def test_status_card_styles_exist():
 
 
 def test_status_command_never_reaches_agent_send_path():
-    send_body = _function_body(MESSAGES_JS, "send")
-    branch_start = send_body.index("if(text.startsWith('/')")
-    branch_end = send_body.index("if(_parsedCmd&&!_cmd)", branch_start)
-    cmd_branch = send_body[branch_start:branch_end]
-    assert "COMMANDS.find" in cmd_branch
-    assert "return;" in cmd_branch
-    assert "api('/api/chat/start'" not in cmd_branch
+    result = _status_send_probe()
+    assert result["handled"] == [{"name": "status", "args": ""}]
+    assert [
+        {key: message[key] for key in ("role", "content")}
+        for message in result["messages"]
+    ] == [{"role": "user", "content": "/status"}]
+    assert result["input"] == ""
+    assert result["startCalls"] == []

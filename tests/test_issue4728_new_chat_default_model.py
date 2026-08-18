@@ -92,6 +92,7 @@ globalThis.S = {
   _pendingSessionToolsets: null,
   _profileSwitchWorkspace: null,
   _profileDefaultWorkspace: null,
+  pendingFiles: [],
 };
 globalThis._defaultModel = args.defaultModel || null;
 globalThis._activeProvider = args.activeProvider || null;
@@ -134,11 +135,14 @@ for (const name of [
   '_setLiveAssistantTps',
   '_syncCtxIndicator',
   'showToast',
+  'renderTray',
+  'autoResize',
 ]) {
   globalThis[name] = () => {};
 }
 globalThis.loadDir = async () => null;
 globalThis._setNewSessionPending = () => {};
+globalThis._saveComposerDraftNow = async () => ({ok: true});
 globalThis.api = async (url, opts) => {
   const body = JSON.parse(opts.body);
   captured.push({ url, body });

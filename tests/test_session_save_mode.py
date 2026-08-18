@@ -91,6 +91,36 @@ def test_eager_chat_start_checkpoints_first_user_message_before_thread(_isolate_
     assert on_disk["pending_user_message"] == "hello eager"
 
 
+def test_eager_checkpoint_keeps_distinct_stable_queue_turns_with_same_payload():
+    s = Session(session_id="eager_distinct_queue_turns", active_stream_id="stream-queue")
+    attachment = {"name": "same.txt", "path": "", "mime": "text/plain"}
+
+    routes._checkpoint_user_message_for_eager_session_save(
+        s, "repeat", [attachment], 100.0, queue_item_id="queue-1",
+    )
+    routes._checkpoint_user_message_for_eager_session_save(
+        s, "repeat", [attachment], 101.0, queue_item_id="queue-2",
+    )
+
+    assert [m["_queue_item_id"] for m in s.messages] == ["queue-1", "queue-2"]
+
+
+def test_eager_checkpoint_legacy_dedupe_requires_exact_checkpoint_identity():
+    s = Session(session_id="eager_legacy_identity")
+    routes._checkpoint_user_message_for_eager_session_save(
+        s, "  repeat   prompt ", [], 200.0, source="webui",
+    )
+    routes._checkpoint_user_message_for_eager_session_save(
+        s, "repeat prompt", [], 200.0, source="webui",
+    )
+    routes._checkpoint_user_message_for_eager_session_save(
+        s, "repeat prompt", [], 201.0, source="webui",
+    )
+
+    assert len(s.messages) == 2
+    assert [m["timestamp"] for m in s.messages] == [200.0, 201.0]
+
+
 def test_eager_wal_repair_does_not_duplicate_checkpointed_user_message(_isolate_state, monkeypatch):
     s = Session(session_id="eager_repair", messages=[{"role": "user", "content": "survive"}])
     s.pending_user_message = "survive"

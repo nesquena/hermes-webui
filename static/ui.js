@@ -12,16 +12,10 @@ function assistantDisplayName(){
   return window._botName||'Hermes';
 }
 const INFLIGHT={};  // keyed by session_id while request in-flight
-const SESSION_QUEUES={};  // keyed by session_id for queued follow-up turns
+const SESSION_QUEUES={};  // keyed by session_id; server-owned render cache
+const SESSION_QUEUE_CAPABILITIES={};
 const MAX_UPLOAD_BYTES=(window.__HERMES_CONFIG__&&window.__HERMES_CONFIG__.maxUploadBytes)||20*1024*1024;
 const MAX_UPLOAD_MB=Math.round(MAX_UPLOAD_BYTES/1024/1024);
-// Tracks which session's queue to drain in setBusy(false).
-// Set to activeSid just before setBusy(false) in done/error handlers so the
-// queue drains the session that *finished*, not the one currently viewed.
-// Single-shot: setBusy() reads and clears this on every call. Concurrent
-// back-to-back stream completions would overwrite it, but HTTPServer is
-// single-threaded so only one done event fires at a time in practice.
-let _queueDrainSid=null;
 const $=id=>document.getElementById(id);
 const OFFLINE_RECHECK_MS=2500;
 const OFFLINE_HEALTH_TIMEOUT_MS=10000;
@@ -217,16 +211,6 @@ function _clearPersistedSessionQueue(sid){
   try{sessionStorage.removeItem(key);}catch(_){}
   try{localStorage.removeItem(key);}catch(_){}
 }
-function _persistSessionQueueStorage(sid, queue){
-  if(!sid) return;
-  const q=Array.isArray(queue)?queue:[];
-  if(!q.length){_clearPersistedSessionQueue(sid);return;}
-  const key=_queueStorageKey(sid);
-  let payload='[]';
-  try{payload=JSON.stringify(q);}catch(_){return;}
-  try{sessionStorage.setItem(key,payload);}catch(_){}
-  try{localStorage.setItem(key,payload);}catch(_){}
-}
 function _readPersistedSessionQueue(sid){
   if(!sid) return [];
   const key=_queueStorageKey(sid);
@@ -247,26 +231,100 @@ function _readPersistedSessionQueue(sid){
   }
   return [];
 }
-function queueSessionMessage(sid, payload){
-  if(!sid||!payload) return 0;
-  const q=_getSessionQueue(sid,true);
-  // Stamp created_at so the restore path can detect stale entries (agent already responded)
-  const entry={...payload, _queued_at: Date.now()};
-  q.push(entry);
-  _persistSessionQueueStorage(sid,q);
-  return q.length;
-}
-function shiftQueuedSessionMessage(sid){
-  const q=_getSessionQueue(sid,false);
-  if(!q.length) return null;
-  const next=q.shift();
-  if(!q.length){
-    delete SESSION_QUEUES[sid];
-    _clearPersistedSessionQueue(sid);
-  } else {
-    _persistSessionQueueStorage(sid,q);
+function hydrateSessionQueue(sid, queue){
+  if(!sid) return [];
+  if(typeof S!=='undefined'&&S.session&&S.session.session_id===sid&&S.session.queue_capability){
+    SESSION_QUEUE_CAPABILITIES[sid]=S.session.queue_capability;
   }
+  const next=Array.isArray(queue)?queue.filter(e=>e&&typeof e==='object').map(e=>({...e})):[];
+  if(next.length) SESSION_QUEUES[sid]=next;
+  else delete SESSION_QUEUES[sid];
+  delete _queueRenderKeys[sid];
   return next;
+}
+const _queueMutationChains={};
+function _queueErrorMessage(error,fallbackKey='queue_failed'){
+  let code=error&&error.code;
+  if(!code&&error&&error.body){
+    try{
+      const body=typeof error.body==='string'?JSON.parse(error.body):error.body;
+      code=body&&body.error_code||null;
+    }catch(_){ }
+  }
+  if(typeof code==='string'&&code.startsWith('queue_')&&typeof t==='function'){
+    const translated=t(code);
+    if(translated&&String(translated)!==String(code))return String(translated);
+  }
+  if(typeof t==='function'){
+    const fallback=t(fallbackKey);
+    if(fallback&&String(fallback)!==String(fallbackKey))return String(fallback);
+  }
+  return fallbackKey;
+}
+function _postSessionQueue(sid, body){
+  const run=()=>api('/api/chat/queue',{method:'POST',body:JSON.stringify({session_id:sid,...body})})
+    .then(response=>{
+      const resolvedSid=String(response&&response.session_id||sid);
+      if(resolvedSid!==sid){
+        hydrateSessionQueue(sid,[]);
+        updateQueueBadge(sid);
+      }
+      hydrateSessionQueue(resolvedSid,response&&response.queue);
+      updateQueueBadge(resolvedSid);
+      return response;
+    })
+    .catch(error=>{
+      if(error&&!error.code&&error.body){
+        try{error.code=JSON.parse(error.body).error_code||null;}catch(_){ }
+      }
+      throw error;
+    });
+  const next=(_queueMutationChains[sid]||Promise.resolve()).catch(()=>{}).then(run);
+  _queueMutationChains[sid]=next;
+  const cleanup=()=>{if(_queueMutationChains[sid]===next)delete _queueMutationChains[sid];};
+  next.then(cleanup,cleanup);
+  return next;
+}
+async function queueSessionMessage(sid, payload){
+  if(!sid||!payload) throw new Error('No owning session for queued message');
+  const ownerSession=typeof S!=='undefined'&&S.session&&S.session.session_id===sid?S.session:null;
+  const queueCapability=ownerSession&&ownerSession.queue_capability||SESSION_QUEUE_CAPABILITIES[sid];
+  if(queueCapability!=='server'){
+    const error=new Error(queueCapability
+      ? 'durable WebUI queue is unsupported for this backend'
+      : 'durable WebUI queue capability is unavailable');
+    error.code=queueCapability?'queue_unsupported':'queue_unavailable';
+    error.status=501;
+    throw error;
+  }
+  const captured=Array.isArray(payload.files)?payload.files.filter(Boolean):[];
+  const uploaded=captured.filter(f=>f&&typeof f==='object'&&String(f.path||'').trim());
+  const browserFiles=captured.filter(f=>!(f&&typeof f==='object'&&String(f.path||'').trim()));
+  let files=[...uploaded];
+  if(browserFiles.length){
+    const result=await uploadPendingFiles({files:browserFiles,sessionId:sid,clearPending:false});
+    if(!Array.isArray(result)||result.length!==browserFiles.length) throw new Error('One or more attachments failed to upload');
+    files.push(...result);
+  }
+  const body={action:'enqueue',text:String(payload.text||''),files,
+    model:payload.model||'',model_provider:payload.model_provider||null,
+    workspace:payload.workspace||null,
+  };
+  if(typeof payload.display_text==='string') body.display_text=payload.display_text;
+  if(payload.intent&&typeof payload.intent==='object'){
+    body.intent=JSON.parse(JSON.stringify(payload.intent));
+    body.intent.attachments=[...files];
+    body.intent.model=payload.model||null;
+    body.intent.model_provider=payload.model_provider||null;
+    if(payload.workspace) body.intent.workspace=payload.workspace;
+  }
+  if(payload.moa_config) body.moa_config=payload.moa_config;
+  const response=await _postSessionQueue(sid,body);
+  return response;
+}
+async function mutateSessionQueue(sid, action, extra={}){
+  if(!sid) throw new Error('No owning session for queue action');
+  return _postSessionQueue(sid,{action,...extra});
 }
 function getQueuedSessionCount(sid){
   return _getSessionQueue(sid,false).length;
@@ -491,7 +549,7 @@ async function startCompressionRecovery(btn){
     if(!sid) throw new Error('Compression recovery did not return a session.');
     try{localStorage.setItem('hermes-webui-session',sid);}catch(_){}
     if(typeof loadSession==='function') await loadSession(sid,{preserveActiveInput:false});
-    else if(data.session){S.session=data.session;S.messages=data.session.messages||[];syncTopbar();renderMessages();}
+    else if(data.session){S.session=data.session;S.messages=data.session.messages||[];if(typeof hydrateSessionQueue==='function') hydrateSessionQueue(S.session.session_id,data.session.queue);syncTopbar();renderMessages();}
     if(typeof renderSessionList==='function') await renderSessionList();
     if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(sid);
     if(typeof showToast==='function') showToast((data&&data.message)||'Started focused continuation.',3000,'success');
@@ -8315,42 +8373,7 @@ function setBusy(v){
     if(typeof _clearActivityElapsedTimer==='function') _clearActivityElapsedTimer();
     setStatus('');
     setComposerStatus('');
-    const sid=_queueDrainSid||(S.session&&S.session.session_id);
-    _queueDrainSid=null;
-    updateQueueBadge(sid);
-    // Drain one queued message for the finished session after UI settles
-    const _isViewedSid=!S.session||sid===S.session.session_id;
-    const next=sid&&_isViewedSid?shiftQueuedSessionMessage(sid):null;
-    if(next){
-      updateQueueBadge(sid);
-      setTimeout(()=>{
-        // Guard: if the user switched away from the drain session during
-        // the 120ms settle window, the queued message must NOT go to the
-        // wrong chat.  Put it back into the original session's queue and
-        // skip sending — it will drain when the user returns to that session
-        // or when its next stream completes while it is the active view.
-        if(S.session&&S.session.session_id!==sid){
-          queueSessionMessage(sid,next);
-          updateQueueBadge(sid);
-          return;
-        }
-        $('msg').value=next.text||'';
-        S.pendingFiles=Array.isArray(next.files)?[...next.files]:[];
-        // Restore model from queued item (sent in /api/chat/start payload)
-        // Note: profile is NOT restored — full profile switch requires server interaction
-        if(next.model&&S.session&&next.model!==S.session.model){
-          S.session.model=next.model;
-        }
-        if(next.model_provider&&S.session) S.session.model_provider=next.model_provider;
-        if(next.model&&S.session){
-          if(typeof _applyModelToDropdown==='function'&&$('modelSelect')) _applyModelToDropdown(next.model,$('modelSelect'),S.session.model_provider||null);
-          if(typeof syncModelChip==='function') syncModelChip();
-        }
-        autoResize();
-        renderTray();
-        send();
-      },120);
-    }
+    updateQueueBadge(S.session&&S.session.session_id);
   }
 }
 
@@ -8389,7 +8412,11 @@ function _renderQueueChips(sid){
   const inner=document.getElementById('queueChips');
   if(!card||!inner) return;
   const q=_getSessionQueue(sid,false);
-  const key=q.map(e=>{const t=e&&(e.text||e.message||e.content||'');return(e&&e._queued_at||0)+':'+t.length+':'+t.slice(0,20);}).join('|');
+  const key=JSON.stringify(q.map(e=>({
+    id:String(e?.id||''),
+    text:String(e?.display_text??e?.text??e?.message??e?.content??''),
+    files:(Array.isArray(e?.files)?e.files:[]).map(file=>String(file?.path||file?.name||file?.filename||''))
+  })));
   if(key===(_queueRenderKeys[sid]||'')&&key!='') return;
   // Skip re-render if user is actively editing inside the queue panel
   if(inner.contains(document.activeElement)&&document.activeElement!==inner) return;
@@ -8424,12 +8451,16 @@ function _renderQueueChips(sid){
     }, 360);
   }
 
-  function _saveAndRefresh(){
-    const liveQ=_getSessionQueue(sid,false);
-    if(!liveQ.length){delete SESSION_QUEUES[sid];_clearPersistedSessionQueue(sid);}
-    else{SESSION_QUEUES[sid]=[...liveQ];_persistSessionQueueStorage(sid,liveQ);}
-    delete _queueRenderKeys[sid];
-    updateQueueBadge(sid);
+  async function _saveAndRefresh(action, extra={}){
+    try{
+      await mutateSessionQueue(sid,action,extra);
+      delete _queueRenderKeys[sid];
+      updateQueueBadge(sid);
+    }catch(err){
+      delete _queueRenderKeys[sid];
+      showToast(_queueErrorMessage(err,'queue_update_failed'),3500,'error');
+      updateQueueBadge(sid);
+    }
   }
 
   // Header (2+ items)
@@ -8447,29 +8478,17 @@ function _renderQueueChips(sid){
     mergeBtn.title='Combine all into one message'+(hasFiles?' — attachments will be removed':'');
     mergeBtn.innerHTML=li('layers',12)+'Combine';
     mergeBtn.onclick=()=>{
-      const _doMerge=(snapshot)=>{
-        const combined=snapshot.map(e=>e&&(e.text||e.message||e.content||'')).filter(Boolean).join('\n\n');
-        const liveQ=_getSessionQueue(sid,false);
-        const first=snapshot.find(e=>e)||{};
-        const firstFiles=(snapshot.find(e=>e&&Array.isArray(e.files)&&e.files.length)||{files:[]}).files;
-        liveQ.length=0;liveQ.push({text:combined,files:firstFiles,model:first.model||'',model_provider:first.model_provider||null,_queued_at:Date.now()});
-        SESSION_QUEUES[sid]=liveQ;
-        _persistSessionQueueStorage(sid,liveQ);
-        delete _queueRenderKeys[sid];
-        updateQueueBadge(sid);
-      };
       if(hasFiles){
-        if(typeof showToast==='function') showToast('Attachments on queued items will be removed',2600,'warning');
+        if(typeof showToast==='function') showToast(typeof t==='function'?t('queue_combine_attachments_warning'):'queue_combine_attachments_warning',2600,'warning');
       }
-      // Merge from current live queue (no delay — snapshot + defer caused data-loss races)
-      _doMerge([..._getSessionQueue(sid,false)]);
+      void _saveAndRefresh('combine');
     };
     const clearBtn=document.createElement('button');
     clearBtn.className='queue-card-icon-btn';
     clearBtn.title='Clear all queued messages';
     clearBtn.setAttribute('aria-label','Clear all queued messages');
     clearBtn.innerHTML=li('x',13);
-    clearBtn.onclick=()=>{q.length=0;_saveAndRefresh();};
+    clearBtn.onclick=()=>{void _saveAndRefresh('clear');};
     actions.appendChild(mergeBtn);
     actions.appendChild(clearBtn);
     // Hide button — collapses flyout entirely; queue pill re-shows it
@@ -8490,25 +8509,26 @@ function _renderQueueChips(sid){
     inner.appendChild(header);
   }
 
-  let _dragTs=null;  // use _queued_at timestamp — survives re-renders, not an index
+  let _dragId=null;
   q.forEach((entry,i)=>{
-    const _entryTs=entry&&entry._queued_at;
-    const entryText=entry&&(entry.text||entry.message||entry.content||'');
+    const _entryId=String(entry&&entry.id||'');
+    const entryText=String(entry?.display_text??entry?.text??entry?.message??entry?.content??'');
     const _files=entry&&Array.isArray(entry.files)?entry.files.filter(Boolean):[];
     const row=document.createElement('div');
     row.className='queue-card-row';
     row.setAttribute('role','listitem');
     row.setAttribute('draggable','true');
-    row.ondragstart=(e)=>{if(_entryTs==null) return;_dragTs=_entryTs;row.style.opacity='.4';e.dataTransfer.effectAllowed='move';};
+    row.ondragstart=(e)=>{if(!_entryId) return;_dragId=_entryId;row.style.opacity='.4';e.dataTransfer.effectAllowed='move';};
     row.ondragend=()=>{row.style.opacity='';};
     row.ondragover=(e)=>{e.preventDefault();row.style.background='var(--hover-bg)';};
     row.ondragleave=()=>{row.style.background='';};
     row.ondrop=(e)=>{
       e.preventDefault();row.style.background='';
-      if(_dragTs!=null&&_dragTs!==_entryTs){
-        const fromIdx=q.findIndex(e=>e&&e._queued_at===_dragTs);
-        if(fromIdx!==-1&&fromIdx!==i){const moved=q.splice(fromIdx,1)[0];q.splice(i,0,moved);}
-        _dragTs=null;_saveAndRefresh();
+      if(_dragId&&_dragId!==_entryId){
+        const itemIds=q.map(e=>String(e&&e.id||''));
+        const fromIdx=itemIds.indexOf(_dragId);
+        if(fromIdx!==-1&&fromIdx!==i){const moved=itemIds.splice(fromIdx,1)[0];itemIds.splice(i,0,moved);void _saveAndRefresh('reorder',{item_ids:itemIds});}
+        _dragId=null;
       }
     };
     // Drag handle
@@ -8529,15 +8549,8 @@ function _renderQueueChips(sid){
       msgSpan.style.overflow='';msgSpan.style.whiteSpace='';msgSpan.style.textOverflow='';
       const newText=msgSpan.textContent.trim();
       if(newText===''&&!_files.length){ msgSpan.textContent=entryText||'—'; return; }
-      if(newText!==entryText){
-        const liveQ=_getSessionQueue(sid,false);
-        const idx=_entryTs!=null?liveQ.findIndex(e=>e&&e._queued_at===_entryTs):i;
-        if(idx!==-1){
-          liveQ[idx]={...liveQ[idx],text:newText};
-          _persistSessionQueueStorage(sid,liveQ);
-          delete _queueRenderKeys[sid];
-          updateQueueBadge(sid);
-        }
+      if(newText!==entryText.trim()){
+        if(_entryId) void _saveAndRefresh('edit',{item_id:_entryId,text:newText});
       }
     };
     msgSpan.onkeydown=(e)=>{if(e.key==='Enter'){e.preventDefault();msgSpan.blur();}if(e.key==='Escape'){msgSpan.textContent=entryText||'—';msgSpan.blur();}};
@@ -8570,13 +8583,7 @@ function _renderQueueChips(sid){
     delBtn.title='Remove from queue';
     delBtn.innerHTML=li('x',13);
     delBtn.onclick=()=>{
-      const liveQ=_getSessionQueue(sid,false);
-      const idx=_entryTs!=null?liveQ.findIndex(e=>e&&e._queued_at===_entryTs):i;
-      if(idx!==-1) liveQ.splice(idx,1);
-      if(!liveQ.length){delete SESSION_QUEUES[sid];_clearPersistedSessionQueue(sid);}
-      else{SESSION_QUEUES[sid]=[...liveQ];_persistSessionQueueStorage(sid,liveQ);}
-      delete _queueRenderKeys[sid];
-      updateQueueBadge(sid);
+      if(_entryId) void _saveAndRefresh('delete',{item_id:_entryId});
     };
     row.appendChild(drag);
     row.appendChild(msgSpan);
@@ -9982,6 +9989,7 @@ async function refreshSession() {
   try {
     const data = await api(`/api/session?session_id=${encodeURIComponent(S.session.session_id)}`);
     S.session = data.session;
+    if(typeof hydrateSessionQueue==='function') hydrateSessionQueue(S.session.session_id,data.session.queue);
     S.messages = data.session.messages || [];
     _messagesTruncated = !!data.session._messages_truncated;
     _oldestIdx = data.session._messages_offset || 0;
@@ -10858,12 +10866,24 @@ function _pendingActiveTurnUserMessage(messages, session){
 }
 
 function getPendingSessionMessage(session, messagesOverride=null){
-  const text=String(session?.pending_user_message||'').trim();
-  if(!text) return null;
-  const attachments=Array.isArray(session?.pending_attachments)?session.pending_attachments.filter(Boolean):[];
+  const pendingItem=session?.pending_queue_item&&typeof session.pending_queue_item==='object'
+    ? session.pending_queue_item : null;
+  const hasDisplayText=pendingItem&&Object.prototype.hasOwnProperty.call(pendingItem,'display_text');
+  const text=hasDisplayText
+    ? String(pendingItem.display_text??'')
+    : String(session?.pending_user_message||'').trim();
+  const attachments=Array.isArray(pendingItem?.files)
+    ? pendingItem.files.filter(Boolean)
+    : (Array.isArray(session?.pending_attachments)?session.pending_attachments.filter(Boolean):[]);
+  if(!text&&!attachments.length) return null;
   const sourceMessages=Array.isArray(messagesOverride)?messagesOverride:session?.messages;
   const messages=Array.isArray(sourceMessages)?sourceMessages:[];
-  const pendingCandidate={role:'user',content:text};
+  const pendingCandidate={
+    role:'user',
+    content:text,
+    attachments,
+    queue_item_id:pendingItem?.id||null,
+  };
   const _matchesPending=(row)=>{
     if(!row) return false;
     return typeof _sameTranscriptMessage==='function'
@@ -10895,9 +10915,11 @@ function getPendingSessionMessage(session, messagesOverride=null){
     role:'user',
     content:text,
     attachments:attachments.length?attachments:undefined,
+    queue_item_id:pendingItem?.id||undefined,
+    _queue_item_id:pendingItem?.id||undefined,
     _ts:session?.pending_started_at||Date.now()/1000,
     _pending:true,
-    _source:session?.pending_user_source||undefined,
+    _source:pendingItem?.source||session?.pending_user_source||undefined,
   };
 }
 async function checkInflightOnBoot(sid) {
@@ -21408,7 +21430,7 @@ async function promptNewFile(targetDir = S.currentDir || '.'){
       // System-minted session (#6022): explicit worktree:false — creating a
       // file from a blank page must not inherit the config worktree default.
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
-      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
+      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;hydrateSessionQueue(S.session.session_id,r.session.queue);S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
     }catch(e){setStatus(t('create_failed')+e.message);return;}
   }
   if(!S.session)return;
@@ -21441,7 +21463,7 @@ async function promptNewFolder(targetDir = S.currentDir || '.'){
       // System-minted session (#6022): explicit worktree:false — creating a
       // folder from a blank page must not inherit the config worktree default.
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
-      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
+      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;hydrateSessionQueue(S.session.session_id,r.session.queue);S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
     }catch(e){setStatus(t('folder_create_failed')+e.message);return;}
   }
   if(!S.session)return;

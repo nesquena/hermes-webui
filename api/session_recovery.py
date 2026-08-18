@@ -264,7 +264,7 @@ def _session_records_clear_sentinel(session_path: Path, bak_path: Path) -> bool:
     for key, value in expected.items():
         if key not in data or data.get(key) != value:
             return False
-    return True
+    return data.get('pending_queue_item') is None
 
 
 def _live_supersedes_backup_by_clear_generation(session_path: Path, bak_path: Path) -> bool:
@@ -622,6 +622,8 @@ def _state_db_row_to_sidecar(row: dict) -> dict:
         'pending_user_message': None,
         'pending_attachments': [],
         'pending_started_at': None,
+        'pending_user_source': None,
+        'pending_queue_item': None,
         'compression_anchor_visible_idx': None,
         'compression_anchor_message_key': None,
         'compression_anchor_summary': None,

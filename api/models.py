@@ -42,7 +42,7 @@ from api.agent_sessions import (
     read_importable_agent_session_rows,
     read_session_lineage_metadata,
 )
-from api.process_event_utils import stamp_message_source
+from api.process_event_utils import build_active_turn_token, stamp_message_source
 
 logger = logging.getLogger(__name__)
 CLI_VISIBLE_SESSION_LIMIT = 20
@@ -872,12 +872,51 @@ def _append_recovered_context_projection(
     recovered_text = _normalize_journal_recovery_text(recovered.get('content'))
     if recovered_text:
         if recovered.get('role') == 'user':
-            if _message_matches_pending_checkpoint(
-                context_messages[-1] if context_messages else None,
-                recovered.get('content'),
-                recovered.get('timestamp'),
-                recovered.get('_source'),
-                recovered.get('attachments'),
+            identity = {
+                'text': recovered.get('content'),
+                'timestamp': recovered.get('timestamp'),
+                'source': recovered.get('_source') or 'webui',
+                'attachments': list(recovered.get('attachments') or []),
+                'queue_item_id': str(
+                    recovered.get('queue_item_id')
+                    or recovered.get('_queue_item_id')
+                    or ''
+                ).strip() or None,
+                'token': recovered.get('_active_turn_token'),
+            }
+            queue_item_id = identity['queue_item_id']
+            active_turn_token = identity['token']
+            if queue_item_id and any(
+                queue_item_id in {
+                    str(existing.get('queue_item_id') or '').strip(),
+                    str(existing.get('_queue_item_id') or '').strip(),
+                }
+                for existing in context_messages
+                if isinstance(existing, dict)
+            ):
+                return
+            if active_turn_token and any(
+                existing.get('_active_turn_token') == active_turn_token
+                for existing in context_messages
+                if isinstance(existing, dict)
+            ):
+                return
+            last_context = context_messages[-1] if context_messages else None
+            if (
+                isinstance(last_context, dict)
+                and not (
+                    any(
+                        str(last_context.get(field) or '').strip()
+                        for field in ('queue_item_id', '_queue_item_id')
+                    )
+                    or (active_turn_token and last_context.get('_active_turn_token'))
+                )
+                and _message_matches_pending_payload(
+                    last_context,
+                    identity['text'],
+                    identity['source'],
+                    identity['attachments'],
+                )
             ):
                 return
         else:
@@ -910,23 +949,96 @@ def _append_recovered_turn_to_context(session, recovered: dict) -> None:
     _append_recovered_context_projection(session, context_messages, projected)
 
 
-def _append_recovered_pending_turn(session, *, timestamp: int | None = None) -> dict | None:
-    pending_text = str(session.pending_user_message or '')
-    if not pending_text:
-        return None
-    recovered_ts = int(time.time())
-    if isinstance(timestamp, (int, float)) and timestamp > 0:
-        recovered_ts = int(timestamp)
+def _pending_turn_payload(session):
+    identity = _pending_turn_identity(session)
+    return identity['text'], identity['source'], identity['attachments']
+
+
+def _pending_turn_identity(session):
+    item = getattr(session, 'pending_queue_item', None)
+    item = item if isinstance(item, dict) else None
+    intent = getattr(session, 'pending_turn_intent', None)
+    intent = intent if isinstance(intent, dict) else None
+    outcome = getattr(session, 'pending_queue_outcome', None)
+    outcome = outcome if isinstance(outcome, dict) else None
+    pending_text = getattr(session, 'pending_user_message', None)
+    if item is not None and item.get('display_text') is not None:
+        text = item['display_text']
+    elif intent is not None and intent.get('display_text') is not None:
+        text = intent['display_text']
+    elif item is not None and item.get('text') is not None:
+        text = item['text']
+    elif pending_text is not None:
+        text = pending_text
+    else:
+        text = ''
+    if item is not None and item.get('files') is not None:
+        attachments = item['files']
+    elif intent is not None and intent.get('attachments') is not None:
+        attachments = intent['attachments']
+    else:
+        attachments = getattr(session, 'pending_attachments', None)
+    queue_item_id = str(
+        (item or {}).get('id')
+        or (intent or {}).get('id')
+        or (outcome or {}).get('item_id')
+        or ''
+    ).strip() or None
+    return {
+        'text': str(text or ''),
+        'source': (
+            (item or {}).get('source')
+            or (intent or {}).get('source')
+            or getattr(session, 'pending_user_source', None)
+            or 'webui'
+        ),
+        'attachments': list(attachments or []),
+        'queue_item_id': queue_item_id,
+        'token': build_active_turn_token(
+            getattr(session, 'active_stream_id', None),
+            getattr(session, 'pending_started_at', None),
+        ),
+        'timestamp': getattr(session, 'pending_started_at', None),
+    }
+
+
+def _materialize_pending_turn_message(identity, timestamp):
+    try:
+        persisted_timestamp = int(float(timestamp))
+    except (TypeError, ValueError):
+        persisted_timestamp = int(time.time())
     recovered: dict = {
         'role': 'user',
-        'content': session.pending_user_message,
-        'timestamp': recovered_ts,
+        'content': identity['text'],
+        'timestamp': persisted_timestamp,
         '_recovered': True,
     }
-    pending_source = getattr(session, 'pending_user_source', None)
-    stamp_message_source(recovered, pending_source)
-    if session.pending_attachments:
-        recovered['attachments'] = list(session.pending_attachments)
+    if identity.get('queue_item_id'):
+        recovered['queue_item_id'] = identity['queue_item_id']
+        recovered['_queue_item_id'] = identity['queue_item_id']
+    if identity.get('attachments'):
+        recovered['attachments'] = copy.deepcopy(identity['attachments'])
+    stamp_message_source(
+        recovered,
+        identity.get('source') or 'webui',
+        active_turn_token=identity.get('token'),
+    )
+    return recovered
+
+
+def _append_recovered_pending_turn(session, *, timestamp: float | None = None) -> dict | None:
+    identity = _pending_turn_identity(session)
+    if not identity['text'] and not identity['attachments']:
+        return None
+    recovered_ts = timestamp
+    if not isinstance(recovered_ts, (int, float)) or not math.isfinite(recovered_ts) or recovered_ts <= 0:
+        recovered_ts = identity['timestamp']
+    if not isinstance(recovered_ts, (int, float)) or not math.isfinite(recovered_ts) or recovered_ts <= 0:
+        recovered_ts = time.time()
+    recovered_ts = int(recovered_ts)
+    if _pending_turn_checkpoint_exists(session.messages, identity, recovered_ts):
+        return None
+    recovered = _materialize_pending_turn_message(identity, recovered_ts)
     session.messages.append(recovered)
     _append_recovered_turn_to_context(session, recovered)
     # The new user turn is now committed to messages (#3831): advance the
@@ -1205,6 +1317,9 @@ class Session:
                  pending_attachments=None,
                  pending_started_at=None,
                  pending_user_source: str=None,
+                 pending_queue_item=None,
+                 pending_turn_intent=None,
+                 pending_queue_outcome=None,
                  context_messages=None,
                  compression_anchor_visible_idx=None,
                  compression_anchor_message_key=None,
@@ -1236,6 +1351,8 @@ class Session:
                  worktree_created_at=None,
                  enabled_toolsets=None,
                  composer_draft=None,
+                 queue=None,
+                 queue_transfer=None,
                  anchor_activity_scenes=None,
                  process_wakeup_pause=None,
                  share_token=None,
@@ -1290,6 +1407,15 @@ class Session:
         self.pending_attachments = pending_attachments or []
         self.pending_started_at = pending_started_at
         self.pending_user_source = pending_user_source
+        self.pending_queue_item = (
+            dict(pending_queue_item) if isinstance(pending_queue_item, dict) else None
+        )
+        self.pending_turn_intent = (
+            dict(pending_turn_intent) if isinstance(pending_turn_intent, dict) else None
+        )
+        self.pending_queue_outcome = (
+            dict(pending_queue_outcome) if isinstance(pending_queue_outcome, dict) else None
+        )
         self.context_messages = context_messages if isinstance(context_messages, list) else []
         self.compression_anchor_visible_idx = compression_anchor_visible_idx
         self.compression_anchor_message_key = compression_anchor_message_key
@@ -1340,6 +1466,8 @@ class Session:
         self.read_only = bool(kwargs.get('read_only', False))
         self.enabled_toolsets = enabled_toolsets  # List[str] or None — per-session toolset override
         self.composer_draft = composer_draft if isinstance(composer_draft, dict) else {}
+        self.queue = [dict(item) for item in queue if isinstance(item, dict)] if isinstance(queue, list) else []
+        self.queue_transfer = queue_transfer if isinstance(queue_transfer, dict) else None
         self.anchor_activity_scenes = anchor_activity_scenes if isinstance(anchor_activity_scenes, dict) else {}
         self.process_wakeup_pause = process_wakeup_pause if isinstance(process_wakeup_pause, dict) else {}
         self.share_token = str(share_token).strip() if share_token else None
@@ -1365,7 +1493,12 @@ class Session:
     def path(self):
         return SESSION_DIR / f'{self.session_id}.json'
 
-    def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
+    def save(
+        self,
+        touch_updated_at: bool = True,
+        skip_index: bool = False,
+        backup_on_shrink: bool = True,
+    ) -> None:
         if not is_safe_session_id(self.session_id):
             raise ValueError(f"Unsafe session_id {self.session_id!r}; refusing to write outside session store")
         # ── #1558 P0 guard ──────────────────────────────────────────────
@@ -1397,6 +1530,8 @@ class Session:
             'cache_read_tokens', 'cache_write_tokens',
             'personality', 'active_stream_id',
             'pending_user_message', 'pending_attachments', 'pending_started_at', 'pending_user_source',
+            'pending_queue_item',
+            'pending_turn_intent', 'pending_queue_outcome',
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
             'compression_anchor_summary', 'pre_compression_snapshot',
             'context_engine', 'compression_anchor_engine', 'compression_anchor_mode',
@@ -1413,7 +1548,8 @@ class Session:
             'parent_session_id',
             'worktree_path', 'worktree_branch', 'worktree_repo_root', 'worktree_created_at',
             'is_cli_session', 'source_tag', 'raw_source', 'session_source', 'source_label', 'read_only',
-            'enabled_toolsets', 'composer_draft',
+            'enabled_toolsets', 'composer_draft', 'queue',
+            'queue_transfer',
             'process_wakeup_pause',
             'share_token', 'share_created_at',
         ]
@@ -1478,7 +1614,7 @@ class Session:
                         self.active_stream_id,
                     )
                     return
-                if existing_msg_count > incoming_msg_count:
+                if backup_on_shrink and existing_msg_count > incoming_msg_count:
                     bak_path = self.path.with_suffix('.json.bak')
                     # SHOULD-FIX #2 (Opus): atomic write via tmp+replace,
                     # mirroring the main save() pattern below. Prevents a
@@ -1791,6 +1927,18 @@ class Session:
             'user_message_count': Session._compute_user_message_count(self.messages),
             'active_stream_id': self.active_stream_id,
             'pending_user_message': self.pending_user_message,
+            'pending_queue_item': (
+                dict(self.pending_queue_item)
+                if isinstance(self.pending_queue_item, dict) else None
+            ),
+            'pending_turn_intent': (
+                dict(self.pending_turn_intent)
+                if isinstance(self.pending_turn_intent, dict) else None
+            ),
+            'pending_queue_outcome': (
+                dict(self.pending_queue_outcome)
+                if isinstance(self.pending_queue_outcome, dict) else None
+            ),
             'has_pending_user_message': has_pending_user_message,
             'is_cli_session': self.is_cli_session,
             'source_tag': self.source_tag,
@@ -1800,6 +1948,12 @@ class Session:
             'read_only': self.read_only,
             'enabled_toolsets': self.enabled_toolsets,
             'composer_draft': self.composer_draft if isinstance(self.composer_draft, dict) else {},
+            'queue': [dict(item) for item in self.queue if isinstance(item, dict)],
+            'queue_transfer': (
+                dict(self.queue_transfer)
+                if isinstance(self.queue_transfer, dict) else None
+            ),
+            'queue_capability': self._queue_capability(),
             'process_wakeup_pause': self.process_wakeup_pause if isinstance(self.process_wakeup_pause, dict) else {},
             'share_token': self.share_token,
             'share_created_at': self.share_created_at,
@@ -1807,6 +1961,16 @@ class Session:
                 self.active_stream_id, active_stream_ids
             ) if include_runtime else False,
         }
+
+    @staticmethod
+    def _queue_capability() -> str:
+        """Report which layer owns follow-up queuing for this WebUI build."""
+        try:
+            from api.runtime_adapter import runtime_adapter_runner_enabled
+
+            return "unsupported" if runtime_adapter_runner_enabled() else "server"
+        except Exception:
+            return "unsupported"
 
 
 PROCESS_WAKEUP_PROVIDER_UNAVAILABLE_TYPES = frozenset({
@@ -2311,9 +2475,16 @@ def _message_matches_pending_checkpoint(message, pending_text, timestamp, source
     if not isinstance(message, dict) or message.get('role') != 'user':
         return False
     try:
-        message_timestamp = int(message.get('timestamp'))
-        expected_timestamp = int(timestamp)
+        message_timestamp = float(message.get('timestamp'))
+        expected_timestamp = float(timestamp)
     except (TypeError, ValueError):
+        return False
+    if (
+        not math.isfinite(message_timestamp)
+        or message_timestamp <= 0
+        or not math.isfinite(expected_timestamp)
+        or expected_timestamp <= 0
+    ):
         return False
     return (
         _normalize_journal_recovery_text(message.get('content'))
@@ -2324,22 +2495,115 @@ def _message_matches_pending_checkpoint(message, pending_text, timestamp, source
     )
 
 
-def _message_matches_pending_text(message, pending_text):
+def _message_matches_pending_payload(message, pending_text, source, attachments):
     if not isinstance(message, dict) or message.get('role') != 'user':
         return False
     return (
         _normalize_journal_recovery_text(message.get('content'))
         == _normalize_journal_recovery_text(pending_text)
+        and (message.get('_source') or 'webui') == (source or 'webui')
+        and list(message.get('attachments') or []) == list(attachments or [])
     )
 
 
-def _latest_user_matches_pending_text(messages, pending_text):
-    if not isinstance(messages, list) or not pending_text:
+def _message_matches_pending_identity(message, identity, timestamp):
+    if not isinstance(message, dict) or message.get('role') != 'user':
         return False
-    for message in reversed(messages):
-        if isinstance(message, dict) and message.get('role') == 'user':
-            return _message_matches_pending_text(message, pending_text)
+    queue_item_id = identity.get('queue_item_id')
+    active_turn_token = identity.get('token')
+    existing_queue_item_ids = {
+        str(message.get('queue_item_id') or '').strip(),
+        str(message.get('_queue_item_id') or '').strip(),
+    }
+    existing_token = message.get('_active_turn_token')
+    if queue_item_id:
+        return (
+            queue_item_id in existing_queue_item_ids
+            or (active_turn_token and existing_token == active_turn_token)
+        )
+    if active_turn_token:
+        if existing_token == active_turn_token:
+            return True
+        if existing_token or any(existing_queue_item_ids):
+            return False
+    return _message_matches_pending_checkpoint(
+        message,
+        identity.get('text'),
+        timestamp,
+        identity.get('source'),
+        identity.get('attachments'),
+    )
+
+
+def _pending_turn_checkpoint_exists(messages, identity, timestamp):
+    if not isinstance(messages, list):
+        return False
+    for message in messages:
+        if not isinstance(message, dict) or message.get('role') != 'user':
+            continue
+        if identity.get('queue_item_id') or identity.get('token'):
+            if _message_matches_pending_identity(message, identity, timestamp):
+                return True
+    last_user = next(
+        (
+            message for message in reversed(messages)
+            if isinstance(message, dict) and message.get('role') == 'user'
+        ),
+        None,
+    )
+    if _message_matches_pending_identity(last_user, identity, timestamp):
+        return True
     return False
+
+
+def _pending_turn_payload_checkpoint_exists(
+    messages,
+    identity,
+    *,
+    require_output=False,
+):
+    """Match only an explicitly recognizable legacy checkpoint shape.
+
+    Old eager saves have no queue identity or timestamp.  They are safe to
+    reuse only when the payload is the tail user row, or when a current
+    assistant/tool output follows the latest matching user in a core/finished
+    transcript.  Stable identities never fall through to this legacy match.
+    """
+    if (
+        not isinstance(messages, list)
+        or identity.get('queue_item_id')
+    ):
+        return False
+    last_user_index = next(
+        (
+            index for index in range(len(messages) - 1, -1, -1)
+            if isinstance(messages[index], dict)
+            and messages[index].get('role') == 'user'
+        ),
+        None,
+    )
+    if last_user_index is None or not _message_matches_pending_payload(
+        messages[last_user_index],
+        identity.get('text'),
+        identity.get('source'),
+        identity.get('attachments'),
+    ):
+        return False
+    if (
+        any(
+            str(messages[last_user_index].get(field) or '').strip()
+            for field in ('queue_item_id', '_queue_item_id')
+        )
+        or messages[last_user_index].get('_active_turn_token')
+    ):
+        return False
+    if not require_output:
+        return last_user_index == len(messages) - 1
+    return any(
+        isinstance(message, dict)
+        and message.get('role') in {'assistant', 'tool'}
+        for message in messages[last_user_index + 1:]
+    )
 
 
 def _partial_message_signature(message: dict) -> tuple:
@@ -2635,18 +2899,12 @@ def _recoverable_unsaved_gateway_terminal_error(
 
 
 def _pending_recovery_turn_start(session) -> int | None:
-    pending_text = getattr(session, 'pending_user_message', None)
-    if not pending_text:
+    identity = _pending_turn_identity(session)
+    if not identity['text'] and not identity['attachments']:
         return None
     for idx in range(len(session.messages or []) - 1, -1, -1):
         message = session.messages[idx]
-        if _message_matches_pending_checkpoint(
-            message,
-            pending_text,
-            session.pending_started_at,
-            session.pending_user_source,
-            session.pending_attachments,
-        ) or _message_matches_pending_text(message, pending_text):
+        if _message_matches_pending_identity(message, identity, identity['timestamp']):
             return idx
     return None
 
@@ -2807,13 +3065,12 @@ def _append_journaled_partial_output(
         if owner_idx is None:
             return False
 
-        pending_text = _normalize_journal_recovery_text(session.pending_user_message)
-        if pending_text and not _message_matches_pending_checkpoint(
+        pending_identity = _pending_turn_identity(session)
+        pending_text = _normalize_journal_recovery_text(pending_identity['text'])
+        if (pending_text or pending_identity['attachments']) and not _message_matches_pending_identity(
             messages[owner_idx],
-            session.pending_user_message,
-            session.pending_started_at,
-            session.pending_user_source,
-            session.pending_attachments,
+            pending_identity,
+            pending_identity['timestamp'],
         ):
             return False
 
@@ -2822,12 +3079,10 @@ def _append_journaled_partial_output(
             if not isinstance(candidate, dict) or candidate.get('role') != 'user':
                 continue
             candidate_text = _normalize_journal_recovery_text(candidate.get('content'))
-            candidate_matches_checkpoint = pending_text and _message_matches_pending_checkpoint(
+            candidate_matches_checkpoint = pending_text and _message_matches_pending_identity(
                 candidate,
-                session.pending_user_message,
-                session.pending_started_at,
-                session.pending_user_source,
-                session.pending_attachments,
+                pending_identity,
+                pending_identity['timestamp'],
             )
             if candidate_matches_checkpoint and candidate.get('_recovered'):
                 continue
@@ -3361,8 +3616,9 @@ def _apply_core_sync_or_error_marker(
     Must never raise — caller is responsible for exception handling.
     """
     sid = session.session_id
+    pending_identity = _pending_turn_identity(session)
     # Bail if pending is unset — nothing to repair.
-    if not session.pending_user_message:
+    if not pending_identity['text'] and not pending_identity['attachments']:
         return False
     if stream_id_for_recheck is not None:
         # Bail if active_stream_id rotated between the pre-lock check and now.
@@ -3377,29 +3633,53 @@ def _apply_core_sync_or_error_marker(
     _terminal_recovery = _recoverable_unsaved_gateway_terminal_error(
         session, _stream_id,
     )
+    _pending_text = pending_identity['text']
+    _pending_source = pending_identity['source']
+    _pending_attachments = pending_identity['attachments']
+    try:
+        from api.routes import _settle_claimed_queue_item
+
+        _settle_claimed_queue_item(
+            session,
+            outcome=(
+                "completed"
+                if _run_journal_terminal_state(session, _stream_id) == "completed"
+                else "error"
+            ),
+            stream_id=_stream_id,
+        )
+    except Exception:
+        logger.debug("Failed to settle stale pending queue item for %s", sid, exc_info=True)
 
     # When messages is already non-empty, do not overwrite history from any core
     # transcript. The pending user turn may still be the only durable copy of a
     # prompt submitted just before a server restart, so materialize it before
     # clearing runtime stream state.
     if len(session.messages) != 0:
-        _recovered_ts = int(time.time())
-        if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
-            _recovered_ts = int(session.pending_started_at)
-        _already_checkpointed = _message_matches_pending_checkpoint(
-            session.messages[-1],
-            session.pending_user_message,
-            _recovered_ts,
-            session.pending_user_source,
-            session.pending_attachments,
+        _recovered_ts = pending_identity['timestamp']
+        if (
+            not isinstance(_recovered_ts, (int, float))
+            or not math.isfinite(_recovered_ts)
+            or _recovered_ts <= 0
+        ):
+            _recovered_ts = time.time()
+        _recovered_ts = int(_recovered_ts)
+        _already_checkpointed = _pending_turn_checkpoint_exists(
+            session.messages, pending_identity, _recovered_ts,
         )
-        _tail_user_already_checkpointed = _already_checkpointed or _message_matches_pending_text(
-            session.messages[-1],
-            session.pending_user_message,
-        )
+        _terminal_state = _run_journal_terminal_state(session, _stream_id)
+        if not _already_checkpointed:
+            _already_checkpointed = _pending_turn_payload_checkpoint_exists(
+                session.messages, pending_identity,
+            )
+        if not _already_checkpointed and _terminal_state == 'completed':
+            _already_checkpointed = _pending_turn_payload_checkpoint_exists(
+                session.messages, pending_identity, require_output=True,
+            )
+        _tail_user_already_checkpointed = _already_checkpointed
         _pending_started_at = session.pending_started_at
-        if _run_journal_terminal_state(session, _stream_id) == 'completed':
-            if not (_already_checkpointed or _latest_user_matches_pending_text(session.messages, session.pending_user_message)):
+        if _terminal_state == 'completed':
+            if not _already_checkpointed:
                 _append_recovered_pending_turn(session, timestamp=_recovered_ts)
             _append_journaled_partial_output(
                 session,
@@ -3411,6 +3691,8 @@ def _apply_core_sync_or_error_marker(
             session.pending_attachments = []
             session.pending_started_at = None
             session.pending_user_source = None
+            session.pending_queue_item = None
+            session.pending_turn_intent = None
             session.save(touch_updated_at=touch_updated_at)
             logger.info(
                 "Session %s: cleared stale pending state for completed stream %s without error marker",
@@ -3421,17 +3703,9 @@ def _apply_core_sync_or_error_marker(
         if not _tail_user_already_checkpointed:
             _append_recovered_pending_turn(session, timestamp=_recovered_ts)
         else:
-            recovered = {
-                'role': 'user',
-                'content': session.pending_user_message,
-                'timestamp': _recovered_ts,
-                '_recovered': True,
-            }
-            pending_source = getattr(session, 'pending_user_source', None)
-            if pending_source and pending_source != 'webui':
-                recovered['_source'] = pending_source
-            if session.pending_attachments:
-                recovered['attachments'] = list(session.pending_attachments)
+            recovered = _materialize_pending_turn_message(
+                pending_identity, _recovered_ts,
+            )
             _append_recovered_turn_to_context(session, recovered)
         recovered_output, terminal_error_recovered = (
             _recover_journaled_output_and_terminal_error(
@@ -3445,6 +3719,8 @@ def _apply_core_sync_or_error_marker(
         session.pending_attachments = []
         session.pending_started_at = None
         session.pending_user_source = None
+        session.pending_queue_item = None
+        session.pending_turn_intent = None
         if not terminal_error_recovered:
             session.messages.append(
                 _build_recovery_marker_with_retry_hook(
@@ -3472,23 +3748,24 @@ def _apply_core_sync_or_error_marker(
             for field in ('input_tokens', 'output_tokens', 'estimated_cost'):
                 if core.get(field) is not None:
                     setattr(session, field, core[field])
-            _pending_text = _normalize_journal_recovery_text(session.pending_user_message)
-            _recovered_ts = int(time.time())
-            if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
-                _recovered_ts = int(session.pending_started_at)
-            _already_checkpointed = _message_matches_pending_checkpoint(
-                session.messages[-1] if session.messages else None,
-                session.pending_user_message,
-                _recovered_ts,
-                session.pending_user_source,
-                session.pending_attachments,
-            )
-            _tail_user_already_checkpointed = _already_checkpointed or _message_matches_pending_text(
-                session.messages[-1] if session.messages else None,
-                session.pending_user_message,
-            )
+            _recovered_ts = pending_identity['timestamp']
             if (
-                _pending_text
+                not isinstance(_recovered_ts, (int, float))
+                or not math.isfinite(_recovered_ts)
+                or _recovered_ts <= 0
+            ):
+                _recovered_ts = time.time()
+            _recovered_ts = int(_recovered_ts)
+            _already_checkpointed = _pending_turn_checkpoint_exists(
+                session.messages, pending_identity, _recovered_ts,
+            )
+            if not _already_checkpointed:
+                _already_checkpointed = _pending_turn_payload_checkpoint_exists(
+                    session.messages, pending_identity, require_output=True,
+                )
+            _tail_user_already_checkpointed = _already_checkpointed
+            if (
+                (_pending_text or _pending_attachments)
                 and not _tail_user_already_checkpointed
                 and (
                     _run_journal_has_visible_output(session, _stream_id)
@@ -3510,6 +3787,8 @@ def _apply_core_sync_or_error_marker(
             session.pending_attachments = []
             session.pending_started_at = None
             session.pending_user_source = None
+            session.pending_queue_item = None
+            session.pending_turn_intent = None
             if recovered_output and not terminal_error_recovered:
                 session.messages.append(
                     _interrupted_recovery_marker(
@@ -3540,12 +3819,17 @@ def _apply_core_sync_or_error_marker(
 
     # Core missing or empty — restore the pending user message as a recovered
     # user turn (preserving the draft), then append an error marker.
-    if session.pending_user_message:
+    if _pending_text or _pending_attachments:
         # Use the original send time if available so the recovered turn
         # appears in the correct chronological position.
-        _recovered_ts = int(time.time())
-        if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
-            _recovered_ts = int(session.pending_started_at)
+        _recovered_ts = pending_identity['timestamp']
+        if (
+            not isinstance(_recovered_ts, (int, float))
+            or not math.isfinite(_recovered_ts)
+            or _recovered_ts <= 0
+        ):
+            _recovered_ts = time.time()
+        _recovered_ts = int(_recovered_ts)
         _append_recovered_pending_turn(session, timestamp=_recovered_ts)
     recovered_output, terminal_error_recovered = (
         _recover_journaled_output_and_terminal_error(
@@ -3560,6 +3844,8 @@ def _apply_core_sync_or_error_marker(
     session.pending_attachments = []
     session.pending_started_at = None
     session.pending_user_source = None
+    session.pending_queue_item = None
+    session.pending_turn_intent = None
     if not terminal_error_recovered:
         session.messages.append(
             _build_recovery_marker_with_retry_hook(
@@ -3681,9 +3967,12 @@ def _repair_stale_pending(session) -> bool:
     # _apply_core_sync_or_error_marker uses this to detect a rotated active_stream_id
     # (e.g. context compression) or a stream that came back alive.
     _seen_stream_id = session.active_stream_id
-    if (not session.pending_user_message
-            or not _seen_stream_id
-            or _seen_stream_id in _active_stream_ids()):
+    pending_identity = _pending_turn_identity(session)
+    if (
+        (not pending_identity['text'] and not pending_identity['attachments'])
+        or not _seen_stream_id
+        or _seen_stream_id in _active_stream_ids()
+    ):
         return False
     if getattr(session, 'pre_compression_snapshot', False):
         logger.debug(
@@ -3913,11 +4202,23 @@ def _sync_sidecar_from_state_db_if_newer(session) -> bool:
         # writer's newer record.
         locked.messages = merged_messages
         locked.context_messages = merged_context
+        try:
+            from api.routes import _settle_claimed_queue_item
+
+            _settle_claimed_queue_item(
+                locked,
+                outcome="error",
+                stream_id=getattr(locked, "active_stream_id", None),
+            )
+        except Exception:
+            logger.debug("Failed to settle state-sync queue item for %s", sid, exc_info=True)
         locked.active_stream_id = None
         locked.pending_user_message = None
         locked.pending_attachments = []
         locked.pending_started_at = None
         locked.pending_user_source = None
+        locked.pending_queue_item = None
+        locked.pending_turn_intent = None
         try:
             locked.save(touch_updated_at=True)
         except Exception:
@@ -3931,11 +4232,15 @@ def _sync_sidecar_from_state_db_if_newer(session) -> bool:
         # shared/cached object so the in-flight read returns the recovered data.
         session.messages = merged_messages
         session.context_messages = merged_context
+        session.queue = list(getattr(locked, "queue", None) or [])
+        session.pending_queue_outcome = getattr(locked, "pending_queue_outcome", None)
         session.active_stream_id = None
         session.pending_user_message = None
         session.pending_attachments = []
         session.pending_started_at = None
         session.pending_user_source = None
+        session.pending_queue_item = None
+        session.pending_turn_intent = None
         logger.info(
             "Session %s: synced sidecar from newer state.db transcript (%d -> %d messages)",
             sid,
@@ -4533,8 +4838,8 @@ def _session_is_evictable(s) -> bool:
     evictable ONLY when ALL of the following hold:
 
       * It is not streaming (no ``active_stream_id``).
-      * It has no in-flight/queued turn (no ``pending_user_message`` and no
-        ``pending_started_at``).
+      * It has no in-flight/queued turn (no ``pending_user_message``, no
+        ``pending_started_at``, and no durable ``queue`` items).
       * Its full state is already persisted to the JSON sidecar, proven by the
         on-disk ``message_count`` being at least the in-memory message count.
         A metadata-only stub is inherently backed by disk, so it is evictable.
@@ -4571,6 +4876,8 @@ def _session_is_evictable(s) -> bool:
     if getattr(s, 'pending_user_message', None):
         return False
     if getattr(s, 'pending_started_at', None):
+        return False
+    if getattr(s, 'queue', None):
         return False
     sid = getattr(s, 'session_id', None)
     if not sid:

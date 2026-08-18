@@ -14,6 +14,7 @@ class FakeSession:
         self.pending_user_message = "current prompt"
         self.pending_attachments = [{"name": "file.txt"}]
         self.pending_started_at = 123.0
+        self.queue = [{"id": "queued", "text": "next turn"}]
         self.messages = [{"role": "user", "content": "current prompt"}]
         self.saved_payload = None
 
@@ -27,6 +28,7 @@ class FakeSession:
             "pending_user_message": self.pending_user_message,
             "pending_attachments": list(self.pending_attachments),
             "pending_started_at": self.pending_started_at,
+            "queue": list(self.queue),
             "touch_updated_at": touch_updated_at,
             "skip_index": skip_index,
         }
@@ -50,6 +52,7 @@ def test_preserve_pre_compression_snapshot_clears_runtime_fields_while_restoring
         "pending_user_message": None,
         "pending_attachments": [],
         "pending_started_at": None,
+        "queue": [{"id": "queued", "text": "next turn"}],
         "touch_updated_at": False,
         "skip_index": False,
     }
@@ -60,6 +63,7 @@ def test_preserve_pre_compression_snapshot_clears_runtime_fields_while_restoring
     assert session.pending_user_message == "current prompt"
     assert session.pending_attachments == [{"name": "file.txt"}]
     assert session.pending_started_at == 123.0
+    assert session.queue == [{"id": "queued", "text": "next turn"}]
 
     saved = json.loads((tmp_path / "old_session.json").read_text(encoding="utf-8"))
     assert saved["pre_compression_snapshot"] is True
@@ -87,6 +91,7 @@ def test_preserve_pre_compression_snapshot_load_and_mark_branch_clears_runtime_f
         "pending_user_message": "stale prompt",
         "pending_attachments": [{"name": "stale.txt"}],
         "pending_started_at": 12345,
+        "queue": [{"id": "archived-queued", "text": "must not replay"}],
     }
     (tmp_path / "old_session.json").write_text(json.dumps(old_payload), encoding="utf-8")
     session = FakeSession()
@@ -102,6 +107,7 @@ def test_preserve_pre_compression_snapshot_load_and_mark_branch_clears_runtime_f
     assert saved["pending_user_message"] is None
     assert saved["pending_attachments"] == []
     assert saved["pending_started_at"] is None
+    assert saved["queue"] == [{"id": "archived-queued", "text": "must not replay"}]
 
 
 def test_preserve_pre_compression_snapshot_does_not_leave_continuation_marked_as_snapshot(tmp_path, monkeypatch):
@@ -120,4 +126,3 @@ def test_preserve_pre_compression_snapshot_does_not_leave_continuation_marked_as
     session.save(touch_updated_at=False)
     continuation = json.loads((tmp_path / "new_session.json").read_text(encoding="utf-8"))
     assert continuation["pre_compression_snapshot"] is False
-

@@ -133,7 +133,10 @@ def test_chat_start_clears_recovery_when_substantive_prompt_starts(monkeypatch, 
     )
     monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _config: False)
 
-    def _fake_start_run(run_session, **_kwargs):
+    def _fake_start_run(run_session, **kwargs):
+        assert kwargs["clear_recovery"] is True
+        run_session.compression_recovery = {}
+        run_session.recommended_recovery_action = None
         assert compression_recovery_payload_for_session(run_session) is None
         run_session.save()
         return {"session_id": sid, "stream_id": "stream1", "_status": 200}
@@ -174,7 +177,10 @@ def test_chat_start_restores_recovery_when_substantive_prompt_start_is_rejected(
     )
     monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _config: False)
 
-    def _fake_start_run(run_session, **_kwargs):
+    def _fake_start_run(run_session, **kwargs):
+        assert kwargs["clear_recovery"] is True
+        run_session.compression_recovery = {}
+        run_session.recommended_recovery_action = None
         assert compression_recovery_payload_for_session(run_session) is None
         run_session.save()
         return {"error": "session already has an active stream", "_status": 409}

@@ -27,7 +27,7 @@ def test_clear_composer_draft_suppresses_same_session_stale_restore():
 def test_non_empty_draft_save_clears_submit_restore_suppression():
     save_body = _block(SESSIONS_JS, "function _saveComposerDraft(sid, text, files)", "function _composerDraftHasPayload")
     assert "_clearComposerDraftRestoreSuppression(sid);" in save_body
-    now_body = _block(SESSIONS_JS, "function _saveComposerDraftNow(sid, text, files)", "// Restore composer draft")
+    now_body = _block(SESSIONS_JS, "function _saveComposerDraftNow(sid, text, files, failClosed=false, onlyIfEmpty=false)", "// Restore composer draft")
     assert "_clearComposerDraftRestoreSuppression(sid);" in now_body
 
 
@@ -41,24 +41,34 @@ def test_restore_skips_suppressed_non_empty_server_draft_only():
 
 def test_busy_send_paths_clear_persisted_composer_draft():
     helper_body = _block(MESSAGES_JS, "function _clearComposerAfterQueuedSelectionSend", "function _flushSelectionBlocksToComposer")
-    assert "function _clearComposerAfterQueuedSelectionSend()" in helper_body
-    assert "const sid=arguments.length?arguments[0]:(S.session&&S.session.session_id);" in helper_body
-    assert "const draftText=composer?String(composer.value||''):'';" in helper_body
-    assert "const draftFiles=Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];" in helper_body
-    assert "_clearComposerDraft(sid,draftText,draftFiles)" in helper_body
+    assert "function _clearComposerAfterQueuedSelectionSend(sid, expectedText, filesSnapshot)" in helper_body
+    assert "const ownerVisible=!!(S.session&&S.session.session_id===sid);" in helper_body
+    assert "_clearComposerDraft(sid,expected,captured)" in helper_body
 
     in_progress_body = _block(MESSAGES_JS, "if (_sendInProgress) {", "  _sendInProgress = true;")
-    assert "_clearComposerAfterQueuedSelectionSend();" in in_progress_body
-    assert "_clearComposerDraft(_targetSid,_text,S.pendingFiles?[...S.pendingFiles]:[])" in in_progress_body
+    assert "_clearComposerAfterQueuedSelectionSend(_targetSid,_rawText,_filesSnapshot);" in in_progress_body
 
     busy_body = _block(MESSAGES_JS, "if(S.busy||compressionRunning){", "  if(S.session&&(S.session.read_only||S.session.is_read_only))")
-    assert "_clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);" in busy_body
-    assert busy_body.count("_clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);") >= 2
+    assert "_clearComposerAfterQueuedSelectionSend(_sid,_sendOwnerDraftText||_queuePayload.text,_filesSnapshot);" in busy_body
+    assert busy_body.count("_clearComposerAfterQueuedSelectionSend(_sid,_sendOwnerDraftText||_queuePayload.text,_filesSnapshot);") >= 2
     assert "_clearComposerDraft(S.session.session_id,text" not in busy_body
     try_steer_body = _block(COMMANDS_JS, "async function _trySteer(", "\nasync function cmdTitle")
     assert "_clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot)" in try_steer_body, (
         "delivered steer must clear the captured owner draft with the submitted payload signature"
     )
+
+
+def test_load_session_strict_save_precedes_destructive_teardown():
+    body = _block(SESSIONS_JS, "async function loadSession(sid)", "async function _ensureSidebarSessionProfile")
+    assert "if(currentSid&&(currentSid!==sid||sameSessionForceReload)){" in body
+    pending_guard = body.index("if(currentSid===sid&&_loadingSessionId&&_loadingSessionId!==sid) return;")
+    generation = body.index("const _loadGeneration = ++_loadSessionGeneration;")
+    assert pending_guard < generation
+    save_idx = body.index("await _saveComposerDraftNow")
+    assert save_idx < body.index("stopApprovalPolling();")
+    assert save_idx < body.index("stopSessionStream();")
+    assert save_idx < body.index("window._clearPendingSelections()")
+    assert save_idx < body.index("S.messages = [];")
 
 
 def test_file_signature_survives_server_draft_round_trip():

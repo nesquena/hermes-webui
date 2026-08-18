@@ -1,3 +1,7 @@
+import json
+import re
+import shutil
+import subprocess
 from pathlib import Path
 
 
@@ -6,6 +10,106 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def read(path):
     return (ROOT / path).read_text(encoding="utf-8")
+
+
+def _js_function(src, name):
+    markers = (f"async function {name}(", f"function {name}(")
+    start = next((src.find(marker) for marker in markers if src.find(marker) >= 0), -1)
+    if start < 0:
+        raise AssertionError(f"{name}() not found")
+    parens = 0
+    brace = -1
+    for idx in range(src.index("(", start), len(src)):
+        if src[idx] == "(":
+            parens += 1
+        elif src[idx] == ")":
+            parens -= 1
+        elif src[idx] == "{" and parens == 0:
+            brace = idx
+            break
+    if brace < 0:
+        raise AssertionError(f"{name}() body not found")
+    depth = 1
+    for idx in range(brace + 1, len(src)):
+        if src[idx] == "{":
+            depth += 1
+        elif src[idx] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start : idx + 1]
+    raise AssertionError(f"{name}() body is unbalanced")
+
+
+def _local_slash_send_probe():
+    commands = read("static/commands.js")
+    messages = read("static/messages.js")
+    start = commands.index("const COMMANDS=[")
+    end = commands.index("];", start) + 2
+    registry = commands[start:end]
+    names = sorted(set(re.findall(r"fn:([A-Za-z_$][\w$]*)", registry)))
+    handlers = []
+    for name in names:
+        if name == "cmdClear":
+            handlers.append(
+                "function cmdClear(){handled.push('clear');return true;}"
+            )
+        else:
+            handlers.append(f"function {name}(){{return true;}}")
+    helpers = "\n".join(
+        _js_function(messages, name)
+        for name in (
+            "_slashCommandMatch",
+            "_echoSlashUserMessage",
+            "_finishSlashCommand",
+            "_runBuiltinSlashCommand",
+            "_prepareSlashTurn",
+            "send",
+        )
+    )
+    script = f"""
+const handled=[];
+let directiveConsumed=false;
+let _forcedSkillDirectivePending={{
+  sessionId:'sid',
+  promise:{{then(resolve){{directiveConsumed=true;resolve({{directive:'must not run'}});}}}},
+}};
+const input={{value:'/clear'}};
+const S={{busy:false,pendingFiles:[],session:{{session_id:'sid',workspace:'',read_only:false}},messages:[]}};
+const _pendingSelections=[];
+const window={{}};
+const document={{querySelector:()=>null}};
+let _sendInProgress=false;
+let _sendInProgressSid=null;
+function $(id){{return id==='msg'?input:null;}}
+function t(key){{return key;}}
+function parseCommand(text){{
+  if(!text.startsWith('/'))return null;
+  const parts=text.slice(1).split(/\\s+/);
+  return {{name:parts[0].toLowerCase(),args:parts.slice(1).join(' ').trim()}};
+}}
+function renderMessages(){{}}
+function autoResize(){{}}
+function hideCmdDropdown(){{}}
+function _flushSelectionBlocksToComposer(){{}}
+function _clearStaleBusyStateBeforeSend(){{}}
+function isCompressionUiRunning(){{return false;}}
+function _dismissHandoffHint(){{}}
+function _chatPayloadModelState(){{return {{model:'model',model_provider:'provider'}};}}
+{chr(10).join(handlers)}
+{registry}
+{helpers}
+(async()=>{{
+  await send();
+  console.log(JSON.stringify({{handled,messages:S.messages,input:input.value,directiveConsumed}}));
+}})().catch(error=>{{console.error(error.stack||error);process.exit(1);}});
+"""
+    node = shutil.which("node")
+    if node is None:
+        raise AssertionError("node is required for the send-path regression")
+    result = subprocess.run(
+        [node, "-"], input=script, capture_output=True, text=True, check=True
+    )
+    return json.loads(result.stdout)
 
 
 def test_use_entry_in_commands_array():
@@ -101,12 +205,12 @@ def test_pending_promise_set_synchronously():
 
 
 def test_directive_survives_local_slash_commands():
-    """The consume block must appear after the slash-command early-return, not before."""
-    src = read("static/messages.js")
-    early_return = src.index("autoResize();hideCmdDropdown();return;")
-    consume = src.index("_forcedSkillDirectivePending")
-    assert early_return < consume, \
-        "slash-command early-return must precede the directive consume block"
+    """A handled local slash command returns before awaiting a forced directive."""
+    result = _local_slash_send_probe()
+    assert result["handled"] == ["clear"]
+    assert result["messages"] == []
+    assert result["input"] == ""
+    assert result["directiveConsumed"] is False
 
 
 def test_directive_pending_captures_session_id():

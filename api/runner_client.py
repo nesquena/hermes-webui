@@ -64,6 +64,7 @@ class HttpRunnerClient:
             "model": request.model,
             "toolsets": list(request.toolsets or []),
             "source": request.source,
+            **({"intent": dict(request.intent)} if request.intent else {}),
             "metadata": dict(request.metadata or {}),
         })
 

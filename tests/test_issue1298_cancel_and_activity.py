@@ -21,6 +21,7 @@ import api.config as config
 import api.models as models
 import api.streaming as streaming
 from api.models import Session
+from api.process_event_utils import build_active_turn_token
 from api.streaming import cancel_stream
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
@@ -143,12 +144,18 @@ class TestIssue1298CancelPreservesUserMessage:
         """If the streaming thread won the race and already merged the user turn
         into s.messages before cancel_stream() got the lock, cancel must not
         append a duplicate."""
-        prior_user = {"role": "user", "content": "Run a tool for me"}
+        prior_ts = 1700000000.0
+        prior_user = {
+            "role": "user",
+            "content": "Run a tool for me",
+            "timestamp": prior_ts,
+        }
         s = _make_pending_session(
             session_id="cancel_sid_already_merged",
             pending_msg="Run a tool for me",
             messages=[prior_user],
         )
+        s.pending_started_at = prior_ts
         stream_id, _agent = _setup_cancel_stream_state(s.session_id)
 
         cancel_stream(stream_id)
@@ -188,6 +195,98 @@ class TestIssue1298CancelPreservesUserMessage:
             "Attachment list must be preserved on the synthesized user turn — "
             f"got {recovered.get('attachments')}"
         )
+
+    def test_cancel_recovers_display_text_for_transformed_command(self):
+        """Cancel must persist the user-facing queued command, not its prompt."""
+        started_at = 1700000000.25
+        s = _make_pending_session(
+            session_id="cancel_sid_transformed_command",
+            pending_msg="internal command prompt",
+            messages=[],
+        )
+        s.pending_started_at = started_at
+        s.pending_queue_item = {
+            "id": "queue-transformed-1",
+            "text": "internal command prompt",
+            "display_text": "/status",
+            "files": [],
+            "source": "webui",
+        }
+        s.pending_turn_intent = {"display_text": "hidden intent display"}
+        s.save()
+        models.SESSIONS[s.session_id] = s
+        stream_id, _agent = _setup_cancel_stream_state(s.session_id)
+
+        cancel_stream(stream_id)
+
+        recovered = next(
+            message for message in s.messages
+            if isinstance(message, dict) and message.get("role") == "user"
+        )
+        assert recovered["content"] == "/status"
+        assert recovered["timestamp"] == int(started_at)
+        assert recovered["queue_item_id"] == "queue-transformed-1"
+        assert recovered["_queue_item_id"] == "queue-transformed-1"
+        assert recovered["_active_turn_token"] == build_active_turn_token(stream_id, started_at)
+
+    def test_cancel_materializes_attachment_only_turn(self):
+        """An attachment-only pending turn must survive cancel as a user row."""
+        s = _make_pending_session(
+            session_id="cancel_sid_attachment_only",
+            pending_msg="",
+            messages=[],
+            attachments=["only-image.png"],
+        )
+        stream_id, _agent = _setup_cancel_stream_state(s.session_id)
+
+        cancel_stream(stream_id)
+
+        user_messages = [
+            message for message in s.messages
+            if isinstance(message, dict) and message.get("role") == "user"
+        ]
+        assert len(user_messages) == 1
+        assert user_messages[0].get("content") == ""
+        assert user_messages[0].get("attachments") == ["only-image.png"]
+
+    def test_cancel_does_not_duplicate_eager_materialized_turn(self):
+        """The eager checkpoint's queue id/token must suppress cancel recovery."""
+        started_at = 1700000001.5
+        stream_id = "stream_eager_checkpoint"
+        queue_item_id = "queue-eager-1"
+        eager_row = {
+            "role": "user",
+            "content": "/status",
+            "timestamp": started_at,
+            "queue_item_id": queue_item_id,
+            "_queue_item_id": queue_item_id,
+            "_active_turn_token": build_active_turn_token(stream_id, started_at),
+        }
+        s = _make_pending_session(
+            session_id="cancel_sid_eager_checkpoint",
+            pending_msg="internal command prompt",
+            messages=[eager_row],
+        )
+        s.pending_started_at = started_at
+        s.active_stream_id = stream_id
+        s.pending_queue_item = {
+            "id": queue_item_id,
+            "text": "internal command prompt",
+            "display_text": "/status",
+            "files": [],
+            "source": "webui",
+        }
+        s.save()
+        models.SESSIONS[s.session_id] = s
+        _setup_cancel_stream_state(s.session_id, stream_id=stream_id)
+
+        cancel_stream(stream_id)
+
+        user_messages = [
+            message for message in s.messages
+            if isinstance(message, dict) and message.get("role") == "user"
+        ]
+        assert user_messages == [eager_row]
 
     def test_cancel_no_pending_user_message_does_nothing_extra(self):
         """When there is no pending_user_message (e.g. cancel after the agent

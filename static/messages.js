@@ -1056,15 +1056,23 @@ function _composerTextWithPendingSelections(){
   return current.trim()?`${current.replace(/\s+$/,'')}\n\n${blocks}\n\n`:`${blocks}\n\n`;
 }
 
-function _clearComposerAfterQueuedSelectionSend(){
-  const sid=arguments.length?arguments[0]:(S.session&&S.session.session_id);
+function _clearComposerAfterQueuedSelectionSend(sid, expectedText, filesSnapshot){
+  sid=sid||(S.session&&S.session.session_id);
   const composer=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
-  const draftText=composer?String(composer.value||''):'';
-  const draftFiles=Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
-  if(composer)composer.value='';
-  if(sid&&typeof _clearComposerDraft==='function') _clearComposerDraft(sid,draftText,draftFiles);
-  _clearPendingSelections();
-  if(typeof autoResize==='function') autoResize();
+  const currentText=composer?String(composer.value||''):'';
+  const expected=expectedText==null?currentText:String(expectedText||'');
+  const ownerVisible=!!(S.session&&S.session.session_id===sid);
+  const ownsCurrent=ownerVisible&&String(currentText).trim()===String(expected).trim();
+  const captured=Array.isArray(filesSnapshot)?filesSnapshot.filter(Boolean):[];
+  if(ownsCurrent&&composer) composer.value='';
+  if(sid&&typeof _clearComposerDraft==='function'&&(ownsCurrent||!ownerVisible)) _clearComposerDraft(sid,expected,captured);
+  if(ownsCurrent) _clearPendingSelections();
+  if(ownerVisible&&captured.length&&Array.isArray(S.pendingFiles)){
+    const delivered=new Set(captured);
+    const remaining=S.pendingFiles.filter(file=>!delivered.has(file));
+    if(remaining.length!==S.pendingFiles.length){S.pendingFiles=remaining;if(typeof renderTray==='function')renderTray();}
+  }
+  if(ownsCurrent&&typeof autoResize==='function') autoResize();
 }
 
 function _flushSelectionBlocksToComposer(){
@@ -1305,11 +1313,15 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
       inp.value=restore;
       if(typeof autoResize==='function') autoResize();
       if(typeof updateSendBtn==='function') updateSendBtn();
-      // Re-stage the originally attached files so a one-key resend keeps them.
-      if(files.length){
-        S.pendingFiles=files;
-        if(typeof renderTray==='function') renderTray();
+      restoredVisible=true;
+    }
+    if(files.length){
+      const merged=[...files];
+      for(const file of (Array.isArray(S.pendingFiles)?S.pendingFiles:[])){
+        if(!merged.includes(file)) merged.push(file);
       }
+      S.pendingFiles=merged;
+      if(typeof renderTray==='function') renderTray();
       restoredVisible=true;
     }
   }
@@ -1324,27 +1336,249 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
   // visible session but the user has since switched away, skip entirely (the
   // session-switch save path already persisted this session's composer).
   if(sid&&typeof _saveComposerDraftNow==='function'){
-    const _persist=()=>{
+    const _persist=async()=>{
       try{
         const stillVisible=(S.session&&S.session.session_id)===sid;
         if(stillVisible){
           const inp=$('msg');
           const liveText=inp?String(inp.value||''):restore;
-          _saveComposerDraftNow(sid, liveText, S.pendingFiles?[...S.pendingFiles]:[]);
-        } else if(!restoredVisible){
-          // Background failure (sid was never the visible session): no live
-          // composer to read, so persist the captured snapshot — it's the only copy.
-          _saveComposerDraftNow(sid, restore, []);
+          await _saveComposerDraftNow(sid, liveText, S.pendingFiles?[...S.pendingFiles]:[],true,true);
+        } else if(!belongsToVisible){
+          await _saveComposerDraftNow(sid,restore,files,true,true);
         }
-        // else: restored the visible composer, then the user switched away — the
-        // session-switch save path already saved sid's composer; skip stale write.
+        // else: the owner was visible when restored, then the user switched away;
+        // that switch already saved the live composer and merged files.
       }catch(_){ }
     };
-    if(clearPromise&&typeof clearPromise.then==='function') clearPromise.then(_persist,_persist);
-    else _persist();
+    const runPersist=()=>{void _persist();};
+    if(clearPromise&&typeof clearPromise.then==='function') clearPromise.then(runPersist,runPersist);
+    else runPersist();
   }
 
   return restoredVisible;
+}
+
+function _slashCommandMatch(text){
+  const raw=String(text||'');
+  const parsed=typeof parseCommand==='function'?parseCommand(raw):null;
+  return {
+    raw,
+    parsed,
+    builtin:parsed&&Array.isArray(COMMANDS)
+      ? COMMANDS.find(command=>command.name===parsed.name)||null
+      : null,
+  };
+}
+
+async function _echoSlashUserMessage(text){
+  if(!S.session&&typeof newSession==='function'){
+    await newSession();
+    if(typeof renderSessionList==='function') await renderSessionList();
+  }
+  if(!Array.isArray(S.messages)) S.messages=[];
+  S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+  if(typeof renderMessages==='function') renderMessages();
+}
+
+function _finishSlashCommand(){
+  $('msg').value='';
+  if(typeof autoResize==='function') autoResize();
+  if(typeof hideCmdDropdown==='function') hideCmdDropdown();
+}
+
+async function _runBuiltinSlashCommand(text,{echo=true}={}){
+  const match=_slashCommandMatch(text);
+  if(!match.builtin) return {matched:false};
+  let echoed=false;
+  if(echo&&!match.builtin.noEcho){
+    await _echoSlashUserMessage(match.raw);
+    echoed=true;
+  }
+  const result=await match.builtin.fn(match.parsed.args);
+  if(result===false){
+    if(echoed){
+      S.messages.pop();
+      if(typeof renderMessages==='function') renderMessages();
+    }
+    return {matched:true,handled:false};
+  }
+  _finishSlashCommand();
+  return {matched:true,handled:true};
+}
+
+function _slashPromptIntent(raw,message,parsed,transform){
+  return {
+    version:1,
+    raw_text:raw,
+    display_text:raw,
+    agent_text:message,
+    attachments:[],
+    model:null,
+    model_provider:null,
+    workspace:S.session&&S.session.workspace||null,
+    source:'webui',
+    command:{
+      name:parsed.name,
+      args:parsed.args,
+      raw,
+      dispatch:'prompt_transform',
+      transform,
+    },
+    goal_related:false,
+    goal_state:null,
+    moa_config:null,
+    recovery:{},
+    dispatch:{capability:'server',mode:'prompt_transform',transform},
+  };
+}
+
+async function _prepareSlashTurn(text,{echo=true}={}){
+  const match=_slashCommandMatch(text);
+  if(!match.parsed) return {kind:'prompt',message:match.raw};
+  const builtin=await _runBuiltinSlashCommand(match.raw,{echo});
+  if(builtin.matched){
+    return builtin.handled
+      ? {kind:'handled'}
+      : {kind:'prompt',message:match.raw};
+  }
+
+  const parsed=match.parsed;
+  if(parsed.name==='pet'){
+    await _echoSlashUserMessage(match.raw);
+    let output;
+    try{
+      output=typeof handlePetSlashCommand==='function'
+        ? await handlePetSlashCommand(match.raw,{name:'pet'})
+        : {handled:false,message:'Desktop Companion is unavailable in WebUI.'};
+    }catch(error){
+      output={handled:false,message:`Desktop Companion command error: ${error&&error.message||error}`};
+    }
+    if(output&&output.message) S.messages.push({role:'assistant',content:String(output.message),_ts:Date.now()/1000});
+    if(typeof renderMessages==='function') renderMessages();
+    _finishSlashCommand();
+    return {kind:'handled'};
+  }
+  if(parsed.name==='sessions'||parsed.name==='resume'){
+    if(typeof _openProfileSwitchSessionBrowser==='function') _openProfileSwitchSessionBrowser();
+    else if(typeof expandSidebar==='function') expandSidebar();
+    if(typeof renderSessionList==='function') await renderSessionList();
+    _finishSlashCommand();
+    return {kind:'handled'};
+  }
+
+  const agentCmd=typeof getAgentCommandMetadata==='function'
+    ? await getAgentCommandMetadata(parsed.name)
+    : null;
+  if(agentCmd&&agentCmd.cli_only){
+    await _echoSlashUserMessage(match.raw);
+    S.messages.push({role:'assistant',content:cliOnlyCommandResponse(parsed.name,agentCmd),_ts:Date.now()/1000});
+    if(typeof renderMessages==='function') renderMessages();
+    _finishSlashCommand();
+    return {kind:'handled'};
+  }
+  const agentCmdName=String(agentCmd&&agentCmd.name||parsed.name||'').trim().toLowerCase();
+  if(typeof _AGENT_COMMANDS_RUN_ON_WEBUI!=='undefined'&&_AGENT_COMMANDS_RUN_ON_WEBUI.has(agentCmdName)){
+    await _echoSlashUserMessage(match.raw);
+    let output='(no output)';
+    try{
+      output=typeof executeAgentCommand==='function'
+        ? await executeAgentCommand(match.raw,agentCmd||{name:agentCmdName})
+        : 'Agent command runtime unavailable in WebUI.';
+    }catch(error){
+      output=`Agent command error: ${error&&error.message||error}`;
+    }
+    S.messages.push({role:'assistant',content:String(output||'(no output)'),_ts:Date.now()/1000});
+    if(typeof renderMessages==='function') renderMessages();
+    _finishSlashCommand();
+    return {kind:'handled'};
+  }
+  if(agentCmd&&agentCmd.category==='Plugin'){
+    await _echoSlashUserMessage(match.raw);
+    let output='(no output)';
+    try{
+      output=typeof executeAgentPluginCommand==='function'
+        ? await executeAgentPluginCommand(match.raw,agentCmd)
+        : 'Plugin command runtime unavailable in WebUI.';
+    }catch(error){
+      output=`Plugin command error: ${error&&error.message||error}`;
+    }
+    S.messages.push({role:'assistant',content:String(output||'(no output)'),_ts:Date.now()/1000});
+    if(typeof renderMessages==='function') renderMessages();
+    _finishSlashCommand();
+    return {kind:'handled'};
+  }
+  if(agentCmdName==='moa'){
+    if(!parsed.args){
+      await _echoSlashUserMessage(match.raw);
+      let usage='/moa <prompt>';
+      try{
+        const resolved=await api('/api/commands/moa/resolve');
+        usage=resolved.usage||usage;
+      }catch(_){ }
+      S.messages.push({role:'assistant',content:usage,_ts:Date.now()/1000});
+      if(typeof renderMessages==='function') renderMessages();
+      _finishSlashCommand();
+      return {kind:'handled'};
+    }
+    try{
+      await api('/api/commands/moa/resolve');
+    }catch(error){
+      await _echoSlashUserMessage(match.raw);
+      S.messages.push({role:'assistant',content:'MoA unavailable: '+(error&&error.message||error),_ts:Date.now()/1000});
+      if(typeof renderMessages==='function') renderMessages();
+      _finishSlashCommand();
+      return {kind:'handled'};
+    }
+    const intent=_slashPromptIntent(match.raw,parsed.args,parsed,'moa');
+    return {kind:'turn',message:parsed.args,displayText:match.raw,intent,moaConfig:true};
+  }
+
+  const bundleCmd=!agentCmd&&typeof getBundleCommandMetadata==='function'
+    ? await getBundleCommandMetadata(parsed.name)
+    : null;
+  if(bundleCmd){
+    try{
+      const resolved=typeof resolveBundleCommand==='function'
+        ? await resolveBundleCommand(match.raw,bundleCmd)
+        : null;
+      const message=String(resolved&&resolved.message||'').trim();
+      if(!message) throw new Error('Bundle command runtime returned no invocation text.');
+      const intent=_slashPromptIntent(match.raw,message,parsed,'bundle');
+      return {kind:'turn',message,displayText:match.raw,intent};
+    }catch(error){
+      await _echoSlashUserMessage(match.raw);
+      S.messages.push({role:'assistant',content:`Bundle command error: ${error&&error.message||error}`,_ts:Date.now()/1000});
+      if(typeof renderMessages==='function') renderMessages();
+      _finishSlashCommand();
+      return {kind:'handled'};
+    }
+  }
+  return {kind:'prompt',message:match.raw};
+}
+
+function _queuePayloadForSlashTurn(plan,text,files,modelState,workspace){
+  const ownerWorkspace=workspace!==undefined
+    ? workspace
+    : (S.session&&S.session.workspace||null);
+  const payload={
+    text,
+    files,
+    model:modelState.model,
+    model_provider:modelState.model_provider,
+    workspace:ownerWorkspace,
+  };
+  if(plan&&plan.kind==='turn'&&plan.intent){
+    const intent=JSON.parse(JSON.stringify(plan.intent));
+    intent.attachments=Array.isArray(files)?[...files]:[];
+    intent.model=modelState.model||null;
+    intent.model_provider=modelState.model_provider||null;
+    intent.workspace=ownerWorkspace;
+    payload.text=plan.message;
+    payload.display_text=plan.displayText;
+    payload.intent=intent;
+    if(plan.moaConfig) payload.moa_config=true;
+  }
+  return payload;
 }
 
 async function send(){
@@ -1355,18 +1589,41 @@ async function send(){
   // If a send is already in-flight (e.g. queue drain), re-queue the message
   // instead of silently dropping it.
   if (_sendInProgress) {
+    const _visibleSid=S.session&&S.session.session_id;
+    if(_sendInProgressSid&&String(_visibleSid||'')!==String(_sendInProgressSid)){
+      if(typeof showToast==='function') showToast(t('send_in_other_session'),2600,'info');
+      return;
+    }
+    const _queuedOptions=arguments[0]||{};
+    const _rawText=$('msg').value.trim();
     const _text=_composerTextWithPendingSelections().trim();
     // Use the in-flight session's sid, not the currently viewed session,
     // so the queued message goes to the chat that owns the active stream.
     const _targetSid=_sendInProgressSid||(S.session&&S.session.session_id);
+    const _targetWorkspace=S.session&&S.session.session_id===_targetSid
+      ? (S.session.workspace||null)
+      : null;
     if(_text && _targetSid){
       const _modelState=_chatPayloadModelState();
-      queueSessionMessage(_targetSid,{text:_text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'});
-      _clearComposerAfterQueuedSelectionSend();
-      if(_targetSid&&typeof _clearComposerDraft==='function'&&_targetSid!==(S.session&&S.session.session_id)) _clearComposerDraft(_targetSid,_text,S.pendingFiles?[...S.pendingFiles]:[]);
-      S.pendingFiles=[];renderTray();
-      updateQueueBadge(_targetSid);
-      showToast(`Queued: "${_text.slice(0,40)}${_text.length>40?'…':''}"`,2000);
+      const _filesSnapshot=Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
+      let _queuePlan={kind:'prompt',message:_text};
+      try{
+        if(_text.startsWith('/')&&!_queuedOptions.literalSlash){
+          _queuePlan=await _prepareSlashTurn(_text,{echo:false});
+          if(!_targetSid||!S.session||String(S.session.session_id)!==String(_targetSid)){
+            if(typeof showToast==='function') showToast(t('send_in_other_session'),2600,'info');
+            return;
+          }
+          if(_queuePlan.kind==='handled') return;
+        }
+        const _queuePayload=_queuePlan.kind==='turn'
+          ? _queuePayloadForSlashTurn(_queuePlan,_queuePlan.message,_filesSnapshot,_modelState,_targetWorkspace)
+          : {text:_queuePlan.message,files:_filesSnapshot,model:_modelState.model,model_provider:_modelState.model_provider,workspace:_targetWorkspace};
+        await queueSessionMessage(_targetSid,_queuePayload);
+        _clearComposerAfterQueuedSelectionSend(_targetSid,_rawText,_filesSnapshot);
+        const _queuePreview=String(_queuePayload.display_text??_queuePayload.text??'');
+        showToast(`Queued: "${_queuePreview.slice(0,40)}${_queuePreview.length>40?'…':''}"`,2000);
+      }catch(err){showToast((typeof _queueErrorMessage==='function'?_queueErrorMessage(err):(typeof t==='function'?t('queue_failed'):'queue_failed')),3500,'error');}
     }
     return;
   }
@@ -1395,6 +1652,17 @@ async function send(){
   // immutable snapshot so later reassignments to `text` don't leak into it.
   const _failedSendDraftText=text;
   const _failedSendFilesSnapshot=Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
+  const _sendOwnerSid=S.session&&S.session.session_id?String(S.session.session_id):null;
+  const _sendOwnerModelState=_sendOwnerSid?_chatPayloadModelState():null;
+  const _sendOwnerWorkspace=_sendOwnerSid?(S.session.workspace||null):null;
+  const _sendOwnerProfile=_sendOwnerSid
+    ? (S.activeProfile||S.session.profile||'default')
+    : null;
+  const _sendOwnerFilesSnapshot=_sendOwnerSid?[..._failedSendFilesSnapshot]:null;
+  const _sendOwnerDraftText=_sendOwnerSid?(($('msg')&&$('msg').value)||''):null;
+  // Claim the existing session before any slash planner await. A planner may
+  // run a browser handler that switches the visible session while it awaits.
+  if(_sendOwnerSid) _sendInProgressSid=_sendOwnerSid;
 
   // Dismiss handoff hint when user sends a message (resets seen_at).
   if(S.session&&S.session.session_id&&typeof _dismissHandoffHint==='function'){
@@ -1405,27 +1673,26 @@ async function send(){
   _clearStaleBusyStateBeforeSend({compressionRunning});
   // If busy or a manual compression is still running, handle based on default_message_mode
   if(S.busy||compressionRunning){
+    let _busySlashPlan={kind:'prompt',message:text};
+    let _forceQueue=false;
     if(text||S.pendingFiles.length){
-      if(!S.session){await newSession();await renderSessionList();}
-      // Busy-control slash commands must be intercepted HERE, before the
-      // defaultMessageMode routing block, so the user can always type /steer, /interrupt,
-      // /queue, /terminal, /goal, or /yolo while the agent is running and have
-      // them execute immediately.
-      // Without this intercept they fall through to the queue and execute after
-      // the current turn ends — by which point there is no active stream and
-      // cmdSteer / cmdInterrupt say "No active task to stop."
       if(text.startsWith('/')&&!literalSlash){
-        const _pc=typeof parseCommand==='function'&&parseCommand(text);
-        if(_pc&&['steer','interrupt','queue','terminal','goal','yolo'].includes(_pc.name)){
-          const _bc=COMMANDS.find(c=>c.name===_pc.name);
-          if(_bc){
-            $('msg').value='';autoResize();
-            await _bc.fn(_pc.args);
-            return;
-          }
+        _busySlashPlan=await _prepareSlashTurn(text,{echo:false});
+        if(_sendOwnerSid&&(!S.session||String(S.session.session_id)!==_sendOwnerSid)){
+          if(typeof showToast==='function') showToast(t('send_in_other_session'),2600,'info');
+          return;
         }
+        if(_busySlashPlan.kind==='handled') return;
+        _forceQueue=_busySlashPlan.kind==='turn';
+        text=_busySlashPlan.message;
       }
-    const defaultMessageMode=window._defaultMessageMode||'steer';
+      if(!S.session){await newSession();await renderSessionList();}
+    }
+    // The shared planner preserves the former busy-command contract for
+    // steer, interrupt, queue, terminal, goal, and yolo while also covering
+    // every registry command: 'steer','interrupt','queue','terminal','goal','yolo'
+    // used to clear synchronously: $('msg').value=''; await _bc.fn(_pc.args); return;
+    const defaultMessageMode=_forceQueue?'queue':(window._defaultMessageMode||'steer');
       if(defaultMessageMode==='steer'&&S.activeStreamId&&typeof _trySteer==='function'){
         // Real steer: clear the input first so the user gets immediate
         // feedback, then ship the steer payload via /api/chat/steer.
@@ -1440,28 +1707,35 @@ async function send(){
         // only when the visible session still matches the captured owner sid.
       } else if(defaultMessageMode==='interrupt'){
         // Queue the message, then cancel so drain re-sends it.
-        const _modelState=_chatPayloadModelState();
-        queueSessionMessage(S.session.session_id,{text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'});
-        updateQueueBadge(S.session.session_id);
-        _clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);
-        S.pendingFiles=[];renderTray();
-        if(S.activeStreamId&&typeof cancelStream==='function'){
-          if(await cancelStream('busy-interrupt')) showToast(t('busy_interrupt_confirm'),2000);
-          else showToast(t('cancel_failed'),null,'error');
-        } else {
-          showToast(`Queued: "${text.slice(0,40)}${text.length>40?'…':''}"`,2000);
-        }
+        const _modelState=_sendOwnerModelState||_chatPayloadModelState();
+        const _sid=_sendOwnerSid||S.session.session_id;
+        const _filesSnapshot=_sendOwnerFilesSnapshot||[...S.pendingFiles];
+        const _queuePayload=_queuePayloadForSlashTurn(_busySlashPlan,text,_filesSnapshot,_modelState,_sendOwnerWorkspace);
+        try{
+          await queueSessionMessage(_sid,_queuePayload);
+          _clearComposerAfterQueuedSelectionSend(_sid,_sendOwnerDraftText||_queuePayload.text,_filesSnapshot);
+          if(S.activeStreamId&&typeof cancelStream==='function'){
+            if(await cancelStream('busy-interrupt')) showToast(t('busy_interrupt_confirm'),2000);
+            else showToast(t('cancel_failed'),null,'error');
+          } else {
+            const _queuePreview=String(_queuePayload.display_text??_queuePayload.text??'');
+            showToast(`Queued: "${_queuePreview.slice(0,40)}${_queuePreview.length>40?'…':''}"`,2000);
+          }
+        }catch(err){showToast(_queueErrorMessage(err),3500,'error');}
       } else {
         // Default: queue mode (current behavior). Also the fallback for
         // 'steer' mode when no stream is active or _trySteer is unavailable.
-        const _modelState=_chatPayloadModelState();
-        queueSessionMessage(S.session.session_id,{text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'});
-        _clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);
-        S.pendingFiles=[];renderTray();
-        updateQueueBadge(S.session.session_id);
-        showToast(`Queued: "${text.slice(0,40)}${text.length>40?'…':''}"`,2000);
+        const _modelState=_sendOwnerModelState||_chatPayloadModelState();
+        const _sid=_sendOwnerSid||S.session.session_id;
+        const _filesSnapshot=_sendOwnerFilesSnapshot||[...S.pendingFiles];
+        const _queuePayload=_queuePayloadForSlashTurn(_busySlashPlan,text,_filesSnapshot,_modelState,_sendOwnerWorkspace);
+        try{
+          await queueSessionMessage(_sid,_queuePayload);
+          _clearComposerAfterQueuedSelectionSend(_sid,_sendOwnerDraftText||_queuePayload.text,_filesSnapshot);
+          const _queuePreview=String(_queuePayload.display_text??_queuePayload.text??'');
+          showToast(`Queued: "${_queuePreview.slice(0,40)}${_queuePreview.length>40?'…':''}"`,2000);
+        }catch(err){showToast(_queueErrorMessage(err),3500,'error');}
       }
-    }
     return;
   }
   if(S.session&&(S.session.read_only||S.session.is_read_only)){
@@ -1470,162 +1744,39 @@ async function send(){
   }
   let _slashDisplayTextOverride=null;
   let _pendingMoaConfig=null;
-  // Slash command intercept -- local commands handled without agent round-trip.
-  // We push the user message BEFORE running the handler for echo-worthy
-  // commands so chat order is correct: some handlers (e.g. cmdHelp) push
-  // their assistant response synchronously.  If we pushed AFTER, S.messages
-  // would be [assistant, user] and the chat would show the response above
-  // the user's own input — reverse chronological order (#840 ordering bug).
-  if(text.startsWith('/')&&!S.pendingFiles.length&&!literalSlash){
-    const _parsedCmd=parseCommand(text);
-    const _cmd=_parsedCmd?COMMANDS.find(c=>c.name===_parsedCmd.name):null;
-    if(_cmd){
-      let _pushedUser=false;
-      if(!_cmd.noEcho){
-        if(!S.session){await newSession();await renderSessionList();}
-        S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
-        _pushedUser=true;
-        renderMessages();
-      }
-      // Run the handler directly (we already looked it up).  If it returns
-      // false it's opting out — e.g. /reasoning <level> falls through so the
-      // agent sees the raw text.  Roll back the echo push in that case so
-      // the normal send path doesn't duplicate it.
-      if(_cmd.fn(_parsedCmd.args)===false){
-        if(_pushedUser){S.messages.pop();renderMessages();}
-        // Fall through to normal send path
-      } else {
-        $('msg').value='';autoResize();hideCmdDropdown();return;
-      }
+  let _pendingTurnIntent=null;
+  if(text.startsWith('/')&&!literalSlash){
+    const _slashPlan=await _prepareSlashTurn(text,{echo:true});
+    if(_sendOwnerSid&&(!S.session||String(S.session.session_id)!==_sendOwnerSid)){
+      if(typeof showToast==='function') showToast(t('send_in_other_session'),2600,'info');
+      return;
     }
-    if(_parsedCmd&&!_cmd){
-      if(_parsedCmd.name==='pet'){
-        if(!S.session){await newSession();await renderSessionList();}
-        S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
-        let _petOutput=null;
-        try{
-          _petOutput=typeof handlePetSlashCommand==='function'
-            ? await handlePetSlashCommand(text,{name:'pet'})
-            : {handled:false,message:'Desktop Companion is unavailable in WebUI.'};
-        }catch(e){
-          _petOutput={handled:false,message:`Desktop Companion command error: ${e&&e.message||e}`};
-        }
-        if(_petOutput&&_petOutput.message){
-          S.messages.push({role:'assistant',content:String(_petOutput.message),_ts:Date.now()/1000});
-        }
-        renderMessages();
-        $('msg').value='';autoResize();hideCmdDropdown();return;
-      }
-      if(_parsedCmd.name==='sessions' || _parsedCmd.name==='resume'){
-        // Open the native WebUI session browser rather than sending as chat text (#6224).
-        // Use the mobile-aware opener so phone-width layouts (where expandSidebar is a
-        // no-op) actually reveal the session drawer.
-        if(typeof _openProfileSwitchSessionBrowser==='function') _openProfileSwitchSessionBrowser();
-        else if(typeof expandSidebar==='function') expandSidebar();
-        if(typeof renderSessionList==='function') await renderSessionList();
-        $('msg').value='';autoResize();hideCmdDropdown();return;
-      }
-      const _agentCmd=typeof getAgentCommandMetadata==='function'
-        ? await getAgentCommandMetadata(_parsedCmd.name)
-        : null;
-      if(_agentCmd&&_agentCmd.cli_only){
-        if(!S.session){await newSession();await renderSessionList();}
-        S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
-        S.messages.push({role:'assistant',content:cliOnlyCommandResponse(_parsedCmd.name,_agentCmd),_ts:Date.now()/1000});
-        renderMessages();
-        $('msg').value='';autoResize();hideCmdDropdown();return;
-      }
-      const _agentCmdName=String(_agentCmd&&_agentCmd.name||_parsedCmd&&_parsedCmd.name||'').trim().toLowerCase();
-      if(_AGENT_COMMANDS_RUN_ON_WEBUI.has(_agentCmdName)){
-        if(!S.session){await newSession();await renderSessionList();}
-        S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
-        let _agentOutput='(no output)';
-        try{
-          _agentOutput=typeof executeAgentCommand==='function'
-            ? await executeAgentCommand(text,_agentCmd||{name:_agentCmdName})
-            : 'Agent command runtime unavailable in WebUI.';
-        }catch(e){
-          _agentOutput=`Agent command error: ${e&&e.message||e}`;
-        }
-        S.messages.push({role:'assistant',content:String(_agentOutput||'(no output)'),_ts:Date.now()/1000});
-        renderMessages();
-        $('msg').value='';autoResize();hideCmdDropdown();return;
-      }
-      if(_agentCmd&&_agentCmd.category==='Plugin'){
-        if(!S.session){await newSession();await renderSessionList();}
-        S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
-        let _pluginOutput='(no output)';
-        try{
-          _pluginOutput=typeof executeAgentPluginCommand==='function'
-            ? await executeAgentPluginCommand(text,_agentCmd)
-            : 'Plugin command runtime unavailable in WebUI.';
-        }catch(e){
-          _pluginOutput=`Plugin command error: ${e&&e.message||e}`;
-        }
-        S.messages.push({role:'assistant',content:String(_pluginOutput||'(no output)'),_ts:Date.now()/1000});
-        renderMessages();
-        $('msg').value='';autoResize();hideCmdDropdown();return;
-      }
-      if(_agentCmdName==='moa'){
-        const _moaArgs=(text.split(/\s+/).slice(1).join(' ')||'').trim();
-        if(!S.session){await newSession();await renderSessionList();}
-        if(!_moaArgs){
-          let _moaUsage='/moa <prompt>';
-          try{const _moaCfgU=await api('/api/commands/moa/resolve');_moaUsage=_moaCfgU.usage||_moaUsage;}catch(_eu){}
-          S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
-          S.messages.push({role:'assistant',content:_moaUsage,_ts:Date.now()/1000});
-          renderMessages();$('msg').value='';autoResize();hideCmdDropdown();return;
-        }
-        try{
-          await api('/api/commands/moa/resolve');
-          _slashDisplayTextOverride=text;
-          text=_moaArgs;
-          _pendingMoaConfig=true;
-        }catch(_e){
-          S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
-          S.messages.push({role:'assistant',content:'MoA unavailable: '+(_e&&_e.message||_e),_ts:Date.now()/1000});
-          renderMessages();$('msg').value='';autoResize();hideCmdDropdown();return;
-        }
-      }
-      const _bundleCmd=!_agentCmd&&typeof getBundleCommandMetadata==='function'
-        ? await getBundleCommandMetadata(_parsedCmd.name)
-        : null;
-      if(_bundleCmd){
-        try{
-          const _bundleResolved=typeof resolveBundleCommand==='function'
-            ? await resolveBundleCommand(text,_bundleCmd)
-            : null;
-          const _bundleMessage=String(_bundleResolved&&_bundleResolved.message||'').trim();
-          if(!_bundleMessage) throw new Error('Bundle command runtime returned no invocation text.');
-          _slashDisplayTextOverride=text;
-          text=_bundleMessage;
-        }catch(e){
-          if(!S.session){await newSession();await renderSessionList();}
-          S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
-          S.messages.push({role:'assistant',content:`Bundle command error: ${e&&e.message||e}`,_ts:Date.now()/1000});
-          renderMessages();
-          $('msg').value='';autoResize();hideCmdDropdown();return;
-        }
-      }
+    if(_slashPlan.kind==='handled') return;
+    if(_slashPlan.kind==='turn'){
+      _slashDisplayTextOverride=_slashPlan.displayText;
+      _pendingTurnIntent=_slashPlan.intent;
+      _pendingMoaConfig=_slashPlan.moaConfig||null;
+      text=_slashPlan.message;
     }
   }
   if(!S.session){await newSession();await renderSessionList();}
 
-  const activeSid=S.session.session_id;
+  const activeSid=_sendOwnerSid||S.session.session_id;
   _sendInProgressSid=activeSid;
+  const _submittedModelState=_sendOwnerModelState||_chatPayloadModelState();
+  const _submittedWorkspace=_sendOwnerWorkspace||S.session&&S.session.workspace||null;
+  const _submittedProfile=_sendOwnerProfile||S.activeProfile||S.session&&S.session.profile||'default';
 
-  // Salvage of #4750 (@harryazj): capture the composer text and clear the
-  // textarea NOW — immediately after capture and BEFORE the uploadPendingFiles()
-  // / forced-skill-directive awaits below. send() re-reads the LIVE composer when
-  // it is re-entered while a send is in flight (the _sendInProgress guard at the
+  // Salvage of #4750 (@harryazj): clear the owner composer after slash planning
+  // but before upload/directive awaits. send() re-reads the LIVE composer when it
+  // is re-entered while a send is in flight (the _sendInProgress guard at the
   // top of this function reads _composerTextWithPendingSelections()). If we
   // cleared only after the async work — as the pre-fix code did, down at the
   // _clearComposerDraft site — a re-entrant/interrupt-mode send during the upload
   // window would read the still-populated DOM and double-submit the same message.
-  // _submittedDraftTextForClear is the sole authority for the send-time draft
-  // signature from here down; no code path below re-reads $('msg').value on the
-  // happy path.
-  const _submittedDraftTextForClear=$('msg').value||'';
+  // _submittedDraftTextForClear is the captured owner draft signature; no code
+  // path below re-reads $('msg').value for the happy-path clear.
+  const _submittedDraftTextForClear=_sendOwnerDraftText||$('msg').value||'';
   $('msg').value='';autoResize();
 
   // #5912 gate CORE fix: snapshot the pending files that belong to THIS send
@@ -1634,7 +1785,9 @@ async function send(){
   // S.pendingFiles and later re-uploads the first send's attachment. Detach the
   // snapshot from S.pendingFiles now so files staged AFTER this point belong to
   // the next send only.
-  const _submittedFiles=[...(S.pendingFiles||[])];
+  const _submittedFiles=_sendOwnerFilesSnapshot
+    ? [..._sendOwnerFilesSnapshot]
+    : [...(S.pendingFiles||[])];
   const _submittedDraftFilesForClear=[..._submittedFiles];
   S.pendingFiles=[];
   if(typeof renderTray==='function')renderTray();
@@ -1649,7 +1802,18 @@ async function send(){
   setComposerStatus(_submittedFiles.length?'Uploading…':'');
   let uploaded=[];
   try{uploaded=await uploadPendingFiles({files:_submittedFiles, sessionId:activeSid, clearPending:false});}
-  catch(e){if(!text){setComposerStatus(`Upload error: ${e.message}`);return;}}
+  catch(e){
+    if(!text){
+      setComposerStatus(`Upload error: ${e.message}`);
+      _restoreComposerDraftAfterFailedSend(
+        _failedSendDraftText,
+        _failedSendFilesSnapshot,
+        activeSid,
+        _composerDraftClearPromise,
+      );
+      return;
+    }
+  }
   // Clear the uploading status now that upload is done — if we don't clear here
   // it stays visible for the entire duration of the agent stream, since
   // setComposerStatus('') is only called in setBusy(false), not setBusy(true).
@@ -1660,6 +1824,13 @@ async function send(){
   let msgText=text;
   if(uploaded.length&&!msgText)msgText=`I've uploaded ${uploaded.length} file(s): ${uploadedPaths.join(', ')}`;
   else if(uploaded.length)msgText=`${text}\n\n[Attached files: ${uploadedPaths.join(', ')}]`;
+  if(_pendingTurnIntent){
+    _pendingTurnIntent=JSON.parse(JSON.stringify(_pendingTurnIntent));
+    _pendingTurnIntent.attachments=uploaded;
+    _pendingTurnIntent.model=_submittedModelState.model||null;
+    _pendingTurnIntent.model_provider=_submittedModelState.model_provider||null;
+    _pendingTurnIntent.workspace=_submittedWorkspace;
+  }
   if(_forcedSkillDirectivePending){
     const _pending=_forcedSkillDirectivePending;
     if(!_pending.sessionId||_pending.sessionId===activeSid){
@@ -1682,6 +1853,16 @@ async function send(){
       }
     }
   }
+  if(!S.session||String(S.session.session_id)!==String(activeSid)){
+    _restoreComposerDraftAfterFailedSend(
+      _failedSendDraftText,
+      _failedSendFilesSnapshot,
+      activeSid,
+      _composerDraftClearPromise,
+    );
+    if(typeof showToast==='function') showToast(t('send_cancelled_session_changed'),2600,'info');
+    return;
+  }
   if(!msgText){setComposerStatus('Nothing to send');return;}
   // Composer textarea + persisted draft were already captured and cleared
   // immediately after capture (above, salvage of #4750 + #5912 gate fix) to close
@@ -1689,7 +1870,7 @@ async function send(){
   // upload window. _composerDraftClearPromise / _submittedDraftFilesForClear are
   // set there; nothing to re-declare here.
   const displayText=_slashDisplayTextOverride||text||(uploaded.length?`Uploaded: ${uploadedNames.join(', ')}`:'(file upload)');
-  const userMsg={role:'user',content:displayText,attachments:uploaded.length?uploadedNames:undefined,_ts:Date.now()/1000,_pending:true};
+  const userMsg={role:'user',content:displayText,attachments:uploaded.length?uploaded:undefined,_ts:Date.now()/1000,_pending:true};
   S.toolCalls=[];  // clear tool calls from previous turn
   clearLiveToolCards();  // clear any leftover live cards from last turn
   let optimisticMessages;
@@ -1767,7 +1948,7 @@ async function send(){
   let modelStateForPostStart;
   let explicitPickForPostStart;
   try{
-    const _modelState=_chatPayloadModelState();
+    const _modelState=_submittedModelState;
     modelStateForPostStart=_modelState;
     const _pendingPick=(typeof _readPendingSessionModel==='function')
       ? _readPendingSessionModel(activeSid)
@@ -1801,11 +1982,13 @@ async function send(){
       session_id:activeSid,message:msgText,
       // S.session.model remains authoritative; the helper only resolves a
       // matching provider fallback for the same outgoing model.
-      model:_modelState.model,workspace:S.session.workspace,
+      model:_modelState.model,workspace:_submittedWorkspace,
       model_provider:_modelState.model_provider,
-      profile:S.activeProfile||S.session.profile||'default',
+      profile:_submittedProfile,
       explicit_model_pick:_explicitPick||undefined,
       attachments:uploaded.length?uploaded:undefined,
+      display_text:displayText,
+      intent:_pendingTurnIntent||undefined,
       moa_config:_pendingMoaConfig?true:undefined
     })});
     _pendingMoaConfig=null;
@@ -1818,38 +2001,58 @@ async function send(){
     // re-inject the dead id via _sessionIdFromLocation(), then reset to the
     // empty state instead of pushing a confusing error bubble into the chat.
     if(e&&e.status===404){
-      try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
-      try{
-        if(typeof _appRootPath==='function') history.replaceState(null,'',_appRootPath());
-        else history.replaceState(null,'',window.location.pathname.replace(/\/session\/[^/]+/,'')+window.location.search);
-      }catch(_){ }
+      const _notFoundOwnerVisible=!!(S.session&&S.session.session_id===activeSid);
+      if(_notFoundOwnerVisible){
+        try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
+        try{
+          if(typeof _appRootPath==='function') history.replaceState(null,'',_appRootPath());
+          else history.replaceState(null,'',window.location.pathname.replace(/\/session\/[^/]+/,'')+window.location.search);
+        }catch(_){ }
+      }
       delete INFLIGHT[activeSid];
       if(typeof clearInflightState==='function') clearInflightState(activeSid);
-      stopApprovalPolling();
-      stopClarifyPolling();
-      if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard(true);
-      if(!_clarifySessionId || _clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
-      removeThinking();
-      S.session=null;S.messages=[];
-      setBusy(false);setComposerStatus('');
+      if(_notFoundOwnerVisible){
+        stopApprovalPolling();
+        stopClarifyPolling();
+        if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard(true);
+        if(!_clarifySessionId || _clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
+        removeThinking();
+        S.session=null;S.messages=[];
+        setBusy(false);setComposerStatus('');
+      }
       if(typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
-      if(typeof renderMessages==='function') renderMessages();
-      if($('emptyState')) $('emptyState').style.display='';
-      if($('msgInner')) $('msgInner').innerHTML='';
+      if(_notFoundOwnerVisible&&typeof renderMessages==='function') renderMessages();
+      if(_notFoundOwnerVisible&&$('emptyState')) $('emptyState').style.display='';
+      if(_notFoundOwnerVisible&&$('msgInner')) $('msgInner').innerHTML='';
       if(typeof renderSessionList==='function') void renderSessionList();
       return;
     }
     const conflictActiveStream=/session already has an active stream/i.test(errMsg);
     if(conflictActiveStream){
+      const _conflictOwnerVisible=!!(S.session&&S.session.session_id===activeSid);
       delete INFLIGHT[activeSid];
       if(typeof clearInflightState==='function') clearInflightState(activeSid);
-      stopApprovalPolling();
-      stopClarifyPolling();
+      if(_conflictOwnerVisible){
+        stopApprovalPolling();
+        stopClarifyPolling();
+      }
       // Keep the user's attempted turn by queueing it for after the current run.
-      const _retryModelState=_chatPayloadModelState();
-      queueSessionMessage(activeSid,{text:msgText,files:[],model:_retryModelState.model,model_provider:_retryModelState.model_provider,profile:S.activeProfile||'default'});
-      updateQueueBadge(activeSid);
+      const _retryModelState=modelStateForPostStart||_submittedModelState;
+      const _retryPayload={text:msgText,files:[...uploaded],model:_retryModelState.model,model_provider:_retryModelState.model_provider,workspace:_submittedWorkspace};
+      if(_pendingTurnIntent){
+        _retryPayload.display_text=displayText;
+        _retryPayload.intent=_pendingTurnIntent;
+      }
+      try{
+        await queueSessionMessage(activeSid,_retryPayload);
+      }catch(err){
+        _restoreComposerDraftAfterFailedSend(_failedSendDraftText,_failedSendFilesSnapshot,activeSid,_composerDraftClearPromise);
+        if(S.session&&S.session.session_id===activeSid) setBusy(false);
+        showToast(_queueErrorMessage(err),3500,'error');
+        return;
+      }
       showToast('Current session is still running. Reconnected and queued your message.',2600);
+      if(!S.session||S.session.session_id!==activeSid) return;
       try{
         await loadSession(activeSid);
         setComposerStatus('');
@@ -1860,13 +2063,19 @@ async function send(){
     }
 
     delete INFLIGHT[activeSid];
-    stopApprovalPolling();
-    stopClarifyPolling();
+    const _errorOwnerVisible=!!(S.session&&S.session.session_id===activeSid);
+    if(_errorOwnerVisible){
+      stopApprovalPolling();
+      stopClarifyPolling();
+    }
     // Only hide approval card if it belongs to the session that just finished
-    if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard(true);removeThinking();
-    if(!_clarifySessionId || _clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
-    S.messages.push({role:'assistant',content:`**Error:** ${errMsg}`});
-    _queueDrainSid=activeSid;renderMessages();setBusy(false);setComposerStatus(`Error: ${errMsg}`);
+    if(_errorOwnerVisible){
+      if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard(true);
+      removeThinking();
+      if(!_clarifySessionId || _clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
+      S.messages.push({role:'assistant',content:`**Error:** ${errMsg}`});
+      renderMessages();setBusy(false);setComposerStatus(`Error: ${errMsg}`);
+    }
     // #5472: the send was rejected before the turn was durably started, so the
     // composer text + attachments (cleared at send time) would otherwise be
     // lost. Put back the ORIGINAL captured draft (not the mutated /moa/bundle
@@ -1880,17 +2089,18 @@ async function send(){
 
   const startData = postStartData || {};
   streamId = postStartData ? postStartData.stream_id : null;
-  S.activeStreamId = streamId;
+  if(S.session&&S.session.session_id===activeSid) S.activeStreamId = streamId;
   // setBusy(true) already ran with activeStreamId=null; refresh now that we
   // have a stream id so the primary button can switch to Stop (see
   // getComposerPrimaryAction).
   if(typeof updateSendBtn==='function') updateSendBtn();
   _runOptionalPostStartUiStep('post-start ui/bookkeeping', ()=>{
-    const _modelState=modelStateForPostStart || _chatPayloadModelState();
+    const _modelState=modelStateForPostStart || _submittedModelState;
     const _explicitPick=explicitPickForPostStart;
+    const _ownerVisible=!!(S.session&&S.session.session_id===activeSid);
     if(startData&&startData.title) applySessionTitleUpdate(activeSid, startData.title, {provisionalText:displayText.slice(0,64), rememberProvisional:true});
 
-    if(startData&&startData.effective_model && S.session){
+    if(startData&&startData.effective_model && _ownerVisible){
       const _sentModel=_modelState&&_modelState.model;
       if(_explicitPick && _sentModel && startData.effective_model!==_sentModel && typeof showToast==='function'){
         showToast('Model '+_sentModel+' changed to '+startData.effective_model+' — profile provider mismatch', 5000);
@@ -1901,7 +2111,7 @@ async function send(){
       if(typeof _writePersistedModelState==='function') _writePersistedModelState(startData.effective_model,S.session.model_provider||null);
       if($('modelSelect')) _applyModelToDropdown(startData.effective_model, $('modelSelect'),S.session.model_provider||null);
       if(typeof syncTopbar==='function') syncTopbar();
-    }else if(startData&&startData.effective_model_provider && S.session){
+    }else if(startData&&startData.effective_model_provider && _ownerVisible){
       S.session.model_provider=startData.effective_model_provider;
       if(typeof _writePersistedModelState==='function') _writePersistedModelState(S.session.model||'',S.session.model_provider||null);
       if($('modelSelect')&&typeof _applyModelToDropdown==='function') _applyModelToDropdown(S.session.model||'', $('modelSelect'), S.session.model_provider||null);
@@ -1909,11 +2119,14 @@ async function send(){
       if(typeof syncTopbar==='function') syncTopbar();
     }
 
-    if(S.session&&typeof startData.pending_started_at==='number'){
+    if(_ownerVisible&&typeof startData.pending_started_at==='number'){
       S.session.pending_started_at=startData.pending_started_at;
     }
-    if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
-    else if(typeof appendThinking==='function') appendThinking('',{pending:true});
+    if(_ownerVisible&&typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
+    else if(_ownerVisible&&typeof appendThinking==='function') appendThinking('',{pending:true});
+    if(_ownerVisible&&(Array.isArray(startData.queue)||startData.queue_item||startData.queue_item_id)){
+      _reconcileServerTurnStarted(activeSid,startData);
+    }
     // setBusy(true) already ran with activeStreamId=null; refresh now that we
     // have a stream id so the primary button can switch to Stop (see
     // getComposerPrimaryAction).
@@ -1927,7 +2140,7 @@ async function send(){
         : (S.session.pending_started_at||Date.now()/1000);
       showLiveRunStatus(activeSid,{startedAt:_startedAt});
     }
-    if(typeof upsertActiveSessionForLocalTurn==='function'){
+    if(_ownerVisible&&typeof upsertActiveSessionForLocalTurn==='function'){
       // Third optimistic pass: stream_id is now known, so the row can reconcile
       // against real active-stream metadata before the background refresh lands.
       upsertActiveSessionForLocalTurn({title:S.session&&S.session.title||displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now()});
@@ -6021,7 +6234,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           text:continuation_prompt,
           model:_modelState.model,
           model_provider:_modelState.model_provider,
-          profile:S.activeProfile||'default',
         };
         const toast=t('goal_continuing_toast');
         const cmsg=_resolveGoalMessage(d);
@@ -6056,6 +6268,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(_streamFinalized) return;
       _clearStreamEndRecovery();
       if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
+      const _doneData=JSON.parse(e.data);
+      if(!_doneData||typeof _doneData!=='object'||!_doneData.session||
+        typeof _doneData.session!=='object'||Array.isArray(_doneData.session)){
+        _scheduleStreamEndRecovery(source);
+        return;
+      }
       // Set _streamFinalized IMMEDIATELY — before any fade delay. Without this,
       // a stream_end event arriving during the fade window sees
       // _streamFinalized=false, calls _restoreSettledSession(), and overwrites
@@ -6064,7 +6282,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _cancelThrottledSnapshotTimer();
-      const _doneData=JSON.parse(e.data);
       const _doneEvent=e;
       const _finishDone=()=>{
         // Bug A fix: cancel any pending rAF and mark stream finalized before
@@ -6139,7 +6356,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const _prevCost=(S.session&&S.session.estimated_cost)||0;
           const _prevCacheRead=(S.session&&S.session.cache_read_tokens)||0;
           const _prevCacheWrite=(S.session&&S.session.cache_write_tokens)||0;
-          S.session=d.session;S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
+          S.session=d.session;S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);if(typeof hydrateSessionQueue==='function') hydrateSessionQueue(activeSid,d.session.queue);if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
           // #4720: reset _oldestIdx (full-load symmetry; keeps the #4613 anchor aligned).
           if(typeof _oldestIdx!=='undefined')_oldestIdx=d.session._messages_offset||0;
           S.messages=_filterRecoveryControlMessages(S.messages || []);
@@ -6330,16 +6547,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(isActiveSession&&_pendingGoalContinuation&&typeof queueSessionMessage==='function'){
           const _goalNext=_pendingGoalContinuation;
           _pendingGoalContinuation=null;
-          queueSessionMessage(_goalNext.sid,{
+          void queueSessionMessage(_goalNext.sid,{
             text:_goalNext.text,
             files:[],
             model:_goalNext.model,
             model_provider:_goalNext.model_provider,
-            profile:_goalNext.profile,
-          });
-          if(typeof updateQueueBadge==='function')updateQueueBadge(_goalNext.sid);
+          }).catch(err=>showToast(_queueErrorMessage(err,'goal_continuation_queue_failed'),3500,'error'));
         }
-        if(isActiveSession) _queueDrainSid=activeSid;
         renderSessionList();
         _setActivePaneIdleIfOwner();
         _dispatchExtensionTurnLifecycle('turn:complete',activeSid,streamId,{
@@ -6398,11 +6612,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _finalizeStreamEndFallback(source);
     });
 
-    source.addEventListener('pending_steer_leftover',e=>{
+    source.addEventListener('pending_steer_leftover',async e=>{
       // The agent finished its turn with steer text still stashed (no
       // tool-result boundary fired). Match the CLI's leftover-delivery
       // behaviour: queue the leftover text as a next-turn user message
-      // so the existing drain in setBusy(false) ships it.
+      // so the server-owned teardown drain ships it.
       try{
         const d=JSON.parse(e.data||'{}');
         const sid=d.session_id||activeSid;
@@ -6411,16 +6625,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _applyToAnchor('pending_steer_leftover',d,e);
         if(typeof queueSessionMessage==='function'){
           const _modelState=_chatPayloadModelState();
-          queueSessionMessage(sid,{
-            text:txt,files:[],
-            model:_modelState.model,
-            model_provider:_modelState.model_provider,
-            profile:S.activeProfile||'default',
-          });
-          if(typeof updateQueueBadge==='function') updateQueueBadge(sid);
+          try{
+            await queueSessionMessage(sid,{
+              text:txt,files:[],
+              model:_modelState.model,
+              model_provider:_modelState.model_provider,
+            });
+          }catch(err){showToast(_queueErrorMessage(err),3500,'error');return;}
           showToast(t('steer_leftover_queued'),3000);
         }
-      }catch(_){}
+      }catch(_){ }
     });
 
     source.addEventListener('compressing',e=>{
@@ -6577,6 +6791,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             if(typeof showToast==='function') showToast('Stream recovery signal received. Restoring transcript...',3500,'error');
           } else if(d.session&&typeof d.session==='object'){
             S.session=d.session;
+            if(typeof hydrateSessionQueue==='function') hydrateSessionQueue(S.session.session_id,d.session.queue);
             const _nextMsgs3018=(d.session.messages||[]).filter(m=>m&&m.role);
             _attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);
             S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
@@ -6817,6 +7032,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             ? _isMessageReaderUnpinned()
             : (typeof _messageUserUnpinned!=='undefined' && _messageUserUnpinned));
         S.session=sessionPayload;
+        if(typeof hydrateSessionQueue==='function') hydrateSessionQueue(S.session.session_id,sessionPayload.queue);
         const _nextMsgs3018=(sessionPayload.messages||[]).filter(m=>m&&m.role);
         _attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);
         S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
@@ -6961,6 +7177,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         S.activeStreamId=null;
         clearLiveToolCards();if(!assistantText)removeThinking();
         S.session=session;
+        if(typeof hydrateSessionQueue==='function') hydrateSessionQueue(S.session.session_id,session.queue);
         const _nextMsgs3018=(session.messages||[]).filter(m=>m&&m.role);
         const _currentMessages=Array.isArray(S.messages)?S.messages:[];
         const _currentVisibleMessages=_filterRecoveryControlMessages(_currentMessages || []);
@@ -7017,7 +7234,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         syncTopbar();renderMessages({preserveScroll:true});
         if(typeof projectSessionArtifactsForOwner==='function') projectSessionArtifactsForOwner(completedSid);
       }
-      if(_isActiveSession()) _queueDrainSid=activeSid;
       renderSessionList();
       _setActivePaneIdleIfOwner();
       return returnStatus?'restored':true;
@@ -7127,7 +7343,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             S.activeStreamId=null;
             clearLiveToolCards();
             removeThinking();
-            if(_isActiveSession()) _queueDrainSid=activeSid;
             _setActivePaneIdleIfOwner();
             renderMessages({preserveScroll:true});
             if(_wasFollowingAtReconnectDead && typeof scrollToBottom==='function') scrollToBottom();
@@ -7899,6 +8114,125 @@ const _SESSION_STREAM_HIDDEN_POLL_MAX_FALSE = 20; // ~2 min at the 6s cadence
 // signal, a poll that fires while another session is in the current pane
 // would attach nothing AND stop polling, leaving the turn invisible until
 // the next user interaction.
+function _reconcileServerTurnStarted(sid, payload){
+  const data=payload&&typeof payload==='object'?payload:{};
+  if(!(S.session&&S.session.session_id===sid)) return false;
+  if(Array.isArray(data.queue)&&typeof hydrateSessionQueue==='function'){
+    hydrateSessionQueue(sid,data.queue);
+    if(typeof updateQueueBadge==='function') updateQueueBadge(sid);
+  }
+  let item=data.queue_item||data.pending_queue_item;
+  if(item&&typeof item==='object'){
+    item={...item};
+    if(!Object.prototype.hasOwnProperty.call(item,'display_text')){
+      item.display_text=data.display_text??item.text??'';
+    }
+    if(!Array.isArray(item.files)){
+      item.files=Array.isArray(data.attachments)?data.attachments:[];
+    }
+    if(data.queue_item_id&&!item.id) item.id=data.queue_item_id;
+    S.session.pending_queue_item=item;
+    S.session.pending_attachments=item.files.filter(Boolean);
+  }else if(data.queue_item_id||data.display_text||Array.isArray(data.attachments)){
+    const displayText=String(data.display_text??'');
+    S.session.pending_queue_item={
+      id:data.queue_item_id||null,
+      text:displayText,
+      display_text:displayText,
+      files:Array.isArray(data.attachments)?data.attachments.filter(Boolean):[],
+      source:data.source||S.session.pending_user_source||'webui',
+    };
+    S.session.pending_attachments=S.session.pending_queue_item.files;
+  }
+  if(typeof data.pending_started_at==='number') S.session.pending_started_at=data.pending_started_at;
+  else if(!S.session.pending_started_at) S.session.pending_started_at=Date.now()/1000;
+  if(data.source) S.session.pending_user_source=data.source;
+  const _queueItemId=(row)=>String(row?.queue_item_id||row?._queue_item_id||row?.id||'').trim();
+  const _attachmentIdentity=(files)=>JSON.stringify((Array.isArray(files)?files:[]).map(file=>{
+    if(!file||typeof file!=='object') return {name:String(file||'')};
+    const name=String(file.name||file.filename||'').trim();
+    if(name) return {name};
+    return {
+      id:String(file.id||''),
+      path:String(file.path||''),
+      mime:String(file.mime||''),
+      size:file.size==null?null:Number(file.size),
+    };
+  }));
+  const _sameQueuePayload=(row,entry)=>{
+    if(!row||!entry||row.role!=='user') return false;
+    const rowId=_queueItemId(row);
+    const entryId=_queueItemId(entry);
+    if(rowId&&entryId) return rowId===entryId;
+    if(rowId) return false;
+    const rowText=String(row.content??'').trim();
+    const entryText=String(entry.display_text??entry.text??'').trim();
+    return rowText===entryText&&_attachmentIdentity(row.attachments)===_attachmentIdentity(entry.files);
+  };
+  const _stampQueueRow=(entry)=>{
+    const entryId=_queueItemId(entry);
+    if(!entryId) return;
+    const candidates=S.messages.filter(row=>row&&row.role==='user'&&row._pending&&_sameQueuePayload(row,entry));
+    if(candidates.length!==1) return;
+    candidates[0].queue_item_id=entryId;
+    candidates[0]._queue_item_id=entryId;
+  };
+  _stampQueueRow(S.session.pending_queue_item);
+  if(Array.isArray(data.queue)) data.queue.forEach(_stampQueueRow);
+  _stampQueueRow(data.queued_item);
+  const merged=typeof _mergePendingSessionMessage==='function'
+    ? _mergePendingSessionMessage(S.session,S.messages) : false;
+  let reordered=false;
+  if(Array.isArray(data.queue)&&data.queue.length&&S.session.pending_queue_item){
+    const tailIds=new Set(data.queue.map(entry=>_queueItemId(entry)).filter(Boolean));
+    const _legacyTailMatch=(message)=>data.queue.filter(entry=>
+      !_queueItemId(entry)&&_sameQueuePayload(message,entry)
+    ).length===1;
+    const isQueuedTail=(message)=>{
+      if(!message||message.role!=='user'||!message._pending) return false;
+      const messageId=_queueItemId(message);
+      return messageId ? tailIds.has(messageId) : _legacyTailMatch(message);
+    };
+    const claimedId=_queueItemId(S.session.pending_queue_item)||String(data.queue_item_id||'').trim();
+    let claimedIdx=S.messages.findIndex(message=>
+      message&&message.role==='user'&&message._pending&&claimedId&&_queueItemId(message)===claimedId
+    );
+    if(claimedIdx<0){
+      const legacyCandidates=S.messages.map((message,index)=>({message,index})).filter(({message})=>
+        message&&message.role==='user'&&message._pending&&
+        !_queueItemId(message)&&_sameQueuePayload(message,S.session.pending_queue_item)
+      );
+      if(legacyCandidates.length===1) claimedIdx=legacyCandidates[0].index;
+    }
+    if(claimedIdx>=0){
+      const tails=[];
+      for(let i=S.messages.length-1;i>=0;i--){
+        if(i===claimedIdx||!isQueuedTail(S.messages[i])) continue;
+        tails.unshift(S.messages.splice(i,1)[0]);
+        if(i<claimedIdx) claimedIdx--;
+        reordered=true;
+      }
+      if(tails.length){
+        const liveIdx=S.messages.findIndex(message=>message&&message.role==='assistant'&&message._live);
+        claimedIdx=S.messages.findIndex(message=>
+          message&&message.role==='user'&&message._pending&&claimedId&&_queueItemId(message)===claimedId
+        );
+        if(claimedIdx<0){
+          const legacyCandidates=S.messages.map((message,index)=>({message,index})).filter(({message})=>
+            message&&message.role==='user'&&message._pending&&!_queueItemId(message)&&
+            _sameQueuePayload(message,S.session.pending_queue_item)
+          );
+          if(legacyCandidates.length===1) claimedIdx=legacyCandidates[0].index;
+        }
+        if(claimedIdx<0) return true;
+        S.messages.splice((liveIdx>=0?liveIdx:claimedIdx)+1,0,...tails);
+      }
+    }
+  }
+  if((merged||reordered)&&typeof renderMessages==='function') renderMessages();
+  return true;
+}
+
 function _attachServerInitiatedStream(sid, streamId, recovered) {
   let handedOff = false;
   try {
@@ -8005,6 +8339,7 @@ function _startHiddenActiveStreamPoll(sid) {
               _sessionStreamHiddenPollFalseStreamId = streamKey;
               _sessionStreamHiddenPollFalseCount = 0;
             }
+            _reconcileServerTurnStarted(sid,d);
             const attached = _attachServerInitiatedStream(sid, streamId, true);
             if (attached) {
               _stopHiddenActiveStreamPoll();
@@ -8217,42 +8552,8 @@ function startSessionStream(sid) {
         // expecting token 0 (which would render a truncated turn). A fresh
         // (non-recovered) frame still attaches from the first token.
         const recovered = !!d.recovered;
-        // Only drive the renderer when this session is the one on screen.
-        const isCurrent = (typeof _isSessionCurrentPane === 'function')
-          ? _isSessionCurrentPane(sid)
-          : (S.session && S.session.session_id === sid);
-        if (!isCurrent) return;
-        // A turn is already rendering in this tab (user-initiated, or we
-        // already attached to this very stream). attachLiveStream is
-        // idempotent per (sid, streamId); bail if we're already on it.
-        if (S.activeStreamId === streamId) return;
-        const existingLive = (typeof LIVE_STREAMS !== 'undefined') ? LIVE_STREAMS[sid] : null;
-        if (existingLive && existingLive.streamId === streamId) return;
-        // Mirror the loadSession reattach setup. For a fresh frame the turn
-        // renders from its first token; for a recovered (replay) frame
-        // attachLiveStream reconstructs the in-progress stream.
-        S.busy = true;
-        S.activeStreamId = streamId;
-        if (S.session && S.session.session_id === sid) {
-          S.session.active_stream_id = streamId;
-          if (typeof d.pending_started_at === 'number') S.session.pending_started_at = d.pending_started_at;
-          else if (!S.session.pending_started_at) S.session.pending_started_at = Date.now()/1000;
-        }
-        if (typeof ensureLiveWorklogShell === 'function') ensureLiveWorklogShell();
-        else if (typeof appendThinking === 'function') appendThinking();
-        if (typeof updateSendBtn === 'function') updateSendBtn();
-        if (typeof setComposerStatus === 'function') setComposerStatus('');
-        if (typeof syncTopbar === 'function') syncTopbar();
-        if (typeof startApprovalPolling === 'function') startApprovalPolling(sid);
-        if (typeof startClarifyPolling === 'function') startClarifyPolling(sid);
-        if (typeof attachLiveStream === 'function') {
-          attachLiveStream(
-            sid, streamId,
-            (S.session && S.session.pending_attachments) || [],
-            recovered ? {reconnecting: true} : {},
-          );
-        }
-        if (typeof renderSessionList === 'function') void renderSessionList();
+        _reconcileServerTurnStarted(sid,d);
+        _attachServerInitiatedStream(sid, streamId, recovered);
       } catch (_) {}
     });
     es.onerror = () => {

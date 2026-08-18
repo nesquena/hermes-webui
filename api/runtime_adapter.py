@@ -38,6 +38,7 @@ class StartRunRequest:
     model: str | None = None
     toolsets: list[str] = field(default_factory=list)
     source: str = "webui"
+    intent: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

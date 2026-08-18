@@ -550,42 +550,36 @@ def test_newSession_resets_busy_state_for_fresh_chat(cleanup_test_sessions):
         "newSession() must refresh the badge for the new session rather than leaving the old session's queue badge visible"
 
 
-def test_session_scoped_message_queue_frontend_wiring(cleanup_test_sessions):
+def test_session_scoped_message_queue_frontend_wiring():
     """R15bb: queued follow-ups must stay attached to their originating session.
-    The frontend should use a session-keyed queue store and drain only the active
-    session's queued messages when that session becomes idle.
+    The frontend should render a session-keyed server queue and never drain it
+    merely because the visible composer becomes idle.
     """
     ui_src = (REPO_ROOT / "static/ui.js").read_text()
     messages_src = (REPO_ROOT / "static/messages.js").read_text()
     sessions_src = (REPO_ROOT / "static/sessions.js").read_text()
     assert "const SESSION_QUEUES" in ui_src
     assert "function queueSessionMessage" in ui_src
-    assert "function shiftQueuedSessionMessage" in ui_src
-    # _queueDrainSid tracks which session's queue to drain even after session switches
-    assert "_queueDrainSid" in ui_src
-    assert "shiftQueuedSessionMessage(sid)" in ui_src
-    assert "queueSessionMessage(S.session.session_id" in messages_src
-    assert "updateQueueBadge(S.session.session_id);" in messages_src
+    assert "function hydrateSessionQueue" in ui_src
+    assert "api('/api/chat/queue'" in ui_src
+    assert "function shiftQueuedSessionMessage" not in ui_src
+    assert "_queueDrainSid" not in ui_src
+    assert "queueSessionMessage(_sid" in messages_src
+    assert "await queueSessionMessage" in messages_src
+    assert "hydrateSessionQueue(S.session.session_id,data.session.queue)" in sessions_src
     assert "updateQueueBadge(sid);" in sessions_src
 
 
-def test_queue_card_cross_session_clear_called_before_draft_save(cleanup_test_sessions):
+def test_queue_card_cross_session_clear_called_after_draft_save(cleanup_test_sessions):
     """R15c: switching away from one session to another should clear the old
     session's queue card before the async draft-save await, so stale DOM cannot
     survive into the destination session.
     """
     src = (REPO_ROOT / "static/sessions.js").read_text()
-    block_pattern = re.compile(
-        r"if \(currentSid && currentSid !== sid\) \{\s*"
-        r"if\(typeof window\._clearPendingSelections==='function'\) window\._clearPendingSelections\(\);\s*"
-        r"if\(typeof _clearQueueCardDisplay==='function'\) _clearQueueCardDisplay\(currentSid\);\s*"
-        r"await _saveComposerDraftNow\(currentSid",
-        re.S,
-    )
-    assert block_pattern.search(src), (
-        "cross-session loadSession path must clear queue card display via"
-        " _clearQueueCardDisplay(currentSid) before awaiting _saveComposerDraftNow"
-    )
+    save_idx = src.index("await _saveComposerDraftNow(currentSid")
+    cross_idx = src.index("if(currentSid!==sid){", save_idx)
+    clear_idx = src.index("_clearQueueCardDisplay(currentSid);", cross_idx)
+    assert save_idx < cross_idx < clear_idx
 
 
 def test_queue_card_cross_session_helper_used_only_for_session_change(cleanup_test_sessions):
@@ -597,7 +591,7 @@ def test_queue_card_cross_session_helper_used_only_for_session_change(cleanup_te
     assert load_start >= 0
     load_end = src.find("  // Sync context usage indicator from session data", load_start)
     load_body = src[load_start:load_end]
-    cross_start = load_body.find("if (currentSid && currentSid !== sid) {")
+    cross_start = load_body.find("if(currentSid!==sid){")
     cross_end = load_body.find("if (currentSid !== sid || forceReload) {", cross_start)
     assert cross_start >= 0 and cross_end >= 0
     assert "_clearQueueCardDisplay(currentSid);" in load_body[cross_start:cross_end], (
@@ -849,7 +843,7 @@ def test_inflight_merge_dedupes_uploaded_user_message(cleanup_test_sessions):
     )
     pending_idx = src.find("function _mergePendingSessionMessage")
     assert pending_idx >= 0, "pending session merge helper not found"
-    pending_block = src[pending_idx:pending_idx+500]
+    pending_block = src[pending_idx:pending_idx+1000]
     assert "_hasCurrentTailUserDuplicate(currentTurnMessages,pendingMsg)" in pending_block, (
         "pending-user merge should dedupe only against the current active-turn user row"
     )
