@@ -56,3 +56,35 @@ def test_agent_row_id_alias_dedupes_restamped_prompt_before_final_answer():
         "original maintenance question",
         "settled final answer",
     ]
+
+
+def test_imported_row_id_is_not_trusted_as_state_identity():
+    """JSON import must not keep a caller-supplied ``_row_id`` as provenance.
+
+    Replay merge now treats ``_row_id`` as an Agent/WebUI identity alias. Import
+    must strip that field the same way it strips ``_state_db_row_id``, or a
+    crafted import can collide with a later genuine state.db turn.
+    """
+    from api.helpers import strip_public_internal_fields
+    from api.models import _state_db_row_identity_details
+
+    imported = strip_public_internal_fields(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "same prompt",
+                    "timestamp": 10.0,
+                    "_row_id": 780107,
+                    "_state_db_row_id": 780107,
+                }
+            ]
+        }
+    )
+    imported_msg = imported["messages"][0]
+    assert isinstance(imported_msg, dict)
+    assert "_row_id" not in imported_msg
+    assert "_state_db_row_id" not in imported_msg
+    identity, valid = _state_db_row_identity_details(imported_msg)
+    assert valid is True
+    assert identity is None
