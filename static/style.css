@@ -5491,8 +5491,9 @@ main.main > #mainPlugin{display:none;}
 .extension-installed-title{font-size:13px;font-weight:600;color:var(--text);overflow-wrap:anywhere;min-width:0;}
 .extension-installed-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:11px;color:var(--muted);}
 .extension-installed-meta code{font-family:var(--font-mono);font-size:11px;color:var(--text);overflow-wrap:anywhere;word-break:break-word;}
-.extension-toggle-btn{white-space:nowrap;flex:0 0 auto;}
-.extension-toggle-btn:disabled{opacity:.55;cursor:not-allowed;}
+.extension-installed-actions{display:flex;align-items:center;justify-content:flex-end;gap:6px;flex:0 0 auto;flex-wrap:wrap;}
+.extension-toggle-btn,.extension-configure-btn{white-space:nowrap;flex:0 0 auto;}
+.extension-toggle-btn:disabled,.extension-configure-btn:disabled{opacity:.55;cursor:not-allowed;}
 .extension-settings-box{margin-top:8px;padding:9px 10px;border:1px solid var(--border);border-radius:8px;background:var(--card-bg,var(--sidebar-bg));}
 .extension-settings-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:8px;}
 .extension-settings-title{font-size:12px;font-weight:700;color:var(--text);}
@@ -5565,7 +5566,8 @@ main.main > #mainPlugin{display:none;}
   .extensions-copy-diagnostics-btn{width:100%;}
   .extension-summary-grid{grid-template-columns:1fr;}
   .extension-installed-row{align-items:flex-start;flex-direction:column;}
-  .extension-toggle-btn{width:100%;}
+  .extension-installed-actions{width:100%;}
+  .extension-installed-actions .extension-toggle-btn,.extension-installed-actions .extension-configure-btn{width:auto;flex:1 1 140px;}
   .extension-sidecar-row-head{align-items:flex-start;flex-direction:column;}
   .extension-sidecar-fields>div{flex-direction:column;gap:2px;}
   .extension-sidecar-fields span{flex:0 0 auto;}

@@ -35,6 +35,7 @@ from api.config import (
     DEFAULT_WORKSPACE as _BOOT_DEFAULT_WORKSPACE,
     MAX_FILE_BYTES, IMAGE_EXTS, MD_EXTS
 )
+from api.subprocess_utils import windows_hide_flags
 
 
 # ── Profile-aware path resolution ───────────────────────────────────────────
@@ -1779,6 +1780,7 @@ def _run_git(args, cwd, timeout=3):
         r = subprocess.run(
             ['git'] + args, cwd=str(cwd), capture_output=True,
             text=True, timeout=timeout,
+            creationflags=windows_hide_flags(),
         )
         return r.stdout.strip() if r.returncode == 0 else None
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
