@@ -7,6 +7,7 @@ applies it to <html dir> and restores `ltr` for non-RTL locales.
 """
 from collections import Counter
 from pathlib import Path
+import os
 import re
 from tests.test_issue2147_profile_concept_help import PROFILE_CONCEPT_KEYS
 
@@ -177,3 +178,132 @@ def test_rtl_shell_css_keeps_technical_surfaces_ltr():
     assert 'input[type="number"]' in rtl_block
     # The sidebar border flips so the right-side rail keeps its divider.
     assert "border-left:1px solid var(--border)" in rtl_block
+
+
+def test_rtl_shell_css_mirrors_manual_tool_surface_rules():
+    """html[dir=rtl] must mirror the .chat-content-rtl plain-text tool rules.
+
+    Review (CHANGES_REQUESTED): setLocale() applies html dir=rtl without the
+    manual .chat-content-rtl class, so the plain-text tool surfaces that the
+    manual rules force LTR (.tool-call-group-body, .tool-result + descendants)
+    must be covered by the automatic shell rules too — otherwise Persian with
+    the manual RTL toggle off lets commands, paths, and JSON inherit RTL.
+    """
+    css = read(REPO / "static" / "style.css")
+    rtl_block_start = css.index('html[dir="rtl"]')
+    rtl_block = css[rtl_block_start:]
+    # Every selector the manual .chat-content-rtl tool rule uses must exist
+    # in the automatic html[dir=rtl] block with the same LTR declarations.
+    for sel in (
+        'html[dir="rtl"] .tool-call-group-body,',
+        'html[dir="rtl"] .tool-call-group-body *,',
+        'html[dir="rtl"] .tool-result,',
+        'html[dir="rtl"] .tool-result *,',
+    ):
+        assert sel in rtl_block, f"missing mirror selector {sel}"
+    # The shared declaration block carries the LTR isolation contract.
+    tool_rule_start = rtl_block.index('html[dir="rtl"] .tool-call-group-body')
+    tool_rule_end = rtl_block.index("}", tool_rule_start)
+    tool_rule = rtl_block[tool_rule_start:tool_rule_end]
+    assert "direction:ltr" in tool_rule
+    assert "text-align:left" in tool_rule
+    assert "unicode-bidi:isolate" in tool_rule
+    # Plain-text path/ID surfaces from the #6664 audit stay LTR as well:
+    # command palette file paths and model IDs are technical identifiers.
+    assert 'html[dir="rtl"] .cmd-item-path-value,' in rtl_block
+    assert 'html[dir="rtl"] .model-opt-id,' in rtl_block
+
+
+def test_rtl_four_case_behavior_matrix():
+    """Four-case behavior matrix for locale-driven vs manual RTL.
+
+    Case 1 — fa / manual-off: setLocale('fa') sets html dir=rtl; the
+      automatic shell rules (not .chat-content-rtl) must isolate tool
+      surfaces, since the manual class is absent.
+    Case 2 — fa / manual-on: html dir=rtl AND .chat-content-rtl are both
+      active; tool surfaces stay LTR under either rule set.
+    Case 3 — LTR / manual-on: html dir=ltr with the manual class; the legacy
+      .chat-content-rtl rules still isolate tool surfaces.
+    Case 4 — fa -> LTR restoration: switching fa -> en restores dir=ltr so an
+      RTL selection never leaks into the next locale or session.
+    """
+    css = read(REPO / "static" / "style.css")
+    src = read(REPO / "static" / "i18n.js")
+
+    # Case 1 + 2: automatic html[dir=rtl] rules must isolate tool surfaces
+    # even when the manual class is not applied.
+    rtl_block = css[css.index('html[dir="rtl"]'):]
+    assert 'html[dir="rtl"] .tool-call-group-body,' in rtl_block
+    assert 'html[dir="rtl"] .tool-result,' in rtl_block
+    assert 'html[dir="rtl"] .tool-call-group-body *,' in rtl_block
+    assert 'html[dir="rtl"] .tool-result *,' in rtl_block
+
+    # Case 2 + 3: the manual .chat-content-rtl rules must remain intact.
+    assert ".chat-content-rtl .tool-call-group-body," in css
+    assert ".chat-content-rtl .tool-call-group-body *," in css
+    assert ".chat-content-rtl .tool-result," in css
+    assert ".chat-content-rtl .tool-result *{" in css
+    tool_manual = css[css.index(".chat-content-rtl .tool-call-group-body,"):]
+    tool_manual = tool_manual[: tool_manual.index("}")]
+    assert "direction:ltr" in tool_manual
+    assert "text-align:left" in tool_manual
+    assert "unicode-bidi:isolate" in tool_manual
+
+    # Case 4: setLocale() must restore dir=ltr for non-RTL locales.
+    assert "document.documentElement.dir = _locale._dir === 'rtl' ? 'rtl' : 'ltr'" in src
+
+
+def test_set_locale_rtl_to_ltr_restoration_behavior():
+    """Behavioral (node + DOM shims): fa sets dir=rtl; switching to en restores ltr.
+
+    Drives the REAL setLocale() from static/i18n.js (case 4 of the behavior
+    matrix: fa -> LTR restoration) and asserts the data-locale stamp.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    node = shutil.which("node")
+    if node is None:
+        import pytest
+
+        pytest.skip("node not on PATH")
+    js = r"""
+const docEl = { lang:'', dir:'', attrs:{}, setAttribute(k,v){this.attrs[k]=v;},
+  getAttribute(k){return this.attrs[k]??null;} };
+global.document = { documentElement: docEl, querySelectorAll: () => [] };
+global.localStorage = { getItem: () => null, setItem: () => {}, removeItem: () => {} };
+global.window = global;
+const fs = require('fs');
+eval(fs.readFileSync(process.argv[2], 'utf8'));
+setLocale('fa');
+const faDir = docEl.dir; const faLoc = docEl.attrs['data-locale'];
+setLocale('en');
+const enDir = docEl.dir; const enLoc = docEl.attrs['data-locale'];
+setLocale('fa'); setLocale('en');  // restoration path after an RTL session
+const restoredDir = docEl.dir;
+process.stdout.write(JSON.stringify({faDir, faLoc, enDir, enLoc, restoredDir}));
+"""
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".js", delete=False, encoding="utf-8"
+    ) as tf:
+        tf.write(js)
+        script = tf.name
+    try:
+        result = subprocess.run(
+            [node, script, str(REPO / "static" / "i18n.js")],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0, f"node error: {result.stderr}"
+        import json
+
+        out = json.loads(result.stdout)
+        assert out["faDir"] == "rtl", out
+        assert out["faLoc"] == "fa", out
+        assert out["enDir"] == "ltr", out
+        assert out["enLoc"] == "en", out
+        assert out["restoredDir"] == "ltr", out
+    finally:
+        os.unlink(script)

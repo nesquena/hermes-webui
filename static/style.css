@@ -7332,6 +7332,19 @@ html[dir="rtl"] .composer-terminal-surface,
 html[dir="rtl"] .composer-terminal-viewport,
 html[dir="rtl"] .composer-terminal-inner,
 html[dir="rtl"] .skill-file-path,
+/* Plain-text tool surfaces: command lines, paths, and JSON rendered inside
+   tool-call groups and tool results must stay LTR + bidi-isolated in an RTL
+   shell (mirror of the .chat-content-rtl rules below) — Persian with the
+   manual RTL class off must not let commands/paths/JSON inherit RTL. */
+html[dir="rtl"] .tool-call-group-body,
+html[dir="rtl"] .tool-call-group-body *,
+html[dir="rtl"] .tool-result,
+html[dir="rtl"] .tool-result *,
+/* Plain-text path/ID surfaces elsewhere in the shell (audit per #6664):
+   command palette file paths and model IDs are technical identifiers and
+   stay LTR; ordinary Persian form text remains RTL. */
+html[dir="rtl"] .cmd-item-path-value,
+html[dir="rtl"] .model-opt-id,
 html[dir="rtl"] input[type="number"],
 html[dir="rtl"] input[type="url"],
 html[dir="rtl"] input[type="tel"],
