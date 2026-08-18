@@ -1395,6 +1395,94 @@ def test_yolo_disable_linearizes_after_selected_gateway_autoapproval(monkeypatch
 
 
 @pytest.mark.skipif(not APPROVAL_AVAILABLE, reason="tools.approval unavailable")
+def test_disable_that_wins_handoff_precedes_enable_drain(monkeypatch):
+    from api import routes
+    from tools.approval import _ApprovalEntry
+
+    sid = "webui-yolo-disable-before-enable-handoff"
+    handoff_lock = threading.Lock()
+    enable_handoff_attempted = threading.Event()
+    allow_enable_handoff = threading.Event()
+    responses = {}
+    worker_errors = []
+    entry = _ApprovalEntry({"approval_id": "approval-after-disable", "command": "late enable"})
+
+    @contextmanager
+    def ordered_handoff(_session_key):
+        role = threading.current_thread().name
+        if role == "yolo-enable":
+            enable_handoff_attempted.set()
+            assert allow_enable_handoff.wait(timeout=1)
+        with handoff_lock:
+            yield
+
+    def fake_j(_handler, data, status=200, extra_headers=None):
+        responses[threading.current_thread().name] = {"payload": data, "status": status}
+        return data
+
+    def run_enable():
+        try:
+            routes._handle_approval_respond(
+                object(),
+                {
+                    "session_id": sid,
+                    "choice": "once",
+                    "approval_id": "approval-after-disable",
+                    "yolo": True,
+                },
+            )
+        except BaseException as exc:
+            worker_errors.append(exc)
+
+    def run_disable():
+        try:
+            routes.handle_post(object(), urllib.parse.urlparse("/api/session/yolo"))
+        except BaseException as exc:
+            worker_errors.append(exc)
+
+    disable_session_yolo(sid)
+    with routes._lock:
+        routes._gateway_queues[sid] = [entry]
+        routes._pending[sid] = [dict(entry.data)]
+
+    monkeypatch.setattr(routes, "gateway_yolo_handoff", ordered_handoff)
+    monkeypatch.setattr(routes, "j", fake_j)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"session_id": sid, "enabled": False})
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "_handle_extension_sidecar_proxy", lambda *_a, **_k: False)
+
+    enable_worker = threading.Thread(target=run_enable, name="yolo-enable")
+    disable_worker = threading.Thread(target=run_disable, name="yolo-disable")
+    try:
+        enable_worker.start()
+        assert enable_handoff_attempted.wait(timeout=1)
+        disable_worker.start()
+        disable_worker.join(timeout=1)
+        assert not disable_worker.is_alive()
+        assert responses["yolo-disable"]["payload"] == {"ok": True, "yolo_enabled": False}
+        assert not entry.event.is_set()
+
+        allow_enable_handoff.set()
+        enable_worker.join(timeout=1)
+        assert not enable_worker.is_alive()
+        assert worker_errors == []
+        assert responses["yolo-enable"]["status"] == 200
+        assert responses["yolo-enable"]["payload"]["ok"] is True
+        assert responses["yolo-enable"]["payload"]["yolo_enabled"] is True
+        assert entry.event.is_set()
+        assert entry.result == "once"
+        assert is_session_yolo_enabled(sid) is True
+    finally:
+        allow_enable_handoff.set()
+        enable_worker.join(timeout=1)
+        disable_worker.join(timeout=1)
+        disable_session_yolo(sid)
+        with routes._lock:
+            routes._pending.pop(sid, None)
+            routes._gateway_queues.pop(sid, None)
+
+
+@pytest.mark.skipif(not APPROVAL_AVAILABLE, reason="tools.approval unavailable")
 def test_yolo_post_first_relay_serializes_next_gateway_approval(monkeypatch):
     from api import route_approvals, routes
 

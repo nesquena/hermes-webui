@@ -24850,9 +24850,10 @@ def _enable_session_yolo_and_release_pending(
             enable_yolo=True,
         )
 
-    yolo_transition = begin_session_yolo_transition(sid)
+    yolo_transition = None
     try:
         with gateway_yolo_handoff(sid):
+            yolo_transition = begin_session_yolo_transition(sid)
             stale_cleared = False
             if approval_id:
                 exact_owner, any_pending = _pending_approval_owner_state(
