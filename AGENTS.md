@@ -58,6 +58,13 @@ Follow that checklist's safety rules:
 - Prefer the existing Python + vanilla JavaScript structure. Do not add
   dependencies, build tools, frameworks, or long-lived processes without clear
   justification and a rollback story.
+- Every `subprocess` spawn must pass `creationflags=` — use
+  `windows_hide_flags()` from `api/_subprocess_compat.py` when you read the
+  child's output, or `windows_detach_flags()` for a background child that must
+  outlive the server. Both return `0` off Windows, so no platform branching is
+  needed at the call site. Without this, each spawn pops a console window on
+  Windows (#3710, #4626, #5692);
+  `tests/test_windows_console_window_guard.py` enforces it.
 - Update docs when changing setup, onboarding, runtime behavior, architecture,
   testing guidance, or user-facing workflows.
 - Do not edit `CHANGELOG.md` in ordinary contributor PRs. The release workflow

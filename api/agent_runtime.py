@@ -15,6 +15,7 @@ import threading
 
 # Retain the discovered path as a diagnostic/test-visible compatibility value;
 # runtime identity is deliberately captured from the loaded module below.
+from api._subprocess_compat import windows_hide_flags
 from api.config import _AGENT_DIR  # noqa: F401
 
 _RESTART_MESSAGE = (
@@ -49,6 +50,7 @@ def _read_agent_revision(
             capture_output=True,
             text=True,
             timeout=2,
+            creationflags=windows_hide_flags(),
         )
         if worktree_result.returncode != 0:
             return None
@@ -69,6 +71,7 @@ def _read_agent_revision(
             capture_output=True,
             text=True,
             timeout=2,
+            creationflags=windows_hide_flags(),
         )
         if tracked_result.returncode != 0:
             return None
@@ -78,6 +81,7 @@ def _read_agent_revision(
             capture_output=True,
             text=True,
             timeout=2,
+            creationflags=windows_hide_flags(),
         )
     except (OSError, subprocess.TimeoutExpired, RuntimeError, ValueError):
         return None
