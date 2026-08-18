@@ -821,15 +821,15 @@ def test_streaming_restores_prior_reasoning_metadata_after_followup():
         "streaming.py must reinsert dropped reasoning-only assistant messages"
 
 
-def test_routes_restores_prior_reasoning_metadata_after_followup():
-    """The non-streaming route path must preserve prior reasoning metadata too."""
+def test_routes_delegates_prior_reasoning_metadata_restoration_to_shared_settlement():
+    """The non-streaming route must use the same metadata-restoring settlement."""
     src = (REPO / 'api' / 'routes.py').read_text(encoding="utf-8")
-    assert "_restore_reasoning_metadata" in src, \
-        "routes.py must import reasoning metadata restoration helper"
-    assert "_next_context_messages" in src and "s.context_messages" in src, \
-        "routes.py must restore prior reasoning metadata into model context"
-    assert 's.messages = _merge_display_messages_after_agent_result(' in src, \
-        "routes.py must merge restored result messages into the visible transcript"
+    assert "_settle_result_messages" in src, \
+        "routes.py must import the shared reasoning-restoring settlement helper"
+    assert "_previous_messages" in src and "_previous_context_messages" in src, \
+        "routes.py must pass both prior projections to shared settlement"
+    assert '_settle_result_messages(' in src and '_result_messages' in src, \
+        "routes.py must settle returned messages through the shared contract"
 
 
 class TestCredentialPoolBackwardCompat(unittest.TestCase):
