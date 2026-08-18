@@ -110,7 +110,7 @@ def apply_regeneration_plan(session, plan: RegenerationPlan):
         return False
     truncate_session_at_keep(session, plan.truncation_boundary)
     prepared_context = truncate_context_for_display_keep(
-        context, rows, plan.truncation_boundary - 1,
+        context, rows, plan.truncation_boundary,
     )
     session.context_messages = prepared_context if prepared_context or not context else context[: plan.truncation_boundary]
     return True
@@ -309,6 +309,8 @@ def resolve_regeneration_turn(
             ):
                 raise RegenerationUnavailable("no_regenerable_turn", 400)
             row = rows[index]
+            if _regeneration_source_class(getattr(session, "session_source", None)) == "fork" and not row.get("_fork_child_turn"):
+                raise RegenerationUnavailable("regeneration_read_only", 403)
             row_source = row.get("_source") or row.get("source")
             if row_source and not _regeneration_source_allowed(row_source):
                 raise RegenerationUnavailable("regeneration_read_only", 403)

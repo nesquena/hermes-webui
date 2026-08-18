@@ -1735,6 +1735,8 @@ def _materialize_active_turn_user(identity, msg_text, source):
             message['timestamp'] = identity['timestamp']
         if identity.get('attachments'):
             message['attachments'] = copy.deepcopy(identity['attachments'])
+    if str(source or '').strip().lower() == 'fork':
+        message['_fork_child_turn'] = True
         stamp_message_source(
             message,
             identity.get('source') or source or 'webui',

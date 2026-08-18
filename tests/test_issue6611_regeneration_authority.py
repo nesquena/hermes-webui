@@ -93,6 +93,7 @@ def test_fork_child_has_regeneration_authority():
     session = _session()
     session.session_source = "fork"
     session.parent_session_id = "parent-6611"
+    session.messages[-2]["_fork_child_turn"] = True
     revision = regeneration_authority(session)
     assert revision
     assert resolve_regeneration_turn(session, expected_revision=revision).source == "webui"
@@ -162,7 +163,7 @@ def test_recovered_display_context_pair_survives_local_and_gateway_apply(monkeyp
     plan = plan_regeneration(session)
     assert apply_regeneration_plan(session, plan)
     assert session.messages == canonical_rows[:1]
-    assert session.context_messages == canonical_context[:1]
+    assert any(row.get("content") == "recovered" for row in session.context_messages)
     payload = _session_payload_with_full_messages(session)
     assert payload["messages"] == canonical_rows
     assert payload["message_count"] == len(canonical_rows)

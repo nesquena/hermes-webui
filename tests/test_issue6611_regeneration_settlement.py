@@ -32,12 +32,10 @@ def test_recovered_prefix_survives_regeneration_truncation():
 
 def test_stale_revision_rejects_without_mutation():
     session = _session()
-    plan = plan_regeneration(session)
-    before = copy.deepcopy(session.messages)
-    session.messages[-1]["content"] = "changed"
+    before = copy.deepcopy(session.__dict__)
     with pytest.raises(RegenerationUnavailable):
-        plan_regeneration(session, expected_revision=plan.revision)
-    assert session.messages != before
+        plan_regeneration(session, expected_revision="stale-revision")
+    assert session.__dict__ == before
 
 
 def test_double_fire_revision_changes_after_winner():

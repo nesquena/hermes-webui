@@ -22253,6 +22253,7 @@ def _start_chat_stream_for_session(
     moa_config=None,
     external_runtime_owned: bool | None = None,
     regeneration=None,
+    transaction_snapshot=None,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn."""
     if external_runtime_owned is None:
@@ -22334,7 +22335,7 @@ def _start_chat_stream_for_session(
                         source=source,
                         moa_config=moa_config,
                         backend_is_gateway=backend_is_gateway,
-                        transaction_snapshot=regeneration_snapshot,
+                        transaction_snapshot=transaction_snapshot,
                     )
                 stream_id = uuid.uuid4().hex
                 diag.stage("save_pending_state") if diag else None
@@ -22504,6 +22505,7 @@ def _start_run(
     moa_config=None,
     gateway_chat_enabled: bool | None = None,
     regeneration=None,
+    transaction_snapshot=None,
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
 
@@ -22548,6 +22550,7 @@ def _start_run(
                 moa_config=moa_config,
                 external_runtime_owned=gateway_chat_enabled,
                 regeneration=regeneration,
+                transaction_snapshot=transaction_snapshot,
             )
 
         def _legacy_adapter_factory():
@@ -22590,6 +22593,7 @@ def _start_run(
         moa_config=moa_config,
         external_runtime_owned=gateway_chat_enabled,
         regeneration=regeneration,
+        transaction_snapshot=transaction_snapshot,
     )
 
 
@@ -23329,14 +23333,16 @@ def _handle_chat_start(handler, body, diag=None):
                 pass
         except PermissionError:
             return bad(handler, "Read-only imported sessions cannot be continued from WebUI", 403)
+        regeneration_persisted_mutation = False
         def _restore_regeneration_preacceptance():
             if regeneration_snapshot is not None:
                 from api.session_ops import restore_regeneration_state
                 restore_regeneration_state(s, regeneration_snapshot)
-                try:
-                    s.save(touch_updated_at=False)
-                except Exception:
-                    logger.exception("Failed to persist rejected regeneration rollback for %s", s.session_id)
+                if regeneration_persisted_mutation:
+                    try:
+                        s.save(touch_updated_at=False)
+                    except Exception:
+                        logger.exception("Failed to persist rejected regeneration rollback for %s", s.session_id)
         def _reject_regeneration(response):
             _restore_regeneration_preacceptance()
             return response
@@ -23374,7 +23380,7 @@ def _handle_chat_start(handler, body, diag=None):
                 return _reject_regeneration(j(handler, {"error": "regeneration accepts only regeneration_revision", "code": "invalid_regeneration_request"}, status=400))
             stale_stream_id = getattr(s, "active_stream_id", None)
             if stale_stream_id and not _active_stream_blocks_chat_start(s, stale_stream_id):
-                _clear_stale_stream_state(s)
+                regeneration_persisted_mutation = bool(_clear_stale_stream_state(s))
             if not isinstance(body.get("regeneration_revision"), str):
                 _restore_regeneration_preacceptance()
                 return j(handler, {"error": "regeneration_revision is required", "code": "stale_regeneration_revision"}, status=409)
@@ -23519,6 +23525,7 @@ def _handle_chat_start(handler, body, diag=None):
             "diag": diag,
             "gateway_chat_enabled": gateway_chat_enabled,
             "regeneration": regeneration,
+            "transaction_snapshot": regeneration_snapshot,
         }
         if not gateway_chat_enabled and moa_config is not None:
             start_run_kwargs["moa_config"] = moa_config
@@ -23538,6 +23545,7 @@ def _handle_chat_start(handler, body, diag=None):
         if recovery:
             recovery_cleared_for_start = copy.deepcopy(recovery)
             clear_compression_recovery(s)
+            regeneration_persisted_mutation = True
         try:
             response = _start_run(
                 s,
