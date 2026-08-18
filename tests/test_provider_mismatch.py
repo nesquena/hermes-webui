@@ -1057,6 +1057,18 @@ def test_issue1734_chat_start_persists_repaired_codex_provider(monkeypatch):
     assert captured_thread["kwargs"]["model_provider"] == "openai-codex"
     assert save_calls[-1]["model_provider"] == "openai-codex"
 
+    # FakeThread intentionally does not execute the real worker, so reproduce
+    # its teardown rather than leaking an active-stream marker into later
+    # sidebar-cache tests.
+    stream_id = payload["stream_id"]
+    with routes.STREAMS_LOCK:
+        routes.STREAMS.pop(stream_id, None)
+    routes.unregister_stream_owner(stream_id)
+    from api.config import clear_session_writeback_owner_if_owned
+
+    clear_session_writeback_owner_if_owned(session.session_id, stream_id)
+    session.active_stream_id = None
+
 
 def test_stale_at_provider_model_falls_back_when_family_mismatches(monkeypatch):
     """Unroutable @provider:model should not invent a bare model for another family."""

@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from contextlib import contextmanager
 
 from api.session_recovery import recover_missing_sidecars_from_state_db, audit_session_recovery
 
@@ -46,6 +47,225 @@ def test_recover_missing_sidecars_from_state_db_materializes_webui_row(tmp_path)
     assert data["source_tag"] == "webui"
     assert data["session_source"] == "webui"
     assert [m["content"] for m in data["messages"]] == ["message 1", "message 2"]
+
+
+def test_recover_missing_sidecar_rereads_state_db_under_sid_authority(
+    tmp_path,
+    monkeypatch,
+):
+    import api.models as models
+
+    state_db = tmp_path / "state.db"
+    sid = _make_state_db(state_db, sid="state_changes_before_lock", messages=1)
+    real_authority = models._session_sidecar_authority
+    updated = False
+
+    @contextmanager
+    def update_before_recovery_enters_authority(session_id, *, session_dir=None):
+        nonlocal updated
+        with real_authority(session_id, session_dir=session_dir):
+            if not updated:
+                with sqlite3.connect(state_db) as conn:
+                    conn.execute(
+                        "INSERT INTO messages "
+                        "(session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+                        (sid, "assistant", "committed while recovery waited", 1235.0),
+                    )
+                    conn.execute(
+                        "UPDATE sessions SET message_count = 2 WHERE id = ?",
+                        (sid,),
+                    )
+                updated = True
+            yield
+
+    monkeypatch.setattr(
+        models,
+        "_session_sidecar_authority",
+        update_before_recovery_enters_authority,
+    )
+
+    result = recover_missing_sidecars_from_state_db(tmp_path, state_db)
+
+    assert result["materialized"] == 1
+    data = json.loads((tmp_path / f"{sid}.json").read_text(encoding="utf-8"))
+    assert [message["content"] for message in data["messages"]] == [
+        "message 1",
+        "committed while recovery waited",
+    ]
+
+
+def test_recover_reread_uses_one_sqlite_snapshot_for_metadata_and_messages(
+    tmp_path,
+    monkeypatch,
+):
+    from api import session_recovery
+
+    state_db = tmp_path / "state.db"
+    sid = _make_state_db(state_db, sid="coherent_snapshot", messages=1)
+    real_connect = sqlite3.connect
+    with real_connect(state_db) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+
+    scans = 0
+
+    class _CursorProxy:
+        def __init__(self, cursor, mutate_after_fetch=False):
+            self._cursor = cursor
+            self._mutate_after_fetch = mutate_after_fetch
+
+        def fetchall(self):
+            rows = self._cursor.fetchall()
+            if self._mutate_after_fetch:
+                with real_connect(state_db) as writer:
+                    writer.execute(
+                        "UPDATE sessions SET title = ?, message_count = 2 WHERE id = ?",
+                        ("Committed replacement", sid),
+                    )
+                    writer.execute(
+                        "INSERT INTO messages "
+                        "(session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+                        (sid, "assistant", "committed replacement", 1235.0),
+                    )
+            return rows
+
+    class _ConnectionProxy:
+        def __init__(self, connection):
+            self._connection = connection
+
+        @property
+        def row_factory(self):
+            return self._connection.row_factory
+
+        @row_factory.setter
+        def row_factory(self, value):
+            self._connection.row_factory = value
+
+        def execute(self, sql, parameters=()):
+            nonlocal scans
+            cursor = self._connection.execute(sql, parameters)
+            normalized = " ".join(sql.split()).lower()
+            mutate = False
+            if " from sessions " in f" {normalized} " and "source = 'webui'" in normalized:
+                scans += 1
+                mutate = scans == 2
+            return _CursorProxy(cursor, mutate_after_fetch=mutate)
+
+        def close(self):
+            self._connection.close()
+
+    def proxied_connect(*args, **kwargs):
+        return _ConnectionProxy(real_connect(*args, **kwargs))
+
+    monkeypatch.setattr(session_recovery.sqlite3, "connect", proxied_connect)
+
+    result = recover_missing_sidecars_from_state_db(tmp_path, state_db)
+
+    assert result["materialized"] == 1
+    data = json.loads((tmp_path / f"{sid}.json").read_text(encoding="utf-8"))
+    observed = (
+        data["title"],
+        data["message_count"],
+        tuple(message["content"] for message in data["messages"]),
+    )
+    assert observed in {
+        ("Recovered from DB", 1, ("message 1",)),
+        ("Committed replacement", 2, ("message 1", "committed replacement")),
+    }
+
+
+def test_recovered_sidecar_fsyncs_temp_before_create_only_publication(
+    tmp_path,
+    monkeypatch,
+):
+    from api import models, session_recovery
+
+    state_db = tmp_path / "state.db"
+    sid = _make_state_db(state_db, sid="durable_materialization", messages=1)
+    events = []
+    monkeypatch.setattr(
+        session_recovery.os,
+        "fsync",
+        lambda _fd: events.append("file"),
+    )
+    monkeypatch.setattr(
+        models,
+        "_fsync_sidecar_directory",
+        lambda _directory: events.append("directory"),
+    )
+
+    result = recover_missing_sidecars_from_state_db(tmp_path, state_db)
+
+    assert result["materialized"] == 1
+    assert events == ["file", "directory"]
+    assert (tmp_path / f"{sid}.json").exists()
+
+
+def test_hidden_background_cleanup_cannot_be_recreated_from_state_db(
+    tmp_path,
+    monkeypatch,
+):
+    from api import models, routes
+
+    state_db = tmp_path / "state.db"
+    sid = _make_state_db(state_db, sid="hidden_background_lifecycle", messages=1)
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    monkeypatch.setattr(routes, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "delete_cli_session", lambda _sid: False)
+    session = models.Session(
+        session_id=sid,
+        title="bg: hidden result",
+        messages=[{"role": "assistant", "content": "hidden result"}],
+    )
+    session.save(skip_index=True)
+
+    routes._delete_hidden_background_session_sidecar(sid)
+    result = recover_missing_sidecars_from_state_db(tmp_path, state_db)
+
+    assert result["materialized"] == 0
+    assert not (tmp_path / f"{sid}.json").exists()
+    assert sid in models._load_webui_deleted_session_tombstone()
+
+
+def test_delete_at_tombstone_cap_retains_current_sid_and_blocks_state_db_recovery(
+    tmp_path,
+    monkeypatch,
+):
+    from api import models
+
+    state_db = tmp_path / "state.db"
+    sid = _make_state_db(
+        state_db,
+        sid="a-target-deleted-session",
+        messages=1,
+    )
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    models._save_webui_deleted_session_tombstone(
+        {f"z-{index:04d}" for index in range(models.WEBUI_DELETED_SESSION_TOMBSTONE_CAP)}
+    )
+    session = models.Session(
+        session_id=sid,
+        messages=[{"role": "user", "content": "deleted but retained in state.db"}],
+    )
+    session.save(skip_index=True)
+
+    with models._session_sidecar_authority(sid):
+        deleted = models._delete_session_sidecar_artifacts_locked(sid)
+
+    retained = models._load_webui_deleted_session_tombstone()
+    expected_retained = {
+        sid,
+        *(f"z-{index:04d}" for index in range(1, models.WEBUI_DELETED_SESSION_TOMBSTONE_CAP)),
+    }
+    assert deleted is True
+    assert retained == frozenset(expected_retained)
+    assert not (tmp_path / f"{sid}.json").exists()
+
+    result = recover_missing_sidecars_from_state_db(tmp_path, state_db)
+
+    assert result["materialized"] == 0
+    assert not (tmp_path / f"{sid}.json").exists()
 
 
 def test_recover_missing_sidecars_from_state_db_skips_deleted_webui_tombstone(tmp_path, monkeypatch):

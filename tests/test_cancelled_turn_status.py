@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pathlib
 
+import api.streaming as streaming
 from api.streaming import (
     _CANCEL_MARKER_PATTERNS,
     _cancelled_turn_content,
@@ -24,6 +25,7 @@ def _read(rel_path: str) -> str:
 
 class _DummySession:
     def __init__(self, path: str = ''):
+        self.session_id = 'ephemeral-cancel-probe'
         self.path = path
         self.messages = []
         self.active_stream_id = 'stream-1'
@@ -90,10 +92,20 @@ class TestCancelledTurnFinalizer:
         assert session.messages[-1]['provider_details_label'] == 'Cancellation details'
         assert session.messages[-1]['_error'] is True
 
-    def test_ephemeral_cancel_finalizer_unlinks_temp_session_without_saving_error_marker(self, tmp_path):
+    def test_ephemeral_cancel_finalizer_delegates_without_saving_error_marker(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
         temp_session = tmp_path / 'btw-session.json'
         temp_session.write_text('{}', encoding='utf-8')
         session = _DummySession(str(temp_session))
+        cleanup_calls = []
+        monkeypatch.setattr(
+            streaming,
+            "_cleanup_ephemeral_session_sidecar_locked",
+            lambda candidate, *, outcome: cleanup_calls.append((candidate, outcome)),
+        )
 
         _finalize_cancelled_turn(session, ephemeral=True)
 
@@ -103,7 +115,8 @@ class TestCancelledTurnFinalizer:
         assert session.pending_started_at is None
         assert session.saved == 0
         assert session.messages == []
-        assert not temp_session.exists()
+        assert cleanup_calls == [(session, "cancelled")]
+        assert temp_session.exists()
 
 
     def test_message_renderer_allows_non_provider_details_label(self):
@@ -121,6 +134,13 @@ class TestCancelledTurnFinalizer:
 
 
 class TestCancelledTurnPersistenceGuards:
+    def test_ephemeral_cleanup_never_directly_unlinks_a_sidecar(self):
+        src = _read("api/streaming.py")
+        assert ".unlink(" not in src
+        assert "_session_sidecar_authority" in src
+        assert "_delete_session_sidecar_artifacts_locked" in src
+        assert 'outcome="completed"' in src
+
     def test_cancel_marker_patterns_are_centralized_for_dedupe(self):
         assert _CANCEL_MARKER_PATTERNS == ('task cancelled', 'task canceled', 'response interrupted')
         src = _read("api/streaming.py")

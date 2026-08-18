@@ -2056,18 +2056,80 @@ def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.') -> Non
         })
 
 
-def _cleanup_ephemeral_cancelled_turn(session) -> None:
-    """Remove transient /btw session state after a cancel without saving it."""
+def _clear_ephemeral_turn_state(session) -> None:
+    """Clear transient stream fields on an in-memory hidden session."""
     session.active_stream_id = None
     session.pending_user_message = None
     session.pending_attachments = []
     session.pending_started_at = None
     session.pending_user_source = None
+
+
+def _cleanup_ephemeral_cancelled_turn(session) -> None:
+    """Remove transient /btw session state after a cancel without saving it."""
+    _clear_ephemeral_turn_state(session)
+    _cleanup_ephemeral_session_sidecar_locked(session, outcome="cancelled")
+
+
+def _cleanup_ephemeral_session_sidecar_locked(session, *, outcome: str) -> bool:
+    """Best-effort hidden-session delete while the caller holds its agent lock.
+
+    Lock order stays agent lock -> SID sidecar authority, matching manual and
+    hidden-background deletion. Any validation or durable-delete failure leaves
+    the HTTP/SSE outcome best-effort, but it is logged and never falls back to a
+    direct unlink outside the tombstone protocol.
+    """
+    sid = str(getattr(session, "session_id", "") or "").strip()
     try:
-        import pathlib
-        pathlib.Path(session.path).unlink(missing_ok=True)
+        from api.models import (
+            _coerce_sidecar_revision,
+            _delete_session_sidecar_artifacts_locked,
+            _read_sidecar_snapshot,
+            _session_sidecar_authority,
+            is_safe_session_id,
+        )
+
+        if not is_safe_session_id(sid):
+            raise ValueError(f"Unsafe ephemeral session_id {sid!r}")
+        directory = Path(SESSION_DIR).resolve()
+        expected_path = (directory / f"{sid}.json").resolve()
+        session_path = Path(getattr(session, "path", "")).resolve()
+        if session_path != expected_path:
+            raise ValueError(
+                f"Ephemeral session path {session_path} does not match SID {sid!r}"
+            )
+        expected_revision = _coerce_sidecar_revision(
+            getattr(session, "_sidecar_revisions", {}).get(sid),
+            sid,
+        )
+        if expected_revision is None:
+            raise RuntimeError(
+                f"Ephemeral session {sid!r} has no owned sidecar revision"
+            )
+        with _session_sidecar_authority(sid, session_dir=directory):
+            current_revision, _payload = _read_sidecar_snapshot(expected_path, sid)
+            if current_revision != expected_revision:
+                raise RuntimeError(
+                    f"Ephemeral session {sid!r} changed before {outcome} cleanup"
+                )
+            deleted = _delete_session_sidecar_artifacts_locked(
+                sid,
+                session_dir=directory,
+                expected_revision=current_revision,
+            )
+            if not deleted:
+                raise RuntimeError(
+                    f"Ephemeral session {sid!r} lost revision authority during cleanup"
+                )
+        return True
     except Exception:
-        logger.debug("Failed to clean up ephemeral cancelled session", exc_info=True)
+        logger.warning(
+            "Failed to clean up %s ephemeral session %s through durable sidecar protocol",
+            outcome,
+            sid or "<invalid>",
+            exc_info=True,
+        )
+        return False
 
 
 def _resolve_current_session_for_write(session):
@@ -4700,46 +4762,39 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
             # In-memory messages are newer than the file; save the full old
             # snapshot from the current session object while preserving its
             # pre-existing parent_session_id lineage.
-            saved_sid = s.session_id
-            saved_snapshot = bool(getattr(s, 'pre_compression_snapshot', False))
-            saved_pinned = bool(getattr(s, 'pinned', False))
-            s.session_id = old_sid
-            s.pre_compression_snapshot = True
-            s.pinned = False
+            from api.models import Session
+
+            owned_old = Session.load(old_sid)
+            if owned_old is None:
+                return
+            snapshot = copy.copy(s)
+            snapshot._sidecar_revisions = dict(owned_old._sidecar_revisions)
+            snapshot.session_id = old_sid
+            snapshot.parent_session_id = existing.get(
+                'parent_session_id',
+                getattr(s, 'parent_session_id', None),
+            )
+            snapshot.pre_compression_snapshot = True
+            snapshot.pinned = False
             # Stage-359 / PR #2295: clear runtime stream-state fields on the
             # archived snapshot so the sidebar does not reopen the parent as
             # a permanently-running session while the child already holds the
-            # completed answer. The continuation session's live state is
-            # restored from saved_* locals in the finally block.
-            saved_active_stream_id = getattr(s, 'active_stream_id', None)
-            saved_pending_user_message = getattr(s, 'pending_user_message', None)
-            saved_pending_attachments = list(getattr(s, 'pending_attachments', []) or [])
-            saved_pending_started_at = getattr(s, 'pending_started_at', None)
-            saved_pending_user_source = getattr(s, 'pending_user_source', None)
-            s.active_stream_id = None
-            s.pending_user_message = None
-            s.pending_attachments = []
-            s.pending_started_at = None
-            s.pending_user_source = None
-            try:
-                # skip_index=False so the snapshot appears in _index.json with
-                # the pre_compression_snapshot marker. The sidebar projection
-                # (#2285) reads that marker to hide the snapshot from active
-                # rows while keeping the JSON discoverable for lineage traversal.
-                s.save(touch_updated_at=False, skip_index=False)
-                logger.info(
-                    "Preserved pre-compression session %s (%d messages) to disk",
-                    old_sid, len(s.messages),
-                )
-            finally:
-                s.session_id = saved_sid
-                s.pre_compression_snapshot = saved_snapshot
-                s.pinned = saved_pinned
-                s.active_stream_id = saved_active_stream_id
-                s.pending_user_message = saved_pending_user_message
-                s.pending_attachments = saved_pending_attachments
-                s.pending_started_at = saved_pending_started_at
-                s.pending_user_source = saved_pending_user_source
+            # completed answer. The continuation object remains untouched;
+            # only the revision-owning snapshot copy is persisted.
+            snapshot.active_stream_id = None
+            snapshot.pending_user_message = None
+            snapshot.pending_attachments = []
+            snapshot.pending_started_at = None
+            snapshot.pending_user_source = None
+            # skip_index=False so the snapshot appears in _index.json with the
+            # pre_compression_snapshot marker. The sidebar projection (#2285)
+            # reads that marker to hide the snapshot from active rows while
+            # keeping the JSON discoverable for lineage traversal.
+            snapshot.save(touch_updated_at=False, skip_index=False)
+            logger.info(
+                "Preserved pre-compression session %s (%d messages) to disk",
+                old_sid, len(snapshot.messages),
+            )
             return
         # Existing file is already at least as complete as memory; stamp only
         # the snapshot marker so index/sidebar projection can hide it without
@@ -10092,11 +10147,13 @@ def _run_agent_streaming(
                 })
                 if _checkpoint_stop is not None:
                     _checkpoint_stop.set()
-                try:
-                    import pathlib
-                    pathlib.Path(s.path).unlink(missing_ok=True)
-                except Exception:
-                    pass
+                with _agent_lock:
+                    _ephemeral_deleted = _cleanup_ephemeral_session_sidecar_locked(
+                        s,
+                        outcome="completed",
+                    )
+                    if _ephemeral_deleted:
+                        _clear_ephemeral_turn_state(s)
                 return  # skip all normal persistence for ephemeral sessions
             if _checkpoint_stop is not None:
                 _checkpoint_stop.set()
