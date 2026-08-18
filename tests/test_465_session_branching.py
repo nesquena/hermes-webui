@@ -308,14 +308,15 @@ def test_branch_marks_explicit_forks_as_fork_sessions():
 
 
 def test_branch_fork_sessions_do_not_collapse_into_parent_lineage():
-    """Fork sessions are not collapsed into compression-lineage; guard must remain in _sessionLineageKey."""
+    """The initial fork edge stays independent while compressed fork tips may collapse."""
     src = _read('static/sessions.js')
     fn = re.search(r'function _sessionLineageKey\(.*?\n\}', src, re.DOTALL)
     assert fn, "Could not find _sessionLineageKey"
     block = fn.group(0)
-    assert "if(s.session_source==='fork') return null;" in block, \
-        "Fork guard must remain in _sessionLineageKey to prevent compression-lineage merging"
-    assert block.index("if(s.session_source==='fork') return null;") < block.index('return s.parent_session_id || null')
+    guard = "if(s.session_source==='fork'&&!(parent&&parent.session_source==='fork'&&isCompressionEdge(parent,s)))"
+    assert guard in block, \
+        "Fork guard must reject the initial non-fork→fork edge while allowing fork compression"
+    assert block.index(guard) < block.index('return s.parent_session_id || null')
 
 
 def test_branch_fork_sessions_nest_under_parent():

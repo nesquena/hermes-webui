@@ -67,6 +67,239 @@ console.log(JSON.stringify(collapsed));
     assert [seg["session_id"] for seg in by_sid["tip"]["_lineage_segments"]] == ["tip", "root"]
 
 
+def test_state_db_only_tip_inherits_materialized_lineage_project():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_sessionLineageKey'));
+eval(extractFunc('_collapseSessionLineageForSidebar'));
+const rows = _collapseSessionLineageForSidebar([
+  {{session_id:'tip', project_id:null, updated_at:20, _lineage_root_id:'root', _lineage_tip_id:'tip'}},
+  {{session_id:'root', project_id:'project-a', updated_at:10, _lineage_root_id:'root', _lineage_tip_id:'tip'}},
+]);
+console.log(JSON.stringify(rows));
+"""
+    collapsed = json.loads(_run_node(source))
+    assert len(collapsed) == 1
+    assert collapsed[0]["session_id"] == "tip"
+    assert collapsed[0]["project_id"] == "project-a"
+
+
+def test_mixed_source_production_compression_lineage_is_prior_turns_not_children():
+    """The production ten-segment chain must project as one conversation.
+
+    state.db can conservatively label these rows ``child_session`` while each
+    WebUI sidecar carries the stronger compression evidence: the parent is a
+    pre-compression snapshot and the child points to that exact parent.
+    """
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+function _isExternalSession() {{ return false; }}
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionLineageKey'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_collapseSessionLineageForSidebar'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+const ids = [
+  '54b6067d50d3',
+  '20260811_111854_014d12',
+  '20260811_134525_f2d39c',
+  '20260811_190249_c207a3',
+  '20260812_034723_084cc9',
+  '20260812_101401_f002bb',
+  '20260812_102343_19117b',
+  '20260812_113743_e99b89',
+  '20260812_120205_592085',
+  '20260812_120834_e64cd8',
+];
+const raw = ids.map((session_id, index) => ({{
+  session_id,
+  parent_session_id:index ? ids[index-1] : null,
+  relationship_type:index ? 'child_session' : null,
+  pre_compression_snapshot:index < ids.length-1,
+  raw_source:index%2 ? 'cli' : 'webui',
+  title:'fix WebUI project assignment across compressed session lineage',
+  created_at:1,
+  updated_at:index+1,
+  last_message_at:index+1,
+  message_count:2,
+}}));
+const rows = _attachChildSessionsToSidebarRows(
+  _collapseSessionLineageForSidebar(raw), raw
+);
+const row = rows[0];
+console.log(JSON.stringify({{
+  rowCount:rows.length,
+  sid:row.session_id,
+  staleVisibleSid:row._lineage_segments.find(segment=>segment.session_id==='20260812_120205_592085').session_id,
+  childSids:(row._child_sessions||[]).map(child=>child.session_id),
+  priorSids:(row._lineage_segments||[])
+    .filter(segment=>segment.session_id!==row.session_id)
+    .map(segment=>segment.session_id),
+}}));
+"""
+    result = json.loads(_run_node(source))
+    assert result == {
+        "rowCount": 1,
+        "sid": "20260812_120834_e64cd8",
+        "staleVisibleSid": "20260812_120205_592085",
+        "childSids": [],
+        "priorSids": [
+            "20260812_120205_592085",
+            "20260812_113743_e99b89",
+            "20260812_102343_19117b",
+            "20260812_101401_f002bb",
+            "20260812_034723_084cc9",
+            "20260811_190249_c207a3",
+            "20260811_134525_f2d39c",
+            "20260811_111854_014d12",
+            "54b6067d50d3",
+        ],
+    }
+
+
+def test_explicit_prior_turn_open_preserves_each_requested_segment_id():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('(?:async\\\\s+)?function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+const opened=[];
+async function _openSidebarSession(session, opts) {{
+  opened.push({{sid:session.session_id, skipLineageResolve:opts.skipLineageResolve}});
+}}
+eval(extractFunc('_openSidebarLineageSegment'));
+(async()=>{{
+  for(const sid of ['snapshot-a','snapshot-b','snapshot-c']){{
+    await _openSidebarLineageSegment({{session_id:sid}});
+  }}
+  console.log(JSON.stringify(opened));
+}})().catch(error=>{{ console.error(error); process.exit(1); }});
+"""
+    assert json.loads(_run_node(source)) == [
+        {"sid": "snapshot-a", "skipLineageResolve": True},
+        {"sid": "snapshot-b", "skipLineageResolve": True},
+        {"sid": "snapshot-c", "skipLineageResolve": True},
+    ]
+
+
+def test_compressed_fork_collapses_within_fork_without_absorbing_original_parent():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_sessionLineageKey'));
+eval(extractFunc('_collapseSessionLineageForSidebar'));
+const raw=[
+  {{session_id:'original', pre_compression_snapshot:true, updated_at:1}},
+  {{session_id:'fork-root', parent_session_id:'original', session_source:'fork', pre_compression_snapshot:true, updated_at:2}},
+  {{session_id:'fork-tip', parent_session_id:'fork-root', session_source:'fork', relationship_type:'child_session', updated_at:3}},
+];
+console.log(JSON.stringify(Object.fromEntries(_collapseSessionLineageForSidebar(raw).map(row=>[
+  row.session_id,
+  (row._lineage_segments||[]).map(segment=>segment.session_id),
+]))));
+"""
+    assert json.loads(_run_node(source)) == {
+        "fork-tip": ["fork-tip", "fork-root"],
+        "original": [],
+    }
+
+
+def test_unmarked_ordinary_sibling_keeps_compression_parent_ambiguous():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_sessionLineageKey'));
+eval(extractFunc('_collapseSessionLineageForSidebar'));
+const raw=[
+  {{session_id:'parent', title:'Same title', pre_compression_snapshot:true, created_at:1, updated_at:1}},
+  {{session_id:'tip', title:'Same title', parent_session_id:'parent', relationship_type:'child_session', created_at:1, updated_at:2}},
+  {{session_id:'ordinary', title:'Same title', parent_session_id:'parent', relationship_type:'child_session', created_at:1, updated_at:3}},
+];
+console.log(JSON.stringify(_collapseSessionLineageForSidebar(raw).map(row=>({{
+  sid:row.session_id,
+  segments:(row._lineage_segments||[]).map(segment=>segment.session_id),
+}}))));
+"""
+    assert json.loads(_run_node(source)) == [
+        {"sid": "tip", "segments": []},
+        {"sid": "ordinary", "segments": []},
+        {"sid": "parent", "segments": []},
+    ]
+
+
 def test_sidebar_active_state_can_fall_back_to_url_session_during_boot():
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
     source = f"""
@@ -1596,7 +1829,8 @@ def test_lineage_segment_expansion_static_contract():
     assert "className='session-lineage-segment'" in js
     assert "const segTitle=_sessionDisplayTitle(seg)||t('session_lineage_segment_untitled');" in js
     assert "row.title=t('session_lineage_segment_open');" in js
-    assert "await _openSidebarSession(seg, {skipLineageResolve:true});" in js
+    assert "await _openSidebarLineageSegment(seg);" in js
+    assert "return _openSidebarSession(segment, {skipLineageResolve:true});" in js
     assert "const openChildSession=async(childSession)=>{" in js
     assert "await _openSidebarSession(childSession, {skipLineageResolve:true});" in js
     assert "if(!opts.skipLineageResolve && typeof _resolveSessionIdFromSidebarLineage==='function'){" in js

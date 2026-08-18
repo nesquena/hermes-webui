@@ -4799,6 +4799,81 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
     raise KeyError(sid)
 
 
+_PROJECT_MOVE_JOURNAL_LOCK = threading.RLock()
+
+
+def _project_move_journal_dir() -> Path:
+    return Path(_cfg.STATE_DIR) / "project-move-journal"
+
+
+def _write_project_move_journal(payload: dict) -> Path:
+    """Durably replace one project-move journal before sidecar mutation."""
+    journal_dir = _project_move_journal_dir()
+    journal_dir.mkdir(parents=True, exist_ok=True)
+    txid = str(payload["txid"])
+    path = journal_dir / f"{txid}.json"
+    tmp = journal_dir / f".{txid}.{uuid.uuid4().hex}.tmp"
+    try:
+        with tmp.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+        try:
+            dir_fd = os.open(journal_dir, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass
+        return path
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def recover_project_move_journals() -> bool:
+    """Recover interrupted lineage project moves before sidebar projection.
+
+    Prepared transactions roll back to their exact original metadata. Committed
+    transactions finish applying one shared target timestamp. A journal is kept
+    when any sidecar cannot be recovered so the next poll/startup retries.
+    """
+    with _PROJECT_MOVE_JOURNAL_LOCK:
+        journal_dir = _project_move_journal_dir()
+        if not journal_dir.exists():
+            return True
+        recovered_all = True
+        for path in sorted(journal_dir.glob("*.json")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                committed = payload.get("state") == "committed"
+                entries = payload.get("entries") or []
+                for entry in entries:
+                    session = Session.load(str(entry["session_id"]))
+                    if session is None or getattr(session, "read_only", False):
+                        raise RuntimeError(f"missing writable sidecar {entry.get('session_id')}")
+                    session.project_id = (
+                        payload.get("target_project_id")
+                        if committed
+                        else entry.get("project_id")
+                    )
+                    session.updated_at = (
+                        payload.get("target_updated_at")
+                        if committed
+                        else entry.get("updated_at")
+                    )
+                    session.save(touch_updated_at=False)
+                path.unlink()
+            except Exception:
+                recovered_all = False
+                logger.error("project move journal recovery failed for %s", path, exc_info=True)
+        return recovered_all
+
+
 def get_session(sid, metadata_only=False):
     """Load a session, optionally with metadata only (skipping messages)."""
     return _resolve_session(sid, metadata_only=metadata_only)
@@ -6133,6 +6208,10 @@ def _diag_stage(diag, name: str) -> None:
 
 
 def all_sessions(diag=None, *, include_lineage_metadata: bool = True):
+    # Resolve any interrupted multi-sidecar project transaction before exposing
+    # sidebar metadata after a process restart.
+    if not recover_project_move_journals():
+        raise RuntimeError("project assignment journal recovery is incomplete")
     _diag_stage(diag, "all_sessions.active_streams")
     active_stream_ids = _active_stream_ids()
     # Phase C: try index first for O(1) read; fall back to full scan

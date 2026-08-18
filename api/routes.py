@@ -45,6 +45,7 @@ from api.agent_sessions import (
     is_cli_session_row,
     is_cli_session_row_visible,
     read_session_lineage_report,
+    resolve_writable_compression_lineage,
 )
 from api.compression_anchor import visible_messages_for_anchor
 from api.compression_recovery import (
@@ -5289,6 +5290,83 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False)
     return s
 
 
+def _project_assignment_compression_edge(parent, child):
+    """Confirm a WebUI rotation edge from both durable sidecars."""
+    parent_sid = str(parent.get("id") or "")
+    child_sid = str(child.get("id") or "")
+    parent_sidecar = Session.load_metadata_only(parent_sid)
+    child_sidecar = Session.load_metadata_only(child_sid)
+    return bool(
+        parent_sidecar
+        and child_sidecar
+        and getattr(parent_sidecar, "pre_compression_snapshot", False)
+        and str(getattr(child_sidecar, "parent_session_id", "") or "") == parent_sid
+    )
+
+
+def _resolve_project_assignment_sessions(requested_session):
+    """Return the complete writable compression lineage for a project move."""
+    requested_sid = str(getattr(requested_session, "session_id", "") or "")
+
+    lineage = resolve_writable_compression_lineage(
+        _active_state_db_path(),
+        requested_sid,
+        compression_edge_validator=_project_assignment_compression_edge,
+    )
+    if lineage.get("error"):
+        raise ValueError("Session compression lineage could not be verified; project assignment was not changed")
+    if not lineage.get("found"):
+        return [requested_session], lineage
+    if not lineage.get("complete"):
+        raise ValueError("Session compression lineage is incomplete; project assignment was not changed")
+
+    sessions = []
+    requested_profile = getattr(requested_session, "profile", None) or get_active_profile_name()
+    for sid in lineage.get("segment_ids") or []:
+        try:
+            segment = _get_or_materialize_session(str(sid))
+        except (KeyError, PermissionError) as exc:
+            raise ValueError(
+                "Session compression lineage is not fully writable; project assignment was not changed"
+            ) from exc
+        segment_profile = getattr(segment, "profile", None) or get_active_profile_name()
+        if not _profiles_match(segment_profile, requested_profile):
+            raise ValueError(
+                "Session compression lineage crosses profiles; project assignment was not changed"
+            )
+        sessions.append(segment)
+    if not sessions or requested_sid not in {
+        str(getattr(segment, "session_id", "") or "") for segment in sessions
+    }:
+        raise ValueError("Session compression lineage is incomplete; project assignment was not changed")
+    return sessions, lineage
+
+
+def _acquire_project_assignment_locks(sessions, *, timeout: float = 5.0):
+    """Acquire unique lineage locks in deterministic session-id order."""
+    def session_id(item):
+        if isinstance(item, str):
+            return item
+        return str(getattr(item, "session_id", "") or "")
+
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    locks = []
+    seen_lock_ids = set()
+    for session in sorted(sessions, key=session_id):
+        lock = _get_session_agent_lock(session_id(session))
+        lock_identity = id(lock)
+        if lock_identity in seen_lock_ids:
+            continue
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not lock.acquire(timeout=remaining):
+            for acquired in reversed(locks):
+                acquired.release()
+            return []
+        locks.append(lock)
+        seen_lock_ids.add(lock_identity)
+    return locks
+
+
 def _share_snapshot_messages_for_session(session, *, cli_meta: dict | None = None) -> list:
     """Return the visible transcript that a public share should snapshot.
 
@@ -9611,6 +9689,9 @@ from api.models import (
     all_sessions,
     title_from,
     _write_session_index,
+    _PROJECT_MOVE_JOURNAL_LOCK,
+    _write_project_move_journal,
+    recover_project_move_journals,
     SESSION_INDEX_FILE,
     _active_state_db_path,
     load_projects,
@@ -16346,12 +16427,56 @@ def handle_post(handler, parsed) -> bool:
             require(body, "session_id")
         except ValueError as e:
             return bad(handler, str(e))
+        requested_sid = str(body["session_id"])
+        state_only_tip = False
         try:
-            s = _get_or_materialize_session(body["session_id"])
+            s = _get_or_materialize_session(requested_sid)
         except KeyError:
-            return bad(handler, "Session not found", 404)
+            def state_only_edge_validator(parent, child):
+                return (
+                    str(child.get("id") or "") == requested_sid
+                    or _project_assignment_compression_edge(parent, child)
+                )
+
+            initial_lineage = resolve_writable_compression_lineage(
+                _active_state_db_path(),
+                requested_sid,
+                compression_edge_validator=state_only_edge_validator,
+            )
+            if not initial_lineage.get("found"):
+                return bad(handler, "Session not found", 404)
+            if not initial_lineage.get("complete"):
+                return bad(
+                    handler,
+                    "Session compression lineage is incomplete; project assignment was not changed",
+                    409,
+                )
+            assignment_sessions = [
+                loaded
+                for sid in initial_lineage.get("segment_ids") or []
+                if (loaded := Session.load(str(sid))) is not None
+            ]
+            if not assignment_sessions:
+                return bad(handler, "Session not found", 404)
+            lineage_profiles = {
+                getattr(segment, "profile", None) or get_active_profile_name()
+                for segment in assignment_sessions
+            }
+            if len(lineage_profiles) != 1:
+                return bad(
+                    handler,
+                    "Session compression lineage crosses profiles; project assignment was not changed",
+                    409,
+                )
+            s = assignment_sessions[-1]
+            state_only_tip = True
         except PermissionError:
             return bad(handler, "Read-only imported sessions cannot be moved from WebUI", 403)
+        if not state_only_tip:
+            try:
+                assignment_sessions, initial_lineage = _resolve_project_assignment_sessions(s)
+            except ValueError as e:
+                return bad(handler, str(e), 409)
         # #1614: refuse moves into a project owned by another profile.
         target_pid = body.get("project_id") or None
         if target_pid:
@@ -16378,22 +16503,162 @@ def handle_post(handler, parsed) -> bool:
         # the wait converts that into an actionable HTTP 503 the client can retry.
         # We keep the lock (rather than dropping it for this metadata-only write)
         # because s.save() still races the streaming thread's atomic writer.
-        _move_lock = _get_session_agent_lock(body["session_id"])
-        if not _move_lock.acquire(timeout=5):
+        # The helper performs a bounded ``lock.acquire(timeout=remaining)`` for
+        # every distinct lineage lock, preserving the #3746 non-blocking gate.
+        lock_owners = (
+            initial_lineage.get("segment_ids") or assignment_sessions
+            if initial_lineage.get("found")
+            else assignment_sessions
+        )
+        _move_locks = _acquire_project_assignment_locks(lock_owners, timeout=5)
+        if not _move_locks:
             return j(
                 handler,
                 {"error": "Session is busy (streaming). Please try again in a moment."},
                 status=503,
             )
         try:
-            s.project_id = target_pid
-            s.save()
+            locked_lineage = resolve_writable_compression_lineage(
+                _active_state_db_path(),
+                requested_sid,
+                compression_edge_validator=(
+                    state_only_edge_validator
+                    if state_only_tip
+                    else _project_assignment_compression_edge
+                ),
+            )
+            expected_ids = {
+                str(getattr(segment, "session_id", "") or "")
+                for segment in assignment_sessions
+            }
+            initial_ids = set(initial_lineage.get("segment_ids") or [])
+            if (
+                locked_lineage.get("error")
+                or (
+                    initial_lineage.get("found")
+                    and not locked_lineage.get("found")
+                )
+                or (
+                    locked_lineage.get("found")
+                    and (
+                        not locked_lineage.get("complete")
+                        or set(locked_lineage.get("segment_ids") or [])
+                        != (initial_ids if initial_lineage.get("found") else expected_ids)
+                    )
+                )
+                or (not locked_lineage.get("found") and len(expected_ids) != 1)
+            ):
+                return bad(
+                    handler,
+                    "Session compression lineage changed while moving; project assignment was not changed",
+                    409,
+                )
+            # Reload while holding every lineage lock so stale pre-lock Session
+            # objects cannot overwrite newer transcript checkpoints.
+            locked_sessions = []
+            for segment in assignment_sessions:
+                sid = str(getattr(segment, "session_id", "") or "")
+                locked = Session.load(sid)
+                if locked is None and len(assignment_sessions) == 1:
+                    # New empty sessions live only in SESSIONS until their first
+                    # write. Preserve that existing single-row move behavior;
+                    # multi-segment lineage mutations still require every
+                    # durable sidecar to be present before any write begins.
+                    locked = segment
+                if locked is None or getattr(locked, "read_only", False):
+                    return bad(
+                        handler,
+                        "Session compression lineage changed while moving; project assignment was not changed",
+                        409,
+                    )
+                locked_sessions.append(locked)
+            with _PROJECT_MOVE_JOURNAL_LOCK:
+                if not recover_project_move_journals():
+                    return bad(
+                        handler,
+                        "A previous project assignment is still recovering; refresh before retrying",
+                        503,
+                    )
+                original_project_ids = {
+                    locked.session_id: locked.project_id for locked in locked_sessions
+                }
+                original_updated_at = {
+                    locked.session_id: locked.updated_at for locked in locked_sessions
+                }
+                transaction_updated_at = time.time()
+                journal = {
+                    "txid": uuid.uuid4().hex,
+                    "state": "prepared",
+                    "target_project_id": target_pid,
+                    "target_updated_at": transaction_updated_at,
+                    "entries": [
+                        {
+                            "session_id": locked.session_id,
+                            "project_id": original_project_ids[locked.session_id],
+                            "updated_at": original_updated_at[locked.session_id],
+                        }
+                        for locked in locked_sessions
+                    ],
+                }
+                journal_path = _write_project_move_journal(journal)
+                for locked in locked_sessions:
+                    locked.project_id = target_pid
+                    locked.updated_at = transaction_updated_at
+                attempted_sessions = []
+                try:
+                    for locked in locked_sessions:
+                        # save() replaces the sidecar before it updates the index.
+                        # Record the attempt first so an index failure rolls back a
+                        # sidecar that was already durably replaced.
+                        attempted_sessions.append(locked)
+                        locked.save(touch_updated_at=False)
+                except Exception:
+                    rollback_failed = False
+                    for saved in reversed(attempted_sessions):
+                        saved.project_id = original_project_ids[saved.session_id]
+                        saved.updated_at = original_updated_at[saved.session_id]
+                        try:
+                            saved.save(touch_updated_at=False)
+                        except Exception:
+                            rollback_failed = True
+                            logger.error(
+                                "session/move rollback failed for %s",
+                                saved.session_id,
+                                exc_info=True,
+                            )
+                    if not rollback_failed:
+                        journal_path.unlink(missing_ok=True)
+                    message = "Project assignment could not be persisted; no sessions were changed"
+                    if rollback_failed:
+                        message = "Project assignment failed and rollback was incomplete; refresh before retrying"
+                    return bad(handler, message, 500)
+                journal["state"] = "committed"
+                _write_project_move_journal(journal)
+                journal_path.unlink(missing_ok=True)
+            with LOCK:
+                for locked in locked_sessions:
+                    if locked.session_id in SESSIONS:
+                        SESSIONS[locked.session_id] = locked
+            s = next(
+                (
+                    locked for locked in locked_sessions
+                    if locked.session_id == requested_sid
+                ),
+                locked_sessions[-1] if state_only_tip else None,
+            )
+            if s is None:
+                return bad(
+                    handler,
+                    "Session compression lineage changed while moving; project assignment was not changed",
+                    409,
+                )
         finally:
-            _move_lock.release()
+            for _move_lock in reversed(_move_locks):
+                _move_lock.release()
         publish_session_list_changed(
             "session_move",
             profile=getattr(s, "profile", None),
-            session_id=getattr(s, "session_id", body["session_id"]),
+            session_id=requested_sid,
         )
         return j(handler, {"ok": True, "session": s.compact()})
 

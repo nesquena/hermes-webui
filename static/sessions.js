@@ -6740,22 +6740,49 @@ function _isForkWithResolvableParent(s, sessionIdsInList){
 }
 
 function _sessionLineageKey(s, sessionIdsInList, sessionsById){
+  const isCompressionEdge=(parent,child)=>{
+    if(!(
+      parent&&child&&parent.session_id&&child.parent_session_id===parent.session_id&&
+      parent.pre_compression_snapshot===true&&(
+        child.session_source!=='fork'||parent.session_source==='fork'
+      )
+    )) return false;
+    let candidateCount=0;
+    const childIsFork=child.session_source==='fork';
+    for(const candidate of (sessionsById?sessionsById.values():[])){
+      if(
+        candidate&&candidate.parent_session_id===parent.session_id&&
+        (candidate.session_source==='fork')===childIsFork
+      ) candidateCount++;
+      if(candidateCount>1) return false;
+    }
+    return candidateCount===1;
+  };
   if(!s||!s.session_id) return null;
-  if(_isChildSession(s)) return null;
-  if(s.session_source==='fork') return null;
+  const parent=s.parent_session_id&&sessionsById?sessionsById.get(s.parent_session_id):null;
+  // Compression rotates the existing Session object, so descendants of a fork
+  // retain session_source='fork'. Collapse only fork→fork snapshot edges; the
+  // original non-fork→fork branch remains an independent conversation.
+  if(s.session_source==='fork'&&!(parent&&parent.session_source==='fork'&&isCompressionEdge(parent,s))){
+    return s.pre_compression_snapshot===true?s.session_id:null;
+  }
+  // Sidecar compression provenance is stronger than state.db's conservative
+  // child-session projection. A continuation can therefore arrive labelled as
+  // a child while its exact parent is a durable pre-compression snapshot.
+  if(_isChildSession(s)&&!isCompressionEdge(parent,s)) return null;
   const lineageKey=s._lineage_root_id||s.lineage_root_id||null;
   if(lineageKey) return lineageKey;
   // WebUI-native context compression may only persist parent_session_id:
   // the preserved parent snapshot is marked pre_compression_snapshot while
   // the new continuation points at it.  When both rows are in the sidebar
   // payload, still collapse them into one conversation (#2489).
-  const parent=s.parent_session_id&&sessionsById?sessionsById.get(s.parent_session_id):null;
   if(s.pre_compression_snapshot||parent&&parent.pre_compression_snapshot){
     let root=s;
     const seen=new Set();
     while(root&&root.parent_session_id&&sessionsById&&sessionsById.has(root.parent_session_id)&&!seen.has(root.parent_session_id)){
       const next=sessionsById.get(root.parent_session_id);
-      if(!next||_isChildSession(next)||next.session_source==='fork'||!(root.pre_compression_snapshot||next.pre_compression_snapshot)) break;
+      if(!next||!isCompressionEdge(next,root)) break;
+      if(root.session_source==='fork'&&next.session_source!=='fork') break;
       seen.add(root.session_id);
       root=next;
     }
@@ -7101,6 +7128,10 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
   for(const child of attachQueue){
     const childRenderable=!!(child&&child.session_id&&renderableChildIds.has(child.session_id));
     if(child&&child.session_id&&visibleBySid.has(child.session_id)) continue;
+    // A raw segment already represented by the collapsed lineage is a prior
+    // turn, never a child row. This prevents one session from appearing in both
+    // expansion lists when state.db conservatively labelled it as a child.
+    if(child&&child.session_id&&visibleBySegmentSid.has(child.session_id)) continue;
     const isForkChild=_isForkWithResolvableParent(child, sessionIdsInList)&&!(child&&child.pinned);
     const childLineageKey=child&&(child._lineage_root_id||child.lineage_root_id||child.parent_session_id);
     const isHiddenLineageReferenceChild=!!(child&&child.archived&&child.parent_session_id&&childLineageKey&&!child.pinned&&!childRenderable);
@@ -7192,6 +7223,10 @@ function _syncSidebarExpansionForActiveSession(rows, activeSid){
   }
 }
 
+async function _openSidebarLineageSegment(segment){
+  return _openSidebarSession(segment, {skipLineageResolve:true});
+}
+
 function _collapseSessionLineageForSidebar(sessions){
   const result=[];
   const sessionIdsInList=new Set((sessions||[]).map(s=>s.session_id));
@@ -7224,7 +7259,18 @@ function _collapseSessionLineageForSidebar(sessions){
       ? _authoritativeLineageTipId(item)
       : item&&(item._lineage_tip_id||item._parent_lineage_tip_id)||null).filter(Boolean));
     const chosen=sorted.find(item=>tipIds.has(item&&item.session_id))||sorted[0];
-    result.push({...chosen,_lineage_key:key,_lineage_collapsed_count:items.length,_lineage_segments:sorted});
+    const collapsed={...chosen,_lineage_key:key,_lineage_collapsed_count:items.length,_lineage_segments:sorted};
+    // A canonical tip can exist only in state.db while older materialized
+    // sidecars own the lineage metadata. Inherit their agreed project value so
+    // a refresh cannot resurrect the tip's absent/stale assignment.
+    if(collapsed.project_id==null){
+      const projectOwner=sorted.find(item=>item&&item.project_id!=null);
+      if(projectOwner) collapsed.project_id=projectOwner.project_id;
+    }
+    // A state.db fallback may conservatively call the proven continuation a
+    // child. Once collapsed from sidecar snapshot edges it is the lineage tip.
+    if(items.length>1&&collapsed.relationship_type==='child_session') delete collapsed.relationship_type;
+    result.push(collapsed);
   }
   return result;
 }
@@ -8282,7 +8328,7 @@ function renderSessionListFromCache(){
         row.title=t('session_lineage_segment_open');
         row.onclick=async(e)=>{
           e.stopPropagation();
-          await _openSidebarSession(seg, {skipLineageResolve:true});
+          await _openSidebarLineageSegment(seg);
         };
         lineageList.appendChild(row);
       }

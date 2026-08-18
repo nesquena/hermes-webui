@@ -1,4 +1,5 @@
 """Shared helpers for reading Hermes Agent sessions from state.db."""
+import json
 import logging
 import sqlite3
 from contextlib import closing
@@ -986,6 +987,196 @@ def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops:
         'children': [_lineage_report_row(row, 'child_session') for row in child_rows],
         'manual_review': manual_review,
     }
+
+
+def resolve_writable_compression_lineage(
+    db_path: Path,
+    session_id: str | None,
+    *,
+    max_hops: int = 20,
+    max_segments: int = 500,
+    compression_edge_validator=None,
+) -> dict:
+    """Resolve every segment in one writable compression lineage.
+
+    Unlike the sidebar projection, a metadata mutation cannot safely degrade to
+    a partial graph: doing so would let the next authoritative refresh select a
+    different segment's stale value.  Return ``complete=False`` for missing
+    parents, cycles, depth/size overflow, malformed schemas, or read failures.
+    Explicit forks and other child-session edges are never included. Callers
+    that own stronger durable rotation evidence may supply
+    ``compression_edge_validator``; a rejected compression edge stays outside
+    the writable lineage.
+    """
+    sid = str(session_id or '').strip()
+    result = {
+        "found": False,
+        "complete": False,
+        "error": False,
+        "root_id": None,
+        "segment_ids": [],
+    }
+    if not sid:
+        return result
+    db_path = Path(db_path)
+    if not db_path.exists():
+        return result
+
+    try:
+        with closing(open_state_db_readonly(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(sessions)")
+            cols = {row[1] for row in cur.fetchall()}
+            if 'id' not in cols:
+                return result
+            cur.execute("SELECT 1 FROM sessions WHERE id = ?", (sid,))
+            if cur.fetchone() is None:
+                return result
+            required = {'id', 'parent_session_id', 'end_reason'}
+            if not required.issubset(cols):
+                # Legacy state.db schemas predate compression lineage entirely.
+                # They cannot encode a partial lineage, so preserve the existing
+                # standalone-sidecar mutation path. Once the lineage columns
+                # exist, missing/cyclic graph rows below fail closed.
+                return result
+
+            source_expr = _optional_col('source', cols)
+            session_source_expr = _optional_col('session_source', cols)
+            model_config_expr = _optional_col('model_config', cols)
+            started_expr = _optional_col('started_at', cols, '0')
+            ended_expr = _optional_col('ended_at', cols)
+
+            def fetch_one(row_id: str | None) -> dict | None:
+                if not row_id:
+                    return None
+                cur.execute(
+                    f"""SELECT s.id, {source_expr}, {session_source_expr},
+                               {model_config_expr}, {started_expr}, s.parent_session_id,
+                               {ended_expr}, s.end_reason
+                        FROM sessions s WHERE s.id = ?""",
+                    (row_id,),
+                )
+                row = cur.fetchone()
+                return dict(row) if row else None
+
+            def is_writable_continuation(parent: dict, child: dict) -> bool:
+                child_is_fork = str(child.get('session_source') or '').strip().lower() == 'fork'
+                parent_is_fork = str(parent.get('session_source') or '').strip().lower() == 'fork'
+                # Compression rotates the existing Session object, so a fork's
+                # continuation inherits session_source="fork". Keep the initial
+                # branch edge independent, but allow durable compression edges
+                # once both sides already belong to that fork lineage.
+                if child_is_fork and not parent_is_fork:
+                    return False
+
+                def branch_markers(row: dict) -> tuple:
+                    raw_model_config = row.get('model_config')
+                    if raw_model_config in (None, ''):
+                        return (None, None)
+                    try:
+                        model_config = json.loads(raw_model_config)
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError("ambiguous lineage model_config") from exc
+                    if not isinstance(model_config, dict):
+                        raise ValueError("ambiguous lineage model_config")
+                    branched_from = model_config.get('_branched_from')
+                    delegate_from = model_config.get('_delegate_from')
+                    markers = [value for value in (branched_from, delegate_from) if value is not None]
+                    if len(markers) > 1 or any(not isinstance(value, str) or not value.strip() for value in markers):
+                        raise ValueError("ambiguous lineage model_config")
+                    return branched_from, delegate_from
+
+                parent_markers = branch_markers(parent)
+                child_markers = branch_markers(child)
+                if parent_markers != child_markers and (
+                    parent_markers != (None, None) or child_markers != (None, None)
+                ):
+                    # Compression preserves model_config. An unchanged marker
+                    # identifies the fork/delegate lineage we are already in;
+                    # a new or changed marker starts an independent branch.
+                    return False
+                if parent.get('end_reason') == 'compression' and compression_edge_validator is not None:
+                    # The mutation caller's durable sidecar proof is authoritative
+                    # for WebUI rotations even when historical state.db source
+                    # labels drift between webui/cli across old segments.
+                    return bool(compression_edge_validator(parent, child))
+                if child_is_fork:
+                    return False
+                return _is_continuation_session(parent, child)
+
+            target = fetch_one(sid)
+            if not target:
+                return result
+            result["found"] = True
+
+            root = target
+            seen_ancestors = {sid}
+            for _hop in range(max(0, int(max_hops))):
+                parent_id = root.get('parent_session_id')
+                if not parent_id:
+                    break
+                parent_id = str(parent_id)
+                parent = fetch_one(parent_id)
+                if parent is None or parent_id in seen_ancestors:
+                    return result
+                if not is_writable_continuation(parent, root):
+                    break
+                seen_ancestors.add(parent_id)
+                root = parent
+            else:
+                if root.get('parent_session_id'):
+                    return result
+
+            root_id = str(root['id'])
+            segment_ids: list[str] = []
+            seen: set[str] = set()
+            frontier: list[tuple[dict, int]] = [(root, 0)]
+            while frontier:
+                current, depth = frontier.pop(0)
+                current_id = str(current['id'])
+                if current_id in seen or depth > max_hops:
+                    return result
+                seen.add(current_id)
+                segment_ids.append(current_id)
+                if len(segment_ids) > max_segments:
+                    return result
+                cur.execute(
+                    f"""SELECT s.id, {source_expr}, {session_source_expr},
+                               {model_config_expr}, {started_expr}, s.parent_session_id,
+                               {ended_expr}, s.end_reason
+                        FROM sessions s WHERE s.parent_session_id = ?""",
+                    (current_id,),
+                )
+                writable_children = []
+                for row in cur.fetchall():
+                    child = dict(row)
+                    if is_writable_continuation(current, child):
+                        writable_children.append(child)
+                # Two sidecar-backed children with the same compression parent
+                # are indistinguishable from a continuation plus an unmarked
+                # ordinary child. Never guess which branch owns lineage-wide
+                # metadata; require repair/manual disambiguation before writing.
+                if len(writable_children) > 1:
+                    return result
+                for child in writable_children:
+                    frontier.append((child, depth + 1))
+
+            if sid not in seen:
+                return result
+            return {
+                "found": True,
+                "complete": True,
+                "error": False,
+                "root_id": root_id,
+                "segment_ids": segment_ids,
+            }
+    except Exception:
+        # The path existed when resolution started. Any open/schema/read failure
+        # is uncertainty, not proof that this is a standalone sidecar. Metadata
+        # mutations must fail closed while their authority store is unreadable.
+        result["error"] = True
+        return result
 
 
 def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[str]) -> dict[str, dict]:
