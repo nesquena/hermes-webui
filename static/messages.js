@@ -4675,7 +4675,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // Prose runs go through the owning text writer. MEDIA tokens go through
     // the single-token DOMParser helper only after a delimiter or
     // reliable filename suffix proves the ref is complete.
-    const re=/MEDIA:"([^"]+)"|MEDIA:'([^']+)'|MEDIA:([^\s\)\]\n]+)/g;
+    const re=/MEDIA:"([^"\r\n]+)"|MEDIA:'([^'\r\n]+)'|MEDIA:([^\s\)\]\n]+)/g;
     let last=0, m;
     let unmatchedTail=null;
     while((m=re.exec(combined))){
@@ -4691,10 +4691,27 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         writeCurrent(slice);
       }
       if(!ref){
-        // Unterminated quoted candidate: hold it in the per-parser tail buffer
-        // so the closing quote can arrive in a later chunk. Only a closing
-        // quote (or a stream-end flush) resolves it — never the bare arm.
+        // Unterminated quoted candidate. If an EOL appears inside it, the
+        // opening quote never closed on its line: flush the malformed
+        // candidate literally (up to and including the EOL) and resume
+        // scanning after it, so following prose is never swallowed or
+        // merged with an unrelated quote on a later line. Otherwise hold
+        // the candidate in the per-parser tail buffer so a closing quote
+        // can arrive in a later chunk. Only a same-line closing quote (or
+        // a stream-end flush) resolves it — never the bare arm.
         const candidate = combined.slice(m.index);
+        const eol = candidate.search(/[\r\n]/);
+        if(eol >= 0){
+          const eolEnd = (candidate[eol]==='\r' && candidate[eol+1]==='\n') ? eol+2 : eol+1;
+          writeCurrent(candidate.slice(0, eolEnd));
+          if(eolEnd < candidate.length){
+            last = m.index + eolEnd;
+            re.lastIndex = last;
+            continue;
+          }
+          last = combined.length;
+          break;
+        }
         if(candidate.length < _MEDIA_TAIL_MAX){
           unmatchedTail = candidate;
         } else {

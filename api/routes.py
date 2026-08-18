@@ -18806,7 +18806,9 @@ def _serve_inline_html_preview(handler, target: Path, cache_control: str, *, csp
     return True
 
 
-_MEDIA_TOKEN_RE = re.compile(r"MEDIA:([^\s\)\]]+)")
+_MEDIA_TOKEN_RE = re.compile(
+    r'MEDIA:"([^"\r\n]+)"|MEDIA:\'([^\'\r\n]+)\'|MEDIA:([^"\s\'\)\]\n][^\s\)\]\n]*)'
+)
 
 
 def _message_content_text(content) -> str:
@@ -18851,11 +18853,18 @@ def _session_media_token_allows_path(sid: str, target: Path, allowed_mimes: set[
         text = _message_content_text(message.get("content"))
         if "MEDIA:" not in text:
             continue
-        for ref in _MEDIA_TOKEN_RE.findall(text):
-            if "://" in ref:
+        for m in _MEDIA_TOKEN_RE.finditer(text):
+            ref = m.group(1) or m.group(2) or m.group(3)
+            if not ref or "://" in ref:
                 continue
             try:
-                if Path(ref).expanduser().resolve() == target_resolved:
+                # Normalize URL encoding exactly once: the renderer decodes a
+                # raw/encoded token before encoding the query path, so an
+                # already-%20 token and a raw-space token must converge on
+                # the same canonical path here. Quotes were already stripped
+                # by the quoted arms; unquote() leaves bare refs unchanged.
+                decoded = unquote(ref)
+                if Path(decoded).expanduser().resolve() == target_resolved:
                     return True
             except Exception:
                 continue
