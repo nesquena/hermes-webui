@@ -708,10 +708,14 @@ function extractFunc(name) {{
 }}
 var _showArchived = false;
 var NO_PROJECT_FILTER = '__none__';
-var _activeProject = 'projA';
+var S = {{ rootProfileNames: ['default'] }};
+var _activeProject = {{ profile: 'default', project_id: 'projA' }};
 var _sidebarReferenceSessions = [{{session_id:'parent', title:'Archived parent (projB)', archived:true, project_id:'projB', updated_at:10, last_message_at:10, source:'webui'}}];
 function _isMessagingSession(s) {{ return false; }}
 function _isCliSession(s) {{ return !!(s && (s.source === 'cli' || s.raw_source === 'cli')); }}
+eval(extractFunc('_canonicalProjectFilterProfile'));
+eval(extractFunc('_projectFilterIdentity'));
+eval(extractFunc('_projectFilterMatches'));
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
