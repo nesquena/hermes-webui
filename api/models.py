@@ -12,7 +12,7 @@ import re
 import threading
 import time
 import uuid
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 from pathlib import Path
 
 try:  # pragma: no cover - platform-specific imports.
@@ -1189,6 +1189,48 @@ def model_explicit_pick_signature(model, model_provider) -> str:
     return f"{_m}\x1f{_p}"
 
 
+def _load_composer_draft_sidecar(session_id: str, fallback: object = None) -> dict:
+    """Overlay the lightweight draft sidecar over legacy embedded metadata."""
+    if session_id in _load_webui_deleted_session_tombstone():
+        return {"text": "", "files": []}
+    try:
+        from api.draft_store import load_draft
+
+        return load_draft(session_id, fallback=fallback)
+    except Exception:
+        logger.debug("Failed to load composer draft sidecar for %s", session_id, exc_info=True)
+        return fallback if isinstance(fallback, dict) else {"text": "", "files": []}
+
+
+def _load_runtime_state_sidecar(session_id: str) -> dict:
+    """Return lightweight pending/run metadata for a session, if present."""
+    if session_id in _load_webui_deleted_session_tombstone():
+        return {}
+    try:
+        from api.session_runtime_state import load_runtime_state
+
+        return load_runtime_state(session_id)
+    except Exception:
+        logger.debug("Failed to load runtime state sidecar for %s", session_id, exc_info=True)
+        return {}
+
+
+def _clear_runtime_state_sidecar_if_terminal(session) -> None:
+    """Remove the runtime overlay once the session has no live pending turn."""
+    if getattr(session, "active_stream_id", None) or getattr(session, "pending_user_message", None):
+        return
+    try:
+        from api.session_runtime_state import clear_runtime_state
+
+        clear_runtime_state(session.session_id)
+    except Exception:
+        logger.debug(
+            "Failed to clear terminal runtime state sidecar for %s",
+            getattr(session, "session_id", None),
+            exc_info=True,
+        )
+
+
 class Session:
     def __init__(self, session_id: str=None, title: str='Untitled',
                  workspace=str(DEFAULT_WORKSPACE), created_workspace=None,
@@ -1506,19 +1548,25 @@ class Session:
         except OSError:
             pass
 
-        tmp = self.path.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
         try:
-            with open(tmp, 'w', encoding='utf-8') as f:
-                f.write(payload)
-                f.flush()
-                os.fsync(f.fileno())
-            _safe_replace(tmp, self.path)
+            from api.session_runtime_state import runtime_state_lock
         except Exception:
+            runtime_state_lock = lambda _session_id: nullcontext()
+        with runtime_state_lock(self.session_id):
+            tmp = self.path.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
             try:
-                tmp.unlink(missing_ok=True)
+                with open(tmp, 'w', encoding='utf-8') as f:
+                    f.write(payload)
+                    f.flush()
+                    os.fsync(f.fileno())
+                _safe_replace(tmp, self.path)
             except Exception:
-                pass
-            raise
+                try:
+                    tmp.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                raise
+            _clear_runtime_state_sidecar_if_terminal(self)
         if not skip_index:
             _write_session_index(updates=[self])
 
@@ -1548,6 +1596,15 @@ class Session:
 
     @classmethod
     def load(cls, sid):
+        try:
+            from api.session_runtime_state import runtime_state_lock
+        except Exception:
+            return cls._load_unlocked(sid)
+        with runtime_state_lock(sid):
+            return cls._load_unlocked(sid)
+
+    @classmethod
+    def _load_unlocked(cls, sid):
         # Validate session ID format to prevent path traversal.  API/gateway
         # session ids may contain hyphens (for example ``api-*`` and
         # ``reachy-voice-*``); allow those but still reject dots/slashes.
@@ -1562,6 +1619,11 @@ class Session:
         _pre_read_sig = _sidecar_stat_signature(p)
         data = json.loads(p.read_text(encoding='utf-8'))
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
+        data['composer_draft'] = _load_composer_draft_sidecar(
+            sid,
+            fallback=data.get('composer_draft'),
+        )
+        data.update(_load_runtime_state_sidecar(sid))
         session = cls(**data)
         if _collapsed_partials:
             try:
@@ -1596,6 +1658,15 @@ class Session:
 
     @classmethod
     def load_metadata_only(cls, sid, *, index_message_counts=None):
+        try:
+            from api.session_runtime_state import runtime_state_lock
+        except Exception:
+            return cls._load_metadata_only_unlocked(sid, index_message_counts=index_message_counts)
+        with runtime_state_lock(sid):
+            return cls._load_metadata_only_unlocked(sid, index_message_counts=index_message_counts)
+
+    @classmethod
+    def _load_metadata_only_unlocked(cls, sid, *, index_message_counts=None):
         """Load only the compact metadata fields, skipping the messages array.
 
         Session JSON files have metadata fields (session_id, title, model, etc.)
@@ -1620,6 +1691,11 @@ class Session:
                 return cls.load(sid)
             parsed['messages'] = []
             parsed['tool_calls'] = []
+            parsed['composer_draft'] = _load_composer_draft_sidecar(
+                sid,
+                fallback=parsed.get('composer_draft'),
+            )
+            parsed.update(_load_runtime_state_sidecar(sid))
             session = cls(**parsed)
             sidecar_message_count = _parse_nonnegative_int(parsed.get('message_count'))
             index_message_count = None
@@ -4697,6 +4773,13 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
         cached = SESSIONS.get(sid)
         if cached is not None and promote_cache:
             SESSIONS.move_to_end(sid)  # LRU: mark as recently used
+    runtime_lock_factory = nullcontext
+    try:
+        from api.session_runtime_state import runtime_state_lock
+
+        runtime_lock_factory = runtime_state_lock
+    except Exception:
+        pass
     if cached is not None:
         # Defensive cache ownership check: compression/continuation and recovery
         # paths can temporarily juggle Session objects across lineage ids.  A
@@ -4716,11 +4799,12 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
     if cached is not None:
         if not metadata_only and _cached_session_lags_disk(cached):
             try:
-                disk_session = Session.load(sid)
-                with LOCK:
-                    SESSIONS[sid] = disk_session
-                    if promote_cache:
-                        SESSIONS.move_to_end(sid)
+                with runtime_lock_factory(sid):
+                    disk_session = Session.load(sid)
+                    with LOCK:
+                        SESSIONS[sid] = disk_session
+                        if promote_cache:
+                            SESSIONS.move_to_end(sid)
                 cached = disk_session
             except Exception:
                 logger.debug(
@@ -4728,12 +4812,15 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
                 )
         if not metadata_only and _inactive_cache_tail_needs_disk_check(cached):
             try:
-                disk_session = Session.load(sid)
-                if _cache_has_stale_unsaved_user_tail(cached, disk_session):
-                    with LOCK:
-                        SESSIONS[sid] = disk_session
-                        if promote_cache:
-                            SESSIONS.move_to_end(sid)
+                with runtime_lock_factory(sid):
+                    disk_session = Session.load(sid)
+                    stale_unsaved_tail = _cache_has_stale_unsaved_user_tail(cached, disk_session)
+                    if stale_unsaved_tail:
+                        with LOCK:
+                            SESSIONS[sid] = disk_session
+                            if promote_cache:
+                                SESSIONS.move_to_end(sid)
+                if stale_unsaved_tail:
                     cached = disk_session
             except Exception:
                 logger.debug(
@@ -4754,48 +4841,47 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
                     "state.db newer-sidecar sync failed on cache hit for session %s", sid, exc_info=True,
                 )
         return cached
-    if metadata_only:
-        s = Session.load_metadata_only(sid)
+    with runtime_lock_factory(sid):
+        if metadata_only:
+            s = Session.load_metadata_only(sid)
+        else:
+            s = Session.load(sid)
         if s:
+            if cache_on_miss:
+                with LOCK:
+                    SESSIONS[sid] = s
+                    if promote_cache:
+                        SESSIONS.move_to_end(sid)
+                    _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+            if not metadata_only:
+                try:
+                    synced_from_state = _sync_sidecar_from_state_db_if_newer(s)
+                    repaired = False if synced_from_state else _repair_stale_pending(s)
+                    # If the stale-pending repair did not fire but the session
+                    # already carries a pending-journal-retry marker (e.g. set on
+                    # a previous repair pass), give the lazy-retry path one
+                    # chance to self-heal on this read.
+                    if not repaired and not synced_from_state and _session_has_pending_journal_retry(s):
+                        try:
+                            _try_retry_journal_recovery_in_place(s)
+                        except Exception:
+                            logger.debug(
+                                "lazy journal-retry failed on cold load for session %s", sid, exc_info=True,
+                            )
+                    # If repair had to bail because the per-session lock was held,
+                    # do not pin the still-stale sidecar in the LRU cache forever.
+                    # Leaving it cached would prevent future get_session() calls from
+                    # re-entering the cache-miss repair path after the lock holder exits.
+                    if cache_on_miss and not repaired and (len(s.messages) == 0
+                            and s.pending_user_message
+                            and s.active_stream_id
+                            and s.active_stream_id not in _active_stream_ids()):
+                        with LOCK:
+                            if SESSIONS.get(sid) is s:
+                                SESSIONS.pop(sid, None)
+                except Exception:
+                    pass  # repair is best-effort
             return s
-    else:
-        s = Session.load(sid)
-    if s:
-        if cache_on_miss:
-            with LOCK:
-                SESSIONS[sid] = s
-                if promote_cache:
-                    SESSIONS.move_to_end(sid)
-                _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
-        if not metadata_only:
-            try:
-                synced_from_state = _sync_sidecar_from_state_db_if_newer(s)
-                repaired = False if synced_from_state else _repair_stale_pending(s)
-                # If the stale-pending repair did not fire but the session
-                # already carries a pending-journal-retry marker (e.g. set on
-                # a previous repair pass), give the lazy-retry path one
-                # chance to self-heal on this read.
-                if not repaired and not synced_from_state and _session_has_pending_journal_retry(s):
-                    try:
-                        _try_retry_journal_recovery_in_place(s)
-                    except Exception:
-                        logger.debug(
-                            "lazy journal-retry failed on cold load for session %s", sid, exc_info=True,
-                        )
-                # If repair had to bail because the per-session lock was held,
-                # do not pin the still-stale sidecar in the LRU cache forever.
-                # Leaving it cached would prevent future get_session() calls from
-                # re-entering the cache-miss repair path after the lock holder exits.
-                if cache_on_miss and not repaired and (len(s.messages) == 0
-                        and s.pending_user_message
-                        and s.active_stream_id
-                        and s.active_stream_id not in _active_stream_ids()):
-                    with LOCK:
-                        if SESSIONS.get(sid) is s:
-                            SESSIONS.pop(sid, None)
-            except Exception:
-                pass  # repair is best-effort
-        return s
     raise KeyError(sid)
 
 
@@ -10271,6 +10357,47 @@ def _cleanup_manifest_thread_lock(hermes_home):
         return lock
 
 
+def _delete_webui_sidecars_for_session(session_id: str) -> bool:
+    """Remove WebUI sidecars and retain failed IDs for retry."""
+    success = False
+    try:
+        from api.draft_store import delete_draft
+        from api.session_runtime_state import clear_runtime_state, runtime_state_lock
+
+        with runtime_state_lock(session_id):
+            with LOCK:
+                SESSIONS.pop(session_id, None)
+            # The tombstone is both the durable retry record and the loader
+            # guard that prevents stale state from attaching to a reused ID.
+            _record_webui_deleted_session_tombstone(session_id)
+            success = delete_draft(session_id) and clear_runtime_state(session_id)
+    except Exception:
+        logger.warning("Failed to coordinate WebUI sidecar cleanup for %s", session_id, exc_info=True)
+    if success:
+        # Keep the tombstone until the owning transcript artifact is removed.
+        _record_webui_deleted_session_tombstone(session_id)
+    else:
+        _record_webui_deleted_session_tombstone(session_id)
+    return success
+
+
+def _retry_webui_deleted_sidecars() -> bool:
+    """Retry tombstoned sidecars only while the retired owner is absent."""
+    complete = True
+    for session_id in tuple(_load_webui_deleted_session_tombstone()):
+        with LOCK:
+            cached_owner = session_id in SESSIONS
+        if cached_owner or (SESSION_DIR / f"{session_id}.json").exists():
+            # Never let retry cleanup delete a newly recreated owner.
+            complete = False
+            continue
+        if not _delete_webui_sidecars_for_session(session_id):
+            complete = False
+        else:
+            _clear_webui_deleted_session_tombstone(session_id)
+    return complete
+
+
 def delete_cli_session(sid) -> bool:
     """Delete a CLI session while serializing manifest and DB cleanup."""
     try:
@@ -10309,6 +10436,7 @@ def _delete_cli_session_locked(sid, hermes_home) -> bool:
     # removals get another chance even when the current session ID
     # is unrelated.
     stale_cleanup_complete = _process_stale_cleanup_manifests(hermes_home)
+    sidecar_cleanup_complete = _retry_webui_deleted_sidecars()
 
     db_path = hermes_home / 'state.db'
     if not db_path.exists():
@@ -10577,6 +10705,9 @@ def _delete_cli_session_locked(sid, hermes_home) -> bool:
                 return False
 
             conn.commit()
+            for removed_id in all_removed_ids:
+                if not _delete_webui_sidecars_for_session(str(removed_id)):
+                    sidecar_cleanup_complete = False
 
             # Post-commit artifact cleanup.  Scan ALL outstanding manifests
             # (including the one just written) and retry every pending ID.
@@ -10681,7 +10812,15 @@ def _delete_cli_session_locked(sid, hermes_home) -> bool:
                 else:
                     mp.unlink(missing_ok=True)
 
-            return stale_cleanup_complete and not artifact_cleanup_failed
+            cleanup_clean = (
+                stale_cleanup_complete
+                and sidecar_cleanup_complete
+                and not artifact_cleanup_failed
+            )
+            if cleanup_clean:
+                for removed_id in all_removed_ids:
+                    _clear_webui_deleted_session_tombstone(str(removed_id))
+            return cleanup_clean
     except Exception:
         logger.warning("Failed to delete CLI session %s from state.db", sid, exc_info=True)
         return False

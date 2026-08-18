@@ -58,7 +58,10 @@ contributor guidance; it does not change runtime behavior or CI gates.
   the replacement API/client surfaces needed before source mounts can be removed.
   Start here for issue #2491 and Docker/source-boundary migration slices.
 - [`docs/rfcs/turn-journal.md`](rfcs/turn-journal.md): proposed crash-safe
-  write-ahead journal for browser-originated chat turns.
+  write-ahead journal for browser-originated chat turns. In deferred-save mode,
+  the WebUI now uses the `submitted` event as the pre-worker durability anchor
+  together with a small per-session runtime-state sidecar; eager-save mode keeps
+  its existing full-save behavior.
 - [`docs/rfcs/webui-pending-intent-controls.md`](rfcs/webui-pending-intent-controls.md):
   proposed control-surface companion to the long-running-session reply model for
   Queue, Steer, Stop-and-send, Interrupt, and leftover-steer inputs submitted
