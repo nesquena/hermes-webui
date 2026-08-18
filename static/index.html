@@ -1490,6 +1490,9 @@
                 <div class="settings-section-title" data-i18n="custom_endpoints_title">Custom Endpoints</div>
                 <div class="settings-section-meta" data-i18n="custom_endpoints_meta">Add any OpenAI-compatible endpoint (vLLM, Ollama, relay, ...) with its API key — no config.yaml or .env editing. Keys are stored in the profile .env file.</div>
               </div>
+              <button type="button" class="settings-action-btn" id="ceAddBtn" onclick="_openCustomEndpointForm(null)" title="Add custom endpoint" data-i18n-title="custom_endpoints_add_title" data-i18n-aria-label="custom_endpoints_add_title" aria-label="Add custom endpoint">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg> <span data-i18n="custom_endpoints_add">+ Add</span>
+              </button>
             </div>
             <div id="customEndpointsList" style="display:flex;flex-direction:column;margin-top:4px">
               <!-- Populated dynamically by loadCustomEndpointsPanel() -->

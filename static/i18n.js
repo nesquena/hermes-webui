@@ -1264,6 +1264,8 @@ const LOCALES = {
     providers_section_meta: 'Manage API keys for AI providers. Changes take effect immediately.',
     // Custom endpoints
     custom_endpoints_title: 'Custom Endpoints',
+    custom_endpoints_add: '+ Add',
+    custom_endpoints_add_title: 'Add custom endpoint',
     custom_endpoints_meta: 'Add any OpenAI-compatible endpoint (vLLM, Ollama, relay, ...) with its API key — no config.yaml or .env editing. Keys are stored in the profile .env file.',
     custom_endpoints_empty: 'No custom endpoints configured.',
     custom_endpoints_name: 'Name',
