@@ -105,7 +105,8 @@ def test_handoff_delete_clears_local_storage_markers():
     assert "_setHandoffStorageValue(sid, _HANDOFF_SUFFIX_DISMISSED_AT, null);" in SESSIONS_JS
     assert "_setHandoffStorageValue(sid, _HANDOFF_SUFFIX_SUMMARY_HANDLED_AT, null);" in SESSIONS_JS
     assert "_clearHandoffStorageForSession(sid);" in SESSIONS_JS
-    assert "ids.forEach(_clearHandoffStorageForSession);" in SESSIONS_JS
+    assert "succeededIds.forEach(sid=>{" in SESSIONS_JS
+    assert "_clearHandoffStorageForSession(sid);" in SESSIONS_JS
 
 
 def test_handoff_summary_renders_as_transcript_card_not_dock_card():

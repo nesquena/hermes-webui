@@ -101,7 +101,8 @@ def test_session_pin_endpoint_caps_pinned_sessions_at_three():
         assert d["session"]["pinned"] is True
     finally:
         for sid in created:
-            post("/api/session/delete", {"session_id": sid})
+            response, status = post("/api/session/delete", {"session_id": sid})
+            assert status == 200, response
 
 
 def test_session_pin_endpoint_ignores_hidden_snapshot_when_enforcing_cap():

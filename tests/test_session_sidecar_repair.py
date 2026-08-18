@@ -21,7 +21,7 @@ from api.models import (
 import api.config as config
 import api.streaming as streaming
 import api.profiles as profiles
-from api.run_journal import RunJournalWriter, append_run_event
+from tests.run_journal_test_utils import RunJournalWriter, append_run_event
 
 
 # ── Fixtures ────────────────────────────────────────────────────────────────

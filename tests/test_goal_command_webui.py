@@ -615,21 +615,33 @@ def test_chat_start_forwards_goal_related_to_gateway_worker(monkeypatch, tmp_pat
     monkeypatch.setattr(routes.threading, "Thread", FakeThread)
     monkeypatch.setattr(routes.uuid, "uuid4", lambda: SimpleNamespace(hex="goal-stream-id"))
 
-    response = routes._start_chat_stream_for_session(
-        FakeSession(),
-        msg="continue the goal",
-        attachments=[],
-        workspace=str(tmp_path),
-        model="gpt-5.5",
-        model_provider="openai-codex",
-        goal_related=True,
-    )
+    session = FakeSession()
+    response = {}
+    try:
+        response = routes._start_chat_stream_for_session(
+            session,
+            msg="continue the goal",
+            attachments=[],
+            workspace=str(tmp_path),
+            model="gpt-5.5",
+            model_provider="openai-codex",
+            goal_related=True,
+        )
 
-    assert response["stream_id"] == "goal-stream-id"
-    assert captured["target"] is routes._run_gateway_chat_streaming
-    assert captured["kwargs"]["goal_related"] is True
-    assert captured["kwargs"]["model_provider"] == "openai-codex"
-    assert captured["started"] is True
+        assert response["stream_id"] == "goal-stream-id"
+        assert captured["target"] is routes._run_gateway_chat_streaming
+        assert captured["kwargs"]["goal_related"] is True
+        assert captured["kwargs"]["model_provider"] == "openai-codex"
+        assert captured["started"] is True
+    finally:
+        stream_id = str(response.get("stream_id") or "")
+        with routes.STREAMS_LOCK:
+            routes.STREAMS.pop(stream_id, None)
+        routes.unregister_stream_owner(stream_id)
+        routes.STREAM_GOAL_RELATED.pop(stream_id, None)
+        with routes.LOCK:
+            if routes.SESSIONS.get(session.session_id) is session:
+                routes.SESSIONS.pop(session.session_id, None)
 
 
 def test_streaming_post_turn_goal_hook_surfaces_and_continues():

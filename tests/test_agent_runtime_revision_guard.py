@@ -515,6 +515,9 @@ def test_stream_admission_uses_one_gateway_ownership_snapshot(monkeypatch, gatew
             routes.STREAMS.pop(stream_id, None)
         unregister_stream_owner(stream_id)
         routes.STREAM_GOAL_RELATED.pop(stream_id, None)
+        with routes.LOCK:
+            if routes.SESSIONS.get(session.session_id) is session:
+                routes.SESSIONS.pop(session.session_id, None)
 
 
 @pytest.mark.parametrize(

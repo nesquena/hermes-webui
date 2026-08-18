@@ -16,8 +16,21 @@ def _keys_for(session_dir, sid):
     return [k for k in run_journal._WRITER_LOCKS if k[0] == dir_key]
 
 
+def _writer(sid, run_id, session_dir):
+    incarnation = run_journal.activate_run_journal_session(
+        sid,
+        session_dir=session_dir,
+    )
+    return RunJournalWriter(
+        sid,
+        run_id,
+        session_dir=session_dir,
+        incarnation=incarnation,
+    )
+
+
 def test_delete_run_journal_evicts_writer_locks(tmp_path):
-    writer = RunJournalWriter("sid-del", "run-1", session_dir=tmp_path)
+    writer = _writer("sid-del", "run-1", tmp_path)
     writer.append_sse_event("token", {"text": "hello"})
     # Constructing the writer + appending populated the per-run lock cache.
     assert _keys_for(tmp_path, "sid-del")
@@ -29,8 +42,8 @@ def test_delete_run_journal_evicts_writer_locks(tmp_path):
 
 
 def test_delete_run_journal_keeps_other_sessions_locks(tmp_path):
-    RunJournalWriter("sid-keep", "run-k", session_dir=tmp_path).append_sse_event("token", {"text": "k"})
-    RunJournalWriter("sid-del", "run-d", session_dir=tmp_path).append_sse_event("token", {"text": "d"})
+    _writer("sid-keep", "run-k", tmp_path).append_sse_event("token", {"text": "k"})
+    _writer("sid-del", "run-d", tmp_path).append_sse_event("token", {"text": "d"})
 
     delete_run_journal("sid-del", session_dir=tmp_path)
 
@@ -39,7 +52,7 @@ def test_delete_run_journal_keeps_other_sessions_locks(tmp_path):
 
 
 def test_delete_run_journal_noop_leaves_cache_untouched(tmp_path):
-    RunJournalWriter("sid-keep", "run-k", session_dir=tmp_path).append_sse_event("token", {"text": "k"})
+    _writer("sid-keep", "run-k", tmp_path).append_sse_event("token", {"text": "k"})
     before = _keys_for(tmp_path, "sid-keep")
 
     # Missing/invalid ids never touch the cache.

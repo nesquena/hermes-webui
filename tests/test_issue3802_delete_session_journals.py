@@ -7,8 +7,14 @@ payloads) on disk, so the conversation stayed recoverable. These tests pin the
 two cleanup helpers: every shard/dir for the deleted session is removed, and an
 unrelated session's journals are left untouched.
 """
+import json
 import os
+import shutil
+from pathlib import Path
 
+import pytest
+
+import api.run_journal as run_journal
 from api.run_journal import RunJournalWriter, delete_run_journal, read_run_events
 from api.turn_journal import (
     append_turn_journal_event,
@@ -22,6 +28,19 @@ def _submit(sid, content, session_dir):
         sid,
         {"event": "submitted", "turn_id": "t1", "stream_id": "s1", "role": "user", "content": content},
         session_dir=session_dir,
+    )
+
+
+def _writer(sid, run_id, session_dir):
+    incarnation = run_journal.activate_run_journal_session(
+        sid,
+        session_dir=session_dir,
+    )
+    return RunJournalWriter(
+        sid,
+        run_id,
+        session_dir=session_dir,
+        incarnation=incarnation,
     )
 
 
@@ -67,7 +86,7 @@ def test_delete_turn_journal_noop_on_missing_or_invalid(tmp_path):
 
 
 def test_delete_run_journal_removes_session_directory(tmp_path):
-    writer = RunJournalWriter("sid-del", "run-1", session_dir=tmp_path)
+    writer = _writer("sid-del", "run-1", tmp_path)
     writer.append_sse_event("token", {"text": "hello"})
     writer.append_sse_event("done", {"session": {"session_id": "sid-del"}})
     run_dir = tmp_path / "_run_journal" / "sid-del"
@@ -80,8 +99,8 @@ def test_delete_run_journal_removes_session_directory(tmp_path):
 
 
 def test_delete_run_journal_leaves_other_sessions_intact(tmp_path):
-    RunJournalWriter("sid-keep", "run-k", session_dir=tmp_path).append_sse_event("token", {"text": "k"})
-    RunJournalWriter("sid-del", "run-d", session_dir=tmp_path).append_sse_event("token", {"text": "d"})
+    _writer("sid-keep", "run-k", tmp_path).append_sse_event("token", {"text": "k"})
+    _writer("sid-del", "run-d", tmp_path).append_sse_event("token", {"text": "d"})
 
     delete_run_journal("sid-del", session_dir=tmp_path)
 
@@ -95,12 +114,207 @@ def test_delete_run_journal_noop_on_missing_or_invalid(tmp_path):
     assert delete_run_journal("", session_dir=tmp_path) is False
 
 
+def test_deleted_session_rejects_bare_writer_and_tokenless_append(tmp_path):
+    sid = "sid-retired-authority"
+    run_id = "run-1"
+    writer = _writer(sid, run_id, tmp_path)
+    writer.append_sse_event("token", {"text": "before"})
+    authority_path = tmp_path / "_run_journal" / ".incarnations" / f"{sid}.json"
+    active = json.loads(authority_path.read_text(encoding="ascii"))
+    assert active["version"] == 2
+    assert active["state"] == "active"
+
+    assert delete_run_journal(sid, session_dir=tmp_path) is True
+    retired = json.loads(authority_path.read_text(encoding="ascii"))
+    assert retired["version"] == 2
+    assert retired["state"] == "retired"
+    assert retired["incarnation"] == active["incarnation"]
+
+    with pytest.raises(RuntimeError, match="run journal writer incarnation required"):
+        RunJournalWriter(sid, run_id, session_dir=tmp_path)
+    with pytest.raises(RuntimeError, match="run journal writer incarnation required"):
+        run_journal.append_run_event(
+            sid,
+            run_id,
+            "token",
+            {"text": "tokenless"},
+            session_dir=tmp_path,
+        )
+    assert not (tmp_path / "_run_journal" / sid).exists()
+
+    replacement = run_journal.activate_run_journal_session(
+        sid,
+        session_dir=tmp_path,
+        reactivate_retired=True,
+    )
+    assert replacement != active["incarnation"]
+
+
+def test_legacy_active_authority_migrates_without_rotating_capability(tmp_path):
+    sid = "sid-legacy-authority"
+    incarnation = "1" * 32
+    authority_path = tmp_path / "_run_journal" / ".incarnations" / f"{sid}.json"
+    authority_path.parent.mkdir(parents=True)
+    authority_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "session_id": sid,
+                "incarnation": incarnation,
+            }
+        ),
+        encoding="ascii",
+    )
+
+    assert run_journal.activate_run_journal_session(sid, session_dir=tmp_path) == incarnation
+    migrated = json.loads(authority_path.read_text(encoding="ascii"))
+    assert migrated == {
+        "version": 2,
+        "session_id": sid,
+        "state": "active",
+        "incarnation": incarnation,
+    }
+
+
+@pytest.mark.parametrize(
+    "authority_bytes",
+    [
+        b"{not-json",
+        b'{"version":2,"version":2,"session_id":"sid-corrupt-authority","state":"active","incarnation":"00000000000000000000000000000000"}',
+        b'{"version":2,"session_id":"wrong","state":"active","incarnation":"00000000000000000000000000000000"}',
+        b'{"version":2,"session_id":"sid-corrupt-authority","state":"unknown","incarnation":"00000000000000000000000000000000"}',
+    ],
+)
+def test_corrupt_authority_record_fails_closed_without_overwrite(tmp_path, authority_bytes):
+    sid = "sid-corrupt-authority"
+    authority_path = tmp_path / "_run_journal" / ".incarnations" / f"{sid}.json"
+    authority_path.parent.mkdir(parents=True)
+    authority_path.write_bytes(authority_bytes)
+
+    with pytest.raises(RuntimeError, match="invalid run journal authority"):
+        run_journal.activate_run_journal_session(sid, session_dir=tmp_path)
+    assert authority_path.read_bytes() == authority_bytes
+
+
+def test_unreadable_authority_record_fails_closed_without_overwrite(tmp_path, monkeypatch):
+    sid = "sid-unreadable-authority"
+    authority_path = tmp_path / "_run_journal" / ".incarnations" / f"{sid}.json"
+    authority_path.parent.mkdir(parents=True)
+    authority_path.write_text("present", encoding="ascii")
+    real_read_text = Path.read_text
+
+    def deny_authority_read(path, *args, **kwargs):
+        if path == authority_path:
+            raise PermissionError("authority denied")
+        return real_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", deny_authority_read)
+    with pytest.raises(RuntimeError, match="unreadable run journal authority"):
+        run_journal.activate_run_journal_session(sid, session_dir=tmp_path)
+
+    monkeypatch.setattr(Path, "read_text", real_read_text)
+    assert authority_path.read_text(encoding="ascii") == "present"
+
+
+def test_delete_run_journal_surfaces_rmtree_failure_without_evicting_caches(
+    tmp_path, monkeypatch
+):
+    writer = _writer("sid-delete-failure", "run-1", tmp_path)
+    writer.append_sse_event("token", {"text": "keep"})
+    run_path = tmp_path / "_run_journal" / "sid-delete-failure" / "run-1.jsonl"
+    dir_key = str(run_path.parent)
+    run_key = str(run_path)
+    run_journal.latest_run_summary(
+        "sid-delete-failure", "run-1", session_dir=tmp_path
+    )
+    with run_journal._WRITER_LOCKS_GUARD:
+        writer_locks_before = {
+            key: lock
+            for key, lock in run_journal._WRITER_LOCKS.items()
+            if key[0] == dir_key
+        }
+    with run_journal._SEQ_CACHE_LOCK:
+        seq_cache_before = {
+            key: value
+            for key, value in run_journal._SEQ_CACHE.items()
+            if str(Path(key).parent) == dir_key
+        }
+    with run_journal._SUMMARY_CACHE_LOCK:
+        summary_cache_before = {
+            key: value
+            for key, value in run_journal._SUMMARY_CACHE.items()
+            if str(Path(key).parent) == dir_key
+        }
+    assert writer_locks_before
+    assert run_key in seq_cache_before
+    assert run_key in summary_cache_before
+
+    def fail_rmtree(path, *, ignore_errors=False):
+        raise OSError("forced-rmtree-failure")
+
+    monkeypatch.setattr(shutil, "rmtree", fail_rmtree)
+    with pytest.raises(OSError, match="forced-rmtree-failure"):
+        delete_run_journal("sid-delete-failure", session_dir=tmp_path)
+
+    assert (tmp_path / "_run_journal" / "sid-delete-failure").exists()
+    with run_journal._WRITER_LOCKS_GUARD:
+        writer_locks_after = {
+            key: lock
+            for key, lock in run_journal._WRITER_LOCKS.items()
+            if key[0] == dir_key
+        }
+    with run_journal._SEQ_CACHE_LOCK:
+        seq_cache_after = {
+            key: value
+            for key, value in run_journal._SEQ_CACHE.items()
+            if str(Path(key).parent) == dir_key
+        }
+    with run_journal._SUMMARY_CACHE_LOCK:
+        summary_cache_after = {
+            key: value
+            for key, value in run_journal._SUMMARY_CACHE.items()
+            if str(Path(key).parent) == dir_key
+        }
+    assert writer_locks_after.keys() == writer_locks_before.keys()
+    for key, lock in writer_locks_before.items():
+        assert writer_locks_after[key] is lock
+    assert seq_cache_after == seq_cache_before
+    assert summary_cache_after == summary_cache_before
+    with pytest.raises(RuntimeError, match="run journal writer incarnation retired"):
+        writer.append_sse_event("token", {"text": "must-not-append-after-delete-intent"})
+
+
+def test_delete_run_journal_keeps_bytes_when_incarnation_retirement_fails(
+    tmp_path, monkeypatch
+):
+    writer = _writer("sid-retire-failure", "run-1", tmp_path)
+    writer.append_sse_event("token", {"text": "keep"})
+    run_path = tmp_path / "_run_journal" / "sid-retire-failure" / "run-1.jsonl"
+
+    def fail_retirement_write(*_args, **_kwargs):
+        raise OSError("forced-incarnation-write-failure")
+
+    monkeypatch.setattr(
+        run_journal,
+        "_write_run_journal_incarnation",
+        fail_retirement_write,
+    )
+    with pytest.raises(OSError, match="forced-incarnation-write-failure"):
+        delete_run_journal("sid-retire-failure", session_dir=tmp_path)
+
+    assert run_path.exists()
+    next_event = writer.append_sse_event(
+        "token", {"text": "writer-remains-admitted-after-retirement-failure"}
+    )
+    assert next_event["seq"] == 2
+
+
 def test_delete_journals_reject_dot_traversal_ids(tmp_path):
     """A bare '.'/'..' passes the dot-permitting id regex but must NOT resolve to
     the journal root/parent and delete the wrong directory (no '/' to catch it).
     """
     # Seed a real run + turn journal so we'd notice an over-broad delete.
-    writer = RunJournalWriter("keep", "run-1", session_dir=tmp_path)
+    writer = _writer("keep", "run-1", tmp_path)
     writer.append_sse_event("token", {"text": "hello"})
     _submit("keep", "hi", tmp_path)
     run_dir = tmp_path / "_run_journal" / "keep"

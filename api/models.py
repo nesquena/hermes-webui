@@ -12,7 +12,8 @@ import re
 import threading
 import time
 import uuid
-from contextlib import closing, contextmanager
+import weakref
+from contextlib import ExitStack, closing, contextmanager
 from pathlib import Path
 
 try:  # pragma: no cover - platform-specific imports.
@@ -183,6 +184,129 @@ def _safe_replace(src: Path, dst: Path) -> None:
 # Serializes index writers so concurrent Session.save() calls cannot race on
 # stale baselines while still allowing LOCK to be released before disk I/O.
 _INDEX_WRITE_LOCK = threading.RLock()
+
+# Serializes durable writes for one session from the first sidecar read through
+# the sidecar replacement and the targeted index write.  This lock is separate
+# from the non-reentrant agent-mutation lock in api.config: rollback may be
+# called from a path that already owns that lock, and save callers may nest
+# persistence helpers.  Weak values preserve one lock for overlapping holders
+# and waiters without leaking an entry for every deleted session id.
+_SESSION_PERSISTENCE_LOCKS = weakref.WeakValueDictionary()
+_SESSION_PERSISTENCE_LOCKS_LOCK = threading.Lock()
+
+# Every in-process Session object carries the persistence capability that was
+# current when it was created/loaded.  Successful deletion revokes and removes
+# the capability for that SID while holding the SID persistence lock; captured
+# objects from the retired generation then fail closed before any write.  A
+# weak registry avoids retaining one entry forever for every historical SID,
+# while each live Session keeps its own capability strongly reachable.
+class _SessionPersistenceCapability:
+    __slots__ = ("revoked", "__weakref__")
+
+    def __init__(self):
+        self.revoked = False
+
+
+_SESSION_PERSISTENCE_GENERATIONS = weakref.WeakValueDictionary()
+_SESSION_PERSISTENCE_GENERATIONS_LOCK = threading.Lock()
+
+
+def _current_session_persistence_generation(session_id: str):
+    """Return (and lazily create) the current in-process SID capability."""
+    sid = str(session_id or "")
+    with _SESSION_PERSISTENCE_GENERATIONS_LOCK:
+        capability = _SESSION_PERSISTENCE_GENERATIONS.get(sid)
+        if capability is None or capability.revoked:
+            capability = _SessionPersistenceCapability()
+            _SESSION_PERSISTENCE_GENERATIONS[sid] = capability
+        return capability
+
+
+def _advance_session_persistence_generation(session_id: str):
+    """Revoke the current SID capability and return the retired object.
+
+    The caller must already hold the SID persistence lock.  Keeping this
+    operation separate from the lock itself makes the lock order explicit at
+    deletion and uncertain-rollback call sites.  The registry entry is removed
+    so the next explicit same-SID construction gets a fresh capability.
+    """
+    sid = str(session_id or "")
+    with _SESSION_PERSISTENCE_GENERATIONS_LOCK:
+        capability = _SESSION_PERSISTENCE_GENERATIONS.get(sid)
+        if capability is not None:
+            capability.revoked = True
+            if _SESSION_PERSISTENCE_GENERATIONS.get(sid) is capability:
+                _SESSION_PERSISTENCE_GENERATIONS.pop(sid, None)
+        return capability
+
+
+def _session_persistence_generation_is_current(session) -> bool:
+    """Return whether *session* still owns the current SID write capability."""
+    sid = str(getattr(session, "session_id", "") or "")
+    generation = getattr(session, "_persistence_generation", None)
+    if not sid or generation is None:
+        return False
+    with _SESSION_PERSISTENCE_GENERATIONS_LOCK:
+        return (
+            generation is not None
+            and not getattr(generation, "revoked", True)
+            and _SESSION_PERSISTENCE_GENERATIONS.get(sid) is generation
+        )
+
+
+def _bind_session_persistence_capability_for_identity_transition(
+    session, source_sid: str, target_sid: str
+) -> None:
+    """Bind *session* to the capability for an explicit SID transition.
+
+    ``Session.session_id`` remains an ordinary dynamic field: assigning it does
+    not implicitly acquire a write capability.  Callers that deliberately move
+    one live object to a new identity must identify both sides of that move so
+    the source generation can be checked before the target generation is
+    adopted.  Both SID locks are held in lexical order to keep this helper
+    composable with another concurrent transition.
+    """
+    source = str(source_sid or "")
+    target = str(target_sid or "")
+    if not source or not target or source == target:
+        raise ValueError("Identity transition requires distinct non-empty session ids")
+    if str(getattr(session, "session_id", "") or "") != target:
+        raise ValueError(
+            f"Identity transition target {target!r} does not match session.session_id"
+        )
+
+    with ExitStack() as locks:
+        for sid in sorted((source, target)):
+            locks.enter_context(_get_session_persistence_lock(sid))
+        with _SESSION_PERSISTENCE_GENERATIONS_LOCK:
+            source_generation = _SESSION_PERSISTENCE_GENERATIONS.get(source)
+            owned_generation = getattr(session, "_persistence_generation", None)
+            if (
+                owned_generation is None
+                or owned_generation is not source_generation
+                or getattr(owned_generation, "revoked", True)
+            ):
+                raise RuntimeError(
+                    f"Refusing identity transition from revoked/deleted session {source!r}"
+                )
+            target_generation = _SESSION_PERSISTENCE_GENERATIONS.get(target)
+            if target_generation is None or getattr(target_generation, "revoked", True):
+                target_generation = _SessionPersistenceCapability()
+                _SESSION_PERSISTENCE_GENERATIONS[target] = target_generation
+            session._persistence_generation = target_generation
+
+
+def _get_session_persistence_lock(session_id: str) -> threading.RLock:
+    """Return the reentrant persistence lock shared by one session id."""
+    sid = str(session_id or "")
+    with _SESSION_PERSISTENCE_LOCKS_LOCK:
+        lock = _SESSION_PERSISTENCE_LOCKS.get(sid)
+        if lock is None:
+            lock = threading.RLock()
+            _SESSION_PERSISTENCE_LOCKS[sid] = lock
+        return lock
+
+
 _SESSION_INDEX_REBUILD_LOCK = threading.Lock()
 _SESSION_INDEX_REBUILD_THREAD = None
 _SESSION_INDEX_REBUILD_THREAD_TARGET: tuple[Path, Path] | None = None
@@ -520,6 +644,76 @@ def prune_session_from_index(session_id: str) -> None:
 
     if _fallback:
         _write_session_index(updates=None)
+
+
+def _settle_session_index_row_locked(
+    session_id: str,
+    *,
+    expected: dict | None,
+    replacement: dict | None,
+) -> bool:
+    """Compare-and-set one session row while the index/global locks are held.
+
+    The caller must already hold ``_INDEX_WRITE_LOCK`` and the non-reentrant
+    ``LOCK``.  This helper deliberately acquires neither lock and never calls
+    ``_write_session_index``/``prune_session_from_index``; rollback paths use it
+    to settle one SID without re-entering ``LOCK`` or overwriting sibling rows.
+    ``expected`` is the exact post-prepare row (or ``None`` when no row should
+    exist).  ``replacement`` is the exact pre-prepare row to restore, or
+    ``None`` to remove the SID.
+    """
+    sid = str(session_id or "")
+    if not sid:
+        return False
+    index_path = SESSION_INDEX_FILE
+    try:
+        if index_path.exists():
+            rows = json.loads(index_path.read_bytes())
+        else:
+            rows = []
+    except (OSError, UnicodeDecodeError, TypeError, ValueError):
+        return False
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        return False
+
+    matches = [i for i, row in enumerate(rows) if row.get("session_id") == sid]
+    if expected is None:
+        if matches:
+            return False
+    elif len(matches) != 1 or rows[matches[0]] != expected:
+        return False
+
+    if replacement is None:
+        if not matches:
+            return True
+        settled = [row for i, row in enumerate(rows) if i not in matches]
+    elif matches:
+        settled = list(rows)
+        settled[matches[0]] = replacement
+    else:
+        settled = list(rows)
+        settled.append(replacement)
+    settled.sort(key=lambda row: row.get("updated_at", 0), reverse=True)
+
+    if settled == rows:
+        return True
+
+    temporary = index_path.with_suffix(
+        f".tmp.{os.getpid()}.{threading.current_thread().ident}"
+    )
+    try:
+        with open(temporary, "w", encoding="utf-8") as fh:
+            json.dump(settled, fh, ensure_ascii=False, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
+        _safe_replace(temporary, index_path)
+    except BaseException:
+        try:
+            temporary.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1190,6 +1384,16 @@ def model_explicit_pick_signature(model, model_provider) -> str:
 
 
 class Session:
+    # Keep the in-process persistence capability out of the dynamic payload
+    # that is serialized/exported, while retaining every historical dynamic
+    # Session field and weak-reference support.
+    __slots__ = (
+        "_persistence_generation",
+        "_persistence_revoked",
+        "__dict__",
+        "__weakref__",
+    )
+
     def __init__(self, session_id: str=None, title: str='Untitled',
                  workspace=str(DEFAULT_WORKSPACE), created_workspace=None,
                  model=DEFAULT_MODEL,
@@ -1242,6 +1446,19 @@ class Session:
                  share_created_at=None,
                  **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
+        # Bind every in-process object to the SID generation visible at
+        # construction time.  ``Session.load`` supplies an explicit snapshot
+        # while holding the SID persistence lock; direct/new/imported objects
+        # take the current capability here so a later successful delete can
+        # retire them before their next save.
+        _persistence_generation = kwargs.get('_persistence_generation')
+        if _persistence_generation is None:
+            _persistence_generation = _current_session_persistence_generation(self.session_id)
+        self._persistence_generation = _persistence_generation
+        # Exact-object quarantine state is process-local and must never enter
+        # the dynamic/exported payload.  A replacement Session.load() receives
+        # a fresh, unquarantined object for the same durable SID.
+        self._persistence_revoked = False
         self.title = title
         self.workspace = str(Path(workspace).expanduser().resolve())
         # #6672: immutable snapshot of the workspace at session creation time.
@@ -1366,6 +1583,7 @@ class Session:
         return SESSION_DIR / f'{self.session_id}.json'
 
     def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
+        """Persist this session while serializing all same-id durable writes."""
         if not is_safe_session_id(self.session_id):
             raise ValueError(f"Unsafe session_id {self.session_id!r}; refusing to write outside session store")
         # ── #1558 P0 guard ──────────────────────────────────────────────
@@ -1384,6 +1602,38 @@ class Session:
                 f"would atomically overwrite on-disk messages with []. "
                 f"Reload with metadata_only=False before mutating state. "
                 f"See #1558."
+            )
+        with _get_session_persistence_lock(self.session_id):
+            return self._save_locked(
+                touch_updated_at=touch_updated_at,
+                skip_index=skip_index,
+            )
+
+    def _save_locked(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
+        if getattr(self, "_persistence_revoked", False):
+            raise RuntimeError(
+                f"Refusing to save persistence-revoked session {self.session_id!r}: "
+                "the exact in-memory owner was quarantined after rollback failure"
+            )
+        if not _session_persistence_generation_is_current(self):
+            raise RuntimeError(
+                f"Refusing to save revoked/deleted session {self.session_id!r}: "
+                "its persistence generation is no longer current"
+            )
+        # A deleted WebUI SID is a retired identity, not an empty slot that a
+        # direct ``Session(session_id=...).save()`` may silently reclaim. Keep
+        # the compatibility path for a live sidecar whose tombstone is stale,
+        # while requiring an explicit import/restore transition to create a
+        # new incarnation after deletion.
+        sidecar_existed_before_save = self.path.exists()
+        if (
+            not sidecar_existed_before_save
+            and not getattr(self, "_allow_deleted_session_reactivation", False)
+            and self.session_id in _load_webui_deleted_session_tombstone()
+        ):
+            raise KeyError(
+                f"Refusing to recreate deleted session {self.session_id!r} "
+                "without an explicit import/restore transition"
             )
         if touch_updated_at:
             self.updated_at = time.time()
@@ -1525,20 +1775,18 @@ class Session:
         # #4985 belt-and-suspenders self-heal: a successful save with at
         # least one real message on the sidecar is unconditional proof the
         # row is alive (the #4985 "zero-message orphan" only ever exists
-        # when ``len(self.messages) == 0``). Clear the tombstone so the
-        # next ``/api/sessions`` poll does not need the prune helper to
-        # run before the row re-appears — useful when the message-commit
-        # happens on a poll that does not yet see state.db.messages rows
-        # (e.g. the WebUI's own sidecar commit lands before the agent's
-        # state.db append, or the helper is skipped via a different code
-        # path). Wrapped because a tombstone failure must never block a
-        # save. The helper's self-healing branch in
-        # ``_prune_orphaned_webui_zero_message_sessions`` is the primary
-        # fix; this is the belt.
+        # when ``len(self.messages) == 0``). A deleted-session tombstone is
+        # different: clear it only when this save updated an already-live
+        # sidecar, or when a caller explicitly authorized a new import/restore
+        # incarnation. Direct SID reuse must leave the tombstone in place.
         if self.messages:
             try:
                 _clear_webui_zero_message_orphan_tombstone(self.session_id)
-                _clear_webui_deleted_session_tombstone(self.session_id)
+                if (
+                    sidecar_existed_before_save
+                    or getattr(self, "_allow_deleted_session_reactivation", False)
+                ):
+                    _clear_webui_deleted_session_tombstone(self.session_id)
             except Exception:
                 logger.debug(
                     "Failed to clear webui tombstone for %s",
@@ -1554,15 +1802,22 @@ class Session:
         if not is_safe_session_id(sid):
             return None
         p = SESSION_DIR / f'{sid}.json'
-        if not p.exists():
-            return None
-        # #5854: snapshot the stat signature BEFORE reading so a legacy-facts
-        # cache write is only committed if the file didn't change under us
-        # during the parse (TOCTOU guard against an atomic replace mid-read).
-        _pre_read_sig = _sidecar_stat_signature(p)
-        data = json.loads(p.read_text(encoding='utf-8'))
-        data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
-        session = cls(**data)
+        # Hold the same per-SID persistence lock across the durable read and
+        # generation bind.  A delete that wins this lock therefore cannot
+        # leave a loader with a pre-delete sidecar while constructing an owner
+        # that appears current after the delete commits.
+        with _get_session_persistence_lock(sid):
+            if not p.exists():
+                return None
+            # #5854: snapshot the stat signature BEFORE reading so a
+            # legacy-facts cache write is only committed if the file didn't
+            # change under us during the parse (TOCTOU guard against an atomic
+            # replace mid-read).
+            _pre_read_sig = _sidecar_stat_signature(p)
+            data = json.loads(p.read_text(encoding='utf-8'))
+            data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
+            data['_persistence_generation'] = _current_session_persistence_generation(sid)
+            session = cls(**data)
         if _collapsed_partials:
             try:
                 # Self-heal bloated sessions on first full load without touching
@@ -4684,6 +4939,72 @@ def get_session_for_scan(sid):
         return None
 
 
+def _load_and_publish_session(
+    sid,
+    *,
+    metadata_only: bool = False,
+    promote_cache: bool = True,
+    cache_on_miss: bool = True,
+):
+    """Load and publish one cold SID across two persistence lock phases.
+
+    ``Session.load`` holds the SID lock across durable read+bind.  This helper
+    then reacquires the same lock for generation validation and cache CAS, so a
+    delete either wins before publication (and invalidates the capability) or
+    waits until this publication is complete.
+    """
+    # Let concurrent cold readers perform their durable read independently;
+    # ``Session.load`` itself holds the SID lock across its read+bind.  We then
+    # take the same lock for generation validation and cache CAS.  If delete
+    # wins the gap, validation fails; if this loader wins, delete waits until
+    # the CAS completes.  This preserves the duplicate-cold-reader behavior
+    # used by chat-start rollback fences without reopening a publish race.
+    s = Session.load_metadata_only(sid) if metadata_only else Session.load(sid)
+    if not s:
+        return None, False
+    with _get_session_persistence_lock(sid):
+        if not _session_persistence_generation_is_current(s):
+            raise KeyError(sid)
+        if str(getattr(s, "session_id", "") or "") != str(sid):
+            logger.warning(
+                "refusing to publish mismatched cold session: requested %s but loaded %s",
+                sid,
+                getattr(s, "session_id", None),
+            )
+            raise KeyError(sid)
+        # Metadata-only callers intentionally never publish their stubs into
+        # SESSIONS; this preserves the pre-existing no-cache semantics that
+        # protect full transcripts from accidental stub saves.
+        if metadata_only:
+            return s, False
+        with LOCK:
+            current = SESSIONS.get(sid)
+            if current is not None:
+                if str(getattr(current, "session_id", "") or "") != str(sid):
+                    logger.warning(
+                        "refusing cold session publication behind mismatched owner: requested %s but cached %s",
+                        sid,
+                        getattr(current, "session_id", None),
+                    )
+                    raise KeyError(sid)
+                # The current exact object is authoritative.  A loader that
+                # observed the earlier miss must not replace it with a stale
+                # or metadata-only object read after the owner was published.
+                s = current
+                if promote_cache:
+                    SESSIONS.move_to_end(sid)
+                # Preserve the historical cold-loader fence: the loser must
+                # return the canonical winner immediately, without running
+                # state.db/journal reconciliation against its own disk read.
+                return s, True
+            if cache_on_miss:
+                SESSIONS[sid] = s
+                if promote_cache:
+                    SESSIONS.move_to_end(sid)
+                _evict_sessions_over_cap()
+        return s, False
+
+
 def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_miss=True):
     """Resolve a session through the canonical freshness/recovery path.
 
@@ -4714,27 +5035,49 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
                     SESSIONS.pop(sid, None)
             cached = None
     if cached is not None:
+        if not _session_persistence_generation_is_current(cached):
+            # A successful same-SID delete may have retired this object while
+            # a reader still held the cache reference.  Do not return or
+            # re-publish a stale owner; the next path must resolve the current
+            # durable state (or raise KeyError for the deleted SID).
+            with LOCK:
+                if SESSIONS.get(sid) is cached:
+                    SESSIONS.pop(sid, None)
+            cached = None
+    if cached is not None:
         if not metadata_only and _cached_session_lags_disk(cached):
             try:
-                disk_session = Session.load(sid)
-                with LOCK:
-                    SESSIONS[sid] = disk_session
-                    if promote_cache:
-                        SESSIONS.move_to_end(sid)
-                cached = disk_session
+                with _get_session_persistence_lock(sid):
+                    disk_session = Session.load(sid)
+                    if (
+                        disk_session is not None
+                        and _session_persistence_generation_is_current(disk_session)
+                    ):
+                        with LOCK:
+                            if SESSIONS.get(sid) is cached:
+                                SESSIONS[sid] = disk_session
+                                if promote_cache:
+                                    SESSIONS.move_to_end(sid)
+                                cached = disk_session
             except Exception:
                 logger.debug(
                     "cached session disk-freshness check failed for session %s", sid, exc_info=True,
                 )
         if not metadata_only and _inactive_cache_tail_needs_disk_check(cached):
             try:
-                disk_session = Session.load(sid)
-                if _cache_has_stale_unsaved_user_tail(cached, disk_session):
-                    with LOCK:
-                        SESSIONS[sid] = disk_session
-                        if promote_cache:
-                            SESSIONS.move_to_end(sid)
-                    cached = disk_session
+                with _get_session_persistence_lock(sid):
+                    disk_session = Session.load(sid)
+                    if (
+                        disk_session is not None
+                        and _session_persistence_generation_is_current(disk_session)
+                        and _cache_has_stale_unsaved_user_tail(cached, disk_session)
+                    ):
+                        with LOCK:
+                            if SESSIONS.get(sid) is cached:
+                                SESSIONS[sid] = disk_session
+                                if promote_cache:
+                                    SESSIONS.move_to_end(sid)
+                                cached = disk_session
             except Exception:
                 logger.debug(
                     "stale cached user-tail check failed for session %s", sid, exc_info=True,
@@ -4754,19 +5097,17 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
                     "state.db newer-sidecar sync failed on cache hit for session %s", sid, exc_info=True,
                 )
         return cached
-    if metadata_only:
-        s = Session.load_metadata_only(sid)
-        if s:
-            return s
-    else:
-        s = Session.load(sid)
+    s, cold_load_lost_cas = _load_and_publish_session(
+        sid,
+        metadata_only=metadata_only,
+        promote_cache=promote_cache,
+        cache_on_miss=cache_on_miss,
+    )
+    if metadata_only and s:
+        return s
     if s:
-        if cache_on_miss:
-            with LOCK:
-                SESSIONS[sid] = s
-                if promote_cache:
-                    SESSIONS.move_to_end(sid)
-                _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+        if cold_load_lost_cas:
+            return s
         if not metadata_only:
             try:
                 synced_from_state = _sync_sidecar_from_state_db_if_newer(s)
@@ -6597,6 +6938,8 @@ def import_cli_session(
     created_at=None,
     updated_at=None,
     parent_session_id=None,
+    *,
+    _allow_deleted_session_reactivation: bool = False,
 ):
     """Create a new WebUI session populated with CLI/agent messages.
 
@@ -6604,32 +6947,37 @@ def import_cli_session(
     keep their lineage in the WebUI store and sidebar instead of reappearing as
     detached orphan chats.
     """
-    s = Session(
-        session_id=session_id,
-        title=title,
-        workspace=get_last_workspace(),
-        model=model,
-        messages=messages,
-        profile=profile,
-        created_at=created_at,
-        updated_at=updated_at,
-        parent_session_id=parent_session_id,
-    )
-    # #4985: import_cli_session uses an explicit sid (the CLI sidecar's id).
-    # If that sid was previously tombstoned as a webui zero-message orphan,
-    # clear the tombstone entry so the freshly-imported session is visible
-    # on the next poll. Wrapped because a tombstone failure must never block
-    # an import.
-    try:
-        _clear_webui_zero_message_orphan_tombstone(s.session_id)
-        _clear_webui_deleted_session_tombstone(s.session_id)
-    except Exception:
-        logger.debug(
-            "Failed to clear webui tombstone for %s",
-            s.session_id,
-            exc_info=True,
-        )
-    s.save(touch_updated_at=False)
+    # Keep the explicit import/restore transition under the same SID lifecycle
+    # lock order as deletion (agent -> persistence). A concurrent delete that
+    # wins before this check leaves the retired tombstone intact and this
+    # materialization fails closed instead of recreating a sidecar.
+    from api.config import _get_session_agent_lock
+
+    agent_lock = _get_session_agent_lock(session_id)
+    with agent_lock:
+        with _get_session_persistence_lock(session_id):
+            sidecar_path = SESSION_DIR / f"{session_id}.json"
+            if (
+                not _allow_deleted_session_reactivation
+                and not sidecar_path.exists()
+                and session_id in _load_webui_deleted_session_tombstone()
+            ):
+                raise KeyError(session_id)
+            s = Session(
+                session_id=session_id,
+                title=title,
+                workspace=get_last_workspace(),
+                model=model,
+                messages=messages,
+                profile=profile,
+                created_at=created_at,
+                updated_at=updated_at,
+                parent_session_id=parent_session_id,
+            )
+            s._allow_deleted_session_reactivation = bool(
+                _allow_deleted_session_reactivation
+            )
+            s.save(touch_updated_at=False)
     return s
 
 
@@ -10273,6 +10621,65 @@ def _cleanup_manifest_thread_lock(hermes_home):
 
 def delete_cli_session(sid) -> bool:
     """Delete a CLI session while serializing manifest and DB cleanup."""
+    return _delete_cli_session_with_scope(sid, require_all_stale_cleanup=True)
+
+
+def delete_cli_session_for_webui_delete(sid) -> bool:
+    """Delete one WebUI SID without charging unrelated stale cleanup to it.
+
+    The ordinary maintenance entry point reports failure while *any* older
+    cleanup manifest remains unsettled.  The WebUI route needs a narrower
+    contract: its retry handle owns only the requested SID, and must not become
+    undeletable because a different historical session left a retry manifest.
+    The requested SID's DB row and artifacts are still deleted and verified by
+    ``_delete_cli_session_locked``. A missing state.db is accepted only when no
+    state-only transcript or retry record for this SID exists; unreadable or
+    malformed authority still fails closed.
+    """
+    return _delete_cli_session_with_scope(sid, require_all_stale_cleanup=False)
+
+
+def _scoped_state_cleanup_absence_is_verified(sid: str, hermes_home: Path) -> bool:
+    """Prove that no state-only artifact or retry record owns *sid*.
+
+    ``{sid}.json`` is deliberately excluded: the WebUI delete route owns that
+    retry sidecar and removes it only after every earlier cleanup gate commits.
+    """
+    if not is_safe_session_id(sid):
+        return False
+    sessions_dir = hermes_home / "sessions"
+    if not sessions_dir.exists():
+        return True
+    try:
+        for manifest in sessions_dir.glob(".cleanup_manifest_*.json"):
+            try:
+                pending_ids = json.loads(manifest.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                # This scoped route cannot attribute an unreadable historical
+                # retry record to the requested SID. Keep it untouched for the
+                # maintenance entry point.
+                continue
+            if not isinstance(pending_ids, list) or not all(
+                isinstance(item, str) for item in pending_ids
+            ):
+                continue
+            if sid in pending_ids:
+                return False
+        if (sessions_dir / f"{sid}.jsonl").exists():
+            return False
+        state_json = sessions_dir / f"{sid}.json"
+        webui_json = SESSION_DIR / f"{sid}.json"
+        if state_json.exists() and state_json.resolve() != webui_json.resolve():
+            return False
+        if any(sessions_dir.glob(f"request_dump_{sid}_*.json")):
+            return False
+    except OSError:
+        return False
+    return True
+
+
+def _delete_cli_session_with_scope(sid, *, require_all_stale_cleanup: bool) -> bool:
+    """Run state cleanup with either maintenance-wide or requested-SID scope."""
     try:
         from api.profiles import get_active_hermes_home
         hermes_home = Path(get_active_hermes_home()).expanduser().resolve()
@@ -10282,13 +10689,65 @@ def delete_cli_session(sid) -> bool:
     try:
         with _cleanup_manifest_thread_lock(hermes_home):
             with _cleanup_manifest_process_lock(hermes_home):
-                return _delete_cli_session_locked(sid, hermes_home)
+                if not require_all_stale_cleanup:
+                    db_path = hermes_home / "state.db"
+                    if not db_path.exists():
+                        _process_stale_cleanup_manifests(
+                            hermes_home,
+                            scoped_sid=str(sid),
+                        )
+                        return _scoped_state_cleanup_absence_is_verified(
+                            sid,
+                            hermes_home,
+                        )
+                    try:
+                        import sqlite3
+
+                        db_uri = f"{db_path.resolve().as_uri()}?mode=ro"
+                        with closing(sqlite3.connect(db_uri, uri=True)) as conn:
+                            has_sessions_table = conn.execute(
+                                "SELECT 1 FROM sqlite_master "
+                                "WHERE type = 'table' AND name = 'sessions'"
+                            ).fetchone() is not None
+                            state_row_exists = bool(
+                                has_sessions_table
+                                and conn.execute(
+                                    "SELECT 1 FROM sessions WHERE id = ?",
+                                    (sid,),
+                                ).fetchone() is not None
+                            )
+                    except Exception:
+                        logger.warning(
+                            "Failed to verify state.db ownership for WebUI delete %s",
+                            sid,
+                            exc_info=True,
+                        )
+                        return False
+                    if not state_row_exists:
+                        _process_stale_cleanup_manifests(
+                            hermes_home,
+                            scoped_sid=str(sid),
+                        )
+                        return _scoped_state_cleanup_absence_is_verified(
+                            sid,
+                            hermes_home,
+                        )
+                return _delete_cli_session_locked(
+                    sid,
+                    hermes_home,
+                    require_all_stale_cleanup=require_all_stale_cleanup,
+                )
     except Exception:
         logger.warning("Failed to delete CLI session %s from state.db", sid, exc_info=True)
         return False
 
 
-def _delete_cli_session_locked(sid, hermes_home) -> bool:
+def _delete_cli_session_locked(
+    sid,
+    hermes_home,
+    *,
+    require_all_stale_cleanup: bool = True,
+) -> bool:
     """Delete a CLI session from state.db using Hermes' session semantics.
 
     A scoped transaction implements the Agent invariant while giving branch and
@@ -10308,10 +10767,18 @@ def _delete_cli_session_locked(sid, hermes_home) -> bool:
     # This runs before the DB-existence check so pending artifact
     # removals get another chance even when the current session ID
     # is unrelated.
-    stale_cleanup_complete = _process_stale_cleanup_manifests(hermes_home)
+    if require_all_stale_cleanup:
+        stale_cleanup_complete = _process_stale_cleanup_manifests(hermes_home)
+    else:
+        stale_cleanup_complete = _process_stale_cleanup_manifests(
+            hermes_home,
+            scoped_sid=str(sid),
+        )
 
     db_path = hermes_home / 'state.db'
     if not db_path.exists():
+        if not require_all_stale_cleanup:
+            return _scoped_state_cleanup_absence_is_verified(sid, hermes_home)
         return False
 
     try:
@@ -10584,6 +11051,15 @@ def _delete_cli_session_locked(sid, hermes_home) -> bool:
             # manifest from a failed commit never unlinks a live session's
             # artifacts.
             artifact_cleanup_failed = False
+            requested_cleanup_ids = set(all_removed_ids)
+
+            def _manifest_failure_is_in_scope(path, pending_ids=None):
+                if require_all_stale_cleanup or path == manifest_path:
+                    return True
+                return bool(
+                    isinstance(pending_ids, list)
+                    and requested_cleanup_ids.intersection(pending_ids)
+                )
 
             def _is_session_alive(conn, sid):
                 """True when *sid* still has a row in the sessions table.
@@ -10606,8 +11082,19 @@ def _delete_cli_session_locked(sid, hermes_home) -> bool:
                 if not is_safe_session_id(removed_id):
                     return False
                 ok = True
+                # The WebUI route owns and verifies {sid}.json only after all
+                # preceding cleanup gates commit. Removing it here would erase
+                # the retry handle if a later phase fails. The maintenance
+                # entry point retains its historical ownership of both files.
                 for suffix in (".json", ".jsonl"):
                     artifact = sessions_dir / f"{removed_id}{suffix}"
+                    if (
+                        not require_all_stale_cleanup
+                        and suffix == ".json"
+                        and artifact.resolve()
+                        == (SESSION_DIR / f"{removed_id}.json").resolve()
+                    ):
+                        continue
                     if not artifact.exists():
                         continue
                     try:
@@ -10649,12 +11136,14 @@ def _delete_cli_session_locked(sid, hermes_home) -> bool:
                 except (OSError, ValueError, TypeError):
                     # The IDs are unknown, so deleting the manifest would lose
                     # the only retry record for potentially orphaned artifacts.
-                    artifact_cleanup_failed = True
+                    if _manifest_failure_is_in_scope(mp):
+                        artifact_cleanup_failed = True
                     continue
                 if not isinstance(pending_ids, list) or not all(
                     isinstance(item, str) for item in pending_ids
                 ):
-                    artifact_cleanup_failed = True
+                    if _manifest_failure_is_in_scope(mp):
+                        artifact_cleanup_failed = True
                     continue
                 still_pending = []
                 for removed_id in pending_ids:
@@ -10677,11 +11166,15 @@ def _delete_cli_session_locked(sid, hermes_home) -> bool:
                         logger.warning(
                             "Failed to rewrite manifest %s", mp, exc_info=True,
                         )
-                    artifact_cleanup_failed = True
+                    if _manifest_failure_is_in_scope(mp, still_pending):
+                        artifact_cleanup_failed = True
                 else:
                     mp.unlink(missing_ok=True)
 
-            return stale_cleanup_complete and not artifact_cleanup_failed
+            return (
+                not artifact_cleanup_failed
+                and (stale_cleanup_complete or not require_all_stale_cleanup)
+            )
     except Exception:
         logger.warning("Failed to delete CLI session %s from state.db", sid, exc_info=True)
         return False
@@ -10692,7 +11185,11 @@ def _delete_cli_session_locked(sid, hermes_home) -> bool:
 # post-commit cleanup remain one critical section without blocking unrelated
 # profiles.
 # ---------------------------------------------------------------------------
-def _process_stale_cleanup_manifests(hermes_home) -> bool:
+def _process_stale_cleanup_manifests(
+    hermes_home,
+    *,
+    scoped_sid: str | None = None,
+) -> bool:
     """Process any leftover cleanup manifests outside a DB transaction.
 
     Called at the start of each delete_cli_session run, before the
@@ -10702,9 +11199,15 @@ def _process_stale_cleanup_manifests(hermes_home) -> bool:
 
     Serialized by the caller's per-profile thread and process locks so that the
     manifest read → DB transaction → post-commit cleanup triad is
-    never interleaved across concurrent delete calls. Returns ``True`` only
-    when every discovered retry record was processed completely.
+    never interleaved across concurrent delete calls. With no ``scoped_sid``
+    (the maintenance path), returns ``True`` only when every discovered retry
+    record was processed completely. With ``scoped_sid``, only manifest entries
+    attributable to that SID are settled; unrelated or un-attributable
+    manifests remain on disk and do not widen the requested cleanup scope.
     """
+    if scoped_sid is not None and not is_safe_session_id(str(scoped_sid)):
+        return False
+    scoped_sid = str(scoped_sid) if scoped_sid is not None else None
     try:
         import sqlite3
     except ImportError:
@@ -10738,9 +11241,12 @@ def _process_stale_cleanup_manifests(hermes_home) -> bool:
             cleanup_complete = False
             continue
         pending_ids = list(pending_ids)
+        if scoped_sid is not None and scoped_sid not in pending_ids:
+            continue
         if not pending_ids:
             mp.unlink(missing_ok=True)
             continue
+        query_ids = [scoped_sid] if scoped_sid is not None else pending_ids
         # Require a successful read-only query to prove absence. Opening via a
         # read-only URI also prevents SQLite from creating a fresh empty DB if
         # state.db disappears between the existence check and connect().
@@ -10749,9 +11255,9 @@ def _process_stale_cleanup_manifests(hermes_home) -> bool:
             with closing(sqlite3.connect(db_uri, uri=True)) as conn:
                 cursor = conn.execute(
                     "SELECT id FROM sessions WHERE id IN ({})".format(
-                        ",".join("?" * len(pending_ids))
+                        ",".join("?" * len(query_ids))
                     ),
-                    pending_ids,
+                    query_ids,
                 )
                 alive = {row[0] for row in cursor.fetchall()}
         except Exception:
@@ -10761,8 +11267,12 @@ def _process_stale_cleanup_manifests(hermes_home) -> bool:
             cleanup_complete = False
             continue
 
-        still_pending = []
-        for removed_id in pending_ids:
+        still_pending = (
+            [removed_id for removed_id in pending_ids if removed_id != scoped_sid]
+            if scoped_sid is not None
+            else []
+        )
+        for removed_id in query_ids:
             if removed_id in alive:
                 # Session still exists — the previous commit never
                 # reached the DB, so this manifest entry is stale.
@@ -10770,7 +11280,11 @@ def _process_stale_cleanup_manifests(hermes_home) -> bool:
                 # into the post-commit cleanup loop where it would
                 # cause the current call to report a false failure.
                 continue
-            if not _clean_pending_artifact(sessions_dir, removed_id):
+            if not _clean_pending_artifact(
+                sessions_dir,
+                removed_id,
+                preserve_webui_sidecar=scoped_sid == removed_id,
+            ):
                 still_pending.append(removed_id)
         if still_pending:
             tmp = mp.with_suffix(".tmp")
@@ -10787,7 +11301,12 @@ def _process_stale_cleanup_manifests(hermes_home) -> bool:
     return cleanup_complete
 
 
-def _clean_pending_artifact(sessions_dir, removed_id):
+def _clean_pending_artifact(
+    sessions_dir,
+    removed_id,
+    *,
+    preserve_webui_sidecar: bool = False,
+):
     """Remove on-disk transcript files for one session ID, outside a
     DB transaction.  Returns True when every artifact is gone (or absent).
     """
@@ -10796,6 +11315,12 @@ def _clean_pending_artifact(sessions_dir, removed_id):
     ok = True
     for suffix in (".json", ".jsonl"):
         artifact = sessions_dir / f"{removed_id}{suffix}"
+        if (
+            preserve_webui_sidecar
+            and suffix == ".json"
+            and artifact.resolve() == (SESSION_DIR / f"{removed_id}.json").resolve()
+        ):
+            continue
         if not artifact.exists():
             continue
         try:

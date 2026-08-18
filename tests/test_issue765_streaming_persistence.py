@@ -289,19 +289,19 @@ class TestIssue765FollowupHardening:
         s.save(skip_index=True)  # seed the file on disk
 
         original_replace = models.os.replace
-        barrier = threading.Barrier(2)
+        start_barrier = threading.Barrier(2)
         replace_sources = []
         errors = []
 
-        def _replace_with_barrier(src, dst):
+        def _record_replace(src, dst):
             replace_sources.append(str(src))
-            barrier.wait(timeout=5)
             return original_replace(src, dst)
 
-        monkeypatch.setattr(models.os, "replace", _replace_with_barrier)
+        monkeypatch.setattr(models.os, "replace", _record_replace)
 
         def _save_worker():
             try:
+                start_barrier.wait(timeout=5)
                 s.save(skip_index=True)
             except Exception as e:
                 errors.append(e)
@@ -313,6 +313,8 @@ class TestIssue765FollowupHardening:
         t1.join(timeout=5)
         t2.join(timeout=5)
 
+        assert not t1.is_alive()
+        assert not t2.is_alive()
         assert not errors, f"Concurrent same-session saves should not fail: {errors}"
         assert len(replace_sources) >= 2, f"Expected replace calls, got {replace_sources}"
         assert len(set(replace_sources)) == 2, (

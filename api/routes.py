@@ -2849,6 +2849,8 @@ from api.config import (
     ACTIVE_RUNS_LOCK,
     register_stream_owner,
     register_session_writeback_owner,
+    clear_session_writeback_owner_if_owned,
+    session_writeback_owner,
     stream_owner_session_id,
     unregister_stream_owner,
     CHAT_LOCK,
@@ -3915,6 +3917,201 @@ def _ensure_full_session_before_mutation(sid: str, session):
         SESSIONS.move_to_end(sid)
         _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
     return full_session
+
+
+def _revalidate_mutation_session_owner(sid: str, admitted_session):
+    """Resolve the canonical owner again while a mutation lock is held.
+
+    Route handlers resolve a session before waiting for the per-SID agent lock
+    so validation and profile checks can run cheaply.  A delete or owner
+    rotation may win that lock before the handler enters its mutation block,
+    however.  Re-resolving inside the lock and requiring object identity keeps
+    the decision and the subsequent save on one canonical owner: a missing
+    owner is a 404, while a live successor is a 409 conflict for the stale
+    request.
+    """
+    try:
+        # Revalidation is deliberately non-materializing.  A delete keeps the
+        # old sidecar available until its durable cleanup commits; falling
+        # back to state.db here could create a fresh sidecar under the stale
+        # mutation before the delete reaches its later cleanup phase.
+        current = get_session(sid)
+    except KeyError:
+        return None, 404, "Session not found"
+    except PermissionError:
+        return None, 403, "Read-only imported sessions cannot be modified from WebUI"
+    if current is not admitted_session:
+        return None, 409, "Session owner changed; retry the mutation"
+    return current, None, None
+
+
+def _session_index_prune_verified(sid: str) -> bool:
+    """Confirm that the durable index no longer contains ``sid``.
+
+    ``prune_session_from_index`` has a best-effort fallback for corrupt or
+    missing indexes and may therefore return without proving settlement.  A
+    delete may revoke the old persistence capability only after this readback
+    confirms either a missing index or a valid list with no matching row.
+    """
+    try:
+        if not SESSION_INDEX_FILE.exists():
+            return True
+        rows = json.loads(SESSION_INDEX_FILE.read_bytes())
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            return False
+        return not any(row.get("session_id") == sid for row in rows)
+    except Exception:
+        logger.debug("Failed to verify deleted session index settlement for %s", sid, exc_info=True)
+        return False
+
+
+def _snapshot_deleted_session_index_row(sid: str) -> tuple[bool, dict | None]:
+    """Capture the exact pre-delete index row without retaining siblings."""
+    from api.models import _INDEX_WRITE_LOCK
+
+    with _INDEX_WRITE_LOCK:
+        try:
+            if not SESSION_INDEX_FILE.exists():
+                return True, None
+            rows = json.loads(SESSION_INDEX_FILE.read_bytes())
+        except Exception:
+            logger.debug("Failed to snapshot deleted session index row for %s", sid, exc_info=True)
+            return False, None
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            return False, None
+        matches = [row for row in rows if row.get("session_id") == sid]
+        if len(matches) > 1:
+            logger.warning("Cannot snapshot duplicate deleted session index rows for %s", sid)
+            return False, None
+        return True, copy.deepcopy(matches[0]) if matches else None
+
+
+def _restore_deleted_session_retry_persistence(
+    sid: str,
+    *,
+    sidecar_snapshot: dict,
+    backup_snapshot: dict,
+    index_row_snapshot: dict | None = None,
+    index_snapshot_valid: bool = True,
+    owner=None,
+) -> bool:
+    """Restore the durable delete-retry authority after a late gate failure.
+
+    The delete route has already removed the sidecar and backup by the time the
+    index/tombstone gates run.  Keep the exact pre-delete file images rather
+    than serializing the live owner again: this avoids changing its generation,
+    timestamp, or index row while preserving a cold-loadable retry handle.
+    """
+    from api.models import _INDEX_WRITE_LOCK, _settle_session_index_row_locked
+
+    # Clear a partially published tombstone before attempting any restore so a
+    # later restore error cannot leave a retired marker shadowing the retry SID.
+    try:
+        _clear_webui_deleted_session_tombstone(sid)
+    except Exception:
+        logger.exception("Failed to clear partial deleted-session tombstone for %s", sid)
+        return False
+    snapshots = (sidecar_snapshot, backup_snapshot)
+    if any(
+        not isinstance(snapshot, dict) or snapshot.get("error")
+        for snapshot in snapshots
+    ):
+        logger.warning(
+            "Cannot restore delete-retry persistence for %s: pre-delete snapshot unavailable",
+            sid,
+        )
+        return False
+    if not index_snapshot_valid:
+        logger.warning("Cannot restore delete-retry index row for %s: pre-delete snapshot unavailable", sid)
+        return False
+
+    # The route already holds the per-SID persistence lock. Keep the exact
+    # owner, sidecar/backup images, and target index row fenced together while
+    # compensating. Sibling index rows are never replaced from a stale image.
+    with _INDEX_WRITE_LOCK:
+        with LOCK:
+            if owner is not None and SESSIONS.get(sid) is not owner:
+                logger.warning("Refusing delete-retry restore for %s: session owner changed", sid)
+                return False
+            try:
+                if SESSION_INDEX_FILE.exists():
+                    current_rows = json.loads(SESSION_INDEX_FILE.read_bytes())
+                else:
+                    current_rows = []
+                if not isinstance(current_rows, list) or any(
+                    not isinstance(row, dict) for row in current_rows
+                ):
+                    return False
+                current_matches = [
+                    row for row in current_rows if row.get("session_id") == sid
+                ]
+                if len(current_matches) > 1:
+                    return False
+                if current_matches and current_matches[0] != index_row_snapshot:
+                    logger.warning("Refusing delete-retry restore for %s: index owner changed", sid)
+                    return False
+
+                # A live sidecar may have been absent before this delete (for
+                # example, an unsaved in-memory owner). In that case use the
+                # exact owner retained by the route as the retry authority.
+                if sidecar_snapshot.get("exists"):
+                    _restore_chat_start_file(sidecar_snapshot)
+                elif owner is not None:
+                    owner.save(touch_updated_at=False, skip_index=True)
+                else:
+                    logger.warning(
+                        "Cannot restore delete-retry sidecar for %s: no pre-delete sidecar or owner",
+                        sid,
+                    )
+                    return False
+                _restore_chat_start_file(backup_snapshot)
+
+                sidecar = SESSION_DIR / f"{sid}.json"
+                if sidecar_snapshot.get("exists"):
+                    if not _chat_start_file_snapshots_equal(
+                        sidecar_snapshot, _snapshot_chat_start_file(sidecar)
+                    ):
+                        return False
+                elif not sidecar.exists():
+                    return False
+                if not _chat_start_file_snapshots_equal(
+                    backup_snapshot, _snapshot_chat_start_file(sidecar.with_suffix(".json.bak"))
+                ):
+                    return False
+                # A tombstone can have been partially published before its gate
+                # raised. It must not shadow this live retry sidecar on a cold
+                # read.
+                if sid in _load_webui_deleted_session_tombstone():
+                    logger.warning(
+                        "Deleted-session tombstone still blocks retry sidecar for %s",
+                        sid,
+                    )
+                    return False
+                if not _settle_session_index_row_locked(
+                    sid,
+                    expected=current_matches[0] if current_matches else None,
+                    replacement=index_row_snapshot,
+                ):
+                    return False
+            except Exception:
+                logger.exception("Failed to restore delete-retry persistence for %s", sid)
+                return False
+    return True
+
+
+def _delete_session_attachments_verified(sid: str) -> None:
+    """Remove one session's attachment inbox and verify no plaintext remains."""
+    from api.upload import _session_attachment_dir
+
+    attachment_dir = Path(_session_attachment_dir(sid))
+    try:
+        if attachment_dir.exists() or attachment_dir.is_symlink():
+            shutil.rmtree(attachment_dir)
+    except FileNotFoundError:
+        # A concurrent cleanup that already removed the directory is success.
+        pass
+    if attachment_dir.exists() or attachment_dir.is_symlink():
+        raise OSError(f"attachment cleanup left residual directory: {attachment_dir}")
 
 
 _ANCHOR_ACTIVITY_SCENE_MAX_BYTES = 256_000
@@ -5136,6 +5333,9 @@ def _handle_session_anchor_scene(handler, body):
     if not _session_visible_to_active_profile(getattr(s, "profile", None) or None, handler):
         return bad(handler, "Session not found", 404)
     with _get_session_agent_lock(sid):
+        s, owner_status, owner_error = _revalidate_mutation_session_owner(sid, s)
+        if owner_status:
+            return bad(handler, owner_error, owner_status)
         idx, message = _find_anchor_scene_message(
             getattr(s, "messages", None) or [],
             message_index=message_index,
@@ -5217,7 +5417,11 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False)
     except KeyError:
         pass
 
-    # Fallback: try to materialize from CLI/agent session metadata
+    # Fallback: try to materialize from CLI/agent session metadata. A durable
+    # delete tombstone retires this WebUI identity; only the explicit
+    # /api/session/import_cli transition may create a new incarnation.
+    if _session_deleted_tombstone_marks_was_webui(sid):
+        raise KeyError(sid)
     cli_meta = _lookup_cli_session_metadata(sid)
 
     # Delegated subagent children (#5307) are view-only: their transcript lives
@@ -9628,6 +9832,9 @@ from api.models import (
     _enrich_sidebar_lineage_metadata,
     _active_stream_ids,
     _evict_sessions_over_cap,
+    _get_session_persistence_lock,
+    _INDEX_WRITE_LOCK,
+    _advance_session_persistence_generation,
     _merge_session_display_metadata,
     _session_message_merge_key,
     _session_messages_have_prefix,
@@ -9643,6 +9850,7 @@ from api.models import (
     _clear_webui_zero_message_orphan_tombstone,
     _load_webui_deleted_session_tombstone,
     _record_webui_deleted_session_tombstone,
+    _clear_webui_deleted_session_tombstone,
     ensure_cron_project,
     _profile_has_user_projects,
     is_cron_session,
@@ -14843,6 +15051,11 @@ def handle_post(handler, parsed) -> bool:
         except PermissionError:
             return bad(handler, "Read-only imported sessions cannot be renamed from WebUI", 403)
         with _get_session_agent_lock(body["session_id"]):
+            s, owner_status, owner_error = _revalidate_mutation_session_owner(
+                body["session_id"], s
+            )
+            if owner_status:
+                return bad(handler, owner_error, owner_status)
             from api.session_ops import apply_session_title_rename
             apply_session_title_rename(s, body["title"])
             s.save()
@@ -14923,6 +15136,9 @@ def handle_post(handler, parsed) -> bool:
             else:
                 prompt = str(value)
         with _get_session_agent_lock(sid):
+            s, owner_status, owner_error = _revalidate_mutation_session_owner(sid, s)
+            if owner_status:
+                return bad(handler, owner_error, owner_status)
             s.personality = name if name else None
             s.save()
         return j(handler, {"ok": True, "personality": s.personality, "prompt": prompt})
@@ -14950,6 +15166,9 @@ def handle_post(handler, parsed) -> bool:
         except KeyError:
             return bad(handler, "Session not found", 404)
         with _get_session_agent_lock(sid):
+            s, owner_status, owner_error = _revalidate_mutation_session_owner(sid, s)
+            if owner_status:
+                return bad(handler, owner_error, owner_status)
             s.enabled_toolsets = toolsets
             s.save()
         return j(handler, {"ok": True, "enabled_toolsets": s.enabled_toolsets})
@@ -15008,6 +15227,9 @@ def handle_post(handler, parsed) -> bool:
         unchanged = False
         with _get_session_agent_lock(sid):
             _draft_mark("acquired_lock")
+            s, owner_status, owner_error = _revalidate_mutation_session_owner(sid, s)
+            if owner_status:
+                return bad(handler, owner_error, owner_status)
             current_draft = dict(getattr(s, "composer_draft", {}) or {})
             next_draft = dict(current_draft)
             if text is not None:
@@ -15059,14 +15281,19 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Session not found", 404)
         except PermissionError:
             return bad(handler, "Read-only imported sessions cannot be updated from WebUI", 403)
-        old_ws = getattr(s, "workspace", "")
-        old_model = getattr(s, "model", None)
-        old_provider = getattr(s, "model_provider", None)
-        try:
-            new_ws = str(resolve_trusted_workspace(body.get("workspace", s.workspace)))
-        except ValueError as e:
-            return bad(handler, str(e))
         with _get_session_agent_lock(body["session_id"]):
+            s, owner_status, owner_error = _revalidate_mutation_session_owner(
+                body["session_id"], s
+            )
+            if owner_status:
+                return bad(handler, owner_error, owner_status)
+            old_ws = getattr(s, "workspace", "")
+            old_model = getattr(s, "model", None)
+            old_provider = getattr(s, "model_provider", None)
+            try:
+                new_ws = str(resolve_trusted_workspace(body.get("workspace", s.workspace)))
+            except ValueError as e:
+                return bad(handler, str(e))
             s.workspace = new_ws
             if "model" in body or "model_provider" in body:
                 model, provider = _session_model_state_from_request(
@@ -15153,62 +15380,347 @@ def handle_post(handler, parsed) -> bool:
         session_lock = _get_session_agent_lock(sid)
         if not session_lock.acquire(timeout=5):
             return bad(handler, "Session busy, try again", 503)
+        persistence_lock = _get_session_persistence_lock(sid)
+        persistence_lock.acquire()
+        index_write_lock_held = False
         try:
+            # Keep the exact in-memory owner for the late-gate compensation
+            # path.  The successful-delete path below remains the only place
+            # that removes this owner or advances its persistence capability.
             with LOCK:
-                SESSIONS.pop(sid, None)
+                retry_owner = SESSIONS.get(sid)
+            retry_index_snapshot_valid, retry_index_row_snapshot = (
+                _snapshot_deleted_session_index_row(sid)
+            )
+            # The run journal contains the full plaintext request/response and
+            # its retired authority is the durable delete-retry marker. Do not
+            # remove the canonical session owner or publish session_delete
+            # until this cleanup has committed: the retained sidecar/sidebar
+            # row is the user's actionable retry handle after a truthful 500.
+            try:
+                from api.run_journal import delete_run_journal
+
+                delete_run_journal(sid)
+            except Exception:
+                logger.debug(
+                    "Failed to delete run journal for session %s; preserving session for retry",
+                    sid,
+                    exc_info=True,
+                )
+                return j(
+                    handler,
+                    {
+                        "ok": False,
+                        "state_db_cleanup_failed": False,
+                        "run_journal_cleanup_failed": True,
+                        "session_artifact_cleanup_failed": False,
+                        **worktree_retained,
+                        "error": "Run journal cleanup failed; retry deletion",
+                    },
+                    status=500,
+                )
+            try:
+                _delete_session_attachments_verified(sid)
+            except Exception:
+                logger.debug(
+                    "Failed to delete attachments for session %s; preserving session for retry",
+                    sid,
+                    exc_info=True,
+                )
+                return j(
+                    handler,
+                    {
+                        "ok": False,
+                        "state_db_cleanup_failed": False,
+                        "run_journal_cleanup_failed": False,
+                        "attachment_cleanup_failed": True,
+                        "turn_journal_cleanup_failed": False,
+                        "session_artifact_cleanup_failed": False,
+                        **worktree_retained,
+                        "error": "Attachment cleanup failed; retry deletion",
+                    },
+                    status=500,
+                )
+            try:
+                from api.turn_journal import delete_turn_journal_verified
+
+                delete_turn_journal_verified(sid)
+            except Exception:
+                logger.debug(
+                    "Failed to delete turn journal for session %s; preserving session for retry",
+                    sid,
+                    exc_info=True,
+                )
+                return j(
+                    handler,
+                    {
+                        "ok": False,
+                        "state_db_cleanup_failed": False,
+                        "run_journal_cleanup_failed": False,
+                        "attachment_cleanup_failed": False,
+                        "turn_journal_cleanup_failed": True,
+                        "session_artifact_cleanup_failed": False,
+                        **worktree_retained,
+                        "error": "Turn journal cleanup failed; retry deletion",
+                    },
+                    status=500,
+                )
+            if not is_messaging_session:
+                try:
+                    from api.models import delete_cli_session_for_webui_delete
+
+                    if not delete_cli_session_for_webui_delete(sid):
+                        return j(
+                            handler,
+                            {
+                                "ok": False,
+                                "state_db_cleanup_failed": True,
+                                "run_journal_cleanup_failed": False,
+                                "attachment_cleanup_failed": False,
+                                "turn_journal_cleanup_failed": False,
+                                "session_artifact_cleanup_failed": False,
+                                **worktree_retained,
+                                "error": "State database cleanup failed; retry deletion",
+                            },
+                            status=500,
+                        )
+                except Exception:
+                    logger.warning("Failed to delete CLI session %s from state.db", sid, exc_info=True)
+                    return j(
+                        handler,
+                        {
+                            "ok": False,
+                            "state_db_cleanup_failed": True,
+                            "run_journal_cleanup_failed": False,
+                            "attachment_cleanup_failed": False,
+                            "turn_journal_cleanup_failed": False,
+                            "session_artifact_cleanup_failed": False,
+                            **worktree_retained,
+                            "error": "State database cleanup failed; retry deletion",
+                        },
+                        status=500,
+                    )
             try:
                 p = (SESSION_DIR / f"{sid}.json").resolve()
                 p.relative_to(SESSION_DIR.resolve())
             except Exception:
                 return bad(handler, "Invalid session_id", 400)
-            sidecar_deleted = False
-            try:
-                p.unlink(missing_ok=True)
-            except Exception:
-                logger.debug("Failed to unlink session file %s", p)
-            sidecar_deleted = not p.exists()
-            try:
-                prune_session_from_index(sid)
-            except Exception:
-                logger.debug("Failed to prune deleted session from index: %s", sid, exc_info=True)
-            try:
-                p.with_suffix('.json.bak').unlink(missing_ok=True)
-            except Exception:
-                logger.debug("Failed to unlink session backup file %s", p.with_suffix('.json.bak'))
-            if sidecar_deleted and not is_messaging_session:
+            backup = p.with_suffix('.json.bak')
+            retry_sidecar_snapshot = _snapshot_chat_start_file(p)
+            retry_backup_snapshot = _snapshot_chat_start_file(backup)
+            residual_artifacts = []
+            for artifact in (p, backup):
                 try:
-                    _record_webui_deleted_session_tombstone(sid)
+                    artifact.unlink(missing_ok=True)
                 except Exception:
-                    logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
+                    logger.debug("Failed to unlink session artifact %s", artifact, exc_info=True)
+                try:
+                    if artifact.exists():
+                        residual_artifacts.append(artifact.name)
+                except Exception:
+                    logger.debug("Failed to verify session artifact removal %s", artifact, exc_info=True)
+                    residual_artifacts.append(artifact.name)
+            if residual_artifacts:
+                logger.warning(
+                    "Session artifact cleanup failed for %s: %s",
+                    sid,
+                    ", ".join(residual_artifacts),
+                )
+                return j(
+                    handler,
+                    {
+                        "ok": False,
+                        "state_db_cleanup_failed": False,
+                        "run_journal_cleanup_failed": False,
+                        "session_artifact_cleanup_failed": True,
+                        **worktree_retained,
+                        "error": "Session file cleanup failed; retry deletion",
+                    },
+                    status=500,
+                )
+            # Keep the index writer fence continuously held from target-row
+            # prune through readback, tombstone publication/verification, and
+            # exact-owner retirement.  A missing-index rebuild takes this same
+            # lock while it snapshots in-memory owners, so it either publishes
+            # before this transaction (and is pruned here) or starts after the
+            # owner has been removed.
+            _INDEX_WRITE_LOCK.acquire()
+            index_write_lock_held = True
+            try:
+                try:
+                    prune_session_from_index(sid)
+                except Exception:
+                    logger.debug("Failed to prune deleted session from index: %s", sid, exc_info=True)
+                    retry_state_restored = _restore_deleted_session_retry_persistence(
+                        sid,
+                        sidecar_snapshot=retry_sidecar_snapshot,
+                        backup_snapshot=retry_backup_snapshot,
+                        index_row_snapshot=retry_index_row_snapshot,
+                        index_snapshot_valid=retry_index_snapshot_valid,
+                        owner=retry_owner,
+                    )
+                    return j(
+                        handler,
+                        {
+                            "ok": False,
+                            "state_db_cleanup_failed": False,
+                            "run_journal_cleanup_failed": False,
+                            "session_artifact_cleanup_failed": False,
+                            "session_index_cleanup_failed": True,
+                            "retry_state_restored": retry_state_restored,
+                            **worktree_retained,
+                            "error": (
+                                "Session index cleanup failed; retry deletion"
+                                if retry_state_restored
+                                else "Delete retry state restoration failed; manual recovery required"
+                            ),
+                        },
+                        status=500,
+                    )
+                if not _session_index_prune_verified(sid):
+                    logger.warning("Session index row was not settled for %s", sid)
+                    retry_state_restored = _restore_deleted_session_retry_persistence(
+                        sid,
+                        sidecar_snapshot=retry_sidecar_snapshot,
+                        backup_snapshot=retry_backup_snapshot,
+                        index_row_snapshot=retry_index_row_snapshot,
+                        index_snapshot_valid=retry_index_snapshot_valid,
+                        owner=retry_owner,
+                    )
+                    return j(
+                        handler,
+                        {
+                            "ok": False,
+                            "state_db_cleanup_failed": False,
+                            "run_journal_cleanup_failed": False,
+                            "session_artifact_cleanup_failed": False,
+                            "session_index_cleanup_failed": True,
+                            "retry_state_restored": retry_state_restored,
+                            **worktree_retained,
+                            "error": (
+                                "Session index cleanup failed; retry deletion"
+                                if retry_state_restored
+                                else "Delete retry state restoration failed; manual recovery required"
+                            ),
+                        },
+                        status=500,
+                    )
+                if not is_messaging_session:
+                    try:
+                        _record_webui_deleted_session_tombstone(sid)
+                    except Exception:
+                        logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
+                        retry_state_restored = _restore_deleted_session_retry_persistence(
+                            sid,
+                            sidecar_snapshot=retry_sidecar_snapshot,
+                            backup_snapshot=retry_backup_snapshot,
+                            index_row_snapshot=retry_index_row_snapshot,
+                            index_snapshot_valid=retry_index_snapshot_valid,
+                            owner=retry_owner,
+                        )
+                        return j(
+                            handler,
+                            {
+                                "ok": False,
+                                "state_db_cleanup_failed": False,
+                                "run_journal_cleanup_failed": False,
+                                "session_artifact_cleanup_failed": False,
+                                "session_index_cleanup_failed": False,
+                                "deleted_session_tombstone_cleanup_failed": True,
+                                "retry_state_restored": retry_state_restored,
+                                **worktree_retained,
+                                "error": (
+                                    "Deleted-session tombstone failed; retry deletion"
+                                    if retry_state_restored
+                                    else "Delete retry state restoration failed; manual recovery required"
+                                ),
+                            },
+                            status=500,
+                        )
+                    if sid not in _load_webui_deleted_session_tombstone():
+                        logger.warning("Deleted-session tombstone was not published for %s", sid)
+                        retry_state_restored = _restore_deleted_session_retry_persistence(
+                            sid,
+                            sidecar_snapshot=retry_sidecar_snapshot,
+                            backup_snapshot=retry_backup_snapshot,
+                            index_row_snapshot=retry_index_row_snapshot,
+                            index_snapshot_valid=retry_index_snapshot_valid,
+                            owner=retry_owner,
+                        )
+                        return j(
+                            handler,
+                            {
+                                "ok": False,
+                                "state_db_cleanup_failed": False,
+                                "run_journal_cleanup_failed": False,
+                                "session_artifact_cleanup_failed": False,
+                                "session_index_cleanup_failed": False,
+                                "deleted_session_tombstone_cleanup_failed": True,
+                                "retry_state_restored": retry_state_restored,
+                                **worktree_retained,
+                                "error": (
+                                    "Deleted-session tombstone failed; retry deletion"
+                                    if retry_state_restored
+                                    else "Delete retry state restoration failed; manual recovery required"
+                                ),
+                            },
+                            status=500,
+                        )
+
+                # Validate and retire the exact admitted owner while holding
+                # LOCK.  Never pop or revoke a successor that replaced the
+                # owner while the durable delete gates were running.
+                owner_replaced = False
+                with LOCK:
+                    if SESSIONS.get(sid) is not retry_owner:
+                        owner_replaced = True
+                    else:
+                        SESSIONS.pop(sid, None)
+                        _advance_session_persistence_generation(sid)
+                if owner_replaced:
+                    logger.warning(
+                        "Refusing successful delete for %s: session owner changed",
+                        sid,
+                    )
+                    retry_state_restored = _restore_deleted_session_retry_persistence(
+                        sid,
+                        sidecar_snapshot=retry_sidecar_snapshot,
+                        backup_snapshot=retry_backup_snapshot,
+                        index_row_snapshot=retry_index_row_snapshot,
+                        index_snapshot_valid=retry_index_snapshot_valid,
+                        owner=retry_owner,
+                    )
+                    return j(
+                        handler,
+                        {
+                            "ok": False,
+                            "state_db_cleanup_failed": False,
+                            "run_journal_cleanup_failed": False,
+                            "session_artifact_cleanup_failed": False,
+                            "session_index_cleanup_failed": False,
+                            "deleted_session_tombstone_cleanup_failed": False,
+                            "retry_state_restored": retry_state_restored,
+                            **worktree_retained,
+                            "error": (
+                                "Session owner changed; retry deletion"
+                                if retry_state_restored
+                                else "Delete retry state restoration failed; manual recovery required"
+                            ),
+                        },
+                        status=500,
+                    )
+            finally:
+                _INDEX_WRITE_LOCK.release()
+                index_write_lock_held = False
         finally:
+            if index_write_lock_held:
+                _INDEX_WRITE_LOCK.release()
+            persistence_lock.release()
             session_lock.release()
         # Evict outside the mutation lock: lifecycle commit may perform provider
         # I/O and must not hold a per-session Session lock.
         from api.config import _evict_session_agent
         _evict_session_agent(sid)
-        try:
-            from api.upload import _session_attachment_dir
-
-            shutil.rmtree(_session_attachment_dir(sid), ignore_errors=True)
-        except Exception:
-            logger.debug("Failed to clean attachment dir for deleted session %s", sid)
-        # Remove the turn-journal shards and the run-journal directory so a
-        # deleted conversation is not recoverable from disk. The session JSON +
-        # state.db rows are cleared above, but these journals retain the user's
-        # messages (turn journal) and the full request/response payloads (run
-        # journal) in plaintext. (#3802)
-        try:
-            from api.turn_journal import delete_turn_journal
-
-            delete_turn_journal(sid)
-        except Exception:
-            logger.debug("Failed to delete turn journal for deleted session %s", sid)
-        try:
-            from api.run_journal import delete_run_journal
-
-            delete_run_journal(sid)
-        except Exception:
-            logger.debug("Failed to delete run journal for deleted session %s", sid)
         # The weak lock registry releases this entry automatically after all
         # holders and waiters drop their strong references.
         # Prune the completion-dedup entry too. The reaper sweeps it once the
@@ -15225,23 +15737,16 @@ def handle_post(handler, parsed) -> bool:
             close_terminal(sid)
         except Exception:
             logger.debug("Failed to close workspace terminal for deleted session %s", sid)
-        # Also delete from CLI state.db for CLI sessions shown in sidebar,
-        # but never erase external messaging channel memory via WebUI delete.
-        state_db_cleanup_failed = False
-        if not is_messaging_session:
-            try:
-                from api.models import delete_cli_session
-
-                state_db_cleanup_failed = not delete_cli_session(sid)
-            except Exception:
-                state_db_cleanup_failed = True
-                logger.warning("Failed to delete CLI session %s", sid, exc_info=True)
         _publish_session_list_changed("session_delete", profile=event_profile)
         return j(
             handler,
             {
                 "ok": True,
-                "state_db_cleanup_failed": state_db_cleanup_failed,
+                "state_db_cleanup_failed": False,
+                "run_journal_cleanup_failed": False,
+                "attachment_cleanup_failed": False,
+                "turn_journal_cleanup_failed": False,
+                "session_artifact_cleanup_failed": False,
                 **worktree_retained,
             },
         )
@@ -15259,6 +15764,9 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Session not found", 404)
         sid = body["session_id"]
         with _get_session_agent_lock(sid):
+            s, owner_status, owner_error = _revalidate_mutation_session_owner(sid, s)
+            if owner_status:
+                return bad(handler, owner_error, owner_status)
             had_sidecar_messages = bool(s.messages or [])
             # Clear is a full truncate-to-empty: route through the SAME helper the
             # /api/session/truncate handler uses (single source of truth) so the
@@ -15365,6 +15873,11 @@ def handle_post(handler, parsed) -> bool:
         if keep < 0:
             return bad(handler, "keep_count must be non-negative")
         with _get_session_agent_lock(body["session_id"]):
+            s, owner_status, owner_error = _revalidate_mutation_session_owner(
+                body["session_id"], s
+            )
+            if owner_status:
+                return bad(handler, owner_error, owner_status)
             from api.session_ops import truncate_session_at_keep
 
             old_msg_count, old_ctx_count = truncate_session_at_keep(s, keep)
@@ -16272,6 +16785,8 @@ def handle_post(handler, parsed) -> bool:
                 with LOCK:
                     SESSIONS[sid] = s
         except KeyError:
+            if _session_deleted_tombstone_marks_was_webui(sid):
+                return bad(handler, "Session not found", 404)
             cli_meta = _lookup_cli_session_metadata(sid)
             if not cli_meta:
                 return bad(handler, "Session not found", 404)
@@ -16284,52 +16799,59 @@ def handle_post(handler, parsed) -> bool:
             _arch_source_tag = (cli_meta.get("source_tag") or cli_meta.get("raw_source") or "").strip().lower()
             if _arch_source_tag == "subagent" or _is_subagent_child_session_id(sid):
                 return bad(handler, "Subagent sessions cannot be archived from WebUI", 400)
-            if _is_messaging_session_record(cli_meta):
-                s = Session(
-                    session_id=sid,
-                    title=cli_meta.get("title") or title_from(get_cli_session_messages(sid), "CLI Session"),
-                    workspace=get_last_workspace(),
-                    messages=[],
-                    model=cli_meta.get("model") or "unknown",
-                    created_at=cli_meta.get("created_at"),
-                    updated_at=cli_meta.get("updated_at"),
-                )
-                s.is_cli_session = is_cli_session_row(cli_meta)
-                s.source_tag = cli_meta.get("source_tag")
-                s.raw_source = cli_meta.get("raw_source") or cli_meta.get("source_tag")
-                s.session_source = cli_meta.get("session_source")
-                s.source_label = cli_meta.get("source_label")
-                s.user_id = cli_meta.get("user_id")
-                s.chat_id = cli_meta.get("chat_id")
-                s.chat_type = cli_meta.get("chat_type")
-                s.thread_id = cli_meta.get("thread_id")
-                s.session_key = cli_meta.get("session_key")
-                s.platform = cli_meta.get("platform")
-                s.save(touch_updated_at=False)
-            else:
-                msgs = get_cli_session_messages(sid)
-                if not msgs:
-                    return bad(handler, "Session not found", 404)
-                s = import_cli_session(
-                    sid,
-                    cli_meta.get("title") or title_from(msgs, "CLI Session"),
-                    msgs,
-                    cli_meta.get("model") or "unknown",
-                    profile=cli_meta.get("profile"),
-                    created_at=cli_meta.get("created_at"),
-                    updated_at=cli_meta.get("updated_at"),
-                )
-                s.is_cli_session = is_cli_session_row(cli_meta)
-                s.source_tag = cli_meta.get("source_tag")
-                s.raw_source = cli_meta.get("raw_source") or cli_meta.get("source_tag")
-                s.session_source = cli_meta.get("session_source")
-                s.source_label = cli_meta.get("source_label")
-                s.user_id = cli_meta.get("user_id")
-                s.chat_id = cli_meta.get("chat_id")
-                s.chat_type = cli_meta.get("chat_type")
-                s.thread_id = cli_meta.get("thread_id")
-                s.session_key = cli_meta.get("session_key")
-                s.platform = cli_meta.get("platform")
+            try:
+                if _is_messaging_session_record(cli_meta):
+                    s = Session(
+                        session_id=sid,
+                        title=cli_meta.get("title") or title_from(get_cli_session_messages(sid), "CLI Session"),
+                        workspace=get_last_workspace(),
+                        messages=[],
+                        model=cli_meta.get("model") or "unknown",
+                        created_at=cli_meta.get("created_at"),
+                        updated_at=cli_meta.get("updated_at"),
+                    )
+                    s.is_cli_session = is_cli_session_row(cli_meta)
+                    s.source_tag = cli_meta.get("source_tag")
+                    s.raw_source = cli_meta.get("raw_source") or cli_meta.get("source_tag")
+                    s.session_source = cli_meta.get("session_source")
+                    s.source_label = cli_meta.get("source_label")
+                    s.user_id = cli_meta.get("user_id")
+                    s.chat_id = cli_meta.get("chat_id")
+                    s.chat_type = cli_meta.get("chat_type")
+                    s.thread_id = cli_meta.get("thread_id")
+                    s.session_key = cli_meta.get("session_key")
+                    s.platform = cli_meta.get("platform")
+                    s.save(touch_updated_at=False)
+                else:
+                    msgs = get_cli_session_messages(sid)
+                    if not msgs:
+                        return bad(handler, "Session not found", 404)
+                    s = import_cli_session(
+                        sid,
+                        cli_meta.get("title") or title_from(msgs, "CLI Session"),
+                        msgs,
+                        cli_meta.get("model") or "unknown",
+                        profile=cli_meta.get("profile"),
+                        created_at=cli_meta.get("created_at"),
+                        updated_at=cli_meta.get("updated_at"),
+                    )
+                    s.is_cli_session = is_cli_session_row(cli_meta)
+                    s.source_tag = cli_meta.get("source_tag")
+                    s.raw_source = cli_meta.get("raw_source") or cli_meta.get("source_tag")
+                    s.session_source = cli_meta.get("session_source")
+                    s.source_label = cli_meta.get("source_label")
+                    s.user_id = cli_meta.get("user_id")
+                    s.chat_id = cli_meta.get("chat_id")
+                    s.chat_type = cli_meta.get("chat_type")
+                    s.thread_id = cli_meta.get("thread_id")
+                    s.session_key = cli_meta.get("session_key")
+                    s.platform = cli_meta.get("platform")
+            except KeyError:
+                # A delete may win after the tombstone check above but before
+                # this fallback materializes its CLI-owned sidecar. Preserve
+                # the existing archive 404 contract instead of leaking the
+                # lifecycle guard as an unhandled server error.
+                return bad(handler, "Session not found", 404)
         with _get_session_agent_lock(sid):
             s.archived = bool(body.get("archived", True))
             s.save(touch_updated_at=False)
@@ -21376,7 +21898,45 @@ def _handle_btw(handler, body):
     # Copy conversation history for context (agent reads from messages)
     ephemeral.messages = list(s.messages or [])
     ephemeral.title = f"btw: {question[:60]}"
+    auxiliary_persistence_before = _snapshot_auxiliary_session_persistence(ephemeral)
     ephemeral.save()
+    auxiliary_persistence_after = _snapshot_auxiliary_session_persistence(ephemeral)
+    from api.run_journal import (
+        RunJournalRetiredAuthorityError,
+        activate_run_journal_session,
+    )
+    try:
+        run_journal_incarnation = activate_run_journal_session(ephemeral.session_id)
+    except RunJournalRetiredAuthorityError as exc:
+        if not _rollback_auxiliary_session_after_authority_failure(
+            ephemeral,
+            before=auxiliary_persistence_before,
+            prepared=auxiliary_persistence_after,
+        ):
+            return j(
+                handler,
+                {
+                    "error": "run journal authority failure left auxiliary session state uncertain",
+                    "type": "run_journal_authority_rollback_failed",
+                    "retryable": False,
+                },
+                status=500,
+            )
+        return j(
+            handler,
+            {
+                "error": str(exc),
+                "type": "run_journal_authority_unavailable",
+            },
+            status=409,
+        )
+    except (RuntimeError, OSError):
+        logger.warning(
+            "Failed to activate run journal for /btw session %s; continuing unjournaled",
+            ephemeral.session_id,
+            exc_info=True,
+        )
+        run_journal_incarnation = None
     stream_id = uuid.uuid4().hex
     ephemeral.active_stream_id = stream_id
     register_session_writeback_owner(ephemeral.session_id, stream_id)
@@ -21390,7 +21950,11 @@ def _handle_btw(handler, body):
     thr = threading.Thread(
         target=_run_agent_streaming,
         args=(ephemeral.session_id, question, s.model, s.workspace, stream_id, None),
-        kwargs={"ephemeral": True, "model_provider": model_provider},
+        kwargs={
+            "ephemeral": True,
+            "model_provider": model_provider,
+            "run_journal_incarnation": run_journal_incarnation,
+        },
         daemon=True,
     )
     thr.start()
@@ -21427,7 +21991,45 @@ def _handle_background(handler, body):
         profile=getattr(s, 'profile', None),
     )
     bg.title = f"bg: {prompt[:60]}"
+    auxiliary_persistence_before = _snapshot_auxiliary_session_persistence(bg)
     bg.save()
+    auxiliary_persistence_after = _snapshot_auxiliary_session_persistence(bg)
+    from api.run_journal import (
+        RunJournalRetiredAuthorityError,
+        activate_run_journal_session,
+    )
+    try:
+        run_journal_incarnation = activate_run_journal_session(bg.session_id)
+    except RunJournalRetiredAuthorityError as exc:
+        if not _rollback_auxiliary_session_after_authority_failure(
+            bg,
+            before=auxiliary_persistence_before,
+            prepared=auxiliary_persistence_after,
+        ):
+            return j(
+                handler,
+                {
+                    "error": "run journal authority failure left auxiliary session state uncertain",
+                    "type": "run_journal_authority_rollback_failed",
+                    "retryable": False,
+                },
+                status=500,
+            )
+        return j(
+            handler,
+            {
+                "error": str(exc),
+                "type": "run_journal_authority_unavailable",
+            },
+            status=409,
+        )
+    except (RuntimeError, OSError):
+        logger.warning(
+            "Failed to activate run journal for background session %s; continuing unjournaled",
+            bg.session_id,
+            exc_info=True,
+        )
+        run_journal_incarnation = None
     stream_id = uuid.uuid4().hex
     bg.active_stream_id = stream_id
     register_session_writeback_owner(bg.session_id, stream_id)
@@ -21442,7 +22044,7 @@ def _handle_background(handler, body):
     bg_sid = bg.session_id
     track_background(parent_sid, bg_sid, stream_id, task_id, prompt)
 
-    def _run_bg_and_notify():
+    def _run_bg_and_notify(*, run_journal_incarnation):
         """Run the background agent, then mark the tracked task `done` with the
         last assistant reply so `/api/background/status` can surface it.  Without
         this, `complete_background()` is never called and the result is lost —
@@ -21457,6 +22059,7 @@ def _handle_background(handler, body):
                 stream_id,
                 None,
                 model_provider=model_provider,
+                run_journal_incarnation=run_journal_incarnation,
             )
             # Reload the bg session from disk and extract the final assistant reply.
             try:
@@ -21488,7 +22091,11 @@ def _handle_background(handler, body):
             except Exception:
                 pass
 
-    thr = threading.Thread(target=_run_bg_and_notify, daemon=True)
+    thr = threading.Thread(
+        target=_run_bg_and_notify,
+        kwargs={"run_journal_incarnation": run_journal_incarnation},
+        daemon=True,
+    )
     thr.start()
     return j(handler, {"task_id": task_id, "stream_id": stream_id, "session_id": bg.session_id})
 
@@ -21590,6 +22197,569 @@ def _prepare_chat_start_session_for_stream(
             source=source,
         )
     s.save()
+
+
+_CHAT_START_ROLLBACK_FIELDS = (
+    "active_stream_id",
+    "pending_user_message",
+    "pending_attachments",
+    "pending_started_at",
+    "pending_user_source",
+    "title",
+    "messages",
+    "truncation_watermark",
+    "workspace",
+    "model",
+    "model_provider",
+    "post_compression_context_tokens_estimate",
+    # ``save()`` updates this metadata field even though the prepare helper
+    # does not assign it directly.  Restoring it keeps the compensation write
+    # observationally identical to the pre-admission sidecar.
+    "updated_at",
+)
+_CHAT_START_ROLLBACK_MISSING = object()
+
+
+def _snapshot_chat_start_session_for_rollback(session) -> dict:
+    """Capture only fields mutated by chat-start prepare/save.
+
+    The snapshot is intentionally narrow: it covers pending/display state,
+    routing metadata, and the save timestamp touched by the prepare helper,
+    without copying unrelated session state.  Values are deep-copied so eager
+    mode's in-place message append cannot mutate the rollback source.
+    """
+    snapshot = {}
+    for field in _CHAT_START_ROLLBACK_FIELDS:
+        if hasattr(session, field):
+            snapshot[field] = copy.deepcopy(getattr(session, field))
+        else:
+            snapshot[field] = _CHAT_START_ROLLBACK_MISSING
+    snapshot["_persistence_before"] = _snapshot_chat_start_persistence(session)
+    return snapshot
+
+
+def _snapshot_chat_start_file(path: Path) -> dict:
+    """Capture one exact file image, or the absence of that file."""
+    try:
+        payload = path.read_bytes()
+        mode = _stat.S_IMODE(path.stat().st_mode)
+    except FileNotFoundError:
+        return {"path": path, "exists": False, "bytes": None, "mode": None}
+    except OSError as exc:
+        return {"path": path, "error": str(exc)}
+    return {"path": path, "exists": True, "bytes": payload, "mode": mode}
+
+
+def _chat_start_file_snapshots_equal(expected: dict, actual: dict) -> bool:
+    """Compare two exact file images without treating missing as empty."""
+    if expected.get("error") or actual.get("error"):
+        return False
+    if expected.get("exists") != actual.get("exists"):
+        return False
+    return not expected.get("exists") or expected.get("bytes") == actual.get("bytes")
+
+
+def _snapshot_chat_start_persistence(session) -> dict | None:
+    """Capture the sidecar and backup images around chat-start preparation."""
+    path = getattr(session, "path", None)
+    if path is None:
+        # Focused route doubles do not expose a real sidecar; their save() is
+        # the persistence boundary and the in-memory fallback remains useful.
+        return None
+    try:
+        path = Path(path)
+    except (TypeError, ValueError):
+        return {"error": "invalid session sidecar path"}
+    backup = path.with_suffix(".json.bak")
+    sidecar = _snapshot_chat_start_file(path)
+    return {
+        "path": path,
+        "sidecar": sidecar,
+        "backup": _snapshot_chat_start_file(backup),
+        # Session.save() writes this exact compact row to the index.  Capturing
+        # only the target row avoids retaining another full _index.json image
+        # on every chat start while still giving rollback an exact CAS value.
+        "index_row": copy.deepcopy(session.compact()) if sidecar.get("exists") else None,
+    }
+
+
+def _chat_start_persistence_matches(snapshot: dict | None) -> bool:
+    """Return whether both files still equal the post-prepare snapshot."""
+    if not isinstance(snapshot, dict) or snapshot.get("error"):
+        return False
+    path = snapshot.get("path")
+    if not isinstance(path, Path):
+        return False
+    current = {
+        "sidecar": _snapshot_chat_start_file(path),
+        "backup": _snapshot_chat_start_file(path.with_suffix(".json.bak")),
+    }
+    for key in ("sidecar", "backup"):
+        expected = snapshot.get(key) or {}
+        actual = current[key]
+        if not _chat_start_file_snapshots_equal(expected, actual):
+            return False
+    return True
+
+
+def _snapshot_auxiliary_session_persistence(session) -> dict:
+    """Capture child sidecar, backup, and index images around the first save.
+
+    Auxiliary sessions use a real ``Session`` in production, but route-level
+    tests also use in-memory doubles without a ``path``.  The latter have no
+    durable child state to clean, so record that explicit boundary instead of
+    guessing a path under the process's real session directory.
+    """
+    snapshot = _snapshot_chat_start_persistence(session)
+    if snapshot is None:
+        return {"unpersisted": True}
+    snapshot["index"] = _snapshot_chat_start_file(Path(SESSION_INDEX_FILE))
+    return snapshot
+
+
+def _auxiliary_session_persistence_matches(snapshot: dict | None) -> bool:
+    """Return whether a child still owns its sidecar and backup images."""
+    if not isinstance(snapshot, dict):
+        return False
+    if snapshot.get("unpersisted"):
+        return True
+    return _chat_start_persistence_matches(snapshot)
+
+
+def _session_index_rows_from_snapshot(snapshot: dict | None) -> list[dict] | None:
+    """Decode one captured index image, rejecting malformed rows."""
+    if not isinstance(snapshot, dict) or snapshot.get("error"):
+        return None
+    if not snapshot.get("exists"):
+        return []
+    try:
+        rows = json.loads(bytes(snapshot.get("bytes") or b"").decode("utf-8"))
+    except (UnicodeDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        return None
+    return rows
+
+
+def _prune_auxiliary_session_index(
+    session_id: str,
+    *,
+    before: dict | None,
+    prepared: dict | None,
+    restore_files: tuple[dict, dict] | None = None,
+) -> bool:
+    """Compare-and-prune only this child's index row under the index lock."""
+    before_index = before.get("index") if isinstance(before, dict) else None
+    prepared_index = prepared.get("index") if isinstance(prepared, dict) else None
+    before_rows = _session_index_rows_from_snapshot(before_index)
+    prepared_rows = _session_index_rows_from_snapshot(prepared_index)
+    if before_rows is None or prepared_rows is None:
+        return False
+    before_matches = [row for row in before_rows if row.get("session_id") == session_id]
+    prepared_matches = [row for row in prepared_rows if row.get("session_id") == session_id]
+    if before_matches or len(prepared_matches) != 1:
+        return False
+    post_row = prepared_matches[0]
+    index_path = Path(SESSION_INDEX_FILE)
+    from api.models import _INDEX_WRITE_LOCK, _safe_replace
+
+    with _INDEX_WRITE_LOCK:
+        current_snapshot = _snapshot_chat_start_file(index_path)
+        current_rows = _session_index_rows_from_snapshot(current_snapshot)
+        if current_rows is None:
+            return False
+        current_matches = [row for row in current_rows if row.get("session_id") == session_id]
+        if len(current_matches) != 1 or current_matches[0] != post_row:
+            return False
+        survivors = [row for row in current_rows if row.get("session_id") != session_id]
+        if restore_files is not None:
+            try:
+                _restore_chat_start_file(restore_files[0])
+                _restore_chat_start_file(restore_files[1])
+            except Exception:
+                logger.exception("Failed to restore rejected auxiliary child persistence")
+                return False
+        temporary = index_path.with_suffix(
+            f".tmp.{os.getpid()}.{threading.current_thread().ident}"
+        )
+        try:
+            with open(temporary, "w", encoding="utf-8") as fh:
+                json.dump(survivors, fh, ensure_ascii=False, indent=2)
+                fh.flush()
+                os.fsync(fh.fileno())
+            _safe_replace(temporary, index_path)
+        except BaseException:
+            try:
+                temporary.unlink(missing_ok=True)
+            except Exception:
+                pass
+            return False
+    return True
+
+
+def _restore_auxiliary_session_persistence(
+    *,
+    session_id: str,
+    before: dict | None,
+    prepared: dict | None,
+) -> bool:
+    """Restore a rejected auxiliary child only while every image is exact."""
+    if not isinstance(before, dict) or not isinstance(prepared, dict):
+        return False
+    if before.get("unpersisted"):
+        return bool(prepared.get("unpersisted"))
+    if (
+        before.get("error")
+        or any((before.get(key) or {}).get("error") for key in ("sidecar", "backup"))
+        or not _auxiliary_session_persistence_matches(prepared)
+    ):
+        logger.warning("Refusing auxiliary run-journal rollback: child persistence rotated")
+        return False
+    return _prune_auxiliary_session_index(
+        session_id,
+        before=before,
+        prepared=prepared,
+        restore_files=(before["sidecar"], before["backup"]),
+    )
+
+
+def _rollback_auxiliary_session_after_authority_failure(
+    session,
+    *,
+    before: dict,
+    prepared: dict,
+) -> bool:
+    """Remove one rejected child without touching a successor or its parent."""
+    session_id = str(getattr(session, "session_id", "") or "")
+    if not isinstance(prepared, dict):
+        return False
+    from api.models import _INDEX_WRITE_LOCK, _get_session_persistence_lock
+
+    # Fixed lock order: persistence lock -> index writer -> in-memory owner.
+    # The persistence lock keeps a same-object Session.save() from replacing a
+    # sidecar between the compare and restore.  LOCK stays held continuously
+    # from the exact-owner check through file/index cleanup and owner removal,
+    # so a successor cannot enter the window and be cleaned as the old child.
+    with _get_session_persistence_lock(session_id):
+        with _INDEX_WRITE_LOCK:
+            with LOCK:
+                current = SESSIONS.get(session_id)
+                if current is not session:
+                    logger.warning(
+                        "Refusing auxiliary run-journal rollback for %s: in-memory child owner rotated",
+                        session_id,
+                    )
+                    return False
+                if not _restore_auxiliary_session_persistence(
+                    session_id=session_id,
+                    before=before,
+                    prepared=prepared,
+                ):
+                    return False
+                # This object is no longer an admissible writer after a
+                # successful auxiliary rollback.  Keep the transient marker
+                # private so a save already waiting on the persistence lock
+                # cannot resurrect the removed sidecar/index row.  A distinct
+                # successor object for the same sid has no marker.
+                if SESSIONS.get(session_id) is not session:
+                    logger.warning(
+                        "Refusing auxiliary run-journal rollback for %s: in-memory child owner rotated during cleanup",
+                        session_id,
+                    )
+                    return False
+                session._persistence_revoked = True
+                SESSIONS.pop(session_id, None)
+    return True
+
+
+def _restore_chat_start_file(snapshot: dict) -> None:
+    """Atomically restore one exact file image or its prior absence."""
+    path = snapshot["path"]
+    if not snapshot.get("exists"):
+        path.unlink(missing_ok=True)
+        return
+    from api.models import _safe_replace
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(
+        f".{path.name}.rollback.tmp.{os.getpid()}.{threading.current_thread().ident}"
+    )
+    try:
+        with open(temporary, "wb") as fh:
+            fh.write(snapshot["bytes"])
+            fh.flush()
+            os.fsync(fh.fileno())
+        _safe_replace(temporary, path)
+        mode = snapshot.get("mode")
+        if mode is not None:
+            os.chmod(path, mode)
+    except BaseException:
+        try:
+            temporary.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+
+
+def _chat_start_index_row_from_snapshot(snapshot: dict | None, session_id: str):
+    """Return the captured compact row for *session_id*, rejecting bad identity."""
+    if not isinstance(snapshot, dict) or "index_row" not in snapshot:
+        return False, None
+    row = snapshot.get("index_row")
+    if row is None:
+        return True, None
+    if not isinstance(row, dict) or row.get("session_id") != session_id:
+        return False, None
+    return True, row
+
+
+def _settle_chat_start_session_index_locked(
+    session_id: str,
+    *,
+    before: dict,
+    prepared: dict,
+) -> bool:
+    """Restore only one chat-start SID's index row under existing locks."""
+    before_ok, before_row = _chat_start_index_row_from_snapshot(before, session_id)
+    prepared_ok, prepared_row = _chat_start_index_row_from_snapshot(prepared, session_id)
+    if not before_ok or not prepared_ok:
+        return False
+    from api.models import _settle_session_index_row_locked
+
+    return _settle_session_index_row_locked(
+        session_id,
+        expected=prepared_row,
+        replacement=before_row,
+    )
+
+
+def _chat_start_session_index_matches_locked(
+    session_id: str,
+    *,
+    prepared: dict,
+) -> bool:
+    """Confirm this SID still has the exact post-prepare index row."""
+    prepared_ok, prepared_row = _chat_start_index_row_from_snapshot(prepared, session_id)
+    if not prepared_ok or prepared_row is None:
+        return False
+    from api.models import _settle_session_index_row_locked
+
+    # replacement==expected makes the lock-aware CAS a read-only exact-row
+    # validation.  The caller already holds both index and global owner locks.
+    return _settle_session_index_row_locked(
+        session_id,
+        expected=prepared_row,
+        replacement=prepared_row,
+    )
+
+
+def _restore_chat_start_persistence(
+    session,
+    *,
+    before: dict | None,
+    prepared: dict | None,
+) -> bool:
+    """Restore sidecar/backup bytes without producing a rollback ``.bak``.
+
+    The caller holds the persistence, index, and global owner locks.  The
+    post-prepare images and exact SID index row are compared before any file is
+    restored; sibling index rows remain untouched.
+    """
+    if before is None:
+        try:
+            session.save(touch_updated_at=False)
+        except Exception:
+            return False
+        return True
+    if (
+        before.get("error")
+        or any((before.get(key) or {}).get("error") for key in ("sidecar", "backup"))
+        or not _chat_start_persistence_matches(prepared)
+    ):
+        logger.warning(
+            "Refusing run-journal persistence rollback for session %s: sidecar rotated",
+            getattr(session, "session_id", "?"),
+        )
+        return False
+    if not _chat_start_session_index_matches_locked(
+        str(getattr(session, "session_id", "") or ""),
+        prepared=prepared,
+    ):
+        logger.warning(
+            "Refusing run-journal persistence rollback for session %s: index owner rotated",
+            getattr(session, "session_id", "?"),
+        )
+        return False
+    try:
+        _restore_chat_start_file(before["sidecar"])
+        _restore_chat_start_file(before["backup"])
+        if not _settle_chat_start_session_index_locked(
+            session.session_id,
+            before=before,
+            prepared=prepared,
+        ):
+            return False
+    except Exception:
+        logger.exception(
+            "Failed to restore run-journal persistence for session %s",
+            getattr(session, "session_id", "?"),
+        )
+        return False
+    return True
+
+
+def _rollback_chat_start_session_after_authority_failure(
+    session,
+    *,
+    stream_id: str,
+    snapshot: dict,
+) -> bool:
+    """Compensate a prepared turn after a retired journal authority failure.
+
+    The caller holds the per-session agent lock.  Rollback is compare-and-clear:
+    it only restores while the session still points at ``stream_id`` and the
+    writeback registry is either absent or still owned by that stream.  A
+    successor therefore remains untouched.  On a matching stream, the exact
+    snapshot is restored and persisted with ``touch_updated_at=False``; a
+    persistence error returns ``False`` so the route fails closed instead of
+    claiming a clean retryable 409.
+    """
+    session_id = str(getattr(session, "session_id", "") or "")
+    from api.models import (
+        _INDEX_WRITE_LOCK,
+        _advance_session_persistence_generation,
+        _get_session_persistence_lock,
+    )
+
+    # The caller already owns the per-session agent lock.  Keep the fixed
+    # agent -> persistence -> index -> global-owner lock order across every
+    # compare and compensation step.  In particular, LOCK remains held while
+    # in-memory fields, sidecar/backup bytes, this SID's index row, writeback
+    # ownership, and the canonical cache are settled; no helper that reacquires
+    # LOCK may run inside this fence.
+    with (
+        _get_session_persistence_lock(session_id),
+        _INDEX_WRITE_LOCK,
+        LOCK,
+    ):
+        if SESSIONS.get(session_id) is not session:
+            logger.warning(
+                "Refusing run-journal rollback for session %s: canonical owner rotated",
+                session_id or "?",
+            )
+            clear_session_writeback_owner_if_owned(session_id, stream_id)
+            return False
+        current_stream_id = getattr(session, "active_stream_id", None)
+        if current_stream_id != stream_id:
+            logger.warning(
+                "Refusing run-journal rollback for session %s: stream moved from %s to %s",
+                session_id or "?",
+                stream_id,
+                current_stream_id,
+            )
+            return False
+        try:
+            current_owner = session_writeback_owner(session_id)
+        except Exception:
+            logger.exception(
+                "Failed to read writeback owner while rolling back stream %s for session %s",
+                stream_id,
+                session_id or "?",
+            )
+            return False
+        if current_owner not in (None, stream_id):
+            logger.warning(
+                "Refusing run-journal rollback for session %s: writeback owner moved from %s to %s",
+                session_id or "?",
+                stream_id,
+                current_owner,
+            )
+            return False
+
+        before_persistence = snapshot.get("_persistence_before")
+        prepared_persistence = snapshot.get("_persistence_after_prepare")
+        # Check every persisted owner before changing in-memory fields.  A save
+        # that completed while rollback was waiting owns the successor image;
+        # restoring the old snapshot would overwrite that successor.
+        if before_persistence is not None and (
+            not isinstance(before_persistence, dict)
+            or before_persistence.get("error")
+            or any(
+                not isinstance(before_persistence.get(key), dict)
+                or before_persistence[key].get("error")
+                for key in ("sidecar", "backup")
+            )
+            or not _chat_start_persistence_matches(prepared_persistence)
+        ):
+            logger.warning(
+                "Refusing run-journal persistence rollback for session %s: sidecar rotated",
+                session_id or "?",
+            )
+            clear_session_writeback_owner_if_owned(session_id, stream_id)
+            return False
+
+        if before_persistence is not None:
+            before_index_ok, _ = _chat_start_index_row_from_snapshot(
+                before_persistence,
+                session_id,
+            )
+            prepared_index_ok, prepared_index_row = _chat_start_index_row_from_snapshot(
+                prepared_persistence,
+                session_id,
+            )
+            if (
+                not before_index_ok
+                or not prepared_index_ok
+                or prepared_index_row is None
+                or not _chat_start_session_index_matches_locked(
+                    session_id,
+                    prepared=prepared_persistence,
+                )
+            ):
+                logger.warning(
+                    "Refusing run-journal persistence rollback for session %s: index owner rotated",
+                    session_id or "?",
+                )
+                clear_session_writeback_owner_if_owned(session_id, stream_id)
+                return False
+
+        for field in _CHAT_START_ROLLBACK_FIELDS:
+            value = snapshot.get(field, _CHAT_START_ROLLBACK_MISSING)
+            if value is _CHAT_START_ROLLBACK_MISSING:
+                try:
+                    delattr(session, field)
+                except AttributeError:
+                    pass
+            else:
+                setattr(session, field, copy.deepcopy(value))
+        if not _restore_chat_start_persistence(
+            session,
+            before=before_persistence,
+            prepared=prepared_persistence,
+        ):
+            # Durable restore failed after the in-memory rollback fields were
+            # staged.  The exact object is now unsafe to write: restoration
+            # may have partially changed the sidecar/index, so retaining a
+            # save-capable canonical object could overwrite the only durable
+            # image whose state is still authoritative.  Quarantine it inside
+            # the existing agent -> persistence -> index -> LOCK fence, clear
+            # only its writeback owner, and evict only if it remains canonical.
+            session._persistence_revoked = True
+            _advance_session_persistence_generation(session_id)
+            clear_session_writeback_owner_if_owned(session_id, stream_id)
+            if SESSIONS.get(session_id) is session:
+                SESSIONS.pop(session_id, None)
+            return False
+        if SESSIONS.get(session_id) is not session:
+            logger.warning(
+                "Refusing run-journal rollback for session %s: canonical owner rotated during restore",
+                session_id or "?",
+            )
+            clear_session_writeback_owner_if_owned(session_id, stream_id)
+            return False
+        clear_session_writeback_owner_if_owned(session_id, stream_id)
+        SESSIONS.move_to_end(session_id)
+        return True
 
 
 def _is_hidden_empty_session(s) -> bool:
@@ -21756,6 +22926,49 @@ def _agent_runtime_barrier_response(
     return None
 
 
+def _bind_chat_start_session_owner(session) -> dict | None:
+    """Bind a chat-start request to its exact in-memory session owner.
+
+    Callers hold the per-session agent lock before invoking this helper.  A
+    missing cache entry is installed with the request's object; an exact
+    same-object hit is retained; and a distinct or mismatched object fails
+    closed so preparation cannot mutate a stale owner.
+    """
+    sid = str(getattr(session, "session_id", "") or "")
+    if not sid:
+        return {
+            "error": "chat-start session owner identity is unavailable",
+            "type": "session_owner_unavailable",
+            "retryable": True,
+            "_status": 409,
+        }
+    with LOCK:
+        current = SESSIONS.get(sid)
+        if current is not None and str(getattr(current, "session_id", "") or "") != sid:
+            return {
+                "error": "chat-start canonical session owner identity is invalid",
+                "type": "session_owner_unavailable",
+                "retryable": True,
+                "_status": 409,
+            }
+        if current is None:
+            SESSIONS[sid] = session
+            SESSIONS.move_to_end(sid)
+            # Do not run cache eviction inside the identity fence: when every
+            # older entry is active, the not-yet-prepared owner could be the
+            # only evictable object and immediately lose canonical ownership.
+        elif current is session:
+            SESSIONS.move_to_end(sid)
+        else:
+            return {
+                "error": "chat-start canonical session owner changed; retry the request",
+                "type": "session_owner_conflict",
+                "retryable": True,
+                "_status": 409,
+            }
+    return None
+
+
 def _start_chat_stream_for_session(
     s,
     *,
@@ -21795,9 +23008,9 @@ def _start_chat_stream_for_session(
                 "active_stream_id": current_stream_id,
                 "_status": 409,
             }
-        # Stale stream id from a previous run; clear and continue.
-        diag.stage("stale_stream_cleanup") if diag else None
-        _clear_stale_stream_state(s)
+        # A stale stream id is cleared only after the per-session lock binds
+        # the exact canonical owner below.  Do not mutate a non-canonical
+        # object before that ownership fence.
 
     # #1932: check if this session has a pending goal continuation flag.
     # The streaming hook sets PENDING_GOAL_CONTINUATION when goal_continue fires,
@@ -21818,6 +23031,10 @@ def _start_chat_stream_for_session(
     diag.stage("session_lock_wait") if diag else None
     while True:
         with session_lock:
+            owner_error = _bind_chat_start_session_owner(s)
+            if owner_error is not None:
+                diag.stage("response_write") if diag else None
+                return owner_error
             locked_stream_id = getattr(s, "active_stream_id", None)
             if locked_stream_id:
                 if _active_stream_blocks_chat_start(s, locked_stream_id):
@@ -21838,9 +23055,29 @@ def _start_chat_stream_for_session(
                         "_status": 409,
                     }
                 needs_stale_cleanup = False
+                from api.run_journal import (
+                    RunJournalRetiredAuthorityError,
+                    activate_run_journal_session,
+                    validate_run_journal_session_activation,
+                )
+                try:
+                    validate_run_journal_session_activation(s.session_id)
+                except RunJournalRetiredAuthorityError as exc:
+                    return {
+                        "error": str(exc),
+                        "type": "run_journal_authority_unavailable",
+                        "_status": 409,
+                    }
+                except (RuntimeError, OSError):
+                    logger.warning(
+                        "Failed to validate run journal authority for session %s; continuing unjournaled",
+                        s.session_id,
+                        exc_info=True,
+                    )
                 stream_id = uuid.uuid4().hex
                 diag.stage("save_pending_state") if diag else None
                 was_hidden_empty_session = _is_hidden_empty_session(s)
+                chat_start_snapshot = _snapshot_chat_start_session_for_rollback(s)
                 _prepare_chat_start_session_for_stream(
                     s,
                     msg=msg,
@@ -21851,6 +23088,35 @@ def _start_chat_stream_for_session(
                     stream_id=stream_id,
                     source=source,
                 )
+                chat_start_snapshot["_persistence_after_prepare"] = (
+                    _snapshot_chat_start_persistence(s)
+                )
+                try:
+                    run_journal_incarnation = activate_run_journal_session(s.session_id)
+                except RunJournalRetiredAuthorityError as exc:
+                    if not _rollback_chat_start_session_after_authority_failure(
+                        s,
+                        stream_id=stream_id,
+                        snapshot=chat_start_snapshot,
+                    ):
+                        return {
+                            "error": "run journal authority failure left session state uncertain",
+                            "type": "run_journal_authority_rollback_failed",
+                            "retryable": False,
+                            "_status": 500,
+                        }
+                    return {
+                        "error": str(exc),
+                        "type": "run_journal_authority_unavailable",
+                        "_status": 409,
+                    }
+                except (RuntimeError, OSError):
+                    logger.warning(
+                        "Failed to activate run journal for session %s; continuing unjournaled",
+                        s.session_id,
+                        exc_info=True,
+                    )
+                    run_journal_incarnation = None
                 break
         if needs_stale_cleanup:
             diag.stage("stale_stream_cleanup") if diag else None
@@ -21900,7 +23166,11 @@ def _start_chat_stream_for_session(
         STREAM_GOAL_RELATED[stream_id] = True
     diag.stage("worker_thread_start") if diag else None
     worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
-    worker_kwargs = {"model_provider": model_provider, "goal_related": goal_related}
+    worker_kwargs = {
+        "model_provider": model_provider,
+        "goal_related": goal_related,
+        "run_journal_incarnation": run_journal_incarnation,
+    }
     if moa_config and not backend_is_gateway:
         worker_kwargs["moa_config"] = moa_config
     if backend_is_gateway:
@@ -27039,6 +28309,7 @@ def _handle_session_import_cli(handler, body):
         created_at=created_at,
         updated_at=updated_at,
         parent_session_id=cli_parent_session_id,
+        _allow_deleted_session_reactivation=True,
     )
     if cron_project_id:
         s.project_id = cron_project_id

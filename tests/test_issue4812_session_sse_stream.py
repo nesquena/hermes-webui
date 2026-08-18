@@ -5,7 +5,8 @@ import queue
 from types import SimpleNamespace
 from urllib.parse import urlparse
 
-from api.run_journal import append_run_event, read_session_run_events
+from api.run_journal import read_session_run_events
+from tests.run_journal_test_utils import append_run_event
 
 
 class _FakeHandler:

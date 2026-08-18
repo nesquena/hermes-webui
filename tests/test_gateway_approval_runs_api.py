@@ -1714,18 +1714,28 @@ def test_start_chat_stream_marks_gateway_run_pending_before_thread_start(monkeyp
     monkeypatch.setattr(routes, "set_last_workspace", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(routes, "threading", SimpleNamespace(Thread=_FakeThread))
 
-    with patch("api.turn_journal.append_turn_journal_event", return_value={}):
-        response = routes._start_chat_stream_for_session(
-            session,
-            msg="hi",
-            attachments=[],
-            workspace="/tmp",
-            model="test-model",
-            external_runtime_owned=True,
-        )
+    try:
+        with patch("api.turn_journal.append_turn_journal_event", return_value={}):
+            response = routes._start_chat_stream_for_session(
+                session,
+                msg="hi",
+                attachments=[],
+                workspace="/tmp",
+                model="test-model",
+                external_runtime_owned=True,
+            )
 
-    assert response["stream_id"] == recorded["stream_id"]
-    assert gateway_chat.gateway_run_id_pending(recorded["stream_id"]) is False
+        assert response["stream_id"] == recorded["stream_id"]
+        assert gateway_chat.gateway_run_id_pending(recorded["stream_id"]) is False
+    finally:
+        stream_id = str(recorded.get("stream_id") or "")
+        with routes.STREAMS_LOCK:
+            routes.STREAMS.pop(stream_id, None)
+        routes.unregister_stream_owner(stream_id)
+        routes.STREAM_GOAL_RELATED.pop(stream_id, None)
+        with routes.LOCK:
+            if routes.SESSIONS.get(session.session_id) is session:
+                routes.SESSIONS.pop(session.session_id, None)
 
 
 def test_start_chat_stream_clears_gateway_run_state_when_thread_start_fails(monkeypatch):
@@ -1774,19 +1784,29 @@ def test_start_chat_stream_clears_gateway_run_state_when_thread_start_fails(monk
     monkeypatch.setattr(routes, "set_last_workspace", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(routes, "threading", SimpleNamespace(Thread=_BoomThread))
 
-    with patch("api.turn_journal.append_turn_journal_event", return_value={}):
-        with pytest.raises(RuntimeError, match="thread start failed"):
-            routes._start_chat_stream_for_session(
-                session,
-                msg="hi",
-                attachments=[],
-                workspace="/tmp",
-                model="test-model",
-                external_runtime_owned=True,
-            )
+    try:
+        with patch("api.turn_journal.append_turn_journal_event", return_value={}):
+            with pytest.raises(RuntimeError, match="thread start failed"):
+                routes._start_chat_stream_for_session(
+                    session,
+                    msg="hi",
+                    attachments=[],
+                    workspace="/tmp",
+                    model="test-model",
+                    external_runtime_owned=True,
+                )
 
-    assert gateway_chat.gateway_run_id_pending(recorded["stream_id"]) is False
-    assert recorded["stream_id"] not in getattr(gateway_chat, "_STREAM_RUN_LIFECYCLE", {})
+        assert gateway_chat.gateway_run_id_pending(recorded["stream_id"]) is False
+        assert recorded["stream_id"] not in getattr(gateway_chat, "_STREAM_RUN_LIFECYCLE", {})
+    finally:
+        stream_id = str(recorded.get("stream_id") or "")
+        with routes.STREAMS_LOCK:
+            routes.STREAMS.pop(stream_id, None)
+        routes.unregister_stream_owner(stream_id)
+        routes.STREAM_GOAL_RELATED.pop(stream_id, None)
+        with routes.LOCK:
+            if routes.SESSIONS.get(session.session_id) is session:
+                routes.SESSIONS.pop(session.session_id, None)
 
 
 @pytest.mark.parametrize(

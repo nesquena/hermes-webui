@@ -909,6 +909,7 @@ def _run_gateway_chat_streaming(
     *,
     model_provider=None,
     goal_related=False,
+    run_journal_incarnation=None,
 ):
     """Bridge a WebUI chat turn through Hermes Gateway's API server.
 
@@ -941,7 +942,11 @@ def _run_gateway_chat_streaming(
         backend="gateway",
     )
     try:
-        run_journal = RunJournalWriter(session_id, stream_id)
+        run_journal = RunJournalWriter(
+            session_id,
+            stream_id,
+            incarnation=run_journal_incarnation,
+        )
     except Exception:
         run_journal = None
         logger.debug("Failed to initialize gateway run journal for stream %s", stream_id, exc_info=True)

@@ -66,6 +66,7 @@ from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
 from api.models import (
     _is_empty_partial_activity_message,
+    _bind_session_persistence_capability_for_identity_transition,
     _evict_sessions_over_cap,
     clear_process_wakeup_pause,
     get_state_db_session_messages,
@@ -4684,6 +4685,7 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
     old_path = SESSION_DIR / f'{old_sid}.json'
     if not old_path.exists():
         return
+    from api.models import Session
     try:
         existing_text = old_path.read_text(encoding='utf-8')
         try:
@@ -4697,54 +4699,45 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
             existing_msgs = -1
             existing_snapshot = False
         if len(s.messages) > existing_msgs:
-            # In-memory messages are newer than the file; save the full old
-            # snapshot from the current session object while preserving its
-            # pre-existing parent_session_id lineage.
-            saved_sid = s.session_id
-            saved_snapshot = bool(getattr(s, 'pre_compression_snapshot', False))
-            saved_pinned = bool(getattr(s, 'pinned', False))
-            s.session_id = old_sid
-            s.pre_compression_snapshot = True
-            s.pinned = False
+            # In-memory messages are newer than the file. Load the existing
+            # parent first so the snapshot can borrow its still-authoritative
+            # persistence capability; never mint a fresh capability for an
+            # old SID that may have been deleted concurrently.
+            snapshot_owner = Session.load(old_sid)
+            if snapshot_owner is None:
+                logger.warning(
+                    "Could not load pre-compression session %s before snapshot preservation",
+                    old_sid,
+                )
+                return
+            snapshot = copy.copy(s)
+            snapshot.session_id = old_sid
+            snapshot._persistence_generation = snapshot_owner._persistence_generation
+            snapshot.pre_compression_snapshot = True
+            snapshot.pinned = False
             # Stage-359 / PR #2295: clear runtime stream-state fields on the
             # archived snapshot so the sidebar does not reopen the parent as
             # a permanently-running session while the child already holds the
-            # completed answer. The continuation session's live state is
-            # restored from saved_* locals in the finally block.
-            saved_active_stream_id = getattr(s, 'active_stream_id', None)
-            saved_pending_user_message = getattr(s, 'pending_user_message', None)
-            saved_pending_attachments = list(getattr(s, 'pending_attachments', []) or [])
-            saved_pending_started_at = getattr(s, 'pending_started_at', None)
-            saved_pending_user_source = getattr(s, 'pending_user_source', None)
-            s.active_stream_id = None
-            s.pending_user_message = None
-            s.pending_attachments = []
-            s.pending_started_at = None
-            s.pending_user_source = None
-            try:
-                # skip_index=False so the snapshot appears in _index.json with
-                # the pre_compression_snapshot marker. The sidebar projection
-                # (#2285) reads that marker to hide the snapshot from active
-                # rows while keeping the JSON discoverable for lineage traversal.
-                s.save(touch_updated_at=False, skip_index=False)
-                logger.info(
-                    "Preserved pre-compression session %s (%d messages) to disk",
-                    old_sid, len(s.messages),
-                )
-            finally:
-                s.session_id = saved_sid
-                s.pre_compression_snapshot = saved_snapshot
-                s.pinned = saved_pinned
-                s.active_stream_id = saved_active_stream_id
-                s.pending_user_message = saved_pending_user_message
-                s.pending_attachments = saved_pending_attachments
-                s.pending_started_at = saved_pending_started_at
-                s.pending_user_source = saved_pending_user_source
+            # completed answer. The continuation's live object remains
+            # untouched, including its SID, capability, and runtime fields.
+            snapshot.active_stream_id = None
+            snapshot.pending_user_message = None
+            snapshot.pending_attachments = []
+            snapshot.pending_started_at = None
+            snapshot.pending_user_source = None
+            # skip_index=False so the snapshot appears in _index.json with
+            # the pre_compression_snapshot marker. The sidebar projection
+            # (#2285) reads that marker to hide the snapshot from active
+            # rows while keeping the JSON discoverable for lineage traversal.
+            snapshot.save(touch_updated_at=False, skip_index=False)
+            logger.info(
+                "Preserved pre-compression session %s (%d messages) to disk",
+                old_sid, len(snapshot.messages),
+            )
             return
         # Existing file is already at least as complete as memory; stamp only
         # the snapshot marker so index/sidebar projection can hide it without
         # rewriting a shorter messages array over a fuller transcript.
-        from api.models import Session
         snapshot = Session.load(old_sid)
         if snapshot:
             snapshot.pre_compression_snapshot = True
@@ -8025,6 +8018,7 @@ def _run_agent_streaming(
     model_provider=None,
     goal_related=False,
     moa_config=None,
+    run_journal_incarnation=None,
 ):
     """Run agent in background thread, writing SSE events to STREAMS[stream_id].
 
@@ -8058,7 +8052,11 @@ def _run_agent_streaming(
         ephemeral=bool(ephemeral),
     )
     try:
-        run_journal = RunJournalWriter(session_id, stream_id)
+        run_journal = RunJournalWriter(
+            session_id,
+            stream_id,
+            incarnation=run_journal_incarnation,
+        )
     except Exception:
         run_journal = None
         logger.debug("Failed to initialize run journal for stream %s", stream_id, exc_info=True)
@@ -10227,6 +10225,9 @@ def _run_agent_streaming(
                     _compression_origin_session_id = old_sid
                     _compression_continuation_session_id = new_sid
                     s.session_id = new_sid
+                    _bind_session_persistence_capability_for_identity_transition(
+                        s, old_sid, new_sid
+                    )
                     # Carry profile identity across the compression boundary.
                     # Without this, s.profile stays None on the continuation
                     # session. On the next request, _run_agent_streaming calls

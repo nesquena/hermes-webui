@@ -4325,23 +4325,38 @@ function _renderBatchActionBar(){
     });
     if(!ok)return;
     try{
-      const results=await Promise.all(ids.map(async sid=>{
+      const settled=await Promise.allSettled(ids.map(async sid=>{
         const response=await api('/api/session/delete',{method:'POST',body:JSON.stringify({session_id:sid})});
         return {response,session:sessionsById.get(sid)||null};
       }));
+      const results=settled.filter(result=>result.status==='fulfilled').map(result=>result.value);
+      const failedIds=ids.filter((_sid,index)=>settled[index].status==='rejected');
+      const succeededIds=ids.filter((_sid,index)=>settled[index].status==='fulfilled');
       const retainedCount=_worktreeResponseCount(results);
-      const cleanupFailedCount=results.filter(result=>result.response&&result.response.state_db_cleanup_failed).length;
-      ids.forEach(_clearHandoffStorageForSession);
-      if(S.session&&ids.includes(S.session.session_id)){
+      const cleanupWarningCount=results.filter(result=>result.response&&result.response.state_db_cleanup_failed).length;
+      succeededIds.forEach(sid=>{
+        _clearHandoffStorageForSession(sid);
+        if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);
+        _optimisticallyRemoveSessionFromList(sid);
+      });
+      _selectedSessions.clear();
+      failedIds.forEach(sid=>_selectedSessions.add(sid));
+      if(S.session&&succeededIds.includes(S.session.session_id)){
         S.session=null;S.messages=[];S.entries=[];localStorage.removeItem('hermes-webui-session');
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
         const remaining=await api('/api/sessions'+_sessionListQueryString());
         if(remaining.sessions&&remaining.sessions.length){await loadSession(remaining.sessions[0].session_id);}
         else{$('msgInner').innerHTML='';$('emptyState').style.display='';}
       }
-      if(cleanupFailedCount) showToast(t('delete_failed')+' ('+cleanupFailedCount+'/'+ids.length+')',0,'error');
+      await renderSessionList();
+      if(failedIds.length){
+        showToast(t('delete_failed')+' ('+failedIds.length+'/'+ids.length+')',0,'error');
+        _updateBatchActionBar();
+        return;
+      }
+      if(cleanupWarningCount) showToast(t('delete_failed')+' ('+cleanupWarningCount+'/'+ids.length+')',0,'error');
       else showToast((retainedCount?t('session_deleted_worktree'):t('session_delete'))+' ('+ids.length+')');
-      exitSessionSelectMode();await renderSessionList();
+      exitSessionSelectMode();
     }catch(e){showToast('Delete failed: '+(e.message||e));}
   };bar.appendChild(deleteBtn);
 }
@@ -9131,10 +9146,12 @@ async function deleteSession(sid, beforeDelete=null){
     }
     const err=deleteResult.error;
     setStatus(`Delete failed: ${err&&err.message?err.message:String(err)}`);
+    showToast(t('delete_failed'),0,'error');
+    await renderSessionList();
     return false;
   }
   const response=deleteResult&&deleteResult.response;
-  const cleanupFailed=!!(response&&response.state_db_cleanup_failed);
+  const cleanupFailed=!!(response&&(response.state_db_cleanup_failed||response.run_journal_cleanup_failed));
   if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);
   if(!optimisticRendered){
     _pendingSessionReflowPositions=reflowPositions;
