@@ -17475,6 +17475,126 @@ def _parse_run_journal_event_id(raw: str | None) -> tuple[str | None, int | None
     return _shared_parse_run_journal_event_id(raw)
 
 
+def _chat_stream_resume_cursor(handler, qs: dict, stream_id: str | None = None) -> tuple[int | None, bool, str | None, str | None]:
+    """Resolve the client's resume cursor for ``/api/chat/stream``.
+
+    Returns ``(after_seq, resume_requested, raw_cursor, runner_cursor)``:
+
+    - ``after_seq``: the parsed same-run cursor seq, or ``None`` when there is
+      no usable same-run (journal-shaped) cursor.
+    - ``resume_requested``: True when the client SUPPLIED any cursor — via the
+      ``after_event_id`` / ``after_seq`` query params, ``replay=1``, or the
+      ``Last-Event-ID`` header — regardless of whether it parsed.
+    - ``raw_cursor``: the opaque cursor string exactly as the client supplied it
+      (the ``Last-Event-ID`` value, or the explicit ``after_event_id``).
+    - ``runner_cursor``: the cursor to hand to the runner observe path, resolved
+      with PROVENANCE so the runner adapter (whose cursors are opaque, not
+      journal-shaped) gets a cursor it can actually use:
+
+        * a valid ``after_seq`` pairs with whatever ``after_event_id`` was
+          supplied — even an opaque runner id like ``event:2`` that the
+          journal parser reads as a foreign run — so the paired runner cursor
+          resumes at the seq (never ``None`` / full replay, which would
+          duplicate events);
+        * a header-only opaque runner id (``Last-Event-ID: event:2``) is
+          preserved as-is so the runner resumes from it;
+        * a malformed or foreign explicit cursor WITHOUT a valid paired
+          ``after_seq`` yields ``None`` — it must block the header and replay
+          from start (this preserves the r2 malformed-blocks-header rule and
+          never forwards an unusable cursor to the runner).
+
+    The presence flag must stay separate from validity: a malformed, foreign-run,
+    or ahead-of-stream cursor resolves to ``after_seq=None`` but still means the
+    client *asked* to resume. That request must be honored with a
+    replay-from-start so no journal events are silently skipped — whereas a
+    genuinely cursor-less request is a fresh subscribe (no replay).
+
+    Precedence is decided by query-parameter PRESENCE, not successful parsing:
+    when an explicit ``after_seq`` / ``after_event_id`` is supplied (even an
+    unparseable one), the ``Last-Event-ID`` header is never consulted, so a
+    header can never override an explicit cursor and silently skip events.
+
+    ``Last-Event-ID`` is the cursor every spec-compliant SSE client (browser
+    ``EventSource`` auto-reconnect, Android/CLI clients) sends automatically on
+    reconnect, carrying the ``id:`` of the last event it received. Every
+    journaled event on this stream already emits ``id: stream_id:seq`` via
+    ``_sse_with_id()``. Same resolution-chain precedent as
+    ``api/kanban_bridge.py`` (``?since=`` → ``Last-Event-ID``).
+    """
+    after_seq_raw = qs.get("after_seq", [None])[0]
+    has_explicit_query = (
+        after_seq_raw not in (None, "")
+        or bool(qs.get("after_event_id", [None])[0])
+        or bool(qs.get("replay", [""])[0])
+    )
+    if has_explicit_query:
+        explicit_raw = str(qs.get("after_event_id", [None])[0] or "").strip() or None
+        after_seq = _parse_run_journal_after_seq(qs, stream_id)
+        # Runner cursor provenance. ``after_seq`` is authoritative when it
+        # parses — it pairs with whatever ``after_event_id`` shape was
+        # supplied, including opaque runner ids (``event:2``) that the journal
+        # parser reads as a foreign run. Read it directly here (not via
+        # ``_parse_run_journal_after_seq``, which checks ``after_event_id``
+        # FIRST and would swallow a paired opaque runner id as "foreign").
+        paired_seq = _parse_run_journal_after_seq_value(after_seq_raw)
+        if paired_seq is not None:
+            runner_cursor = str(paired_seq)
+        else:
+            event_run_id, event_seq = _parse_run_journal_event_id(explicit_raw)
+            runner_cursor = (
+                explicit_raw
+                if explicit_raw and event_seq is not None and (not stream_id or event_run_id == stream_id)
+                else None
+            )
+        return after_seq, True, explicit_raw, runner_cursor
+    headers = getattr(handler, "headers", None)
+    if headers is None:
+        return None, False, None, None
+    try:
+        raw = headers.get("Last-Event-ID")
+    except Exception:
+        return None, False, None, None
+    raw = str(raw or "").strip()
+    if not raw:
+        return None, False, None, None
+    event_run_id, event_seq = _parse_run_journal_event_id(raw)
+    if event_run_id and event_seq is not None:
+        if stream_id and event_run_id != stream_id:
+            # Foreign-run journal cursor: asked to resume THIS run but the cursor
+            # names a different journal run — can't honor it for the journal
+            # path (after_seq stays None → replay-from-start). The runner path
+            # keys cursors by run_id independently (the cursor is forwarded as
+            # an opaque per-run query param), so a ``run:seq`` header still
+            # reaches it as-is; this mirrors how a foreign after_event_id on
+            # the journal path is rejected while the same client's explicit
+            # opaque cursor= would still reach the runner.
+            return None, True, raw, raw
+        return event_seq, True, raw, raw
+    # Malformed as a JOURNAL cursor. A colon-less opaque value is a plausible
+    # runner cursor (runner ids need not be journal-shaped), so preserve it for
+    # the runner; a value that merely fails int() parsing is unusable anywhere.
+    runner_cursor = raw if ":" not in raw else None
+    return None, True, raw, runner_cursor
+
+
+def _parse_run_journal_after_seq_value(raw) -> int | None:
+    """Parse a bare ``after_seq`` value, independent of any ``after_event_id``.
+
+    Used by the runner-cursor provenance path, where ``after_seq`` is
+    authoritative on its own and must NOT be gated behind the
+    ``after_event_id``-first ordering of ``_parse_run_journal_after_seq`` (a
+    paired opaque runner id like ``event:2`` would otherwise be read as a
+    foreign run and swallow the seq). Mirrors the ``after_seq`` tail of that
+    parser: absent/blank → None, non-numeric → 0.
+    """
+    if raw in (None, ""):
+        return None
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _parse_run_journal_after_seq(qs: dict, stream_id: str | None = None) -> int | None:
     event_run_id, event_seq = _parse_run_journal_event_id(qs.get("after_event_id", [None])[0])
     if event_run_id:
@@ -17586,7 +17706,8 @@ def _run_journal_covers_offline_gap(
 
 
 def _sse_replay_run_journal_gap_checked(
-    handler, qs: dict, stream_id: str, stream_snapshot: dict
+    handler, qs: dict, stream_id: str, stream_snapshot: dict,
+    *, resume_cursor: tuple[int | None, bool] | None = None,
 ) -> tuple[bool, int | None]:
     """Journal-replay for a reconnecting client, enforcing offline-gap coverage.
 
@@ -17596,12 +17717,30 @@ def _sse_replay_run_journal_gap_checked(
     (see ``_run_journal_covers_offline_gap``), a recovery_control apperror has
     been emitted and the caller must return instead of draining the retained
     tail (``gap_recovered=True``).
+
+    ``resume_cursor`` is the caller-resolved ``(after_seq, resume_requested)``
+    pair from ``_chat_stream_resume_cursor``. Presence and validity are kept
+    separate: an invalid / foreign-run / unparseable cursor means the client
+    *asked* to resume but we couldn't honor it, so it is normalized to
+    replay-from-start (``after_seq=None`` inside the replay) rather than
+    treated as "no cursor" — which would skip replay and silently drain a
+    truncated buffer. A genuinely cursor-less request (``resume_requested``
+    False) is a fresh subscribe and returns ``(False, None)`` with no replay.
+
+    Direct callers that only supply ``qs`` keep the historical behavior: the
+    cursor is derived from the query params (presence of ``replay`` /
+    ``after_seq`` / ``after_event_id`` counts as resume-requested).
     """
-    if not (
-        qs.get("replay", [""])[0]
-        or qs.get("after_seq", [None])[0] not in (None, "")
-        or qs.get("after_event_id", [None])[0]
-    ):
+    if resume_cursor is None:
+        after_seq = _parse_run_journal_after_seq(qs, stream_id)
+        resume_requested = (
+            bool(qs.get("replay", [""])[0])
+            or qs.get("after_seq", [None])[0] not in (None, "")
+            or bool(qs.get("after_event_id", [None])[0])
+        )
+    else:
+        after_seq, resume_requested = resume_cursor
+    if not resume_requested:
         return False, None
     try:
         offline_dropped = int(stream_snapshot.get("offline_dropped_events") or 0)
@@ -17611,7 +17750,33 @@ def _sse_replay_run_journal_gap_checked(
         str(stream_snapshot.get("last_event_id") or ""),
         stream_id,
     )
-    after_seq = _parse_run_journal_after_seq(qs, stream_id)
+    # Normalize an unparseable / foreign cursor (asked to resume, but no usable
+    # same-run seq) to replay-from-start so the gap check and dedup operate on
+    # a real cursor instead of silently skipping the whole journal.
+    if after_seq is None:
+        after_seq = 0
+    # Normalize a numeric cursor strictly AHEAD of the snapshot's last known
+    # frame to replay-from-start too: the client believes it already holds
+    # everything, so on a truncated buffer the coverage check's
+    # ``floor >= replay_max_seq`` would falsely declare the gap covered, replay
+    # nothing, and drain only the retained tail — silently losing every event
+    # before it (Codex r2 #2). ``>`` (not ``>=``) — a cursor EQUAL to the
+    # cutoff is a valid in-range cursor (see the dedup bound below).
+    #
+    # An UNKNOWN snapshot cutoff (no parseable ``last_event_id`` — e.g. the
+    # channel has not seen an id-bearing frame yet) is treated as fence 0:
+    # with no cutoff to bound it, any positive client cursor would otherwise
+    # be installed verbatim as the live dedup bound and filter EVERY queued
+    # frame — including the terminal ``stream_end`` fence — leaving the
+    # reconnect stalled on heartbeats with an empty body (Codex r4). Failing
+    # closed to replay-from-start delivers the buffered events (at worst
+    # duplicating what the client already holds) instead of silently losing
+    # them. Frames dropped while the cutoff is unknown still cannot prove
+    # coverage below (``cutoff_seq is None`` → not covered), so the
+    # recovery_control fail-closed path is preserved.
+    effective_cutoff = snapshot_cutoff_seq if snapshot_cutoff_seq is not None else 0
+    if after_seq > effective_cutoff:
+        after_seq = 0
     # The subscribe snapshot already queued the retained offline tail, which
     # covers [first buffered frame → snapshot cutoff] by itself. The journal
     # only has to bridge (client cursor → first buffered frame) — and the
@@ -17659,18 +17824,21 @@ def _sse_replay_run_journal_gap_checked(
     # tail (after_seq >= first buffered frame) would otherwise get the queued
     # copy of frames it already rendered — a double-render, since this filter
     # is the only dedup for replayed streams.
-    if after_seq is not None:
-        cursor_bound = after_seq
-        if snapshot_cutoff_seq is not None:
-            # A legitimate cursor can never exceed the channel's last known
-            # frame; clamping keeps a bogus/corrupt cursor from filtering the
-            # queued terminal frame and pinning the loop on heartbeats.
-            cursor_bound = min(cursor_bound, snapshot_cutoff_seq)
-        replay_cutoff_seq = (
-            cursor_bound
-            if replay_cutoff_seq is None
-            else max(replay_cutoff_seq, cursor_bound)
-        )
+    #
+    # Dedup bound semantics: the drain filter skips ``seq <= replay_cutoff_seq``.
+    # The event AT the cursor (seq == after_seq) was already delivered to this
+    # client, so the cursor must itself enter the bound — equality included —
+    # otherwise the buffered copy of that event double-sends. A cursor strictly
+    # ahead of the snapshot was already normalized to 0 above; here only
+    # in-range cursors (after_seq <= snapshot_cutoff_seq) contribute a bound,
+    # and the terminal frame must always survive.
+    if after_seq is not None and after_seq > 0:
+        if snapshot_cutoff_seq is None or after_seq <= snapshot_cutoff_seq:
+            replay_cutoff_seq = (
+                after_seq
+                if replay_cutoff_seq is None
+                else max(replay_cutoff_seq, after_seq)
+            )
     return False, replay_cutoff_seq
 
 
@@ -17832,16 +18000,47 @@ def _handle_sse_stream(handler, parsed):
     stream_id = qs.get("stream_id", [""])[0]
     if not _stream_id_visible_to_request_profile(handler, stream_id):
         return True
+    # Resume cursor: explicit query params (after_event_id/after_seq/replay)
+    # win; the Last-Event-ID header that spec-compliant SSE clients auto-send
+    # on reconnect is the fallback. Presence is tracked separately from the
+    # parsed seq — a client that supplied ANY cursor asked to resume, and an
+    # unusable (invalid/foreign/ahead-of-stream) cursor must replay from start
+    # rather than silently skip journal events.
+    resume_cursor = _chat_stream_resume_cursor(handler, qs, stream_id)
+    resume_after_seq, resume_requested, resume_raw_cursor, runner_resume_cursor = resume_cursor
     stream = STREAMS.get(stream_id)
     if stream is None:
-        if _stream_runner_run_events(handler, stream_id, _runner_stream_cursor_from_query(qs)):
+        # Runner-observe path: consume the ALREADY-RESOLVED cursor — do not
+        # re-parse query params or re-read the header (Codex r2 #3 / r3). The
+        # explicit opaque ``cursor`` query param still wins for runner clients
+        # that speak that contract. Otherwise use the resolver's
+        # provenance-resolved runner cursor: a valid ``after_seq`` pairs with
+        # opaque runner ids (event:2), a header-only opaque runner id resumes
+        # as-is, and a malformed/foreign cursor without a valid paired seq
+        # yields None (replay from start, never forwarding an unusable cursor).
+        runner_cursor = str(qs.get("cursor", [""])[0] or "").strip() or None
+        if runner_cursor is None and resume_requested:
+            runner_cursor = runner_resume_cursor
+        if _stream_runner_run_events(handler, stream_id, runner_cursor):
             return True
         try:
-            journal_available = bool(find_run_summary(stream_id)) if stream_id else False
+            journal_summary = find_run_summary(stream_id) if stream_id else None
         except Exception:
-            journal_available = False
-        if not journal_available:
+            journal_summary = None
+        if not journal_summary:
             return j(handler, {"error": "stream not found"}, status=404)
+        # Normalize a cursor strictly AHEAD of the dead stream's authoritative
+        # last_seq to replay-from-start: passing it straight through would make
+        # the journal reader emit an empty SSE body for a journal that actually
+        # holds events (Codex r2 #2). Equality is in-range — the event at the
+        # cursor was already delivered, so the replay correctly resumes after it.
+        dead_after_seq = resume_after_seq
+        try:
+            last_seq = int(journal_summary.get("last_seq") or 0)
+        except (TypeError, ValueError):
+            last_seq = 0
+        if dead_after_seq is not None and dead_after_seq > last_seq:
+            dead_after_seq = 0
         handler.send_response(200)
         handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
         handler.send_header("Cache-Control", "no-cache")
@@ -17849,7 +18048,7 @@ def _handle_sse_stream(handler, parsed):
         handler.send_header("Connection", "close")
         end_sse_headers(handler)
         try:
-            _replay_run_journal(handler, stream_id, _parse_run_journal_after_seq(qs, stream_id))
+            _replay_run_journal(handler, stream_id, dead_after_seq)
         except _CLIENT_DISCONNECT_ERRORS:
             pass
         return True
@@ -17868,7 +18067,8 @@ def _handle_sse_stream(handler, parsed):
     # Replay shares the drain loop's try/finally so every exit path unsubscribes.
     try:
         gap_recovered, replay_cutoff_seq = _sse_replay_run_journal_gap_checked(
-            handler, qs, stream_id, stream_snapshot
+            handler, qs, stream_id, stream_snapshot,
+            resume_cursor=(resume_after_seq, resume_requested),
         )
         if gap_recovered:
             return True
@@ -18267,6 +18467,14 @@ def _gateway_sse_probe_payload(settings, watcher):
         'fallback_poll_ms': 30000,
         'ok': enabled and watcher_alive,
         'watcher_running': watcher_alive,
+        # Cross-client scope markers (hermes-webui/hermes-android#58 follow-up):
+        # this probe ONLY describes the optional gateway/agent-sessions stream.
+        # Persistent per-session streaming (GET /api/session/stream) is always
+        # available and is NOT gated by show_cli_sessions, so a negative gateway
+        # probe result must not be read as "session SSE unavailable".
+        'scope': 'gateway_sessions',
+        'session_stream_available': True,
+        'session_stream_path': '/api/session/stream',
     }
     if not enabled:
         payload['error'] = 'agent sessions not enabled'
@@ -18281,6 +18489,12 @@ def _handle_gateway_sse_stream(handler, parsed):
     """SSE endpoint for real-time gateway session updates.
     Streams change events from the gateway watcher background thread.
     Only active when show_cli_sessions (show_agent_sessions) setting is enabled.
+
+    Probe mode (``?probe=1``) reports the status of THIS optional stream only.
+    Its result says nothing about the always-on persistent per-session stream
+    (``/api/session/stream``) — the probe payload carries explicit
+    ``scope`` / ``session_stream_available`` markers so cross-client consumers
+    do not misclassify usable session streaming as unavailable.
     """
     settings = load_settings()
 

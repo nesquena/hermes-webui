@@ -692,6 +692,7 @@ The WebUI is still coupled to Hermes Agent internals for runtime execution, prov
 - [`TESTING.md`](TESTING.md) — manual browser test plan and automated coverage reference
 - [`DESIGN.md`](DESIGN.md) — design tokens and the calm-console direction
 - [`docs/UIUX-GUIDE.md`](docs/UIUX-GUIDE.md) — UI/UX principles sourced from the design docs and visual inventories
+- [`docs/sse-streams.md`](docs/sse-streams.md) — cross-client SSE endpoint reference: session streaming, gateway SSE probe scope, heartbeats, and proxy behavior
 - [`docs/CONTRACTS.md`](docs/CONTRACTS.md) — project contract/RFC/design index for contributors and agents
 - [`docs/rfcs/README.md`](docs/rfcs/README.md) — RFC index for larger architecture and durability proposals
 
