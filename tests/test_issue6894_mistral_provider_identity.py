@@ -46,6 +46,15 @@ def test_canonical_identity_preservation_matrix():
 def test_configured_mistral_key_becomes_selectable_and_savable(monkeypatch, tmp_path):
     cfg = {"providers": {"mistralai": {"api_key": "legacy-key"}},
            "model": {"provider": "mistralai"}}
+    monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+    monkeypatch.setattr(config, "_thread_local_env_value", lambda _name, default="": default)
+    monkeypatch.setattr(providers, "_thread_local_env_value", lambda _name, default="": default)
+    monkeypatch.setattr(providers, "_load_env_file", lambda _path: {})
+    monkeypatch.setattr(providers, "_pool_entry_payloads", lambda _provider: [])
+    monkeypatch.setattr(config, "_get_config_path", lambda: tmp_path / "config.yaml")
+    monkeypatch.setattr(config, "cfg", cfg)
+    monkeypatch.setattr(config, "_cfg_cache", cfg)
+    monkeypatch.setattr(config, "_cfg_fingerprint", None)
     assert config._canonical_provider_config(cfg, "mistral")["api_key"] == "legacy-key"
     writes = []
     monkeypatch.setattr(providers, "get_config", lambda: cfg)
@@ -358,6 +367,47 @@ def test_live_models_uses_legacy_provider_credentials(monkeypatch):
     }]
     assert payload["provider"] == "mistral"
     assert "mistral-live-model" in {model["id"] for model in payload["models"]}
+
+
+def test_named_custom_catalog_inherits_shared_custom_provider_key(monkeypatch, tmp_path):
+    import json
+    import urllib.request
+
+    cfgfile = tmp_path / "config.yaml"
+    cfgfile.write_text(
+        "model:\n  provider: custom:demo\n  base_url: https://proxy.example/v1\n"
+        "providers:\n  custom:\n    api_key: shared-custom-key\n"
+        "custom_providers:\n  - name: Demo\n    base_url: https://proxy.example/v1\n",
+        encoding="utf-8",
+    )
+    calls = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps({"data": [{"id": "demo-live-model"}]}).encode("utf-8")
+
+    def fake_urlopen(req, timeout=None):
+        calls.append((req.full_url, req.headers.get("Authorization"), timeout))
+        return Response()
+
+    monkeypatch.setattr(config, "_get_config_path", lambda: cfgfile)
+    monkeypatch.setattr(config, "_get_auth_store_path", lambda: tmp_path / "auth.json")
+    monkeypatch.setattr(config, "_read_live_provider_model_ids", lambda _pid: [])
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    _install_hermes_modules(monkeypatch)
+    config.reload_config()
+    config.invalidate_models_cache()
+
+    catalog = config.get_available_models(force_refresh=True)
+    group = next(group for group in catalog["groups"] if group.get("provider_id") == "custom:demo")
+    assert calls == [("https://proxy.example/v1/models", "Bearer shared-custom-key", 5.0)]
+    assert "demo-live-model" in {model["id"] for model in group["models"]}
 
 
 def test_catalog_endpoint_uses_canonical_equivalent_key_not_custom_key(monkeypatch, tmp_path):
