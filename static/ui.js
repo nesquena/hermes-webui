@@ -2841,6 +2841,8 @@ function _providerFromModelValue(modelId){
 }
 function _modelPickerOptionIdentity(modelId, providerId){
   let value=String(modelId||'');
+  const presetRest=(typeof _providerQualifiedPresetRest==='function')?_providerQualifiedPresetRest(value,providerId):null;
+  if(presetRest) value=presetRest;
   const provider=String(providerId||'').trim();
   if(value.startsWith('@')&&value.includes(':')){
     const exactPrefix=provider ? `@${provider}:` : '';
@@ -2855,6 +2857,37 @@ function _modelPickerOptionIdentity(modelId, providerId){
     }
   }
   return value.replace(/-/g,'.').toLowerCase();
+}
+// Provider-qualified "@"-qualified remainder (e.g. "openrouter/@preset/<name>"
+// → "@preset/<name>") when the value's first-slash prefix matches its option's
+// own provider group and the remainder is "@"-qualified. Returns null otherwise,
+// so vendor-prefixed model ids (e.g. "kilo/minimax/minimax-m3") are left
+// untouched: their group provider is not their first-slash prefix and their
+// remainder is not "@"-qualified. Shared by the outgoing normalization
+// (_modelStateForSelect) and the canonical identity below so the OpenRouter
+// @preset round-trip stays closed (#6936).
+function _providerQualifiedPresetRest(modelId, providerId){
+  const value=String(modelId||'');
+  const provider=String(providerId||'').trim();
+  if(!value||!provider) return null;
+  const slashAt=value.indexOf('/');
+  if(slashAt<=0) return null;
+  const valuePrefix=value.slice(0,slashAt);
+  const valueRest=value.slice(slashAt+1);
+  if(!valuePrefix||!valueRest.startsWith('@')) return null;
+  if(valuePrefix.toLowerCase()!==provider.toLowerCase()) return null;
+  return valueRest;
+}
+// Canonical identity used by the model-picker lookup, dedup and selected-row
+// paths: the catalog option value "openrouter/@preset/<name>" and the normalized
+// send/session form "@preset/<name>" (with provider "openrouter") resolve to the
+// SAME key, so a restored preset re-finds its existing option instead of
+// injecting a duplicate row and losing the selection (#6936 round-trip).
+function _modelPickerCanonicalIdentity(modelId, providerId){
+  let value=String(modelId||'');
+  const presetRest=(typeof _providerQualifiedPresetRest==='function')?_providerQualifiedPresetRest(value,providerId):null;
+  if(presetRest) value=presetRest;
+  return _modelPickerOptionIdentity(value,providerId);
 }
 function _deduplicateModelPickerOptions(sel,selectedValue){
   if(!sel||!sel.querySelectorAll) return 0;
@@ -2933,19 +2966,14 @@ function _modelStateForSelect(sel, modelId){
   // into their value ("openrouter/@preset/<name>") but never set data-model
   // (that attribute is only set by the fallback injection path
   // _ensureModelOptionInDropdown), so the raw value would otherwise be sent as
-  // the model id. Split a "<provider>/<qualified-id>" value on its FIRST slash
-  // when the prefix matches the option's own provider group and the remainder
-  // is a qualified id (e.g. "@preset/<name>") — send the qualified id as model
-  // with the provider split out (#6936). Vendor-prefixed model ids (e.g.
-  // "kilo/minimax/minimax-m3") are left untouched: their group provider does
-  // not equal their first-slash prefix, and their remainder is not '@'-qualified.
-  let resolvedModel=value;
-  const slashAt=value.indexOf('/');
-  const valuePrefix=slashAt>0?value.slice(0,slashAt):'';
-  const valueRest=slashAt>0?value.slice(slashAt+1):'';
-  if(valuePrefix&&valueRest.startsWith('@')&&provider&&valuePrefix.toLowerCase()===provider.toLowerCase()){
-    resolvedModel=valueRest;
-  }
+  // the model id. Send the "@"-qualified remainder as model with the provider
+  // split out, via the same shared helper the reverse/restore paths use — the
+  // session then stores "@preset/<name>" + model_provider "openrouter", which
+  // the canonical identity round-trips back to the original catalog option
+  // (#6936). Vendor-prefixed model ids (e.g. "kilo/minimax/minimax-m3") are
+  // left untouched: their group provider is not their first-slash prefix.
+  const presetRest=(typeof _providerQualifiedPresetRest==='function')?_providerQualifiedPresetRest(value,provider):null;
+  const resolvedModel=presetRest||value;
   return {model:resolvedModel,model_provider:(provider&&provider!=='default')?provider:null};
 }
 function _captureModelDropdownSelection(sel){
