@@ -30,7 +30,7 @@ import http.client
 import socket as _socket
 from collections import defaultdict, deque
 from pathlib import Path
-from contextlib import closing
+from contextlib import closing, contextmanager
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
@@ -128,7 +128,9 @@ def _persist_generated_session_title(
         with LOCK:
             latest = SESSIONS.get(sid)
             if latest is not None and str(getattr(latest, "session_id", "") or "") != sid:
-                SESSIONS.pop(sid, None)
+                # #6327: mismatch removal is a canonical same-SID cache
+                # removal — drop it under per-SID lease authority.
+                _publish_owner_removal_lease(sid)
                 latest = None
             elif latest is not None:
                 SESSIONS.move_to_end(sid)
@@ -155,10 +157,16 @@ def _persist_generated_session_title(
         # mark_session_title_generated sets s.llm_title_generated = True and clears manual_title.
         mark_session_title_generated(session)
         session.save(touch_updated_at=False)
-        with LOCK:
-            SESSIONS[sid] = session
-            SESSIONS.move_to_end(sid)
-            _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+        # #6327 (review 17, blocker 2): this same-SID replacement is a
+        # canonical owner publication — hold the per-SID owner-generation
+        # lease ACROSS the exact SESSIONS write (an in-flight sink for this
+        # session serializes first, installed sink claims are refused, and
+        # the CAS refresh's compare-and-write can never interleave with it).
+        with _publish_owner_lease(sid):
+            with LOCK:
+                SESSIONS[sid] = session
+                SESSIONS.move_to_end(sid)
+                _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
     _sync_session_title_to_insights(session)
     _publish_session_list_changed(
         event_reason,
@@ -2853,6 +2861,8 @@ from api.config import (
     unregister_stream_owner,
     CHAT_LOCK,
     _get_session_agent_lock,
+    SESSION_AGENT_LOCKS,
+    SESSION_AGENT_LOCKS_LOCK,
     CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS,
     load_settings,
     persisted_speech_settings_keys,
@@ -2945,7 +2955,7 @@ def _cancelled_run_is_stale(run_entry) -> bool:
         return False
 
 
-def _clear_stale_stream_state(session) -> bool:
+def _clear_stale_stream_state(session, *, _agent_lock_held=False) -> bool:
     """Clear persisted streaming flags when the in-memory stream no longer exists.
 
     A server restart or worker crash can leave active_stream_id/pending_* in the
@@ -2957,6 +2967,15 @@ def _clear_stale_stream_state(session) -> bool:
     atomically overwrite the on-disk JSON, wiping the conversation. In that
     case we re-load the full session before mutating, so the persisted
     write carries the real messages forward.
+
+    LOCK CONTRACT (#6327 review 14): this helper never REACQUIRES the
+    per-session AGENT lock when the caller already holds it.  The historical
+    implementation took ``_get_session_agent_lock(session.session_id)``
+    itself, which deadlocked ``_start_chat_stream_for_session`` (it holds the
+    same non-reentrant lock across its owner-generation transaction and calls
+    this helper).  Callers that already hold the lock pass
+    ``_agent_lock_held=True`` and the mutation primitive runs directly under
+    the caller's hold; every other caller keeps the historical acquire.
     """
     stream_id = getattr(session, "active_stream_id", None)
     if not stream_id:
@@ -3068,68 +3087,85 @@ def _clear_stale_stream_state(session) -> bool:
                 pass
             return False
 
-    # ── #1533 race fix: acquire the per-session lock and re-read
-    # active_stream_id under it. A concurrent chat_start may have already
-    # registered a new stream after our STREAMS_LOCK check above; in that
-    # case we must NOT clobber its session.active_stream_id.
+    # ── #1533 race fix: re-read active_stream_id under the per-session lock.
+    # A concurrent chat_start may have already registered a new stream after
+    # our STREAMS_LOCK check above; in that case we must NOT clobber its
+    # session.active_stream_id.  #6327 review 14: when the caller already
+    # holds the per-session AGENT lock (_agent_lock_held=True) we run the
+    # mutation primitive directly under that hold — re-acquiring the same
+    # non-reentrant lock here deadlocks the owner-generation transaction.
+    if _agent_lock_held:
+        return _clear_stale_stream_state_locked(session, stream_id, original_stub)
     with _get_session_agent_lock(session.session_id):
-        if getattr(session, "active_stream_id", None) != stream_id:
-            return False
-        if getattr(session, "pending_user_message", None):
-            try:
-                from api.models import _apply_core_sync_or_error_marker, _get_profile_home
-                profile_home = _get_profile_home(getattr(session, "profile", None))
-                core_path = profile_home / "sessions" / f"session_{session.session_id}.json"
-                repaired = _apply_core_sync_or_error_marker(
-                    session,
-                    core_path,
-                    stream_id_for_recheck=stream_id,
-                    touch_updated_at=False,
-                )
-            except Exception:
-                logger.exception(
-                    "_clear_stale_stream_state: failed to repair stale pending stream %s "
-                    "for session %s",
-                    stream_id, getattr(session, "session_id", "?"),
-                )
-                repaired = False
-            if repaired:
-                if original_stub is not session:
-                    try:
-                        original_stub.active_stream_id = None
-                        if hasattr(original_stub, "pending_user_message"):
-                            original_stub.pending_user_message = None
-                        if hasattr(original_stub, "pending_attachments"):
-                            original_stub.pending_attachments = []
-                        if hasattr(original_stub, "pending_started_at"):
-                            original_stub.pending_started_at = None
-                        if hasattr(original_stub, "pending_user_source"):
-                            original_stub.pending_user_source = None
-                    except Exception:
-                        pass
-                return True
-            if getattr(session, "active_stream_id", None) != stream_id:
-                return False
-        _materialize_pending_user_turn_before_error(session)
-        session.active_stream_id = None
-        if hasattr(session, "pending_user_message"):
-            session.pending_user_message = None
-        if hasattr(session, "pending_attachments"):
-            session.pending_attachments = []
-        if hasattr(session, "pending_started_at"):
-            session.pending_started_at = None
-        if hasattr(session, "pending_user_source"):
-            session.pending_user_source = None
+        return _clear_stale_stream_state_locked(session, stream_id, original_stub)
+
+
+def _clear_stale_stream_state_locked(session, stream_id, original_stub) -> bool:
+    """Lock-held mutation primitive of ``_clear_stale_stream_state``.
+
+    #6327 review 14: runs the stale-stream mutation while the per-session
+    AGENT lock is held — either acquired by ``_clear_stale_stream_state``
+    itself or already held by the caller (``_start_chat_stream_for_session``
+    passes ``_agent_lock_held=True``).  The caller's lock is non-reentrant,
+    so this primitive never acquires it.
+    """
+    if getattr(session, "active_stream_id", None) != stream_id:
+        return False
+    if getattr(session, "pending_user_message", None):
         try:
-            # Runtime cleanup is not user activity; do not bubble old sessions
-            # to the top of the sidebar just because a stale stream flag was
-            # repaired during a read/list path.
-            session.save(touch_updated_at=False)
+            from api.models import _apply_core_sync_or_error_marker, _get_profile_home
+            profile_home = _get_profile_home(getattr(session, "profile", None))
+            core_path = profile_home / "sessions" / f"session_{session.session_id}.json"
+            repaired = _apply_core_sync_or_error_marker(
+                session,
+                core_path,
+                stream_id_for_recheck=stream_id,
+                touch_updated_at=False,
+            )
         except Exception:
             logger.exception(
-                "_clear_stale_stream_state: save() failed for session %s",
-                getattr(session, "session_id", "?"),
+                "_clear_stale_stream_state: failed to repair stale pending stream %s "
+                "for session %s",
+                stream_id, getattr(session, "session_id", "?"),
             )
+            repaired = False
+        if repaired:
+            if original_stub is not session:
+                try:
+                    original_stub.active_stream_id = None
+                    if hasattr(original_stub, "pending_user_message"):
+                        original_stub.pending_user_message = None
+                    if hasattr(original_stub, "pending_attachments"):
+                        original_stub.pending_attachments = []
+                    if hasattr(original_stub, "pending_started_at"):
+                        original_stub.pending_started_at = None
+                    if hasattr(original_stub, "pending_user_source"):
+                        original_stub.pending_user_source = None
+                except Exception:
+                    pass
+            return True
+        if getattr(session, "active_stream_id", None) != stream_id:
+            return False
+    _materialize_pending_user_turn_before_error(session)
+    session.active_stream_id = None
+    if hasattr(session, "pending_user_message"):
+        session.pending_user_message = None
+    if hasattr(session, "pending_attachments"):
+        session.pending_attachments = []
+    if hasattr(session, "pending_started_at"):
+        session.pending_started_at = None
+    if hasattr(session, "pending_user_source"):
+        session.pending_user_source = None
+    try:
+        # Runtime cleanup is not user activity; do not bubble old sessions
+        # to the top of the sidebar just because a stale stream flag was
+        # repaired during a read/list path.
+        session.save(touch_updated_at=False)
+    except Exception:
+        logger.exception(
+            "_clear_stale_stream_state: save() failed for session %s",
+            getattr(session, "session_id", "?"),
+        )
     # Patch the caller's stub (if different from the full-load object) so
     # its in-memory active_stream_id matches what just got persisted.
     if original_stub is not session:
@@ -3910,10 +3946,17 @@ def _ensure_full_session_before_mutation(sid: str, session):
     full_session = Session.load(sid)
     if full_session is None:
         raise KeyError(sid)
-    with LOCK:
-        SESSIONS[sid] = full_session
-        SESSIONS.move_to_end(sid)
-        _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+    # #6327: upgrading the cached metadata stub REPLACES the canonical owner
+    # object under the same SID — run the replacement as a per-SID
+    # publication transaction so the lease authority is held ACROSS the exact
+    # SESSIONS write (an in-flight sink serializes first, and no claim can be
+    # accepted with a lease minted in a bump-to-publication gap).
+    with _publish_owner_lease(sid):
+        _clear_owner_sink_claims(sid)
+        with LOCK:
+            SESSIONS[sid] = full_session
+            SESSIONS.move_to_end(sid)
+            _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
     return full_session
 
 
@@ -9628,6 +9671,7 @@ from api.models import (
     _enrich_sidebar_lineage_metadata,
     _active_stream_ids,
     _evict_sessions_over_cap,
+    _publish_owner_removal_lease,
     _merge_session_display_metadata,
     _session_message_merge_key,
     _session_messages_have_prefix,
@@ -9816,6 +9860,241 @@ def _pre_compression_continuation_session_id(session) -> str | None:
         )
         latest_sid = _safe_first(_row_value(latest, "session_id", None)) or None
         # Only hand the client a well-formed session id (it gets written to URL/localStorage).
+        if latest_sid and not is_safe_session_id(latest_sid):
+            return None
+        return latest_sid
+
+    memory_seen_ids: set[str] = set()
+    rows = _child_rows_from_memory(memory_seen_ids)
+    index_rows = _child_rows_from_index(memory_seen_ids)
+    if index_rows is not None:
+        return _resolve_from_rows(rows + index_rows)
+
+    rows.extend(_child_rows_from_sidecars(memory_seen_ids))
+    return _resolve_from_rows(rows)
+
+
+# #6327: mutating-flow compression continuation authority.  A fork/branch/
+# delegate child shares parent_session_id + profile with a real compression
+# continuation, so parent/profile equality alone is NOT continuation authority
+# (the canonical classifier in api/agent_sessions.py rejects forks for the same
+# reason).  Ownership selection in the process-wakeup mutating flow must never
+# use the newest-visible-descendant UI helper (_pre_compression_continuation_
+# session_id): that helper is designed to hand a *recovery URL* to a browser and
+# deliberately accepts any same-profile descendant, newest by timestamp.  A
+# newer fork would therefore win ownership and credential clear/suppression/
+# start would be attached to the wrong conversation.  This authority instead
+# requires the DURABLE explicit predecessor->continuation edge
+# (``compression_continuation_of``, stamped by production compression on the
+# live continuation alongside parent_session_id) — the requested session (and
+# every intermediate hop) is an archived pre_compression_snapshot whose marker
+# is persisted to disk, the candidate's edge/parent points back at that
+# archived node, the candidate is live (not itself archived) and same-profile —
+# and FAILS CLOSED on zero or ambiguous (multiple) candidates.
+#
+# ``session_source`` is provenance, NOT mutation authority: production
+# compression rotates the SAME session object in place and preserves its
+# provenance, so a real compressed fork keeps session_source="fork" on both the
+# archived snapshot and the live continuation.  Such a child is accepted ONLY
+# when it carries the durable edge; a branch-route fork (edge absent) is an
+# independent conversation and never wins ownership.
+_REJECTED_COMPRESSION_CONTINUATION_SOURCES = frozenset(
+    ("fork", "branch", "delegate", "delegated", "delegation", "subagent")
+)
+
+
+def _compression_continuation_session_id(snapshot) -> str | None:
+    """Return the SINGLE live compression continuation for an archived snapshot.
+
+    Mutating-flow-specific owner authority (#6327).  Unlike the UI recovery
+    helper, this requires the durable explicit compression
+    predecessor->continuation edge (``compression_continuation_of`` stamped
+    by production compression on the live continuation) or, for legacy
+    pre-edge chains, a same-surface parent link that is NOT fork/branch/
+    delegate provenance.  ``session_source`` is provenance, not mutation
+    authority: production compression rotates the SAME session object in
+    place and preserves its provenance (a compressed fork keeps
+    session_source=\"fork\"), so a fork-provenance child IS accepted when it
+    carries the durable edge — but a branch-route fork (no edge) never wins
+    ownership.  Returns None on zero OR ambiguous candidates (the caller
+    requeues/fails — the archived snapshot is never mutated).
+    """
+    if not getattr(snapshot, "pre_compression_snapshot", False):
+        return None
+    sid = _safe_first(getattr(snapshot, "session_id", None))
+    if not sid:
+        return None
+    # Pin the snapshot's profile: a crafted/corrupt foreign-profile sidecar
+    # whose parent_session_id collided must never leak cross-profile.
+    snapshot_profile = getattr(snapshot, "profile", None)
+    snapshot_source = str(
+        _safe_first(getattr(snapshot, "session_source", None), "") or ""
+    ).strip().lower()
+
+    def _child_rows_from_memory(seen_ids: set[str]) -> list:
+        rows = []
+        try:
+            with LOCK:
+                memory_sessions = list(SESSIONS.values())
+            for child in memory_sessions:
+                child_sid = _safe_first(getattr(child, "session_id", None))
+                if not child_sid or child_sid in seen_ids:
+                    continue
+                seen_ids.add(child_sid)
+                rows.append(child)
+        except Exception:
+            pass
+        return rows
+
+    def _child_rows_from_index(seen_ids: set[str]) -> list | None:
+        if not SESSION_INDEX_FILE.exists():
+            return None
+        try:
+            entries = json.loads(SESSION_INDEX_FILE.read_bytes())
+        except Exception:
+            return None
+        if not isinstance(entries, list):
+            return None
+        try:
+            persisted_sidecar_ids = {
+                path.stem
+                for path in SESSION_DIR.glob("*.json")
+                if not path.name.startswith("_") and is_safe_session_id(path.stem)
+            }
+        except Exception:
+            return None
+        indexed_ids: set[str] = set()
+        row_seen_ids = set(seen_ids)
+        rows = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            child_sid = _safe_first(entry.get("session_id"))
+            if not child_sid or not is_safe_session_id(child_sid):
+                continue
+            indexed_ids.add(child_sid)
+            if child_sid in row_seen_ids:
+                continue
+            # Accept rows carrying either the durable compression
+            # predecessor->continuation edge OR a parent link (legacy chains).
+            if not _safe_first(entry.get("parent_session_id")) and not _safe_first(
+                entry.get("compression_continuation_of")
+            ):
+                continue
+            row_seen_ids.add(child_sid)
+            rows.append(entry)
+        if persisted_sidecar_ids - indexed_ids - seen_ids:
+            return None
+        return rows
+
+    def _child_rows_from_sidecars(seen_ids: set[str]) -> list:
+        rows = []
+        try:
+            for path in SESSION_DIR.glob("*.json"):
+                if path.name.startswith("_"):
+                    continue
+                child_sid = path.stem
+                if not child_sid or child_sid in seen_ids:
+                    continue
+                child = Session.load_metadata_only(child_sid)
+                if child:
+                    seen_ids.add(child_sid)
+                    rows.append(child)
+        except Exception:
+            pass
+        return rows
+
+    def _row_value(row, key, default=None):
+        return row.get(key, default) if isinstance(row, dict) else getattr(row, key, default)
+
+    def _row_has_backing_state(row) -> bool:
+        child_sid = _safe_first(_row_value(row, "session_id"))
+        if not child_sid or not is_safe_session_id(child_sid):
+            return False
+        if not isinstance(row, dict):
+            return True
+        return (SESSION_DIR / f"{child_sid}.json").exists()
+
+    def _resolve_from_rows(rows: list) -> str | None:
+        children_by_parent: dict[str, list] = {}
+        for child in rows:
+            parent_sid = _safe_first(_row_value(child, "parent_session_id"))
+            child_sid = _safe_first(_row_value(child, "session_id"))
+            if not child_sid or child_sid == sid:
+                continue
+            # Cross-profile guard: only follow continuations within the
+            # snapshot's profile.
+            if not _profiles_match(_row_value(child, "profile"), snapshot_profile):
+                continue
+            # Index by BOTH the parent link (legacy chains) and the durable
+            # compression predecessor->continuation edge (#6327): production
+            # compression sets both, but the edge is the mutation authority —
+            # a child whose parent_session_id is stale/missing still resolves
+            # through compression_continuation_of.
+            for link_sid in (
+                parent_sid,
+                _safe_first(_row_value(child, "compression_continuation_of")),
+            ):
+                if not link_sid:
+                    continue
+                children_by_parent.setdefault(link_sid, []).append(child)
+                if parent_sid and link_sid == parent_sid:
+                    break
+
+        candidates = []
+        frontier = [sid]
+        seen = {sid}
+        for _ in range(20):
+            if not frontier:
+                break
+            parent_sid = frontier.pop(0)
+            for child in children_by_parent.get(parent_sid, []):
+                child_sid = _safe_first(_row_value(child, "session_id"))
+                if not child_sid or child_sid in seen or not _row_has_backing_state(child):
+                    continue
+                seen.add(child_sid)
+                child_source = str(
+                    _safe_first(_row_value(child, "session_source"), "") or ""
+                ).strip().lower()
+                # #6327: durable explicit predecessor->continuation edge.  The
+                # live continuation stamped by production compression carries
+                # compression_continuation_of == the archived snapshot's sid —
+                # this is the ONLY authority that distinguishes a real
+                # continuation from a branch-route fork, and it is valid even
+                # when BOTH sides preserve fork provenance (production
+                # compression rotates the same session object in place).
+                child_continuation_of = str(
+                    _safe_first(_row_value(child, "compression_continuation_of"), "") or ""
+                ).strip()
+                durable_edge = bool(child_continuation_of) and child_continuation_of == parent_sid
+                if child_source in _REJECTED_COMPRESSION_CONTINUATION_SOURCES:
+                    if not durable_edge:
+                        # Fork/branch/delegate WITHOUT the durable edge is an
+                        # independent conversation (stamped by
+                        # /api/session/branch): never continuation authority —
+                        # a newer fork must not win ownership over the true
+                        # continuation.  With the edge (a compressed fork) it
+                        # IS the continuation.
+                        continue
+                if snapshot_source and child_source and child_source != snapshot_source:
+                    # Cross-surface child (e.g. CLI continuation of a WebUI
+                    # parent) is not a mutating-flow compression continuation.
+                    continue
+                if _row_value(child, "pre_compression_snapshot", False):
+                    # Archived intermediate snapshot: hop to ITS continuation
+                    # (durable marker on the hop parent is the evidence).
+                    frontier.append(child_sid)
+                else:
+                    candidates.append(child)
+
+        if not candidates:
+            # Fail closed: no live continuation exists.
+            return None
+        if len(candidates) > 1:
+            # Fail closed: ambiguous — never guess which descendant owns the
+            # conversation (the caller requeues and the snapshot stays intact).
+            return None
+        latest_sid = _safe_first(_row_value(candidates[0], "session_id", None)) or None
         if latest_sid and not is_safe_session_id(latest_sid):
             return None
         return latest_sid
@@ -15154,19 +15433,46 @@ def handle_post(handler, parsed) -> bool:
         if not session_lock.acquire(timeout=5):
             return bad(handler, "Session busy, try again", 503)
         try:
-            with LOCK:
-                SESSIONS.pop(sid, None)
             try:
                 p = (SESSION_DIR / f"{sid}.json").resolve()
                 p.relative_to(SESSION_DIR.resolve())
             except Exception:
                 return bad(handler, "Invalid session_id", 400)
-            sidecar_deleted = False
-            try:
-                p.unlink(missing_ok=True)
-            except Exception:
-                logger.debug("Failed to unlink session file %s", p)
-            sidecar_deleted = not p.exists()
+            # #6327: deletion is a canonical owner publication — run it as a
+            # per-SID publication transaction so the lease authority is held
+            # ACROSS the exact SESSIONS removal (an in-flight sink for this
+            # session serializes first and installed sink claims are refused).
+            with _publish_owner_lease(sid):
+                _clear_owner_sink_claims(sid)
+                with LOCK:
+                    SESSIONS.pop(sid, None)
+                # #6327 (review 16): unlink the sidecar and record the durable
+                # delete tombstone INSIDE the per-SID lease authority — a
+                # cold-load publisher that acquires the lease afterwards
+                # observes the deletion (no cache entry + tombstone) and can
+                # never resurrect the deleted session across an in-flight load.
+                sidecar_deleted = False
+                try:
+                    p.unlink(missing_ok=True)
+                except Exception:
+                    logger.debug("Failed to unlink session file %s", p)
+                sidecar_deleted = not p.exists()
+                if sidecar_deleted and not is_messaging_session:
+                    # #6327 (review 17, blocker 2): durable deletion
+                    # revocation FAILS CLOSED.  A tombstone persistence error
+                    # must NOT be swallowed — the HTTP delete reports failure
+                    # (500) instead of success-after-lost-revocation, and a
+                    # cold loader that waited behind this deletion re-checks
+                    # the bumped owner-generation under the lease and never
+                    # resurrects the deleted session.
+                    try:
+                        _record_webui_deleted_session_tombstone(sid)
+                    except Exception:
+                        logger.exception(
+                            "Failed to record durable delete tombstone for WebUI session %s",
+                            sid,
+                        )
+                        return bad(handler, "Failed to persist session deletion", 500)
             try:
                 prune_session_from_index(sid)
             except Exception:
@@ -15175,11 +15481,6 @@ def handle_post(handler, parsed) -> bool:
                 p.with_suffix('.json.bak').unlink(missing_ok=True)
             except Exception:
                 logger.debug("Failed to unlink session backup file %s", p.with_suffix('.json.bak'))
-            if sidecar_deleted and not is_messaging_session:
-                try:
-                    _record_webui_deleted_session_tombstone(sid)
-                except Exception:
-                    logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
         finally:
             session_lock.release()
         # Evict outside the mutation lock: lifecycle commit may perform provider
@@ -16269,8 +16570,14 @@ def handle_post(handler, parsed) -> bool:
                 s = Session.load(sid)
                 if s is None:
                     raise KeyError(sid)
-                with LOCK:
-                    SESSIONS[sid] = s
+                # #6327: upgrading the cached metadata stub REPLACES the
+                # canonical owner object under the same SID — publish as a
+                # per-SID publication transaction holding the lease authority
+                # across the exact SESSIONS write.
+                with _publish_owner_lease(sid):
+                    _clear_owner_sink_claims(sid)
+                    with LOCK:
+                        SESSIONS[sid] = s
         except KeyError:
             cli_meta = _lookup_cli_session_metadata(sid)
             if not cli_meta:
@@ -21460,8 +21767,14 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
             else:
                 should_delete = s and s.title == "Untitled" and len(s.messages) == 0
             if should_delete:
-                with LOCK:
-                    SESSIONS.pop(p.stem, None)
+                # #6327: cleanup deletion is a canonical owner publication —
+                # run it as a per-SID publication transaction so the lease
+                # authority is held ACROSS the exact SESSIONS removal
+                # (installed sink claims are refused).
+                with _publish_owner_lease(p.stem):
+                    _clear_owner_sink_claims(p.stem)
+                    with LOCK:
+                        SESSIONS.pop(p.stem, None)
                 p.unlink(missing_ok=True)
                 cleaned += 1
                 phase1_removed_ids.add(p.stem)
@@ -21984,8 +22297,18 @@ def _start_chat_stream_for_session(
     source: str = "webui",
     moa_config=None,
     external_runtime_owned: bool | None = None,
+    owner_token: dict | None = None,
 ):
-    """Persist pending state, register an SSE channel, and start an agent turn."""
+    """Persist pending state, register an SSE channel, and start an agent turn.
+
+    ``owner_token`` is the #6327 immutable owner token built under the
+    canonical current owner's AGENT lock by ``start_session_turn()``.  When
+    supplied, the canonical owner is re-verified under the per-session lock
+    BEFORE any pending-state mutation: a replaced/compressed/rotated owner
+    yields a retryable 409 instead of mutating or starting a stale session.
+    Callers that resolve their session synchronously (browser chat-start)
+    pass no token and are unaffected.
+    """
     if external_runtime_owned is None:
         external_runtime_owned = webui_gateway_chat_enabled(get_config())
     backend_is_gateway = bool(external_runtime_owned)
@@ -21996,41 +22319,148 @@ def _start_chat_stream_for_session(
         stale_response["_status"] = 409
         return stale_response
     attachments = attachments or []
-    # Prevent duplicate runs in the same session while a stream is still active.
-    # This commonly happens after page refresh/reconnect races and can produce
-    # duplicated clarify cards for what appears to be a single user request.
-    diag.stage("active_stream_check") if diag else None
-    current_stream_id = getattr(s, "active_stream_id", None)
-    if current_stream_id:
-        if _active_stream_blocks_chat_start(s, current_stream_id):
-            diag.stage("response_write") if diag else None
-            return {
-                "error": "session already has an active stream",
-                "active_stream_id": current_stream_id,
-                "_status": 409,
-            }
-        # Stale stream id from a previous run; clear and continue.
-        diag.stage("stale_stream_cleanup") if diag else None
-        _clear_stale_stream_state(s)
-
-    # #1932: check if this session has a pending goal continuation flag.
-    # The streaming hook sets PENDING_GOAL_CONTINUATION when goal_continue fires,
-    # so the next chat/start for this session is automatically treated as goal-related.
-    if not goal_related and s.session_id in PENDING_GOAL_CONTINUATION:
-        goal_related = True
-        PENDING_GOAL_CONTINUATION.discard(s.session_id)
-
-    # process_complete wakeup (ours-original, Option B): if this session has a
-    # pending process_complete marker (set by api/background_process.py drain),
-    # discard it atomically here. Mirrors the goal_continue pattern (#1932).
-    # The marker is server-internal telemetry; the actual wakeup is delivered
-    # either server-side (Option Z) or via the PR #2279 next-turn drain.
-    if s.session_id in PENDING_BG_TASK_COMPLETIONS:
-        PENDING_BG_TASK_COMPLETIONS.discard(s.session_id)
-
     session_lock = _get_session_agent_lock(s.session_id)
     diag.stage("session_lock_wait") if diag else None
+    # #6327 validate-before-mutate, ONE owner-generation transaction: for the
+    # token path, owner validation + active-stream disposition + stale
+    # cleanup + goal/background marker consumption + pending-state
+    # preparation all run inside a single ``session_lock`` hold, with the
+    # owner fence re-verified immediately BEFORE each mutation.  A same-SID
+    # replacement after the first validation but before the first mutation is
+    # therefore caught before anything changes — a 409 leaves zero
+    # stale-object, marker, pending-state, and save changes (barrier test).
+    # The non-token path (synchronous browser chat-start) keeps the
+    # historical disposition loop unchanged.
+    if owner_token is not None:
+
+        def _owner_fence_409(_error):
+            diag.stage("owner_fence") if diag else None
+            return {
+                "error": "session owner changed during revalidation",
+                "owner_fence": _error,
+                "retryable": True,
+                "session_id": str(
+                    getattr(owner_token.get("owner"), "session_id", None) or s.session_id
+                ),
+                "_status": 409,
+            }
+
+        with session_lock:
+            _fence_error = _validate_start_owner_fence(owner_token, session_lock)
+            if _fence_error is not None:
+                return _owner_fence_409(_fence_error)
+            # Active-stream disposition (no mutation yet — re-verify before
+            # the stale cleanup below touches the object).
+            diag.stage("active_stream_check") if diag else None
+            current_stream_id = getattr(s, "active_stream_id", None)
+            if current_stream_id:
+                if _active_stream_blocks_chat_start(s, current_stream_id):
+                    diag.stage("response_write") if diag else None
+                    return {
+                        "error": "session already has an active stream",
+                        "active_stream_id": current_stream_id,
+                        "_status": 409,
+                    }
+                # Re-verify immediately before the stale-cleanup mutation.
+                _fence_error = _validate_start_owner_fence(owner_token, session_lock)
+                if _fence_error is not None:
+                    return _owner_fence_409(_fence_error)
+                diag.stage("stale_stream_cleanup") if diag else None
+                # #6327 review 14: we already hold the non-reentrant
+                # per-session AGENT lock here; the helper must NOT re-acquire
+                # it (that deadlocked this validate-before-mutate path).  The
+                # lock-held mutation primitive runs under our hold.
+                _clear_stale_stream_state(s, _agent_lock_held=True)
+                if getattr(s, "active_stream_id", None):
+                    # Cleanup deferred (stale-repair grace) — still active.
+                    diag.stage("response_write") if diag else None
+                    return {
+                        "error": "session already has an active stream",
+                        "active_stream_id": getattr(s, "active_stream_id", None),
+                        "_status": 409,
+                    }
+            else:
+                blocking_run_stream_id = _active_run_stream_for_session(s.session_id)
+                if blocking_run_stream_id:
+                    diag.stage("response_write") if diag else None
+                    return {
+                        "error": "session already has an active stream",
+                        "active_stream_id": blocking_run_stream_id,
+                        "_status": 409,
+                    }
+            # #1932: pending goal continuation marker consumption (re-verify
+            # first so a replacement between validation and the discard is
+            # never followed by consuming the new owner's marker).
+            if not goal_related and s.session_id in PENDING_GOAL_CONTINUATION:
+                _fence_error = _validate_start_owner_fence(owner_token, session_lock)
+                if _fence_error is not None:
+                    return _owner_fence_409(_fence_error)
+                goal_related = True
+                PENDING_GOAL_CONTINUATION.discard(s.session_id)
+            # process_complete wakeup marker consumption (re-verify first).
+            if s.session_id in PENDING_BG_TASK_COMPLETIONS:
+                _fence_error = _validate_start_owner_fence(owner_token, session_lock)
+                if _fence_error is not None:
+                    return _owner_fence_409(_fence_error)
+                PENDING_BG_TASK_COMPLETIONS.discard(s.session_id)
+            # Pending-state preparation (final re-verify before the write).
+            stream_id = uuid.uuid4().hex
+            _fence_error = _validate_start_owner_fence(owner_token, session_lock)
+            if _fence_error is not None:
+                return _owner_fence_409(_fence_error)
+            diag.stage("save_pending_state") if diag else None
+            was_hidden_empty_session = _is_hidden_empty_session(s)
+            _prepare_chat_start_session_for_stream(
+                s,
+                msg=msg,
+                attachments=attachments,
+                workspace=workspace,
+                model=model,
+                model_provider=model_provider,
+                stream_id=stream_id,
+                source=source,
+            )
+    else:
+        # Prevent duplicate runs in the same session while a stream is still active.
+        # This commonly happens after page refresh/reconnect races and can produce
+        # duplicated clarify cards for what appears to be a single user request.
+        diag.stage("active_stream_check") if diag else None
+        current_stream_id = getattr(s, "active_stream_id", None)
+        if current_stream_id:
+            if _active_stream_blocks_chat_start(s, current_stream_id):
+                diag.stage("response_write") if diag else None
+                return {
+                    "error": "session already has an active stream",
+                    "active_stream_id": current_stream_id,
+                    "_status": 409,
+                }
+            # Stale stream id from a previous run; clear and continue.
+            diag.stage("stale_stream_cleanup") if diag else None
+            _clear_stale_stream_state(s)
+
+        # #1932: check if this session has a pending goal continuation flag.
+        # The streaming hook sets PENDING_GOAL_CONTINUATION when goal_continue fires,
+        # so the next chat/start for this session is automatically treated as goal-related.
+        if not goal_related and s.session_id in PENDING_GOAL_CONTINUATION:
+            goal_related = True
+            PENDING_GOAL_CONTINUATION.discard(s.session_id)
+
+        # process_complete wakeup (ours-original, Option B): if this session has a
+        # pending process_complete marker (set by api/background_process.py drain),
+        # discard it atomically here. Mirrors the goal_continue pattern (#1932).
+        # The marker is server-internal telemetry; the actual wakeup is delivered
+        # either server-side (Option Z) or via the PR #2279 next-turn drain.
+        if s.session_id in PENDING_BG_TASK_COMPLETIONS:
+            PENDING_BG_TASK_COMPLETIONS.discard(s.session_id)
+
+    # The immutable-owner-token path completed its disposition (validation +
+    # stale cleanup + marker consumption + pending-state prep) in the single
+    # owner-generation transaction above, so this historical disposition loop
+    # runs for the non-token path only.
+    needs_stale_cleanup = False
     while True:
+        if owner_token is not None:
+            break
         with session_lock:
             locked_stream_id = getattr(s, "active_stream_id", None)
             if locked_stream_id:
@@ -22117,6 +22547,11 @@ def _start_chat_stream_for_session(
     worker_kwargs = {"model_provider": model_provider, "goal_related": goal_related}
     if moa_config and not backend_is_gateway:
         worker_kwargs["moa_config"] = moa_config
+    if owner_token is not None:
+        # #6327 route-to-worker acceptance: carry the immutable owner token
+        # into the worker so its own get_session() re-read is fenced against a
+        # same-SID replacement between route acceptance and worker start.
+        worker_kwargs["owner_token"] = owner_token
     if backend_is_gateway:
         from api.gateway_chat import _mark_gateway_run_starting
         _mark_gateway_run_starting(stream_id)
@@ -22204,6 +22639,91 @@ def _runtime_adapter_goal_action(goal_args: str) -> str:
     return "set"
 
 
+def _build_browser_start_owner_token(s, *, model, provider, normalized_model, workspace):
+    """#6327 canonical per-session owner authority for browser runner-local starts.
+
+    The process-wakeup drain path builds its immutable owner token through
+    ``_build_immutable_session_owner_token``, recomputing the route lane from
+    the LIVE owner (wakeups must never carry predecessor-derived routing).  A
+    browser ``/api/chat/start`` is the opposite: the route lane the caller
+    resolved (workspace + model/provider + normalized_model) IS the authority
+    — the run must be fenced for exactly the lane the browser requested,
+    never silently recomputed to a different one.  Under the canonical
+    per-session AGENT lock we re-verify ``s`` is still the live owner and
+    snapshot the compact immutable token carrying the browser's lane plus the
+    profile-home generation and credential-state fingerprint, so
+    ``_claim_runner_owner_fence`` can mint the complete fence the real
+    ``HttpRunnerClient`` compare-and-accepts (review 16 blocker 1: ordinary
+    browser runner-local starts were previously unfenced and deterministically
+    refused with a retryable 409 before ever contacting the runner).
+
+    Returns ``(token, None)`` or ``(None, reason)`` — the caller surfaces a
+    retryable 409 (an unowned run is never acknowledged).
+    """
+    if s is None:
+        return None, "missing_owner"
+    live_sid = str(getattr(s, "session_id", "") or "")
+    if not live_sid:
+        return None, "empty_sid"
+    lock = _get_session_agent_lock(live_sid)
+    with lock:
+        with SESSION_AGENT_LOCKS_LOCK:
+            canonical = SESSION_AGENT_LOCKS.get(live_sid)
+        if canonical is not lock:
+            return None, "lock_migrated"
+        try:
+            resolved = get_session(live_sid)
+        except KeyError:
+            resolved = None
+        if resolved is None or resolved is not s:
+            return None, "owner_replaced"
+        try:
+            credential_fingerprint = process_wakeup_credential_state_fingerprint(s)
+        except Exception:
+            # Fail closed: a fence without the credential-state generation
+            # cannot be compared-and-accepted by the runner.
+            return None, "credential_fingerprint_unreadable"
+        # #6327 (review 17, blocker): snapshot the canonical owner's pause
+        # state with the SAME representation the immutable owner-token /
+        # mismatch path uses (_build_immutable_session_owner_token and
+        # _process_wakeup_owner_token_mismatch both normalize a dict pause
+        # via ``dict(pause) if isinstance(pause, dict) else None``).  A real
+        # Session always initializes ``process_wakeup_pause={}``
+        # (api/models.py), so the previous hard-coded ``None`` made the
+        # immediate pre-POST mismatch check see live {} != token None →
+        # ``pause_state_changed`` → a retryable 409 BEFORE
+        # ``adapter.start_run()`` for every ordinary browser runner-local
+        # start.  Snapshotting under this AGENT lock keeps the token
+        # immutable: a pause mutation after capture is refused by the claim
+        # fence before the runner is ever contacted.
+        _pause = getattr(s, "process_wakeup_pause", None)
+        _pause_state = dict(_pause) if isinstance(_pause, dict) else None
+        token = {
+            "requested_sid": live_sid,
+            "session_id": live_sid,
+            "owner": s,
+            "profile": str(getattr(s, "profile", "") or ""),
+            "profile_home": _process_wakeup_profile_home(s),
+            # #6327 (review 17): the browser-request lane is the AUTHORITY —
+            # the caller resolved workspace/model/provider/normalized_model for
+            # exactly this run (possibly an EXPLICIT change that has not been
+            # persisted to the owner fields yet).  ``lane_source == "request"``
+            # tells the fence claim to bind the token's lane verbatim instead
+            # of recomputing it from the still-old persisted owner (which
+            # would wrongly reject model/provider/workspace changes with a 409
+            # before the runner is ever contacted).
+            "lane_source": "request",
+            "model": model,
+            "provider": provider,
+            "normalized_model": bool(normalized_model),
+            "workspace": str(workspace or ""),
+            "pause_state": _pause_state,
+            "pause_matches": False,
+            "credential_state_fingerprint": credential_fingerprint,
+        }
+    return token, None
+
+
 def _start_run(
     s,
     *,
@@ -22218,6 +22738,7 @@ def _start_run(
     diag=None,
     moa_config=None,
     gateway_chat_enabled: bool | None = None,
+    owner_token: dict | None = None,
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
 
@@ -22239,11 +22760,16 @@ def _start_run(
     """
     from api.runtime_adapter import (
         LegacyJournalRuntimeAdapter,
+        RunnerRuntimeAdapter,
         StartRunRequest,
         build_runtime_adapter,
         runtime_adapter_enabled,
         runtime_adapter_runner_enabled,
     )
+    # #6327 runner acceptance: the client raises RunnerFenceRefused when the
+    # receiver did not compare-and-accept the exact nonce/version + complete
+    # claim, and RunnerClientError for ambiguous post-POST transport failures.
+    from api.runner_client import RunnerClientError, RunnerFenceRefused
 
     if runtime_adapter_enabled() or runtime_adapter_runner_enabled():
         def _legacy_start_run(request: StartRunRequest) -> dict:
@@ -22259,6 +22785,7 @@ def _start_run(
                 source=request.source or source,
                 moa_config=moa_config,
                 external_runtime_owned=gateway_chat_enabled,
+                owner_token=owner_token,
             )
 
         def _legacy_adapter_factory():
@@ -22271,19 +22798,124 @@ def _start_run(
             )
             if adapter is None:
                 raise NotImplementedError("runtime adapter selection returned no adapter")
-            result = adapter.start_run(
-                StartRunRequest(
-                    session_id=s.session_id,
-                    message=msg,
-                    attachments=attachments,
-                    workspace=workspace,
-                    profile=getattr(s, "profile", None),
-                    provider=model_provider,
-                    model=model,
-                    source=source,
-                    metadata={"route": route},
+            owner_fence = None
+            if isinstance(adapter, RunnerRuntimeAdapter):
+                if owner_token is None:
+                    # #6327 (review 16 blocker 1): ordinary browser
+                    # runner-local starts arrive WITHOUT the immutable owner
+                    # token only the process-wakeup drain path builds.  The
+                    # real HttpRunnerClient fails closed when the fence is
+                    # absent (RunnerFenceRefused → deterministic retryable
+                    # 409 before ever contacting the runner), so establish
+                    # the canonical per-session owner authority NOW — under
+                    # the AGENT lock, for exactly the route lane the caller
+                    # resolved — and claim the complete fence below.
+                    owner_token, _browser_fence_error = _build_browser_start_owner_token(
+                        s,
+                        model=model,
+                        provider=model_provider,
+                        normalized_model=normalized_model,
+                        workspace=workspace,
+                    )
+                    if owner_token is None:
+                        # No token: no provisional worker state was ever
+                        # installed for a browser start, so there is nothing
+                        # to retire — surface the retryable 409 directly.
+                        return {
+                            "error": "session owner changed before the agent turn started",
+                            "owner_fence": _browser_fence_error,
+                            "retryable": True,
+                            "session_id": str(getattr(s, "session_id", "") or ""),
+                            "_status": 409,
+                        }
+                # #6327 runner acceptance: claim the compact NON-EMPTY
+                # JSON-safe generation/route fence under the canonical owner's
+                # per-session AGENT lock immediately before the runner HTTP
+                # call, so a same-SID replacement after the route's comparison
+                # can never reach the runner/provider.  On movement, retire the
+                # route's provisional pending state, re-defer the wakeup, and
+                # surface a retryable 409 so the caller requeues instead of
+                # silently 500ing — an unowned run is never acknowledged.
+                owner_fence, fence_error = _claim_runner_owner_fence(owner_token, s)
+                if fence_error is not None:
+                    _worker_retire_pending_state(
+                        owner_token,
+                        stream_id="",
+                        session_id=str(getattr(s, "session_id", "") or ""),
+                        wakeup_prompt=msg if source == "process_wakeup" else None,
+                        requeue_wakeup=(source == "process_wakeup"),
+                        reason=fence_error,
+                    )
+                    return {
+                        "error": "session owner changed before the agent turn started",
+                        "owner_fence": fence_error,
+                        "retryable": True,
+                        "session_id": str(getattr(s, "session_id", "") or ""),
+                        "_status": 409,
+                    }
+            try:
+                result = adapter.start_run(
+                    StartRunRequest(
+                        session_id=s.session_id,
+                        message=msg,
+                        attachments=attachments,
+                        workspace=workspace,
+                        profile=getattr(s, "profile", None),
+                        provider=model_provider,
+                        model=model,
+                        source=source,
+                        metadata={"route": route},
+                        owner_fence=owner_fence,
+                    )
                 )
-            )
+            except RunnerFenceRefused as exc:
+                # #6327 receiver-authoritative refusal: the runner did not
+                # bind the run to the exact nonce/version + complete claim
+                # (accepted:true, SID, profile/home, generation, route, lease).
+                # The run was NOT acknowledged — retire the route's
+                # provisional pending state, re-defer the wakeup, and surface
+                # a retryable 409 so the caller requeues under the current
+                # owner instead of treating the run as started.
+                if owner_token is not None:
+                    _worker_retire_pending_state(
+                        owner_token,
+                        stream_id="",
+                        session_id=str(getattr(s, "session_id", "") or ""),
+                        wakeup_prompt=msg if source == "process_wakeup" else None,
+                        requeue_wakeup=(source == "process_wakeup"),
+                        reason=str(exc),
+                    )
+                return {
+                    "error": "runner refused the owner fence; run not started",
+                    "owner_fence": str(exc),
+                    "retryable": True,
+                    "session_id": str(getattr(s, "session_id", "") or ""),
+                    "_status": 409,
+                }
+            except RunnerClientError as exc:
+                # Ambiguous post-POST failure: the runner may or may not have
+                # created the run (transport error, HTTP error, malformed
+                # body).  Never assert that no run started — reconcile
+                # idempotently by re-deferring the wakeup (durable, safe to
+                # repeat) and surface a retryable error so the caller
+                # requeues and the runner-side run, if any, is reconciled by
+                # the next attempt.
+                if owner_token is not None:
+                    _worker_retire_pending_state(
+                        owner_token,
+                        stream_id="",
+                        session_id=str(getattr(s, "session_id", "") or ""),
+                        wakeup_prompt=msg if source == "process_wakeup" else None,
+                        requeue_wakeup=(source == "process_wakeup"),
+                        reason=str(exc),
+                    )
+                return {
+                    "error": str(exc),
+                    "retryable": True,
+                    "ambiguous": True,
+                    "session_id": str(getattr(s, "session_id", "") or ""),
+                    "_status": 502,
+                }
         except NotImplementedError as exc:
             return {"error": str(exc), "_status": 501}
         return _chat_start_response_from_run_start(result)
@@ -22300,6 +22932,7 @@ def _start_run(
         source=source,
         moa_config=moa_config,
         external_runtime_owned=gateway_chat_enabled,
+        owner_token=owner_token,
     )
 
 
@@ -22319,6 +22952,28 @@ def _process_wakeup_revalidation_provider(model, provider) -> str:
     return str(candidate or "").strip()
 
 
+def _wakeup_owner_profile(session_or_token) -> str:
+    """Read the profile field from a Session object or an immutable owner token."""
+    if isinstance(session_or_token, dict):
+        return str(session_or_token.get("profile") or "").strip()
+    return str(getattr(session_or_token, "profile", "") or "").strip()
+
+
+def _process_wakeup_profile_home(session) -> str:
+    """Resolve the canonical hermes home path for a session's profile.
+
+    Read-only (no process state mutated, no PROCESS ownership acquired) so it
+    is safe to compute inside the per-session AGENT lock — it is part of the
+    #6327 immutable owner token.
+    """
+    try:
+        from api.profiles import get_hermes_home_for_profile
+
+        return str(get_hermes_home_for_profile(getattr(session, "profile", None)))
+    except Exception:
+        return ""
+
+
 def _process_wakeup_provider_has_recovery_credential(
     session,
     *,
@@ -22332,7 +22987,7 @@ def _process_wakeup_provider_has_recovery_credential(
     ).strip()
     if not provider_id:
         return False
-    profile_name = str(getattr(session, "profile", "") or "").strip()
+    profile_name = _wakeup_owner_profile(session)
     if profile_name and not _is_root_profile(profile_name):
         with profile_scope_for_detached_worker(
             profile_name,
@@ -22352,6 +23007,1343 @@ def _refresh_process_wakeup_pause_credential_fingerprint(session) -> bool:
     updated["credential_state_fingerprint"] = process_wakeup_credential_state_fingerprint(session)
     session.process_wakeup_pause = updated
     return True
+
+
+def _resolve_live_session_owner(session_id, *, preferred=None):
+    """Resolve the canonical LIVE session owner for a wakeup request.
+
+    #6327: the production compression path mutates the live ``Session``
+    object in place (``session_id`` rotation), migrates ``SESSIONS[old]`` →
+    ``SESSIONS[new]``, preserves the old SID as an archived
+    ``pre_compression_snapshot`` sidecar, and aliases the per-session AGENT
+    lock entry to the new SID.  A wakeup that resolved an owner before (or
+    while) that happened must follow the live owner, never the archived
+    snapshot.
+
+      - ``preferred`` is the object resolved earlier (possibly rotated in
+        place by compression).  When it is still the canonical cache owner of
+        its live sid, it IS the live continuation — use it.
+      - Otherwise resolve ``session_id``.  If it now resolves to an archived
+        pre-compression snapshot, follow to the newest live continuation
+        (bounded + profile-matched) or fail (the caller requeues and the
+        snapshot is never mutated).
+
+    Returns ``(owner, live_sid)`` or ``(None, None)``.  Never acquires AGENT
+    or PROCESS; the caller takes the canonical lock for ``live_sid``.
+    """
+    if preferred is not None:
+        live_sid = str(getattr(preferred, "session_id", "") or "")
+        if live_sid:
+            with LOCK:
+                cached = SESSIONS.get(live_sid)
+            if cached is preferred and not getattr(
+                preferred, "pre_compression_snapshot", False
+            ):
+                return preferred, live_sid
+    try:
+        s = get_session(session_id)
+    except KeyError:
+        return None, None
+    if s is None:
+        return None, None
+    live_sid = str(getattr(s, "session_id", "") or "") or str(session_id)
+    if getattr(s, "pre_compression_snapshot", False):
+        # The requested SID is an archived pre-compression snapshot: resolve
+        # its live continuation atomically (bounded + profile-matched) or
+        # fail/requeue.  Never clear/suppress/save/start on the snapshot.
+        #
+        # #6327: ownership selection uses the mutating-flow-specific
+        # compression continuation authority (_compression_continuation_...
+        # session_id), NOT the newest-visible-descendant UI helper.  The UI
+        # helper accepts any same-profile descendant (including forks stamped
+        # by /api/session/branch) and picks the newest by timestamp, so an
+        # archived parent A with a true continuation C and a NEWER fork F
+        # would resolve F as the live owner and attach credential
+        # clear/suppression/start to the wrong conversation.  The strict
+        # authority rejects forks/branches/delegates, requires the durable
+        # archived-snapshot predecessor evidence, and fails closed on zero or
+        # ambiguous candidates.
+        try:
+            continuation_sid = _compression_continuation_session_id(s)
+        except Exception:
+            continuation_sid = None
+        if not continuation_sid:
+            return None, None
+        try:
+            s = get_session(continuation_sid)
+        except KeyError:
+            return None, None
+        if s is None or getattr(s, "pre_compression_snapshot", False):
+            return None, None  # defensive: a continuation must be live
+        live_sid = str(getattr(s, "session_id", "") or "") or str(continuation_sid)
+    return s, live_sid
+
+
+def _live_owner_routing_lane(owner, *, fallback_model=None, fallback_provider=None):
+    """Recompute the routing lane (workspace + model/provider) from a live owner.
+
+    #6327: the immutable owner token snapshots the workspace + model/provider
+    lane RECOMPUTED from the selected LIVE owner (never predecessor-derived
+    routing).  This helper recomputes the SAME lane at apply/fence time so
+    every field that authorizes apply/start is compared exactly — a
+    workspace/model/provider movement during the out-of-AGENT revalidation
+    window fails closed instead of applying the stale answer to the new lane.
+
+    Returns ``(workspace, model, provider, normalized)``.  Raises ValueError
+    when the live workspace cannot be resolved (stale/invalid workspace) —
+    callers fail closed (``workspace_unresolvable``).
+    """
+    workspace = _resolve_chat_workspace_with_recovery(owner, None)
+    _pp_provider, _pp_default, _pp_cfg = _read_profile_model_config(
+        owner, getattr(owner, "model_provider", None)
+    )
+    _lane_model, _lane_provider, _lane_normalized = (
+        _resolve_compatible_session_model_state(
+            getattr(owner, "model", None),
+            getattr(owner, "model_provider", None),
+            profile_provider=_pp_provider,
+            profile_default_model=_pp_default,
+            profile_config=_pp_cfg,
+            prefer_cached_catalog=True,
+        )
+    )
+    return (
+        str(workspace),
+        _lane_model or fallback_model,
+        _lane_provider or fallback_provider,
+        bool(_lane_normalized),
+    )
+
+
+def _process_wakeup_owner_token_mismatch(token, owner, *, recompute_lane: bool = True) -> str | None:
+    """Return a reason string when the live owner no longer matches ``token``.
+
+    Called while holding the canonical AGENT lock for ``owner``'s live sid.
+    ``token`` was snapshotted under the same lock earlier; every mutable
+    field the out-of-AGENT revalidation (and the validation-to-start fence)
+    depends on is compared exactly — owner identity, SID, archived flag,
+    profile + home generation, the ROUTE lane (workspace + model/provider,
+    recomputed from the live owner, #6327), pause version/state, and the
+    credential-state fingerprint.  ``None`` means the token still matches.
+
+    ``recompute_lane=False`` (browser runner-local tokens, #6327 review 17):
+    the token's lane was resolved BY THE REQUEST (an explicit model/provider/
+    workspace change that has not been persisted to the owner fields yet) and
+    is the authority — the lane is NOT recomputed from the still-old
+    persisted owner, so a legitimate explicit lane change is never rejected
+    with a 409 before the runner is contacted.  Owner identity, SID, archived
+    flag, profile/home generation, pause, and the credential-state
+    fingerprint are still compared exactly either way.
+    """
+    if owner is not token.get("owner"):
+        return "owner_replaced"
+    if str(getattr(owner, "session_id", "") or "") != str(token.get("session_id") or ""):
+        return "session_id_rotated"
+    if getattr(owner, "pre_compression_snapshot", False):
+        return "session_archived"
+    if str(getattr(owner, "profile", "") or "") != str(token.get("profile") or ""):
+        return "profile_changed"
+    if _process_wakeup_profile_home(owner) != token.get("profile_home"):
+        return "profile_home_changed"
+    # ── #6327: fence the route lane that authorizes apply/start ────────────
+    # The process-wakeup token records workspace/model/provider RECOMPUTED
+    # from the selected live owner.  Recompute the same lane now: a
+    # workspace/model/provider movement during the out-of-AGENT revalidation
+    # window must never let the stale answer (or the run) apply to the new
+    # lane.  Browser runner-local tokens (``recompute_lane=False``) carry the
+    # request-resolved lane instead — the browser's explicit model/provider/
+    # workspace change is the authority and is bound to the fence verbatim,
+    # never recomputed from the still-old persisted owner (#6327 review 17).
+    if recompute_lane and token.get("workspace") is not None:
+        try:
+            _live_workspace, _live_model, _live_provider, _live_normalized = (
+                _live_owner_routing_lane(
+                    owner,
+                    fallback_model=token.get("model"),
+                    fallback_provider=token.get("provider"),
+                )
+            )
+        except ValueError:
+            # Stale/invalid live workspace: fail closed — the apply would 400
+            # on the workspace anyway.
+            return "workspace_unresolvable"
+        if str(_live_workspace) != str(token.get("workspace") or ""):
+            return "workspace_changed"
+        if str(_live_model or "") != str(token.get("model") or ""):
+            return "model_changed"
+        if str(_live_provider or "") != str(token.get("provider") or ""):
+            return "provider_changed"
+        if bool(_live_normalized) != bool(token.get("normalized_model")):
+            return "normalized_model_changed"
+    live_pause = getattr(owner, "process_wakeup_pause", None)
+    live_pause_state = dict(live_pause) if isinstance(live_pause, dict) else None
+    if live_pause_state != token.get("pause_state"):
+        return "pause_state_changed"
+    try:
+        live_fingerprint = process_wakeup_credential_state_fingerprint(owner)
+    except Exception:
+        # #6327: fail closed — an unreadable credential fingerprint must NOT
+        # authorize the stale revalidation answer.  Surface a mismatch so the
+        # caller retries outside AGENT (bounded) or drops the wakeup; never
+        # treat a read failure as "still matches".
+        return "credential_fingerprint_unreadable"
+    if live_fingerprint != token.get("credential_state_fingerprint"):
+        return "credential_state_changed"
+    return None
+
+
+def _build_immutable_session_owner_token(
+    session_id,
+    *,
+    model,
+    provider,
+    preferred=None,
+    classification: str = "credential_pool_empty",
+):
+    """Resolve the canonical LIVE owner and snapshot an immutable owner token.
+
+    #6327 required shape, step 1: under the canonical current owner's AGENT
+    lock, snapshot an immutable token containing the requested/current SID,
+    exact owner identity, profile + home generation, the resolved
+    route/model/provider lane, pause version/state, and the credential-state
+    generation/fingerprint.  Step 2 (the PROCESS-owning credential lookup)
+    runs OUTSIDE this lock; step 3 re-acquires it and applies only when every
+    token field still matches.
+
+    When the requested SID is an archived pre-compression snapshot, the live
+    owner is resolved through the mutating-flow compression continuation
+    authority and the workspace + model/provider lane are RECOMPUTED from the
+    selected live owner — predecessor-derived routing is never carried into
+    the continuation.
+
+    Never acquires PROCESS.  Returns ``(token, live_owner, routing)`` or
+    ``(None, None, None)`` when the session is gone / only archived, or
+    ``(None, None, {"error": ..., "_status": ...})`` for a hard routing
+    failure (unreadable credential fingerprint, unresolvable workspace).
+    ``routing`` is ``{"workspace", "model", "provider", "normalized_model"}``
+    derived from the LIVE owner — callers must use it (not predecessor-derived
+    values) for the revalidation and the run.
+    """
+    live_owner = preferred
+    _fingerprint_unreadable = False
+    for _ in range(4):  # bounded re-resolution across concurrent rotation
+        live_owner, live_sid = _resolve_live_session_owner(
+            session_id, preferred=live_owner
+        )
+        if live_owner is None:
+            if _fingerprint_unreadable:
+                return None, None, {
+                    "error": "Failed to read credential state fingerprint",
+                    "_status": 503,
+                }
+            return None, None, None
+        lock = _get_session_agent_lock(live_sid)
+        with lock:
+            # Canonicality under the lock: compression migrates lock entries
+            # while holding them, so the entry must still map the owner's
+            # live sid to the lock we just acquired.
+            with SESSION_AGENT_LOCKS_LOCK:
+                canonical = SESSION_AGENT_LOCKS.get(live_owner.session_id)
+            if canonical is not lock:
+                continue  # lock migrated underneath us — re-resolve
+            if getattr(live_owner, "pre_compression_snapshot", False):
+                continue  # archived mid-resolution — re-resolve (follows continuation)
+            # ── #6327: recompute the routing lane from the LIVE owner ──────
+            # Never carry predecessor-derived routing (workspace, model/
+            # provider lane) from an archived pre-compression snapshot into
+            # the live continuation.  Workspace, profile home, the pause key
+            # (model/provider lane), and the credential fingerprint below are
+            # all derived from the selected live owner only.  The SAME lane
+            # recompute runs at apply/fence time
+            # (_process_wakeup_owner_token_mismatch) so every field that
+            # authorizes apply/start is compared exactly.
+            try:
+                live_workspace, lane_model, lane_provider, lane_normalized = (
+                    _live_owner_routing_lane(
+                        live_owner,
+                        fallback_model=model,
+                        fallback_provider=provider,
+                    )
+                )
+            except ValueError as exc:
+                return None, None, {"error": str(exc), "_status": 400}
+            pause = getattr(live_owner, "process_wakeup_pause", None)
+            pause_state = dict(pause) if isinstance(pause, dict) else None
+            pause_matches = bool(
+                pause_state
+                and process_wakeup_pause_matches(
+                    live_owner,
+                    model=lane_model,
+                    provider=lane_provider,
+                    classification=classification,
+                )
+            )
+            try:
+                credential_fingerprint = process_wakeup_credential_state_fingerprint(
+                    live_owner
+                )
+            except Exception:
+                # #6327: fail closed — an unreadable credential fingerprint
+                # cannot authorize the out-of-AGENT answer.  Retry (bounded);
+                # on exhaustion the caller surfaces a 503 and never applies.
+                _fingerprint_unreadable = True
+                continue
+            token = {
+                "requested_sid": str(session_id),
+                "session_id": str(getattr(live_owner, "session_id", "") or ""),
+                "owner": live_owner,
+                "profile": str(getattr(live_owner, "profile", "") or ""),
+                "profile_home": _process_wakeup_profile_home(live_owner),
+                "model": lane_model,
+                "provider": lane_provider,
+                "normalized_model": bool(lane_normalized),
+                "workspace": str(live_workspace),
+                "pause_state": pause_state,
+                "pause_matches": pause_matches,
+                "credential_state_fingerprint": credential_fingerprint,
+            }
+            routing = {
+                "workspace": str(live_workspace),
+                "model": lane_model,
+                "provider": lane_provider,
+                "normalized_model": bool(lane_normalized),
+            }
+            return token, live_owner, routing
+    if _fingerprint_unreadable:
+        return None, None, {
+            "error": "Failed to read credential state fingerprint",
+            "_status": 503,
+        }
+    return None, None, None
+
+
+def _save_session_quietly(session, session_id):
+    try:
+        session.save(touch_updated_at=False)
+    except Exception:
+        logger.debug(
+            "failed to persist process_wakeup state for session %s",
+            session_id,
+            exc_info=True,
+        )
+
+
+def _apply_process_wakeup_revalidation_once(
+    token, revalidation, *, model, provider, retry_on_stale: bool = True
+):
+    """Acquire the canonical current owner's lock, verify the token, apply.
+
+    #6327 required shape, step 3: re-acquire the canonical current owner's
+    AGENT lock and apply the out-of-lock revalidation answer ONLY when every
+    token field still matches; on replacement/SID rotation/profile-home/
+    pause/credential-generation movement, retry outside AGENT (the caller
+    bounds the budget).  Never acquires PROCESS while AGENT is held.
+
+    Returns:
+      ``{"retry": True, "session": <owner>, "reason": ...}`` — owner moved;
+        the caller rebuilds the token and re-runs the revalidation outside
+        AGENT (bounded), or falls back to the suppression pass.
+      ``{"retry": False, "session": <owner>, "paused_response": dict|None,
+        "error": dict|None}`` — applied.  ``paused_response`` is the 409
+        suppressed-wakeup payload when the pause could not be recovered.
+    """
+    owner = token.get("owner")
+    if owner is None:
+        return {
+            "retry": False,
+            "session": None,
+            "paused_response": None,
+            "error": {"error": "Session not found", "_status": 404},
+        }
+    for _ in range(4):
+        live_sid = str(getattr(owner, "session_id", "") or "")
+        if not live_sid:
+            return {"retry": True, "session": owner, "reason": "owner_sid_empty"}
+        lock = _get_session_agent_lock(live_sid)
+        with lock:
+            with SESSION_AGENT_LOCKS_LOCK:
+                canonical = SESSION_AGENT_LOCKS.get(owner.session_id)
+            if canonical is not lock:
+                return {"retry": True, "session": owner, "reason": "lock_migrated"}
+            # Canonical-owner identity: the live sid must resolve (through the
+            # cache or the disk-freshness resolver) to the tokenized object.
+            # A replaced object under the same SID, an evicted owner, or an
+            # archived pre-compression snapshot all fail this check.
+            try:
+                resolved = get_session(live_sid)
+            except KeyError:
+                resolved = None
+            if resolved is None or resolved is not owner:
+                return {"retry": True, "session": owner, "reason": "owner_replaced"}
+            mismatch = _process_wakeup_owner_token_mismatch(token, owner)
+            if mismatch:
+                return {"retry": True, "session": owner, "reason": mismatch}
+            if clear_process_wakeup_pause_if_model_changed(
+                owner, model=model, provider=provider
+            ):
+                _save_session_quietly(owner, token.get("session_id"))
+            if process_wakeup_pause_matches(
+                owner,
+                model=model,
+                provider=provider,
+                classification="credential_pool_empty",
+            ):
+                _revalidation_applies = bool(
+                    revalidation is not None
+                    and revalidation.get("token_session_id") == token.get("session_id")
+                )
+                if _revalidation_applies:
+                    _credential_state_changed = False
+                    try:
+                        _credential_state_changed = (
+                            process_wakeup_pause_credential_state_changed(owner)
+                        )
+                    except Exception:
+                        logger.debug(
+                            "failed to compare process_wakeup credential state for session %s",
+                            token.get("session_id"),
+                            exc_info=True,
+                        )
+                        # #6327: fail closed — the credential state is
+                        # unverifiable, so do NOT clear the pause on an
+                        # unverifiable recovery; refresh the fingerprint so the
+                        # next drain cycle revalidates instead.
+                        _credential_state_changed = True
+                    if bool(revalidation.get("recovered")):
+                        _recovery_reason = (
+                            "credential_state_changed"
+                            if _credential_state_changed
+                            else "credential_recovered"
+                        )
+                        if clear_process_wakeup_pause(owner, reason=_recovery_reason):
+                            _save_session_quietly(owner, token.get("session_id"))
+                    elif _credential_state_changed:
+                        if _refresh_process_wakeup_pause_credential_fingerprint(owner):
+                            _save_session_quietly(owner, token.get("session_id"))
+                elif retry_on_stale:
+                    # The live pause matched but the revalidation result is
+                    # missing/stale (preflight failed, or the pause appeared
+                    # after the preflight): drop AGENT and retry outside it.
+                    return {"retry": True, "session": owner, "reason": "revalidation_stale"}
+                # else: retries exhausted / no result — treat the pause as
+                # not recovered (suppressed below).
+            paused = suppress_process_wakeup_for_provider_pause(
+                owner,
+                model=model,
+                provider=provider,
+                classification="credential_pool_empty",
+            )
+            if paused is not None:
+                try:
+                    PENDING_BG_TASK_COMPLETIONS.discard(owner.session_id)
+                except Exception:
+                    logger.debug(
+                        "failed to discard pending bg-task marker for paused wakeup %s",
+                        token.get("session_id"),
+                        exc_info=True,
+                    )
+                _save_session_quietly(owner, token.get("session_id"))
+                return {
+                    "retry": False,
+                    "session": owner,
+                    "paused_response": {
+                        "error": PROCESS_WAKEUP_PAUSE_ERROR,
+                        "message": (
+                            "Automatic process wakeups are paused for this session because "
+                            "the provider credential pool is unavailable."
+                        ),
+                        "process_wakeup_pause": paused,
+                        "_status": 409,
+                    },
+                    "error": None,
+                }
+            return {
+                "retry": False,
+                "session": owner,
+                "paused_response": None,
+                "error": None,
+            }
+    return {"retry": True, "session": owner, "reason": "owner_churn"}
+
+
+def _suppress_process_wakeup_once(token, *, model, provider, session_id):
+    """Final bounded fallback: suppress the wakeup on the CURRENT live owner.
+
+    Used when the out-of-AGENT revalidation budget is exhausted: never start
+    or mutate a stale owner.  Resolves the live owner (following rotation),
+    suppresses when the pause still matches (409 requeue), and returns the
+    live owner + a fresh token so a subsequently started run is never
+    fenced-stale.
+    """
+    owner = token.get("owner")
+    if owner is None:
+        return {
+            "session": None,
+            "token": token,
+            "paused_response": {
+                "error": PROCESS_WAKEUP_PAUSE_ERROR,
+                "message": "Automatic process wakeups are paused for this session because the provider credential pool is unavailable.",
+                "process_wakeup_pause": {},
+                "_status": 409,
+            },
+            "error": {"error": "Session not found", "_status": 404},
+        }
+    for _ in range(4):
+        live_sid = str(getattr(owner, "session_id", "") or "")
+        if not live_sid:
+            return {"session": owner, "token": token, "paused_response": None, "error": None}
+        lock = _get_session_agent_lock(live_sid)
+        with lock:
+            with SESSION_AGENT_LOCKS_LOCK:
+                canonical = SESSION_AGENT_LOCKS.get(owner.session_id)
+            if canonical is not lock:
+                continue
+            try:
+                resolved = get_session(live_sid)
+            except KeyError:
+                resolved = None
+            if resolved is None or resolved is not owner:
+                fresh, _fresh_sid = _resolve_live_session_owner(session_id, preferred=owner)
+                if fresh is None:
+                    return {
+                        "session": owner,
+                        "token": token,
+                        "paused_response": None,
+                        "error": {"error": "Session not found", "_status": 404},
+                    }
+                owner = fresh
+                continue
+            if clear_process_wakeup_pause_if_model_changed(
+                owner, model=model, provider=provider
+            ):
+                _save_session_quietly(owner, session_id)
+            paused = suppress_process_wakeup_for_provider_pause(
+                owner,
+                model=model,
+                provider=provider,
+                classification="credential_pool_empty",
+            )
+            if paused is not None:
+                try:
+                    PENDING_BG_TASK_COMPLETIONS.discard(owner.session_id)
+                except Exception:
+                    logger.debug(
+                        "failed to discard pending bg-task marker for paused wakeup %s",
+                        session_id,
+                        exc_info=True,
+                    )
+                _save_session_quietly(owner, session_id)
+                return {
+                    "session": owner,
+                    "token": token,
+                    "paused_response": {
+                        "error": PROCESS_WAKEUP_PAUSE_ERROR,
+                        "message": (
+                            "Automatic process wakeups are paused for this session because "
+                            "the provider credential pool is unavailable."
+                        ),
+                        "process_wakeup_pause": paused,
+                        "_status": 409,
+                    },
+                    "error": None,
+                }
+            return {"session": owner, "token": token, "paused_response": None, "error": None}
+    return {"session": owner, "token": token, "paused_response": None, "error": None}
+
+
+def _validate_start_owner_fence(owner_token, held_lock) -> str | None:
+    """Return an error string when the canonical owner moved, else None.
+
+    #6327 required shape, step 5 (validation-to-start fence): called from
+    ``_start_chat_stream_for_session`` while holding ``held_lock`` (the
+    per-session AGENT lock selected from the owner's mutable SID).  Verifies
+    the lock entry still maps the owner's live sid to the held lock, the
+    canonical cache still owns the exact tokenized object, and every token
+    field still matches — so the pending-state mutation and stream start only
+    ever target the session the out-of-AGENT revalidation authorized.  No
+    PROCESS acquisition.
+    """
+    if not isinstance(owner_token, dict):
+        return None
+    owner = owner_token.get("owner")
+    if owner is None:
+        return "missing_owner"
+    live_sid = str(getattr(owner, "session_id", "") or "")
+    if not live_sid:
+        return "empty_sid"
+    if live_sid != str(owner_token.get("session_id") or ""):
+        return "session_id_rotated"
+    with SESSION_AGENT_LOCKS_LOCK:
+        canonical_lock = SESSION_AGENT_LOCKS.get(live_sid)
+    if canonical_lock is not held_lock:
+        return "lock_migrated"
+    try:
+        resolved = get_session(live_sid)
+    except KeyError:
+        resolved = None
+    if resolved is None or resolved is not owner:
+        return "owner_replaced"
+    return _process_wakeup_owner_token_mismatch(owner_token, owner)
+
+
+def _worker_atomic_owner_claim(
+    owner_token,
+    s,
+    *,
+    stream_id,
+    session_id,
+    wakeup_prompt=None,
+    requeue_wakeup=False,
+) -> str | None:
+    """Atomically claim the canonical owner at the worker's side-effect boundary.
+
+    #6327 required shape, step 5b (route-to-worker acceptance): the worker
+    thread re-reads the canonical session via ``get_session(session_id)``
+    after the route layer already validated the fence under AGENT.  A
+    same-SID replacement between route acceptance and that re-read would
+    otherwise make the worker run the conversation on the replacement object
+    (different profile/home/credential generation) while the pending state
+    was written to the tokenized owner.  This claim carries the exact
+    owner/generation authority into the worker UNDER the canonical per-session
+    AGENT lock — closing the check-to-provider-call gap — and verifies the
+    worker's own re-read ``s`` is the tokenized owner with every token field
+    still matching (identity + SID + archived flag + route lane + pause +
+    credential fingerprint).
+
+    On mismatch the provisional pending state the ROUTE wrote (pending
+    sidecar + active stream id) is TRANSACTIONALLY retired under the same
+    lock, the wakeup is re-deferred (``requeue_wakeup``) so the drain
+    redelivers on the CURRENT live owner, and the stream owner registry entry
+    is dropped — never \"acknowledge success and fail later on an unowned
+    stream\".  The caller emits the apperror; its own finally closes the
+    stream channel.
+
+    Returns None when the owner is claimed; else the mismatch reason.  Never
+    acquires PROCESS; never raises into the worker.
+    """
+    if not isinstance(owner_token, dict):
+        return None
+    owner = owner_token.get("owner")
+    if owner is None:
+        return _worker_retire_pending_state(
+            owner_token,
+            stream_id=stream_id,
+            session_id=session_id,
+            wakeup_prompt=wakeup_prompt,
+            requeue_wakeup=requeue_wakeup,
+            reason="missing_owner",
+        )
+    if s is not owner:
+        # The worker's re-read is not the tokenized owner (same-SID
+        # replacement, or in-place SID rotation where get_session(stale_sid)
+        # falls back to the archived pre-compression snapshot).  Never run on
+        # the wrong object: retire the route's provisional pending state and
+        # re-defer the wakeup so the next drain resolves the CURRENT live
+        # owner through the continuation authority.
+        return _worker_retire_pending_state(
+            owner_token,
+            stream_id=stream_id,
+            session_id=session_id,
+            wakeup_prompt=wakeup_prompt,
+            requeue_wakeup=requeue_wakeup,
+            reason="owner_replaced",
+        )
+    live_sid = str(getattr(owner, "session_id", "") or "")
+    if not live_sid:
+        return _worker_retire_pending_state(
+            owner_token,
+            stream_id=stream_id,
+            session_id=session_id,
+            wakeup_prompt=wakeup_prompt,
+            requeue_wakeup=requeue_wakeup,
+            reason="empty_sid",
+        )
+    lock = _get_session_agent_lock(live_sid)
+    reason = None
+    with lock:
+        with SESSION_AGENT_LOCKS_LOCK:
+            canonical = SESSION_AGENT_LOCKS.get(live_sid)
+        if canonical is not lock:
+            reason = "lock_migrated"
+        else:
+            try:
+                resolved = get_session(live_sid)
+            except KeyError:
+                resolved = None
+            if resolved is None or resolved is not owner:
+                reason = "owner_replaced"
+            else:
+                reason = _process_wakeup_owner_token_mismatch(owner_token, owner)
+    if reason is not None:
+        # #6327 review: never retire while still holding the claim lock.
+        # ``_worker_retire_pending_state`` re-acquires the SAME non-reentrant
+        # per-session AGENT lock (``_get_session_agent_lock`` returns a plain
+        # ``threading.Lock``) to transact the cleanup; a nested acquisition
+        # here deadlocks the worker.  Compute the disposition under the lock,
+        # release it, THEN retire/requeue/compare-and-clear.
+        return _worker_retire_pending_state(
+            owner_token,
+            stream_id=stream_id,
+            session_id=session_id,
+            wakeup_prompt=wakeup_prompt,
+            requeue_wakeup=requeue_wakeup,
+            reason=reason,
+        )
+    # #6327 accepted-claim rule: on success install the versioned sink claim
+    # under the canonical AGENT lock so the worker's first provider/network
+    # sink can compare-and-accept it (and replacement/compression can
+    # invalidate it) instead of a bare check-return-call fence.
+    _install_worker_sink_claim(owner_token, owner, stream_id)
+    return None
+
+
+# ── #6327 per-session owner-generation lease ──────────────────────────────
+# The old sink fence (``_worker_sink_owner_fence``) re-verified the owner
+# under the AGENT lock, RETURNED, and then let the provider/network call
+# happen later — a same-SID replacement landing between the check and the
+# sink still reached the provider under stale ownership.  The accepted-claim
+# rule replaces that check-return-call pattern with a PER-SESSION OWNER
+# GENERATION LEASE: every canonical owner publisher (same-SID replacement,
+# deletion, cache refresh, compression/rotation publication) bumps the
+# session's lease token BEFORE it publishes the new owner, and a worker's
+# versioned sink claim (bound to the exact owner identity, SID, generation,
+# route, stream/run ID, and the lease token captured at install) is
+# compare-and-accepted under the PER-SESSION lease lock.  That lock is held
+# ACROSS the sink (never AGENT across network I/O, and never a process-global
+# mutex), so a publication for the same session blocks until the in-flight
+# sink completes while other sessions are never serialized behind one
+# session's LLM/network turn.
+_SESSION_OWNER_LEASES_GUARD = threading.Lock()
+_SESSION_OWNER_LEASES: dict[str, tuple[threading.Lock, str]] = {}
+
+
+def _session_owner_lease(sid):
+    """Return the ``(lease_lock, current_token)`` pair for *sid*, on demand.
+
+    The per-session lease lock is the compare-and-accept authority: a worker
+    holds it across its sink, so a publisher bumping the lease for the same
+    session serializes AFTER the in-flight sink — never a global mutex.
+    """
+    sid = str(sid or "")
+    with _SESSION_OWNER_LEASES_GUARD:
+        entry = _SESSION_OWNER_LEASES.get(sid)
+        if entry is None:
+            entry = (threading.Lock(), uuid.uuid4().hex)
+            _SESSION_OWNER_LEASES[sid] = entry
+        return entry
+
+
+def _read_owner_lease(sid) -> str:
+    """Return the current owner-generation lease token for *sid*."""
+    sid = str(sid or "")
+    lock, _ = _session_owner_lease(sid)
+    with lock:
+        with _SESSION_OWNER_LEASES_GUARD:
+            entry = _SESSION_OWNER_LEASES.get(sid)
+            return entry[1] if entry is not None else ""
+
+
+def _bump_owner_lease(sid) -> str:
+    """Bump the per-session owner-generation lease to a fresh token.
+
+    Every canonical owner publisher MUST call this (or
+    ``_invalidate_owner_sink_claims``) BEFORE publishing a new owner.  The
+    per-session lease lock is held across a worker's sink, so when a worker
+    is currently sinking this call blocks until that sink completes — the
+    new owner is never published while the old owner's sink is in flight,
+    without any process-global mutex.
+    """
+    sid = str(sid or "")
+    lock, _ = _session_owner_lease(sid)
+    with lock:
+        token = uuid.uuid4().hex
+        with _SESSION_OWNER_LEASES_GUARD:
+            _SESSION_OWNER_LEASES[sid] = (lock, token)
+        return token
+
+
+@contextmanager
+def _publish_owner_lease(sid):
+    """Per-SID publication transaction: hold the lease ACROSS the SESSIONS write.
+
+    #6327 review (14): replaces bump-and-return.  ``_bump_owner_lease``
+    released the per-session lease lock BEFORE the publisher mutated
+    ``SESSIONS``, so an old owner could validate, install/accept a claim
+    carrying the NEW lease in the bump-to-publication gap, and the
+    publication could replace that owner while its sink was in flight.  This
+    context manager bumps the token and keeps the lease lock held until the
+    caller's exact ``SESSIONS`` remove/replace/rotation write (the ``with``
+    body) completes: a worker's sink holds this same lock, so an in-flight
+    sink for the same session serializes before the publication, and any
+    claim installed under the previous lease is refused at its next
+    compare-and-accept because the lease already moved.
+    """
+    sid = str(sid or "")
+    lock, _ = _session_owner_lease(sid)
+    with lock:
+        token = uuid.uuid4().hex
+        with _SESSION_OWNER_LEASES_GUARD:
+            _SESSION_OWNER_LEASES[sid] = (lock, token)
+        yield token
+
+
+# Sentinel: no captured owner-generation comparison requested for the CAS.
+_OWNER_LEASE_GEN_UNSET = object()
+
+
+@contextmanager
+def _publish_owner_lease_if_current(
+    sid, *, expected, expected_generation=_OWNER_LEASE_GEN_UNSET
+):
+    """Per-SID publication transaction that bumps the lease ONLY on CAS-hit.
+
+    #6327 (review 16): identical to ``_publish_owner_lease`` except the bump
+    is conditional.  While the per-SID lease is held (preserving the
+    lease → LOCK order), ``SESSIONS[sid] is expected`` is evaluated under the
+    global LOCK; the token is refreshed and the body runs ONLY when the CAS
+    hits.  A CAS-fail — a concurrent canonical winner was installed while the
+    caller's disk I/O was in flight — returns WITHOUT bumping the lease, so
+    the winner's claims are never invalidated by a stale publisher's bump,
+    and WITHOUT running the body, so the winner is never overwritten.
+
+    #6327 (review 17, blocker 2): the global LOCK is now held ACROSS the
+    yield — compare-and-publish is ONE atomic lease → LOCK operation.  The
+    previous version checked the CAS under LOCK, released LOCK, and only then
+    yielded, so a publisher that uses only LOCK (generated-title persistence,
+    browser foreign-session publication) could install a current winner in
+    the check→write gap and the stale refresh would overwrite it.  With LOCK
+    held across the compare AND the caller's exact map write, no other
+    publisher can interleave a winner between them.  Callers MUST NOT
+    re-acquire ``LOCK`` inside the guarded body (it is non-reentrant and
+    already held).
+
+    ``expected_generation`` (review 17): when given (not the sentinel), the
+    captured per-SID owner-generation token is ALSO compared under LOCK
+    before the bump/write.  A deletion (or any canonical publication) that
+    fired while the caller's disk I/O was in flight bumps the generation, so
+    the cold loader observes the movement even when the durable tombstone
+    persistence itself failed — a deleted session is never resurrected
+    behind a successful-looking HTTP delete.
+
+    ``SESSIONS``/``LOCK`` are resolved lazily from ``api.config`` (the
+    canonical source the models-side callers bind): test fixtures rebind the
+    config + models copies, so a stale routes-module binding would observe a
+    different dict than the publishers mutate.
+
+    Yields the freshly minted lease token on CAS-hit, or ``None`` on CAS-fail
+    (the caller's guarded body must skip its SESSIONS write) — the context
+    manager always yields exactly once so ``@contextmanager`` never raises
+    ``RuntimeError: generator didn't yield``.
+    """
+    try:
+        from api.config import LOCK as _CAS_LOCK, SESSIONS as _CAS_SESSIONS
+    except Exception:
+        _CAS_LOCK = None
+        _CAS_SESSIONS = None
+    if _CAS_LOCK is None or _CAS_SESSIONS is None:
+        yield
+        return
+    sid = str(sid or "")
+    lock, _ = _session_owner_lease(sid)
+    with lock:
+        # LOCK is acquired and held ACROSS the compare AND the caller's map
+        # write (the ``yield`` body): no LOCK-only publisher can slip a
+        # winner into a check→write gap (review 17 blocker 2).
+        with _CAS_LOCK:
+            _cas_ok = _CAS_SESSIONS.get(sid) is expected
+            if _cas_ok and expected_generation is not _OWNER_LEASE_GEN_UNSET:
+                with _SESSION_OWNER_LEASES_GUARD:
+                    _entry = _SESSION_OWNER_LEASES.get(sid)
+                    _current_gen = _entry[1] if _entry is not None else ""
+                _cas_ok = _current_gen == expected_generation
+            if not _cas_ok:
+                # CAS-fail (a concurrent canonical winner was installed while
+                # the caller's disk I/O was in flight): yield None WITHOUT
+                # bumping the lease, so the winner's claims are never
+                # invalidated by a stale publisher's bump.  The caller's
+                # guarded body must skip its SESSIONS write.  LOCK is
+                # released when this generator resumes/exits.
+                yield None
+                return
+            token = uuid.uuid4().hex
+            with _SESSION_OWNER_LEASES_GUARD:
+                _SESSION_OWNER_LEASES[sid] = (lock, token)
+            yield token
+
+
+# Bookkeeping registry of installed claims (keyed by (sid, stream_id)); the
+# acceptance AUTHORITY is the per-session lease above.  ``_WORKER_SINK_CLAIMS_LOCK``
+# only guards dict operations — it is never held across a sink.
+_WORKER_SINK_CLAIMS_LOCK = threading.Lock()
+_WORKER_SINK_CLAIMS: dict[tuple[str, str], dict] = {}
+
+
+class _SinkClaimRefused(Exception):
+    """Raised when a versioned sink claim cannot be accepted.
+
+    ``reason`` carries the machine-readable mismatch (owner_replaced,
+    lock_migrated, claim_invalidated, ...) for the apperror + retire path.
+    """
+
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _install_worker_sink_claim(owner_token, owner, stream_id):
+    """Install the versioned sink claim under canonical owner authority.
+
+    Called from ``_worker_atomic_owner_claim``'s success path while still
+    holding the canonical per-session AGENT lock: the claim is bound to the
+    exact owner identity/SID/generation/route plus this worker's stream id,
+    so a replacement either changes the canonical cache (the owner
+    re-verification refuses) or rotation/compression moves the SID (the
+    claim key becomes unreachable and the token ``session_id_rotated`` check
+    refuses).  Never acquires PROCESS.
+    """
+    live_sid = str(getattr(owner, "session_id", "") or "")
+    claim = {
+        "session_id": live_sid,
+        "stream_id": str(stream_id or ""),
+        "version": uuid.uuid4().hex,
+        # #6327 per-session owner-generation lease captured at install time:
+        # the sink guard compares it under the per-session lease lock, so a
+        # publisher that bumps the lease BEFORE publishing (replacement,
+        # deletion, cache refresh, compression/rotation) refuses this claim
+        # at its next sink compare-and-accept.
+        "lease": _read_owner_lease(live_sid),
+        "owner_generation": str(owner_token.get("credential_state_fingerprint") or ""),
+        "profile": str(getattr(owner, "profile", "") or ""),
+        "profile_home": str(owner_token.get("profile_home") or ""),
+        "route": {
+            "workspace": str(owner_token.get("workspace") or ""),
+            "model": str(owner_token.get("model") or ""),
+            "provider": str(owner_token.get("provider") or ""),
+            "normalized_model": bool(owner_token.get("normalized_model")),
+        },
+        "accepted": False,
+    }
+    with _WORKER_SINK_CLAIMS_LOCK:
+        _WORKER_SINK_CLAIMS[(live_sid, claim["stream_id"])] = claim
+
+
+def _worker_sink_claim_for(session_id, stream_id):
+    """Return a copy of the installed claim for (session_id, stream_id)."""
+    with _WORKER_SINK_CLAIMS_LOCK:
+        entry = _WORKER_SINK_CLAIMS.get((str(session_id or ""), str(stream_id or "")))
+    return dict(entry) if entry is not None else None
+
+
+def _worker_clear_sink_claim(session_id, stream_id):
+    """Drop the sink claim for exactly (session_id, stream_id)."""
+    with _WORKER_SINK_CLAIMS_LOCK:
+        _WORKER_SINK_CLAIMS.pop((str(session_id or ""), str(stream_id or "")), None)
+
+
+def _clear_owner_sink_claims(sid):
+    """Drop every outstanding sink claim bound to *sid* (bookkeeping only).
+
+    Callers hold the per-session lease authority (inside
+    ``_publish_owner_lease``) when they call this; the acceptance authority
+    is the bumped lease, this only keeps the registry tidy.  Never acquires
+    the lease lock itself.
+    """
+    sid = str(sid or "")
+    with _WORKER_SINK_CLAIMS_LOCK:
+        for key in [k for k in _WORKER_SINK_CLAIMS if k[0] == sid]:
+            _WORKER_SINK_CLAIMS.pop(key, None)
+
+
+def _invalidate_owner_sink_claims(session_id):
+    """Invalidate every outstanding sink claim bound to *session_id*.
+
+    #6327: every canonical owner publisher calls this (or ``_publish_owner_lease``)
+    BEFORE publishing a new owner.  It bumps the per-session owner-generation
+    lease so any claim installed under the previous lease is refused with
+    ``claim_invalidated`` at its next sink compare-and-accept and the
+    provider/network call is never reached.  Because a worker holds the
+    per-session lease lock across its sink, this call blocks while that
+    session's sink is in flight (never a process-global mutex) — a newer
+    owner can never supersede the old one between acceptance and the actual
+    sink.  The retire path (no SESSIONS write follows) uses this bump+clear
+    form; publishers that DO mutate ``SESSIONS`` must wrap their exact write
+    in ``_publish_owner_lease`` instead so the lease authority is held
+    through the publication.
+    """
+    sid = str(session_id or "")
+    with _publish_owner_lease(sid):
+        _clear_owner_sink_claims(sid)
+
+
+@contextmanager
+def _worker_sink_claim_guard(claim, owner_token, s, stream_id):
+    """Compare-and-accept the versioned sink claim and hold it across the sink.
+
+    Replaces the old check-return-call sink fence: under the canonical
+    per-session AGENT lock the exact owner identity/SID/generation/route are
+    re-verified, then the versioned claim installed at worker start is
+    compare-and-accepted under ``_WORKER_SINK_CLAIMS_LOCK``.  The claim lock
+    is held for the whole ``with`` body — the actual provider/network sink —
+    so a concurrent replacement/compression cannot invalidate the claim
+    between acceptance and the sink.  Never holds AGENT across network I/O;
+    never acquires PROCESS.
+
+    Raises ``_SinkClaimRefused`` (the worker retires/requeues and emits an
+    apperror instead of sinking on a stale owner).
+    """
+    reason = None
+    if claim is None or not isinstance(owner_token, dict):
+        reason = "claim_missing"
+    else:
+        owner = owner_token.get("owner")
+        if owner is None:
+            reason = "missing_owner"
+        elif s is not owner:
+            reason = "owner_replaced"
+        else:
+            live_sid = str(getattr(owner, "session_id", "") or "")
+            if not live_sid:
+                reason = "empty_sid"
+            else:
+                lock = _get_session_agent_lock(live_sid)
+                with lock:
+                    with SESSION_AGENT_LOCKS_LOCK:
+                        canonical = SESSION_AGENT_LOCKS.get(live_sid)
+                    if canonical is not lock:
+                        reason = "lock_migrated"
+                    else:
+                        try:
+                            resolved = get_session(live_sid)
+                        except KeyError:
+                            resolved = None
+                        if resolved is None or resolved is not owner:
+                            reason = "owner_replaced"
+                        else:
+                            reason = _process_wakeup_owner_token_mismatch(owner_token, owner)
+    key = (
+        str(claim.get("session_id") or "") if isinstance(claim, dict) else "",
+        str(stream_id or ""),
+    )
+    # Compare-and-accept under the PER-SESSION owner-generation lease lock,
+    # then hold that lock ACROSS the sink (the ``with`` body): a publisher
+    # bumping the lease for this session (replacement/compression/refresh)
+    # blocks until the sink completes, so a newer owner can never supersede
+    # the old one between acceptance and the provider call — without holding
+    # any process-global mutex across the turn.
+    if reason is None:
+        lease_lock, _ = _session_owner_lease(str(claim.get("session_id") or ""))
+        with lease_lock:
+            with _SESSION_OWNER_LEASES_GUARD:
+                _lease_entry = _SESSION_OWNER_LEASES.get(str(claim.get("session_id") or ""))
+                current_lease = _lease_entry[1] if _lease_entry is not None else ""
+            with _WORKER_SINK_CLAIMS_LOCK:
+                installed = _WORKER_SINK_CLAIMS.get(key)
+            if (
+                current_lease != str(claim.get("lease") or "")
+                or installed is None
+                or str(installed.get("version") or "") != str(claim.get("version") or "")
+            ):
+                reason = "claim_invalidated"
+            else:
+                installed["accepted"] = True
+                try:
+                    yield None
+                finally:
+                    with _WORKER_SINK_CLAIMS_LOCK:
+                        _WORKER_SINK_CLAIMS.pop(key, None)
+    if reason is not None:
+        with _WORKER_SINK_CLAIMS_LOCK:
+            _WORKER_SINK_CLAIMS.pop(key, None)
+        raise _SinkClaimRefused(reason)
+
+
+def _worker_sink_accept_call(owner_token, s, stream_id, sink):
+    """Accept the versioned sink claim and run ``sink()`` under it.
+
+    Returns ``(None, sink_result)`` on success or ``(reason, None)`` when the
+    claim could not be accepted — the sink (provider call / gateway POST /
+    legacy chat-completions POST) is NEVER invoked on a stale owner.
+    Exceptions raised by ``sink()`` propagate (the claim is released first).
+    Never acquires PROCESS.
+    """
+    if owner_token is None:
+        return None, sink()
+    claim = _worker_sink_claim_for(str(getattr(s, "session_id", "") or ""), stream_id)
+    try:
+        with _worker_sink_claim_guard(claim, owner_token, s, stream_id):
+            return None, sink()
+    except _SinkClaimRefused as exc:
+        return exc.reason, None
+
+
+def _claim_runner_owner_fence(owner_token, s):
+    """Atomically claim the canonical owner and build the runner-local fence.
+
+    #6327 required shape (runner acceptance): called from ``_start_run``
+    immediately before the runner HTTP call.  Under the canonical per-session
+    AGENT lock, re-verifies the immutable owner token against the live owner
+    (identity + SID + every token field) and returns a compact NON-EMPTY
+    JSON-safe generation/route fence the runner must validate atomically
+    before its first provider/network side effect.  Never contains live
+    Session objects.
+
+    Returns ``(fence, None)`` on success; ``(None, reason)`` on owner
+    movement — the caller retires/requeues and surfaces a retryable error so
+    an unowned run is never acknowledged.
+    """
+    if not isinstance(owner_token, dict):
+        return None, None
+    owner = owner_token.get("owner")
+    if owner is None:
+        return None, "missing_owner"
+    if s is not owner:
+        return None, "owner_replaced"
+    live_sid = str(getattr(owner, "session_id", "") or "")
+    if not live_sid:
+        return None, "empty_sid"
+    lock = _get_session_agent_lock(live_sid)
+    with lock:
+        with SESSION_AGENT_LOCKS_LOCK:
+            canonical = SESSION_AGENT_LOCKS.get(live_sid)
+        if canonical is not lock:
+            return None, "lock_migrated"
+        try:
+            resolved = get_session(live_sid)
+        except KeyError:
+            resolved = None
+        if resolved is None or resolved is not owner:
+            return None, "owner_replaced"
+        # #6327 (review 17): browser runner-local tokens carry a
+        # request-resolved lane (explicit model/provider/workspace change not
+        # yet persisted to the owner fields) — that lane is the authority and
+        # is bound to the fence verbatim.  Only process-wakeup tokens
+        # recompute the lane from the live persisted owner.
+        mismatch = _process_wakeup_owner_token_mismatch(
+            owner_token,
+            owner,
+            recompute_lane=owner_token.get("lane_source") != "request",
+        )
+        if mismatch:
+            return None, mismatch
+        # Compact generation/route fence under canonical owner authority: the
+        # generation (profile + home + credential-state fingerprint) and the
+        # route lane (workspace/model/provider) RECOMPUTED from the live owner
+        # when the token was built.  The token fields were just re-verified
+        # against the live owner under this lock, so they are the current
+        # authority, not stale predecessor-derived values.
+        fence = {
+            "session_id": str(live_sid),
+            # #6327: canonicalize the root-profile wire identity — a root
+            # session (profile None/'') serializes as the canonical 'default'
+            # so a valid root session never falls into the generic
+            # schema-error path and the request lane cross-binds cleanly.
+            "profile": str(getattr(owner, "profile", "") or "").strip() or "default",
+            "profile_home": str(owner_token.get("profile_home") or ""),
+            "generation": str(owner_token.get("credential_state_fingerprint") or ""),
+            "route": {
+                "workspace": str(owner_token.get("workspace") or ""),
+                "model": str(owner_token.get("model") or ""),
+                "provider": str(owner_token.get("provider") or ""),
+                "normalized_model": bool(owner_token.get("normalized_model")),
+            },
+            # #6327 accepted-claim rule (runner-local): the run claim version.
+            # Transport is not acceptance — the runner must echo SID +
+            # generation (compare-and-accept) before the run is treated as
+            # started, so the claim carries this per-run nonce too.
+            "version": uuid.uuid4().hex,
+            # #6327 per-session owner-generation lease: captured at claim time
+            # and echoed in the accepted response, so the receiver can bind
+            # the run to the exact nonce/version + complete claim instead of
+            # a reflected payload that only matches session_id + generation.
+            "lease": _read_owner_lease(live_sid),
+        }
+    return fence, None
+
+
+def _worker_retire_pending_state(
+    owner_token,
+    *,
+    stream_id,
+    session_id,
+    wakeup_prompt=None,
+    requeue_wakeup=False,
+    reason="",
+) -> str:
+    """Transactionally retire the route's provisional pending state.
+
+    The route layer wrote pending sidecar fields (pending_user_message /
+    pending_attachments / pending_started_at / pending_user_source) and the
+    active stream id onto the tokenized owner before spawning the worker.
+    When the worker refuses the owner at its side-effect boundary, those
+    provisional fields must be retired (not left dangling behind an acked
+    stream), the wakeup re-deferred so the drain redelivers, and the stream
+    owner registry entry dropped.  Retiring runs under the canonical per-
+    session AGENT lock so it is atomic with any concurrent writer.  Never
+    acquires PROCESS; never raises into the worker.
+    """
+    owner = owner_token.get("owner")
+    live_sid = str(getattr(owner, "session_id", "") or "") if owner is not None else ""
+    if live_sid:
+        try:
+            lock = _get_session_agent_lock(live_sid)
+            with lock:
+                with SESSION_AGENT_LOCKS_LOCK:
+                    canonical = SESSION_AGENT_LOCKS.get(live_sid)
+                if canonical is not lock:
+                    # Owner lock migrated — the provisional sidecar belongs to
+                    # a stale object; fall through so the wakeup is still
+                    # redelivered and the stream-owner entry dropped.
+                    pass
+                else:
+                    try:
+                        resolved = get_session(live_sid)
+                    except KeyError:
+                        resolved = None
+                    # Only retire the provisional sidecar when the canonical
+                    # cache still maps the tokenized owner AND the versioned
+                    # owner generation (identity + SID + profile/home +
+                    # credential fingerprint + route lane) still matches: a
+                    # moved owner must never be clobbered, and a
+                    # profile/home/credential-generation movement on the same
+                    # object must not let a stale generation clear fields the
+                    # current owner owns — but redelivery/cleanup below still
+                    # run so the replacement cannot be skipped (#6327 review:
+                    # "ensure an owner replacement cannot return before wakeup
+                    # redelivery and stream-owner cleanup").
+                    if (
+                        resolved is not None
+                        and resolved is owner
+                        and _process_wakeup_owner_token_mismatch(
+                            owner_token,
+                            resolved,
+                            recompute_lane=owner_token.get("lane_source") != "request",
+                        )
+                        is None
+                    ):
+                        _retire_provisional_pending_state(owner, stream_id=stream_id)
+        except Exception:
+            logger.debug(
+                "failed to retire provisional pending state for session %s (reason=%s)",
+                session_id,
+                reason,
+                exc_info=True,
+            )
+    if requeue_wakeup and wakeup_prompt:
+        try:
+            from api.background_process import record_deferred_wakeup
+
+            record_deferred_wakeup(str(session_id), "", str(wakeup_prompt))
+        except Exception:
+            logger.debug(
+                "failed to re-defer wakeup for session %s (reason=%s)",
+                session_id,
+                reason,
+                exc_info=True,
+            )
+    try:
+        unregister_stream_owner(stream_id)
+    except Exception:
+        logger.debug("failed to unregister stream owner for stream %s", stream_id, exc_info=True)
+    # #6327 accepted-claim rule: invalidate any sink claim bound to this
+    # session so a stale worker's next sink compare-and-accept is refused.
+    try:
+        _invalidate_owner_sink_claims(str(session_id or ""))
+    except Exception:
+        logger.debug(
+            "failed to invalidate sink claims for session %s", session_id, exc_info=True
+        )
+    return reason
+
+
+def _retire_provisional_pending_state(session, *, stream_id) -> None:
+    """Clear the provisional pending sidecar fields for a refused stream.
+
+    Mirrors the route-side ``_prepare_chat_start_session_for_stream`` write:
+    pending_user_message/pending_attachments/pending_started_at/
+    pending_user_source are the exact fields that helper set.  The active
+    stream id is cleared only when it still points at the refused stream (a
+    newer turn may have claimed the session in the meantime — never clobber
+    it).  Called while holding the canonical per-session AGENT lock.
+    """
+    changed = False
+    for attr in (
+        "pending_user_message",
+        "pending_attachments",
+        "pending_started_at",
+        "pending_user_source",
+    ):
+        if getattr(session, attr, None) not in (None, [], ""):
+            try:
+                setattr(session, attr, [] if attr == "pending_attachments" else None)
+                changed = True
+            except Exception:
+                logger.debug(
+                    "failed to clear provisional field %s on session %s",
+                    attr,
+                    getattr(session, "session_id", None),
+                    exc_info=True,
+                )
+    if getattr(session, "active_stream_id", None) == stream_id:
+        try:
+            session.active_stream_id = None
+            changed = True
+        except Exception:
+            logger.debug(
+                "failed to clear active_stream_id on session %s",
+                getattr(session, "session_id", None),
+                exc_info=True,
+            )
+    if changed:
+        _save_session_quietly(session, getattr(session, "session_id", None))
+
+
+# #6327: bounded retries for the out-of-AGENT credential revalidation loop in
+# start_session_turn().  Each retry re-runs the revalidation OUTSIDE the
+# per-session agent lock after the live pause/provider/fingerprint state moved
+# underneath it.  The budget keeps a hostile concurrent writer from spinning
+# the wakeup thread; after it is exhausted the pause is simply treated as not
+# recovered and the next drain cycle revalidates.
+_PROCESS_WAKEUP_REVALIDATION_MAX_RETRIES = 3
+
+
+def _revalidate_process_wakeup_credential_outside_agent_lock(token, *, model, provider):
+    """Revalidate paused wakeup credential availability OUTSIDE the agent lock.
+
+    #6327: the named-profile branch of this revalidation enters
+    ``profile_scope_for_detached_worker()``, which holds
+    ``_PROCESS_ENV_OWNERSHIP_LOCK`` for its full body.  Streaming owns that
+    lock for the entire turn (unconditional since #6327) and waits for the
+    per-session agent lock at writeback, so performing this revalidation
+    while holding AGENT is a reachable AB/BA cycle:
+
+        streaming:      PROCESS -> waits AGENT
+        process wakeup: AGENT   -> waits PROCESS
+
+    The result is bound to the IMMUTABLE owner ``token`` snapshotted under
+    the canonical owner's AGENT lock (see
+    ``_build_immutable_session_owner_token``): the caller re-acquires the
+    canonical lock and applies the answer only when every token field still
+    matches, retrying outside AGENT (bounded) otherwise.  Returns the
+    ``token_session_id`` the revalidation targeted plus the recovery outcome.
+    """
+    _credential_recovered = False
+    try:
+        _credential_recovered = _process_wakeup_provider_has_recovery_credential(
+            token,
+            model=model,
+            provider=provider,
+            provider_id=_process_wakeup_revalidation_provider(model, provider),
+        )
+    except Exception:
+        logger.debug(
+            "failed to revalidate process_wakeup credential availability for session %s",
+            token.get("session_id", "?"),
+            exc_info=True,
+        )
+    return {
+        "token_session_id": token.get("session_id"),
+        "recovered": bool(_credential_recovered),
+    }
 
 
 def start_session_turn(
@@ -22409,154 +24401,193 @@ def start_session_turn(
     except KeyError:
         return {"error": "Session not found", "_status": 404}
 
-    try:
-        workspace = _resolve_chat_workspace_with_recovery(s, None)
-    except WorkspaceBindingPersistenceError as e:
-        return {"error": str(e), "_status": 500}
-    except ValueError as e:
-        return {"error": str(e), "_status": 400}
-
-    requested_model = s.model
-    requested_provider = getattr(s, "model_provider", None)
-    # Server-initiated wakeup (Option Z): resolve persisted model via the
-    # standard helper in cache-only mode so wakeups never trigger a cold
-    # catalog rebuild. Thread the session's PROFILE model defaults through too
-    # (mirrors _handle_chat_start) — a brand-new session that spawned a
-    # background task before its first human turn has an empty s.model, and
-    # without the profile defaults the resolver would fall back to the global
-    # DEFAULT_MODEL instead of the profile's configured default (greptile flag).
-    _pp_provider, _pp_default, _pp_cfg = _read_profile_model_config(s, requested_provider)
-    model, model_provider, normalized_model = _resolve_compatible_session_model_state(
-        requested_model,
-        requested_provider,
-        profile_provider=_pp_provider,
-        profile_default_model=_pp_default,
-        profile_config=_pp_cfg,
-        prefer_cached_catalog=True,
-    )
+    # ── #6327: select the LIVE owner FIRST, then derive the routing lane ──
+    # (workspace + profile/model/provider) ONLY from that owner.  The
+    # requested SID may be an archived pre-compression snapshot whose stale or
+    # invalid workspace must never 400 before its live continuation is
+    # considered: _build_immutable_session_owner_token resolves the canonical
+    # live owner through the continuation authority and recomputes the lane
+    # from it (predecessor-derived routing is never carried into the
+    # continuation).  ``s`` is used only as the preferred candidate seed and
+    # the requested model/provider fallback when the live owner has none
+    # persisted.
+    #
+    # #6327 immutable owner token fences the out-of-AGENT revalidation: for a
+    # named profile, _process_wakeup_provider_has_recovery_credential() enters
+    # profile_scope_for_detached_worker(), which holds
+    # _PROCESS_ENV_OWNERSHIP_LOCK (PROCESS) for its full body.  Streaming now
+    # owns PROCESS for the entire turn (unconditional) and waits for AGENT at
+    # writeback, so revalidating while holding AGENT is a reachable AB/BA
+    # cycle:
+    #
+    #     streaming:      PROCESS -> waits AGENT
+    #     process wakeup: AGENT   -> waits PROCESS
+    #
+    # The revalidation therefore runs OUTSIDE AGENT.  Because its result is
+    # applied later, it is bound to an IMMUTABLE owner token snapshotted under
+    # the canonical current owner's AGENT lock: requested/current SID, exact
+    # owner identity, profile + home generation, the resolved model/provider
+    # lane, pause version/state, and the credential-state fingerprint.  After
+    # the unlocked lookup the canonical owner's lock is re-acquired and the
+    # answer applied ONLY when every token field still matches; on
+    # replacement / SID rotation / profile-home / pause / credential-state
+    # movement the loop retries outside AGENT within the bounded budget.  The
+    # validation-to-start gap is fenced by passing the token into
+    # _start_run() -> _start_chat_stream_for_session(), which re-verifies the
+    # canonical owner before any pending-state mutation.
     _paused_wakeup_response = None
-    with _get_session_agent_lock(s.session_id):
+    _wakeup_token, _live_owner, _routing = _build_immutable_session_owner_token(
+        session_id,
+        model=getattr(s, "model", None),
+        provider=getattr(s, "model_provider", None),
+        preferred=s,
+    )
+    if _wakeup_token is None:
+        if _routing and _routing.get("error"):
+            return {"error": _routing["error"], "_status": int(_routing.get("_status") or 400)}
+        return {"error": "Session not found", "_status": 404}
+    workspace = _routing["workspace"]
+    model = _routing["model"]
+    model_provider = _routing["provider"]
+    normalized_model = _routing["normalized_model"]
+    _credential_revalidation = None
+    if _wakeup_token.get("pause_matches"):
         try:
-            s = get_session(session_id)
-        except KeyError:
-            return {"error": "Session not found", "_status": 404}
-        if clear_process_wakeup_pause_if_model_changed(
-            s,
+            _credential_revalidation = _revalidate_process_wakeup_credential_outside_agent_lock(
+                _wakeup_token,
+                model=model,
+                provider=model_provider,
+            )
+        except Exception:
+            logger.debug(
+                "failed to preflight process_wakeup credential revalidation for session %s",
+                session_id,
+                exc_info=True,
+            )
+            _credential_revalidation = None
+    _revalidation_retries = 0
+    while True:
+        _apply = _apply_process_wakeup_revalidation_once(
+            _wakeup_token,
+            _credential_revalidation,
             model=model,
             provider=model_provider,
-        ):
-            try:
-                s.save(touch_updated_at=False)
-            except Exception:
-                logger.debug(
-                    "failed to persist process_wakeup pause reset for session %s",
-                    session_id,
-                    exc_info=True,
+            retry_on_stale=(turn_source == "process_wakeup"),
+        )
+        if _apply.get("error") is not None:
+            return _apply["error"]
+        _live_owner = _apply["session"]
+        if _apply.get("retry"):
+            if _revalidation_retries >= _PROCESS_WAKEUP_REVALIDATION_MAX_RETRIES:
+                # Budget exhausted: never start or mutate a stale owner.
+                # Rebuild on the CURRENT live owner and suppress once so the
+                # next drain cycle revalidates; with no live pause the fresh
+                # token lets the run start (or the fence requeue) cleanly.
+                _wakeup_token, _live_owner, _routing = _build_immutable_session_owner_token(
+                    session_id, model=model, provider=model_provider, preferred=_live_owner,
                 )
-        if turn_source == "process_wakeup":
-            _credential_state_changed = False
-            try:
-                _credential_state_changed = process_wakeup_pause_credential_state_changed(s)
-            except Exception:
-                logger.debug(
-                    "failed to compare process_wakeup credential state for session %s",
-                    session_id,
-                    exc_info=True,
+                if _wakeup_token is None:
+                    if _routing and _routing.get("error"):
+                        return {"error": _routing["error"], "_status": int(_routing.get("_status") or 400)}
+                    return {"error": "Session not found", "_status": 404}
+                workspace = _routing["workspace"]
+                model = _routing["model"]
+                model_provider = _routing["provider"]
+                normalized_model = _routing["normalized_model"]
+                _final = _suppress_process_wakeup_once(
+                    _wakeup_token, model=model, provider=model_provider, session_id=session_id,
                 )
-            if process_wakeup_pause_matches(
-                s,
-                model=model,
-                provider=model_provider,
-                classification='credential_pool_empty',
-            ):
-                _credential_recovered = False
-                _credential_revalidation_provider = _process_wakeup_revalidation_provider(
-                    model,
-                    model_provider,
+                if _final.get("error") is not None:
+                    return _final["error"]
+                if _final.get("paused_response") is not None:
+                    return _final["paused_response"]
+                _wakeup_token, _live_owner = _final["token"], _final["session"]
+            else:
+                _revalidation_retries += 1
+                _wakeup_token, _live_owner, _routing = _build_immutable_session_owner_token(
+                    session_id, model=model, provider=model_provider, preferred=_live_owner,
                 )
+                if _wakeup_token is None:
+                    if _routing and _routing.get("error"):
+                        return {"error": _routing["error"], "_status": int(_routing.get("_status") or 400)}
+                    return {"error": "Session not found", "_status": 404}
+                workspace = _routing["workspace"]
+                model = _routing["model"]
+                model_provider = _routing["provider"]
+                normalized_model = _routing["normalized_model"]
+                _credential_revalidation = None
+                if _wakeup_token.get("pause_matches"):
+                    try:
+                        _credential_revalidation = (
+                            _revalidate_process_wakeup_credential_outside_agent_lock(
+                                _wakeup_token,
+                                model=model,
+                                provider=model_provider,
+                            )
+                        )
+                    except Exception:
+                        logger.debug(
+                            "failed to re-run process_wakeup credential revalidation for session %s",
+                            session_id,
+                            exc_info=True,
+                        )
+                        _credential_revalidation = None
+                continue
+        else:
+            _paused_wakeup_response = _apply.get("paused_response")
+            if _paused_wakeup_response is not None:
+                return _paused_wakeup_response
+        resp = _start_run(
+            _live_owner,
+            msg=msg,
+            attachments=[],
+            workspace=workspace,
+            model=model,
+            model_provider=model_provider,
+            normalized_model=normalized_model,
+            source=turn_source,
+            route="start_session_turn",
+            owner_token=_wakeup_token,
+        )
+        if isinstance(resp, dict) and resp.get("retryable"):
+            # #6327 validation-to-start fence fired: the canonical owner moved
+            # between the pause apply and run acceptance.  Rebuild the token on
+            # the current owner and retry the whole flow outside AGENT
+            # (bounded); on budget exhaustion surface the fence 409 so the
+            # drain requeues.
+            if _revalidation_retries >= _PROCESS_WAKEUP_REVALIDATION_MAX_RETRIES:
+                return resp
+            _revalidation_retries += 1
+            _wakeup_token, _live_owner, _routing = _build_immutable_session_owner_token(
+                session_id, model=model, provider=model_provider, preferred=_live_owner,
+            )
+            if _wakeup_token is None:
+                if _routing and _routing.get("error"):
+                    return {"error": _routing["error"], "_status": int(_routing.get("_status") or 400)}
+                return {"error": "Session not found", "_status": 404}
+            workspace = _routing["workspace"]
+            model = _routing["model"]
+            model_provider = _routing["provider"]
+            normalized_model = _routing["normalized_model"]
+            _credential_revalidation = None
+            if _wakeup_token.get("pause_matches"):
                 try:
-                    _credential_recovered = _process_wakeup_provider_has_recovery_credential(
-                        s,
+                    _credential_revalidation = _revalidate_process_wakeup_credential_outside_agent_lock(
+                        _wakeup_token,
                         model=model,
                         provider=model_provider,
-                        provider_id=_credential_revalidation_provider,
                     )
                 except Exception:
                     logger.debug(
-                        "failed to revalidate process_wakeup credential availability for session %s",
+                        "failed to re-run process_wakeup credential revalidation for session %s",
                         session_id,
                         exc_info=True,
                     )
-                if _credential_recovered:
-                    _recovery_reason = (
-                        'credential_state_changed'
-                        if _credential_state_changed
-                        else 'credential_recovered'
-                    )
-                    if clear_process_wakeup_pause(s, reason=_recovery_reason):
-                        try:
-                            s.save(touch_updated_at=False)
-                        except Exception:
-                            logger.debug(
-                                "failed to persist process_wakeup credential recovery reset for session %s",
-                                session_id,
-                                exc_info=True,
-                            )
-                elif _credential_state_changed:
-                    if _refresh_process_wakeup_pause_credential_fingerprint(s):
-                        try:
-                            s.save(touch_updated_at=False)
-                        except Exception:
-                            logger.debug(
-                                "failed to persist process_wakeup credential-state fingerprint refresh for session %s",
-                                session_id,
-                                exc_info=True,
-                            )
-            _paused_wakeup = suppress_process_wakeup_for_provider_pause(
-                s,
-                model=model,
-                provider=model_provider,
-                classification='credential_pool_empty',
-            )
-            if _paused_wakeup is not None:
-                try:
-                    PENDING_BG_TASK_COMPLETIONS.discard(s.session_id)
-                except Exception:
-                    logger.debug(
-                        "failed to discard pending bg-task marker for paused wakeup %s",
-                        session_id,
-                        exc_info=True,
-                    )
-                try:
-                    s.save(touch_updated_at=False)
-                except Exception:
-                    logger.debug(
-                        "failed to persist process_wakeup suppression for session %s",
-                        session_id,
-                        exc_info=True,
-                    )
-                _paused_wakeup_response = {
-                    "error": PROCESS_WAKEUP_PAUSE_ERROR,
-                    "message": (
-                        "Automatic process wakeups are paused for this session because "
-                        "the provider credential pool is unavailable."
-                    ),
-                    "process_wakeup_pause": _paused_wakeup,
-                    "_status": 409,
-                }
+                    _credential_revalidation = None
+            continue
+        break
     if _paused_wakeup_response is not None:
         return _paused_wakeup_response
-    resp = _start_run(
-        s,
-        msg=msg,
-        attachments=[],
-        workspace=workspace,
-        model=model,
-        model_provider=model_provider,
-        normalized_model=normalized_model,
-        source=turn_source,
-        route="start_session_turn",
-    )
 
     # ── Defect B: live-view of server-initiated turns ──────────────────────
     # Option Z starts this turn server-side, so NO browser EventSource is
@@ -23014,9 +25045,17 @@ def _handle_chat_start(handler, body, diag=None):
                 )
             s = synth
             try:
-                with LOCK:
-                    SESSIONS[s.session_id] = s
-                    SESSIONS.move_to_end(s.session_id)
+                # #6327 (review 17, blocker 2): materialising a foreign
+                # session's sidecar REPLACES the canonical owner under the
+                # same SID — publish as a per-SID publication transaction
+                # holding the owner-generation lease across the exact
+                # SESSIONS write (an in-flight sink serializes first and no
+                # claim can be accepted with a lease minted in a
+                # bump-to-publication gap).
+                with _publish_owner_lease(s.session_id):
+                    with LOCK:
+                        SESSIONS[s.session_id] = s
+                        SESSIONS.move_to_end(s.session_id)
             except Exception:
                 # If the in-memory LRU refuses the new session, fall through
                 # with the just-persisted sidecar; _start_run will load it

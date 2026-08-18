@@ -6319,14 +6319,22 @@ def _strip_stale_user_merge_from_messages(
 
 
 def _save_streaming_checkpoint(session):
-    """Persist a streaming checkpoint under the session's profile context."""
+    """Persist a streaming checkpoint under the session's profile context.
+
+    #6327: uses the READ-ONLY explicit-profile scope (thread/context-local
+    only — it never mirrors ``os.environ``, so it never takes the shared
+    ``_PROCESS_ENV_OWNERSHIP_LOCK``).  The periodic checkpoint thread runs
+    under the per-session agent lock; entering the process-env ownership
+    protocol here would invert the global lock order (AGENT -> PROCESS) and
+    deadlock against the streaming turn's bounded join, which holds PROCESS
+    for the whole turn and needs the same session lock to finalize.
+    """
     from api import profiles as profiles_api
 
-    with profiles_api.profile_env_for_background_worker(
+    with profiles_api.profile_env_for_background_worker_readonly(
         session,
         "streaming checkpoint",
         logger_override=logger,
-        scope_skill_modules=False,
     ):
         session.save(skip_index=True)
 
@@ -8025,6 +8033,7 @@ def _run_agent_streaming(
     model_provider=None,
     goal_related=False,
     moa_config=None,
+    owner_token=None,
 ):
     """Run agent in background thread, writing SSE events to STREAMS[stream_id].
 
@@ -8482,12 +8491,27 @@ def _run_agent_streaming(
     _streaming_skill_home_snapshot = None
     _restore_streaming_skill_home_modules = False
     _acquired_streaming_skill_home_patch_lock = False
+    # #6327: the streaming turn holds the shared process-env ownership lock
+    # for the ENTIRE turn — it mirrors raw os.environ unconditionally, and
+    # the lock is acquired BEFORE any snapshot/mutation (and before the
+    # legacy/static skill-module patch lock per the single global lock
+    # order) so concurrent direct/active/detached profile scopes can never
+    # observe a half-installed env, and the mid-turn detached/profile scope
+    # re-enters it on the same thread without an AB/BA cycle.
+    _acquired_streaming_process_env_lock = False
     # Initialised here (before any code that may raise) so the outer `finally`
     # block can safely check `if _checkpoint_stop is not None` even when an
     # exception fires before the checkpoint thread is created (Issue #765).
     _checkpoint_stop = None
     _ckpt_thread = None
     _agent_lock = None
+    # #6327 ownership-loss settlement: set when this worker refused the owner
+    # at its sink (claim refused).  The outer finally must NEVER repair/save a
+    # non-canonical owner — on ownership loss the provisional pending state is
+    # retired/redelivered by the claim path, and the stale-finalizer
+    # (_last_resort_sync_from_core) is skipped so a stale session is never
+    # mutated or saved.
+    _ownership_loss_settled = False
     try:
         # Register this stream with the global streaming meter and start the 1 Hz
         # metering ticker. Kept INSIDE the outer try so the outer `finally`'s
@@ -8502,6 +8526,52 @@ def _run_agent_streaming(
         _turn_session_identity_tokens = _set_turn_session_identity(session_id)
         s = get_session(session_id)
         _turn_pending_source = getattr(s, 'pending_user_source', None) or 'webui'
+        if owner_token is not None:
+            # #6327 route-to-worker acceptance: the route layer validated the
+            # immutable owner token under the per-session AGENT lock before
+            # spawning this worker.  The worker re-reads the canonical session
+            # here; a same-SID replacement between route acceptance and this
+            # re-read must never let the conversation run on the replacement
+            # object (different profile/home/credential generation) while the
+            # pending state was written to the tokenized owner.  The claim
+            # re-verifies the exact owner/generation authority UNDER the
+            # canonical AGENT lock (closing the check-to-provider-call gap)
+            # and, on mismatch, transactionally retires the route's
+            # provisional pending state + re-defers the wakeup so the drain
+            # redelivers — never "acknowledge success and fail later on an
+            # unowned stream".  Fail closed with an apperror instead of
+            # running on the wrong owner.
+            from api.routes import _worker_atomic_owner_claim
+
+            _worker_mismatch = _worker_atomic_owner_claim(
+                owner_token,
+                s,
+                stream_id=stream_id,
+                session_id=session_id,
+                wakeup_prompt=msg_text if _turn_pending_source == "process_wakeup" else None,
+                requeue_wakeup=(_turn_pending_source == "process_wakeup"),
+            )
+            if _worker_mismatch is not None:
+                # #6327 ownership-loss settlement: the canonical owner moved
+                # before this worker's first side effect.  Mark the loss so the
+                # outer finally never runs the stale-finalizer on the
+                # non-canonical object (its provisional state was already
+                # retired/redelivered by the claim path).
+                _ownership_loss_settled = True
+                logger.warning(
+                    "stream worker %s refused owner for session %s: %s",
+                    stream_id,
+                    session_id,
+                    _worker_mismatch,
+                )
+                put("apperror", {
+                    "error": "session owner changed before the agent turn started",
+                    "owner_fence": _worker_mismatch,
+                    "session_id": session_id,
+                    "retryable": True,
+                    "_status": 409,
+                })
+                return  # apperror closes the stream on the client side
         _active_turn_identity = _active_turn_authority(s, stream_id, msg_text)
         update_active_run(stream_id, phase="running", session_id=session_id)
         s.workspace = str(Path(workspace).expanduser().resolve())
@@ -8556,6 +8626,7 @@ def _run_agent_streaming(
                 get_profile_runtime_env,
                 _skill_modules_support_profile_home,
                 _SKILL_HOME_MODULE_PATCH_LOCK,
+                _PROCESS_ENV_OWNERSHIP_LOCK,
             )
             _profile_home_path = get_hermes_home_for_profile(getattr(s, 'profile', None))
             _profile_home = str(_profile_home_path)
@@ -8571,6 +8642,7 @@ def _run_agent_streaming(
             restore_skill_home_modules = None
             _skill_modules_support_profile_home = None
             _SKILL_HOME_MODULE_PATCH_LOCK = None
+            _PROCESS_ENV_OWNERSHIP_LOCK = None
 
         # Profile-aware provider/model enrichment: when the session belongs
         # to a profile that specifies model.provider and model.default, use
@@ -8656,8 +8728,30 @@ def _run_agent_streaming(
                     )
                     _streaming_modules_are_dynamic = False
 
+            # #6327: enforce ONE global lock order
+            # (_PROCESS_ENV_OWNERSHIP_LOCK -> optional _SKILL_HOME_MODULE_PATCH_LOCK
+            # -> _ENV_LOCK) across every process-env-mirroring entrypoint.
+            # This turn snapshots and mutates raw os.environ UNCONDITIONALLY
+            # (snapshot below, restore in the outer finally), so the shared
+            # process-env ownership lock is taken BEFORE any snapshot or
+            # mutation of the raw env — not only in the legacy/static
+            # skill-module block.  Otherwise, on the dynamic/nonlegacy branch,
+            # a direct named/root profile scope could run concurrently while
+            # this turn's env is installed: both threads would observe the
+            # wrong profile on the raw channel, and the reversed restoration
+            # order would leave stale values behind.
+            if _PROCESS_ENV_OWNERSHIP_LOCK is not None:
+                _PROCESS_ENV_OWNERSHIP_LOCK.acquire()
+                _acquired_streaming_process_env_lock = True
             if not (_streaming_override_installed and _streaming_modules_are_dynamic):
                 _restore_streaming_skill_home_modules = True
+                # The legacy/static full-turn block takes the skill-module
+                # patch lock BELOW the ownership lock (global order): the turn
+                # later re-enters profile_scope_for_detached_worker() (a
+                # full-body PROCESS holder) for model resolution, and direct
+                # background scopes hold PROCESS while waiting for SKILL —
+                # acquiring SKILL first would create the cross-thread AB/BA
+                # cycle the ownership protocol exists to rule out.
                 _SKILL_HOME_MODULE_PATCH_LOCK.acquire()
                 _acquired_streaming_skill_home_patch_lock = True
 
@@ -10034,7 +10128,64 @@ def _run_agent_streaming(
                     requested_provider=(_session_requested_provider or ""),
                 )
                 _run_conversation_kwargs["user_message"] = user_message
-            result = agent.run_conversation(**_run_conversation_kwargs)
+            # #6327 sink boundary: the route-to-worker claim
+            # (``_worker_atomic_owner_claim``) released the per-session AGENT
+            # lock before this first provider call, so a same-SID replacement
+            # in that window would otherwise reach the provider unowned.
+            # Re-verify the canonical owner under the lock immediately before
+            # the sink and refuse with an apperror (retire + re-defer) instead
+            # of calling the provider on a replaced session.
+            if owner_token is not None:
+                from api.routes import (
+                    _worker_retire_pending_state,
+                    _worker_sink_accept_call,
+                )
+
+                # #6327 accepted-claim rule: instead of a check-return-call
+                # fence (re-verify the owner under AGENT, return, then call
+                # the provider later — leaving a same-SID replacement window
+                # before the sink), the versioned sink claim installed at
+                # worker start is compare-and-accepted and held across the
+                # actual provider call.  Replacement/compression invalidates
+                # the claim, so a stale worker is refused HERE and never
+                # reaches the provider.
+                _sink_mismatch, _sink_result = _worker_sink_accept_call(
+                    owner_token,
+                    s,
+                    stream_id,
+                    lambda: agent.run_conversation(**_run_conversation_kwargs),
+                )
+                if _sink_mismatch is not None:
+                    # #6327 ownership-loss settlement: mark the loss so the
+                    # outer finally NEVER calls _last_resort_sync_from_core on
+                    # the non-canonical owner (it can append rows, clear
+                    # pending state, and save the stale session).
+                    _ownership_loss_settled = True
+                    logger.warning(
+                        "stream worker %s refused owner at provider sink for session %s: %s",
+                        stream_id,
+                        session_id,
+                        _sink_mismatch,
+                    )
+                    _worker_retire_pending_state(
+                        owner_token,
+                        stream_id=stream_id,
+                        session_id=session_id,
+                        wakeup_prompt=msg_text if _turn_pending_source == "process_wakeup" else None,
+                        requeue_wakeup=(_turn_pending_source == "process_wakeup"),
+                        reason=_sink_mismatch,
+                    )
+                    put("apperror", {
+                        "error": "session owner changed before the agent turn started",
+                        "owner_fence": _sink_mismatch,
+                        "session_id": session_id,
+                        "retryable": True,
+                        "_status": 409,
+                    })
+                    return  # apperror closes the stream on the client side
+                result = _sink_result
+            else:
+                result = agent.run_conversation(**_run_conversation_kwargs)
             _active_turn_identity = _resolve_active_turn_authority(
                 _active_turn_identity,
                 result=result,
@@ -10275,22 +10426,81 @@ def _run_agent_streaming(
                     # over the just-preserved snapshot back to the original fork
                     # parent, losing access to the recoverable history in old_sid.json.
                     s.parent_session_id = old_sid
-                    with LOCK:
-                        cached_old_session = SESSIONS.pop(old_sid, None)
-                        if cached_old_session is not None and cached_old_session is not s:
-                            cached_old_sid = str(getattr(cached_old_session, 'session_id', '') or '')
-                            if cached_old_sid == str(old_sid):
-                                SESSIONS[old_sid] = cached_old_session
-                            else:
-                                logger.warning(
-                                    "compression cache migration skipped stale object: old_sid=%s new_sid=%s cached_session_id=%s",
-                                    old_sid,
-                                    new_sid,
-                                    cached_old_sid or None,
-                                )
-                        SESSIONS[new_sid] = s
-                        SESSIONS.move_to_end(new_sid)
-                        _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+                    # #6327: durable explicit predecessor->continuation edge.
+                    # parent_session_id alone is shared with /api/session/branch
+                    # forks, and session_source is provenance (a compressed fork
+                    # preserves session_source="fork"); neither is mutation
+                    # authority.  This field is the ONLY durable evidence that
+                    # old_sid's archived pre-compression snapshot continues into
+                    # THIS live session, so an old-SID wakeup can resolve the
+                    # live owner without ever guessing between a continuation and
+                    # a newer fork.  Forks created by the branch route never
+                    # carry it.
+                    s.compression_continuation_of = old_sid
+                    # #6327: old→new compression publication is a canonical
+                    # owner publisher — publish as a per-SID publication
+                    # transaction so the lease authority for BOTH the old SID
+                    # (removed) and the new SID (published) is held ACROSS the
+                    # exact SESSIONS write: any in-flight sink bound to the
+                    # old SID serializes first, its installed sink claims are
+                    # refused, and no claim can be accepted with a lease
+                    # minted in a bump-to-publication gap (a stale worker can
+                    # never keep sinking on the archived predecessor after the
+                    # rotation).
+                    try:
+                        from api.routes import _publish_owner_lease, _clear_owner_sink_claims
+
+                        # Deterministic lock order (old, new) so two
+                        # concurrent rotations can never AB/BA.
+                        _lease_a, _lease_b = sorted((str(old_sid), str(new_sid)))
+                        if _lease_a == _lease_b:
+                            # Defensive: a same-SID "rotation" must not
+                            # double-acquire the non-reentrant lease lock.
+                            _pub_cm = _publish_owner_lease(_lease_a)
+                            _pub_cm2 = contextlib.nullcontext()
+                        else:
+                            _pub_cm = _publish_owner_lease(_lease_a)
+                            _pub_cm2 = _publish_owner_lease(_lease_b)
+                    except Exception:
+                        _pub_cm = _pub_cm2 = None
+                        logger.debug(
+                            "failed to acquire publication lease across compression %s -> %s",
+                            old_sid,
+                            new_sid,
+                            exc_info=True,
+                        )
+                    if _pub_cm is None:
+                        _pub_ctx = contextlib.nullcontext()
+                        _pub_ctx2 = contextlib.nullcontext()
+                    else:
+                        _pub_ctx, _pub_ctx2 = _pub_cm, _pub_cm2
+                    with _pub_ctx, _pub_ctx2:
+                        try:
+                            _clear_owner_sink_claims(old_sid)
+                            _clear_owner_sink_claims(new_sid)
+                        except Exception:
+                            logger.debug(
+                                "failed to clear sink claims across compression %s -> %s",
+                                old_sid,
+                                new_sid,
+                                exc_info=True,
+                            )
+                        with LOCK:
+                            cached_old_session = SESSIONS.pop(old_sid, None)
+                            if cached_old_session is not None and cached_old_session is not s:
+                                cached_old_sid = str(getattr(cached_old_session, 'session_id', '') or '')
+                                if cached_old_sid == str(old_sid):
+                                    SESSIONS[old_sid] = cached_old_session
+                                else:
+                                    logger.warning(
+                                        "compression cache migration skipped stale object: old_sid=%s new_sid=%s cached_session_id=%s",
+                                        old_sid,
+                                        new_sid,
+                                        cached_old_sid or None,
+                                    )
+                            SESSIONS[new_sid] = s
+                            SESSIONS.move_to_end(new_sid)
+                            _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
                     # Migrate the per-session lock by aliasing new_sid to the
                     # held _agent_lock reference directly. Keep old_sid aliased
                     # too until the weak registry can reclaim both safely after
@@ -11937,9 +12147,24 @@ def _run_agent_streaming(
             _ckpt_thread.join(timeout=15)
         if (s is not None
                 and getattr(s, 'active_stream_id', None) == stream_id
-                and getattr(s, 'pending_user_message', None)):
+                and getattr(s, 'pending_user_message', None)
+                and not _ownership_loss_settled):
             update_active_run(stream_id, phase="finalizing")
             _last_resort_sync_from_core(s, stream_id, _agent_lock)
+        # #6327 accepted-claim cleanup: drop the sink claim this worker
+        # installed so a refused/normal exit never leaks a claim registry
+        # entry for (session_id, stream_id).
+        try:
+            from api.routes import _worker_clear_sink_claim
+
+            _worker_clear_sink_claim(session_id, stream_id)
+        except Exception:
+            logger.debug(
+                "failed to clear worker sink claim for session %s stream %s",
+                session_id,
+                stream_id,
+                exc_info=True,
+            )
         _clear_thread_env()  # TD1: always clear thread-local context
         if _streaming_cron_profile_home_token is not None:
             _STREAMING_CRON_PROFILE_HOME.reset(_streaming_cron_profile_home_token)
@@ -11955,6 +12180,9 @@ def _run_agent_streaming(
         if _acquired_streaming_skill_home_patch_lock:
             _SKILL_HOME_MODULE_PATCH_LOCK.release()
             _acquired_streaming_skill_home_patch_lock = False
+        if _acquired_streaming_process_env_lock:
+            _PROCESS_ENV_OWNERSHIP_LOCK.release()
+            _acquired_streaming_process_env_lock = False
         _reset_streaming_hermes_home_override(*_streaming_hermes_home_override_ctx)
         # xsession wakeup misroute root fix (Option 1): restore the per-turn
         # session-identity context-locals (reset-token semantics). MUST run on

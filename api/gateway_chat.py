@@ -807,7 +807,7 @@ def stop_gateway_run(run_id: str) -> bool:
         return False
 
 
-def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, model_provider, terminal_error):
+def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, model_provider, terminal_error, owner_token=None):
     from api.streaming import (
         _classify_provider_error,
         _materialize_pending_user_turn_before_error,
@@ -819,6 +819,12 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
 
     with _get_session_agent_lock(session_id):
         session = get_session(session_id)
+        # #6327 teardown authority: never settle the error on a non-canonical
+        # owner — the tokenized owner must still be the canonical cache owner
+        # with every owner-generation field matching, and the stream must
+        # still be this worker's stream.
+        if not _gateway_cleanup_owner_matches(owner_token, session, stream_id):
+            return None
         if not _stream_writeback_is_current(session, stream_id):
             return None
         error_classification = _classify_provider_error(terminal_error)
@@ -888,6 +894,32 @@ def _clear_gateway_pending_state(session: Any, stream_id: str) -> None:
     session.save()
 
 
+def _gateway_cleanup_owner_matches(owner_token, session, stream_id) -> bool:
+    """#6327 teardown authority: refuse cleanup on a non-canonical owner.
+
+    Gateway refusal/error/finally cleanup must compare ``{owner identity,
+    generation, stream_id}`` instead of re-resolving by SID + stream id
+    alone: a same-SID replacement must never have its pending state cleared,
+    its transcript mutated, or its error settlement written by the stale
+    worker's teardown.  Returns True when *session* is the tokenized owner
+    with every owner-generation field still matching (or when no token was
+    supplied — the synchronous path has no fence to compare).
+    """
+    if not isinstance(owner_token, dict):
+        return True
+    owner = owner_token.get("owner")
+    if owner is None or session is not owner:
+        return False
+    try:
+        from api.routes import _process_wakeup_owner_token_mismatch
+
+        if _process_wakeup_owner_token_mismatch(owner_token, session) is not None:
+            return False
+    except Exception:
+        return False
+    return True
+
+
 def _cleanup_gateway_pending_mirror(session_id: str) -> None:
     try:
         from api.route_approvals import (
@@ -909,6 +941,7 @@ def _run_gateway_chat_streaming(
     *,
     model_provider=None,
     goal_related=False,
+    owner_token=None,
 ):
     """Bridge a WebUI chat turn through Hermes Gateway's API server.
 
@@ -987,6 +1020,42 @@ def _run_gateway_chat_streaming(
     usage = {"input_tokens": 0, "output_tokens": 0, "estimated_cost": 0}
     try:
         s = get_session(session_id)
+        if owner_token is not None:
+            # #6327 route-to-worker acceptance (gateway worker): same atomic
+            # claim as _run_agent_streaming — re-verify the exact
+            # owner/generation authority UNDER the canonical per-session AGENT
+            # lock (closing the check-to-provider-call gap) and, on mismatch,
+            # transactionally retire the route's provisional pending state +
+            # re-defer the wakeup; never run the conversation on a same-SID
+            # replacement that landed between route acceptance and the
+            # worker's own get_session() re-read.
+            from api.routes import _worker_atomic_owner_claim
+
+            _worker_mismatch = _worker_atomic_owner_claim(
+                owner_token,
+                s,
+                stream_id=stream_id,
+                session_id=session_id,
+                wakeup_prompt=msg_text
+                if (getattr(s, "pending_user_source", None) or "") == "process_wakeup"
+                else None,
+                requeue_wakeup=(getattr(s, "pending_user_source", None) or "") == "process_wakeup",
+            )
+            if _worker_mismatch is not None:
+                logger.warning(
+                    "gateway stream worker %s refused owner for session %s: %s",
+                    stream_id,
+                    session_id,
+                    _worker_mismatch,
+                )
+                put_gateway_event("apperror", {
+                    "error": "session owner changed before the agent turn started",
+                    "owner_fence": _worker_mismatch,
+                    "session_id": session_id,
+                    "retryable": True,
+                    "_status": 409,
+                })
+                return  # apperror closes the stream on the client side
         from api.config import get_config  # imported lazily to avoid config-cycle churn
 
         cfg = get_config()
@@ -1057,17 +1126,66 @@ def _run_gateway_chat_streaming(
                 body_extras["reasoning_effort"] = reasoning_effort
             if _gw_overrides.get("service_tier"):
                 body_extras["service_tier"] = _gw_overrides["service_tier"]
+            # #6327 accepted-claim rule (Gateway runs): same as the direct
+            # worker — the versioned sink claim installed at worker start is
+            # compare-and-accepted and held across the /v1/runs POST, so a
+            # same-SID replacement can never reach the network sink.
             try:
-                final_text, usage = _run_gateway_runs_api_streaming(
-                    session_id, msg_text, model, workspace, stream_id,
-                    base_url, api_key, prefill_messages, body_extras,
-                    put_gateway_event=put_gateway_event,
-                    cancel_event=cancel_event,
-                    attachments=attachments,
-                    cfg=cfg,
-                    session=s,
-                    active_provider=(model_provider or ""),
-                )
+                if owner_token is not None:
+                    from api.routes import _worker_retire_pending_state, _worker_sink_accept_call
+
+                    _sink_mismatch, _sink_out = _worker_sink_accept_call(
+                        owner_token,
+                        s,
+                        stream_id,
+                        lambda: _run_gateway_runs_api_streaming(
+                            session_id, msg_text, model, workspace, stream_id,
+                            base_url, api_key, prefill_messages, body_extras,
+                            put_gateway_event=put_gateway_event,
+                            cancel_event=cancel_event,
+                            attachments=attachments,
+                            cfg=cfg,
+                            session=s,
+                            active_provider=(model_provider or ""),
+                        ),
+                    )
+                    if _sink_mismatch is not None:
+                        logger.warning(
+                            "gateway stream worker %s refused owner at runs-API sink for session %s: %s",
+                            stream_id,
+                            session_id,
+                            _sink_mismatch,
+                        )
+                        _worker_retire_pending_state(
+                            owner_token,
+                            stream_id=stream_id,
+                            session_id=session_id,
+                            wakeup_prompt=msg_text
+                            if (getattr(s, "pending_user_source", None) or "") == "process_wakeup"
+                            else None,
+                            requeue_wakeup=(getattr(s, "pending_user_source", None) or "") == "process_wakeup",
+                            reason=_sink_mismatch,
+                        )
+                        put_gateway_event("apperror", {
+                            "error": "session owner changed before the agent turn started",
+                            "owner_fence": _sink_mismatch,
+                            "session_id": session_id,
+                            "retryable": True,
+                            "_status": 409,
+                        })
+                        return  # apperror closes the stream on the client side
+                    final_text, usage = _sink_out
+                else:
+                    final_text, usage = _run_gateway_runs_api_streaming(
+                        session_id, msg_text, model, workspace, stream_id,
+                        base_url, api_key, prefill_messages, body_extras,
+                        put_gateway_event=put_gateway_event,
+                        cancel_event=cancel_event,
+                        attachments=attachments,
+                        cfg=cfg,
+                        session=s,
+                        active_provider=(model_provider or ""),
+                    )
             except Exception as exc:
                 error_payload = _settle_gateway_terminal_error(
                     session_id,
@@ -1076,6 +1194,7 @@ def _run_gateway_chat_streaming(
                     model,
                     model_provider,
                     str(exc),
+                    owner_token=owner_token,
                 )
                 if error_payload is None:
                     return
@@ -1142,7 +1261,51 @@ def _run_gateway_chat_streaming(
             update_active_run(stream_id, phase="gateway-request")
             last_payload = {}
             sse_event = "message"
-            with urllib.request.urlopen(req, timeout=_gateway_read_timeout_secs()) as resp:
+            # #6327 accepted-claim rule (legacy Gateway /v1/chat/completions):
+            # this path previously had NO sink fence — a same-SID replacement
+            # after the route/worker claim could still reach the POST.  The
+            # versioned claim is compare-and-accepted and held across the
+            # urlopen POST exactly like the runs-API and direct sinks.
+            if owner_token is not None:
+                from api.routes import _worker_retire_pending_state, _worker_sink_accept_call
+
+                def _legacy_gateway_sink():
+                    return urllib.request.urlopen(
+                        req, timeout=_gateway_read_timeout_secs()
+                    )
+
+                _sink_mismatch, _sink_resp = _worker_sink_accept_call(
+                    owner_token, s, stream_id, _legacy_gateway_sink
+                )
+                if _sink_mismatch is not None:
+                    logger.warning(
+                        "gateway stream worker %s refused owner at chat-completions sink for session %s: %s",
+                        stream_id,
+                        session_id,
+                        _sink_mismatch,
+                    )
+                    _worker_retire_pending_state(
+                        owner_token,
+                        stream_id=stream_id,
+                        session_id=session_id,
+                        wakeup_prompt=msg_text
+                        if (getattr(s, "pending_user_source", None) or "") == "process_wakeup"
+                        else None,
+                        requeue_wakeup=(getattr(s, "pending_user_source", None) or "") == "process_wakeup",
+                        reason=_sink_mismatch,
+                    )
+                    put_gateway_event("apperror", {
+                        "error": "session owner changed before the agent turn started",
+                        "owner_fence": _sink_mismatch,
+                        "session_id": session_id,
+                        "retryable": True,
+                        "_status": 409,
+                    })
+                    return  # apperror closes the stream on the client side
+                resp = _sink_resp
+            else:
+                resp = urllib.request.urlopen(req, timeout=_gateway_read_timeout_secs())
+            with resp:
                 for raw_line in _iter_sse_lines_cancellable(resp, cancel_event):
                     if cancel_event.is_set():
                         put_gateway_event("cancel", {"message": "Cancelled by user"})
@@ -1250,6 +1413,7 @@ def _run_gateway_chat_streaming(
                 model,
                 model_provider,
                 terminal_error,
+                owner_token=owner_token,
             )
             if error_payload is None:
                 return
@@ -1458,10 +1622,31 @@ def _run_gateway_chat_streaming(
         if s is not None:
             try:
                 with _get_session_agent_lock(session_id):
-                    _clear_gateway_pending_state(get_session(session_id), stream_id)
+                    resolved = get_session(session_id)
+                    # #6327 teardown authority: only clear pending state when
+                    # the resolved session is STILL the tokenized owner
+                    # (identity + generation) — a same-SID replacement must
+                    # never have its pending state cleared by this worker's
+                    # finally.
+                    if _gateway_cleanup_owner_matches(owner_token, resolved, stream_id):
+                        _clear_gateway_pending_state(resolved, stream_id)
             except Exception:
                 logger.debug("Failed to clear gateway stream state", exc_info=True)
             _cleanup_gateway_pending_mirror(session_id)
+        # #6327: clear the installed sink claim on EVERY exit path (success,
+        # refusal, pre-sink exception) so the claim registry never leaks an
+        # entry for (session_id, stream_id).
+        try:
+            from api.routes import _worker_clear_sink_claim
+
+            _worker_clear_sink_claim(session_id, stream_id)
+        except Exception:
+            logger.debug(
+                "failed to clear gateway worker sink claim for session %s stream %s",
+                session_id,
+                stream_id,
+                exc_info=True,
+            )
         with STREAMS_LOCK:
             AGENT_INSTANCES.pop(stream_id, None)
             CANCEL_FLAGS.pop(stream_id, None)

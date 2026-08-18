@@ -39,6 +39,13 @@ class StartRunRequest:
     toolsets: list[str] = field(default_factory=list)
     source: str = "webui"
     metadata: dict[str, Any] = field(default_factory=dict)
+    # #6327 route-to-worker acceptance (runner backend): the compact JSON-safe
+    # owner fence claimed under the per-session AGENT lock immediately before
+    # the start_run call.  The runner records/validates this generation so a
+    # same-SID replacement between route acceptance and the provider call can
+    # never be acknowledged as a successful run on an unowned session.  Never
+    # contains live Session objects.
+    owner_fence: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
