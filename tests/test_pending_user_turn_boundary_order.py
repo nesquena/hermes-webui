@@ -215,6 +215,30 @@ def test_unmatched_transcript_row_does_not_duplicate_below_its_own_output():
     )
 
 
+def test_unmatched_transcript_row_slightly_before_started_at_is_adopted():
+    """Current-turn user row whose timestamp drifted slightly earlier than
+    pending_started_at must still be classified as this turn, not history.
+
+    Review 2026-08-18 (CHANGES_REQUESTED): +0.4s drift is adopted, but -0.4s
+    made the row look older than the boundary, so the classifier returned i+1
+    and the merge inserted a second bubble above the existing row.
+    """
+    drifted = {"role": "user", "content": _PROMPT, "timestamp": _T0 - 0.4}
+    result = _probe(drifted, with_live=False)
+    assert not result["duplicated"], (
+        "the pending prompt was rendered twice (the transcript row plus a "
+        f"materialized copy): {result['order']}"
+    )
+    assert not result["belowOwnOutput"], (
+        f"the adopted bubble landed below its own turn output: {result['order']}"
+    )
+    assert result["promptIdxs"] == [result["firstOutputIdx"] - 1], (
+        "the drifted current-turn user row must sit at the turn boundary; "
+        f"got indices {result['promptIdxs']} with turn output starting at "
+        f"{result['firstOutputIdx']} ({result['order']})"
+    )
+
+
 def test_timestampless_transcript_row_fails_closed_to_prior_merge_behavior():
     """Same class, with a transcript row carrying no timestamp at all.
 
