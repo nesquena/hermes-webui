@@ -3508,12 +3508,35 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     _applyComposerFooterVisibilitySettings();
     if(typeof _applyTtsEnabled==='function') _applyTtsEnabled(localStorage.getItem('hermes-tts-enabled')==='true');
   }
-  // Non-blocking update check (fire-and-forget, once per tab session)
-  // ?test_updates=1 in URL forces banner display for testing (bypasses sessionStorage guards)
+  // Non-blocking update check (re-checks on tab focus + periodic poll).
+  // Overlapping triggers (boot, visibilitychange, 30-min timer) are coalesced
+  // behind one boot-scope in-flight promise: callers arriving while a request
+  // is pending share that promise instead of issuing duplicate POSTs, and the
+  // token is cleared in finally so a later trigger can run after settlement.
+  // ?test_updates=1 in URL forces banner display for testing (bypasses dismissed guard)
   const _testUpdates=new URLSearchParams(location.search).get('test_updates')==='1';
-  if(_testUpdates||(_bootSettings.check_for_updates!==false&&!sessionStorage.getItem('hermes-update-checked')&&!sessionStorage.getItem('hermes-update-dismissed'))){
-    const _checkUrl='api/updates/check'+(_testUpdates?'?simulate=1':'');
-    api(_checkUrl,{method:_testUpdates?'GET':'POST',body:_testUpdates?undefined:JSON.stringify({force:false})}).then(d=>{if(!_testUpdates)sessionStorage.setItem('hermes-update-checked','1');if((d.webui&&d.webui.behind>0)||(d.agent&&d.agent.behind>0))_showUpdateBanner(d);}).catch(()=>{});
+  let _updateCheckInFlight=null;
+  const _checkUpdates=()=>{
+    if(_bootSettings.check_for_updates===false||sessionStorage.getItem('hermes-update-dismissed')) return;
+    if(_updateCheckInFlight) return _updateCheckInFlight;
+    _updateCheckInFlight=api('api/updates/check',{method:'POST',body:JSON.stringify({force:false})}).then(d=>{
+      // Re-check dismissed state after fetch — the user may have dismissed
+      // the banner while the request was in flight, preventing a race where
+      // _showUpdateBanner() re-displays a banner the user just closed.
+      if(sessionStorage.getItem('hermes-update-dismissed')) return;
+      if((d.webui&&d.webui.behind>0)||(d.agent&&d.agent.behind>0)) _showUpdateBanner(d);
+    }).catch(()=>{}).finally(()=>{_updateCheckInFlight=null;});
+    return _updateCheckInFlight;
+  };
+  if(_testUpdates){
+    api('api/updates/check?simulate=1',{method:'GET'}).then(d=>_showUpdateBanner(d)).catch(()=>{});
+  }else{
+    _checkUpdates();
+    // Re-check when a background tab becomes visible again (visibilitychange);
+    // a tab that was closed and re-opened is handled by the normal boot path.
+    document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible') _checkUpdates();});
+    // Periodic re-check every 30 minutes for always-open tabs (1,800,000 ms)
+    setInterval(_checkUpdates,1800000);
   }
   const _bootActiveProfileUnauthRedirectBudget=(()=>{
     const markerKey='hermes-webui-active-profile-bootstrap-401';
