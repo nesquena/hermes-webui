@@ -2281,37 +2281,6 @@ from api.workspace import set_last_workspace
 # metadata added by the webui and must be stripped before the API call.
 # `reasoning_content` is provider-facing for reasoning-capable models. Display
 # metadata such as `reasoning`, `thinking`, and `_reasoning` stays omitted here.
-def _copy_api_safe_fields(msg: dict) -> dict:
-    """Return a new dict with only API-safe message fields.
-
-    Uses explicit field-by-field access (always O(|safe_keys|)) instead of a
-    dict comprehension over all msg keys (O(|msg_keys|)), which is faster when
-    messages carry extra WebUI metadata fields like ``timestamp``, ``_ts``,
-    ``_error``, ``_partial``, ``_recovered``, ``attachments``, etc. (#6006 perf).
-    """
-    sanitized = {}
-    role = msg.get('role')
-    if role is not None:
-        sanitized['role'] = role
-    content = msg.get('content')
-    if content is not None:
-        sanitized['content'] = content
-    tool_calls = msg.get('tool_calls')
-    if tool_calls is not None:
-        sanitized['tool_calls'] = tool_calls
-    tool_call_id = msg.get('tool_call_id')
-    if tool_call_id is not None:
-        sanitized['tool_call_id'] = tool_call_id
-    name = msg.get('name')
-    if name is not None:
-        sanitized['name'] = name
-    refusal = msg.get('refusal')
-    if refusal is not None:
-        sanitized['refusal'] = refusal
-    reasoning_content = msg.get('reasoning_content')
-    if reasoning_content is not None:
-        sanitized['reasoning_content'] = reasoning_content
-    return sanitized
 
 _NATIVE_IMAGE_MAX_BYTES = 20 * 1024 * 1024
 
@@ -7102,9 +7071,7 @@ def _restore_reasoning_metadata(previous_messages, updated_messages):
     def _safe_projection(msg):
         if not isinstance(msg, dict):
             return None
-        projected = _copy_api_safe_fields(msg)
-        if not projected.get('role'):
-            return None
+        projected = {k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS and msg.get('role')}
         # Mirror the empty-tool_calls drop applied by _api_safe_message_positions
         # (#5737) so this projection matches the API-safe positions it's aligned
         # against — otherwise a row stored with tool_calls: [] projects
