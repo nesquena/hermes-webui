@@ -557,19 +557,21 @@ process.stdout.write(JSON.stringify({
     assert "**" not in data["finalText"]
     assert "](" not in data["finalText"]
     assert data["finalText"] == data["candidateRendered"]
-    # Rendered text diverges from source here, so the cursor stays in source
-    # space — but trimmed by the parser's held-back tail (Greptile P1
-    # follow-up), so it matches what the adopted DOM actually renders.
+    # Parser-owned rows must not publish a source-space cursor. The next
+    # refresh has to adopt the parsed DOM again; pending tails stay on the
+    # parser until it flushes them.
     assert data["pendingTail"] == "."
-    assert data["cursor"] == md_source[: -len(data["pendingTail"])]
+    assert data["cursor"] is None
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
-def test_live_prose_rebuild_cursor_excludes_parser_pending_tail():
-    """Greptile P1 follow-up: on a cursorless markdown rebuild the adopted DOM
-    lags the source by the parser's pending tail. The resume cursor must match
-    the adopted content — not the full source length — so the next
-    reconciliation re-appends the held-back text before settlement."""
+def test_live_prose_rebuild_leaves_parser_pending_tail_on_parser():
+    """Parser pending tails stay on the parser after a cursorless rebuild.
+
+    A source-space resume cursor would make the next refresh append the
+    held-back bytes as raw text and break later Markdown. The visible row
+    must keep the adopted parsed DOM until the parser itself flushes.
+    """
     md_source = "Voici **un** [lien](https://example.com) super."
     script = (
         _HARNESS
@@ -579,16 +581,12 @@ const smd = await import(process.env.SMD_PATH);
 
 const SOURCE = %s;
 
-// Existing row: cursorless, the parser has only seen a prefix of the source.
 const existing = makeRow(undefined);
 delete existing.dataset.rawText;
 const body = existing.querySelector('.msg-body');
 const parser = smd.parser(smd.default_renderer(body));
 smd.parser_write(parser, SOURCE.slice(0, 8));
 
-// Candidate: the persistent incremental node, full source written, parser
-// still live (not ended) and bound on the body exactly like
-// _smdBindParserIdentity does in production.
 const candidate = makeRow(SOURCE);
 const candidateBody = candidate.querySelector('.msg-body');
 const candidateParser = smd.parser(smd.default_renderer(candidateBody));
@@ -597,17 +595,18 @@ candidateBody.__smdParser = candidateParser;
 const pendingTail = String(candidateParser.pending || '') + String(candidateParser.text || '');
 const candidateRendered = candidateBody.textContent;
 
-// First reconciliation: cursorless rebuild adopts the cloned parsed DOM.
 _refreshTransparentFadeProseRow(existing, candidate, null);
 const afterRebuildText = existing.querySelector('.msg-body').textContent;
 const afterRebuildCursor = existing.getAttribute('data-stream-fade-text');
 
-// Next reconciliation of the SAME live row (no new source text needed — the
-// scene re-renders every frame). With a correct cursor this appends the
-// held-back tail; with a full source-length cursor it appends nothing and the
-// pending text stays missing until settlement.
 _refreshTransparentFadeProseRow(existing, candidate, null);
 const afterResumeBody = existing.querySelector('.msg-body');
+const afterResumeStrong = findTag(afterResumeBody, 'STRONG');
+const afterResumeLink = findTag(afterResumeBody, 'A');
+
+if(typeof smd.parser_end === 'function') smd.parser_end(candidateParser);
+_refreshTransparentFadeProseRow(existing, candidate, null);
+const afterEndBody = existing.querySelector('.msg-body');
 
 process.stdout.write(JSON.stringify({
   pendingTail,
@@ -616,31 +615,148 @@ process.stdout.write(JSON.stringify({
   afterRebuildCursor,
   afterResumeText: afterResumeBody.textContent,
   afterResumeCursor: existing.getAttribute('data-stream-fade-text'),
+  hasStrongAfterResume: !!afterResumeStrong,
+  hasLinkAfterResume: !!afterResumeLink,
+  literalStarsAfterResume: afterResumeBody.textContent.includes('**'),
+  afterEndText: afterEndBody.textContent,
+  literalStarsAfterEnd: afterEndBody.textContent.includes('**'),
 }));
 """
         % json.dumps(md_source)
     )
     data = _run_node_module(script)
 
-    # Precondition: the live parser really holds a non-empty pending tail, and
-    # the adopted DOM therefore lags the source text.
     assert data["pendingTail"], "expected the streaming parser to hold a pending tail"
     assert data["pendingTail"] == "."
     assert data["afterRebuildText"] == data["candidateRendered"]
     assert not data["afterRebuildText"].endswith(data["pendingTail"])
+    assert data["afterRebuildCursor"] is None
+    # Same live parser: later refreshes must keep parsed structure. The
+    # parser may flush its held-back "." into the candidate; that is still
+    # parser-owned text, not a source-byte append.
+    assert data["afterResumeCursor"] is None
+    assert data["hasStrongAfterResume"] is True
+    assert data["hasLinkAfterResume"] is True
+    assert data["literalStarsAfterResume"] is False
+    assert data["afterResumeText"].startswith("Voici un lien super")
+    assert "**" not in data["afterResumeText"]
+    assert "](" not in data["afterResumeText"]
+    # After the parser flushes, the adopted DOM may grow, but still no
+    # literal markdown syntax.
+    assert data["literalStarsAfterEnd"] is False
+    assert "super" in data["afterEndText"]
 
-    # The fix under test: the resume cursor matches the adopted content, i.e.
-    # source minus the parser's held-back tail — not the full source length.
-    assert data["afterRebuildCursor"] == md_source[: -len(data["pendingTail"])], (
-        "resumeCursor must exclude the parser's pending tail; got "
-        f"{data['afterRebuildCursor']!r}"
-    )
 
-    # Regression: the next reconciliation re-appends the pending text, so it is
-    # visible in the live row BEFORE settlement.
-    assert data["afterResumeText"] == data["candidateRendered"] + data["pendingTail"], (
-        "pending text never reached the live row: "
-        f"{data['afterResumeText']!r}"
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_live_prose_keeps_parser_authority_across_markdown_close():
+    """#7082 re-gate: two reconciliations across incomplete-to-complete Markdown
+    must keep the parser as the only DOM authority.
+
+    Cloning the parsed body and then appending later source bytes through
+    ``_appendTransparentFadeText`` leaves literal ``**world**`` in the visible
+    row while the live parser has already built ``<strong>world</strong>``.
+    """
+    first_source = "Hello **"
+    full_source = "Hello **world** done "
+    script = (
+        _HARNESS
+        + _REBUILD_PRELUDE
+        + """
+const smd = await import(process.env.SMD_PATH);
+
+const FIRST = %s;
+const FULL = %s;
+
+function countSubstr(hay, needle){
+  if(!needle) return 0;
+  let n = 0, from = 0;
+  while(true){
+    const i = hay.indexOf(needle, from);
+    if(i < 0) return n;
+    n += 1;
+    from = i + needle.length;
+  }
+}
+function serialize(node){
+  if(!node) return '';
+  if(node.nodeType === 3) return node.textContent;
+  const tag = String(node.tagName || '').toLowerCase();
+  if(!tag || tag === '#fragment' || tag === 'div' && node._classes && node._classes.has('msg-body')){
+    return (node.childNodes || []).map(serialize).join('');
+  }
+  const inner = (node.childNodes || []).map(serialize).join('');
+  return '<' + tag + '>' + inner + '</' + tag + '>';
+}
+
+const existing = makeRow(undefined);
+delete existing.dataset.rawText;
+
+const candidate = makeRow(FIRST);
+const candidateBody = candidate.querySelector('.msg-body');
+const parser = smd.parser(smd.default_renderer(candidateBody));
+smd.parser_write(parser, FIRST);
+candidateBody.__smdParser = parser;
+
+_refreshTransparentFadeProseRow(existing, candidate, null);
+
+smd.parser_write(parser, FULL.slice(FIRST.length));
+candidate.dataset.rawText = FULL;
+_refreshTransparentFadeProseRow(existing, candidate, null);
+
+const liveAfterClose = existing.querySelector('.msg-body');
+const strongAfterClose = findTag(liveAfterClose, 'STRONG');
+const htmlAfterClose = serialize(liveAfterClose);
+const textAfterClose = liveAfterClose.textContent;
+const candidateHtmlAfterClose = serialize(candidateBody);
+
+if(typeof smd.parser_end === 'function') smd.parser_end(parser);
+_refreshTransparentFadeProseRow(existing, candidate, null);
+const liveAfterEnd = existing.querySelector('.msg-body');
+const strongAfterEnd = findTag(liveAfterEnd, 'STRONG');
+
+process.stdout.write(JSON.stringify({
+  htmlAfterClose,
+  textAfterClose,
+  candidateHtmlAfterClose,
+  candidateTextAfterClose: candidateBody.textContent,
+  hasStrongAfterClose: !!strongAfterClose,
+  strongTextAfterClose: strongAfterClose ? strongAfterClose.textContent : null,
+  helloCountAfterClose: countSubstr(textAfterClose, 'Hello'),
+  worldCountAfterClose: countSubstr(textAfterClose, 'world'),
+  doneCountAfterClose: countSubstr(textAfterClose, 'done'),
+  literalStarsAfterClose: textAfterClose.includes('**'),
+  htmlAfterEnd: serialize(liveAfterEnd),
+  textAfterEnd: liveAfterEnd.textContent,
+  hasStrongAfterEnd: !!strongAfterEnd,
+  strongTextAfterEnd: strongAfterEnd ? strongAfterEnd.textContent : null,
+  literalStarsAfterEnd: liveAfterEnd.textContent.includes('**'),
+  helloCountAfterEnd: countSubstr(liveAfterEnd.textContent, 'Hello'),
+  worldCountAfterEnd: countSubstr(liveAfterEnd.textContent, 'world'),
+  doneCountAfterEnd: countSubstr(liveAfterEnd.textContent, 'done'),
+}));
+"""
+        % (json.dumps(first_source), json.dumps(full_source))
     )
-    assert data["afterResumeText"].endswith("super.")
-    assert data["afterResumeCursor"] == md_source
+    data = _run_node_module(script)
+
+    assert data["hasStrongAfterClose"] is True, (
+        "visible row lost parser emphasis after the second reconciliation: "
+        f"html={data['htmlAfterClose']!r} text={data['textAfterClose']!r}"
+    )
+    assert data["strongTextAfterClose"] == "world"
+    assert data["literalStarsAfterClose"] is False, (
+        "literal ** leaked into the live row: "
+        f"{data['textAfterClose']!r} html={data['htmlAfterClose']!r}"
+    )
+    assert data["helloCountAfterClose"] == 1
+    assert data["worldCountAfterClose"] == 1
+    assert data["doneCountAfterClose"] == 1
+    assert "world" in data["textAfterClose"]
+    assert "done" in data["textAfterClose"]
+
+    assert data["hasStrongAfterEnd"] is True
+    assert data["strongTextAfterEnd"] == "world"
+    assert data["literalStarsAfterEnd"] is False
+    assert data["helloCountAfterEnd"] == 1
+    assert data["worldCountAfterEnd"] == 1
+    assert data["doneCountAfterEnd"] == 1

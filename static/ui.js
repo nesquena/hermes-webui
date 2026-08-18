@@ -13846,21 +13846,36 @@ function _refreshTransparentFadeProseRow(existing, node, preservedState){
     existing.appendChild(body);
   }
   if(body.classList) body.classList.add('stream-fade-active');
-  if(!hasCursor || !nextText.startsWith(currentText)){
+  const candidateBody = node.querySelector ? node.querySelector('.msg-body') : null;
+  const parserOwned = !!(candidateBody && candidateBody !== body && candidateBody.__smdParser);
+  const mute = (typeof window !== 'undefined' && typeof window.__streamFadeMuteRenderedPrefix === 'function')
+    ? window.__streamFadeMuteRenderedPrefix
+    : null;
+  if(parserOwned && typeof candidateBody.cloneNode === 'function'){
+    // One authority after the first parser-owned rebuild: keep adopting the
+    // live parsed DOM. Cloning once and then appending later source bytes
+    // through `_appendTransparentFadeText` turns `Hello **` / `Hello **world**`
+    // into literal `**world**` while the candidate already has
+    // `<strong>world</strong>`. Pending and MEDIA tails stay on the parser
+    // until it flushes them into this candidate.
+    const prevRendered = String(body.textContent || '');
+    const clone = candidateBody.cloneNode(true);
+    body.textContent = '';
+    while(clone.childNodes && clone.childNodes.length) body.appendChild(clone.childNodes[0]);
+    _bindTransparentFadeCleanup(body);
+    if(mute && prevRendered) mute(body, prevRendered);
+    if(existing.removeAttribute) existing.removeAttribute('data-stream-fade-text');
+  }else if(!hasCursor || !nextText.startsWith(currentText)){
     // Rebuild branch. Snapshot the rendered text BEFORE clearing (#7082
     // review should-fix): without it every word re-wraps as `.is-new`, the
     // whole visible row dips to opacity 0 and fades back (~620ms), and the
     // wholesale node replacement invites the one-time scroll-anchor bounce
-    // the #6257 comment in _bindTransparentFadeCleanup warns about.
+    // the #6257 comment in `_bindTransparentFadeCleanup` warns about.
     const prevRendered = String(body.textContent || '');
     existing.setAttribute('data-stream-fade-text', '');
-    // Markdown preservation (Greptile P1): prefer cloning the candidate's own
-    // `.msg-body` DOM over a plain source-text rebuild. For live rows the
-    // candidate is the incremental streaming-markdown node, so its body is
-    // the markdown pipeline's parsed output — links, emphasis, headings,
-    // lists and code stay rendered instead of the row flattening to literal
-    // markdown source until settlement.
-    const candidateBody = node.querySelector ? node.querySelector('.msg-body') : null;
+    // Non-parser candidates may still carry a parsed-looking body (tests and
+    // rewind rebuilds). Clone that DOM when present so we do not flatten it
+    // back to literal source.
     let resumeCursor = nextText;
     if(candidateBody && candidateBody !== body &&
        typeof candidateBody.cloneNode === 'function' &&
@@ -13869,45 +13884,17 @@ function _refreshTransparentFadeProseRow(existing, node, preservedState){
       body.textContent = '';
       while(clone.childNodes && clone.childNodes.length) body.appendChild(clone.childNodes[0]);
       _bindTransparentFadeCleanup(body);
-      // The streaming parser holds a pending tail, so the adopted DOM can lag
-      // the source text. When the rendered text is a strict prefix of the
-      // source (plain prose), resume the cursor from it so the held-back
-      // characters arrive with the next delta instead of being dropped.
       const renderedNow = String(body.textContent || '');
-      if(renderedNow && nextText.startsWith(renderedNow)){
-        resumeCursor = renderedNow;
-      }else{
-        // Markdown (Greptile P1 follow-up): rendered text diverges from the
-        // source, so the rendered-prefix resume above cannot apply — but the
-        // cloned DOM still lags the source by the parser's held-back tail. A
-        // full source-length cursor would make the next reconciliation append
-        // nothing and the pending characters vanish until settlement. The
-        // parser state is bound on the incremental node's body by
-        // _smdBindParserIdentity (messages.js), and `pending`/`text` are its
-        // unrendered source-space buffers (`text` is flushed at the end of
-        // every parser_write; read defensively anyway). Trim the cursor by
-        // exactly that held-back length so the cursor matches what the clone
-        // actually renders and the tail re-appends with the next delta.
-        const liveParser = candidateBody.__smdParser;
-        const heldLen = liveParser
-          ? String(liveParser.pending || '').length + String(liveParser.text || '').length
-          : 0;
-        if(heldLen > 0 && heldLen <= nextText.length){
-          resumeCursor = nextText.slice(0, nextText.length - heldLen);
-        }
-      }
+      if(renderedNow && nextText.startsWith(renderedNow)) resumeCursor = renderedNow;
     }else{
       body.textContent = '';
       _appendTransparentFadeText(body, nextText);
     }
-    // messages.js _streamFadeMuteRenderedPrefix idiom (exported on window the
-    // same way __anchorProseIncrementalNode is): rendered-space compare of the
+    // messages.js `_streamFadeMuteRenderedPrefix` idiom (exported on window the
+    // same way `__anchorProseIncrementalNode` is): rendered-space compare of the
     // pre-rebuild snapshot against the rebuilt body, stripping `.is-new` from
     // spans inside the common prefix so already-visible words do not replay
     // their fade — only genuinely-new tail words animate.
-    const mute = (typeof window !== 'undefined' && typeof window.__streamFadeMuteRenderedPrefix === 'function')
-      ? window.__streamFadeMuteRenderedPrefix
-      : null;
     if(mute && prevRendered) mute(body, prevRendered);
     existing.setAttribute('data-stream-fade-text', resumeCursor);
   }else{
