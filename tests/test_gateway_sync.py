@@ -760,6 +760,181 @@ def test_stitch_continuations_does_not_prefix_model_config_branch_child(tmp_path
     assert [m['content'] for m in stitched] == ['parent msg', 'continuation msg']
 
 
+def test_inherited_model_config_marker_does_not_split_compression_continuation():
+    """A compression child that inherits an ancestor fork/delegate marker stays a continuation.
+
+    publish_compression_child copies model_config verbatim, so D' (child of
+    delegate D) carries ``_delegate_from=A0`` rather than D. Presence-only
+    matching would wrong-split D→D'. Markers only count when they point at
+    the child's direct parent; a real fork of D stays separate.
+    """
+    from api.agent_sessions import _is_continuation_session, _project_agent_session_rows
+
+    ancestor_id = 'A0'
+    delegate_id = 'D'
+    continuation_id = 'Dprime'
+    fork_id = 'Dfork'
+
+    delegate = {
+        'id': delegate_id,
+        'source': 'webui',
+        'ended_at': 200.0,
+        'end_reason': 'compression',
+        'parent_session_id': ancestor_id,
+        'model_config': json.dumps({'_delegate_from': ancestor_id}),
+    }
+    inherited_child = {
+        'id': continuation_id,
+        'source': 'webui',
+        'started_at': 199.7,
+        'parent_session_id': delegate_id,
+        'model_config': json.dumps({'_delegate_from': ancestor_id}),
+    }
+    direct_fork = {
+        'id': fork_id,
+        'source': 'webui',
+        'started_at': 199.6,
+        'parent_session_id': delegate_id,
+        'model_config': json.dumps({'_branched_from': delegate_id}),
+    }
+
+    assert _is_continuation_session(delegate, inherited_child)
+    assert not _is_continuation_session(delegate, direct_fork)
+
+    rows = [
+        {
+            'id': ancestor_id,
+            'title': 'Root',
+            'source': 'webui',
+            'started_at': 50.0,
+            'parent_session_id': None,
+            'ended_at': 90.0,
+            'end_reason': None,
+            'actual_message_count': 2,
+            'actual_user_message_count': 1,
+            'message_count': 2,
+            'last_activity': 89.0,
+        },
+        {
+            'id': delegate_id,
+            'title': 'Delegate conversation',
+            'source': 'webui',
+            'started_at': 100.0,
+            'parent_session_id': ancestor_id,
+            'ended_at': 200.0,
+            'end_reason': 'compression',
+            'model_config': json.dumps({'_delegate_from': ancestor_id}),
+            'actual_message_count': 3,
+            'actual_user_message_count': 1,
+            'message_count': 3,
+            'last_activity': 199.0,
+        },
+        {
+            'id': continuation_id,
+            'title': 'Delegate conversation',
+            'source': 'webui',
+            'started_at': 199.7,
+            'parent_session_id': delegate_id,
+            'ended_at': None,
+            'end_reason': None,
+            'model_config': json.dumps({'_delegate_from': ancestor_id}),
+            'actual_message_count': 2,
+            'actual_user_message_count': 1,
+            'message_count': 2,
+            'last_activity': 201.0,
+        },
+        {
+            'id': fork_id,
+            'title': 'Explicit fork of delegate',
+            'source': 'webui',
+            'started_at': 199.6,
+            'parent_session_id': delegate_id,
+            'ended_at': None,
+            'end_reason': None,
+            'model_config': json.dumps({'_branched_from': delegate_id}),
+            'actual_message_count': 2,
+            'actual_user_message_count': 1,
+            'message_count': 2,
+            'last_activity': 202.0,
+        },
+    ]
+
+    projected = _project_agent_session_rows(rows)
+    projected_by_id = {row['id']: row for row in projected}
+
+    assert continuation_id in projected_by_id
+    assert projected_by_id[continuation_id]['_lineage_root_id'] == delegate_id
+    assert projected_by_id[continuation_id]['_compression_segment_count'] == 2
+    assert delegate_id not in projected_by_id
+    assert fork_id in projected_by_id
+    assert projected_by_id[fork_id]['relationship_type'] == 'child_session'
+    assert '_lineage_root_id' not in projected_by_id[fork_id]
+
+
+def test_stitch_continuations_keeps_inherited_marker_compression_child(tmp_path, monkeypatch):
+    """Transcript stitch must keep D→D' when D' inherited D's ancestor marker."""
+    import api.models as models
+    from api.models import get_state_db_session_messages
+
+    db = tmp_path / 'state.db'
+    conn = sqlite3.connect(str(db))
+    conn.executescript("""
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            source TEXT,
+            session_source TEXT,
+            model_config TEXT,
+            started_at REAL,
+            parent_session_id TEXT,
+            ended_at REAL,
+            end_reason TEXT
+        );
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            role TEXT,
+            content TEXT,
+            timestamp REAL
+        );
+    """)
+    conn.execute(
+        "INSERT INTO sessions (id, source, started_at, ended_at, end_reason) "
+        "VALUES ('A0', 'webui', 50.0, 90.0, NULL)"
+    )
+    conn.execute(
+        "INSERT INTO sessions (id, source, model_config, started_at, parent_session_id, "
+        "ended_at, end_reason) VALUES ('D', 'webui', ?, 100.0, 'A0', 200.0, 'compression')",
+        (json.dumps({'_delegate_from': 'A0'}),),
+    )
+    conn.execute(
+        "INSERT INTO sessions (id, source, model_config, started_at, parent_session_id) "
+        "VALUES ('Dprime', 'webui', ?, 199.7, 'D')",
+        (json.dumps({'_delegate_from': 'A0'}),),
+    )
+    conn.execute(
+        "INSERT INTO sessions (id, source, model_config, started_at, parent_session_id) "
+        "VALUES ('Dfork', 'webui', ?, 199.6, 'D')",
+        (json.dumps({'_branched_from': 'D'}),),
+    )
+    conn.executemany(
+        "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+        [
+            ('D', 'user', 'seg-1', 150.0),
+            ('Dprime', 'user', 'seg-2', 199.9),
+            ('Dfork', 'user', 'fork msg', 199.8),
+        ],
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(models, '_active_state_db_path', lambda: db)
+
+    stitched = get_state_db_session_messages('Dprime', stitch_continuations=True)
+    assert [m['content'] for m in stitched] == ['seg-1', 'seg-2']
+
+    fork_msgs = get_state_db_session_messages('Dfork', stitch_continuations=True)
+    assert [m['content'] for m in fork_msgs] == ['fork msg']
+
+
 def test_compression_lineage_prefers_freshest_descendant_over_newer_direct_sibling():
     """A later-started stale sibling must not hide a deeper active branch."""
     conn = _ensure_state_db()

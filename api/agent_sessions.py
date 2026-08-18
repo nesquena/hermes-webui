@@ -317,6 +317,13 @@ def _has_model_config_branch_identity(row: dict | None) -> bool:
     separate lineages even when the parent's compression boundary overlaps
     their start timestamp.
 
+    Markers only count as a fork when they point at ``parent_session_id``.
+    Compression copies ``model_config`` onto the continuation
+    (``publish_compression_child`` callers pass
+    ``agent._session_init_model_config``), so a delegate's continuation
+    carries ``_delegate_from=<the delegate's own parent>``. Presence-only
+    matching would treat that real continuation as a fork.
+
     Fail closed: a non-empty ``model_config`` that cannot be parsed as a JSON
     object is ambiguous identity evidence — treat the row as a boundary, not a
     compression continuation.
@@ -335,7 +342,12 @@ def _has_model_config_branch_identity(row: dict | None) -> bool:
         parsed = raw
     if not isinstance(parsed, dict):
         return True
-    return bool(parsed.get('_delegate_from') or parsed.get('_branched_from'))
+    parent_id = row.get('parent_session_id')
+    branched = parsed.get('_branched_from')
+    delegated = parsed.get('_delegate_from')
+    if parent_id:
+        return branched == parent_id or delegated == parent_id
+    return branched is not None or delegated is not None
 
 
 def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
@@ -357,9 +369,9 @@ def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
     if str(child.get('session_source') or '').strip().lower() == 'fork':
         return False
     # Branch/delegate identity lives in model_config in production
-    # (_delegate_from authoritative, _branched_from for manual branches);
-    # reject that direct boundary before the compression-overlap tolerance
-    # below can reclassify a real fork/delegate child as a continuation.
+    # (_delegate_from authoritative, _branched_from for manual branches).
+    # Markers only count when they point at the child's direct parent;
+    # inherited markers on a compression child must not split the lineage.
     if _has_model_config_branch_identity(child):
         return False
     parent_source = str(parent.get('source') or '').strip().lower()
