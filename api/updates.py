@@ -42,10 +42,18 @@ _SUMMARY_CACHE_MAX = 16
 _summary_cache: OrderedDict = OrderedDict()
 _cache_lock = threading.Lock()
 _check_in_progress = False
+# Per-repo serialization: a straggler thread from a timed-out check must not
+# overlap a newer check on the same checkout. Guarded by
+# _repo_check_locks_guard (never _cache_lock) so acquiring a repo lock can
+# never deadlock against cache-lock holders. (PR #6830, Greptile: detached
+# checks overlap later fetches)
+_repo_check_locks: dict[str, threading.Lock] = {}
+_repo_check_locks_guard = threading.Lock()
 _apply_lock = threading.Lock()   # prevents concurrent stash/pull/pop on same repo
 CACHE_TTL = 1800  # 30 minutes
 _AGENT_GATEWAY_RESTART_RETRY_DELAY_S = 1.0
 _FORCE_DIRTY_PROBE_TIMEOUT = 5
+_UPDATE_CHECK_BUDGET_S = 45  # bounded overall budget for concurrent update checks (PR #6830)
 _GIT_DIAGNOSTIC_MAX_CHARS = 300
 _CREDENTIAL_IN_URL_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)([^/@\s'\"]+)@")
 _GITHUB_TOKEN_RE = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
@@ -1203,6 +1211,25 @@ def _check_repo_branch(path, name, *, fetch=True):
     }
 
 
+def _repo_check_lock(path: Path) -> threading.Lock:
+    """Return the per-repo lock serializing git operations on ``path``.
+
+    After a timed-out check, ``executor.shutdown(wait=False)`` leaves the
+    straggler worker running (bounded by the 30s fetch timeout). Without
+    this lock a new forced check could run git concurrently on the same
+    checkout — index.lock failures, or update results computed from refs
+    that changed mid-read. (PR #6830, Greptile: detached checks overlap
+    later fetches)
+    """
+    key = str(path)
+    with _repo_check_locks_guard:
+        lock = _repo_check_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _repo_check_locks[key] = lock
+        return lock
+
+
 def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     """Check if a git repo is behind its latest release. Returns dict or None.
 
@@ -1230,48 +1257,55 @@ def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
             'no_git': True,
         }
 
-    # Fetch tags first so update prompts track published releases, not every
-    # development commit that lands on master/main after the latest release.
-    #
-    # --force is required because the WebUI is a release-tracking consumer:
-    # it never pushes tags, so it should always defer to whatever the remote
-    # says a release tag points to. Without --force, a remote re-tag (e.g.
-    # after a squash-merge that re-points a release tag at a new SHA) jams
-    # the update path indefinitely with "would clobber existing tag" errors.
-    # See #2756.
-    fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--tags', '--force'], path, timeout=15)
-    if not fetch_ok:
+    # Serialize git operations on this checkout. A straggler from a
+    # timed-out check may still be fetching (bounded by the 30s fetch
+    # timeout); a new forced check must not run git concurrently on the
+    # same repo — index.lock failures, or results computed from refs that
+    # changed mid-read. (PR #6830, Greptile: detached checks overlap later
+    # fetches)
+    with _repo_check_lock(path):
+        # Fetch tags first so update prompts track published releases, not every
+        # development commit that lands on master/main after the latest release.
+        #
+        # --force is required because the WebUI is a release-tracking consumer:
+        # it never pushes tags, so it should always defer to whatever the remote
+        # says a release tag points to. Without --force, a remote re-tag (e.g.
+        # after a squash-merge that re-points a release tag at a new SHA) jams
+        # the update path indefinitely with "would clobber existing tag" errors.
+        # See #2756.
+        fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--tags', '--force'], path, timeout=30)
+        if not fetch_ok:
+            release_info = _check_repo_release(path, name, channel)
+            message = 'fetch failed'
+            if fetch_out:
+                message = f'{message}: {_sanitize_git_diagnostic(fetch_out)}'
+            if release_info is not None:
+                release_info = dict(release_info)
+                release_info['error'] = message
+                release_info['stale_check'] = True
+                release_info['dirty'] = _is_dirty(path)
+                return release_info
+            return {
+                'name': name,
+                'behind': None,
+                'error': message,
+                'stale_check': True,
+                'dirty': _is_dirty(path),
+            }
+
         release_info = _check_repo_release(path, name, channel)
-        message = 'fetch failed'
-        if fetch_out:
-            message = f'{message}: {_sanitize_git_diagnostic(fetch_out)}'
         if release_info is not None:
             release_info = dict(release_info)
-            release_info['error'] = message
-            release_info['stale_check'] = True
             release_info['dirty'] = _is_dirty(path)
             return release_info
-        return {
-            'name': name,
-            'behind': None,
-            'error': message,
-            'stale_check': True,
-            'dirty': _is_dirty(path),
-        }
 
-    release_info = _check_repo_release(path, name, channel)
-    if release_info is not None:
-        release_info = dict(release_info)
-        release_info['dirty'] = _is_dirty(path)
-        return release_info
-
-    branch_info = _check_repo_branch(path, name, fetch=False)
-    if branch_info is not None:
-        branch_info = dict(branch_info)
-        branch_info['dirty'] = _is_dirty(path)
-        branch_info['channel'] = channel
-        return branch_info
-    return None
+        branch_info = _check_repo_branch(path, name, fetch=False)
+        if branch_info is not None:
+            branch_info = dict(branch_info)
+            branch_info['dirty'] = _is_dirty(path)
+            branch_info['channel'] = channel
+            return branch_info
+        return None
 
 
 def _probe_dirty(
@@ -1360,14 +1394,89 @@ def check_for_updates(force=False, *, include_agent=True, channel=None):
         _check_in_progress = True
 
     try:
-        # Run checks outside the lock (network I/O)
-        webui_info = _check_repo(REPO_ROOT, 'webui', channel)
-        # The update channel is a WebUI-only concept. The Agent is a separate
-        # project that tags plain v* and legitimately tracks master past its
-        # tags; it must ALWAYS use the default channel regardless of the user's
-        # WebUI channel selection. (Codex gate: passing 'experimental' here made
-        # the Agent ignore its v* tags and fall back to origin/master.)
-        agent_info = _check_repo(_AGENT_DIR, 'agent', DEFAULT_UPDATE_CHANNEL) if include_agent else _ignored_agent_update_info()
+        # Run checks concurrently with a bounded overall timeout to prevent
+        # slow network I/O from blocking the response. Each _check_repo call
+        # can take up to 30s (git fetch timeout), so the serial path could
+        # take up to 60s. We cap the aggregate at 45s and return partial
+        # results if one check times out. (PR #6830)
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+
+        webui_info = None
+        agent_info = None
+
+        def _check_webui():
+            return _check_repo(REPO_ROOT, 'webui', channel)
+
+        def _check_agent():
+            # The update channel is a WebUI-only concept. The Agent is a separate
+            # project that tags plain v* and legitimately tracks master past its
+            # tags; it must ALWAYS use the default channel regardless of the user's
+            # WebUI channel selection. (Codex gate: passing 'experimental' here made
+            # the Agent ignore its v* tags and fall back to origin/master.)
+            return _check_repo(_AGENT_DIR, 'agent', DEFAULT_UPDATE_CHANNEL)
+
+        executor = ThreadPoolExecutor(max_workers=2)
+        try:
+            webui_future = executor.submit(_check_webui)
+            agent_future = executor.submit(_check_agent) if include_agent else None
+
+            budget_start = time.monotonic()
+            remaining = _UPDATE_CHECK_BUDGET_S
+
+            # Wait for WebUI with the full remaining budget
+            try:
+                webui_info = webui_future.result(timeout=remaining)
+            except (FutureTimeoutError, Exception) as e:
+                webui_future.cancel()
+                logger.warning('WebUI update check failed or timed out: %s', e)
+                webui_info = {
+                    'name': 'webui',
+                    'behind': None,
+                    'error': f'check timed out after {_UPDATE_CHECK_BUDGET_S}s' if isinstance(e, FutureTimeoutError) else str(e),
+                    'stale_check': True,
+                }
+
+            if agent_future is not None:
+                # Give the second future only the remaining budget so the
+                # aggregate wait never exceeds _UPDATE_CHECK_BUDGET_S.
+                # An exhausted budget must NOT grant a fresh floor wait —
+                # mark the future timed out without calling result().
+                # (PR #6830, maintainer review)
+                elapsed = time.monotonic() - budget_start
+                remaining = _UPDATE_CHECK_BUDGET_S - elapsed
+                if remaining <= 0 and not agent_future.done():
+                    # Budget exhausted and the agent check is still running —
+                    # mark it timed out without waiting. (PR #6830, maintainer
+                    # review: no fresh floor wait past the aggregate budget)
+                    agent_future.cancel()
+                    logger.warning('Agent update check timed out after %ss', _UPDATE_CHECK_BUDGET_S)
+                    agent_info = {
+                        'name': 'agent',
+                        'behind': None,
+                        'error': f'check timed out after {_UPDATE_CHECK_BUDGET_S}s',
+                        'stale_check': True,
+                    }
+                else:
+                    # If the agent already finished (even after budget expiry)
+                    # result() returns immediately; otherwise wait the remaining
+                    # budget. Preserves partial successful results.
+                    try:
+                        agent_info = agent_future.result(timeout=remaining)
+                    except (FutureTimeoutError, Exception) as e:
+                        agent_future.cancel()
+                        logger.warning('Agent update check failed or timed out: %s', e)
+                        agent_info = {
+                            'name': 'agent',
+                            'behind': None,
+                            'error': f'check timed out after {_UPDATE_CHECK_BUDGET_S}s' if isinstance(e, FutureTimeoutError) else str(e),
+                            'stale_check': True,
+                        }
+            else:
+                agent_info = _ignored_agent_update_info()
+        finally:
+            # Don't wait for straggler threads — shutdown immediately so the
+            # caller's deadline isn't blown past the budget. (PR #6830, Greptile)
+            executor.shutdown(wait=False)
 
         with _cache_lock:
             _update_cache['webui'] = webui_info
@@ -1976,96 +2085,104 @@ def apply_force_update(target: str, channel=None) -> dict:
         if path is None or not (path / '.git').exists():
             return {'ok': False, 'message': 'Not a git repository'}
 
-        # NOTE: v2 of PR #5688 removed the prior stale-lock cleanup loop from
-        # this entry point. The mtime-based heuristic was empirically proven
-        # unsafe (a live `git add` was shown to hold .git/index.lock past 31 s
-        # with unchanged mtime) and unconditional pre-cleanup clobbered locks
-        # for force-update retries that had nothing to do with a lock error.
-        # Lock cleanup is now ONLY performed by the explicit
-        # /api/updates/clear_lock endpoint, where the user has opted in to
-        # a non-destructive retry.
-
-        # --force so a remote re-tag (e.g. squash-merge that re-points an
-        # existing release tag) doesn't jam the apply path with "would clobber
-        # existing tag". See #2756.
-        fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=15)
-        if not fetch_ok:
-            return {
-                'ok': False,
-                'message': _apply_fetch_failure_message(
-                    fetch_out,
-                    'Could not reach the remote repository. Check your connection.',
-                ),
-            }
-
-        compare_ref = _select_apply_compare_ref(path, channel, target)
-        # Stable channel, already up to date on the promoted subset: nothing to
-        # force to. Do NOT fall back to origin/master (firehose). See
-        # _select_apply_compare_ref channel semantics.
-        if compare_ref is None:
-            dirty_state = None
-            if target == 'webui' and channel == 'stable':
-                dirty_state = _probe_dirty(path, timeout=_FORCE_DIRTY_PROBE_TIMEOUT)
-            if dirty_state is True:
-                compare_ref = 'HEAD'
-            else:
-                return {
-                    'ok': True,
-                    'message': f'{target} is already up to date on the {channel} channel.',
-                    'target': target,
-                    'up_to_date': True,
-                    'channel': channel,
-                }
-
-        # Rewind guard (Codex CORE #3): refuse to reset --hard onto a ref that
-        # is an ANCESTOR of HEAD — that would downgrade the checkout. This is the
-        # switch-back-to-stable-while-ahead case. A ref that is a descendant of
-        # HEAD (normal update / opt-in to experimental) fast-forwards fine and is
-        # allowed. Refs on a divergent line (neither ancestor nor descendant) are
-        # the legitimate force-update case (conflict/diverged recovery) and are
-        # also allowed — the guard fires ONLY on a pure-ancestor rewind.
-        if _head_contains_ref(path, compare_ref) and not _can_fast_forward_to(path, compare_ref):
-            return {
-                'ok': False,
-                'message': (
-                    f'{target} is already ahead of the {channel} channel '
-                    f'({compare_ref}); refusing to rewind the checkout. '
-                    'Switching to a slower channel keeps your current version '
-                    'until that channel catches up.'
-                ),
-                'target': target,
-                'channel': channel,
-                'refused_rewind': True,
-            }
-        if not _discard_local_changes(path, compare_ref):
-            return {'ok': False, 'message': f'Force reset to {compare_ref} failed'}
-
-        with _cache_lock:
-            _update_cache['checked_at'] = 0
-
-        if target == 'agent':
-            gateway_ok, gateway_result = _ensure_gateway_restart_for_agent_update()
-            if not gateway_ok:
-                return {
-                    'ok': False,
-                    'message': _agent_gateway_restart_failure_message(target, gateway_result),
-                    'target': target,
-                    'gateway_restart': gateway_result.get('status'),
-                }
-
-        _schedule_restart()
-
-        response = {
-            'ok': True,
-            'message': f'{target} force-updated to {compare_ref}',
-            'target': target,
-            'restart_scheduled': True,
-        }
-        if target == 'agent':
-            response['gateway_restart'] = gateway_result.get('status')
-        return response
+        # Serialize git operations against check stragglers on this repo.
+        # (PR #6830, Greptile: apply bypasses repository lock)
+        with _repo_check_lock(path):
+            return _apply_force_update_locked(target, channel, path)
     finally:
         _apply_lock.release()
+
+
+def _apply_force_update_locked(target, channel, path):
+    """Force-apply body, called under _apply_lock and the per-repo check lock."""
+    # NOTE: v2 of PR #5688 removed the prior stale-lock cleanup loop from
+    # this entry point. The mtime-based heuristic was empirically proven
+    # unsafe (a live `git add` was shown to hold .git/index.lock past 31 s
+    # with unchanged mtime) and unconditional pre-cleanup clobbered locks
+    # for force-update retries that had nothing to do with a lock error.
+    # Lock cleanup is now ONLY performed by the explicit
+    # /api/updates/clear_lock endpoint, where the user has opted in to
+    # a non-destructive retry.
+
+    # --force so a remote re-tag (e.g. squash-merge that re-points an
+    # existing release tag) doesn't jam the apply path with "would clobber
+    # existing tag". See #2756.
+    fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=15)
+    if not fetch_ok:
+        return {
+            'ok': False,
+            'message': _apply_fetch_failure_message(
+                fetch_out,
+                'Could not reach the remote repository. Check your connection.',
+            ),
+        }
+
+    compare_ref = _select_apply_compare_ref(path, channel, target)
+    # Stable channel, already up to date on the promoted subset: nothing to
+    # force to. Do NOT fall back to origin/master (firehose). See
+    # _select_apply_compare_ref channel semantics.
+    if compare_ref is None:
+        dirty_state = None
+        if target == 'webui' and channel == 'stable':
+            dirty_state = _probe_dirty(path, timeout=_FORCE_DIRTY_PROBE_TIMEOUT)
+        if dirty_state is True:
+            compare_ref = 'HEAD'
+        else:
+            return {
+                'ok': True,
+                'message': f'{target} is already up to date on the {channel} channel.',
+                'target': target,
+                'up_to_date': True,
+                'channel': channel,
+            }
+
+    # Rewind guard (Codex CORE #3): refuse to reset --hard onto a ref that
+    # is an ANCESTOR of HEAD — that would downgrade the checkout. This is the
+    # switch-back-to-stable-while-ahead case. A ref that is a descendant of
+    # HEAD (normal update / opt-in to experimental) fast-forwards fine and is
+    # allowed. Refs on a divergent line (neither ancestor nor descendant) are
+    # the legitimate force-update case (conflict/diverged recovery) and are
+    # also allowed — the guard fires ONLY on a pure-ancestor rewind.
+    if _head_contains_ref(path, compare_ref) and not _can_fast_forward_to(path, compare_ref):
+        return {
+            'ok': False,
+            'message': (
+                f'{target} is already ahead of the {channel} channel '
+                f'({compare_ref}); refusing to rewind the checkout. '
+                'Switching to a slower channel keeps your current version '
+                'until that channel catches up.'
+            ),
+            'target': target,
+            'channel': channel,
+            'refused_rewind': True,
+        }
+    if not _discard_local_changes(path, compare_ref):
+        return {'ok': False, 'message': f'Force reset to {compare_ref} failed'}
+
+    with _cache_lock:
+        _update_cache['checked_at'] = 0
+
+    if target == 'agent':
+        gateway_ok, gateway_result = _ensure_gateway_restart_for_agent_update()
+        if not gateway_ok:
+            return {
+                'ok': False,
+                'message': _agent_gateway_restart_failure_message(target, gateway_result),
+                'target': target,
+                'gateway_restart': gateway_result.get('status'),
+            }
+
+    _schedule_restart()
+
+    response = {
+        'ok': True,
+        'message': f'{target} force-updated to {compare_ref}',
+        'target': target,
+        'restart_scheduled': True,
+    }
+    if target == 'agent':
+        response['gateway_restart'] = gateway_result.get('status')
+    return response
 
 
 def apply_update(target, channel=None):
@@ -2136,6 +2253,16 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
     if path is None or not (path / '.git').exists():
         return {'ok': False, 'message': 'Not a git repository'}
 
+    # Serialize git operations against check stragglers on this repo. A
+    # detached check thread from a timed-out check may still be fetching;
+    # the apply must not run git concurrently on the same checkout.
+    # (PR #6830, Greptile: apply bypasses repository lock)
+    with _repo_check_lock(path):
+        return _apply_update_locked(target, channel, path)
+
+
+def _apply_update_locked(target, channel, path):
+    """Apply body, called under _apply_lock and the per-repo check lock."""
     # Fetch before attempting pull, so the remote ref is current.
     # --force so a remote re-tag doesn't block the update path (see #2756).
     fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=15)
