@@ -8772,6 +8772,7 @@ def _message_window_for_display(messages, msg_limit=None, msg_before=None, expan
 
 
 _LIMITED_TOOL_CONTENT_MAX_CHARS = 4096
+_LIMITED_RENDERABLE_CONTENT_MAX_CHARS = 64 * 1024
 # Server-side ceiling on the ?msg_limit= tail-window size. A client could
 # otherwise request msg_limit=1000000 and force the server to assemble and
 # serialize an unbounded message payload (the frontend's own pagination grows
@@ -8844,6 +8845,10 @@ _LIMITED_TOOL_CONTENT_NOTICE = (
     "\n\n[Tool output truncated in paginated session response; "
     "load the full transcript to inspect the complete result.]"
 )
+_LIMITED_RENDERABLE_CONTENT_NOTICE = (
+    "\n\n[Message content truncated in paginated session response; "
+    "the complete content remains stored in the session.]"
+)
 
 
 def _tool_message_for_limited_payload(message):
@@ -8877,9 +8882,93 @@ def _tool_message_for_limited_payload(message):
     return clipped
 
 
+def _renderable_content_preview_for_limited_payload(content):
+    """Return ``(bounded_content, original_chars)`` for oversized display text."""
+    preview_chars = max(
+        0,
+        _LIMITED_RENDERABLE_CONTENT_MAX_CHARS - len(_LIMITED_RENDERABLE_CONTENT_NOTICE),
+    )
+    if isinstance(content, str):
+        original_chars = len(content)
+        if original_chars <= _LIMITED_RENDERABLE_CONTENT_MAX_CHARS:
+            return None
+        return content[:preview_chars] + _LIMITED_RENDERABLE_CONTENT_NOTICE, original_chars
+
+    if not isinstance(content, list):
+        # msgContent() renders top-level objects only as "[object Object]".
+        # Keep their structure untouched rather than projecting fields into text.
+        return None
+
+    text_indexes = [
+        index
+        for index, part in enumerate(content)
+        if (
+            isinstance(part, dict)
+            and part.get("type") == "text"
+            and isinstance(part.get("text"), str)
+        )
+    ]
+    if not text_indexes:
+        return None
+    joined_text = "".join(content[index]["text"] for index in text_indexes)
+    original_chars = len(joined_text)
+    if original_chars <= _LIMITED_RENDERABLE_CONTENT_MAX_CHARS:
+        return None
+
+    # Match msgContent()'s visible-text semantics without letting leading/trailing
+    # whitespace consume the payload budget. Keep each surviving character in
+    # its original text block so interleaved non-text blocks retain their order.
+    visible_text = joined_text.strip()
+    bounded_visible_chars = min(len(visible_text), preview_chars)
+    visible_start = len(joined_text) - len(joined_text.lstrip())
+    visible_end = visible_start + bounded_visible_chars
+    bounded_content = list(content)
+    cursor = 0
+    for index in text_indexes:
+        part = content[index]
+        text = part["text"]
+        part_start = cursor
+        part_end = cursor + len(text)
+        slice_start = max(part_start, visible_start)
+        slice_end = min(part_end, visible_end)
+        clipped_part = dict(part)
+        if slice_start < slice_end:
+            clipped_part["text"] = text[
+                slice_start - part_start : slice_end - part_start
+            ]
+        else:
+            clipped_part["text"] = ""
+        bounded_content[index] = clipped_part
+        cursor = part_end
+    last_text_index = text_indexes[-1]
+    bounded_content[last_text_index]["text"] += _LIMITED_RENDERABLE_CONTENT_NOTICE
+    return bounded_content, original_chars
+
+
+def _renderable_message_for_limited_payload(message):
+    """Return a bounded copy of oversized user/assistant content for display loads."""
+    if not isinstance(message, dict):
+        return message
+    role = str(message.get("role") or "").strip().lower()
+    if role not in ("user", "assistant"):
+        return message
+    bounded = _renderable_content_preview_for_limited_payload(message.get("content"))
+    if bounded is None:
+        return message
+    bounded_content, original_chars = bounded
+    clipped = dict(message)
+    clipped["content"] = bounded_content
+    clipped["_content_truncated"] = True
+    clipped["_content_original_chars"] = original_chars
+    return clipped
+
+
 def _messages_for_limited_payload(messages) -> list:
-    """Bound hidden tool-result payloads before sending a msg_limit response."""
-    return [_tool_message_for_limited_payload(msg) for msg in list(messages or [])]
+    """Bound oversized display content before sending a msg_limit response."""
+    return [
+        _renderable_message_for_limited_payload(_tool_message_for_limited_payload(msg))
+        for msg in list(messages or [])
+    ]
 
 
 def _limited_webui_messages_for_display(session, state_db_messages) -> list:
@@ -13244,22 +13333,33 @@ def handle_get(handler, parsed) -> bool:
             if synth is None:
                 # 'no_foreign_state' / 'invalid_sid' — nothing to render.
                 return bad(handler, "Session not found", 404)
-            # Build the legacy dict response from the synthesized Session so
-            # the wire shape stays byte-equivalent to the previous inline
-            # synthesis (the frontend has been reading these exact keys).
-            msgs = list(synth.messages or [])
+            # Build the legacy dict response from the synthesized Session while
+            # applying the same display window as the ordinary sidecar path.
+            all_msgs = list(synth.messages or [])
+            if load_messages:
+                msgs, messages_offset = _message_window_for_display(
+                    all_msgs,
+                    msg_limit=msg_limit,
+                    msg_before=msg_before,
+                    expand_renderable=expand_renderable,
+                )
+                if msg_limit is not None:
+                    msgs = _messages_for_limited_payload(msgs)
+            else:
+                msgs = []
+                messages_offset = 0
             sess = {
                 "session_id": synth.session_id,
                 "title": synth.title,
                 "workspace": synth.workspace,
                 "model": synth.model,
-                "message_count": len(msgs),
+                "message_count": len(all_msgs),
                 "created_at": synth.created_at,
                 "updated_at": synth.updated_at,
                 "last_message_at": (
                     (cli_meta or {}).get("last_message_at")
                     or (cli_meta or {}).get("updated_at", 0)
-                    or ((msgs or [{}])[-1].get("timestamp", 0))
+                    or ((all_msgs or [{}])[-1].get("timestamp", 0))
                 ),
                 "pinned": bool(getattr(synth, "pinned", False)),
                 "archived": bool(getattr(synth, "archived", False)),
@@ -13289,8 +13389,13 @@ def handle_get(handler, parsed) -> bool:
                 "read_only": bool(getattr(synth, "read_only", False)),
                 "messages": msgs,
                 "tool_calls": [],
+                "_messages_truncated": (
+                    load_messages and msg_limit is not None and messages_offset > 0
+                ),
+                "_messages_offset": messages_offset,
+                "_msg_limit_max": _MAX_MSG_LIMIT,
             }
-            attach_todo_state(sess, msgs)
+            attach_todo_state(sess, all_msgs)
             sess = _merge_cli_sidebar_metadata(sess, cli_meta)
             return j(handler, {"session": public_session_projection(sess)})
 

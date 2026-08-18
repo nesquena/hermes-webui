@@ -3861,7 +3861,9 @@ async function _loadOlderMessages() {
 //   2. Bump _messagesGeneration before mutating S.messages so any
 //      in-flight prefetch's post-await generation check bails out.
 async function _ensureAllMessagesLoaded() {
-  if (!_messagesTruncated || !S.session) return;
+  const hasContentTruncatedMessage=()=>
+    (S.messages||[]).some(message=>message&&message._content_truncated===true);
+  if ((!_messagesTruncated&&!hasContentTruncatedMessage()) || !S.session) return;
   if (_loadingOlder) {
     // A prefetch is mid-flight (between the `_loadingOlder = true` line
     // and its post-await guards). Bumping the generation token now
@@ -3874,7 +3876,7 @@ async function _ensureAllMessagesLoaded() {
     while (_loadingOlder) {
       await new Promise(resolve => setTimeout(resolve, 16));
     }
-    if (!_messagesTruncated || !S.session) return;
+    if ((!_messagesTruncated&&!hasContentTruncatedMessage()) || !S.session) return;
   }
   _loadingOlder = true;
   try {
