@@ -13,6 +13,8 @@ import os
 import re
 import json
 import pathlib
+import shutil
+import subprocess
 import pytest
 
 from tests.conftest import requires_agent_modules
@@ -265,3 +267,44 @@ class TestYoloI18n:
 
         for key in self.REQUIRED_KEYS:
             assert key in block, f"Key '{key}' missing in locale '{locale}'"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_yolo_command_ignores_stale_same_session_generation():
+    commands_js = _read_static_file("commands.js")
+    start = commands_js.index("async function cmdYolo(")
+    cmd_yolo = commands_js[start:commands_js.index("\n// ── Branch / fork command", start)]
+
+    def run(api_source, expected_calls):
+        script = "\n".join([
+            "const calls=[]; const toasts=[]; let pillUpdates=0; let cardHides=0;",
+            "const S={session:{session_id:'old-session'}};",
+            "let _loadSessionGeneration=1;",
+            "let _yoloEnabled=false; let _approvalSessionId=null; let _approvalCurrentId=null;",
+            "const t=k=>k; const showToast=msg=>toasts.push(msg);",
+            "const $=()=>({classList:{contains:()=>false}});",
+            "const _updateYoloPill=()=>{pillUpdates+=1;};",
+            "const hideApprovalCard=()=>{cardHides+=1;};",
+            "const toggleYoloFromApproval=async()=>{throw new Error('unexpected card path');};",
+            f"const api={api_source};",
+            cmd_yolo,
+            "(async()=>{",
+            " await cmdYolo();",
+            f" if(JSON.stringify(calls)!==JSON.stringify({expected_calls!r})) throw new Error('wrong calls '+JSON.stringify(calls));",
+            " if(_yoloEnabled!==false) throw new Error('stale response changed new session state');",
+            " if(pillUpdates!==0) throw new Error('stale response updated the new session pill');",
+            " if(cardHides!==0) throw new Error('stale response hid the new session card');",
+            " if(toasts.length!==0) throw new Error('stale response emitted a toast');",
+            "})().catch(e=>{console.error(e.stack||e);process.exit(1)});",
+        ])
+        result = subprocess.run([shutil.which("node"), "-e", script], text=True, capture_output=True)
+        assert result.returncode == 0, result.stderr
+
+    run(
+        "async path=>{calls.push(path);_loadSessionGeneration=2;return {yolo_enabled:false};}",
+        ["/api/session/yolo?session_id=old-session"],
+    )
+    run(
+        "async (path,opts)=>{calls.push(path);if(path.includes('?'))return {yolo_enabled:false};_loadSessionGeneration=2;const e=new Error('relay failed');e.body=JSON.stringify({error:'relay failed',yolo_enabled:true});throw e;}",
+        ["/api/session/yolo?session_id=old-session", "/api/session/yolo"],
+    )
