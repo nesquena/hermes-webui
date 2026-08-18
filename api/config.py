@@ -2647,14 +2647,15 @@ def _get_provider_base_url(provider_id):
 
     Returns the URL stripped of trailing ``/`` if configured, otherwise None.
     """
-    prov_cfg = _get_provider_cfg(provider_id)
+    canonical_provider_id = _canonicalise_provider_id(provider_id)
+    prov_cfg = _canonical_provider_config(cfg, canonical_provider_id)
     explicit = (prov_cfg.get("base_url") or "").strip().rstrip("/")
     if explicit:
         return explicit
     model_cfg = cfg.get("model", {}) or {}
     if isinstance(model_cfg, dict):
-        model_provider = str(model_cfg.get("provider") or "").strip().lower()
-        if model_provider == str(provider_id).strip().lower():
+        model_provider = _canonicalise_provider_id(model_cfg.get("provider"))
+        if model_provider == canonical_provider_id:
             model_base = (model_cfg.get("base_url") or "").strip().rstrip("/")
             if model_base:
                 return model_base
@@ -6853,8 +6854,6 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             if not canonical:
                 return
             if roster_authoritative:
-                if canonical == "openai-codex":
-                    return
                 if canonical in roster_provider_ids and canonical not in roster_authenticated_ids:
                     return
             env_detected_providers.add(canonical)
