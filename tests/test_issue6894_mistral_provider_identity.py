@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import types
 from types import SimpleNamespace
@@ -370,8 +371,11 @@ def test_live_models_uses_legacy_provider_credentials(monkeypatch):
 
 
 def test_named_custom_catalog_inherits_shared_custom_provider_key(monkeypatch, tmp_path):
+    import copy
     import json
     import urllib.request
+
+    import api.profiles as profiles
 
     cfgfile = tmp_path / "config.yaml"
     cfgfile.write_text(
@@ -396,18 +400,56 @@ def test_named_custom_catalog_inherits_shared_custom_provider_key(monkeypatch, t
         calls.append((req.full_url, req.headers.get("Authorization"), timeout))
         return Response()
 
-    monkeypatch.setattr(config, "_get_config_path", lambda: cfgfile)
-    monkeypatch.setattr(config, "_get_auth_store_path", lambda: tmp_path / "auth.json")
-    monkeypatch.setattr(config, "_read_live_provider_model_ids", lambda _pid: [])
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-    _install_hermes_modules(monkeypatch)
-    config.reload_config()
-    config.invalidate_models_cache()
+    saved_cfg_cache = copy.deepcopy(config._cfg_cache)
+    saved_cfg_alias = config.cfg
+    saved_cfg_state = {
+        name: getattr(config, name)
+        for name in ("_cfg_mtime", "_cfg_path", "_cfg_fingerprint")
+    }
+    saved_model_state = {
+        name: copy.deepcopy(getattr(config, name))
+        for name in (
+            "_available_models_cache",
+            "_available_models_cache_ts",
+            "_available_models_live_rebuild_ts",
+            "_available_models_cache_source_fingerprint",
+            "_models_cache_provenance",
+            "_advertised_model_ids_memo",
+            "_cache_build_in_progress",
+        )
+    }
+    saved_pool_cache = copy.deepcopy(config._CREDENTIAL_POOL_CACHE)
+    try:
+        for name in tuple(os.environ):
+            if name.endswith(("_API_KEY", "_TOKEN")) or name == "API_KEY":
+                monkeypatch.delenv(name, raising=False)
+        monkeypatch.setattr(config, "_get_config_path", lambda: cfgfile)
+        monkeypatch.setattr(config, "_get_auth_store_path", lambda: tmp_path / "auth.json")
+        monkeypatch.setattr(config, "_get_models_cache_path", lambda: tmp_path / "models.json")
+        monkeypatch.setattr(config, "_thread_local_env_value", lambda _name, default="": default)
+        monkeypatch.setattr(config, "_read_live_provider_model_ids", lambda _pid: [])
+        monkeypatch.setattr(config, "_pool_entry_payloads", lambda _provider: [])
+        monkeypatch.setattr(config, "_has_explicit_pool_credentials", lambda _provider: False)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        _install_hermes_modules(monkeypatch)
+        config.reload_config()
+        config.invalidate_models_cache()
 
-    catalog = config.get_available_models(force_refresh=True)
-    group = next(group for group in catalog["groups"] if group.get("provider_id") == "custom:demo")
-    assert calls == [("https://proxy.example/v1/models", "Bearer shared-custom-key", 5.0)]
-    assert "demo-live-model" in {model["id"] for model in group["models"]}
+        catalog = config.get_available_models(force_refresh=True)
+        group = next(group for group in catalog["groups"] if group.get("provider_id") == "custom:demo")
+        assert calls == [("https://proxy.example/v1/models", "Bearer shared-custom-key", 5.0)]
+        assert "demo-live-model" in {model["id"] for model in group["models"]}
+    finally:
+        config._cfg_cache.clear()
+        config._cfg_cache.update(saved_cfg_cache)
+        config.cfg = saved_cfg_alias
+        for name, value in saved_cfg_state.items():
+            setattr(config, name, value)
+        for name, value in saved_model_state.items():
+            setattr(config, name, value)
+        config._CREDENTIAL_POOL_CACHE.clear()
+        config._CREDENTIAL_POOL_CACHE.update(saved_pool_cache)
 
 
 def test_catalog_endpoint_uses_canonical_equivalent_key_not_custom_key(monkeypatch, tmp_path):
