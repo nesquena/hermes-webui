@@ -1506,3 +1506,123 @@ def test_admission_slot_released_on_claim_and_format_failures(monkeypatch):
         _reset_wakeup_state()
 
 
+def test_busy_predicate_covers_stream_publication_window_before_active_runs(
+    monkeypatch,
+):
+    """#6959 gate (MUST-FIX 1 repro): a worker blocked *before* ACTIVE_RUNS
+    registration — stream already published (STREAMS + STREAM_SESSION_OWNERS
+    populated), worker thread not yet in ACTIVE_RUNS — must still count as an
+    active turn. Otherwise a sibling same-origin completion would pass the busy
+    pre-check, reserve, claim, and 409 against the already-published stream,
+    burning the finite delivery-attempt budget. With the fix, completions that
+    arrive in that window defer WITHOUT claiming (zero claims, zero attempts)."""
+    _reset_wakeup_state()
+    registry = _install_fake_process_registry(monkeypatch)
+    delivery = _install_fake_durable_delivery_api(monkeypatch)
+    # ACTIVE_RUNS is empty: the worker has NOT yet registered — only the
+    # pre-registration stream publication is visible.
+    monkeypatch.setattr(cfg, "ACTIVE_RUNS", {})
+    monkeypatch.setattr(cfg, "STREAMS", {"stream-preactive": object()})
+    monkeypatch.setattr(
+        cfg,
+        "STREAM_SESSION_OWNERS",
+        {"stream-preactive": "webui-session-1"},
+    )
+    monkeypatch.setattr(bp, "_emit_bg_task_complete_events_coalesced", lambda *_args: 1)
+    monkeypatch.setattr(bp, "ASYNC_DELIVERY_ROUTING_RETRY_SECONDS", 30.0)
+
+    try:
+        # The real predicate (not monkeypatched) must see the published stream.
+        assert bp._session_has_active_turn("webui-session-1") is True
+        # Cross-origin isolation: another session is not blocked by it.
+        assert bp._session_has_active_turn("other-session") is False
+
+        # A completion for the origin arrives in the publication window: it
+        # must defer via the busy path — zero claims, zero delivery attempts.
+        bp._process_async_delegation_event(
+            _async_delegation_event(delegation_id="deleg_preactive"),
+            session_id="webui-session-1",
+            delegation_id="deleg_preactive",
+            process_registry=registry,
+        )
+        assert delivery["claim"] == [], (
+            "no claim may be taken while the pre-ACTIVE_RUNS stream is live"
+        )
+        assert delivery["delivery_attempts"] == 0
+        assert delivery["release"] == []
+        with bp._ASYNC_DELEGATION_WAKEUP_ADMISSION_LOCK:
+            assert bp._ASYNC_DELEGATION_WAKEUP_ADMISSION_INFLIGHT == set(), (
+                "busy-path exit must not leave a reservation behind"
+            )
+        assert delivery["delivery_state"] == "pending"
+    finally:
+        _reset_wakeup_state()
+
+
+def test_admission_slot_released_when_retry_helper_raises(monkeypatch):
+    """#6959 gate (MUST-FIX 2 repro): the post-reservation body must release
+    the per-origin admission even when a retry helper raises mid-path — the
+    old code released manually AFTER schedule_async_delegation_claim_retry, so
+    a raise there stranded the reservation permanently and every later
+    completion for the origin deferred forever without delivery."""
+    _reset_wakeup_state()
+    registry = _install_fake_process_registry(monkeypatch)
+    delivery = _install_fake_durable_delivery_api(monkeypatch)
+    monkeypatch.setattr(bp, "_session_has_active_turn", lambda _session_id: False)
+    monkeypatch.setattr(bp, "ASYNC_DELIVERY_ROUTING_RETRY_SECONDS", 30.0)
+
+    def _admission_empty() -> bool:
+        with bp._ASYNC_DELEGATION_WAKEUP_ADMISSION_LOCK:
+            return not bp._ASYNC_DELEGATION_WAKEUP_ADMISSION_INFLIGHT
+
+    try:
+        # Claim succeeds, then the claim-None retry scheduler raises: the
+        # exception must NOT strand the reservation.
+        delivery["delivery_state"] = "delivered"  # claim returns None
+        monkeypatch.setattr(
+            bp,
+            "schedule_async_delegation_claim_retry",
+            lambda *a, **k: (_ for _ in ()).throw(
+                RuntimeError("retry scheduler boom")
+            ),
+        )
+        with pytest.raises(RuntimeError):
+            bp._process_async_delegation_event(
+                _async_delegation_event(delegation_id="deleg_raise_claim"),
+                session_id="webui-session-1",
+                delegation_id="deleg_raise_claim",
+                process_registry=registry,
+            )
+        assert _admission_empty(), (
+            "reservation must be released even when the retry scheduler raises"
+        )
+
+        # The session is NOT bricked: a later completion still claims and
+        # delivers normally (real wakeup thread; its own finally releases).
+        from api import routes
+
+        delivery["delivery_state"] = "pending"
+        monkeypatch.setattr(
+            bp,
+            "schedule_async_delegation_claim_retry",
+            lambda *a, **k: False,
+        )
+        monkeypatch.setattr(bp, "format_wakeup_prompt", lambda _evt: "delegation result")
+        monkeypatch.setattr(
+            routes,
+            "start_session_turn",
+            lambda *_args, **_kwargs: {"_status": 200, "stream_id": "stream-1"},
+        )
+        bp._process_async_delegation_event(
+            _async_delegation_event(delegation_id="deleg_raise_ok"),
+            session_id="webui-session-1",
+            delegation_id="deleg_raise_ok",
+            process_registry=registry,
+        )
+        assert _wait_until(lambda: len(delivery["complete"]) == 1)
+        assert delivery["delivery_state"] == "delivered"
+        assert _wait_until(_admission_empty)
+    finally:
+        _reset_wakeup_state()
+
+
