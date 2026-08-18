@@ -12128,7 +12128,7 @@ async function checkUpdatesNow(channelOverride){
     // saved setting. (Fable UX gate.)
     const _checkBody={force:true};
     if(channelOverride==='stable'||channelOverride==='experimental') _checkBody.channel=channelOverride;
-    const data=await api('/api/updates/check',{method:'POST',body:JSON.stringify(_checkBody),timeoutMs:60000});
+    const data=await api('/api/updates/check',{method:'POST',body:JSON.stringify(_checkBody),timeoutMs:300000});
     if(data.disabled){
       if(status){status.textContent=t('settings_updates_disabled');status.style.color='var(--muted)';}
     } else {
