@@ -13815,6 +13815,8 @@ function _appendTransparentFadeText(body, text){
 }
 
 function _refreshTransparentFadeProseRow(existing, node, preservedState){
+  if(!existing || !node) return node || existing;
+  if(existing === node) return existing;
   let body = existing.querySelector ? existing.querySelector('.msg-body') : null;
   const nextText = String((node.dataset && node.dataset.rawText) || (node.textContent || ''));
   // Resume strictly from the source-space cursor. `body.textContent` is NOT a
@@ -13826,6 +13828,37 @@ function _refreshTransparentFadeProseRow(existing, node, preservedState){
   // guessing a delta.
   const hasCursor = !!(existing.getAttribute && existing.getAttribute('data-stream-fade-text') !== null);
   const currentText = hasCursor ? String(existing.getAttribute('data-stream-fade-text') || '') : '';
+  const candidateBody = node.querySelector ? node.querySelector('.msg-body') : null;
+  const parserOwned = !!(candidateBody && candidateBody !== body && candidateBody.__smdParser);
+  const mute = (typeof window !== 'undefined' && typeof window.__streamFadeMuteRenderedPrefix === 'function')
+    ? window.__streamFadeMuteRenderedPrefix
+    : null;
+  if(parserOwned){
+    // Promote the actual parser-owned candidate into the keyed row's DOM
+    // position once. Cloning its children into the old visible row on every
+    // later growth frame cuts off the previous tail word's ~620ms fade
+    // (`.is-new` is stripped from the replacement) and breaks word-node
+    // identity used for scroll-anchor stability. After this swap, later
+    // keyed renders hit `_refreshTransparentLiveRow(existing === node)` and
+    // keep growing the same parser target. Pending and MEDIA tails stay on
+    // the parser until it flushes them.
+    const prevRendered = String((body && body.textContent) || '');
+    if(candidateBody.classList) candidateBody.classList.add('stream-fade-active');
+    _bindTransparentFadeCleanup(candidateBody);
+    if(mute && prevRendered) mute(candidateBody, prevRendered);
+    if(node.removeAttribute) node.removeAttribute('data-stream-fade-text');
+    const parent = existing.parentNode || existing.parentElement || null;
+    if(parent && existing.parentNode === parent){
+      if(typeof parent.replaceChild === 'function'){
+        parent.replaceChild(node, existing);
+      }else if(typeof parent.insertBefore === 'function'){
+        parent.insertBefore(node, existing);
+        if(typeof existing.remove === 'function') existing.remove();
+      }
+    }
+    _rehydrateTransparentLiveRow(node, existing, preservedState);
+    return node;
+  }
   const pairs = _transparentLiveRowAttributePairs(node);
   const kept = Object.create(null);
   for(const pair of pairs){
@@ -13846,26 +13879,7 @@ function _refreshTransparentFadeProseRow(existing, node, preservedState){
     existing.appendChild(body);
   }
   if(body.classList) body.classList.add('stream-fade-active');
-  const candidateBody = node.querySelector ? node.querySelector('.msg-body') : null;
-  const parserOwned = !!(candidateBody && candidateBody !== body && candidateBody.__smdParser);
-  const mute = (typeof window !== 'undefined' && typeof window.__streamFadeMuteRenderedPrefix === 'function')
-    ? window.__streamFadeMuteRenderedPrefix
-    : null;
-  if(parserOwned && typeof candidateBody.cloneNode === 'function'){
-    // One authority after the first parser-owned rebuild: keep adopting the
-    // live parsed DOM. Cloning once and then appending later source bytes
-    // through `_appendTransparentFadeText` turns `Hello **` / `Hello **world**`
-    // into literal `**world**` while the candidate already has
-    // `<strong>world</strong>`. Pending and MEDIA tails stay on the parser
-    // until it flushes them into this candidate.
-    const prevRendered = String(body.textContent || '');
-    const clone = candidateBody.cloneNode(true);
-    body.textContent = '';
-    while(clone.childNodes && clone.childNodes.length) body.appendChild(clone.childNodes[0]);
-    _bindTransparentFadeCleanup(body);
-    if(mute && prevRendered) mute(body, prevRendered);
-    if(existing.removeAttribute) existing.removeAttribute('data-stream-fade-text');
-  }else if(!hasCursor || !nextText.startsWith(currentText)){
+  if(!hasCursor || !nextText.startsWith(currentText)){
     // Rebuild branch. Snapshot the rendered text BEFORE clearing (#7082
     // review should-fix): without it every word re-wraps as `.is-new`, the
     // whole visible row dips to opacity 0 and fades back (~620ms), and the

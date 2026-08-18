@@ -110,6 +110,7 @@ class FakeElement {
     this.type = '';
     this.disabled = false;
     this._classes = new Set();
+    this._listeners = Object.create(null);
     const self = this;
     this.classList = {
       add(...n){ n.forEach(x=>self._classes.add(x)); },
@@ -139,11 +140,46 @@ class FakeElement {
     if(n.parentNode){ const i = n.parentNode.childNodes.indexOf(n); if(i >= 0) n.parentNode.childNodes.splice(i, 1); }
     n.parentNode = this; this.childNodes.push(n); return n;
   }
+  insertBefore(n, ref){
+    if(n && n._isFragment){ n.childNodes.slice().forEach(c=>this.insertBefore(c, ref)); return n; }
+    if(n && n.parentNode){ const i = n.parentNode.childNodes.indexOf(n); if(i >= 0) n.parentNode.childNodes.splice(i, 1); }
+    if(n) n.parentNode = this;
+    if(!ref){ this.childNodes.push(n); return n; }
+    const i = this.childNodes.indexOf(ref);
+    if(i < 0) this.childNodes.push(n);
+    else this.childNodes.splice(i, 0, n);
+    return n;
+  }
+  replaceChild(n, old){
+    const i = this.childNodes.indexOf(old);
+    if(i < 0) return old;
+    if(n && n.parentNode){ const j = n.parentNode.childNodes.indexOf(n); if(j >= 0) n.parentNode.childNodes.splice(j, 1); }
+    if(old) old.parentNode = null;
+    if(n) n.parentNode = this;
+    this.childNodes[i] = n;
+    return old;
+  }
+  remove(){
+    if(!this.parentNode) return;
+    const i = this.parentNode.childNodes.indexOf(this);
+    if(i >= 0) this.parentNode.childNodes.splice(i, 1);
+    this.parentNode = null;
+  }
   setAttribute(name, value){ this.attributes[String(name)] = String(value ?? ''); }
   getAttribute(name){ const k = String(name); return k in this.attributes ? this.attributes[k] : null; }
   removeAttribute(name){ delete this.attributes[String(name)]; }
   getAttributeNames(){ return Object.keys(this.attributes); }
-  addEventListener(){}
+  addEventListener(type, fn){
+    const key = String(type || '');
+    if(!this._listeners[key]) this._listeners[key] = [];
+    this._listeners[key].push(fn);
+  }
+  dispatchEvent(event){
+    const type = event && event.type ? String(event.type) : '';
+    const list = this._listeners[type] || [];
+    for(const fn of list) fn(event);
+    return true;
+  }
   cloneNode(deep){
     const copy = new FakeElement(this.tagName);
     copy._classes = new Set(this._classes);
@@ -153,11 +189,19 @@ class FakeElement {
     return copy;
   }
   querySelector(sel){
-    const want = String(sel).split(',')[0].trim().replace(/^\./, '');
+    const options = String(sel || '').split(',').map(s => s.trim()).filter(Boolean);
+    const matches = (el, option)=>{
+      const classes = [];
+      const re = /\.([A-Za-z0-9_-]+)/g;
+      let m;
+      while((m = re.exec(option))) classes.push(m[1]);
+      if(!classes.length) return false;
+      return classes.every(cls => el._classes && el._classes.has(cls));
+    };
     const walk = (node)=>{
       for(const c of node.childNodes){
         if(c.nodeType !== 1) continue;
-        if(c._classes.has(want)) return c;
+        if(options.some(opt => matches(c, opt))) return c;
         const hit = walk(c);
         if(hit) return hit;
       }
@@ -371,6 +415,7 @@ const messagesSrc = readFileSync(process.env.MESSAGES_JS_PATH, 'utf8');
   extractFunc('_transparentLiveRowInteractiveState'),
   extractFunc('_rehydrateTransparentLiveRow'),
   extractFunc('_refreshTransparentFadeProseRow'),
+  extractFunc('_refreshTransparentLiveRow'),
 ].join('\\n'));
 (0, eval)(extractFuncFrom(messagesSrc, '_streamFadeMuteRenderedPrefix'));
 globalThis.window.__streamFadeMuteRenderedPrefix = globalThis._streamFadeMuteRenderedPrefix;
@@ -390,13 +435,14 @@ function makeRow(rawText){
   return row;
 }
 function collectFadeSpans(root){
+  return collectFadeSpanNodes(root).map(c=>({ text: c.textContent, isNew: c._classes.has('is-new') }));
+}
+function collectFadeSpanNodes(root){
   const out = [];
   const walk = (node)=>{
     for(const c of node.childNodes || []){
       if(c.nodeType !== 1) continue;
-      if(c._classes && c._classes.has('stream-fade-word')){
-        out.push({ text: c.textContent, isNew: c._classes.has('is-new') });
-      }
+      if(c._classes && c._classes.has('stream-fade-word')) out.push(c);
       walk(c);
     }
   };
@@ -525,9 +571,9 @@ candidateBody.__smdParser = candidateParser;
 const candidateRendered = candidateBody.textContent;
 const pendingTail = String(candidateParser.pending || '') + String(candidateParser.text || '');
 
-_refreshTransparentFadeProseRow(existing, candidate, null);
+const visible = _refreshTransparentFadeProseRow(existing, candidate, null);
 
-const refreshedBody = existing.querySelector('.msg-body');
+const refreshedBody = visible.querySelector('.msg-body');
 const link = findTag(refreshedBody, 'A');
 const strong = findTag(refreshedBody, 'STRONG');
 process.stdout.write(JSON.stringify({
@@ -540,7 +586,9 @@ process.stdout.write(JSON.stringify({
   linkHref: link ? link.getAttribute('href') : null,
   hasStrong: !!strong,
   strongText: strong ? strong.textContent : null,
-  cursor: existing.getAttribute('data-stream-fade-text'),
+  cursor: visible.getAttribute('data-stream-fade-text'),
+  adoptedParserRow: visible === candidate,
+  sameParserBody: refreshedBody === candidateBody,
 }));
 """
         % json.dumps(md_source)
@@ -562,6 +610,8 @@ process.stdout.write(JSON.stringify({
     # parser until it flushes them.
     assert data["pendingTail"] == "."
     assert data["cursor"] is None
+    assert data["adoptedParserRow"] is True
+    assert data["sameParserBody"] is True
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -595,18 +645,18 @@ candidateBody.__smdParser = candidateParser;
 const pendingTail = String(candidateParser.pending || '') + String(candidateParser.text || '');
 const candidateRendered = candidateBody.textContent;
 
-_refreshTransparentFadeProseRow(existing, candidate, null);
-const afterRebuildText = existing.querySelector('.msg-body').textContent;
-const afterRebuildCursor = existing.getAttribute('data-stream-fade-text');
+const visible = _refreshTransparentFadeProseRow(existing, candidate, null);
+const afterRebuildText = visible.querySelector('.msg-body').textContent;
+const afterRebuildCursor = visible.getAttribute('data-stream-fade-text');
 
-_refreshTransparentFadeProseRow(existing, candidate, null);
-const afterResumeBody = existing.querySelector('.msg-body');
+const sameVisible = _refreshTransparentFadeProseRow(visible, candidate, null);
+const afterResumeBody = sameVisible.querySelector('.msg-body');
 const afterResumeStrong = findTag(afterResumeBody, 'STRONG');
 const afterResumeLink = findTag(afterResumeBody, 'A');
 
 if(typeof smd.parser_end === 'function') smd.parser_end(candidateParser);
-_refreshTransparentFadeProseRow(existing, candidate, null);
-const afterEndBody = existing.querySelector('.msg-body');
+const settledVisible = _refreshTransparentFadeProseRow(sameVisible, candidate, null);
+const afterEndBody = settledVisible.querySelector('.msg-body');
 
 process.stdout.write(JSON.stringify({
   pendingTail,
@@ -614,12 +664,16 @@ process.stdout.write(JSON.stringify({
   afterRebuildText,
   afterRebuildCursor,
   afterResumeText: afterResumeBody.textContent,
-  afterResumeCursor: existing.getAttribute('data-stream-fade-text'),
+  afterResumeCursor: sameVisible.getAttribute('data-stream-fade-text'),
   hasStrongAfterResume: !!afterResumeStrong,
   hasLinkAfterResume: !!afterResumeLink,
   literalStarsAfterResume: afterResumeBody.textContent.includes('**'),
   afterEndText: afterEndBody.textContent,
   literalStarsAfterEnd: afterEndBody.textContent.includes('**'),
+  adoptedParserRow: visible === candidate,
+  laterRefreshSameRow: sameVisible === candidate,
+  settledSameRow: settledVisible === candidate,
+  sameParserBody: afterResumeBody === candidateBody,
 }));
 """
         % json.dumps(md_source)
@@ -634,6 +688,10 @@ process.stdout.write(JSON.stringify({
     # Same live parser: later refreshes must keep parsed structure. The
     # parser may flush its held-back "." into the candidate; that is still
     # parser-owned text, not a source-byte append.
+    assert data["adoptedParserRow"] is True
+    assert data["laterRefreshSameRow"] is True
+    assert data["settledSameRow"] is True
+    assert data["sameParserBody"] is True
     assert data["afterResumeCursor"] is None
     assert data["hasStrongAfterResume"] is True
     assert data["hasLinkAfterResume"] is True
@@ -697,21 +755,21 @@ const parser = smd.parser(smd.default_renderer(candidateBody));
 smd.parser_write(parser, FIRST);
 candidateBody.__smdParser = parser;
 
-_refreshTransparentFadeProseRow(existing, candidate, null);
+const visible = _refreshTransparentFadeProseRow(existing, candidate, null);
 
 smd.parser_write(parser, FULL.slice(FIRST.length));
 candidate.dataset.rawText = FULL;
-_refreshTransparentFadeProseRow(existing, candidate, null);
+const sameVisible = _refreshTransparentFadeProseRow(visible, candidate, null);
 
-const liveAfterClose = existing.querySelector('.msg-body');
+const liveAfterClose = sameVisible.querySelector('.msg-body');
 const strongAfterClose = findTag(liveAfterClose, 'STRONG');
 const htmlAfterClose = serialize(liveAfterClose);
 const textAfterClose = liveAfterClose.textContent;
 const candidateHtmlAfterClose = serialize(candidateBody);
 
 if(typeof smd.parser_end === 'function') smd.parser_end(parser);
-_refreshTransparentFadeProseRow(existing, candidate, null);
-const liveAfterEnd = existing.querySelector('.msg-body');
+const settledVisible = _refreshTransparentFadeProseRow(sameVisible, candidate, null);
+const liveAfterEnd = settledVisible.querySelector('.msg-body');
 const strongAfterEnd = findTag(liveAfterEnd, 'STRONG');
 
 process.stdout.write(JSON.stringify({
@@ -733,6 +791,10 @@ process.stdout.write(JSON.stringify({
   helloCountAfterEnd: countSubstr(liveAfterEnd.textContent, 'Hello'),
   worldCountAfterEnd: countSubstr(liveAfterEnd.textContent, 'world'),
   doneCountAfterEnd: countSubstr(liveAfterEnd.textContent, 'done'),
+  adoptedParserRow: visible === candidate,
+  laterRefreshSameRow: sameVisible === candidate,
+  settledSameRow: settledVisible === candidate,
+  sameParserBody: liveAfterClose === candidateBody,
 }));
 """
         % (json.dumps(first_source), json.dumps(full_source))
@@ -760,3 +822,160 @@ process.stdout.write(JSON.stringify({
     assert data["helloCountAfterEnd"] == 1
     assert data["worldCountAfterEnd"] == 1
     assert data["doneCountAfterEnd"] == 1
+    assert data["adoptedParserRow"] is True
+    assert data["laterRefreshSameRow"] is True
+    assert data["settledSameRow"] is True
+    assert data["sameParserBody"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_live_prose_post_rewind_keeps_tail_word_identity_across_two_growths():
+    """#7082 must-fix: after the separate-owner rewind transition, two later
+    growth frames must keep the first genuinely-new tail span as the same
+    node with ``.is-new`` until an explicit ``animationend``.
+    """
+    prefix_source = "Hello there"
+    first_growth = "Hello there world"
+    second_growth = "Hello there world more"
+    script = (
+        _HARNESS
+        + _REBUILD_PRELUDE
+        + """
+const smd = await import(process.env.SMD_PATH);
+
+const PREFIX = %s;
+const FIRST = %s;
+const SECOND = %s;
+
+function wrapWords(parent, text){
+  const words = String(text || '').split(' ');
+  words.forEach((word, i)=>{
+    const span = new FakeElement('span');
+    span.className = 'stream-fade-word is-new';
+    span.textContent = word;
+    parent.appendChild(span);
+    if(i < words.length - 1) parent.appendChild(new TextNode(' '));
+  });
+}
+
+const host = new FakeElement('div');
+const existing = makeRow(undefined);
+delete existing.dataset.rawText;
+const staleBody = existing.querySelector('.msg-body');
+wrapWords(staleBody, PREFIX);
+host.appendChild(existing);
+
+const candidate = makeRow(PREFIX);
+const candidateBody = candidate.querySelector('.msg-body');
+const parser = smd.parser(smd.default_renderer(candidateBody));
+smd.parser_write(parser, PREFIX);
+candidateBody.__smdParser = parser;
+const pendingAtAdopt = String(parser.pending || '') + String(parser.text || '');
+// Keep the live parser identity, then rebuild fade spans so the mute + later
+// growth can be observed as node identity. Do not parser_write after this:
+// the default renderer would replace the word nodes we need to pin.
+candidateBody.textContent = '';
+const p = new FakeElement('p');
+const strong = new FakeElement('strong');
+const hello = new FakeElement('span');
+hello.className = 'stream-fade-word is-new';
+hello.textContent = 'Hello';
+const there = new FakeElement('span');
+there.className = 'stream-fade-word is-new';
+there.textContent = 'there';
+strong.appendChild(there);
+p.appendChild(hello);
+p.appendChild(new TextNode(' '));
+p.appendChild(strong);
+candidateBody.appendChild(p);
+
+const visible = _refreshTransparentFadeProseRow(existing, candidate, null);
+const afterAdoptNew = collectFadeSpanNodes(visible).filter(span => span._classes.has('is-new'));
+
+candidate.dataset.rawText = FIRST;
+const world = new FakeElement('span');
+world.className = 'stream-fade-word is-new';
+world.textContent = 'world';
+p.appendChild(new TextNode(' '));
+p.appendChild(world);
+const afterFirstGrowth = _refreshTransparentLiveRow(visible, candidate, null);
+const firstNewWasAnimated = world._classes.has('is-new');
+const firstNewAfterFirstGrowth = world;
+
+candidate.dataset.rawText = SECOND;
+const more = new FakeElement('span');
+more.className = 'stream-fade-word is-new';
+more.textContent = 'more';
+p.appendChild(new TextNode(' '));
+p.appendChild(more);
+const afterSecondGrowth = _refreshTransparentLiveRow(afterFirstGrowth, candidate, null);
+const afterSecondSpans = collectFadeSpanNodes(afterSecondGrowth);
+const afterSecondNew = afterSecondSpans.filter(span => span._classes.has('is-new'));
+const secondNewSameIdentity = world === firstNewAfterFirstGrowth && afterSecondSpans.includes(world);
+const secondNewIsNew = world._classes.has('is-new');
+
+visible.querySelector('.msg-body').dispatchEvent({ type: 'animationend', target: world });
+const afterCleanupNew = collectFadeSpanNodes(afterSecondGrowth).filter(span => span._classes.has('is-new'));
+
+if(typeof smd.parser_end === 'function') smd.parser_end(parser);
+const settled = _refreshTransparentLiveRow(afterSecondGrowth, candidate, null);
+const settledBody = settled.querySelector('.msg-body');
+
+process.stdout.write(JSON.stringify({
+  adoptedParserRow: visible === candidate,
+  firstGrowthSameRow: afterFirstGrowth === candidate,
+  secondGrowthSameRow: afterSecondGrowth === candidate,
+  sameParserBody: afterSecondGrowth.querySelector('.msg-body') === candidateBody,
+  afterAdoptNewTexts: afterAdoptNew.map(span => span.textContent),
+  firstNewText: firstNewAfterFirstGrowth.textContent,
+  firstNewWasAnimated,
+  firstNewStillConnected: !!(world.parentNode),
+  secondNewSameIdentity,
+  secondNewIsNew,
+  afterSecondNewTexts: afterSecondNew.map(span => span.textContent),
+  afterCleanupNewTexts: afterCleanupNew.map(span => span.textContent),
+  hasStrong: !!findTag(afterSecondGrowth, 'STRONG'),
+  strongText: findTag(afterSecondGrowth, 'STRONG') ? findTag(afterSecondGrowth, 'STRONG').textContent : null,
+  literalStars: afterSecondGrowth.textContent.includes('**'),
+  pendingAtAdopt,
+  settledSameRow: settled === candidate,
+  afterSecondText: afterSecondGrowth.querySelector('.msg-body').textContent,
+  afterEndText: settledBody.textContent,
+  cursorAfterAdopt: visible.getAttribute('data-stream-fade-text'),
+  cursorAfterSecond: afterSecondGrowth.getAttribute('data-stream-fade-text'),
+  oldRowDetached: existing.parentNode === null,
+  adoptedRowParented: visible.parentNode === host,
+  helloCount: (settledBody.textContent.match(/Hello/g) || []).length,
+  worldCount: (settledBody.textContent.match(/world/g) || []).length,
+  moreCount: (settledBody.textContent.match(/more/g) || []).length,
+}));
+"""
+        % (json.dumps(prefix_source), json.dumps(first_growth), json.dumps(second_growth))
+    )
+    data = _run_node_module(script)
+
+    assert data["adoptedParserRow"] is True
+    assert data["firstGrowthSameRow"] is True
+    assert data["secondGrowthSameRow"] is True
+    assert data["sameParserBody"] is True
+    assert data["afterAdoptNewTexts"] == []
+    assert data["firstNewText"] == "world"
+    assert data["firstNewWasAnimated"] is True
+    assert data["firstNewStillConnected"] is True
+    assert data["secondNewSameIdentity"] is True
+    assert data["secondNewIsNew"] is True
+    assert data["afterSecondNewTexts"] == ["world", "more"]
+    assert data["afterCleanupNewTexts"] == ["more"]
+    assert data["hasStrong"] is True
+    assert data["strongText"] == "there"
+    assert data["literalStars"] is False
+    assert data["settledSameRow"] is True
+    assert data["afterSecondText"] == second_growth
+    assert data["afterEndText"] == second_growth
+    assert data["cursorAfterAdopt"] is None
+    assert data["cursorAfterSecond"] is None
+    assert data["oldRowDetached"] is True
+    assert data["adoptedRowParented"] is True
+    assert data["helloCount"] == 1
+    assert data["worldCount"] == 1
+    assert data["moreCount"] == 1
