@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import copy
 import os
 import sys
 import types
 from types import SimpleNamespace
+
+import pytest
 
 import api.config as config
 import api.onboarding as onboarding
@@ -26,6 +29,47 @@ def _install_hermes_modules(monkeypatch, roster=None, model_ids=None):
     monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli)
     monkeypatch.setitem(sys.modules, "hermes_cli.models", models)
     monkeypatch.setitem(sys.modules, "hermes_cli.auth", auth)
+
+
+@pytest.fixture(autouse=True)
+def _restore_config_module_state():
+    cache_obj = config._cfg_cache
+    cache_state = copy.deepcopy(cache_obj)
+    cfg_obj = config.cfg
+    cfg_state = copy.deepcopy(cfg_obj)
+    cfg_state_values = {
+        name: getattr(config, name)
+        for name in ("_cfg_mtime", "_cfg_path", "_cfg_fingerprint")
+    }
+    model_state = {
+        name: copy.deepcopy(getattr(config, name))
+        for name in (
+            "_available_models_cache",
+            "_available_models_cache_ts",
+            "_available_models_live_rebuild_ts",
+            "_available_models_cache_source_fingerprint",
+            "_models_cache_provenance",
+            "_advertised_model_ids_memo",
+            "_cache_build_in_progress",
+            "_yaml_file_cache",
+        )
+    }
+    pool_cache_obj = config._CREDENTIAL_POOL_CACHE
+    pool_cache_state = copy.deepcopy(pool_cache_obj)
+    yield
+    cache_obj.clear()
+    cache_obj.update(cache_state)
+    config._cfg_cache = cache_obj
+    cfg_obj.clear()
+    cfg_obj.update(cfg_state)
+    config.cfg = cfg_obj
+    for name, value in cfg_state_values.items():
+        setattr(config, name, value)
+    for name, value in model_state.items():
+        setattr(config, name, value)
+    pool_cache_obj.clear()
+    pool_cache_obj.update(pool_cache_state)
+    config._CREDENTIAL_POOL_CACHE = pool_cache_obj
 
 
 def test_canonical_identity_preservation_matrix():
@@ -371,7 +415,6 @@ def test_live_models_uses_legacy_provider_credentials(monkeypatch):
 
 
 def test_named_custom_catalog_inherits_shared_custom_provider_key(monkeypatch, tmp_path):
-    import copy
     import json
     import urllib.request
 
@@ -400,56 +443,130 @@ def test_named_custom_catalog_inherits_shared_custom_provider_key(monkeypatch, t
         calls.append((req.full_url, req.headers.get("Authorization"), timeout))
         return Response()
 
-    saved_cfg_cache = copy.deepcopy(config._cfg_cache)
-    saved_cfg_alias = config.cfg
-    saved_cfg_state = {
-        name: getattr(config, name)
-        for name in ("_cfg_mtime", "_cfg_path", "_cfg_fingerprint")
-    }
-    saved_model_state = {
-        name: copy.deepcopy(getattr(config, name))
-        for name in (
-            "_available_models_cache",
-            "_available_models_cache_ts",
-            "_available_models_live_rebuild_ts",
-            "_available_models_cache_source_fingerprint",
-            "_models_cache_provenance",
-            "_advertised_model_ids_memo",
-            "_cache_build_in_progress",
-        )
-    }
-    saved_pool_cache = copy.deepcopy(config._CREDENTIAL_POOL_CACHE)
-    try:
-        for name in tuple(os.environ):
-            if name.endswith(("_API_KEY", "_TOKEN")) or name == "API_KEY":
-                monkeypatch.delenv(name, raising=False)
-        monkeypatch.setattr(config, "_get_config_path", lambda: cfgfile)
-        monkeypatch.setattr(config, "_get_auth_store_path", lambda: tmp_path / "auth.json")
-        monkeypatch.setattr(config, "_get_models_cache_path", lambda: tmp_path / "models.json")
-        monkeypatch.setattr(config, "_thread_local_env_value", lambda _name, default="": default)
-        monkeypatch.setattr(config, "_read_live_provider_model_ids", lambda _pid: [])
-        monkeypatch.setattr(config, "_pool_entry_payloads", lambda _provider: [])
-        monkeypatch.setattr(config, "_has_explicit_pool_credentials", lambda _provider: False)
-        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
-        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-        _install_hermes_modules(monkeypatch)
-        config.reload_config()
-        config.invalidate_models_cache()
+    for name in tuple(os.environ):
+        if name.endswith(("_API_KEY", "_TOKEN")) or name == "API_KEY":
+            monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(config, "_get_config_path", lambda: cfgfile)
+    monkeypatch.setattr(config, "_get_auth_store_path", lambda: tmp_path / "auth.json")
+    monkeypatch.setattr(config, "_get_models_cache_path", lambda: tmp_path / "models.json")
+    monkeypatch.setattr(config, "_thread_local_env_value", lambda _name, default="": default)
+    monkeypatch.setattr(config, "_read_live_provider_model_ids", lambda _pid: [])
+    monkeypatch.setattr(config, "_pool_entry_payloads", lambda _provider: [])
+    monkeypatch.setattr(config, "_has_explicit_pool_credentials", lambda _provider: False)
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    _install_hermes_modules(monkeypatch)
+    config.reload_config()
+    config.invalidate_models_cache()
 
-        catalog = config.get_available_models(force_refresh=True)
-        group = next(group for group in catalog["groups"] if group.get("provider_id") == "custom:demo")
-        assert calls == [("https://proxy.example/v1/models", "Bearer shared-custom-key", 5.0)]
-        assert "demo-live-model" in {model["id"] for model in group["models"]}
-    finally:
-        config._cfg_cache.clear()
-        config._cfg_cache.update(saved_cfg_cache)
-        config.cfg = saved_cfg_alias
-        for name, value in saved_cfg_state.items():
-            setattr(config, name, value)
-        for name, value in saved_model_state.items():
-            setattr(config, name, value)
-        config._CREDENTIAL_POOL_CACHE.clear()
-        config._CREDENTIAL_POOL_CACHE.update(saved_pool_cache)
+    catalog = config.get_available_models(force_refresh=True)
+    group = next(group for group in catalog["groups"] if group.get("provider_id") == "custom:demo")
+    assert calls == [("https://proxy.example/v1/models", "Bearer shared-custom-key", 5.0)]
+    assert "demo-live-model" in {model["id"] for model in group["models"]}
+
+
+def test_named_custom_catalog_prefers_own_key_over_shared_custom_key(monkeypatch, tmp_path):
+    import json
+    import urllib.request
+
+    import api.profiles as profiles
+
+    cfgfile = tmp_path / "config.yaml"
+    cfgfile.write_text(
+        "model:\n  provider: custom:demo\n  base_url: https://proxy.example/v1\n"
+        "providers:\n  custom:\n    api_key: shared-custom-key\n"
+        "custom_providers:\n  - name: Demo\n    api_key: named-custom-key\n"
+        "    base_url: https://proxy.example/v1\n",
+        encoding="utf-8",
+    )
+    calls = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps({"data": [{"id": "named-live-model"}]}).encode("utf-8")
+
+    def fake_urlopen(req, timeout=None):
+        calls.append((req.full_url, req.headers.get("Authorization"), timeout))
+        return Response()
+
+    for name in tuple(os.environ):
+        if name.endswith(("_API_KEY", "_TOKEN")) or name == "API_KEY":
+            monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(config, "_get_config_path", lambda: cfgfile)
+    monkeypatch.setattr(config, "_get_auth_store_path", lambda: tmp_path / "auth.json")
+    monkeypatch.setattr(config, "_get_models_cache_path", lambda: tmp_path / "models.json")
+    monkeypatch.setattr(config, "_thread_local_env_value", lambda _name, default="": default)
+    monkeypatch.setattr(config, "_read_live_provider_model_ids", lambda _pid: [])
+    monkeypatch.setattr(config, "_pool_entry_payloads", lambda _provider: [])
+    monkeypatch.setattr(config, "_has_explicit_pool_credentials", lambda _provider: False)
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    _install_hermes_modules(monkeypatch)
+    config.reload_config()
+    config.invalidate_models_cache()
+
+    catalog = config.get_available_models(force_refresh=True)
+    group = next(group for group in catalog["groups"] if group.get("provider_id") == "custom:demo")
+    assert calls == [("https://proxy.example/v1/models", "Bearer named-custom-key", 5.0)]
+    assert "named-live-model" in {model["id"] for model in group["models"]}
+
+
+def test_inactive_named_custom_catalog_inherits_shared_custom_provider_key(monkeypatch, tmp_path):
+    import json
+    import urllib.request
+
+    import api.profiles as profiles
+
+    cfgfile = tmp_path / "config.yaml"
+    cfgfile.write_text(
+        "model:\n  provider: google\n  default: gemini-2.5-pro\n"
+        "providers:\n  google:\n    api_key: google-key\n"
+        "  custom:\n    api_key: shared-custom-key\n"
+        "custom_providers:\n  - name: Demo\n    base_url: https://proxy.example/v1\n",
+        encoding="utf-8",
+    )
+    calls = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps({"data": [{"id": "inactive-live-model"}]}).encode("utf-8")
+
+    def fake_urlopen(req, timeout=None):
+        calls.append((req.full_url, req.headers.get("Authorization"), timeout))
+        return Response()
+
+    for name in tuple(os.environ):
+        if name.endswith(("_API_KEY", "_TOKEN")) or name == "API_KEY":
+            monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(config, "_get_config_path", lambda: cfgfile)
+    monkeypatch.setattr(config, "_get_auth_store_path", lambda: tmp_path / "auth.json")
+    monkeypatch.setattr(config, "_get_models_cache_path", lambda: tmp_path / "models.json")
+    monkeypatch.setattr(config, "_thread_local_env_value", lambda _name, default="": default)
+    monkeypatch.setattr(config, "_read_live_provider_model_ids", lambda _pid: [])
+    monkeypatch.setattr(config, "_pool_entry_payloads", lambda _provider: [])
+    monkeypatch.setattr(config, "_has_explicit_pool_credentials", lambda _provider: False)
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    _install_hermes_modules(monkeypatch)
+    config.reload_config()
+    config.invalidate_models_cache()
+
+    catalog = config.get_available_models(force_refresh=True)
+    group = next(group for group in catalog["groups"] if group.get("provider_id") == "custom:demo")
+    assert calls == [("https://proxy.example/v1/models", "Bearer shared-custom-key", 5.0)]
+    assert "@custom:demo:inactive-live-model" in {model["id"] for model in group["models"]}
 
 
 def test_catalog_endpoint_uses_canonical_equivalent_key_not_custom_key(monkeypatch, tmp_path):
