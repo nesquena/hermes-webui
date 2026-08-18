@@ -24,6 +24,7 @@ The fix adds:
 """
 
 import json
+import threading
 import time
 
 import pytest
@@ -1257,6 +1258,7 @@ def _run_real_sequential_executor_with_guardrail_suffix(tmp_path, monkeypatch):
             args=function_args,
             middleware_trace=list(middleware_trace or []),
             blocked=False,
+            dispatched=True,
         )
 
     monkeypatch.setattr(te, "_run_agent_tool_execution_middleware", _stub_middleware)
@@ -1270,6 +1272,10 @@ def _run_real_sequential_executor_with_guardrail_suffix(tmp_path, monkeypatch):
     class _FakeAgent:
         _incremental_persistence_failed = False
         _interrupt_requested = False
+        # Real sequential executor tracks active worker threads on the agent
+        # (agent/tool_executor.py `_run()`); provide the production shape.
+        _tool_worker_threads_lock = threading.Lock()
+        _tool_worker_threads = set()
         verbose_logging = False
         quiet_mode = False
         log_prefix = "[fake] "
@@ -1316,25 +1322,38 @@ def _run_real_sequential_executor_with_guardrail_suffix(tmp_path, monkeypatch):
         def _apply_pending_steer_to_tool_results(self, messages, num_tools):
             pass
 
-        def _flush_messages_to_session_db(self, messages):
-            # Mirror the executor's incremental persistence: append the
-            # in-memory tool rows to the REAL temp SessionDB.
-            for msg in messages:
-                if not isinstance(msg, dict) or msg.get("role") != "tool":
-                    continue
-                content = msg.get("content")
-                db.append_message(
-                    session_id=session_id,
-                    role="tool",
-                    content=content if isinstance(content, str)
-                    else json.dumps(content, ensure_ascii=False),
-                    tool_name=msg.get("tool_name"),
-                    tool_call_id=msg.get("tool_call_id"),
-                )
-            return True
-
     agent = _FakeAgent()
     agent.session_id = session_id
+
+    # REAL agent flush path: bind the canonical AIAgent SessionDB persistence
+    # (marker-based dedup + append_messages_batch transaction) to the
+    # temporary store — no hand-written persistence mirror.
+    from run_agent import AIAgent
+
+    agent._session_db = db
+    agent._session_db_created = True
+    agent._session_persist_lock = None
+    agent._persist_disabled = False
+    agent._flushed_db_message_session_id = None
+    agent._last_flushed_db_idx = 0
+    agent._db_flush_scan_prefix = None
+    agent._flushed_db_message_ids = None
+    agent._persist_user_message_idx = None
+    agent._persist_user_message_override = None
+    agent._persist_user_message_timestamp = None
+    agent._pending_cli_user_message = None
+
+    def _real_flush(messages, conversation_history=None):
+        return AIAgent._flush_messages_to_session_db(agent, messages, conversation_history)
+
+    agent._flush_messages_to_session_db = _real_flush
+    # The canonical wrapper delegates to _flush_messages_to_session_db_unlocked;
+    # bind the real unlocked body too so the flush runs marker-dedup +
+    # append_messages_batch against the temp store.
+    def _real_flush_unlocked(messages, conversation_history=None):
+        return AIAgent._flush_messages_to_session_db_unlocked(agent, messages, conversation_history)
+
+    agent._flush_messages_to_session_db_unlocked = _real_flush_unlocked
 
     tool_call = SimpleNamespace(
         id="call-seq-guard-1",
@@ -1343,39 +1362,85 @@ def _run_real_sequential_executor_with_guardrail_suffix(tmp_path, monkeypatch):
             arguments=json.dumps({"command": "pytest tests/ -q"}),
         ),
     )
-    assistant_message = SimpleNamespace(tool_calls=[tool_call])
-    messages = [
-        {"role": "user", "content": "Run the tests."},
-        {"role": "assistant", "content": "", "tool_calls": [
-            {"id": "call-seq-guard-1", "function": {"name": "terminal", "arguments": "{}"}}
-        ]},
-    ]
 
+    # Scripted fake provider: request 1 returns the terminal tool call,
+    # request 2 returns the final response — the same-turn loop shape.
+    provider_requests = []
+    _provider_calls = {"n": 0}
+
+    def _fake_provider(api_messages, **kwargs):
+        _provider_calls["n"] += 1
+        provider_requests.append(list(api_messages))
+        if _provider_calls["n"] == 1:
+            return SimpleNamespace(
+                content="",
+                tool_calls=[tool_call],
+                finish_reason="tool_calls",
+            )
+        return SimpleNamespace(
+            content="All done.",
+            tool_calls=None,
+            finish_reason="stop",
+        )
+
+    # Phase 1 — the loop's first same-turn provider request.
+    messages = [{"role": "user", "content": "Run the tests."}]
+    assistant_response = _fake_provider(messages)
+    assistant_message = SimpleNamespace(
+        content=getattr(assistant_response, "content", ""),
+        tool_calls=assistant_response.tool_calls,
+    )
+    # The loop appends the assistant tool-call row before executing tools.
+    messages.append({
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{
+            "id": tool_call.id,
+            "type": "function",
+            "function": {
+                "name": "terminal",
+                "arguments": tool_call.function.arguments,
+            },
+        }],
+    })
+
+    # Phase 2 — REAL sequential executor (stubbed terminal dispatch only,
+    # real guardrail suffix, real agent flush).
     te.execute_tool_calls_sequential(
         agent, assistant_message, messages, effective_task_id="task-6481"
     )
-    return messages, db, session_id
+
+    # Phase 3 — the loop's SECOND same-turn provider request: the exact
+    # live list the executor just appended the tool row to.
+    final_response = _fake_provider(messages)
+    assert final_response.content == "All done."
+
+    return provider_requests, messages, db, session_id, agent
 
 
 def test_real_sequential_executor_guardrail_suffix_stays_sanitized(tmp_path, monkeypatch):
-    """The REAL sequential executor never leaks verification_evidence.
+    """The production same-turn composition never leaks verification_evidence.
 
-    Production composition from the re-gate: the executor runs the terminal
-    dispatch (stubbed to return the actual serialized result), appends
-    tool-guard guidance to the string (``_append_guardrail_observation``),
-    builds the tool message through the sanitizer-wrapped
-    ``make_tool_result_message``, appends it to the live conversation, and
-    flushes it to SessionDB — all before WebUI regains control. The evidence
-    field must be absent from the in-memory tool message, the second same-turn
-    provider payload, and the persisted row, while the guidance suffix remains
-    intact.
+    A scripted fake provider (terminal tool call, then final response) drives
+    the REAL sequential executor; only terminal dispatch is stubbed. The
+    executor appends real tool-guard guidance and persists through the REAL
+    AIAgent SessionDB flush. The second same-turn provider request, the live
+    tool row, and the persisted row must all be evidence-free with the
+    guidance suffix byte-for-byte intact.
     """
-    messages, db, session_id = _run_real_sequential_executor_with_guardrail_suffix(
-        tmp_path, monkeypatch
+    provider_requests, messages, db, session_id, agent = (
+        _run_real_sequential_executor_with_guardrail_suffix(tmp_path, monkeypatch)
     )
 
-    # 1. In-memory tool message — evidence gone, suffix intact.
-    tool_msgs = [m for m in messages if isinstance(m, dict) and m.get("role") == "tool"]
+    assert not agent._incremental_persistence_failed, "real agent flush must succeed"
+
+    # 1. The scripted provider was called twice in the same turn.
+    assert len(provider_requests) == 2
+
+    # 2. Second same-turn provider payload — the exact list the loop hands
+    # the provider after tool execution (not a manual re-serialization).
+    second_payload = provider_requests[1]
+    tool_msgs = [m for m in second_payload if isinstance(m, dict) and m.get("role") == "tool"]
     assert len(tool_msgs) == 1
     content = tool_msgs[0]["content"]
     assert isinstance(content, str)
@@ -1384,22 +1449,24 @@ def test_real_sequential_executor_guardrail_suffix_stays_sanitized(tmp_path, mon
     parsed = json.loads(content[: -len(_GUARDRAIL_SUFFIX)])
     assert parsed["output"] == "12 passed, 0 failed"
     assert parsed["exit_code"] == 0
+    assert "verification_evidence" not in json.dumps(second_payload, ensure_ascii=False)
 
-    # 2. Second same-turn provider payload — what the model would receive on
-    # the next request in the same turn (raw serialized messages). The suffix
-    # is embedded as escaped ``\n\n`` inside the JSON-encoded string.
-    provider_payload = json.dumps(messages, ensure_ascii=False)
-    assert "verification_evidence" not in provider_payload
-    assert "[Tool loop warning: tool_loop; count=2;" in provider_payload
+    # 3. The live tool row appended to the loop's message list.
+    live_tool = [m for m in messages if isinstance(m, dict) and m.get("role") == "tool"]
+    assert len(live_tool) == 1
+    assert "verification_evidence" not in live_tool[0]["content"]
+    assert live_tool[0]["content"].endswith(_GUARDRAIL_SUFFIX)
 
-    # 2b. The WebUI model-boundary sanitizer is also clean on the live list.
+    # 4. Persisted row — written by the REAL AIAgent flush path
+    # (marker dedup + append_messages_batch), suffix intact.
+    rows = db.get_messages(session_id)
+    tool_rows = [r for r in rows if str(r.get("role")) == "tool"]
+    assert len(tool_rows) == 1
+    row_content = str(tool_rows[0]["content"])
+    assert "verification_evidence" not in row_content
+    assert row_content.endswith(_GUARDRAIL_SUFFIX)
+    assert "12 passed, 0 failed" in row_content
+
+    # 5. The WebUI model-boundary sanitizer is also clean on the live list.
     sanitized = streaming._sanitize_messages_for_api(messages)
     assert "verification_evidence" not in json.dumps(sanitized, ensure_ascii=False)
-
-    # 3. Persisted SessionDB row — evidence gone, suffix intact.
-    rows = db.get_messages(session_id)
-    assert len(rows) == 1
-    row_content = str(rows[0]["content"])
-    assert "verification_evidence" not in row_content
-    assert "12 passed, 0 failed" in row_content
-    assert _GUARDRAIL_SUFFIX in row_content
