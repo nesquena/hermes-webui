@@ -3127,6 +3127,11 @@ def model_with_provider_context(model_id: str, model_provider: str | None = None
     if _is_plugin_model_provider(provider):
         return f"@{provider}:{model}"
 
+    # Codex live/cache models are intentionally absent from the static catalog,
+    # so bare same-provider IDs can be claimed by overlapping providers.* entries.
+    if provider == "openai-codex":
+        return f"@{provider}:{model}"
+
     # If the selected provider is already the configured provider, leaving the
     # model bare preserves provider-specific base_url/proxy settings.
     if provider == config_provider:

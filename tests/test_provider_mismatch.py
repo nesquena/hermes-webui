@@ -552,6 +552,43 @@ def test_bare_codex_gpt_runtime_bridge_routes_to_codex(monkeypatch):
     assert base_url is None
 
 
+def test_live_only_codex_model_beats_overlapping_configured_provider(monkeypatch):
+    """Live-only Codex models must not be hijacked by another configured provider."""
+    import api.config as config
+
+    monkeypatch.setitem(config.cfg, "model", {
+        "provider": "openai-codex",
+        "default": "gpt-5.5",
+        "base_url": "https://chatgpt.com/backend-api/codex",
+    })
+    monkeypatch.setitem(config.cfg, "providers", {
+        "shared-relay": {
+            "base_url": "https://relay.example/v1",
+            "models": {"gpt-5.3-codex": {}},
+        }
+    })
+    monkeypatch.setitem(
+        config._PROVIDER_MODELS,
+        "openai-codex",
+        [
+            model for model in config._PROVIDER_MODELS["openai-codex"]
+            if model.get("id") != "gpt-5.3-codex"
+        ],
+    )
+
+    runtime_model = config.model_with_provider_context(
+        "gpt-5.3-codex", "openai-codex"
+    )
+    resolved = config.resolve_model_provider(runtime_model)
+
+    assert runtime_model == "@openai-codex:gpt-5.3-codex"
+    assert resolved == (
+        "gpt-5.3-codex",
+        "openai-codex",
+        "https://chatgpt.com/backend-api/codex",
+    )
+
+
 def test_non_openrouter_slash_model_provider_context_stays_unqualified():
     """Portal/custom slash IDs must not be blindly wrapped as @provider:model."""
     import api.config as config
