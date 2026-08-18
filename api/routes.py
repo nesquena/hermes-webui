@@ -7998,40 +7998,49 @@ def _session_index_marks_was_webui(sid: str) -> bool:
     ``is_cli_session``/``read_only`` markers — are NOT treated as deleted
     WebUI sessions, even when the sidecar is absent.
     """
-    if not SESSION_INDEX_FILE.exists():
+    if not SESSION_INDEX_FILE.exists() and not (SESSION_DIR / "_sessions.sqlite3").exists():
         return False
     try:
-        entries = json.loads(SESSION_INDEX_FILE.read_bytes())
+        entry = _read_session_index_row(
+            sid,
+            session_dir=SESSION_DIR,
+            session_index_file=SESSION_INDEX_FILE,
+        )
     except Exception:
-        return False
-    for entry in entries if isinstance(entries, list) else []:
-        if entry.get("session_id") != sid:
-            continue
-        # Classify per source field, not on a collapsed `a or b or c` — a
-        # legacy CLI/imported row can carry is_cli_session:true with BLANK
-        # source fields, and collapsing-then-defaulting-to-WebUI would wrongly
-        # 404 it (it should keep its read-only CLI stub).
-        srcs = [
-            str(entry.get("source_tag") or "").strip().lower(),
-            str(entry.get("raw_source") or "").strip().lower(),
-            str(entry.get("session_source") or "").strip().lower(),
-        ]
-        explicit = [s for s in srcs if s]
-        if any(s in ("webui", "fork") for s in explicit):
-            # Explicit WebUI-origin (incl. forks, which /api/session/branch
-            # stamps session_source="fork") — a deleted sidecar bricks
-            # identically. 404.
-            return True
-        if explicit:
-            # Explicit non-WebUI source (cli, telegram, claude_code, ...) —
-            # genuine foreign session, keep the existing CLI/read-only stub.
+        try:
+            entries = json.loads(SESSION_INDEX_FILE.read_bytes())
+            entry = next(
+                (
+                    row
+                    for row in entries if isinstance(entries, list)
+                    and isinstance(row, dict)
+                    and row.get("session_id") == sid
+                ),
+                None,
+            )
+        except Exception:
             return False
-        # All source fields blank: WebUI-origin UNLESS the row is a legacy
-        # CLI/imported session marked only by is_cli_session / read_only.
-        is_cli = entry.get("is_cli_session") is True
-        is_read_only = bool(entry.get("read_only") or entry.get("is_read_only"))
-        return not (is_cli or is_read_only)
-    return False
+    if not isinstance(entry, dict):
+        return False
+    # Classify per source field, not on a collapsed `a or b or c` — a
+    # legacy CLI/imported row can carry is_cli_session:true with BLANK
+    # source fields, and collapsing-then-defaulting-to-WebUI would wrongly
+    # 404 it (it should keep its read-only CLI stub).
+    srcs = [
+        str(entry.get("source_tag") or "").strip().lower(),
+        str(entry.get("raw_source") or "").strip().lower(),
+        str(entry.get("session_source") or "").strip().lower(),
+    ]
+    explicit = [s for s in srcs if s]
+    if any(s in ("webui", "fork") for s in explicit):
+        # Explicit WebUI-origin (incl. forks, which /api/session/branch
+        # stamps session_source="fork") — a deleted sidecar bricks identically.
+        return True
+    if explicit:
+        return False
+    is_cli = entry.get("is_cli_session") is True
+    is_read_only = bool(entry.get("read_only") or entry.get("is_read_only"))
+    return not (is_cli or is_read_only)
 
 
 def _session_deleted_tombstone_marks_was_webui(sid: str) -> bool:
@@ -9611,6 +9620,9 @@ from api.models import (
     all_sessions,
     title_from,
     _write_session_index,
+    _read_session_index_rows,
+    _read_session_index_row,
+    delete_incremental_session,
     SESSION_INDEX_FILE,
     _active_state_db_path,
     load_projects,
@@ -9699,10 +9711,13 @@ def _pre_compression_continuation_session_id(session) -> str | None:
         return rows
 
     def _child_rows_from_index(seen_ids: set[str]) -> list | None:
-        if not SESSION_INDEX_FILE.exists():
+        if not SESSION_INDEX_FILE.exists() and not (SESSION_DIR / "_sessions.sqlite3").exists():
             return None
         try:
-            entries = json.loads(SESSION_INDEX_FILE.read_bytes())
+            entries = _read_session_index_rows(
+                session_dir=SESSION_DIR,
+                session_index_file=SESSION_INDEX_FILE,
+            )
         except Exception:
             return None
         if not isinstance(entries, list):
@@ -16488,9 +16503,12 @@ def handle_post(handler, parsed) -> bool:
         # lands without a competing write. (If the streaming session isn't in the
         # cache for some reason, fall back to a direct save.) Guard each per-session
         # update so one slow/failing session can't abort the whole request.
-        if SESSION_INDEX_FILE.exists():
+        if SESSION_INDEX_FILE.exists() or (SESSION_DIR / "_sessions.sqlite3").exists():
             try:
-                index = json.loads(SESSION_INDEX_FILE.read_bytes())
+                index = _read_session_index_rows(
+                    session_dir=SESSION_DIR,
+                    session_index_file=SESSION_INDEX_FILE,
+                )
                 active_ids = _active_stream_ids()
                 deferred_to_stream = []
                 for entry in index:
@@ -21463,6 +21481,7 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
                 with LOCK:
                     SESSIONS.pop(p.stem, None)
                 p.unlink(missing_ok=True)
+                delete_incremental_session(p.stem)
                 cleaned += 1
                 phase1_removed_ids.add(p.stem)
         except Exception:
@@ -21694,6 +21713,7 @@ def _handle_background(handler, body):
             # next rebuild via _index_entry_exists().
             try:
                 (SESSION_DIR / f"{bg_sid}.json").unlink(missing_ok=True)
+                delete_incremental_session(bg_sid)
             except Exception:
                 pass
         except Exception:
@@ -21795,7 +21815,8 @@ def _prepare_chat_start_session_for_stream(
         provisional_title = _provisional_title_from_prompt(msg, current_title or "Untitled")
         if provisional_title and not _is_default_or_empty_session_title(provisional_title):
             s.title = provisional_title
-    if get_webui_session_save_mode() == "eager":
+    eager_save = get_webui_session_save_mode() == "eager"
+    if eager_save:
         _checkpoint_user_message_for_eager_session_save(
             s,
             msg,
@@ -21803,7 +21824,10 @@ def _prepare_chat_start_session_for_stream(
             s.pending_started_at,
             source=source,
         )
-    s.save()
+    if eager_save or not isinstance(s, Session):
+        s.save()
+    else:
+        s.save(metadata_only=True)
 
 
 def _is_hidden_empty_session(s) -> bool:

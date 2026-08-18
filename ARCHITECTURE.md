@@ -727,7 +727,7 @@ restriction from the UI yet (see ROADMAP.md Wave 4 for the plan).
 | TD3 | High     | No test coverage                                     | PARTIAL Sprint 1 | 19 HTTP integration tests added; unit tests pending Phase A split |
 | TD4 | Medium   | All code in one file (HTML/CSS/JS/Python mingled)    | FIXED Sprint 5   | JS extracted to static/app.js in Sprint 5 (Sprint 9: app.js deleted, replaced by 6 modules). Phase A complete. |
 | TD5 | Medium   | No request validation (KeyError -> 500 + traceback)  | FIXED Sprint 4   | All endpoints hardened: /api/list, /api/file, /api/crons/* all return clean 400/404 |
-| TD6 | Low      | all_sessions() full directory scan every call        | FIXED Sprint 5   | Session index file (_index.json) built on every save. all_sessions() reads index O(1). Phase C partial. |
+| TD6 | Low      | all_sessions() full directory scan every call        | FIXED Sprint 5   | Keyed SQLite compact index serves bounded sidebar reads; legacy `_index.json` remains importable. |
 | TD7 | Low      | No structured logging                                | FIXED Sprint 1   | log_request() override emits JSON per request |
 
 ---
@@ -802,8 +802,11 @@ All three problems fixed in Sprint 5:
 
 1. SESSIONS cache: OrderedDict with LRU cap of 100, oldest evicted automatically.
 2. LOCK: all SESSIONS dict reads/writes wrapped with LOCK (from Sprint 1).
-3. Session index: `sessions/_index.json` maintained on every save/delete.
-   `all_sessions()` reads the index file (O(1)) instead of scanning all JSONs.
+3. Session persistence: `sessions/_sessions.sqlite3` owns transactional keyed
+   transcript components and compact sidebar rows. Legacy session JSON and
+   `_index.json` snapshots remain readable/importable; bounded snapshots may
+   still mirror for compatibility. `all_sessions()` reads at most 1,000 compact
+   rows instead of rewriting or reparsing the complete legacy index per turn.
 
 ### Phase D: Input Validation and Error Handling -- COMPLETE
 
@@ -1621,13 +1624,16 @@ _set_thread_env(**kwargs) and _clear_thread_env() set/clear _thread_ctx.env.
 _run_agent_streaming() calls _set_thread_env() before env var writes, _clear_thread_env() in outer finally.
 Process-level os.environ writes still exist as fallback (needed until terminal tool reads thread-local).
 
-#### Phase C: Session Index File
+#### Phase C: Incremental Session Store
 
-SESSION_INDEX_FILE = SESSION_DIR / '_index.json'.
-_write_session_index(): builds compact() list from SESSIONS + disk files, writes JSON.
-Called in Session.save() -- keeps index always current.
-all_sessions(): reads index JSON first (one file read); overlays in-memory SESSIONS; falls back to full glob scan on error.
-Index files starting with '_' are skipped during full scan to avoid recursion.
+`SESSION_INDEX_FILE = SESSION_DIR / '_index.json'` remains legacy input and a
+bounded compatibility mirror. `api.incremental_session_store` stores session
+metadata, transcript components, and compact index rows in
+`sessions/_sessions.sqlite3` with SQLite `FULL` synchronous transactions.
+`Session.save()` updates only changed keyed components; large JSON snapshots are
+not rewritten after import. `all_sessions()` imports a changed legacy index once,
+then queries at most 1,000 compact rows. It still overlays in-memory sessions and
+falls back to the legacy full scan when no usable store/index exists.
 
 #### New Workspace Infrastructure
 
