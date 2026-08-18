@@ -1076,9 +1076,10 @@ def test_context_anchor_reference_uses_session_summary_fallback():
 
     assert "sessionCompressionSummary" in src
     assert "const sessionCompressionSummary" in src
-    assert "referenceText=referenceMessage" in src
-    assert ": sessionCompressionSummary" in src
-    assert "_shouldShowSettledCompressionReference(referenceText)" in src
+    assert "const referenceText=(()=>{" in src
+    assert "if(!referenceMessage) return sessionCompressionSummary;" in src
+    assert "return segment!==null?segment:raw;" in src
+    assert "!compactionCardNodes.length && _shouldShowSettledCompressionReference(referenceText)" in src
     assert "!_isContextCompactionText(referenceText)" in src
 
 
@@ -1234,7 +1235,7 @@ def test_preserved_task_list_attaches_once_per_render():
     assert ".reverse().find(m=>_isPreservedCompressionTaskListMessage(m))" in src
     assert "const preservedCompressionTaskMessages=_latestPreservedCompressionTaskListMessages(S.messages);" in src
     assert "S.messages.filter(m=>_isPreservedCompressionTaskListMessage(m))" not in src
-    assert "let preservedCompressionTaskCardsAttached=!!referenceNode;" in src
+    assert "let preservedCompressionTaskCardsAttached=!!referenceNode||compactionCardNodes.length>0;" in src
     assert "const preservedOnlyNode=" in src
     assert "(!preservedCompressionTaskCardsAttached&&(!referenceNode||compressionState)&&preservedCompressionTaskMessages.length)" in src
 
