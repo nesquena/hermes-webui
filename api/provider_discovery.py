@@ -71,6 +71,12 @@ def resolve_credential(
     env_value = env_value or (lambda name: __import__("os").getenv(name, ""))
     has_api_key = "api_key" in raw
     has_key_env = "key_env" in raw
+    if has_key_env:
+        name = str(raw.get("key_env") or "").strip()
+        if name:
+            resolved = _from_env(name, "key_env", env_value)
+            if resolved.state == "resolved":
+                return resolved
     if has_api_key:
         value = raw.get("api_key")
         value_text = str(value or "").strip()
@@ -78,22 +84,15 @@ def resolve_credential(
             if value_text.startswith("${") and value_text.endswith("}"):
                 name = value_text[2:-1].strip()
                 resolved = _from_env(name, "api_key:${...}", env_value)
-                if resolved or not has_key_env:
+                if resolved.state == "resolved":
                     return resolved
-                # An unresolved template can still use the explicitly declared
-                # key_env source; only source-absent entries reach ambient fallback.
             elif value_text.startswith("${"):
-                if not has_key_env:
-                    return ProviderCredential("declared_unavailable", "api_key:${...}")
+                return ProviderCredential("declared_unavailable", "api_key:${...}")
             else:
                 return ProviderCredential("resolved", "api_key", value_text)
-    if has_key_env:
-        name = str(raw.get("key_env") or "").strip()
-        if name:
-            return _from_env(name, "key_env", env_value)
-        return ProviderCredential("declared_unavailable", "key_env")
-    if has_api_key:
         return ProviderCredential("declared_unavailable", "api_key")
+    if has_key_env:
+        return ProviderCredential("declared_unavailable", "key_env")
     if (provider_hint == "custom" or provider_hint.startswith("custom:")) and fallback_value is not None:
         value = fallback_value(provider_hint)
         if value and str(value).strip():

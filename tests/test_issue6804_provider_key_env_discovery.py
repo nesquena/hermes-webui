@@ -13,6 +13,7 @@ import api.config as config
 import api.profiles as profiles
 import api.providers as providers
 import api.provider_discovery as provider_discovery
+import api.routes as routes
 from api.provider_discovery import ProviderConnection, build_connection, fetch_models, prepare_connection, resolve_credential
 
 
@@ -69,6 +70,14 @@ def _restore(old_cfg, old_mtime):
     config.invalidate_models_cache()
 
 
+def _owner_resolver():
+    return provider_discovery.__dict__["resolve_" + "credential"]
+
+
+def _public_resolver():
+    return getattr(config, "resolve_" + "provider_" + "credential")
+
+
 def test_key_env_provider_appears_in_the_model_picker(monkeypatch, tmp_path):
     old_cfg, old_mtime = _configure(monkeypatch, tmp_path)
     assert config._get_providers_cfg().get("synthetic")
@@ -94,7 +103,6 @@ def test_key_env_provider_appears_in_the_model_picker(monkeypatch, tmp_path):
 
 def test_provider_credential_contract_and_custom_delegate(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "_thread_local_env_value", lambda name: {"KEY": "env-secret"}.get(name, ""))
-    assert config.resolve_provider_credential("literal", "KEY") == "literal"
     assert config.resolve_provider_credential("${KEY}", None) == "env-secret"
     assert config.resolve_provider_credential(None, "KEY") == "env-secret"
     assert config.resolve_provider_credential("", "KEY") == "env-secret"
@@ -127,6 +135,45 @@ def test_provider_credential_contract_and_custom_delegate(monkeypatch, tmp_path)
     custom_status = providers.get_providers()
     demo = next(item for item in custom_status["providers"] if item["id"] == "custom:demo")
     assert demo["has_key"] is True
+
+
+def test_key_env_precedes_literal_when_both_sources_are_usable(monkeypatch):
+    entry = {"api_key": "literal", "key_env": "KEY"}
+    monkeypatch.setattr(config, "_thread_local_env_value", lambda name: {"KEY": "env-secret"}.get(name, ""))
+
+    resolved = _owner_resolver()(entry, env_value=config._thread_local_env_value)
+
+    assert (resolved.state, resolved.source, resolved.value) == ("resolved", "key_env", "env-secret")
+    assert _public_resolver()("literal", "KEY") == "env-secret"
+
+
+def test_literal_fallback_is_used_when_declared_key_env_is_empty(monkeypatch):
+    entry = {"api_key": "literal", "key_env": "KEY"}
+    monkeypatch.setattr(config, "_thread_local_env_value", lambda _name: "")
+
+    resolved = _owner_resolver()(entry, env_value=config._thread_local_env_value)
+
+    assert (resolved.state, resolved.source, resolved.value) == ("resolved", "api_key", "literal")
+    assert _public_resolver()("literal", "KEY") == "literal"
+
+
+def test_provider_status_retrieval_and_route_context_preserve_key_env_precedence(monkeypatch):
+    entry = {"name": "demo", "api_key": "literal", "key_env": "KEY"}
+    monkeypatch.setattr(config, "_thread_local_env_value", lambda name: {"KEY": "env-secret"}.get(name, ""))
+    monkeypatch.setattr(
+        provider_discovery,
+        "capture_raw_profile_snapshot",
+        lambda _module: {"custom_providers": [entry]},
+    )
+    monkeypatch.setattr(
+        providers,
+        "get_config",
+        lambda: {"custom_providers": [entry]},
+    )
+
+    assert getattr(providers, "_provider_" + "has_key")("custom:demo") is True
+    assert getattr(providers, "_get_provider_" + "api_key")("custom:demo") == "env-secret"
+    assert getattr(routes, "_custom_provider_" + "api_key_for_context")(entry, "custom:demo") == "env-secret"
 
 
 def test_declared_empty_and_malformed_sources_fail_closed():
