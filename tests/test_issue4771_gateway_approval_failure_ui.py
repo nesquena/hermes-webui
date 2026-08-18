@@ -73,6 +73,8 @@ def _run_failure_case(api_js: str) -> dict:
             _extract_fn(MESSAGES_JS, "_clearApprovalPendingForSession"),
             _extract_fn(MESSAGES_JS, "_renderPendingApprovalForActiveSession"),
             _extract_fn(MESSAGES_JS, "_approvalMirrorOwnerFor"),
+            _extract_fn(MESSAGES_JS, "_approvalOwnerForPending"),
+            _extract_fn(MESSAGES_JS, "_approvalOwnerIdentityMatches"),
             _extract_fn(MESSAGES_JS, "_captureApprovalResponseOwner"),
             _extract_fn(MESSAGES_JS, "_approvalResponseOwnerIsCurrent"),
             _extract_fn(MESSAGES_JS, "_approvalResponseMatches"),
@@ -104,6 +106,7 @@ let _approvalPendingBySession = new Map();
 let _loadSessionGeneration = 1;
 let _approvalResponding = null;
 let _approvalClearedOwner = null;
+let _approvalDisplayedOwner = null;
 let _approvalSignature = '';
 let _approvalVisibleSince = 0;
 let _approvalHideTimer = null;
@@ -261,6 +264,8 @@ def test_poll_rerender_keeps_inflight_buttons_disabled_and_blocks_duplicates():
             _extract_fn(MESSAGES_JS, "_clearApprovalPendingForSession"),
             _extract_fn(MESSAGES_JS, "_renderPendingApprovalForActiveSession"),
             _extract_fn(MESSAGES_JS, "_approvalMirrorOwnerFor"),
+            _extract_fn(MESSAGES_JS, "_approvalOwnerForPending"),
+            _extract_fn(MESSAGES_JS, "_approvalOwnerIdentityMatches"),
             _extract_fn(MESSAGES_JS, "_captureApprovalResponseOwner"),
             _extract_fn(MESSAGES_JS, "_approvalResponseOwnerIsCurrent"),
             _extract_fn(MESSAGES_JS, "_approvalResponseMatches"),
@@ -287,6 +292,7 @@ let _approvalPendingBySession = new Map();
 let _loadSessionGeneration = 1;
 let _approvalResponding = null;
 let _approvalClearedOwner = null;
+let _approvalDisplayedOwner = null;
 let _approvalSignature = '';
 let _approvalVisibleSince = 0;
 let _approvalHideTimer = null;
