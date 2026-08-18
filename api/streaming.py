@@ -672,7 +672,7 @@ def _is_fallback_lifecycle_message(kind: str, message: str) -> bool:
             or 'falling back' in m
             or 'fallback activated' in m
             or 'trying fallback' in m
-            or 'switched to fallback model:' in m
+            or 'switched to fallback' in m
         )
     )
 
@@ -682,14 +682,19 @@ def _is_effective_fallback_lifecycle_message(kind: str, message: str) -> bool:
 
     Retry notices such as ``trying fallback`` and ``switching to fallback`` are
     emitted before activation and may still recover on the primary.  Hermes
-    emits the one-shot ``Switched to fallback model: ...`` lifecycle notice
-    after it has replaced ``agent.model``, ``agent.provider`` and
-    ``agent.reasoning_config``.  Only that post-activation notice is safe to use
-    as the trigger for replacing live effective-run metadata.
+    emits one of two post-activation success wordings after it has replaced
+    ``agent.model``, ``agent.provider`` and ``agent.reasoning_config``:
+
+    - ``Switched to fallback model: X via P1 → Y via P2`` (pending notice)
+    - ``↻ Switched to fallback: Y (P2)`` (empty-content path)
+
+    Only those post-activation notices are safe to use as the trigger for
+    replacing live effective-run metadata.  ``switching`` does not contain
+    ``switched``, so pre-activation retry chatter stays excluded.
     """
     k = str(kind or '').strip().lower()
     m = str(message or '').strip().lower()
-    return k == 'lifecycle' and 'switched to fallback model:' in m
+    return k == 'lifecycle' and 'switched to fallback' in m
 
 
 def _is_agent_compression_start_status(kind: str, message: str) -> bool:

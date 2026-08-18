@@ -149,8 +149,41 @@ class TestBackendEmission:
         )
         assert [event for event, _ in events] == ["warning"]
 
+    def test_short_empty_content_success_line_also_refreshes_run_meta(self):
+        # conversation_loop empty-content path uses a shorter wording.
+        agent = _FakeAgent(
+            {"enabled": True, "effort": "high"},
+            model="fallback",
+            provider="p2",
+        )
+        events = []
+        handled = _bridge_fallback_lifecycle_status(
+            "lifecycle",
+            "↻ Switched to fallback: fallback (p2)",
+            agent=agent,
+            session_id="fallback-short",
+            put=lambda event, data: events.append((event, data)),
+        )
+        assert handled is True
+        assert [event for event, _ in events] == ["warning", "run_meta"]
+        assert events[1][1]["model"] == "fallback"
+        assert events[1][1]["provider"] == "p2"
+
     def test_done_payload_carries_reasoning_effort(self):
         assert "usage['reasoning_effort'] = _effort_label_done" in STREAMING_PY
+
+    def test_done_handler_copies_used_model_onto_last_assistant(self):
+        # usage.used_model is stamped from agent.model AFTER the run (so a
+        # fallback is attributed correctly). The live settle path must copy
+        # it onto lastAsst._usedModel or the chip stays empty until reload.
+        assert "lastAsst._usedModel=d.usage.used_model" in MESSAGES_JS
+
+    def test_ephemeral_carry_forward_keeps_used_model_and_effort(self):
+        # A shorter terminal snapshot must not drop the chips the live path
+        # just stamped.
+        ephemeral = MESSAGES_JS.split("const _EPHEMERAL_TURN_FIELDS=")[1].split("];")[0]
+        assert "'_usedModel'" in ephemeral
+        assert "'_reasoningEffort'" in ephemeral
 
     def test_display_metadata_persists_reasoning_effort(self):
         assert "_dm['_reasoningEffort'] = _effort_label" in STREAMING_PY

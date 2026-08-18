@@ -6289,6 +6289,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               if(typeof d.usage.reasoning_effort==='string'&&d.usage.reasoning_effort){
                 lastAsst._reasoningEffort=d.usage.reasoning_effort;
               }
+              if(typeof d.usage.used_model==='string'&&d.usage.used_model){
+                lastAsst._usedModel=d.usage.used_model;
+              }
               if(typeof d.usage.tps==='number'&&d.usage.tps>0){
                 lastAsst._turnTps=d.usage.tps;
               }
@@ -6958,7 +6961,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     return `${m.role}|${ts}|${body.slice(0,160)}`;
   }
-  const _EPHEMERAL_TURN_FIELDS=['_turnUsage','_turnDuration','_turnTps','_gatewayRouting','_statusCard','_anchor_stream_id','_anchor_activity_scene'];
+  const _EPHEMERAL_TURN_FIELDS=['_turnUsage','_turnDuration','_turnTps','_gatewayRouting','_usedModel','_reasoningEffort','_statusCard','_anchor_stream_id','_anchor_activity_scene'];
   function _isHistoricalAnchorActivityScene(scene){
     if(!scene||typeof scene!=='object') return false;
     const identity=scene.identity&&typeof scene.identity==='object'?scene.identity:null;
