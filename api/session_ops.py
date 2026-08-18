@@ -9,15 +9,337 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+import copy
+import hashlib
+from dataclasses import dataclass
+from contextlib import nullcontext
 from bisect import bisect_left
 from typing import Any
 
 from api.config import LOCK, _get_session_agent_lock
 from api.models import get_session, SESSIONS
+from api.agent_sessions import normalize_agent_session_source
 
 logger = logging.getLogger(__name__)
 
 AUTO_TITLE_LABELS = {'untitled', 'new chat'}
+
+
+class RegenerationUnavailable(Exception):
+    def __init__(self, code: str, status: int = 409, message: str | None = None):
+        super().__init__(message or code)
+        self.code = code
+        self.status = status
+
+
+def _regeneration_source_class(value):
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return ""
+    if raw == "fork":
+        return "fork"
+    normalized = normalize_agent_session_source(raw).get("session_source")
+    return str(normalized or raw).strip().lower()
+
+
+def _regeneration_source_allowed(value):
+    return _regeneration_source_class(value) in {"webui", "fork"}
+
+
+@dataclass(frozen=True)
+class RegenerationTurn:
+    user_index: int
+    assistant_index: int
+    message: dict
+    message_text: str
+    attachments: list
+    source: str
+    message_count: int
+    revision: str
+    row_digest: str
+
+
+@dataclass(frozen=True)
+class RegenerationPlan:
+    canonical_rows: list
+    canonical_context: list
+    turn: RegenerationTurn
+    revision: str
+    row_digest: str
+    message_count: int
+    truncation_boundary: int
+
+
+def plan_regeneration(session, *, expected_revision=None, lock_held=False):
+    """Prepare one canonical display/context pair for a locked regeneration."""
+    lock_context = nullcontext() if lock_held else _get_session_agent_lock(session.session_id)
+    with lock_context:
+        rows, context = regeneration_state(session)
+        revision = regeneration_revision_for(rows, session=session, context=context)
+        if expected_revision is not None and expected_revision != revision:
+            raise RegenerationUnavailable("stale_regeneration_revision")
+        turn = resolve_regeneration_turn(
+            rows, session=session, expected_revision=revision,
+            lock_held=True, context=context,
+        )
+        return RegenerationPlan(
+            canonical_rows=copy.deepcopy(rows),
+            canonical_context=copy.deepcopy(context),
+            turn=turn,
+            revision=revision,
+            row_digest=turn.row_digest,
+            message_count=len(rows),
+            truncation_boundary=turn.user_index + 1,
+        )
+
+
+def apply_regeneration_plan(session, plan: RegenerationPlan):
+    """Install the prepared pair and truncate it without a second authority read."""
+    if not isinstance(plan, RegenerationPlan):
+        return False
+    rows = copy.deepcopy(plan.canonical_rows)
+    context = copy.deepcopy(plan.canonical_context)
+    if len(rows) != plan.message_count or plan.truncation_boundary != plan.turn.user_index + 1:
+        return False
+    if regeneration_revision_for(rows, session=session, context=context) != plan.revision:
+        return False
+    session.messages = rows
+    session.context_messages = context
+    current = session.messages[plan.turn.user_index]
+    if not isinstance(current, dict) or current.get("role") != "user":
+        return False
+    truncate_session_at_keep(session, plan.truncation_boundary)
+    prepared_context = truncate_context_for_display_keep(
+        context, rows, plan.truncation_boundary - 1,
+    )
+    session.context_messages = prepared_context if prepared_context or not context else context[: plan.truncation_boundary]
+    return True
+
+
+def snapshot_regeneration_state(session):
+    return copy.deepcopy(session.__dict__)
+
+
+def restore_regeneration_state(session, snapshot):
+    session.__dict__.clear()
+    session.__dict__.update(copy.deepcopy(snapshot))
+
+
+def regeneration_revision_for(rows, *, session=None, context=None) -> str:
+    """Hash the canonical writable transcript and its aligned context."""
+    payload = json.dumps(
+        {
+            "session_id": str(getattr(session, "session_id", "") or "") if session is not None else "",
+            "messages": list(rows or []),
+            "context_messages": list(context or []),
+            "truncation_watermark": getattr(session, "truncation_watermark", None) if session is not None else None,
+            "truncation_boundary": getattr(session, "truncation_boundary", None) if session is not None else None,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def regeneration_transcript(session, *, state_messages=None):
+    """Return the state.db-reconciled transcript used by every authority consumer."""
+    if state_messages is None:
+        return regeneration_state(session)[0]
+    from api.models import reconciled_state_db_messages_for_session
+    return reconciled_state_db_messages_for_session(session, state_messages=state_messages)
+
+
+def regeneration_context(session):
+    return regeneration_state(session)[1]
+
+
+def regeneration_state(session):
+    """Read one immutable state.db snapshot and reconcile both transcript views."""
+    from api.models import (
+        get_state_db_session_messages,
+        reconciled_state_db_messages_for_session,
+    )
+
+    state_messages = get_state_db_session_messages(
+        getattr(session, "session_id", None),
+        profile=getattr(session, "profile", None),
+    )
+    return (
+        reconciled_state_db_messages_for_session(
+            session,
+            state_messages=state_messages,
+        ),
+        reconciled_state_db_messages_for_session(
+            session,
+            prefer_context=True,
+            state_messages=state_messages,
+        ),
+    )
+
+
+def regeneration_revision(session) -> str:
+    rows, context = regeneration_state(session)
+    return regeneration_revision_for(
+        rows,
+        session=session,
+        context=context,
+    )
+
+
+def regeneration_authority(
+    session,
+    rows=None,
+    *,
+    context=None,
+    full_transcript=True,
+    canonical_state=None,
+):
+    """Mint a revision only for a complete, writable, canonical transcript."""
+    if not full_transcript or getattr(session, "read_only", False) or getattr(session, "is_cli_session", False):
+        return None
+    source = getattr(session, "session_source", None) or getattr(session, "raw_source", None) or getattr(session, "source_tag", None)
+    if source and not _regeneration_source_allowed(source):
+        return None
+    if _regeneration_source_class(source) == "fork" and not getattr(session, "parent_session_id", None):
+        return None
+    if getattr(session, "active_stream_id", None) or getattr(session, "pending_user_message", None):
+        return None
+    canonical_rows, canonical_context = canonical_state or regeneration_state(session)
+    rows = list(canonical_rows if rows is None else rows)
+    if not rows:
+        return None
+    if rows != canonical_rows:
+        return None
+    if context is not None and list(context or []) != canonical_context:
+        return None
+    try:
+        resolve_regeneration_turn(
+            canonical_rows,
+            session=session,
+            context=canonical_context,
+        )
+    except RegenerationUnavailable:
+        return None
+    return regeneration_revision_for(
+        canonical_rows,
+        session=session,
+        context=canonical_context,
+    )
+
+
+def resolve_regeneration_turn(
+    rows,
+    *,
+    session=None,
+    expected_revision=None,
+    lock_held=False,
+    context=None,
+):
+    """Select the current session's final complete local exchange under its lock."""
+    legacy_session_call = session is None and not isinstance(rows, (list, tuple))
+    legacy_context = None
+    if legacy_session_call:
+        session = rows
+        rows, legacy_context = regeneration_state(session)
+    lock_context = (
+        _get_session_agent_lock(session.session_id)
+        if legacy_session_call and not lock_held
+        else nullcontext()
+    )
+    with lock_context:
+        rows = list(rows or [])
+        if context is None:
+            context = legacy_context
+        if context is None:
+            _, context = regeneration_state(session)
+        context = list(context)
+        revision = regeneration_revision_for(rows, session=session, context=context)
+        if expected_revision is not None and expected_revision != revision:
+            raise RegenerationUnavailable("stale_regeneration_revision")
+        if getattr(session, "read_only", False) or getattr(session, "is_cli_session", False):
+            raise RegenerationUnavailable("regeneration_read_only", 403)
+        raw_sources = (
+            getattr(session, "raw_source", None),
+            getattr(session, "source_tag", None),
+        )
+        normalized_sources = {
+            str(raw_source or "").strip().lower()
+            for raw_source in (*raw_sources, getattr(session, "session_source", None))
+        }
+        if any(source and not _regeneration_source_allowed(source) for source in normalized_sources):
+            raise RegenerationUnavailable("regeneration_read_only", 403)
+        if _regeneration_source_class(getattr(session, "session_source", None)) == "fork" and not getattr(session, "parent_session_id", None):
+            raise RegenerationUnavailable("regeneration_read_only", 403)
+        if getattr(session, "active_stream_id", None):
+            raise RegenerationUnavailable("session_active")
+        if getattr(session, "pending_user_message", None):
+            raise RegenerationUnavailable("session_active")
+        assistant_index = next(
+            (
+                index
+                for index in range(len(rows) - 1, -1, -1)
+                if isinstance(rows[index], dict)
+                and rows[index].get("role") == "assistant"
+                and _assistant_message_has_final_visible_text(rows[index])
+            ),
+            None,
+        )
+        if assistant_index is not None:
+            index = next(
+                (
+                    candidate
+                    for candidate in range(assistant_index - 1, -1, -1)
+                    if isinstance(rows[candidate], dict)
+                    and rows[candidate].get("role") == "user"
+                ),
+                None,
+            )
+        else:
+            index = None
+        if index is not None:
+            if any(
+                isinstance(row, dict) and row.get("role") == "user"
+                for row in rows[assistant_index + 1:]
+            ):
+                raise RegenerationUnavailable("no_regenerable_turn", 400)
+            if any(
+                isinstance(row, dict) and row.get("role") in {"assistant", "tool"}
+                for row in rows[assistant_index + 1:]
+            ):
+                raise RegenerationUnavailable("no_regenerable_turn", 400)
+            row = rows[index]
+            row_source = row.get("_source") or row.get("source")
+            if row_source and not _regeneration_source_allowed(row_source):
+                raise RegenerationUnavailable("regeneration_read_only", 403)
+            content = _extract_text(row.get("content", ""))
+            if content:
+                row_digest = hashlib.sha256(
+                    json.dumps(
+                        row,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        default=str,
+                    ).encode("utf-8")
+                ).hexdigest()
+                return RegenerationTurn(
+                    index,
+                    assistant_index,
+                    copy.deepcopy(row),
+                    content,
+                    copy.deepcopy(row.get("attachments") or []),
+                    str(row.get("_source") or "webui"),
+                    len(rows),
+                    revision,
+                    row_digest,
+                )
+    raise RegenerationUnavailable("no_regenerable_turn", 400)
+
+
+def _assistant_message_has_final_visible_text(message) -> bool:
+    from api.streaming import _assistant_message_has_final_visible_text as _has_final_text
+
+    return _has_final_text(message)
 
 
 def _live_active_stream_id(session) -> str | None:
@@ -618,7 +940,18 @@ def _extract_text(content: Any) -> str:
     if isinstance(content, list):
         parts = []
         for p in content:
-            if isinstance(p, dict) and p.get('type') == 'text':
-                parts.append(p.get('text', ''))
+            if not isinstance(p, dict):
+                continue
+            part_type = str(p.get('type') or '').lower()
+            if part_type not in ('', 'text', 'input_text', 'output_text'):
+                continue
+            part_text = (
+                p.get('text')
+                or p.get('content')
+                or p.get('input_text')
+                or p.get('output_text')
+                or ''
+            )
+            parts.append(str(part_text))
         return ' '.join(parts)
     return str(content)

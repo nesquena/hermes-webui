@@ -2849,6 +2849,7 @@ from api.config import (
     ACTIVE_RUNS_LOCK,
     register_stream_owner,
     register_session_writeback_owner,
+    clear_session_writeback_owner_if_owned,
     stream_owner_session_id,
     unregister_stream_owner,
     CHAT_LOCK,
@@ -13168,6 +13169,18 @@ def handle_get(handler, parsed) -> bool:
             ):
                 raw["is_cli_session"] = False
                 raw["read_only"] = True
+            if not raw.get("read_only") and not raw.get("is_cli_session") and not _truncated:
+                from api.session_ops import regeneration_authority, regeneration_state
+                canonical_state = regeneration_state(s)
+                revision = regeneration_authority(
+                    s,
+                    rows=canonical_state[0],
+                    context=canonical_state[1],
+                    full_transcript=True,
+                    canonical_state=canonical_state,
+                )
+                if revision:
+                    raw["regeneration_revision"] = revision
             redact = redact_session_data(raw)
             _t5 = _time.monotonic()
             if _diag: _diag.stage("t5_after_redact")
@@ -21770,6 +21783,8 @@ def _prepare_chat_start_session_for_stream(
     stream_id: str,
     started_at: float | None = None,
     source: str = "webui",
+    retained_user=None,
+    defer_save: bool = False,
 ):
     """Persist chat-start state according to webui.session_save_mode.
 
@@ -21790,12 +21805,32 @@ def _prepare_chat_start_session_for_stream(
     s.pending_attachments = attachments
     s.pending_started_at = started_at if started_at is not None else time.time()
     s.pending_user_source = source
+    if retained_user is not None:
+        from api.process_event_utils import build_active_turn_token
+
+        retained_user["timestamp"] = s.pending_started_at
+        active_turn_token = build_active_turn_token(stream_id, s.pending_started_at)
+        retained_user["_active_turn_token"] = active_turn_token
+        retained_id = retained_user.get("id") or retained_user.get("message_id")
+        retained_timestamp = retained_user.get("timestamp")
+        for context_row in reversed(list(getattr(s, "context_messages", None) or [])):
+            if not isinstance(context_row, dict) or context_row.get("role") != "user":
+                continue
+            context_id = context_row.get("id") or context_row.get("message_id")
+            if retained_id is not None and context_id != retained_id:
+                continue
+            if retained_timestamp is not None and context_row.get("timestamp") != retained_timestamp:
+                continue
+            if context_row.get("content") != retained_user.get("content"):
+                continue
+            context_row["_active_turn_token"] = active_turn_token
+            break
     current_title = getattr(s, "title", None)
-    if _is_default_or_empty_session_title(current_title):
+    if retained_user is None and _is_default_or_empty_session_title(current_title):
         provisional_title = _provisional_title_from_prompt(msg, current_title or "Untitled")
         if provisional_title and not _is_default_or_empty_session_title(provisional_title):
             s.title = provisional_title
-    if get_webui_session_save_mode() == "eager":
+    if retained_user is None and get_webui_session_save_mode() == "eager":
         _checkpoint_user_message_for_eager_session_save(
             s,
             msg,
@@ -21803,7 +21838,8 @@ def _prepare_chat_start_session_for_stream(
             s.pending_started_at,
             source=source,
         )
-    s.save()
+    if not defer_save:
+        s.save()
 
 
 def _is_hidden_empty_session(s) -> bool:
@@ -21849,6 +21885,238 @@ def _active_stream_blocks_chat_start(session, stream_id: str | None) -> bool:
         if pending_started_at and time.time() - pending_started_at < grace_seconds:
             return True
     return False
+
+
+def _start_regeneration_stream_locked(
+    s,
+    *,
+    turn,
+    workspace: str,
+    model: str,
+    model_provider,
+    normalized_model: bool,
+    diag,
+    goal_related: bool,
+    source: str,
+    moa_config,
+    backend_is_gateway: bool,
+    transaction_snapshot=None,
+):
+    """Commit a retained-row regeneration before releasing its real worker."""
+    from api.session_ops import (
+        RegenerationUnavailable,
+        apply_regeneration_plan,
+        plan_regeneration,
+        restore_regeneration_state,
+        snapshot_regeneration_state,
+    )
+
+    snapshot = transaction_snapshot if transaction_snapshot is not None else snapshot_regeneration_state(s)
+    try:
+        plan = plan_regeneration(
+            s, expected_revision=turn.revision, lock_held=True
+        )
+        turn = plan.turn
+    except RegenerationUnavailable as exc:
+        restore_regeneration_state(s, snapshot)
+        return {"error": str(exc), "code": exc.code, "_status": exc.status}
+    except Exception:
+        restore_regeneration_state(s, snapshot)
+        raise
+    stream_id = uuid.uuid4().hex
+    gateway_starting = False
+    thread_started = False
+    save_attempted = False
+    accepted = False
+    journal_event = {}
+    release_worker = threading.Event()
+    abort_worker = threading.Event()
+    worker_thread = None
+
+    worker_target = (
+        _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
+    )
+    worker_kwargs = {
+        "model_provider": model_provider,
+        "goal_related": goal_related,
+    }
+    if backend_is_gateway:
+        worker_kwargs["regeneration"] = True
+    if moa_config and not backend_is_gateway:
+        worker_kwargs["moa_config"] = moa_config
+
+    def _gated_worker():
+        release_worker.wait()
+        if abort_worker.is_set():
+            return
+        worker_target(
+            s.session_id,
+            turn.message_text,
+            model,
+            workspace,
+            stream_id,
+            copy.deepcopy(turn.attachments),
+            **worker_kwargs,
+        )
+
+    def _cleanup_owned_start():
+        if goal_related:
+            STREAM_GOAL_RELATED.pop(stream_id, None)
+        with STREAMS_LOCK:
+            STREAMS.pop(stream_id, None)
+        unregister_stream_owner(stream_id)
+        clear_session_writeback_owner_if_owned(s.session_id, stream_id)
+        if gateway_starting:
+            try:
+                from api.gateway_chat import (
+                    _clear_gateway_run_starting,
+                    _finish_gateway_run_starting,
+                )
+
+                _finish_gateway_run_starting(stream_id)
+                _clear_gateway_run_starting(stream_id)
+            except Exception:
+                logger.debug(
+                    "Failed to clear compensated gateway start %s",
+                    stream_id,
+                    exc_info=True,
+                )
+
+    try:
+        if not apply_regeneration_plan(s, plan):
+            restore_regeneration_state(s, snapshot)
+            return {
+                "error": "Session changed while regeneration was being prepared.",
+                "code": "stale_regeneration_revision",
+                "_status": 409,
+            }
+        retained_user = s.messages[-1]
+        msg = turn.message_text
+        attachments = copy.deepcopy(turn.attachments)
+        was_hidden_empty_session = _is_hidden_empty_session(s)
+        _prepare_chat_start_session_for_stream(
+            s,
+            msg=msg,
+            attachments=attachments,
+            workspace=workspace,
+            model=model,
+            model_provider=model_provider,
+            stream_id=stream_id,
+            source=turn.source,
+            retained_user=retained_user,
+            defer_save=True,
+        )
+
+        diag.stage("turn_journal_submitted") if diag else None
+        from api.turn_journal import append_turn_journal_event
+
+        journal_event = append_turn_journal_event(
+            s.session_id,
+            {
+                "event": "submitted",
+                "stream_id": stream_id,
+                "role": "user",
+                "content": msg,
+                "attachments": attachments,
+                "workspace": workspace,
+                "model": model,
+                "model_provider": model_provider,
+                "created_at": s.pending_started_at,
+            },
+        )
+        diag.stage("stream_registration") if diag else None
+        stream = create_stream_channel()
+        register_stream_owner(stream_id, s.session_id)
+        with STREAMS_LOCK:
+            STREAMS[stream_id] = stream
+        if goal_related:
+            STREAM_GOAL_RELATED[stream_id] = True
+        if backend_is_gateway:
+            from api.gateway_chat import _mark_gateway_run_starting
+
+            gateway_starting = True
+            _mark_gateway_run_starting(stream_id)
+
+        diag.stage("worker_thread_start") if diag else None
+        worker_thread = threading.Thread(target=_gated_worker, daemon=True)
+        worker_thread.start()
+        thread_started = True
+        save_attempted = True
+        s.save()
+        accepted = True
+        set_last_workspace(workspace)
+        release_worker.set()
+    except Exception:
+        abort_worker.set()
+        release_worker.set()
+        if (
+            thread_started
+            and worker_thread is not None
+            and callable(getattr(worker_thread, "join", None))
+        ):
+            worker_thread.join(timeout=1)
+        _cleanup_owned_start()
+        if accepted:
+            if journal_event:
+                try:
+                    append_turn_journal_event(
+                        s.session_id,
+                        {
+                            "event": "interrupted",
+                            "stream_id": stream_id,
+                            "turn_id": journal_event.get("turn_id"),
+                            "reason": "post_acceptance_workspace_failure",
+                        },
+                    )
+                except Exception:
+                    logger.warning("Failed to close accepted regeneration journal", exc_info=True)
+            raise
+        restore_regeneration_state(s, snapshot)
+        if save_attempted:
+            try:
+                s.save(touch_updated_at=False)
+            except Exception:
+                logger.exception(
+                    "Failed to persist compensated regeneration for %s",
+                    s.session_id,
+                )
+        if journal_event:
+            try:
+                append_turn_journal_event(
+                    s.session_id,
+                    {
+                        "event": "interrupted",
+                        "stream_id": stream_id,
+                        "turn_id": journal_event.get("turn_id"),
+                        "reason": "start_compensated",
+                    },
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to close compensated turn journal event",
+                    exc_info=True,
+                )
+        raise
+
+    release_worker.set()
+    if was_hidden_empty_session:
+        publish_session_list_changed(
+            "session_new",
+            profile=getattr(s, "profile", None),
+            session_id=getattr(s, "session_id", None),
+        )
+    response = {
+        "stream_id": stream_id,
+        "session_id": s.session_id,
+        "pending_started_at": s.pending_started_at,
+        "turn_id": journal_event.get("turn_id"),
+        "title": s.title,
+    }
+    if normalized_model:
+        response["effective_model"] = model
+    if model_provider:
+        response["effective_model_provider"] = model_provider
+    return response
 
 
 def _active_run_stream_for_session(session_id: str | None) -> str | None:
@@ -21984,6 +22252,7 @@ def _start_chat_stream_for_session(
     source: str = "webui",
     moa_config=None,
     external_runtime_owned: bool | None = None,
+    regeneration=None,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn."""
     if external_runtime_owned is None:
@@ -22052,6 +22321,21 @@ def _start_chat_stream_for_session(
                         "_status": 409,
                     }
                 needs_stale_cleanup = False
+                if regeneration is not None:
+                    return _start_regeneration_stream_locked(
+                        s,
+                        turn=regeneration,
+                        workspace=workspace,
+                        model=model,
+                        model_provider=model_provider,
+                        normalized_model=normalized_model,
+                        diag=diag,
+                        goal_related=goal_related,
+                        source=source,
+                        moa_config=moa_config,
+                        backend_is_gateway=backend_is_gateway,
+                        transaction_snapshot=regeneration_snapshot,
+                    )
                 stream_id = uuid.uuid4().hex
                 diag.stage("save_pending_state") if diag else None
                 was_hidden_empty_session = _is_hidden_empty_session(s)
@@ -22182,6 +22466,7 @@ def _chat_start_response_from_run_start(result):
         "effective_model",
         "effective_model_provider",
         "error",
+        "code",
         "active_stream_id",
         "_status",
     ):
@@ -22218,6 +22503,7 @@ def _start_run(
     diag=None,
     moa_config=None,
     gateway_chat_enabled: bool | None = None,
+    regeneration=None,
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
 
@@ -22246,6 +22532,8 @@ def _start_run(
     )
 
     if runtime_adapter_enabled() or runtime_adapter_runner_enabled():
+        if regeneration is not None and runtime_adapter_runner_enabled():
+            return {"error": "Regeneration is not supported by the runner backend.", "code": "unsupported_regeneration_backend", "_status": 409}
         def _legacy_start_run(request: StartRunRequest) -> dict:
             return _start_chat_stream_for_session(
                 s,
@@ -22259,6 +22547,7 @@ def _start_run(
                 source=request.source or source,
                 moa_config=moa_config,
                 external_runtime_owned=gateway_chat_enabled,
+                regeneration=regeneration,
             )
 
         def _legacy_adapter_factory():
@@ -22300,6 +22589,7 @@ def _start_run(
         source=source,
         moa_config=moa_config,
         external_runtime_owned=gateway_chat_enabled,
+        regeneration=regeneration,
     )
 
 
@@ -22952,6 +23242,14 @@ def _handle_chat_start(handler, body, diag=None):
                 {"status": "suppressed", "reason": "silent_control_message"},
                 status=200,
             )
+        if body.get("regenerate") is True:
+            from api.runtime_adapter import runtime_adapter_runner_enabled
+
+            if runtime_adapter_runner_enabled():
+                return j(handler, {
+                    "error": "Regeneration is not supported by the runner backend.",
+                    "code": "unsupported_regeneration_backend",
+                }, status=409)
         # Reject a stale local Agent runtime before materialising, claiming, or
         # mutating any session state. Gateway-backed turns run in the gateway's
         # process and do not depend on this WebUI process's imported checkout.
@@ -22959,8 +23257,12 @@ def _handle_chat_start(handler, body, diag=None):
         if stale_response is not None:
             return j(handler, stale_response, status=409)
         diag.stage("get_session") if diag else None
+        regeneration_snapshot = None
         try:
             s = _get_or_materialize_session(body["session_id"], refresh_cli_messages=True)
+            if body.get("regenerate") is True:
+                from api.session_ops import snapshot_regeneration_state
+                regeneration_snapshot = snapshot_regeneration_state(s)
         except KeyError:
             # No WebUI sidecar. If this is a foreign-origin session (CLI,
             # TUI, Desktop) with recoverable state.db messages, claim it by
@@ -23013,6 +23315,9 @@ def _handle_chat_start(handler, body, diag=None):
                     500,
                 )
             s = synth
+            if body.get("regenerate") is True:
+                from api.session_ops import snapshot_regeneration_state
+                regeneration_snapshot = snapshot_regeneration_state(s)
             try:
                 with LOCK:
                     SESSIONS[s.session_id] = s
@@ -23024,6 +23329,17 @@ def _handle_chat_start(handler, body, diag=None):
                 pass
         except PermissionError:
             return bad(handler, "Read-only imported sessions cannot be continued from WebUI", 403)
+        def _restore_regeneration_preacceptance():
+            if regeneration_snapshot is not None:
+                from api.session_ops import restore_regeneration_state
+                restore_regeneration_state(s, regeneration_snapshot)
+                try:
+                    s.save(touch_updated_at=False)
+                except Exception:
+                    logger.exception("Failed to persist rejected regeneration rollback for %s", s.session_id)
+        def _reject_regeneration(response):
+            _restore_regeneration_preacceptance()
+            return response
         diag.stage("validate_profile") if diag else None
         requested_profile = str(body.get("profile") or "").strip()
         active_profile = _get_active_profile_name()
@@ -23052,15 +23368,39 @@ def _handle_chat_start(handler, body, diag=None):
                 s.profile = requested_profile
             else:
                 return bad(handler, "Session not found", 404)
+        regeneration = None
+        if body.get("regenerate") is True:
+            if any(key in body for key in ("message", "attachments", "keep_count", "prompt", "prompt_index")):
+                return _reject_regeneration(j(handler, {"error": "regeneration accepts only regeneration_revision", "code": "invalid_regeneration_request"}, status=400))
+            stale_stream_id = getattr(s, "active_stream_id", None)
+            if stale_stream_id and not _active_stream_blocks_chat_start(s, stale_stream_id):
+                _clear_stale_stream_state(s)
+            if not isinstance(body.get("regeneration_revision"), str):
+                _restore_regeneration_preacceptance()
+                return j(handler, {"error": "regeneration_revision is required", "code": "stale_regeneration_revision"}, status=409)
+            try:
+                from api.session_ops import plan_regeneration, RegenerationUnavailable
+                regeneration = plan_regeneration(
+                    s, expected_revision=body["regeneration_revision"]
+                )
+            except RegenerationUnavailable as exc:
+                _restore_regeneration_preacceptance()
+                return j(handler, {"error": str(exc), "code": exc.code}, status=exc.status)
+            msg = regeneration.turn.message_text
+            attachments = copy.deepcopy(regeneration.turn.attachments)[:20]
+        else:
+            msg = None
+            attachments = None
         diag.stage("normalize_message") if diag else None
-        msg = str(body.get("message", "")).strip()
+        msg = str(msg if msg is not None else body.get("message", "")).strip()
         if not msg:
-            return bad(handler, "message is required")
+            return _reject_regeneration(bad(handler, "message is required"))
         diag.stage("normalize_attachments") if diag else None
-        attachments = _normalize_chat_attachments(body.get("attachments") or [])[:20]
+        if attachments is None:
+            attachments = _normalize_chat_attachments(body.get("attachments") or [])[:20]
         recovery = compression_recovery_payload_for_session(s)
         if recovery and not attachments and is_generic_continuation_intent(msg):
-            return j(
+            return _reject_regeneration(j(
                 handler,
                 {
                     "error": "This session exhausted context compression. Start a focused continuation, then describe the next narrow task.",
@@ -23070,14 +23410,17 @@ def _handle_chat_start(handler, body, diag=None):
                     "session_id": getattr(s, "session_id", body["session_id"]),
                 },
                 status=409,
-            )
+            ))
         diag.stage("resolve_workspace") if diag else None
         try:
-            workspace = _resolve_chat_workspace_with_recovery(s, body.get("workspace"))
+            if regeneration is not None:
+                workspace = _resolve_chat_workspace_for_regeneration(s, body.get("workspace"))
+            else:
+                workspace = _resolve_chat_workspace_with_recovery(s, body.get("workspace"))
         except WorkspaceBindingPersistenceError as e:
-            return bad(handler, str(e), 500)
+            return _reject_regeneration(bad(handler, str(e), 500))
         except ValueError as e:
-            return bad(handler, str(e))
+            return _reject_regeneration(bad(handler, str(e)))
         requested_model = body.get("model") or s.model
         requested_provider = (
             body.get("model_provider")
@@ -23091,13 +23434,13 @@ def _handle_chat_start(handler, body, diag=None):
         gateway_chat_enabled = webui_gateway_chat_enabled(config_snapshot)
         if body.get("moa_config"):
             if gateway_chat_enabled:
-                return bad(handler, "MoA override is unavailable on gateway-backed sessions", 409)
+                return _reject_regeneration(bad(handler, "MoA override is unavailable on gateway-backed sessions", 409))
             from api.commands import resolve_moa_config
 
             try:
                 moa_config = resolve_moa_config()
             except RuntimeError as e:
-                return bad(handler, str(e), 503)
+                return _reject_regeneration(bad(handler, str(e), 503))
         diag.stage("resolve_model_provider") if diag else None
         model, model_provider, normalized_model = _resolve_compatible_session_model_state(
             requested_model,
@@ -23152,14 +23495,14 @@ def _handle_chat_start(handler, body, diag=None):
                 or model != configured_default
                 or explicit_model_pick
             ):
-                return bad(handler, "MoA override is unavailable on gateway-backed sessions", 409)
+                return _reject_regeneration(bad(handler, "MoA override is unavailable on gateway-backed sessions", 409))
         elif model_provider == "moa" and moa_config is None:
             from api.commands import resolve_moa_config
 
             try:
                 moa_config = resolve_moa_config(model)
             except RuntimeError as e:
-                return bad(handler, str(e), 503)
+                return _reject_regeneration(bad(handler, str(e), 503))
         # NOTE: runtime-adapter selection is delegated to _start_run (shared
         # with start_session_turn so both entry points behave identically
         # under runtime_adapter_enabled() / runtime_adapter_runner_enabled()
@@ -23175,6 +23518,7 @@ def _handle_chat_start(handler, body, diag=None):
             "route": "/api/chat/start",
             "diag": diag,
             "gateway_chat_enabled": gateway_chat_enabled,
+            "regeneration": regeneration,
         }
         if not gateway_chat_enabled and moa_config is not None:
             start_run_kwargs["moa_config"] = moa_config
@@ -23215,6 +23559,8 @@ def _handle_chat_start(handler, body, diag=None):
             restore_err = _restore_cleared_recovery()
             if restore_err is not None:
                 return bad(handler, f"failed to restore compression recovery: {_sanitize_error(restore_err)}", 500)
+        if status >= 400 and regeneration_snapshot is not None:
+            _restore_regeneration_preacceptance()
         diag.stage("response_write") if diag else None
         return j(handler, response, status=status)
     finally:
@@ -23241,6 +23587,17 @@ def _resolve_chat_workspace_with_recovery(s, requested_workspace) -> str:
         expected_workspace=stored_workspace,
     )
     return str(persisted.workspace)
+
+
+def _resolve_chat_workspace_for_regeneration(s, requested_workspace) -> str:
+    """Resolve regeneration's workspace without persisting before start acceptance."""
+    if requested_workspace not in (None, ""):
+        return str(resolve_trusted_workspace(requested_workspace))
+    workspace, _recovered = resolve_implicit_workspace_with_recovery(
+        getattr(s, "workspace", None),
+        get_last_workspace,
+    )
+    return str(workspace)
 
 
 def _normalize_chat_attachments(raw_attachments):
