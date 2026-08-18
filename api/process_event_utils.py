@@ -73,6 +73,14 @@ _WAKEUP_WATCH_MATCH_RE = re.compile(
     r"Command: (?P<cmd>[^\n]*)\n"
     r"Matched output:\n"
 )
+_WAKEUP_KANBAN_RE = re.compile(
+    r"\A\[kanban\] Task (?P<sid>[^\n]+) needs attention\.\n"
+    r"Title: (?P<title>[^\n]*)\n"
+    r"Assignee: (?P<assignee>[^\n]*)\n"
+    r"Board: (?P<board>[^\n]*)\n"
+    r"Event cursor: (?P<event_cursor>\d+)\n"
+    r"Events:\n"
+)
 
 
 def wakeup_display_meta(text: Any) -> dict | None:
@@ -113,6 +121,16 @@ def wakeup_display_meta(text: Any) -> dict | None:
             "task_id": m.group("sid"),
             "command": m.group("cmd"),
             "pattern": m.group("pattern"),
+        }
+    m = _WAKEUP_KANBAN_RE.match(body)
+    if m:
+        return {
+            "type": "kanban",
+            "task_id": m.group("sid"),
+            "title": m.group("title"),
+            "assignee": m.group("assignee"),
+            "board": m.group("board"),
+            "event_cursor": int(m.group("event_cursor")),
         }
     return None
 

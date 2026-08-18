@@ -496,15 +496,23 @@ def start_session_channel_reaper() -> bool:
     global _REAPER_THREAD
     with _THREAD_LIFECYCLE_LOCK:
         if _REAPER_THREAD is not None and _REAPER_THREAD.is_alive():
-            return False
-        _REAPER_STOP.clear()
-        _REAPER_THREAD = threading.Thread(
-            target=_reaper_loop,
-            name="hermes-webui-session-channel-reaper",
-            daemon=True,
-        )
-        _REAPER_THREAD.start()
-        return True
+            started = False
+        else:
+            _REAPER_STOP.clear()
+            _REAPER_THREAD = threading.Thread(
+                target=_reaper_loop,
+                name="hermes-webui-session-channel-reaper",
+                daemon=True,
+            )
+            _REAPER_THREAD.start()
+            started = True
+    try:
+        from api.kanban_notifier import start_notifier_thread
+
+        start_notifier_thread()
+    except Exception:
+        logger.warning("Kanban WebUI notifier failed to start", exc_info=True)
+    return started
 
 
 def stop_session_channel_reaper(timeout: float = 2.0) -> None:
@@ -512,6 +520,12 @@ def stop_session_channel_reaper(timeout: float = 2.0) -> None:
     th = _REAPER_THREAD
     if th is not None and th.is_alive():
         th.join(timeout=timeout)
+    try:
+        from api.kanban_notifier import stop_notifier_thread
+
+        stop_notifier_thread(timeout=timeout)
+    except Exception:
+        logger.warning("Kanban WebUI notifier failed to stop", exc_info=True)
 
 
 def _truncate(text: str, limit: int) -> str:

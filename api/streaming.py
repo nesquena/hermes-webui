@@ -8025,6 +8025,8 @@ def _run_agent_streaming(
     model_provider=None,
     goal_related=False,
     moa_config=None,
+    acceptance_gate=None,
+    acceptance_state=None,
 ):
     """Run agent in background thread, writing SSE events to STREAMS[stream_id].
 
@@ -8047,6 +8049,13 @@ def _run_agent_streaming(
                 exc_info=True,
             )
         return
+    if acceptance_gate is not None:
+        acceptance_gate.wait()
+        if not bool((acceptance_state or {}).get("accepted")):
+            with STREAMS_LOCK:
+                STREAMS.pop(stream_id, None)
+            unregister_stream_owner(stream_id)
+            return
     register_active_run(
         stream_id,
         session_id=session_id,
@@ -8062,7 +8071,7 @@ def _run_agent_streaming(
     except Exception:
         run_journal = None
         logger.debug("Failed to initialize run journal for stream %s", stream_id, exc_info=True)
-    if not ephemeral:
+    if not ephemeral and acceptance_gate is None:
         try:
             append_turn_journal_event_for_stream(
                 session_id,

@@ -16442,13 +16442,15 @@ function _parseProcessWakeupBody(text){
   const s=String(text||'');
   // Header groups are single-line by grammar; the output group captures the
   // rest verbatim (leading indentation / trailing blank lines preserved). The
-  // watch suppression note is intentionally NOT split out of the output — real
+  // watch suppression note is intentionally NOT split out of the output because real
   // process output can contain the identical text, so stripping it would drop
   // legitimate content (#6350 review finding 2). It rides along in `output`.
   let m=s.match(/^\[IMPORTANT: Background process ([^\n]*?) completed \(exit_code=([^)\n]*)\)\.\nCommand: ([^\n]*)\nOutput:\n([\s\S]*)\]$/);
   if(m) return {type:'completion',taskId:m[1],exitCode:m[2],command:m[3],output:m[4],pattern:null};
   m=s.match(/^\[IMPORTANT: Background process ([^\n]*?) matched watch pattern "(.*)"\.\nCommand: ([^\n]*)\nMatched output:\n([\s\S]*)\]$/);
   if(m) return {type:'watch_match',taskId:m[1],pattern:m[2],command:m[3],output:m[4],exitCode:null};
+  m=s.match(/^\[kanban\] Task ([^\n]+) needs attention\.\nTitle: ([^\n]*)\nAssignee: ([^\n]*)\nBoard: ([^\n]*)\nEvent cursor: (\d+)\nEvents:\n([\s\S]*?)\n\nCheck the card, its comments, and its result\. Decide the next step\.$/);
+  if(m) return {type:'kanban',taskId:m[1],title:m[2],assignee:m[3],board:m[4],eventCursor:m[5],output:m[6],command:'',pattern:null,exitCode:null};
   return null;
 }
 // Server-stamped _wakeup_meta (authoritative when present) merged over the
@@ -16468,24 +16470,32 @@ function _processWakeupInfo(m, text){
     command:String(pick('command','command')||''),
     exitCode:pick('exit_code','exitCode'),
     pattern:pick('pattern','pattern'),
+    title:String(pick('title','title')||''),
+    assignee:String(pick('assignee','assignee')||''),
+    board:String(pick('board','board')||''),
+    eventCursor:pick('event_cursor','eventCursor'),
     output:parsed?parsed.output:null,
   };
 }
 function _processWakeupCardHtml(info, rawText, extras){
   const isWatch=info.type==='watch_match';
+  const isKanban=info.type==='kanban';
   const exitStr=info.exitCode==null?'':String(info.exitCode);
   // Signal-killed processes report negative exit codes (subprocess returncode).
   const exitKnown=/^-?\d+$/.test(exitStr);
   const exitOk=exitStr==='0';
   let chip;
-  if(isWatch){
+  if(isKanban){
+    const board=String(info.board||'');
+    chip=`<span class="process-wakeup-chip neutral">${li('list-todo',11)}<code title="${esc(board)}">${esc(board||info.taskId||'Kanban')}</code></span>`;
+  }else if(isWatch){
     chip=`<span class="process-wakeup-chip watch" title="${esc(t('process_wakeup_matched'))}">${li('eye',11)}<code title="${esc(String(info.pattern||''))}">${esc(String(info.pattern||''))}</code></span>`;
   }else{
     const cls=exitOk?'ok':(exitKnown?'fail':'neutral');
     const icon=exitOk?li('check',11):(exitKnown?li('x',11):'');
     chip=`<span class="process-wakeup-chip ${cls}">${icon}<span>exit ${esc(exitStr||'?')}</span></span>`;
   }
-  const cmdHtml=info.command?`<code class="process-wakeup-cmd" title="${esc(info.command)}">${esc(info.command)}</code>`:'';
+  const cmdHtml=isKanban?`<code class="process-wakeup-cmd" title="${esc(info.title||info.taskId)}">${esc(info.taskId)}</code>`:(info.command?`<code class="process-wakeup-cmd" title="${esc(info.command)}">${esc(info.command)}</code>`:'');
   // Preserve output byte-for-byte for the <pre>; trim ONLY for the
   // empty/non-empty decision so leading indentation and trailing blank lines
   // survive (#6350 review finding 1).
@@ -16496,7 +16506,9 @@ function _processWakeupCardHtml(info, rawText, extras){
   // wrapping value in the expanded detail so touch/keyboard users can read it
   // without relying on a hover tooltip (#6350 review finding 4).
   const patternRow=(isWatch&&info.pattern)?`<div class="process-wakeup-pattern-row"><span class="process-wakeup-detail-key">${esc(t('process_wakeup_matched'))}</span><code>${esc(String(info.pattern))}</code></div>`:'';
-  return `<details class="process-wakeup-card"><summary class="process-wakeup-summary"><span class="process-wakeup-toggle">${li('chevron-right',12)}</span><span class="process-wakeup-label">${li('terminal',13)}<span>${esc(t('process_wakeup_label'))}</span></span>${cmdHtml}${chip}${extras.timeHtml||''}</summary><div class="process-wakeup-detail">${extras.filesHtml||''}${patternRow}${cmdRow}<div class="msg-body process-wakeup-body">${outHtml}</div>${extras.footHtml||''}</div></details>`;
+  const label=isKanban?'Kanban':t('process_wakeup_label');
+  const labelIcon=isKanban?li('list-todo',13):li('terminal',13);
+  return `<details class="process-wakeup-card"><summary class="process-wakeup-summary"><span class="process-wakeup-toggle">${li('chevron-right',12)}</span><span class="process-wakeup-label">${labelIcon}<span>${esc(label)}</span></span>${cmdHtml}${chip}${extras.timeHtml||''}</summary><div class="process-wakeup-detail">${extras.filesHtml||''}${patternRow}${cmdRow}<div class="msg-body process-wakeup-body">${outHtml}</div>${extras.footHtml||''}</div></details>`;
 }
 
 function renderMessages(options){
