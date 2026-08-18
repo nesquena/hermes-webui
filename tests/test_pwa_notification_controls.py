@@ -39,7 +39,7 @@ def test_notification_payload_uses_completion_session_when_provided():
     assert "tag:sid?`hermes-${sid}`" in MESSAGES_JS
     assert "function _completionNotificationPreviewText" in MESSAGES_JS
     assert "_completionNotificationPreviewText(lastAsst," in MESSAGES_JS
-    assert "sendBrowserNotification('Response complete',_completionPreview||'Task finished',{forceHidden:_wasEverBackgrounded,sid:activeSid})" in MESSAGES_JS
+    assert "sendBrowserNotification('Response complete',_completionPreview||'Task finished',{forceHidden:_wasEverBackgrounded,sid:completedSid})" in MESSAGES_JS
     assert "assistantText?assistantText.slice(0,100)" not in MESSAGES_JS
     assert "sendBrowserNotification('Approval required',d.description||'Tool approval needed',{sid:activeSid})" in MESSAGES_JS
     assert "sendBrowserNotification('Clarification needed',d.question||'Tool clarification needed',{sid:activeSid})" in MESSAGES_JS
@@ -100,6 +100,38 @@ def test_desktop_background_notification_signal_stays_out_of_stream_visibility()
     for name in DESKTOP_BACKGROUND_NOTIFICATION_NAMES:
         assert name not in stream_tracker
         assert name not in deferred_recovery
+
+
+def test_rotated_done_notification_uses_continuation_session_for_tag_and_url():
+    """
+    #6689 re-gate: after auto-compression rotates the session id to a continuation,
+    the completion notification's tag and click URL must point to the CONTINUATION
+    session (completedSid), not the archived parent (activeSid).
+
+    The done handler computes completedSid from the done payload and passes it to
+    sendBrowserNotification. _notificationOptions derives the tag and data.url from
+    options.sid, so the notification must carry completedSid. The hidden/background
+    delivery gate (forceHidden) must still be respected — only the sid changes.
+    """
+    done_block = _source_between(
+        "source.addEventListener('done'", "source.addEventListener('stream_end'"
+    )
+    # The notification call in the done block must use completedSid
+    assert "sendBrowserNotification('Response complete'" in done_block
+    assert "sid:completedSid" in done_block
+    # The legacy activeSid must NOT appear in the response-complete call
+    # (it may appear in approval/clarification calls — those are pre-rotation)
+    response_complete_call = done_block[
+        done_block.index("sendBrowserNotification('Response complete'")
+        : done_block.index("sendBrowserNotification('Response complete'") + 200
+    ]
+    assert "sid:activeSid" not in response_complete_call, (
+        "response-complete notification must not use activeSid (archived parent)"
+    )
+    # The preview helper must receive the completed session id
+    assert "sessionId:completedSid" in done_block
+    # forceHidden gate must still be present (hidden/background delivery preserved)
+    assert "forceHidden:_wasEverBackgrounded" in done_block
 
 
 def test_service_worker_handles_notification_clicks_without_hijacking_other_sessions():
