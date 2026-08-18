@@ -1,7 +1,5 @@
 import copy
-import json
 import queue
-import re
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -17,22 +15,7 @@ from api.session_ops import (
     snapshot_regeneration_state,
 )
 
-
-ISSUE_ARTIFACT = Path(__file__).parents[1].parent / ".claude" / "pr-sweep" / "bodies" / "hermes-webui-issue-6611.json"
-
-
-def _issue_artifact_messages():
-    artifact = json.loads(ISSUE_ARTIFACT.read_text(encoding="utf-8"))
-    reproduction = artifact["body"].split("## Reproduction on current master", 1)[1]
-    block = reproduction.split("```", 2)[1]
-    rows = [
-        {"role": role, "content": content}
-        for role, content in re.findall(
-            r"\{role:\s*'([^']+)',\s*content:\s*'([^']+)'", block
-        )
-    ]
-    assert [row["role"] for row in rows] == ["user", "assistant"]
-    return rows
+from tests._issue6611_fixture import load_issue6611_fixture
 
 
 def _session():
@@ -405,7 +388,7 @@ def test_issue_artifact_rows_follow_production_regeneration_and_error_settlement
     from api.session_ops import apply_regeneration_plan, plan_regeneration
     from api.streaming import _materialize_pending_user_turn_before_error
 
-    rows = _issue_artifact_messages()
+    rows = load_issue6611_fixture()["rows"]
     session = Session(
         session_id="artifact-production-6611",
         messages=copy.deepcopy(rows),

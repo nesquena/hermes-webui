@@ -1,22 +1,11 @@
 import json
-import re
 import subprocess
 from pathlib import Path
 
+from tests._issue6611_fixture import load_issue6611_fixture
+
 
 ROOT = Path(__file__).parents[1]
-ISSUE_ARTIFACT = ROOT.parent / ".claude" / "pr-sweep" / "bodies" / "hermes-webui-issue-6611.json"
-
-
-def _issue_artifact_messages():
-    artifact = json.loads(ISSUE_ARTIFACT.read_text(encoding="utf-8"))
-    reproduction = artifact["body"].split("## Reproduction on current master", 1)[1]
-    block = reproduction.split("```", 2)[1]
-    rows = []
-    for role, content in re.findall(r"\{role:\s*'([^']+)',\s*content:\s*'([^']+)'", block):
-        rows.append({"role": role, "content": content})
-    assert [row["role"] for row in rows] == ["user", "assistant"]
-    return rows
 
 
 def _start_regeneration_source():
@@ -28,7 +17,7 @@ def _start_regeneration_source():
 
 def _run_node(scenario, *, with_metadata=False):
     function_source = _start_regeneration_source()
-    initial_messages = _issue_artifact_messages()
+    initial_messages = load_issue6611_fixture()["rows"]
     if with_metadata:
         initial_messages[0].update({"attachments": ["proof.txt"], "custom": "keep"})
     messages_json = json.dumps(initial_messages)
@@ -91,9 +80,9 @@ def test_reporter_flow_keeps_one_prompt_and_adopts_one_accepted_stream():
 
 
 def test_issue_artifact_regeneration_leaves_one_user_row():
-    artifact = json.loads(ISSUE_ARTIFACT.read_text(encoding="utf-8"))
-    assert artifact["number"] == 6611
-    artifact_rows = _issue_artifact_messages()
+    fixture = load_issue6611_fixture()
+    assert fixture["issue"] == 6611
+    artifact_rows = fixture["rows"]
     result = _run_node("success")
     assert [row["role"] for row in result["messages"]].count("user") == 1
     assert [row["role"] for row in result["messages"]] == ["user"]
