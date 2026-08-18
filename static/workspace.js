@@ -1582,7 +1582,10 @@ async function _wsLoadMoreDirEntries(dirPath){
     console.warn('loadMoreDirEntries', err);
     if(typeof showToast === 'function') showToast(t('file_open_failed'), 4000, 'error');
   }finally{
-    meta.loading = false;
+    // _wsStoreDirListing replaces S._dirMeta[dir]; clear the CURRENT object,
+    // not the captured reference, to avoid lifecycle drift.
+    const fresh = (S._dirMeta || {})[dir];
+    if(fresh) fresh.loading = false;
   }
   if(typeof renderFileTree === 'function') renderFileTree();
 }
