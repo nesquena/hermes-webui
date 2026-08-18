@@ -36,6 +36,7 @@ GREEN after the fix.
 """
 from __future__ import annotations
 
+import contextvars
 import importlib
 import os
 import sys
@@ -64,9 +65,9 @@ class _FakeEnv:
 class _FakeFileOps:
     """Minimal stand-in for ShellFileOperations (the file_ops cache value)."""
 
-    def __init__(self, env):
-        self.env = env
-        self.cwd = getattr(env, "cwd", None)
+    def __init__(self, env_obj):
+        self.env = env_obj
+        self.cwd = getattr(env_obj, "cwd", None)
         self._webui_backend_generation = None
 
 
@@ -183,6 +184,26 @@ def _build_fake_terminal_tool_module() -> types.ModuleType:
             elif hasattr(env, "stop"):
                 env.stop()
 
+    def _cleanup_inactive_envs(lifetime_seconds=300):
+        # Faithful to tools/terminal_tool.py:_cleanup_inactive_envs — the
+        # idle reaper the installed terminal_tool starts on every call.  It
+        # pops stale envs DIRECTLY from the registry (never through the
+        # WebUI retirement paths) and tears them down outside the lock.
+        current_time = time.time()
+        envs_to_stop = []
+        with mod._env_lock:
+            for task_id, last_time in list(mod._last_activity.items()):
+                if current_time - last_time > lifetime_seconds:
+                    env = mod._active_environments.pop(task_id, None)
+                    mod._last_activity.pop(task_id, None)
+                    if env is not None:
+                        envs_to_stop.append((task_id, env))
+        for _task_id, env in envs_to_stop:
+            if hasattr(env, "cleanup"):
+                env.cleanup()
+            elif hasattr(env, "stop"):
+                env.stop()
+
     def terminal_tool(
         command, background=False, timeout=None, task_id=None,
         session_id=None, force=False, workdir=None, pty=False,
@@ -205,6 +226,7 @@ def _build_fake_terminal_tool_module() -> types.ModuleType:
     mod._create_environment = _create_environment
     mod.get_active_env = get_active_env
     mod.cleanup_vm = cleanup_vm
+    mod._cleanup_inactive_envs = _cleanup_inactive_envs
     mod.terminal_tool = terminal_tool
     return mod
 
@@ -1366,3 +1388,343 @@ def test_forced_docker_teardown_timeout_fails_closed(fake_terminal_tool, monkeyp
     assert "default" not in fake_terminal_tool._active_environments
     with pytest.raises(RuntimeError, match="fail"):
         streaming._validate_backend_ownership(fake_terminal_tool, "default", None)
+
+
+def test_terminal_retirement_deferred_while_command_executes(fake_terminal_tool):
+    """Blocker 1 (2026-08-06 review): acquisition and execution share ONE
+    authority.  A retirement attempted while a guarded terminal command is
+    executing against the validated env must be DEFERRED (execution lease) —
+    the installed ``terminal_tool`` re-reads the registry by key right before
+    ``env.execute()``, so replacing the object mid-command would make the
+    command run against a non-validated replacement.  The command completes
+    against the exact validated object; retirement proceeds afterwards.
+    """
+    streaming = importlib.import_module("api.streaming")
+    started = threading.Event()
+    release = threading.Event()
+    executed_against = []
+
+    def gated_terminal_tool(
+        command, background=False, timeout=None, task_id=None,
+        session_id=None, force=False, workdir=None, pty=False,
+        notify_on_complete=False, watch_patterns=None,
+    ):
+        # Execution half of the installed tool: the SECOND by-key lookup,
+        # then env.execute() against whatever it found.
+        eff = fake_terminal_tool._resolve_container_task_id(task_id)
+        with fake_terminal_tool._env_lock:
+            env = (
+                fake_terminal_tool._active_environments.get(eff)
+                or fake_terminal_tool._active_environments.get(task_id)
+            )
+        executed_against.append(env)
+        started.set()
+        assert release.wait(timeout=15), "release gate never opened"
+        return '{"output": "ok", "exit_code": 0}'
+
+    fake_terminal_tool.terminal_tool = gated_terminal_tool
+    streaming._install_terminal_env_generation_guard()
+
+    env_a = {"TERMINAL_ENV": "ssh", "TERMINAL_SSH_HOST": "host-a"}
+    streaming._last_backend_identity = streaming._compute_backend_identity(env_a)
+    streaming._current_backend_generation = 0
+
+    result = {}
+
+    def _run_command():
+        # The Agent's parallel-tool worker bridge runs the tool on a child
+        # thread and propagates ContextVars — copy_context() is the faithful
+        # shape, so the turn's captured generation reaches the wrapper.
+        result["out"] = fake_terminal_tool.terminal_tool(
+            "long cmd", session_id="s-l")
+
+    try:
+        streaming._begin_turn_generation(env_a)          # gen 0
+        ctx = contextvars.copy_context()
+        thread = threading.Thread(
+            target=lambda: ctx.run(_run_command), daemon=True)
+        thread.start()
+        assert started.wait(timeout=15), "command never started"
+        validated = fake_terminal_tool._active_environments.get("default")
+        assert validated is not None
+        # Mid-command retirement attempt (turn-exit drain / identity switch
+        # would call exactly this path): must be DEFERRED by the lease.
+        streaming._retire_generation_env(0, "default")
+        assert fake_terminal_tool._active_environments.get("default") is validated
+        assert not validated.cleaned
+        release.set()
+        thread.join(timeout=15)
+        assert result["out"] == '{"output": "ok", "exit_code": 0}'
+        # The second lookup found the SAME validated object — no replacement.
+        assert executed_against[0] is validated
+    finally:
+        # Turn exit drains the deferred eviction: the now-idle env is
+        # retired and physically cleaned.
+        streaming._end_turn_generation()
+    assert "default" not in fake_terminal_tool._active_environments
+    assert validated.cleaned
+
+
+def test_reaper_does_not_reap_env_mid_execution(fake_terminal_tool):
+    """Blocker 1: the agent's idle reaper (``_cleanup_inactive_envs``, which
+    the installed terminal_tool STARTS on every call and which pops envs
+    DIRECTLY from the registry) must not remove an environment a guarded
+    terminal command is executing against — the by-key second lookup would
+    then create a fresh, never-validated env and run the command there.  A
+    leased env is kept alive (activity refresh) until the command finishes.
+    """
+    streaming = importlib.import_module("api.streaming")
+    started = threading.Event()
+    release = threading.Event()
+    executed_against = []
+
+    def gated_terminal_tool(
+        command, background=False, timeout=None, task_id=None,
+        session_id=None, force=False, workdir=None, pty=False,
+        notify_on_complete=False, watch_patterns=None,
+    ):
+        eff = fake_terminal_tool._resolve_container_task_id(task_id)
+        with fake_terminal_tool._env_lock:
+            env = (
+                fake_terminal_tool._active_environments.get(eff)
+                or fake_terminal_tool._active_environments.get(task_id)
+            )
+        executed_against.append(env)
+        started.set()
+        assert release.wait(timeout=15), "release gate never opened"
+        return '{"output": "ok", "exit_code": 0}'
+
+    fake_terminal_tool.terminal_tool = gated_terminal_tool
+    streaming._install_terminal_env_generation_guard()
+
+    env_a = {"TERMINAL_ENV": "ssh", "TERMINAL_SSH_HOST": "host-a"}
+    streaming._last_backend_identity = streaming._compute_backend_identity(env_a)
+    streaming._current_backend_generation = 0
+
+    result = {}
+
+    def _run_command():
+        result["out"] = fake_terminal_tool.terminal_tool(
+            "long cmd", session_id="s-r")
+
+    try:
+        streaming._begin_turn_generation(env_a)          # gen 0
+        ctx = contextvars.copy_context()
+        thread = threading.Thread(
+            target=lambda: ctx.run(_run_command), daemon=True)
+        thread.start()
+        assert started.wait(timeout=15), "command never started"
+        validated = fake_terminal_tool._active_environments.get("default")
+        assert validated is not None
+        # Force the env idle (as a long-running command with no background
+        # process would be), then sweep with a 10s lifetime: at 60s idle the
+        # unfenced reaper would reap it; the fence must keep the env a
+        # guarded command is executing against alive.
+        fake_terminal_tool._last_activity["default"] = time.time() - 60
+        fake_terminal_tool._cleanup_inactive_envs(10)
+        assert fake_terminal_tool._active_environments.get("default") is validated
+        assert not validated.cleaned
+        release.set()
+        thread.join(timeout=15)
+        assert result["out"] == '{"output": "ok", "exit_code": 0}'
+        assert executed_against[0] is validated
+    finally:
+        streaming._end_turn_generation()
+    # Once idle, a later sweep reaps the env normally.
+    fake_terminal_tool._cleanup_inactive_envs(0)
+    assert "default" not in fake_terminal_tool._active_environments
+    assert validated.cleaned
+
+
+def test_fail_closed_gate_refuses_registry_swap_after_validation(
+    fake_terminal_tool, monkeypatch,
+):
+    """Blocker 1: execution never begins against a REPLACEMENT.  If a foreign
+    actor swaps the registry object in the window AFTER the ownership
+    transaction's final check and BEFORE the pre-execution gate, the wrapper
+    refuses (fail-closed) instead of executing on the replacement.
+    """
+    streaming = importlib.import_module("api.streaming")
+    streaming._install_terminal_env_generation_guard()
+
+    env_a = {"TERMINAL_ENV": "ssh", "TERMINAL_SSH_HOST": "host-a"}
+    streaming._last_backend_identity = streaming._compute_backend_identity(env_a)
+    streaming._current_backend_generation = 0
+
+    real_acquire = streaming._acquire_backend_object
+
+    def swapping_acquire(
+        tt, effective_task_id, raw_task_id, acquire_fn, on_acquired=None,
+    ):
+        result = real_acquire(
+            tt, effective_task_id, raw_task_id, acquire_fn,
+            on_acquired=on_acquired,
+        )
+        # The foreign actor acts between the transaction's final ownership
+        # check and the wrapper's post-lock pre-execution gate: swap the
+        # validated object for another env under the same key.
+        with tt._env_lock:
+            tt._active_environments[effective_task_id] = _FakeEnv(generation=0)
+        return result
+
+    monkeypatch.setattr(streaming, "_acquire_backend_object", swapping_acquire)
+
+    try:
+        streaming._begin_turn_generation(env_a)          # gen 0
+        with pytest.raises(RuntimeError, match="changed after ownership validation"):
+            fake_terminal_tool.terminal_tool("echo hi", session_id="s-g")
+    finally:
+        streaming._end_turn_generation()
+    # No command ran against the replacement.
+    assert fake_terminal_tool.executed_envs == []
+
+
+def test_docker_teardown_verifies_physical_removal_fail_closed(
+    fake_terminal_tool, monkeypatch,
+):
+    """Blocker 3 (2026-08-06 review): ``wait_for_cleanup()`` only proves the
+    worker thread ended — the installed Docker worker ignores ``docker
+    stop``/``rm -f`` return codes, so a failed removal still reports success
+    while the old container and labels remain.  The retired container
+    identity must be verified GONE before replacement is permitted; a
+    still-existing container FAILS CLOSED and blocks later replacement.
+    """
+    streaming = importlib.import_module("api.streaming")
+
+    env_a = {"TERMINAL_ENV": "docker", "TERMINAL_DOCKER_IMAGE": "img-a"}
+    env_b = {"TERMINAL_ENV": "docker", "TERMINAL_DOCKER_IMAGE": "img-b"}
+    streaming._last_backend_identity = streaming._compute_backend_identity(env_a)
+    streaming._env_backend_generations["default"] = 0
+    stale = _FakeDockerEnv(generation=0, removal_seconds=0.05)
+    stale._container_id = "c0ffee1234567890"
+    stale._docker_exe = "docker"
+    fake_terminal_tool._active_environments["default"] = stale
+    streaming._install_terminal_env_generation_guard()
+
+    monkeypatch.setattr(streaming, "_docker_container_exists", lambda exe, cid: True)
+
+    with pytest.raises(RuntimeError, match="still exists after forced teardown"):
+        streaming._begin_turn_generation(env_b)
+    streaming._end_turn_generation()
+    # Fail-closed: the teardown fence refuses later creation for the key.
+    assert "default" not in fake_terminal_tool._active_environments
+    with pytest.raises(RuntimeError, match="fail"):
+        streaming._validate_backend_ownership(fake_terminal_tool, "default", None)
+
+
+def test_docker_teardown_physical_removal_verified_ok(fake_terminal_tool, monkeypatch):
+    """Blocker 3 happy path: once the retired container identity is confirmed
+    gone, replacement construction proceeds normally.
+    """
+    streaming = importlib.import_module("api.streaming")
+    monkeypatch.setattr(streaming, "_docker_container_exists", lambda exe, cid: False)
+
+    env_a = {"TERMINAL_ENV": "docker", "TERMINAL_DOCKER_IMAGE": "img-a"}
+    env_b = {"TERMINAL_ENV": "docker", "TERMINAL_DOCKER_IMAGE": "img-b"}
+    streaming._last_backend_identity = streaming._compute_backend_identity(env_a)
+    streaming._env_backend_generations["default"] = 0
+    stale = _FakeDockerEnv(generation=0, removal_seconds=0.05)
+    stale._container_id = "c0ffee1234567890"
+    stale._docker_exe = "docker"
+    fake_terminal_tool._active_environments["default"] = stale
+    streaming._install_terminal_env_generation_guard()
+
+    try:
+        streaming._begin_turn_generation(env_b)   # retire stale + create fresh
+        out = fake_terminal_tool.terminal_tool("echo fresh", session_id="s-d2")
+        fresh = fake_terminal_tool._active_environments["default"]
+        assert fresh is not stale
+        assert fresh._webui_backend_generation == 1
+        assert out == '{"output": "ok", "exit_code": 0}'
+    finally:
+        streaming._end_turn_generation()
+
+
+def test_profile_terminal_mappings_cover_canonical_schema(fake_terminal_tool):
+    """Blocker 2 (2026-08-06 review): the WebUI profile snapshot must cover
+    every field the agent's canonical terminal schema supports
+    (``TERMINAL_CONFIG_ENV_MAP`` in hermes_cli/config.py) — a profile that
+    configures e.g. ``docker_shm_size`` / ``vercel_runtime`` / ``sandbox_dir``
+    in config.yaml must not silently fall back to WebUI hard-coded defaults —
+    and every effective constructor input must stay in the turn's immutable
+    snapshot (the same object the identity fingerprint is computed from).
+    """
+    import api.profiles as profiles
+    streaming = importlib.import_module("api.streaming")
+
+    # Mirror of hermes_cli/config.py:TERMINAL_CONFIG_ENV_MAP (agent side).
+    canonical = {
+        "backend", "modal_mode", "degraded_mode", "cwd", "timeout",
+        "lifetime_seconds", "docker_image", "docker_forward_env",
+        "singularity_image", "modal_image", "daytona_image", "vercel_runtime",
+        "ssh_host", "ssh_user", "ssh_port", "ssh_key", "container_cpu",
+        "container_memory", "container_disk", "container_persistent",
+        "docker_volumes", "docker_env", "docker_mount_cwd_to_workspace",
+        "docker_network", "docker_extra_args", "docker_shm_size",
+        "docker_run_as_host_user", "docker_persist_across_processes",
+        "docker_orphan_reaper", "sandbox_dir", "persistent_shell",
+    }
+    missing = canonical - set(profiles._TERMINAL_ENV_MAPPINGS)
+    assert not missing, (
+        "profile terminal mapping omits canonical fields: %s" % sorted(missing))
+
+    # Every mapped canonical field must also be part of the backend identity
+    # fingerprint, so the immutable turn snapshot cannot diverge from the
+    # identity that was published.
+    mapped_vars = {profiles._TERMINAL_ENV_MAPPINGS[k] for k in canonical}
+    missing_identity = mapped_vars - set(streaming._BACKEND_IDENTITY_KEYS)
+    assert not missing_identity, (
+        "backend identity keys omit mapped fields: %s" % sorted(missing_identity))
+
+    # End-to-end: a profile runtime env configuring the previously-omitted
+    # fields flows through the real constructor input (the wrapped
+    # _get_env_config -> _create_environment) from the SAME immutable
+    # snapshot the fingerprint was computed from.
+    streaming._install_terminal_env_generation_guard()
+    profile_env = {
+        "TERMINAL_ENV": "docker",
+        "TERMINAL_DOCKER_IMAGE": "img-a",
+        "TERMINAL_DOCKER_SHM_SIZE": "2g",
+        "TERMINAL_DOCKER_NETWORK": "false",
+        "TERMINAL_DOCKER_EXTRA_ARGS": '["--cpus=2"]',
+        "TERMINAL_DOCKER_RUN_AS_HOST_USER": "true",
+        "TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES": "false",
+        "TERMINAL_DOCKER_ORPHAN_REAPER": "false",
+        "TERMINAL_VERCEL_RUNTIME": "nodejs20",
+        "TERMINAL_SANDBOX_DIR": "/sandbox",
+        "TERMINAL_DEGRADED_MODE": "true",
+    }
+    streaming._last_backend_identity = streaming._compute_backend_identity(
+        {"TERMINAL_ENV": "docker", "TERMINAL_DOCKER_IMAGE": "img-a"})
+    streaming._current_backend_generation = 0
+    try:
+        streaming._begin_turn_generation(profile_env)
+        # The fingerprint was computed from the SAME normalized object.
+        bound = streaming._get_turn_backend_config()
+        assert bound is not None
+        assert streaming._compute_backend_identity(bound) == streaming._last_backend_identity
+        # The construction authority returns the profile values, not
+        # hard-coded defaults.
+        config = fake_terminal_tool._get_env_config()          # wrapped
+        assert config["docker_shm_size"] == "2g", config
+        assert config["docker_network"] is False, config
+        assert config["docker_extra_args"] == ["--cpus=2"], config
+        assert config["docker_run_as_host_user"] is True, config
+        assert config["docker_persist_across_processes"] is False, config
+        assert config["docker_orphan_reaper"] is False, config
+        assert config["vercel_runtime"] == "nodejs20", config
+        # The REAL creation funnel consumed the snapshot values.
+        out = fake_terminal_tool.terminal_tool("echo hi", session_id="s-p")
+        created = fake_terminal_tool.created_configs[-1]
+        cc = created["container_config"]
+        assert cc["docker_shm_size"] == "2g", created
+        assert cc["docker_network"] is False, created
+        assert cc["docker_extra_args"] == ["--cpus=2"], created
+        assert cc["docker_run_as_host_user"] is True, created
+        assert cc["docker_persist_across_processes"] is False, created
+        assert cc["docker_orphan_reaper"] is False, created
+        assert cc["vercel_runtime"] == "nodejs20", created
+        assert out == '{"output": "ok", "exit_code": 0}'
+    finally:
+        streaming._end_turn_generation()
+    assert streaming._get_turn_backend_config() is None

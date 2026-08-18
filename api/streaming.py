@@ -2597,6 +2597,8 @@ _BACKEND_IDENTITY_KEYS: tuple[str, ...] = (
     'TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES',
     'TERMINAL_DOCKER_ORPHAN_REAPER',
     'TERMINAL_VERCEL_RUNTIME',
+    'TERMINAL_SANDBOX_DIR',
+    'TERMINAL_DEGRADED_MODE',
 )
 
 # Backends whose environment is a container/sandbox (mirrors
@@ -2752,7 +2754,7 @@ def _build_env_config_from_snapshot(
             raise ValueError(
                 f'Invalid value for {name}: {raw!r} (expected {label}). '
                 'Check the profile terminal configuration.'
-            )
+            ) from None
 
     env_type = str(snapshot.get('TERMINAL_ENV', 'local'))
     mount_docker_cwd = str(snapshot.get(
@@ -3026,6 +3028,31 @@ def _wait_for_in_flight_cleanup(
             )
 
 
+def _docker_container_exists(docker_exe: str, container_id: str) -> bool:
+    """True when a container with *container_id* still exists (``docker ps -a``).
+
+    Verifies that forced retirement PHYSICALLY removed the container: the
+    installed Docker worker runs ``docker stop`` / ``docker rm -f`` without
+    checking return codes and publishes no outcome, so ``wait_for_cleanup()``
+    alone cannot distinguish a completed removal from a silently failed one.
+    A failed ``rm -f`` leaves the container and its labels in place, and a
+    replacement would reattach by labels — so existence is checked before any
+    replacement is permitted.
+    """
+    try:
+        result = subprocess.run(
+            [docker_exe, 'ps', '-a', '--no-trunc', '--filter',
+             'id={}'.format(container_id), '--format', '{{.ID}}'],
+            capture_output=True, timeout=15, stdin=subprocess.DEVNULL,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise RuntimeError(
+            f'Could not verify removal of Docker container '
+            f'{container_id[:12]}: {exc} (fail-closed)'
+        ) from exc
+    return bool((result.stdout or b'').strip())
+
+
 def _cleanup_environment_object(env, task_key: str = 'default') -> None:
     """Run the teardown the agent's ``cleanup_vm`` would run on one env.
 
@@ -3048,6 +3075,14 @@ def _cleanup_environment_object(env, task_key: str = 'default') -> None:
     never remove the replacement's live container.
     """
     timeout = float(os.environ.get('HERMES_WEBUI_BACKEND_CLEANUP_TIMEOUT', '90'))
+    # Capture the physical container identity BEFORE teardown: the installed
+    # Docker cleanup nulls ``_container_id`` before its worker thread starts,
+    # so it is only readable here.
+    container_id = (
+        getattr(env, '_container_id', None)
+        or getattr(env, 'container_id', None)
+    )
+    docker_exe = getattr(env, '_docker_exe', None)
     done = threading.Event()
     failed = False
     with _in_flight_env_cleanups_lock:
@@ -3072,6 +3107,21 @@ def _cleanup_environment_object(env, task_key: str = 'default') -> None:
                     f'finish within {timeout:.0f}s; refusing to proceed '
                     '(fail-closed — a replacement must not attach to a '
                     'still-removing container)'
+                )
+        # Physical-removal verification (fail-closed): ``wait_for_cleanup()``
+        # only proves the worker thread ended.  The installed Docker worker
+        # ignores ``docker stop``/``rm -f`` return codes and publishes no
+        # outcome, so a failed ``rm -f`` still reports success while the old
+        # container and its labels remain — and a replacement would reattach
+        # by labels.  Verify the retired container identity is gone before
+        # permitting replacement.
+        if container_id and docker_exe:
+            if _docker_container_exists(docker_exe, container_id):
+                raise RuntimeError(
+                    f'Retired Docker container {container_id[:12]} still '
+                    f'exists after forced teardown; refusing to proceed '
+                    '(fail-closed — a replacement must not reattach to the '
+                    'stale container by labels)'
                 )
     except Exception:
         failed = True
@@ -3109,6 +3159,17 @@ def _retire_generation_env(generation: int | None, task_key: str = 'default') ->
         if env_gen != generation:
             # Replaced by a newer env, or tagged with a different generation —
             # never retire it.
+            return
+        if _env_has_execution_lease(env):
+            # A guarded terminal command is mid-execution against this exact
+            # object.  The installed terminal_tool re-reads the registry by
+            # key before env.execute(), so retiring now would make the
+            # in-flight command run against whatever replaced it.  Defer: the
+            # retirement is re-queued and retried once the last lease releases
+            # (turn-exit drain, or the lease-release drain).
+            if generation is not None:
+                with _backend_generation_lock:
+                    _pending_eviction_generations.add(generation)
             return
         # Compare-and-remove: this whole read/pop is one lock hold, so the
         # registry cannot change underneath us.
@@ -3414,6 +3475,51 @@ def _mark_file_backend_generation(task_key: str, generation: int) -> None:
         _file_backend_generations[task_key] = generation
 
 
+# Execution leases: ``id(env)`` -> number of guarded terminal commands
+# currently executing against that exact object.  The installed
+# ``terminal_tool()`` re-reads ``_active_environments`` by key BEFORE calling
+# ``env.execute()``, so an environment retired/replaced between the WebUI's
+# final ownership check and that lookup would make the command execute
+# against a non-validated object.  A leased environment is therefore never
+# removed by any WebUI retirement path; retirement is deferred until the last
+# lease releases.  Guarded by ``_env_execution_leases_lock``.
+_env_execution_leases: dict[int, int] = {}
+_env_execution_leases_lock = threading.Lock()
+
+
+def _env_has_execution_lease(env) -> bool:
+    """True when a guarded terminal command is executing against *env*."""
+    with _env_execution_leases_lock:
+        return _env_execution_leases.get(id(env), 0) > 0
+
+
+def _acquire_env_execution_lease(env) -> None:
+    """Mark one in-flight guarded terminal execution against *env*."""
+    with _env_execution_leases_lock:
+        _env_execution_leases[id(env)] = _env_execution_leases.get(id(env), 0) + 1
+
+
+def _release_env_execution_lease(env) -> None:
+    """Mark one in-flight guarded terminal execution as finished.
+
+    The lease lock is released BEFORE the deferred-eviction drain runs, so
+    the drain (which takes the registry lock) can never deadlock against a
+    retirement path holding the registry lock while checking a lease.
+    """
+    with _env_execution_leases_lock:
+        remaining = _env_execution_leases.get(id(env), 1) - 1
+        if remaining > 0:
+            _env_execution_leases[id(env)] = remaining
+        else:
+            _env_execution_leases.pop(id(env), None)
+    # A retirement deferred while this lease was held may now proceed.
+    try:
+        _drain_pending_evictions()
+    except Exception:
+        logger.debug('Failed to drain deferred evictions after lease release',
+                     exc_info=True)
+
+
 def _begin_turn_generation(profile_runtime_env: dict | None) -> None:
     """Turn-setup entry: ONE generation-lock transaction, fail-closed.
 
@@ -3624,6 +3730,32 @@ def _install_terminal_env_generation_guard() -> None:
 
         tt._get_env_config = _wrapped_get_env_config
 
+    # 0b) terminal_tool._cleanup_inactive_envs — the agent's idle reaper.
+    #     The installed terminal_tool STARTS the cleanup daemon on every call
+    #     (before the by-key env lookup), and the reaper pops idle envs
+    #     DIRECTLY from _active_environments.  A pop between the WebUI's final
+    #     ownership check and the installed lookup would make the command
+    #     execute against a replacement — or against a freshly created,
+    #     never-validated env.  A leased environment (a guarded terminal
+    #     command executing against that exact object) is kept alive instead:
+    #     its activity stamp is refreshed so the sweep skips it, and it is
+    #     only retired after the last lease releases (via the deferred
+    #     eviction drain).
+    if hasattr(tt, '_cleanup_inactive_envs'):
+        original_cleanup_inactive_envs = tt._cleanup_inactive_envs
+
+        def _wrapped_cleanup_inactive_envs(lifetime_seconds: int = 300):
+            with _env_execution_leases_lock:
+                leased_ids = set(_env_execution_leases.keys())
+            if leased_ids:
+                with tt._env_lock:
+                    for task_id, env in list(tt._active_environments.items()):
+                        if id(env) in leased_ids:
+                            tt._last_activity[task_id] = time.time()
+            return original_cleanup_inactive_envs(lifetime_seconds)
+
+        tt._cleanup_inactive_envs = _wrapped_cleanup_inactive_envs
+
     # 1) terminal_tool.terminal_tool — split into env acquisition (inside the
     #    shared transaction) and command execution (AFTER the transaction):
     #    the installed terminal implementation acquires/reuses the
@@ -3762,13 +3894,27 @@ def _install_terminal_env_generation_guard() -> None:
                 )
             # Lock released — only now does the command execute, against the
             # exact validated environment.
-            return original_terminal_tool(
-                command, background=background, timeout=timeout,
-                task_id=task_id, session_id=session_id, force=force,
-                workdir=workdir, pty=pty,
-                notify_on_complete=notify_on_complete,
-                watch_patterns=watch_patterns,
-            )
+            #
+            # Execution lease: the installed terminal_tool re-reads the
+            # registry by key before env.execute(), so a retirement between
+            # this final check and that lookup would execute the command
+            # against a replacement.  The lease pins the validated object for
+            # the duration of the command: every WebUI retirement path defers
+            # removal while a lease is held, and the registry is re-checked
+            # on release.
+            if env is not None:
+                _acquire_env_execution_lease(env)
+            try:
+                return original_terminal_tool(
+                    command, background=background, timeout=timeout,
+                    task_id=task_id, session_id=session_id, force=force,
+                    workdir=workdir, pty=pty,
+                    notify_on_complete=notify_on_complete,
+                    watch_patterns=watch_patterns,
+                )
+            finally:
+                if env is not None:
+                    _release_env_execution_lease(env)
 
         tt.terminal_tool = _wrapped_terminal_tool
 
