@@ -1250,6 +1250,36 @@ def _home_override_active() -> bool:
 
 
 @contextmanager
+def _root_home_override_scope():
+    """Install the explicit root-home ContextVar override in default/root scopes.
+
+    Named-profile scopes install a profile-home override; the default/root
+    scopes previously no-opped, so after a named→default switch the in-process
+    home resolver (ContextVar base value / stale env) could keep resolving the
+    old named home inside the scope (#6857). Pin the resolved root home
+    explicitly so scoped readers resolve the default home consistently. No-op
+    on agents without the override API (pre-v0.18 legacy env behavior).
+    """
+    mod = _resolve_hermes_home_override()
+    token = None
+    if mod is not None:
+        try:
+            token = mod.set_hermes_home_override(
+                str(get_hermes_home_for_profile(""))
+            )
+        except Exception:
+            token = None
+    try:
+        yield
+    finally:
+        if token is not None:
+            try:
+                mod.reset_hermes_home_override(token)
+            except Exception:
+                pass
+
+
+@contextmanager
 def profile_env_for_background_worker(
     session,
     purpose: str = "background worker",
@@ -1712,6 +1742,16 @@ def init_profile_state() -> None:
     else:
         _active_profile = _read_active_profile_file()
         home = get_active_hermes_home()
+    # #6857: one-time STARTUP publication. init_profile_state() runs outside any
+    # ContextVar override and before any request scope exists; origin/master
+    # unconditionally published the resolved home here. Legacy/unscoped readers
+    # and module imports that snapshot HERMES_HOME depend on this base value —
+    # e.g. on the supported Windows migration path the WebUI canonical home
+    # (%USERPROFILE%\\.hermes) must win over the agent fallback
+    # (%LOCALAPPDATA%\\hermes). This is the single allowed process-global write:
+    # request-time and process-switch writes remain prohibited (they race across
+    # concurrent per-profile requests); single-threaded init makes this safe.
+    os.environ['HERMES_HOME'] = str(home)
     _set_hermes_home(home)
     install_cron_scheduler_profile_isolation()
     _reload_dotenv(home)
