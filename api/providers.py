@@ -1365,10 +1365,13 @@ def _provider_has_key(provider_id: str, *, _declared_snapshot: dict | None = Non
     # Previously this checked globally, causing all providers to show
     # "configured" when the active provider had a top-level api_key.
     model_cfg = cfg.get("model", {})
-    if isinstance(model_cfg, dict) and str(model_cfg.get("api_key") or "").strip():
+    if isinstance(model_cfg, dict):
         active_provider = model_cfg.get("provider")
         if active_provider and str(active_provider).strip().lower() == provider_id.lower():
-            if _provider_value_counts_as_api_key(provider_id, model_cfg.get("api_key")):
+            from api.config import resolve_provider_credential_entry
+
+            model_key = resolve_provider_credential_entry(model_cfg, provider_id)
+            if _provider_value_counts_as_api_key(provider_id, model_key):
                 return True
     # Check providers.<id>.api_key
     providers_cfg = cfg.get("providers") or {}
@@ -1428,9 +1431,12 @@ def _get_provider_api_key(provider_id: str, *, _declared_snapshot: dict | None =
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, dict):
         active_provider = str(model_cfg.get("provider") or "").strip().lower()
-        model_key = str(model_cfg.get("api_key") or "").strip()
-        if model_key and active_provider == provider_id and _provider_value_counts_as_api_key(provider_id, model_key):
-            return model_key
+        if active_provider == provider_id:
+            from api.config import resolve_provider_credential_entry
+
+            model_key = resolve_provider_credential_entry(model_cfg, provider_id)
+            if _provider_value_counts_as_api_key(provider_id, model_key):
+                return model_key
 
     providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):

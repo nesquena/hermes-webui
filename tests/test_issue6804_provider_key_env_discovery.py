@@ -175,6 +175,24 @@ def test_provider_status_retrieval_and_route_context_preserve_key_env_precedence
     assert getattr(providers, "_get_provider_" + "api_key")("custom:demo") == "env-secret"
     assert getattr(routes, "_custom_provider_" + "api_key_for_context")(entry, "custom:demo") == "env-secret"
 
+    model_entry = {"provider": "synthetic", "api_key": "literal", "key_env": "KEY"}
+    monkeypatch.setattr(
+        provider_discovery,
+        "capture_raw_profile_snapshot",
+        lambda _module: {"model": model_entry},
+    )
+    monkeypatch.setattr(providers, "get_config", lambda: {"model": model_entry})
+    assert providers._provider_has_key("synthetic") is True
+    assert providers._get_provider_api_key("synthetic") == "env-secret"
+
+
+def test_declared_failure_preserves_key_env_source(monkeypatch):
+    resolved = resolve_credential(
+        {"api_key": "${BROKEN", "key_env": "KEY"},
+        env_value=lambda _name: "",
+    )
+    assert (resolved.state, resolved.source) == ("declared_unavailable", "key_env")
+
 
 def test_declared_empty_and_malformed_sources_fail_closed():
     fallback = lambda _hint: "ambient-secret"
