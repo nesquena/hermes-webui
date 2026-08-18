@@ -5383,6 +5383,7 @@ let _touchBatchPending=false;
 let _sessionTouchGen=0; // generation token — bumped on profile/filter changes
 let _touchBatchToken=0; // monotonic token for token-owned microtask work
 let _touchContinuousBatchScheduled=false;
+let _sessionTouchStartIndex=0; // first canonical row currently present in the touch DOM window
 // Single explicit scroll-owner record: {gen, list, handler, raf, token}.
 // Replaces the former split globals (_touchScrollHandler + _touchScrollFallbackRaf).
 // Every piece of scroll-trigger work — the scroll listener, the RAF handle,
@@ -5418,6 +5419,7 @@ function _invalidateTouchRender(){
   _touchScrollOwner=null;
   _touchRenderState=null;
   _sessionTouchListEl=null;
+  _sessionTouchStartIndex=0;
   _sessionTouchLoadedCount=0;
   _sessionTouchTotalCount=0;
   _touchBatchPending=false;
@@ -5466,8 +5468,7 @@ function _ensureTouchSentinelObserver(list){
             return;
           }
           const el=_sessionTouchListEl;
-          const nearBottom=el.scrollHeight-el.scrollTop-el.clientHeight<200;
-          if(!nearBottom) {
+          if(!_touchLoadedBoundaryNearViewport(el, _touchRenderState, 200)) {
             if(token===_touchBatchToken) _touchBatchPending=false;
             return;
           }
@@ -5477,6 +5478,25 @@ function _ensureTouchSentinelObserver(list){
       }
     }
   },{root:list,rootMargin:'0px 0px 200px 0px',threshold:0});
+}
+
+function _touchLoadedBoundaryNearViewport(list, state, lookahead){
+  if(!list||!state) return false;
+  const total=state.flatRows&&state.flatRows.length||0;
+  const loaded=Math.min(total, Math.max(0, Number(_sessionTouchLoadedCount)||0));
+  if(loaded>=total) return false;
+  const itemHeight=Math.max(1, Number(state.itemHeight)||SESSION_VIRTUAL_ROW_HEIGHT);
+  const viewportHeight=Math.max(0, Number(list.clientHeight)||0);
+  const scrollTop=Math.max(0, Number(list.scrollTop)||0);
+  const margin=Math.max(0, Number(lookahead)||200);
+  // Trigger from the loaded-content boundary, not from the full virtual
+  // scrollHeight. The per-group spacers intentionally preserve the total
+  // scrollbar size; using scrollHeight therefore waits until the user is near
+  // the END of a 10K-row list before loading row 101. The loaded boundary is
+  // the first still-virtual row, so scrolling near it backfills before blank
+  // group bodies can sit in the viewport.
+  const loadedBoundary=loaded*itemHeight;
+  return (loadedBoundary-scrollTop-viewportHeight)<=margin;
 }
 
 /// Append new session rows to the list without wiping existing DOM.
@@ -5493,29 +5513,35 @@ function _appendTouchBatch(){
   const list=state.list;
   if(!list||list!==_sessionTouchListEl) return;
   const total=state.flatRows.length;
-  const oldLoaded=_sessionTouchLoadedCount||0;
+  const oldStart=Math.min(total, Math.max(0, Number(_sessionTouchStartIndex)||0));
+  const oldLoaded=Math.min(total, Math.max(oldStart, Number(_sessionTouchLoadedCount)||0));
   const targetEnd=Math.min(total, oldLoaded+SESSION_TOUCH_BATCH_SIZE);
   if(targetEnd<=oldLoaded) return; // nothing to append
-  // Validate DOM SID prefix matches the stored order. If the DOM has diverged
-  // (e.g. a deferred cache update changed _allSessions and the list was
-  // partially re-rendered), bail out and trigger a full re-render instead of
-  // splicing a new-cache suffix onto an old-cache prefix.
+  // Validate DOM SID window matches the stored order. Most touch renders start
+  // at 0 and grow a prefix. Directly opening an old active session, though,
+  // paints a bounded active-centered window so we do not synchronously render
+  // thousands of preceding rows. In that case the DOM authority is
+  // [oldStart, oldLoaded), not [0, oldLoaded).
   const existingItems=list.querySelectorAll('.session-item[data-sid]');
-  if(existingItems.length!==oldLoaded){
-    // DOM row count must match the loaded count exactly — fewer means
+  const expectedExisting=Math.max(0, oldLoaded-oldStart);
+  if(existingItems.length!==expectedExisting){
+    // DOM row count must match the loaded touch window exactly — fewer means
     // something wiped rows, more means a stale live row snuck in. Either
-    // way, the prefix is unauthoritative: full re-render.
+    // way, the window is unauthoritative: full re-render.
     _invalidateTouchRender();
+    _sessionTouchStartIndex=0;
     _sessionTouchLoadedCount=0;
     renderSessionListFromCache();
     return;
   }
-  for(let i=0;i<oldLoaded;i++){
+  for(let i=0;i<expectedExisting;i++){
     const domSid=existingItems[i]&&existingItems[i].dataset.sid;
-    const stateSid=state.flatRows[i]&&state.flatRows[i].session&&state.flatRows[i].session.session_id;
+    const stateIdx=oldStart+i;
+    const stateSid=state.flatRows[stateIdx]&&state.flatRows[stateIdx].session&&state.flatRows[stateIdx].session.session_id;
     if(domSid!==stateSid){
       // Row identity mismatch — DOM is stale. Full re-render.
       _invalidateTouchRender();
+      _sessionTouchStartIndex=0;
       _sessionTouchLoadedCount=0;
       renderSessionListFromCache();
       return;
@@ -5703,11 +5729,10 @@ function _updateTouchSentinel(list, total, loadedCount){
 /// event. Without this, one append can leave the sentinel still intersecting
 /// but the observer silent — the list stalls at 100/224.
 ///
-/// The check uses getBoundingClientRect() against the list's viewport. If the
-/// sentinel is within 200px of the bottom edge of the visible area, another
-/// batch is scheduled via a generation-guarded microtask. This continues until
-/// either all rows are loaded, the sentinel is out of view, or the generation
-/// changes (profile switch / invalidation).
+/// The check is anchored to the loaded-content boundary, not the total
+/// scrollHeight, and work is scheduled through rAF. That guarantees at most one
+/// batch per frame/task: a 10K-session list can no longer be synchronously
+/// drained by a non-yielding Promise chain before the browser paints.
 function _scheduleContinuousBatch(){
   if(_touchContinuousBatchScheduled) return;
   const state=_touchRenderState;
@@ -5716,46 +5741,19 @@ function _scheduleContinuousBatch(){
   if(!list||list!==_sessionTouchListEl) return;
   const total=state.flatRows.length;
   if(_sessionTouchLoadedCount>=total) return;
-  // Check if the sentinel is near the bottom of the visible viewport.
   const sentinel=list.querySelector('[data-touch-sentinel]');
   if(!sentinel || sentinel.style.display==='none') return;
-  // Use getBoundingClientRect to measure the sentinel's position relative
-  // to the list's visible area. If within the lookahead margin, batch again.
-  let shouldBatch=false;
-  try{
-    const listRect=list.getBoundingClientRect();
-    const sentinelRect=sentinel.getBoundingClientRect();
-    // If the sentinel is above the bottom of the viewport + lookahead margin,
-    // it's "near" — batch again. Also batch if sentinelRect has zero height
-    // (headless test environment where layout isn't real).
-    const lookahead=200;
-    if(sentinelRect.height===0 && sentinelRect.top===0){
-      // Headless/no-layout environment (e.g. test VM): always batch to prove
-      // continuous completion. In a real browser this branch is unreachable.
-      shouldBatch=true;
-    }else{
-      shouldBatch=sentinelRect.top <= (listRect.bottom + lookahead);
-    }
-  }catch(_){
-    // getBoundingClientRect unavailable (test env): always batch.
-    shouldBatch=true;
-  }
-  if(!shouldBatch) return;
+  if(!_touchLoadedBoundaryNearViewport(list, state, 200)) return;
   _touchContinuousBatchScheduled=true;
   const capturedGen=_sessionTouchGen;
   const token=++_touchBatchToken;
-  Promise.resolve().then(()=>{
+  requestAnimationFrame(()=>{
     _touchContinuousBatchScheduled=false;
     if(capturedGen!==_sessionTouchGen) return;
     if(token!==_touchBatchToken) return;
-    // Note: we do NOT check _touchBatchPending here. The continuous batch
-    // chain is: this .then → _appendTouchBatch → _scheduleContinuousBatch
-    // → new .then. The _touchBatchPending flag is set by the caller before
-    // _appendTouchBatch and cleared in finally AFTER _appendTouchBatch
-    // returns — but _scheduleContinuousBatch runs INSIDE _appendTouchBatch,
-    // so _touchBatchPending is still true when the new .then is scheduled.
-    // The generation+token guard is sufficient: if a scroll/IO path is also
-    // appending concurrently, the token check prevents double-append.
+    if(!_sessionTouchListEl||_sessionTouchListEl!==list) return;
+    if(!_touchLoadedBoundaryNearViewport(list, state, 200)) return;
+    if(_touchBatchPending) return;
     _touchBatchPending=true;
     try{
       _appendTouchBatch();
@@ -5796,7 +5794,7 @@ function _createTouchGroupWrapper(g, state){
   return wrapper;
 }
 
-function _setupTouchSentinel(list, total, flatRows, renderOneSession, activeSid, paintedExtent){
+function _setupTouchSentinel(list, total, flatRows, renderOneSession, activeSid, paintedExtent, paintedStart){
   // Touch-mode exit: if we were previously in touch mode but no longer are,
   // invalidate all touch state (observer, RAF, pending, render state).
   if(!list||!_isTouchPrimary()){
@@ -5813,7 +5811,8 @@ function _setupTouchSentinel(list, total, flatRows, renderOneSession, activeSid,
   // to 0; without restoring, the first _appendTouchBatch() reads oldLoaded=0,
   // its prefix check is vacuous, and it appends rows 0–39 behind the already-
   // painted rows 0–59 — duplicating the first batch.
-  _sessionTouchLoadedCount=Math.min(total, Math.max(0, Number(paintedExtent)||0));
+  _sessionTouchStartIndex=Math.min(total, Math.max(0, Number(paintedStart)||0));
+  _sessionTouchLoadedCount=Math.min(total, Math.max(_sessionTouchStartIndex, Number(paintedExtent)||0));
   _sessionTouchListEl=list;
   _sessionTouchTotalCount=total;
   // Save canonical render state for incremental appends.
@@ -5823,6 +5822,7 @@ function _setupTouchSentinel(list, total, flatRows, renderOneSession, activeSid,
     flatRows:flatRows,
     renderOneSession:renderOneSession,
     activeSid:activeSid,
+    itemHeight:SESSION_VIRTUAL_ROW_HEIGHT,
   };
   // Ensure group wrappers have data-group-label so _appendTouchBatch can find them.
   // The initial render already sets this attribute, but we verify here for safety.
@@ -5895,8 +5895,7 @@ function _setupTouchSentinel(list, total, flatRows, renderOneSession, activeSid,
       const t=_sessionTouchTotalCount||0;
       const l=_sessionTouchLoadedCount||0;
       if(l>=t) return;
-      const nearBottom=el.scrollHeight-el.scrollTop-el.clientHeight<200;
-      if(!nearBottom) return;
+      if(!_touchLoadedBoundaryNearViewport(el, _touchRenderState, 200)) return;
       if(_touchBatchPending||_touchContinuousBatchScheduled) return;
       const token=++_touchBatchToken;
       owner.token=token;
@@ -5926,8 +5925,7 @@ function _setupTouchSentinel(list, total, flatRows, renderOneSession, activeSid,
           return;
         }
         const el2=_sessionTouchListEl;
-        const nearBottom2=el2.scrollHeight-el2.scrollTop-el2.clientHeight<200;
-        if(!nearBottom2) {
+        if(!_touchLoadedBoundaryNearViewport(el2, _touchRenderState, 200)) {
           if(token===_touchBatchToken) _touchBatchPending=false;
           return;
         }
@@ -8012,22 +8010,22 @@ function _sessionVirtualWindow(opts){
   const viewportHeight=Math.max(itemHeight, Number(opts&&opts.viewportHeight)||itemHeight*10);
   const visibleRows=Math.max(1, Math.ceil(viewportHeight/itemHeight));
   // On touch-primary devices, use incremental batched rendering: render an
-  // initial batch, then append more rows on scroll without wiping innerHTML.
-  // The "window" is always [0, loadedCount) — rows are never removed, only
-  // appended. The scroll listener calls _appendTouchBatch() to grow it.
-  // Include the active session in the window if it's beyond the initial prefix
-  // — the touch branch must not omit an active session (desktop-only handling
-  // would otherwise skip it).
+  // initial prefix, then append more rows on scroll without wiping innerHTML.
+  // Rows are normally never removed. The one exception is a direct jump to an
+  // active session deep in a huge sidebar: render a bounded active-centered
+  // touch window instead of synchronously painting every preceding row.
   if(typeof _isTouchPrimary==='function'&&_isTouchPrimary()){
+    let start=0;
     let loadedCount=Math.min(total, _sessionTouchLoadedCount||SESSION_TOUCH_INITIAL_BATCH);
     const activeIdx=Number.isFinite(Number(opts&&opts.activeIndex))?Number(opts.activeIndex):-1;
-    // Ensure the active session row is within the rendered prefix.
     if(activeIdx>=0&&activeIdx<total&&activeIdx>=loadedCount){
-      loadedCount=Math.min(total, activeIdx+1);
-      // Persist the extended count so _appendTouchBatch starts from here.
-      _sessionTouchLoadedCount=loadedCount;
+      const windowRows=Math.max(SESSION_TOUCH_INITIAL_BATCH, visibleRows+(buffer*2));
+      start=Math.max(0, Math.min(activeIdx-buffer, Math.max(0,total-windowRows)));
+      loadedCount=Math.min(total, start+windowRows);
     }
-    return {virtualized:false,batched:true,start:0,end:loadedCount,topPad:0,bottomPad:Math.max(0,(total-loadedCount)*itemHeight),itemHeight,total};
+    _sessionTouchStartIndex=start;
+    _sessionTouchLoadedCount=loadedCount;
+    return {virtualized:false,batched:true,start:start,end:loadedCount,topPad:start*itemHeight,bottomPad:Math.max(0,(total-loadedCount)*itemHeight),itemHeight,total};
   }
   if(total<=threshold){
     return {virtualized:false,start:0,end:total,topPad:0,bottomPad:0,itemHeight,total};
@@ -8770,7 +8768,7 @@ function renderSessionListFromCache(){
   // transition internally (invalidates observer/RAF/state when leaving touch mode).
   // Gating this inside `if(_isTouchPrimary())` made the teardown unreachable,
   // leaving a dangling observer and RAF after a touch→desktop transition.
-  _setupTouchSentinel(list, flatSessionRows.length, flatSessionRows, _renderOneSession, activeSidForSidebar, virtualWindow.end);
+  _setupTouchSentinel(list, flatSessionRows.length, flatSessionRows, _renderOneSession, activeSidForSidebar, virtualWindow.end, virtualWindow.start);
   const archivePagingFilterActive=_sessionArchivePagingFilterActive();
   if(_showArchived&&!archivePagingFilterActive){
     const activeArchivedTotal=_sessionSourceFilter==='cli'?_archivedCliCount:_archivedWebuiCount;

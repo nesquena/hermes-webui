@@ -385,6 +385,65 @@ NODE_BIN = shutil.which("node")
 _node_tests = pytest.mark.skipif(NODE_BIN is None, reason="node not on PATH")
 
 
+@_node_tests
+def test_touch_active_session_window_is_bounded_not_prefix_render():
+    """Opening a deep active session on touch must not render rows 0..activeIdx.
+
+    The RED gate reproduced activeIndex=9999 rendering all 10,000 rows
+    synchronously. The touch path should instead return a bounded active-centered
+    batched window and persist that window's start/end for append validation.
+    """
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+let _sessionTouchLoadedCount = 60;
+let _sessionTouchStartIndex = 0;
+const SESSION_TOUCH_INITIAL_BATCH = 60;
+const SESSION_TOUCH_BATCH_SIZE = 40;
+const SESSION_VIRTUAL_ROW_HEIGHT = 52;
+const SESSION_VIRTUAL_BUFFER_ROWS = 8;
+const SESSION_VIRTUAL_THRESHOLD_ROWS = 80;
+function _isTouchPrimary() {{ return true; }}
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = SESSIONS_JS.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = SESSIONS_JS.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < SESSIONS_JS.length) {{
+    if (SESSIONS_JS[i] === '{{') depth++;
+    else if (SESSIONS_JS[i] === '}}') depth--;
+    i++;
+  }}
+  return SESSIONS_JS.slice(start, i);
+}}
+eval(extractFunc('_sessionVirtualWindow'));
+const w = _sessionVirtualWindow({{
+  total: 10000,
+  scrollTop: 0,
+  viewportHeight: 1180,
+  itemHeight: SESSION_VIRTUAL_ROW_HEIGHT,
+  buffer: SESSION_VIRTUAL_BUFFER_ROWS,
+  threshold: SESSION_VIRTUAL_THRESHOLD_ROWS,
+  activeIndex: 9999,
+}});
+console.log(JSON.stringify({{
+  start: w.start,
+  end: w.end,
+  rows: w.end - w.start,
+  activeVisible: 9999 >= w.start && 9999 < w.end,
+  persistedStart: _sessionTouchStartIndex,
+  persistedEnd: _sessionTouchLoadedCount,
+}}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["activeVisible"], "Deep active row must still be included"
+    assert result["start"] > 0, "Deep active touch window must not start at row 0"
+    assert result["rows"] <= 80, \
+        f"Touch active window must not synchronously render thousands of rows, got {result['rows']}"
+    assert result["persistedStart"] == result["start"]
+    assert result["persistedEnd"] == result["end"]
+
+
 def _run_node_vm(source: str) -> str:
     with tempfile.NamedTemporaryFile(
         "w", suffix=".cjs", encoding="utf-8", dir=ROOT, delete=False
@@ -613,6 +672,7 @@ let _touchSentinelObserver = null;
 let _touchBatchPending = false;
 let _touchBatchToken = 0;
 let _touchContinuousBatchScheduled = false;
+let _sessionTouchStartIndex = 0;
 let _touchScrollOwner = null;
 const SESSION_TOUCH_BATCH_SIZE = 40;
 const SESSION_TOUCH_INITIAL_BATCH = 60;
@@ -647,6 +707,7 @@ function _invalidateTouchRender() {
   _touchScrollOwner = null;
   _touchRenderState = null;
   _sessionTouchListEl = null;
+  _sessionTouchStartIndex = 0;
   _sessionTouchLoadedCount = 0;
   _sessionTouchTotalCount = 0;
   _touchBatchPending = false;
@@ -659,6 +720,7 @@ function _invalidateTouchRender() {
 eval(extractFunc('_createTouchGroupWrapper'));
 eval(extractFunc('_updateTouchGroupSpacers'));
 eval(extractFunc('_updateTouchSentinel'));
+eval(extractFunc('_touchLoadedBoundaryNearViewport'));
 eval(extractFunc('_scheduleContinuousBatch'));
 eval(extractFunc('_appendTouchBatch'));
 eval(extractFunc('_ensureTouchSentinelObserver'));
@@ -1736,8 +1798,8 @@ def test_prefix_authority_exact_match():
     equality (!==) not less-than (<). An extra stale live row (61 items,
     oldLoaded=60) must invalidate/rebuild, not silently duplicate."""
     fn = _extract_fn(SESSIONS_JS, "_appendTouchBatch")
-    assert "existingItems.length!==oldLoaded" in fn, \
-        "Prefix validation must use exact equality (!==), not < — an extra stale row must invalidate"
+    assert "existingItems.length!==expectedExisting" in fn, \
+        "Window validation must use exact equality (!==), not < — an extra stale row must invalidate"
 
 
 def test_append_commit_two_phase():
@@ -2633,26 +2695,12 @@ console.log(JSON.stringify({
 
 
 @_node_tests
-def test_continuous_batch_completes_224_rows_no_manual_reentry():
-    """Gate-certifier blocking fix: calling _appendTouchBatch() once must trigger
-    a continuous chain of batches via _scheduleContinuousBatch() that completes
-    60→100→140→180→220→224 WITHOUT any manual sentinel leave/re-enter.
-
-    The gate-certifier reproduced this stall in real Chromium: after one append
-    (60→100), the per-group spacers shrank and the sentinel stayed intersecting
-    but the IntersectionObserver emitted no second transition. The list stalled
-    at 100/224 with "Loading more…" visible.
-
-    This test proves the fix: _appendTouchBatch() now calls
-    _scheduleContinuousBatch() after a successful append, which re-checks
-    whether the sentinel is still near the viewport and schedules another batch.
-    The chain continues until all rows are loaded.
-
-    In the Node VM, getBoundingClientRect() returns zero values (no real layout),
-    so _scheduleContinuousBatch takes the headless branch (always batch) — this
-    proves the continuous-completion property without a real browser. In a real
-    browser, the getBoundingClientRect branch provides the same guarantee using
-    actual viewport geometry.
+def test_continuous_batch_yields_one_batch_per_raf():
+    """Gate-certifier RED fix: the post-append continuation must not drain a
+    large sidebar through a non-yielding Promise chain. If the loaded boundary is
+    still in/near the viewport, _appendTouchBatch() may schedule one follow-up,
+    but that follow-up must run through requestAnimationFrame so the browser gets
+    a paint/task boundary between batches.
     """
     total = 224
     flat_rows = []
@@ -2664,11 +2712,17 @@ def test_continuous_batch_completes_224_rows_no_manual_reentry():
     source = f"""
 const SESSIONS_JS = {SESSIONS_JS!r};
 """ + _node_test_preamble() + f"""
+let rafSchedules = 0;
+let rafCallbacks = [];
+global.requestAnimationFrame = function(fn) {{ rafSchedules++; rafCallbacks.push(fn); return rafSchedules; }};
+global.cancelAnimationFrame = function() {{}};
 const list = makeList();
 _sessionTouchListEl = list;
 _sessionTouchGen = 1;
 _sessionTouchLoadedCount = 60; // initial batch already rendered
 _sessionTouchTotalCount = {total};
+list.clientHeight = 200;
+list.scrollTop = 5000; // after 60→100, loaded boundary is 5200: exactly at viewport bottom
 
 // Pre-populate DOM with 60 session items
 for (let i = 0; i < 60; i++) list._items.push(makeSessionItem('sess_' + i));
@@ -2680,6 +2734,7 @@ _touchRenderState = {{
   flatRows: {json.dumps(flat_rows)},
   renderOneSession: function(s) {{ return makeSessionItem(s.session_id); }},
   activeSid: null,
+  itemHeight: SESSION_VIRTUAL_ROW_HEIGHT,
 }};
 
 // Create group wrapper with body that tracks items
@@ -2702,20 +2757,20 @@ list.children.push(sentinel);
 // Track the batch progression
 const progress = [];
 
-// Call _appendTouchBatch once — _scheduleContinuousBatch should chain the rest
+// Call _appendTouchBatch once. It may schedule a continuation, but that
+// continuation must be a RAF, not a Promise microtask that drains the list.
 _appendTouchBatch();
 progress.push(_sessionTouchLoadedCount);
 
-// Drain microtasks: _scheduleContinuousBatch uses Promise.resolve().then()
-// to schedule the next batch. In the Node VM, microtasks don't run until the
-// current sync stack unwinds. We drain repeatedly until all rows are loaded
-// or a safety limit is hit.
-// In a real browser, the microtask queue drains naturally between frames.
 (async function() {{
-  for (let i = 0; i < 100; i++) {{
-    await Promise.resolve(); // drain one microtask level
-    if (_sessionTouchLoadedCount >= {total}) break;
-  }}
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  const loadedAfterMicrotasks = _sessionTouchLoadedCount;
+  const rafsAfterFirstAppend = rafSchedules;
+  const callbacks = rafCallbacks.splice(0);
+  for (const cb of callbacks) cb();
+  const loadedAfterOneRaf = _sessionTouchLoadedCount;
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  const loadedAfterPostRafMicrotasks = _sessionTouchLoadedCount;
 
   const finalLoaded = _sessionTouchLoadedCount;
   const allSids = list._items.map(i => i.dataset.sid);
@@ -2725,6 +2780,10 @@ progress.push(_sessionTouchLoadedCount);
 
   console.log(JSON.stringify({{
     finalLoaded,
+    loadedAfterMicrotasks,
+    loadedAfterOneRaf,
+    loadedAfterPostRafMicrotasks,
+    rafSchedules: rafsAfterFirstAppend,
     totalItems: list._items.length,
     uniqueCount: uniqueSids.length,
     orderedCorrectly,
@@ -2736,14 +2795,22 @@ progress.push(_sessionTouchLoadedCount);
 }})();
 """
     result = json.loads(_run_node_vm(source))
-    assert result["finalLoaded"] == 224, \
-        f"Continuous batch must complete to 224, got {result['finalLoaded']} — stall after one append"
-    assert result["totalItems"] == 224, \
-        f"DOM must have 224 items, got {result['totalItems']}"
-    assert result["uniqueCount"] == 224, \
-        f"All 224 SIDs must be unique, got {result['uniqueCount']} unique"
+    assert result["loadedAfterMicrotasks"] == 100, \
+        f"Promise microtasks must not drain more batches, got {result['loadedAfterMicrotasks']}"
+    assert result["rafSchedules"] == 1, \
+        f"A single RAF continuation should be scheduled, got {result['rafSchedules']}"
+    assert result["loadedAfterOneRaf"] == 140, \
+        f"One RAF continuation should append one batch (100→140), got {result['loadedAfterOneRaf']}"
+    assert result["loadedAfterPostRafMicrotasks"] == 140, \
+        f"Post-RAF microtasks must not continue draining the list, got {result['loadedAfterPostRafMicrotasks']}"
+    assert result["finalLoaded"] == 140, \
+        f"Continuous scheduler must yield after one RAF batch, got {result['finalLoaded']}"
+    assert result["totalItems"] == 140, \
+        f"DOM must have 140 items after one RAF batch, got {result['totalItems']}"
+    assert result["uniqueCount"] == 140, \
+        f"All loaded SIDs must be unique, got {result['uniqueCount']} unique"
     assert result["orderedCorrectly"], \
-        "SIDs must be in order sess_0..sess_223"
+        "SIDs must be in order for the loaded prefix"
     assert result["noBlanks"], \
         f"No blank gaps: DOM items ({result['totalItems']}) must match loaded count ({result['finalLoaded']})"
     assert result["innerHTMLWipes"] == 0, \
@@ -2753,9 +2820,9 @@ progress.push(_sessionTouchLoadedCount);
 
 
 @_node_tests
-def test_continuous_batch_completes_150_rows_multigroup():
-    """Continuous batch must complete 60→100→140→150 across multiple groups
-    without manual re-entry. Proves the fix works with group boundaries."""
+def test_continuous_batch_yields_across_multigroup_append():
+    """A yielded continuation can append across group boundaries without DOM wipes;
+    it must still stop after one RAF batch rather than draining to completion."""
     total = 150
     flat_rows = []
     for i in range(60):
@@ -2766,11 +2833,17 @@ def test_continuous_batch_completes_150_rows_multigroup():
     source = f"""
 const SESSIONS_JS = {SESSIONS_JS!r};
 """ + _node_test_preamble() + f"""
+let rafSchedules = 0;
+let rafCallbacks = [];
+global.requestAnimationFrame = function(fn) {{ rafSchedules++; rafCallbacks.push(fn); return rafSchedules; }};
+global.cancelAnimationFrame = function() {{}};
 const list = makeList();
 _sessionTouchListEl = list;
 _sessionTouchGen = 1;
 _sessionTouchLoadedCount = 60;
 _sessionTouchTotalCount = {total};
+list.clientHeight = 200;
+list.scrollTop = 5000;
 
 for (let i = 0; i < 60; i++) list._items.push(makeSessionItem('s1_' + i));
 
@@ -2778,6 +2851,7 @@ _touchRenderState = {{
   gen: 1, list: list, flatRows: {json.dumps(flat_rows)},
   renderOneSession: function(s) {{ return makeSessionItem(s.session_id); }},
   activeSid: null,
+  itemHeight: SESSION_VIRTUAL_ROW_HEIGHT,
 }};
 
 // Set up G1 (full) and G2 (empty — will receive new rows)
@@ -2802,15 +2876,12 @@ sentinel.style = {{ display: '' }};
 list._sentinel = sentinel;
 list.children.push(sentinel);
 
-_appendTouchBatch(); // triggers continuous chain
+_appendTouchBatch(); // 60→100, schedules one yielded RAF continuation
+const callbacks = rafCallbacks.splice(0);
+for (const cb of callbacks) cb(); // 100→140; must not drain final 10 synchronously
 
-// Drain microtasks for the continuous batch chain
 (async function() {{
-  for (let i = 0; i < 50; i++) {{
-    const before = _sessionTouchLoadedCount;
-    await Promise.resolve();
-    if (_sessionTouchLoadedCount === before) break;
-  }}
+  for (let i = 0; i < 10; i++) await Promise.resolve();
 
   const allSids = list._items.map(i => i.dataset.sid);
   const uniqueSids = [...new Set(allSids)];
@@ -2823,12 +2894,12 @@ _appendTouchBatch(); // triggers continuous chain
 }})();
 """
     result = json.loads(_run_node_vm(source))
-    assert result["finalLoaded"] == 150, \
-        f"Continuous batch must complete to 150, got {result['finalLoaded']}"
-    assert result["totalItems"] == 150, \
-        f"DOM must have 150 items, got {result['totalItems']}"
-    assert result["uniqueCount"] == 150, \
-        f"All 150 SIDs must be unique, got {result['uniqueCount']}"
+    assert result["finalLoaded"] == 140, \
+        f"Yielded multigroup batch must stop at 140 after one RAF, got {result['finalLoaded']}"
+    assert result["totalItems"] == 140, \
+        f"DOM must have 140 items after one RAF, got {result['totalItems']}"
+    assert result["uniqueCount"] == 140, \
+        f"All 140 loaded SIDs must be unique, got {result['uniqueCount']}"
 
 
 @_node_tests
@@ -3701,26 +3772,14 @@ let appendCount = 0;
 // token mismatch BEFORE calling _appendTouchBatch, so any appendLog
 // entry with token===newerToken is proof the newer continuation ran.
 let appendLog = [];
-// Pending-transition ledger: every assignment to _touchBatchPending is
-// recorded with the current token, so the token-supersession oracle can
-// prove the stale microtask did NOT clear the newer owner's pending latch.
-// The stale microtask bails on token mismatch and therefore never enters
-// the `if(token===_touchBatchToken) _touchBatchPending=false;` branch —
-// any clear event MUST be attributed to the newer (matching-token) path.
-let pendingLog = [];
-// Shadow the production _touchBatchPending with an instrumented accessor
-// so we can attribute every transition. The underlying storage is the
-// same variable name via a closure-captured backing field.
-let _touchBatchPendingBacking = false;
-Object.defineProperty(globalThis, '_touchBatchPending', {{
-  get: function() {{ return _touchBatchPendingBacking; }},
-  set: function(v) {{
-    pendingLog.push({{ token: _touchBatchToken, from: _touchBatchPendingBacking, to: v }});
-    _touchBatchPendingBacking = v;
-  }},
-  configurable: true,
-  enumerable: true,
-}});
+// Pending-state samples read the real lexical _touchBatchPending binding from
+// the Node VM preamble. Do not use Object.defineProperty(globalThis, ...): the
+// production-shaped harness declares _touchBatchPending with `let`, so a global
+// accessor instruments the wrong object and the oracle goes false-green.
+let pendingSamples = [];
+function samplePending(label) {{
+  pendingSamples.push({{ label: label, token: _touchBatchToken, pending: _touchBatchPending }});
+}}
 
 window.IntersectionObserver = function(cb, opts) {{
   this.disconnect = function(){{}};
@@ -3942,29 +4001,32 @@ async function fireScrollDrainRAFMutateThenMicrotasks(mutator) {{
   const staleRafCbs = rafCallbacks.splice(0);
   for (const cb of staleRafCbs) cb();
   const staleToken4 = _touchBatchToken; // token the stale microtask captured
-  // BEFORE draining the stale microtask, supersede via re-setup (real
-  // production scheduler path: bumps gen + token, installs new owner).
-  _setupTouchSentinel(list, {total}, flatRows, renderOne, null, 100);
+  samplePending('after_stale_raf');
+  // Create a same-generation token supersession through the real scroll
+  // scheduler. We deliberately release the latch before draining stale so the
+  // newer scroll handler can queue its own RAF/Promise; this isolates the token
+  // guard (gen, owner, list, loaded, total, and geometry all stay valid).
+  _touchBatchPending = false;
+  samplePending('after_adversarial_release');
+  if (_touchScrollOwner && _touchScrollOwner.handler) _touchScrollOwner.handler();
+  const newerRafCbs = rafCallbacks.splice(0);
+  for (const cb of newerRafCbs) cb();
   const newerOwner4 = _touchScrollOwner;
   const tokenAfterSupersede4 = _touchBatchToken;
   const snapAfterSupersede4 = snapshotLiveTree();
-  // Immediately fire the NEWER scroll handler (still near bottom)
-  if (_touchScrollOwner && _touchScrollOwner.handler) _touchScrollOwner.handler();
-  // Drain the newer RAF — this sets token=T+2 and arms the newer microtask
-  const newerRafCbs = rafCallbacks.splice(0);
-  for (const cb of newerRafCbs) cb();
-  const newerToken4 = _touchBatchToken; // token the newer microtask captured
-  // Drain BOTH microtasks in FIFO order (stale first, newer second)
+  const newerToken4 = _touchBatchToken;
+  const pendingBetween4 = _touchBatchPending;
+  samplePending('after_newer_raf_before_microtasks');
+  // Drain stale microtask, then newer microtask in FIFO order.
   for (let i = 0; i < 10; i++) await Promise.resolve();
   // Attribute appends to the schedule that queued them.
   const staleAppends4 = appendLog.filter(function(e) {{ return e.token === staleToken4; }}).length;
   const newerAppends4 = appendLog.filter(function(e) {{ return e.token === newerToken4; }}).length;
-  // Attribute pending transitions: the stale microtask bails on token
-  // mismatch, so it never enters the clear-pending branch. Any clear
-  // (true→false) with token===newerToken4 is proof the newer microtask
-  // settled its own latch.
-  const stalePendingClears4 = pendingLog.filter(function(e) {{ return e.token === staleToken4 && e.to === false; }}).length;
-  const newerPendingClears4 = pendingLog.filter(function(e) {{ return e.token === newerToken4 && e.to === false; }}).length;
+  // The probe runs after the stale continuation and before the newer
+  // continuation. If the stale path incorrectly clears pending despite token
+  // mismatch, pendingBetween4 is false and this oracle bites.
+  const staleDidNotClear4 = pendingBetween4 === true;
+  const newerCleared4 = _touchBatchPending === false;
   const newerLoaded4 = _sessionTouchLoadedCount;
   const tree4 = assertLiveTreeUntouched(snap4);
   // Re-setup to loaded=140 so subsequent scenarios start from the expected state.
@@ -3974,13 +4036,13 @@ async function fireScrollDrainRAFMutateThenMicrotasks(mutator) {{
     // Stale microtask carried token=staleToken4 and must NOT have appended:
     staleNoAppend: staleAppends4 === 0,
     // Stale microtask must NOT clear pending (newer owner owns it):
-    staleDidNotClearPending: stalePendingClears4 === 0,
+    staleDidNotClearPending: staleDidNotClear4,
     tokenWasSuperseded: tokenAfterSupersede4 !== tokenBefore4,
     staleTokenDistinct: staleToken4 !== newerToken4,
     ownerWasReplaced: newerOwner4 !== staleOwner4,
     // Newer continuation ran through the real scheduler and appended once:
     newerSettled: newerAppends4 === 1,
-    newerClearedPending: newerPendingClears4 >= 1,
+    newerClearedPending: newerCleared4,
     newerLoaded: newerLoaded4,
     expectedNewerLoaded: 140,
     pendingClearedAfterSettlement: _touchBatchPending === false,
@@ -4232,6 +4294,8 @@ async function fireScrollDrainRAFMutateThenMicrotasks(mutator) {{
         "Token supersession: original 100 SID order must be unchanged"
     assert s["newerSettled"], \
         "Token supersession: newer owner must settle (append succeeds after stale rejection)"
+    assert s["newerClearedPending"], \
+        "Token supersession: newer owner must clear the real lexical _touchBatchPending latch after settling"
     assert s["newerLoaded"] == 140, \
         f"Token supersession: newer owner loaded must be 140, got {s['newerLoaded']}"
     assert s["pendingClearedAfterSettlement"], \
