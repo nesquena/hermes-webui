@@ -88,9 +88,18 @@ def test_canonical_identity_preservation_matrix():
     assert {raw: config._canonicalise_provider_id(raw) for raw in expected} == expected
 
 
-def test_configured_mistral_key_becomes_selectable_and_savable(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "ambient_mistral_key",
+    [None, "leaked-suite-key"],
+    ids=["clean-environment", "conflicting-environment"],
+)
+def test_configured_mistral_key_becomes_selectable_and_savable(
+    monkeypatch, tmp_path, ambient_mistral_key
+):
     cfg = {"providers": {"mistralai": {"api_key": "legacy-key"}},
            "model": {"provider": "mistralai"}}
+    if ambient_mistral_key is not None:
+        monkeypatch.setenv("MISTRAL_API_KEY", ambient_mistral_key)
     monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
     monkeypatch.setattr(config, "_thread_local_env_value", lambda _name, default="": default)
     monkeypatch.setattr(providers, "_thread_local_env_value", lambda _name, default="": default)
