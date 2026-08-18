@@ -929,7 +929,13 @@ def _is_session_lease_wait_message(kind: str, message: str) -> bool:
 
 
 def _is_effective_fallback_lifecycle_message(kind: str, message: str) -> bool:
-    """Return True only after Hermes has installed a new effective runtime."""
+    """Return True only after Hermes has installed a new effective runtime.
+
+    Retry notices such as ``trying fallback`` and ``switching to fallback`` are
+    emitted before activation and may still recover on the primary. Hermes emits
+    ``Switched to fallback...`` or ``Model fallback: ...; using ...`` only after
+    replacing the active runtime; a primary-restore notice is likewise effective.
+    """
     k = str(kind or '').strip().lower()
     m = str(message or '').strip().lower()
     if k != 'lifecycle':
