@@ -7301,6 +7301,10 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 provider_cfg = _canonical_provider_config(cfg, provider)
                 if isinstance(provider_cfg, dict):
                     api_key = (provider_cfg.get("api_key") or "").strip()
+            if not api_key and (provider == "custom" or provider.startswith("custom:")):
+                custom_cfg = _canonical_provider_config(cfg, "custom")
+                if isinstance(custom_cfg, dict):
+                    api_key = (custom_cfg.get("api_key") or "").strip()
             if not api_key:
                 api_key_vars = (
                     "HERMES_API_KEY",
