@@ -150,29 +150,31 @@ def reconcile_gateway_pending_mirror_locked(session_key: str) -> tuple[dict | No
 
     live_head_entry = live_gateway_queue[0] if live_gateway_queue else None
     live_head_data = getattr(live_head_entry, "data", None) or {}
-    has_no_run_mirror = any(
-        _is_gateway_mirror_entry(entry)
-        and not str(entry.get("run_id") or "").strip()
-        for entry in queue_list
-    )
     live_run_id = str(live_head_data.get("run_id") or "").strip()
-    live_has_token = bool(live_head_data.get(_GATEWAY_ENTRY_DATA_TOKEN_KEY))
+    # Tokenize EVERY live no-run producer, and derive `live_token` from the
+    # authoritative head, whenever `_gateway_queues[session_key]` has live
+    # producers. This deliberately does NOT defer to a pre-existing no-run
+    # mirror: an unmatched/tokenless mirror A (which the fail-closed binding in
+    # submit_gateway_pending_mirror leaves deliberately unbound) must never
+    # suppress the live producer's token, or A masks the real pending approval
+    # B — B never surfaces as the head and can't be actioned, while responding
+    # to A resolves nothing. Only the authoritative head's mirror may survive
+    # while a producer exists; tokenless-orphan retention is reserved for the
+    # genuine no-producer case (#7093), which lands here with an empty
+    # `live_gateway_queue` and therefore a `None` `live_token` anyway.
     live_local_tokens: set[str] = set()
     for live_entry in live_gateway_queue:
         live_data = getattr(live_entry, "data", None) or {}
         if str(live_data.get("run_id") or "").strip():
             continue
-        live_entry_token = str(live_data.get(_GATEWAY_ENTRY_DATA_TOKEN_KEY) or "").strip()
-        if live_entry_token or not has_no_run_mirror:
-            live_entry_token = _gateway_mirror_entry_token(live_entry) or ""
-            if live_entry_token:
-                live_local_tokens.add(live_entry_token)
-                if not str(live_data.get("approval_id") or "").strip():
-                    live_data["approval_id"] = f"gwlocal:{live_entry_token}"
+        live_entry_token = _gateway_mirror_entry_token(live_entry) or ""
+        if live_entry_token:
+            live_local_tokens.add(live_entry_token)
+            if not str(live_data.get("approval_id") or "").strip():
+                live_data["approval_id"] = f"gwlocal:{live_entry_token}"
     live_token = (
         _gateway_mirror_entry_token(live_head_entry)
         if live_head_entry and live_head_data
-        and (live_run_id or live_has_token or not has_no_run_mirror)
         else None
     )
     if live_token and live_run_id and not str(live_head_data.get("approval_id") or "").strip():
@@ -221,7 +223,14 @@ def reconcile_gateway_pending_mirror_locked(session_key: str) -> tuple[dict | No
             changed = True
             continue
 
-        if entry.get(_GATEWAY_MIRROR_RETAINED):
+        # A retained mirror is one whose own producer had already vanished when
+        # the user responded (the missing-producer 409 kept visible until an
+        # explicit teardown). It survives ONLY while no producer is live: once
+        # `_gateway_queues[session_key]` holds a real producer again, an
+        # unresolvable retained mirror must not mask it, so fall through to the
+        # normal matching below (which keeps it if it still matches a live
+        # token and discards it otherwise).
+        if entry.get(_GATEWAY_MIRROR_RETAINED) and not live_gateway_queue:
             rebuilt.append(entry)
             continue
 

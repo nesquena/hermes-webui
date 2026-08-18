@@ -166,13 +166,23 @@ def test_legacy_non_head_producer_unblocks_only_its_producer():
 
 
 def test_legacy_stale_request_id_does_not_resolve_unrelated_live_producer():
-    """A no-run mirror whose identity matches NO live producer must never
-    resolve a different, unrelated live producer.
+    """A no-run mirror whose identity matches NO live producer must neither
+    resolve nor mask a different, unrelated live producer.
 
-    Regression for the approval-integrity violation found in review of
-    818fd2fd: the previous fallback bound an unmatched mirror to "the first
-    unclaimed token" (or the queue head), so approving a stale/foreign
-    command A could silently execute an unrelated live command B.
+    Regression for two defects on the same boundary:
+      * the approval-integrity violation found in review of 818fd2fd — the
+        old fallback bound an unmatched mirror to "the first unclaimed token"
+        (or the queue head), so approving a stale/foreign command A could
+        silently execute an unrelated live command B;
+      * the liveness/masking hole the fail-closed fix opened in its place —
+        the unmatched tokenless mirror A was still appended and retained,
+        suppressing B's token so the real pending approval never surfaced and
+        could not be actioned.
+
+    The invariant asserted here is displayed == resolvable == resolved: the
+    authoritative live producer is what the UI shows, responding to the stale
+    id fails without waking anything, and approving the displayed entry wakes
+    exactly its own producer.
     """
     from api import routes
     from api import route_approvals as ra
@@ -200,31 +210,45 @@ def test_legacy_stale_request_id_does_not_resolve_unrelated_live_producer():
         stale_approval_a["command"] = "rm -rf /tmp/a-command-DIFFERENT"
         stale_approval_a["request_id"] = "req-a-stale-" + uuid.uuid4().hex[:8]
         stale_approval_a["approval_id"] = "appr-a-" + uuid.uuid4().hex[:8]
+        stale_approval_id = stale_approval_a["approval_id"]
 
-        ra.submit_gateway_pending_mirror(sid, stale_approval_a)
+        head, total = ra.submit_gateway_pending_mirror(sid, stale_approval_a)
 
+        # The stale copy must not be displayed, and above all must not mask B.
         with ra._lock:
-            mirrored = next(
-                m for m in ra._pending[sid]
-                if m["command"] == stale_approval_a["command"]
-            )
-        # Fail-closed: an unmatched identity must not borrow another live
-        # producer's token.
-        assert not str(mirrored.get(ra._GATEWAY_MIRROR_TOKEN) or "").strip(), (
-            "BUG: mirror for an unmatched request_id was stamped with a "
-            "foreign producer's token, allowing it to resolve that producer."
+            pending_now = list(ra._pending.get(sid) or [])
+        assert all(
+            m.get("command") != stale_approval_a["command"] for m in pending_now
+        ), (
+            "BUG: the unmatched stale mirror A was retained; it masks live "
+            "producer B, which can then never surface or be actioned."
         )
-        approval_id = mirrored["approval_id"]
+        assert head is not None, "live producer B must still surface a head"
+        assert head["command"] == producer_b.data["command"], (
+            "BUG: the displayed head is not the authoritative live producer."
+        )
+        assert total == 1
+        b_approval_id = str(head["approval_id"]).strip()
+        assert b_approval_id and b_approval_id != stale_approval_id
 
-        routes._resolve_approval_legacy(sid, approval_id, "once")
-
-        # What MUST NOT happen, regardless of whether the stale card itself
-        # cleared: the unrelated live producer B must not be resolved.
+        # Responding with A's stale id must fail closed — and must NOT wake B.
+        ok_stale = routes._resolve_approval_legacy(sid, stale_approval_id, "once")
+        assert ok_stale is False, (
+            "a stale approval_id must not report success"
+        )
         assert not producer_b.event.is_set(), (
             "BUG: approving unrelated stale command A resolved live "
             "producer B instead."
         )
         assert producer_b.result is None
+
+        # Approving the entry the user was actually shown wakes exactly it.
+        ok_b = routes._resolve_approval_legacy(sid, b_approval_id, "once")
+        assert ok_b is True
+        assert producer_b.event.is_set(), (
+            "BUG: approving the displayed head did not unblock its producer."
+        )
+        assert producer_b.result == "once"
     finally:
         with ra._lock:
             ra._gateway_queues.pop(sid, None)
@@ -233,12 +257,14 @@ def test_legacy_stale_request_id_does_not_resolve_unrelated_live_producer():
 
 def test_legacy_identityless_mirror_with_multiple_producers_does_not_bind_to_head():
     """A tokenless, identity-less no-run mirror submitted while multiple
-    producers are parked must not be silently bound to the queue head.
+    producers are parked must neither bind to the queue head nor mask it.
 
     Regression for the approval-integrity violation found in review of
-    818fd2fd: inferring ownership from the queue head for an unmatched
-    mirror let approving it resolve the wrong (head) producer instead of
-    failing closed.
+    818fd2fd (inferring ownership from the queue head let approving an
+    unmatched mirror resolve the wrong producer) AND for the masking hole the
+    fail-closed fix opened (the unmatched mirror was retained and suppressed
+    the authoritative head's token). Asserts the same displayed == resolved
+    invariant as the stale-id case above, with two producers parked.
     """
     from api import routes
     from api import route_approvals as ra
@@ -276,27 +302,47 @@ def test_legacy_identityless_mirror_with_multiple_producers_does_not_bind_to_hea
             "choices": ["once", "session", "always", "deny"],
         }
 
-        ra.submit_gateway_pending_mirror(sid, identityless_copy)
+        mirror_head, total = ra.submit_gateway_pending_mirror(sid, identityless_copy)
+        identityless_approval_id = str(identityless_copy["approval_id"]).strip()
 
+        # The identity-less copy must not be displayed, and must not suppress
+        # the authoritative head's mirror.
         with ra._lock:
-            mirrored = next(
-                m for m in ra._pending[sid]
-                if m["command"] == "rm -rf /tmp/mystery-command"
-            )
-        assert not str(mirrored.get(ra._GATEWAY_MIRROR_TOKEN) or "").strip(), (
-            "BUG: an identity-less mirror was bound to a live producer's "
-            "token while multiple producers were parked."
+            pending_now = list(ra._pending.get(sid) or [])
+        assert all(
+            m.get("command") != "rm -rf /tmp/mystery-command" for m in pending_now
+        ), (
+            "BUG: an identity-less mirror was retained while producers were "
+            "parked; it masks the authoritative head."
         )
-        approval_id = mirrored["approval_id"]
+        assert mirror_head is not None
+        assert mirror_head["command"] == head.data["command"], (
+            "BUG: the displayed head is not the authoritative live producer."
+        )
+        assert total == 1
+        head_approval_id = str(mirror_head["approval_id"]).strip()
+        assert head_approval_id and head_approval_id != identityless_approval_id
 
-        routes._resolve_approval_legacy(sid, approval_id, "once")
-
+        # Responding with the identity-less id must wake nobody.
+        ok_identityless = routes._resolve_approval_legacy(
+            sid, identityless_approval_id, "once"
+        )
+        assert ok_identityless is False
         assert not head.event.is_set(), (
             "BUG: an identity-less mirror resolved the queue HEAD instead "
             "of failing closed."
         )
         assert not non_head.event.is_set()
         assert head.result is None
+        assert non_head.result is None
+
+        # Approving the displayed head resolves exactly that producer and
+        # leaves the non-head producer parked.
+        ok_head = routes._resolve_approval_legacy(sid, head_approval_id, "once")
+        assert ok_head is True
+        assert head.event.is_set()
+        assert head.result == "once"
+        assert not non_head.event.is_set()
         assert non_head.result is None
     finally:
         with ra._lock:
