@@ -80,6 +80,14 @@ _UPDATE_FREEZE_DRAINED = threading.Condition(_UPDATE_FREEZE_LOCK)
 _frozen = False
 _freeze_generation = 0
 _active_readers = 0
+# Exception-safety tracker (issue #6992 re-gate): set by the apply internals
+# immediately before the first working-tree-mutating git command. The apply
+# wrappers consult it on the exception path — if no mutation may have started
+# the served tree is still coherent and the freeze can be released; once
+# mutation may have started the freeze must persist (or the process must be
+# replaced) so mixed-revision bytes are never exposed. Reset at each wrapper
+# entry; updates are serialized by _apply_lock.
+_update_mutation_may_have_started = False
 # Bounded drain: a pathological reader (e.g. a client stalling mid-download
 # while we hold a ticket) must not hang the update forever. When the bound is
 # reached the update FAILS CLOSED: freeze_static_serving() raises
@@ -1774,6 +1782,109 @@ def _schedule_restart(delay: float = 2.0) -> None:
     import os
     import sys
 
+    def _restart_now() -> None:
+        """Synchronously replace this process image.
+
+        Runs the restart sequence without the delay and without re-acquiring
+        ``_apply_lock`` (the caller already holds it). Never returns:
+        ``os.execv`` replaces the process image, and any exec failure falls
+        back to ``os._exit(0)`` so the process supervisor (start.sh / Docker)
+        restarts us. Used as the synchronous fallback when the delayed
+        restart thread cannot start (issue #6992 — an exception while frozen
+        must never leave static serving permanently 503 with no replacement
+        pending).
+        """
+        _wait_until_restart_safe()
+        # Purge bytecode caches so the new process imports from
+        # current source.  Without this, Python may serve stale .pyc
+        # files whose mtime matches the just-pulled .py files,
+        # causing AttributeError when new methods are missing from
+        # cached class definitions.
+        if _AGENT_DIR is not None:
+            _purge_agent_pycache(Path(_AGENT_DIR))
+        _purge_agent_pycache(REPO_ROOT)
+        try:
+            # Re-exec into the just-pulled image.
+            #
+            # sys.argv[0]'s meaning depends on how the server was launched:
+            #
+            #   * Source checkout (`python server.py` via bootstrap.py /
+            #     ctl.sh / start.sh): sys.argv[0] is the SCRIPT path
+            #     (e.g. "/root/hermes-webui/server.py"), sys.executable is
+            #     the interpreter. CPython treats argv[1] as the script to
+            #     run, so we must pass [sys.executable] + sys.argv.
+            #
+            #   * Frozen/packaged build (PyInstaller, embedded zipapp,
+            #     etc.): sys.argv[0] == sys.executable == <binary>. Passing
+            #     [sys.executable] + sys.argv would re-insert the binary as
+            #     argv[1] — the kernel launches it, the interpreter treats
+            #     the binary itself as the "script" to run, and execv
+            #     effectively becomes a recursive no-op that never reaches
+            #     bind(), leaving the WebUI stuck "offline" after every
+            #     self-update. Pass argv as-is instead.
+            #
+            # Distinguish the two cases with sys.frozen (set by
+            # PyInstaller / zipapp / similar). For source checkouts the
+            # `[sys.executable] + sys.argv` form is the canonical CPython
+            # re-exec idiom (same shape Flask/Django reloaders use) and
+            # is the correct path.
+            #
+            # IMPORTANT: On Windows, os.execv() does NOT replace the
+            # current process — it spawns a new process while the old
+            # one keeps running.  This causes "address already in use"
+            # because the old process still holds the port.  On Windows
+            # we use subprocess.Popen() + os._exit() instead.
+            if sys.platform == 'win32':
+                import subprocess
+                if getattr(sys, "frozen", False):
+                    args = sys.argv
+                else:
+                    args = [sys.executable] + sys.argv
+                # Prefer pythonw.exe over python.exe so the restarted
+                # server does not create a visible console window.
+                # sys.executable may point at python.exe (console
+                # subsystem); substitute pythonw.exe if it exists
+                # next to python.exe.
+                _exe = sys.executable
+                if _exe.lower().endswith('python.exe'):
+                    _w_exe = _exe[:-4] + 'w.exe'  # python.exe -> pythonw.exe
+                    if os.path.isfile(_w_exe):
+                        if getattr(sys, "frozen", False):
+                            args = sys.argv
+                        else:
+                            args = [_w_exe] + sys.argv
+                # Start new process fully detached with NO console
+                # window.  DETACHED_PROCESS alone is not sufficient
+                # on modern Windows — without CREATE_NO_WINDOW a
+                # python.exe (console-subsystem) child still flashes
+                # an empty terminal window, which the user then
+                # manually kills (taking the WebUI with it).
+                subprocess.Popen(
+                    args,
+                    cwd=os.getcwd(),
+                    creationflags=(
+                        subprocess.DETACHED_PROCESS
+                        | subprocess.CREATE_NEW_PROCESS_GROUP
+                        | subprocess.CREATE_NO_WINDOW
+                    ),
+                    close_fds=True,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                # Exit immediately — the port is released as soon as
+                # this process dies, allowing the new process to bind.
+                os._exit(0)
+            else:
+                if getattr(sys, "frozen", False):
+                    os.execv(sys.executable, sys.argv)
+                else:
+                    os.execv(sys.executable, [sys.executable] + sys.argv)
+        except Exception:
+            # Last-resort: if execv fails for any reason, just exit so the
+            # process supervisor (start.sh / Docker) restarts us.
+            os._exit(0)
+
     def _do():
         import time
         time.sleep(delay)
@@ -1786,98 +1897,26 @@ def _schedule_restart(delay: float = 2.0) -> None:
         # Threads die when execv replaces the process image, so the lock is
         # released atomically by the kernel.
         with _apply_lock:
-            _wait_until_restart_safe()
-            # Purge bytecode caches so the new process imports from
-            # current source.  Without this, Python may serve stale .pyc
-            # files whose mtime matches the just-pulled .py files,
-            # causing AttributeError when new methods are missing from
-            # cached class definitions.
-            if _AGENT_DIR is not None:
-                _purge_agent_pycache(Path(_AGENT_DIR))
-            _purge_agent_pycache(REPO_ROOT)
-            try:
-                # Re-exec into the just-pulled image.
-                #
-                # sys.argv[0]'s meaning depends on how the server was launched:
-                #
-                #   * Source checkout (`python server.py` via bootstrap.py /
-                #     ctl.sh / start.sh): sys.argv[0] is the SCRIPT path
-                #     (e.g. "/root/hermes-webui/server.py"), sys.executable is
-                #     the interpreter. CPython treats argv[1] as the script to
-                #     run, so we must pass [sys.executable] + sys.argv.
-                #
-                #   * Frozen/packaged build (PyInstaller, embedded zipapp,
-                #     etc.): sys.argv[0] == sys.executable == <binary>. Passing
-                #     [sys.executable] + sys.argv would re-insert the binary as
-                #     argv[1] — the kernel launches it, the interpreter treats
-                #     the binary itself as the "script" to run, and execv
-                #     effectively becomes a recursive no-op that never reaches
-                #     bind(), leaving the WebUI stuck "offline" after every
-                #     self-update. Pass argv as-is instead.
-                #
-                # Distinguish the two cases with sys.frozen (set by
-                # PyInstaller / zipapp / similar). For source checkouts the
-                # `[sys.executable] + sys.argv` form is the canonical CPython
-                # re-exec idiom (same shape Flask/Django reloaders use) and
-                # is the correct path.
-                #
-                # IMPORTANT: On Windows, os.execv() does NOT replace the
-                # current process — it spawns a new process while the old
-                # one keeps running.  This causes "address already in use"
-                # because the old process still holds the port.  On Windows
-                # we use subprocess.Popen() + os._exit() instead.
-                if sys.platform == 'win32':
-                    import subprocess
-                    if getattr(sys, "frozen", False):
-                        args = sys.argv
-                    else:
-                        args = [sys.executable] + sys.argv
-                    # Prefer pythonw.exe over python.exe so the restarted
-                    # server does not create a visible console window.
-                    # sys.executable may point at python.exe (console
-                    # subsystem); substitute pythonw.exe if it exists
-                    # next to python.exe.
-                    _exe = sys.executable
-                    if _exe.lower().endswith('python.exe'):
-                        _w_exe = _exe[:-4] + 'w.exe'  # python.exe -> pythonw.exe
-                        if os.path.isfile(_w_exe):
-                            if getattr(sys, "frozen", False):
-                                args = sys.argv
-                            else:
-                                args = [_w_exe] + sys.argv
-                    # Start new process fully detached with NO console
-                    # window.  DETACHED_PROCESS alone is not sufficient
-                    # on modern Windows — without CREATE_NO_WINDOW a
-                    # python.exe (console-subsystem) child still flashes
-                    # an empty terminal window, which the user then
-                    # manually kills (taking the WebUI with it).
-                    subprocess.Popen(
-                        args,
-                        cwd=os.getcwd(),
-                        creationflags=(
-                            subprocess.DETACHED_PROCESS
-                            | subprocess.CREATE_NEW_PROCESS_GROUP
-                            | subprocess.CREATE_NO_WINDOW
-                        ),
-                        close_fds=True,
-                        stdin=subprocess.DEVNULL,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-                    # Exit immediately — the port is released as soon as
-                    # this process dies, allowing the new process to bind.
-                    os._exit(0)
-                else:
-                    if getattr(sys, "frozen", False):
-                        os.execv(sys.executable, sys.argv)
-                    else:
-                        os.execv(sys.executable, [sys.executable] + sys.argv)
-            except Exception:
-                # Last-resort: if execv fails for any reason, just exit so the
-                # process supervisor (start.sh / Docker) restarts us.
-                os._exit(0)
+            _restart_now()
 
-    threading.Thread(target=_do, daemon=True).start()
+    try:
+        _start_restart_thread(_do)
+    except Exception as exc:
+        # The restart thread could not start (e.g. resource exhaustion at
+        # Thread.start()). The checkout may already have been mutated in
+        # place, so static serving must NOT be exposed again until this
+        # process is replaced (issue #6992 — mixed-revision immutable cache).
+        # Fall back to a synchronous restart: it replaces the process and
+        # never returns.
+        logger.error(
+            'restart thread failed to start (%s); restarting synchronously', exc
+        )
+        _restart_now()
+
+
+def _start_restart_thread(target) -> None:
+    """Start the delayed-restart thread (split out for test injection)."""
+    threading.Thread(target=target, daemon=True).start()
 
 
 def _ensure_gateway_restart_for_agent_update() -> tuple[bool, dict]:
@@ -2142,6 +2181,11 @@ def apply_force_update(target: str, channel=None) -> dict:
     if not _apply_lock.acquire(blocking=False):
         return {'ok': False, 'message': 'Update already in progress'}
     freeze_token = None
+    # Fresh per-invocation mutation tracking (issue #6992 re-gate): set by
+    # _locked() right before the first mutating git command; read by the
+    # exception handler below to decide whether the freeze may be released.
+    global _update_mutation_may_have_started
+    _update_mutation_may_have_started = False
 
     def _locked(channel: str) -> dict:
         if target == 'webui':
@@ -2217,6 +2261,11 @@ def apply_force_update(target: str, channel=None) -> dict:
                 'channel': channel,
                 'refused_rewind': True,
             }
+        # From here on the served checkout may be mutated in place
+        # (checkout ./ clean / reset --hard) — mark it so an exception on
+        # this path can never unfreeze into a possibly-mixed tree (issue
+        # #6992).
+        _mark_update_mutation_started()
         if not _discard_local_changes(path, compare_ref):
             return {'ok': False, 'message': f'Force reset to {compare_ref} failed'}
 
@@ -2277,6 +2326,38 @@ def apply_force_update(target: str, channel=None) -> dict:
         if freeze_token is not None and not response.get('restart_scheduled'):
             unfreeze_static_serving(freeze_token)
         return response
+    except Exception:
+        # Exception-safety for the freeze lifecycle (issue #6992 re-gate):
+        # without this handler the finally below releases only _apply_lock,
+        # so an exception raised after the freeze was acquired (e.g.
+        # _schedule_restart's restart thread failing to start, after the
+        # checkout was already updated) would leave /static/* frozen at 503
+        # until a restart or another successful update — server.py keeps the
+        # process alive on the 500. Decide by mutation state:
+        if freeze_token is not None:
+            if not _update_mutation_may_have_started:
+                # Pre-mutation failure: the served tree is untouched, so
+                # release ONLY this caller's freeze generation and let
+                # static serving resume (the request surfaces the 500).
+                unfreeze_static_serving(freeze_token)
+            else:
+                # Mutation may already have started: NEVER unfreeze into a
+                # possibly-mixed tree. Guarantee process replacement before
+                # static assets are exposed again. _schedule_restart either
+                # starts the restart thread or — if that fails — replaces the
+                # process synchronously; it does not return without a
+                # replacement being guaranteed.
+                try:
+                    _schedule_restart()
+                except Exception:
+                    # Both the thread start and the synchronous fallback
+                    # failed: keep the freeze (fail-closed — 503 rather than
+                    # mixed immutable bytes). A later update or manual
+                    # restart clears it.
+                    logger.exception(
+                        'force_update: failed to schedule restart after update error'
+                    )
+        raise
     finally:
         _apply_lock.release()
 
