@@ -44,41 +44,41 @@ def _read_agent_revision(
 
     try:
         worktree_result = subprocess.run(
-            ["git", "-C", str(agent_dir), "rev-parse", "--show-toplevel"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
+                    ["git", "-C", str(agent_dir), "rev-parse", "--show-toplevel"],
+                    check=False,
+                    capture_output=True,
+                    text=True, encoding="utf-8", errors="replace",
+                    timeout=2,
+                )
         if worktree_result.returncode != 0:
             return None
         worktree = Path(worktree_result.stdout.strip()).resolve()
         relative_module = module_path.relative_to(worktree).as_posix()
         tracked_result = subprocess.run(
-            [
-                "git",
-                "--literal-pathspecs",
-                "-C",
-                str(worktree),
-                "ls-files",
-                "--error-unmatch",
-                "--",
-                relative_module,
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
+                    [
+                        "git",
+                        "--literal-pathspecs",
+                        "-C",
+                        str(worktree),
+                        "ls-files",
+                        "--error-unmatch",
+                        "--",
+                        relative_module,
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True, encoding="utf-8", errors="replace",
+                    timeout=2,
+                )
         if tracked_result.returncode != 0:
             return None
         revision_result = subprocess.run(
-            ["git", "-C", str(worktree), "rev-parse", "--verify", "HEAD"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
+                    ["git", "-C", str(worktree), "rev-parse", "--verify", "HEAD"],
+                    check=False,
+                    capture_output=True,
+                    text=True, encoding="utf-8", errors="replace",
+                    timeout=2,
+                )
     except (OSError, subprocess.TimeoutExpired, RuntimeError, ValueError):
         return None
 

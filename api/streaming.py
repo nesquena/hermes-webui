@@ -1012,13 +1012,13 @@ def _load_prefill_messages_script(config_data: dict) -> dict:
         return {"status": "error", "source": "script", "label": label, "messages": [], "message_count": 0, "error": "prefill script is empty"}
     try:
         proc = subprocess.run(
-            command,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=_prefill_script_timeout(config_data),
-            check=False,
-        )
+                    command,
+                    text=True, encoding="utf-8", errors="replace",
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=_prefill_script_timeout(config_data),
+                    check=False,
+                )
     except subprocess.TimeoutExpired:
         return {"status": "error", "source": "script", "label": label, "messages": [], "message_count": 0, "error": "prefill script timed out"}
     except Exception as exc:

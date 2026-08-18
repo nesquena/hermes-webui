@@ -1829,12 +1829,14 @@ def _launch_account_usage_worker_process(
         PYTHON_EXE = sys.executable or "python3"
 
     kwargs: dict[str, Any] = {
-        "stdin": stdin,
-        "stdout": stdout,
-        "stderr": subprocess.DEVNULL,
-        "text": True,
-        "bufsize": 1,
-    }
+            "stdin": stdin,
+            "stdout": stdout,
+            "stderr": subprocess.DEVNULL,
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+            "bufsize": 1,
+        }
     if hasattr(os, "fork"):  # POSIX
         kwargs["preexec_fn"] = _account_usage_preexec_fn
 

@@ -218,6 +218,7 @@ def _run_git(args, cwd, timeout=10):
             [git_executable] + args, cwd=str(cwd), capture_output=True,
             text=True, timeout=timeout,
             encoding='utf-8', errors='replace',
+            creationflags=(subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0),
         )
         # On non-UTF-8 locales (e.g. Chinese Windows GBK), a binary git
         # output that fails to decode used to leave r.stdout = None and crash
