@@ -418,7 +418,7 @@ def test_issue_artifact_rows_follow_production_regeneration_and_error_settlement
     session.pending_attachments = []
     session.pending_started_at = None
     session.pending_user_source = None
-    session.messages.append({"role": "assistant", "content": "provider failed", "_error": True})
+    session.messages.append(copy.deepcopy(rows[1]))
     assert [row["role"] for row in session.messages] == ["user", "assistant"]
     assert [row["content"] for row in session.messages if row["role"] == "user"] == [rows[0]["content"]]
     monkeypatch.setattr(models_api, "SESSION_DIR", tmp_path)
