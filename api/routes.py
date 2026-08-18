@@ -22592,6 +22592,7 @@ def _handle_goal_command(handler, body):
         and not stream_running
     )
     workspace = model = model_provider = normalized_model = None
+    explicit_model_pick = bool(body.get("explicit_model_pick"))
     previous_goal_state = None
     if will_kickoff:
         try:
@@ -22604,6 +22605,11 @@ def _handle_goal_command(handler, body):
             if "model_provider" in body
             else getattr(s, "model_provider", None)
         )
+        # #6703: carry the explicit-pick marker through goal kickoffs. The
+        # frontend marks a session-level provider/model choice as explicit (same
+        # signal /api/chat/start receives); without it the model resolver treats
+        # a persisted cross-provider pick as stale and "repairs" it back to the
+        # profile default, silently switching providers mid-session.
         _pp_provider, _pp_default, _pp_cfg = _read_profile_model_config(s, requested_provider)
         model, model_provider, normalized_model = _resolve_compatible_session_model_state(
             requested_model,
@@ -22611,7 +22617,20 @@ def _handle_goal_command(handler, body):
             profile_provider=_pp_provider,
             profile_default_model=_pp_default,
             profile_config=_pp_cfg,
+            explicit_model_pick=explicit_model_pick,
         )
+        # #5979/#6703 parity with chat-start: record a SIGNATURE of the
+        # deliberately-picked model+provider so the streaming resolver can
+        # preserve a custom-proxy vendor namespace on a cold catalog. A first
+        # /goal launch after a deliberate custom-provider pick must survive a
+        # cold streaming catalog exactly like /api/chat/start does; otherwise the
+        # provider reverts to the profile default mid-session.
+        try:
+            if explicit_model_pick:
+                from api.models import model_explicit_pick_signature as _mk_sig
+                s.model_explicit_pick_signature = _mk_sig(model, model_provider)
+        except Exception:
+            pass
         previous_goal_state = goal_state_snapshot(s.session_id, profile_home=profile_home)
 
     from api.runtime_adapter import LegacyJournalRuntimeAdapter, runtime_adapter_enabled
@@ -22663,7 +22682,16 @@ def _handle_goal_command(handler, body):
                 profile_provider=_pp_provider,
                 profile_default_model=_pp_default,
                 profile_config=_pp_cfg,
+                explicit_model_pick=explicit_model_pick,
             )
+            # #6703 parity: same explicit-pick signature stamping on the
+            # kickoff-prompt fallback resolution path as /api/chat/start.
+            try:
+                if explicit_model_pick:
+                    from api.models import model_explicit_pick_signature as _mk_sig
+                    s.model_explicit_pick_signature = _mk_sig(model, model_provider)
+            except Exception:
+                pass
         stream_response = _start_chat_stream_for_session(
             s,
             msg=kickoff_prompt,
