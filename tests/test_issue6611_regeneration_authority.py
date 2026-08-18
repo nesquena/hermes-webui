@@ -37,17 +37,29 @@ def test_private_active_turn_token_is_redacted_in_nested_context_and_journal():
     session_dict = session.compact() | {
         "messages": session.messages,
         "context_messages": [
-            {"role": "user", "content": "p", "_active_turn_token": "secret"}
+            {
+                "role": "user",
+                "content": "p",
+                "_active_turn_token": "secret",
+                "_fork_child_turn": "authority6611",
+            }
         ],
         "runtime_journal_snapshot": {
             "context_messages": [
-                {"role": "user", "content": "p", "_active_turn_token": "secret"}
+                {
+                    "role": "user",
+                    "content": "p",
+                    "_active_turn_token": "secret",
+                    "_fork_child_turn": "authority6611",
+                }
             ]
         },
     }
     public = redact_session_data(session_dict)
     assert public["context_messages"][0].get("_active_turn_token") is None
+    assert public["context_messages"][0].get("_fork_child_turn") is None
     assert public["runtime_journal_snapshot"]["context_messages"][0].get("_active_turn_token") is None
+    assert public["runtime_journal_snapshot"]["context_messages"][0].get("_fork_child_turn") is None
 
 
 def test_public_active_turn_marker_matches_only_the_active_user_row():
@@ -93,10 +105,65 @@ def test_fork_child_has_regeneration_authority():
     session = _session()
     session.session_source = "fork"
     session.parent_session_id = "parent-6611"
-    session.messages[-2]["_fork_child_turn"] = True
+    session.messages[-2]["_fork_child_turn"] = session.session_id
     revision = regeneration_authority(session)
     assert revision
     assert resolve_regeneration_turn(session, expected_revision=revision).source == "webui"
+
+
+def test_fork_of_fork_copied_parent_marker_refuses_authority():
+    session = _session()
+    session.session_source = "fork"
+    session.parent_session_id = "parent-6611"
+    session.messages[-2]["_fork_child_turn"] = "parent-6611"
+    assert regeneration_authority(session) is None
+    try:
+        resolve_regeneration_turn(session)
+    except RegenerationUnavailable as exc:
+        assert exc.code == "regeneration_read_only"
+    else:
+        raise AssertionError("parent fork marker was accepted by child")
+
+
+def test_current_fork_child_materialization_binds_and_accepts_its_new_turn(monkeypatch):
+    from api import routes
+
+    session = Session(
+        session_id="fork-child-current-6611",
+        messages=[
+            {"role": "user", "content": "parent prompt", "_fork_child_turn": "parent-6611"},
+            {"role": "assistant", "content": "parent answer"},
+        ],
+        context_messages=[
+            {"role": "user", "content": "parent prompt"},
+            {"role": "assistant", "content": "parent answer"},
+        ],
+        session_source="fork",
+        parent_session_id="parent-6611",
+    )
+    monkeypatch.setattr(routes, "register_session_writeback_owner", lambda *_args: None)
+    monkeypatch.setattr(routes, "get_webui_session_save_mode", lambda: "eager")
+    routes._prepare_chat_start_session_for_stream(
+        session,
+        msg="current child prompt",
+        attachments=[],
+        workspace="C:/workspace",
+        model="model",
+        model_provider="provider",
+        stream_id="fork-current-stream",
+        started_at=123.0,
+        defer_save=True,
+    )
+    assert session.messages[-1]["_fork_child_turn"] == session.session_id
+    session.messages.append({"role": "assistant", "content": "current answer"})
+    session.active_stream_id = None
+    session.pending_user_message = None
+    session.pending_attachments = []
+    session.pending_started_at = None
+    session.pending_user_source = None
+    revision = regeneration_authority(session)
+    assert revision
+    assert resolve_regeneration_turn(session, expected_revision=revision).message["content"] == "current child prompt"
 
 
 def test_fork_without_child_lineage_refuses_authority():

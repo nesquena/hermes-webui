@@ -1569,6 +1569,7 @@ def _active_turn_authority(session, stream_id, msg_text):
         else None
     )
     return {
+        'session_id': getattr(session, 'session_id', None),
         'token': token,
         'text': pending_text if pending_text is not None else msg_text,
         'timestamp': getattr(session, 'pending_started_at', None),
@@ -1736,7 +1737,9 @@ def _materialize_active_turn_user(identity, msg_text, source):
         if identity.get('attachments'):
             message['attachments'] = copy.deepcopy(identity['attachments'])
     if str(source or '').strip().lower() == 'fork':
-        message['_fork_child_turn'] = True
+        child_session_id = identity.get('session_id') if isinstance(identity, dict) else None
+        if child_session_id:
+            message['_fork_child_turn'] = child_session_id
         stamp_message_source(
             message,
             identity.get('source') or source or 'webui',
@@ -7451,7 +7454,7 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
         '_recovered': True,
     }
     if str(pending_source or '').strip().lower() == 'fork':
-        recovered['_fork_child_turn'] = True
+        recovered['_fork_child_turn'] = session.session_id
     stamp_message_source(recovered, pending_source)
     if pending_attachments:
         recovered['attachments'] = pending_attachments

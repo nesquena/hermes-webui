@@ -21737,7 +21737,7 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
             msg_text = " ".join(str(msg or "").split())
             if latest_text == msg_text:
                 if str(source or "").strip().lower() == "fork":
-                    latest["_fork_child_turn"] = True
+                    latest["_fork_child_turn"] = s.session_id
                 return
     user_msg = {"role": "user", "content": msg}
     from api.process_event_utils import build_active_turn_token, stamp_message_source
@@ -21748,7 +21748,7 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
         active_turn_token=build_active_turn_token(getattr(s, "active_stream_id", None), started_at),
     )
     if str(source or "").strip().lower() == "fork":
-        user_msg["_fork_child_turn"] = True
+        user_msg["_fork_child_turn"] = s.session_id
     if isinstance(started_at, (int, float)) and started_at > 0:
         user_msg["timestamp"] = float(started_at)
     if attachments:
@@ -21776,6 +21776,9 @@ def _provisional_title_from_prompt(prompt: str, fallback: str = "Untitled") -> s
     return title_from([{"role": "user", "content": text}], fallback) or fallback
 
 
+_RETAINED_CONTEXT_USER_UNSET = object()
+
+
 def _prepare_chat_start_session_for_stream(
     s,
     *,
@@ -21788,6 +21791,7 @@ def _prepare_chat_start_session_for_stream(
     started_at: float | None = None,
     source: str = "webui",
     retained_user=None,
+    retained_context_user=_RETAINED_CONTEXT_USER_UNSET,
     defer_save: bool = False,
 ):
     """Persist chat-start state according to webui.session_save_mode.
@@ -21817,31 +21821,43 @@ def _prepare_chat_start_session_for_stream(
     if retained_user is not None:
         from api.process_event_utils import build_active_turn_token
 
-        retained_id = retained_user.get("id") or retained_user.get("message_id")
-        retained_old_timestamp = retained_user.get("timestamp")
-        retained_old_content = retained_user.get("content")
         retained_user["timestamp"] = s.pending_started_at
         active_turn_token = build_active_turn_token(stream_id, s.pending_started_at)
         retained_user["_active_turn_token"] = active_turn_token
         if str(effective_source or "").strip().lower() == "fork":
-            retained_user["_fork_child_turn"] = True
-        for context_row in reversed(list(getattr(s, "context_messages", None) or [])):
-            if not isinstance(context_row, dict) or context_row.get("role") != "user":
-                continue
-            context_id = context_row.get("id") or context_row.get("message_id")
-            id_match = retained_id is not None and context_id == retained_id
-            old_shape_match = (
-                retained_old_timestamp is not None
-                and context_row.get("timestamp") == retained_old_timestamp
-                and context_row.get("content") == retained_old_content
-            )
-            if not (id_match or old_shape_match):
-                continue
-            context_row["timestamp"] = s.pending_started_at
-            context_row["_active_turn_token"] = active_turn_token
-            if str(effective_source or "").strip().lower() == "fork":
-                context_row["_fork_child_turn"] = True
-            break
+            retained_user["_fork_child_turn"] = s.session_id
+        if retained_context_user is not _RETAINED_CONTEXT_USER_UNSET:
+            if retained_context_user is not None and not any(
+                row is retained_context_user
+                for row in list(getattr(s, "context_messages", None) or [])
+            ):
+                raise RuntimeError("regeneration retained context row is not installed")
+            if isinstance(retained_context_user, dict):
+                retained_context_user["timestamp"] = s.pending_started_at
+                retained_context_user["_active_turn_token"] = active_turn_token
+                if str(effective_source or "").strip().lower() == "fork":
+                    retained_context_user["_fork_child_turn"] = s.session_id
+        else:
+            retained_id = retained_user.get("id") or retained_user.get("message_id")
+            retained_old_timestamp = retained_user.get("timestamp")
+            retained_old_content = retained_user.get("content")
+            for context_row in reversed(list(getattr(s, "context_messages", None) or [])):
+                if not isinstance(context_row, dict) or context_row.get("role") != "user":
+                    continue
+                context_id = context_row.get("id") or context_row.get("message_id")
+                id_match = retained_id is not None and context_id == retained_id
+                old_shape_match = (
+                    retained_old_timestamp is not None
+                    and context_row.get("timestamp") == retained_old_timestamp
+                    and context_row.get("content") == retained_old_content
+                )
+                if not (id_match or old_shape_match):
+                    continue
+                context_row["timestamp"] = s.pending_started_at
+                context_row["_active_turn_token"] = active_turn_token
+                if str(effective_source or "").strip().lower() == "fork":
+                    context_row["_fork_child_turn"] = s.session_id
+                break
     current_title = getattr(s, "title", None)
     if retained_user is None and _is_default_or_empty_session_title(current_title):
         provisional_title = _provisional_title_from_prompt(msg, current_title or "Untitled")
@@ -21943,6 +21959,11 @@ def _start_regeneration_stream_locked(
             "_status": exc.status,
             "_regeneration_locked_plan_rejected": True,
         }
+    except Exception as exc:
+        # The plan read is side-effect free. Do not let the route restore its
+        # older request snapshot over a concurrent accepted session state.
+        setattr(exc, "_regeneration_skip_outer_rollback", True)
+        raise
     # plan_regeneration is read-only. Take the complete rollback snapshot only
     # after its lock-scoped revision and authority checks have succeeded.
     snapshot = snapshot_regeneration_state(s)
@@ -22008,7 +22029,12 @@ def _start_regeneration_stream_locked(
                 )
 
     try:
-        if not apply_regeneration_plan(s, plan):
+        applied, retained_context_user = apply_regeneration_plan(
+            s,
+            plan,
+            return_context_user=True,
+        )
+        if not applied:
             restore_regeneration_state(s, snapshot)
             return {
                 "error": "Session changed while regeneration was being prepared.",
@@ -22030,6 +22056,7 @@ def _start_regeneration_stream_locked(
             stream_id=stream_id,
             source=turn.source,
             retained_user=retained_user,
+            retained_context_user=retained_context_user,
             defer_save=True,
         )
 
@@ -22072,7 +22099,7 @@ def _start_regeneration_stream_locked(
         accepted = True
         set_last_workspace(workspace)
         release_worker.set()
-    except Exception:
+    except Exception as exc:
         abort_worker.set()
         release_worker.set()
         if (
@@ -22096,6 +22123,7 @@ def _start_regeneration_stream_locked(
                     )
                 except Exception:
                     logger.warning("Failed to close accepted regeneration journal", exc_info=True)
+            setattr(exc, "_regeneration_accepted", True)
             raise
         restore_regeneration_state(s, snapshot)
         if save_attempted:
@@ -22122,6 +22150,7 @@ def _start_regeneration_stream_locked(
                     "Failed to close compensated turn journal event",
                     exc_info=True,
                 )
+        setattr(exc, "_regeneration_preacceptance_restored", True)
         raise
 
     release_worker.set()
@@ -23585,8 +23614,15 @@ def _handle_chat_start(handler, body, diag=None):
                 s,
                 **start_run_kwargs,
             )
-        except Exception:
-            _restore_cleared_recovery()
+        except Exception as exc:
+            if not getattr(exc, "_regeneration_accepted", False):
+                if (
+                    regeneration_snapshot is not None
+                    and not getattr(exc, "_regeneration_skip_outer_rollback", False)
+                    and not getattr(exc, "_regeneration_preacceptance_restored", False)
+                ):
+                    _restore_regeneration_preacceptance()
+                _restore_cleared_recovery()
             raise
         # Map adapter-selection NotImplementedError (501) onto the legacy
         # bad-request response shape that this route exposed historically

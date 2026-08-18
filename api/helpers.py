@@ -21,6 +21,7 @@ _PUBLIC_MESSAGE_INTERNAL_FIELDS = frozenset({
     "state_db_row_id",
     "_active_turn_token",
     "_active_turn_user",
+    "_fork_child_turn",
 })
 
 

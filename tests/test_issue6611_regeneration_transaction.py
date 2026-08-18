@@ -1,5 +1,6 @@
 import copy
 import json
+import queue
 import re
 from types import SimpleNamespace
 from pathlib import Path
@@ -53,7 +54,13 @@ def test_plan_installs_rows_and_context_as_one_prepared_pair():
     assert isinstance(plan, RegenerationPlan)
     assert plan.canonical_rows == session.messages
     assert plan.canonical_context == session.context_messages
-    assert apply_regeneration_plan(session, plan)
+    applied, retained_context_user = apply_regeneration_plan(
+        session,
+        plan,
+        return_context_user=True,
+    )
+    assert applied
+    assert retained_context_user is session.context_messages[0]
     assert session.messages == plan.canonical_rows[: plan.truncation_boundary]
     assert session.context_messages == plan.canonical_context[: plan.truncation_boundary]
     assert any(row.get("content") == "prompt" for row in session.context_messages)
@@ -189,13 +196,129 @@ def test_locked_unexpected_plan_error_does_not_restore_a_request_time_snapshot(m
     assert session.__dict__ == current_state
 
 
+def test_locked_preacceptance_exception_restores_the_transaction_snapshot(monkeypatch):
+    from api import routes
+
+    session = _session()
+    plan = plan_regeneration(session)
+    before = copy.deepcopy(session.__dict__)
+
+    def fail_prepare(*_args, **_kwargs):
+        raise RuntimeError("prepare failed")
+
+    monkeypatch.setattr(routes, "_prepare_chat_start_session_for_stream", fail_prepare)
+    with pytest.raises(RuntimeError, match="prepare failed") as raised:
+        routes._start_regeneration_stream_locked(
+            session,
+            turn=plan.turn,
+            workspace="C:/workspace",
+            model="model",
+            model_provider="provider",
+            normalized_model=False,
+            diag=None,
+            goal_related=False,
+            source="webui",
+            moa_config=None,
+            backend_is_gateway=False,
+            transaction_snapshot=before,
+        )
+    assert raised.value._regeneration_preacceptance_restored is True
+    assert session.__dict__ == before
+
+
+def test_locked_postacceptance_workspace_exception_does_not_restore_turn(monkeypatch):
+    from api import routes
+    import api.turn_journal as turn_journal
+
+    session = _session()
+    plan = plan_regeneration(session)
+    monkeypatch.setattr(routes, "register_session_writeback_owner", lambda *_args: None)
+    monkeypatch.setattr(routes, "clear_session_writeback_owner_if_owned", lambda *_args: None)
+    monkeypatch.setattr(routes, "register_stream_owner", lambda *_args: None)
+    monkeypatch.setattr(routes, "unregister_stream_owner", lambda *_args: None)
+    monkeypatch.setattr(routes, "create_stream_channel", lambda: queue.Queue())
+    monkeypatch.setattr(turn_journal, "append_turn_journal_event", lambda *_args, **_kwargs: {"turn_id": "turn-6611"})
+    monkeypatch.setattr(Session, "save", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(routes, "set_last_workspace", lambda *_args: (_ for _ in ()).throw(RuntimeError("workspace failed")))
+
+    class FakeThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            return None
+
+        def join(self, timeout=None):
+            return None
+
+    monkeypatch.setattr(routes.threading, "Thread", FakeThread)
+    before = copy.deepcopy(session.__dict__)
+    with pytest.raises(RuntimeError, match="workspace failed") as raised:
+        routes._start_regeneration_stream_locked(
+            session,
+            turn=plan.turn,
+            workspace="C:/workspace",
+            model="model",
+            model_provider="provider",
+            normalized_model=False,
+            diag=None,
+            goal_related=False,
+            source="webui",
+            moa_config=None,
+            backend_is_gateway=False,
+            transaction_snapshot=before,
+        )
+    assert raised.value._regeneration_accepted is True
+    assert session.active_stream_id is not None
+    assert session.__dict__ != before
+
+
+def test_chat_start_outer_exception_restores_regeneration_preacceptance(monkeypatch):
+    from api import routes
+    import api.runtime_adapter as runtime_adapter
+
+    session = _session()
+    revision = plan_regeneration(session).revision
+    before = copy.deepcopy(session.__dict__)
+    monkeypatch.setattr(runtime_adapter, "runtime_adapter_runner_enabled", lambda: False)
+    monkeypatch.setattr(routes, "_get_or_materialize_session", lambda *_args, **_kwargs: session)
+    monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda **_kwargs: None)
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *_args: True)
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(routes, "_read_profile_model_config", lambda *_args: (None, None, {}))
+    monkeypatch.setattr(routes, "_resolve_chat_workspace_for_regeneration", lambda *_args: "C:/workspace")
+    monkeypatch.setattr(routes, "get_config_snapshot", lambda: {})
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda *_args: False)
+    monkeypatch.setattr(routes, "_resolve_compatible_session_model_state", lambda *_args, **_kwargs: ("model", "provider", False))
+    monkeypatch.setattr(routes, "_repair_foreign_session_model_provider", lambda *_args, **_kwargs: "provider")
+    monkeypatch.setattr(routes, "compression_recovery_payload_for_session", lambda *_args: None)
+
+    def fail_start(*_args, **_kwargs):
+        raise RuntimeError("start failed before acceptance")
+
+    monkeypatch.setattr(routes, "_start_run", fail_start)
+    with pytest.raises(RuntimeError, match="start failed before acceptance"):
+        routes._handle_chat_start(
+            None,
+            {
+                "session_id": session.session_id,
+                "regenerate": True,
+                "regeneration_revision": revision,
+            },
+        )
+    assert session.__dict__ == before
+
+
 def test_prepare_mirrors_active_turn_token_to_context_before_timestamp_mutation(monkeypatch):
     from api import routes
 
     session = _session()
     retained_user = session.messages[0]
-    retained_user["timestamp"] = 10
-    session.context_messages[0]["timestamp"] = 10
+    session.context_messages = [
+        {"role": "user", "content": "prompt"},
+        {"role": "user", "content": "prompt"},
+    ]
+    retained_context_user = session.context_messages[1]
     monkeypatch.setattr(routes, "register_session_writeback_owner", lambda *_args: None)
     routes._prepare_chat_start_session_for_stream(
         session,
@@ -207,11 +330,14 @@ def test_prepare_mirrors_active_turn_token_to_context_before_timestamp_mutation(
         stream_id="token-parity-stream",
         started_at=99.0,
         retained_user=retained_user,
+        retained_context_user=retained_context_user,
         defer_save=True,
     )
     assert retained_user["timestamp"] == 99.0
-    assert session.context_messages[0]["timestamp"] == 99.0
-    assert session.context_messages[0]["_active_turn_token"] == retained_user["_active_turn_token"]
+    assert "timestamp" not in session.context_messages[0]
+    assert "_active_turn_token" not in session.context_messages[0]
+    assert retained_context_user["timestamp"] == 99.0
+    assert retained_context_user["_active_turn_token"] == retained_user["_active_turn_token"]
 
 
 def test_prepare_marks_new_fork_turn_in_eager_materialization(monkeypatch):
@@ -239,7 +365,7 @@ def test_prepare_marks_new_fork_turn_in_eager_materialization(monkeypatch):
         defer_save=True,
     )
     assert len(session.messages) == 1
-    assert session.messages[0]["_fork_child_turn"] is True
+    assert session.messages[0]["_fork_child_turn"] == session.session_id
 
     deferred = Session(
         session_id="fork-deferred-6611",
@@ -264,15 +390,18 @@ def test_prepare_marks_new_fork_turn_in_eager_materialization(monkeypatch):
             "text": deferred.pending_user_message,
             "source": deferred.pending_user_source,
             "timestamp": deferred.pending_started_at,
+            "session_id": deferred.session_id,
         },
         deferred.pending_user_message,
         deferred.pending_user_source,
     )
-    assert materialized["_fork_child_turn"] is True
+    assert materialized["_fork_child_turn"] == deferred.session_id
 
 
-def test_issue_artifact_rows_follow_production_regeneration_and_error_settlement(monkeypatch):
+def test_issue_artifact_rows_follow_production_regeneration_and_error_settlement(monkeypatch, tmp_path):
+    """Exercise production plan/apply/prepare/materializer/save-reload helpers, not HTTP integration."""
     from api import routes
+    from api import models as models_api
     from api.session_ops import apply_regeneration_plan, plan_regeneration
     from api.streaming import _materialize_pending_user_turn_before_error
 
@@ -309,6 +438,13 @@ def test_issue_artifact_rows_follow_production_regeneration_and_error_settlement
     session.messages.append({"role": "assistant", "content": "provider failed", "_error": True})
     assert [row["role"] for row in session.messages] == ["user", "assistant"]
     assert [row["content"] for row in session.messages if row["role"] == "user"] == [rows[0]["content"]]
+    monkeypatch.setattr(models_api, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models_api, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    session.save(touch_updated_at=False)
+    reloaded = Session.load(session.session_id)
+    assert reloaded is not None
+    assert [row["role"] for row in reloaded.messages] == ["user", "assistant"]
+    assert [row["content"] for row in reloaded.messages if row["role"] == "user"] == [rows[0]["content"]]
 
 
 def test_locked_start_always_replans_after_browser_validation():

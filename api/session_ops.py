@@ -93,27 +93,44 @@ def plan_regeneration(session, *, expected_revision=None, lock_held=False):
         )
 
 
-def apply_regeneration_plan(session, plan: RegenerationPlan):
+def apply_regeneration_plan(
+    session,
+    plan: RegenerationPlan,
+    *,
+    return_context_user: bool = False,
+):
     """Install the prepared pair and truncate it without a second authority read."""
+    def _result(success, context_user=None):
+        return (success, context_user) if return_context_user else success
+
     if not isinstance(plan, RegenerationPlan):
-        return False
+        return _result(False)
     rows = copy.deepcopy(plan.canonical_rows)
     context = copy.deepcopy(plan.canonical_context)
     if len(rows) != plan.message_count or plan.truncation_boundary != plan.turn.user_index + 1:
-        return False
+        return _result(False)
     if regeneration_revision_for(rows, session=session, context=context) != plan.revision:
-        return False
+        return _result(False)
     session.messages = rows
     session.context_messages = context
     current = session.messages[plan.turn.user_index]
     if not isinstance(current, dict) or current.get("role") != "user":
-        return False
+        return _result(False)
     truncate_session_at_keep(session, plan.truncation_boundary)
-    prepared_context = truncate_context_for_display_keep(
-        context, rows, plan.truncation_boundary,
+    prepared_context, context_boundary_index = truncate_context_for_display_keep(
+        context,
+        rows,
+        plan.truncation_boundary,
+        return_boundary_index=True,
     )
     session.context_messages = prepared_context if prepared_context or not context else context[: plan.truncation_boundary]
-    return True
+    retained_context_user = None
+    if context_boundary_index is not None:
+        for context_row in reversed(session.context_messages[: context_boundary_index + 1]):
+            if isinstance(context_row, dict) and context_row.get("role") == "user":
+                retained_context_user = context_row
+                break
+    return _result(True, retained_context_user)
 
 
 def snapshot_regeneration_state(session):
@@ -309,7 +326,10 @@ def resolve_regeneration_turn(
             ):
                 raise RegenerationUnavailable("no_regenerable_turn", 400)
             row = rows[index]
-            if _regeneration_source_class(getattr(session, "session_source", None)) == "fork" and not row.get("_fork_child_turn"):
+            if (
+                _regeneration_source_class(getattr(session, "session_source", None)) == "fork"
+                and row.get("_fork_child_turn") != getattr(session, "session_id", None)
+            ):
                 raise RegenerationUnavailable("regeneration_read_only", 403)
             row_source = row.get("_source") or row.get("source")
             if row_source and not _regeneration_source_allowed(row_source):
@@ -443,16 +463,21 @@ def truncate_context_for_display_keep(
     context_messages: list | None,
     full_messages: list | None,
     keep: int,
+    *,
+    return_boundary_index: bool = False,
 ) -> list:
     """Align model context with display prefix ``full_messages[:keep]``."""
+    def _result(rows, boundary_index=None):
+        return (rows, boundary_index) if return_boundary_index else rows
+
     if keep <= 0:
-        return []
+        return _result([])
     ctx = context_messages if isinstance(context_messages, list) else []
     msgs = full_messages if isinstance(full_messages, list) else []
     if not ctx:
-        return []
+        return _result([])
     if len(msgs) == 0:
-        return []
+        return _result([])
     # Only the perfectly-parallel case (display and context row-for-row) can be
     # sliced at the raw display index. When the two arrays differ in length —
     # in EITHER direction — they have diverged and need alignment:
@@ -469,7 +494,7 @@ def truncate_context_for_display_keep(
     # strips unanswered tool_calls; gateway: it forwards no tool_calls/tool rows
     # at all), so we do not re-do that trimming here.
     if len(ctx) == len(msgs):
-        return ctx[:keep]
+        return _result(ctx[:keep], min(keep, len(ctx)) - 1)
 
     def _row_signature(row: Any) -> tuple[str, ...] | None:
         if not isinstance(row, dict):
@@ -698,8 +723,8 @@ def truncate_context_for_display_keep(
                 and isinstance(msgs[keep - 1], dict)
                 and msgs[keep - 1].get('role') == 'user'
             ):
-                return ctx[:last_kept + 1]
-            return ctx[:first_unkept]
+                return _result(ctx[:last_kept + 1], last_kept)
+            return _result(ctx[:first_unkept], first_unkept - 1)
         if last_kept is not None:
             ambiguous_first_unkept = ambiguous_matches[keep]
             if (
@@ -707,8 +732,8 @@ def truncate_context_for_display_keep(
                 and isinstance(msgs[keep - 1], dict)
                 and msgs[keep - 1].get('role') != 'user'
             ):
-                return ctx[:ambiguous_first_unkept]
-            return ctx[:last_kept + 1]
+                return _result(ctx[:ambiguous_first_unkept], ambiguous_first_unkept - 1)
+            return _result(ctx[:last_kept + 1], last_kept)
 
         # Both boundary rows were ambiguous/unmatched (common in large sessions
         # where context rows have lost their id/timestamp so the matcher can't
@@ -727,14 +752,15 @@ def truncate_context_for_display_keep(
             for i in range(keep - 1, -1, -1):
                 resolved = matches[i] if matches[i] is not None else ambiguous_matches[i]
                 if resolved is not None:
-                    return ctx[:resolved + 1]
+                    return _result(ctx[:resolved + 1], resolved)
 
     # Final fallback preserves #5096 behavior when alignment is unreliable
     # (no display row resolved to a context index, or keep >= len(msgs)).
     prefix_len = max(0, len(ctx) - len(msgs))
     prefix = ctx[:prefix_len]
     suffix = ctx[prefix_len:]
-    return prefix + suffix[:keep]
+    result = prefix + suffix[:keep]
+    return _result(result, len(result) - 1 if result else None)
 
 
 def truncate_session_at_keep(session, keep: int) -> tuple[int, int]:
