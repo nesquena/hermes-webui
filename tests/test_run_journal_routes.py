@@ -1188,6 +1188,59 @@ def test_live_stream_cursor_equal_to_cutoff_does_not_double_send(monkeypatch):
     assert stream.unsubscribed is True
 
 
+def test_live_stream_ahead_cursor_unknown_cutoff_still_delivers(monkeypatch):
+    """An ahead-of-stream Last-Event-ID with an UNKNOWN snapshot cutoff
+    (no parseable last_event_id) must not become the live dedup bound.
+
+    Before the fix, header run_1:999 + snapshot_cutoff_seq=None installed 999
+    as the drain filter bound, so every queued frame — including the terminal
+    stream_end fence — was discarded and the reconnect stalled on heartbeats
+    with an empty SSE body (Codex r4 data-loss). The unknown cutoff is treated
+    as fence 0, normalizing the cursor to replay-from-start so both queued
+    events are delivered exactly once and the subscriber is released.
+    """
+    import api.routes as routes
+
+    class FakeStream:
+        def __init__(self):
+            self.q = queue.Queue()
+            self.q.put_nowait(("token", {"text": "t1"}, "run_1:1"))
+            self.q.put_nowait(("stream_end", {}, "run_1:2"))
+            self.unsubscribed = False
+
+        def subscribe_with_snapshot(self):
+            # No last_event_id / first_event_id: cutoff is UNKNOWN (None).
+            return self.q, {"offline_buffered_events": 2}
+
+        def unsubscribe(self, q):
+            self.unsubscribed = q is self.q
+
+    handler = _HeaderHandler(last_event_id="run_1:999")
+    stream = FakeStream()
+    monkeypatch.setattr(routes, "find_run_summary", lambda _sid: None)
+    monkeypatch.setattr(
+        routes, "read_run_events", lambda *a, **k: {"events": []}
+    )
+    monkeypatch.setattr(routes, "stale_interrupted_event", lambda *_a, **_k: None)
+    previous_streams = dict(routes.STREAMS)
+    routes.STREAMS.clear()
+    routes.STREAMS["run_1"] = stream
+    try:
+        routes._handle_sse_stream(
+            handler, urlparse("/api/chat/stream?stream_id=run_1")
+        )
+    finally:
+        routes.STREAMS.clear()
+        routes.STREAMS.update(previous_streams)
+
+    body = handler.wfile.getvalue().decode("utf-8")
+    # Both events emit exactly once — including the terminal fence.
+    assert body.count("id: run_1:1\n") == 1
+    assert body.count("id: run_1:2\n") == 1
+    assert body.count("event: stream_end\n") == 1
+    assert stream.unsubscribed is True
+
+
 def test_dead_stream_ahead_of_stream_cursor_returns_full_replay(monkeypatch):
     """A cursor AHEAD of the dead stream's authoritative last_seq is normalized
     to replay-from-start, so the journal's real events are emitted instead of

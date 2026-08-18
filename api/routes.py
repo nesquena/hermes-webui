@@ -17762,7 +17762,20 @@ def _sse_replay_run_journal_gap_checked(
     # nothing, and drain only the retained tail — silently losing every event
     # before it (Codex r2 #2). ``>`` (not ``>=``) — a cursor EQUAL to the
     # cutoff is a valid in-range cursor (see the dedup bound below).
-    if snapshot_cutoff_seq is not None and after_seq > snapshot_cutoff_seq:
+    #
+    # An UNKNOWN snapshot cutoff (no parseable ``last_event_id`` — e.g. the
+    # channel has not seen an id-bearing frame yet) is treated as fence 0:
+    # with no cutoff to bound it, any positive client cursor would otherwise
+    # be installed verbatim as the live dedup bound and filter EVERY queued
+    # frame — including the terminal ``stream_end`` fence — leaving the
+    # reconnect stalled on heartbeats with an empty body (Codex r4). Failing
+    # closed to replay-from-start delivers the buffered events (at worst
+    # duplicating what the client already holds) instead of silently losing
+    # them. Frames dropped while the cutoff is unknown still cannot prove
+    # coverage below (``cutoff_seq is None`` → not covered), so the
+    # recovery_control fail-closed path is preserved.
+    effective_cutoff = snapshot_cutoff_seq if snapshot_cutoff_seq is not None else 0
+    if after_seq > effective_cutoff:
         after_seq = 0
     # The subscribe snapshot already queued the retained offline tail, which
     # covers [first buffered frame → snapshot cutoff] by itself. The journal
