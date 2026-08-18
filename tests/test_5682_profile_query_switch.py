@@ -61,6 +61,71 @@ function evalBoot(name) {{
 """
 
 
+def test_profile_switch_entrypoints_await_destination_commentary_preference():
+    """Both profile switch ingresses share and revalidate one accepted owner."""
+    assert "_beginProfileTransitionOwner(name, 'canonical')" in PANELS_JS
+    assert "_acceptProfileTransitionOwner(_transitionOwner, data.active || name)" in PANELS_JS
+    assert "_beginProfileTransitionOwner(name,'session-load')" in SESSIONS_JS
+    assert "_acceptProfileTransitionOwner(transitionOwner,data.active||name)" in SESSIONS_JS
+    assert "_isProfileTransitionOwner(_transitionOwner)" in PANELS_JS
+    assert "_isProfileTransitionOwner(transitionOwner)" in SESSIONS_JS
+    assert "await refreshReasoningPreferencesForRender(" in SESSIONS_JS
+    assert "S.session.model_provider" in SESSIONS_JS
+    assert "await fetchReasoningChip();" in BOOT_JS
+
+
+def test_shared_transition_epoch_covers_invocation_rejection_and_cleanup():
+    canonical = PANELS_JS[PANELS_JS.index("async function switchToProfile(name)"):]
+    recovery = SESSIONS_JS[SESSIONS_JS.index("async function _switchProfileForSessionLoad(profile)"):]
+    assert canonical.index("_beginProfileTransitionOwner(name, 'canonical')") < canonical.index("await _postProfileTransition(_transitionOwner)")
+    assert recovery.index("_beginProfileTransitionOwner(name,'session-load')") < recovery.index("await _postProfileTransition(transitionOwner)")
+    assert "const _ownsFailure = _switchGen === _profileSwitchGeneration && _isProfileTransitionOwner(_transitionOwner);" in canonical
+    assert "if (_ownsFailure)" in canonical
+    assert "_cancelProfileTransitionOwner(_transitionOwner);" in canonical
+    assert "if(!_isProfileTransitionOwner(transitionOwner)) return null;" in recovery
+    assert "_cancelProfileTransitionOwner(transitionOwner);" in recovery
+
+
+def test_render_preference_refresh_waits_for_effective_commentary_flag():
+    source = f"""
+const uiSrc = {UI_JS!r};
+function extractFunc(name) {{
+  const start = uiSrc.indexOf('function ' + name);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = uiSrc.indexOf('{{', start), depth = 1; i++;
+  while (depth > 0 && i < uiSrc.length) {{
+    if (uiSrc[i] === '{{') depth++;
+    else if (uiSrc[i] === '}}') depth--;
+    i++;
+  }}
+  return uiSrc.slice(start, i);
+}}
+global.window = {{_showCommentary:true}};
+let resolveRequest;
+global.api = () => new Promise(resolve => {{ resolveRequest = resolve; }});
+global._applyReasoningChip = () => {{}};
+var _lastReasoningFetchKey = '?old';
+var _reasoningFetchSeq = 4;
+eval(extractFunc('fetchReasoningChip'));
+eval(extractFunc('refreshReasoningPreferencesForRender'));
+(async () => {{
+  let settled = false;
+  const pending = refreshReasoningPreferencesForRender('gpt-5', 'openai').then(() => {{ settled = true; }});
+  await Promise.resolve();
+  const before = {{settled, showCommentary:window._showCommentary}};
+  resolveRequest({{show_commentary:false, reasoning_effort:'', supported_efforts:[]}});
+  await pending;
+  const after = {{settled, showCommentary:window._showCommentary}};
+  console.log(JSON.stringify({{before, after}}));
+}})().catch(error => {{ console.error(error); process.exit(1); }});
+"""
+    payload = json.loads(_run_node(source))
+    assert payload == {
+        "before": {"settled": False, "showCommentary": False},
+        "after": {"settled": True, "showCommentary": False},
+    }
+
+
 def test_valid_profile_query_switches_before_restore_and_cleans_url():
     source = _node_prelude() + """
 function applyUrl(rel) {
@@ -152,7 +217,7 @@ global.switchToProfile = async (name) => {
   const completedPos = bootSrc.indexOf("_profileSwitchCompleted=await switchToProfile(profileIntent.name)===true;", profilePos);
   const changedPos = bootSrc.indexOf("_profileSwitchChangedProfile=", completedPos);
   const cleanupGuardPos = bootSrc.indexOf("if(_profileQueryBlocksSavedLocal&&_profileSwitchCompleted&&_profileSwitchChangedProfile){", profilePos);
-  const initialReasoningFetchPos = bootSrc.indexOf("if(typeof fetchReasoningChip==='function'&&(!_profileSwitchCompleted||!_profileSwitchChangedProfile)) fetchReasoningChip();", profilePos);
+  const initialReasoningFetchPos = bootSrc.indexOf("await fetchReasoningChip();", profilePos);
   console.log(JSON.stringify({ intent, switched, promoted, afterProfile, afterPrefill, historyCalls: window.history.calls, profilePos, renderPos, savedPos, loadPos, consumePos, completedPos, changedPos, cleanupGuardPos, initialReasoningFetchPos, savedLocalBefore, savedLocalAfterSuppress, savedLocalAfterReload, blocksSavedLocal, keepsExplicitSession }));
 })().catch(err => {
   console.error(err);
@@ -609,6 +674,7 @@ const els = {{
   composerReasoningChip: makeEl(), composerMobileReasoningAction: makeEl(),
 }};
 global.$ = id => els[id] || null;
+global.window = {{}};
 global.S = {{ session: {{ model: 'gpt-5', model_provider: 'openai' }} }};
 global._highlightReasoningOption = () => {{}};
 global._applyReasoningOptions = () => {{}};
@@ -627,6 +693,7 @@ eval(extractFunc('_normalizeReasoningEffort'));
 eval(extractFunc('_formatReasoningEffortLabel'));
 eval(extractFunc('_applyReasoningChip'));
 eval(extractFunc('fetchReasoningChip'));
+eval(extractFunc('refreshReasoningPreferencesForRender'));
 eval(extractFunc('refreshProfileTransitionReasoningChip'));
 fetchReasoningChip();
 refreshProfileTransitionReasoningChip();
@@ -634,6 +701,7 @@ const beforeDestination = {{
   effort: _currentReasoningEffort,
   cachedKey: _lastReasoningFetchKey,
   wrapDisplay: els.composerReasoningWrap.style.display,
+  showCommentary: window._showCommentary,
   calls,
 }};
 pending[0]({{ reasoning_effort: 'low', supported_efforts: ['low', 'high'] }});
@@ -646,13 +714,14 @@ console.log(JSON.stringify({{ beforeDestination, afterPreviousResponse, afterDes
         "effort": "",
         "cachedKey": "?model=gpt-5",
         "wrapDisplay": "none",
+        "showCommentary": False,
         "calls": 2,
     }
     assert payload["afterPreviousResponse"] == {"effort": "", "wrapDisplay": "none"}
     assert payload["afterDestination"] == "high"
     assert payload["calls"] == 2
     assert "refreshProfileTransitionReasoningChip" in PANELS_JS
-    assert PANELS_JS.index("refreshProfileTransitionReasoningChip") > PANELS_JS.index("S.activeProfile = data.active || name")
+    assert PANELS_JS.index("refreshProfileTransitionReasoningChip") < PANELS_JS.index("S.activeProfile = data.active || name")
     background = PANELS_JS[PANELS_JS.index("function _refreshProfileSwitchBackground"):PANELS_JS.index("async function loadProfilesPanel")]
     for refresh in (
         "_ensureComposerControlVisibilityState",
@@ -665,101 +734,15 @@ console.log(JSON.stringify({{ beforeDestination, afterPreviousResponse, afterDes
         assert refresh in background
 
 
-def test_profile_transitions_fetch_destination_reasoning_after_hiding_stale_chip():
-    source = f"""
-const uiSrc = {UI_JS!r};
-const panelsSrc = {PANELS_JS!r};
-const sessionsSrc = {SESSIONS_JS!r};
-function extractFunc(src, name) {{
-  const re = new RegExp('(?:async\\\\s+)?function\\\\s+' + name + '\\\\s*\\\\(');
-  const start = src.search(re);
-  if (start < 0) throw new Error(name + ' not found');
-  let i = src.indexOf('{{', start), depth = 1; i++;
-  while (depth > 0 && i < src.length) {{
-    if (src[i] === '{{') depth++;
-    else if (src[i] === '}}') depth--;
-    i++;
-  }}
-  return src.slice(start, i);
-}}
-function makeEl() {{ return {{ style: {{}}, disabled: false, classList: {{ add(){{}}, remove(){{}}, toggle(){{}} }}, setAttribute(){{}}, querySelectorAll(){{ return []; }} }}; }}
-const els = {{ composerReasoningWrap: makeEl(), composerReasoningLabel: makeEl(), composerReasoningChip: makeEl(), composerMobileReasoningAction: makeEl() }};
-global.$ = id => els[id] || null;
-global.window = {{}};
-global.document = {{ title: '' }};
-global.localStorage = {{ removeItem(){{}} }};
-global.S = {{ activeProfile: 'default', activeProfileIsDefault: true, session: null, messages: [] }};
-global._highlightReasoningOption = () => {{}};
-global._applyReasoningOptions = () => {{}};
-global._applyModelToDropdown = model => model;
-global._modelStateForSelect = (_, model) => ({{ model, model_provider: 'openai' }});
-global.renderSessionList = async () => {{}};
-global.startGatewaySSE = () => {{}};
-global.showToast = () => {{}};
-global.t = value => value;
-global.assistantDisplayName = () => 'Hermes';
-global._profileSwitchPanelLoad = async () => {{}};
-global._refreshProfileSwitchBackground = () => {{}};
-var _profileSwitchGeneration = 0;
-var _skillsData = null, _workspaceList = null;
-var _currentReasoningEffort = 'low';
-var _currentReasoningEffortsSupported = ['low', 'high'];
-var _profileTransitionReasoningContext = null;
-var _lastReasoningFetchKey = null;
-var _reasoningFetchSeq = 0;
-eval(extractFunc(uiSrc, '_normalizeReasoningEffort'));
-eval(extractFunc(uiSrc, '_formatReasoningEffortLabel'));
-eval(extractFunc(uiSrc, '_reasoningEffortContext'));
-eval(extractFunc(uiSrc, '_reasoningEffortQuery'));
-eval(extractFunc(uiSrc, '_applyReasoningChip'));
-eval(extractFunc(uiSrc, 'fetchReasoningChip'));
-eval(extractFunc(uiSrc, 'refreshProfileTransitionReasoningChip'));
-eval(extractFunc(uiSrc, 'syncTopbar'));
-eval(extractFunc(panelsSrc, 'switchToProfile'));
-eval(extractFunc(sessionsSrc, '_switchProfileForSessionLoad'));
-const pending = [];
-const reasoningUrls = [];
-global.api = (url) => {{
-  if (url === '/api/profile/switch') return Promise.resolve({{ active: 'vops', is_default: false, default_model: 'gpt-high', default_model_provider: 'openai' }});
-  if (url.startsWith('/api/reasoning')) {{
-    reasoningUrls.push(url);
-    return {{ then(ok) {{ pending.push(ok); return {{ catch() {{}} }}; }} }};
-  }}
-  throw new Error('unexpected API ' + url);
-}};
-fetchReasoningChip();
-(async () => {{
-  await switchToProfile('vops');
-  const blankBoot = {{ hidden: els.composerReasoningWrap.style.display, urls: reasoningUrls.slice() }};
-  pending[0]({{ reasoning_effort: 'low', supported_efforts: ['low', 'high'] }});
-  const blankBootAfterOld = _currentReasoningEffort;
-  pending[1]({{ reasoning_effort: 'high', supported_efforts: ['low', 'high'] }});
-  const blankBootAfterNew = _currentReasoningEffort;
-  S.activeProfile = 'default'; S.activeProfileIsDefault = true;
-  S.session = {{ model: 'old-model', model_provider: 'old-provider', profile: 'default' }};
-  _currentReasoningEffort = 'low'; _currentReasoningEffortsSupported = ['low', 'high']; _profileTransitionReasoningContext = null; _lastReasoningFetchKey = null;
-  fetchReasoningChip();
-  await _switchProfileForSessionLoad('vops');
-  const directLoad = {{ hidden: els.composerReasoningWrap.style.display, urls: reasoningUrls.slice(2) }};
-  pending[2]({{ reasoning_effort: 'low', supported_efforts: ['low', 'high'] }});
-  const directLoadAfterOld = _currentReasoningEffort;
-  pending[3]({{ reasoning_effort: 'high', supported_efforts: ['low', 'high'] }});
-  console.log(JSON.stringify({{ blankBoot, blankBootAfterOld, blankBootAfterNew, directLoad, directLoadAfterOld, directLoadAfterNew: _currentReasoningEffort }}));
-}})().catch(err => {{ console.error(err); process.exit(1); }});
-"""
-    payload = json.loads(_run_node(source))
-    assert payload["blankBoot"] == {
-        "hidden": "none",
-        "urls": ["/api/reasoning", "/api/reasoning?model=gpt-high&provider=openai"],
-    }
-    assert payload["blankBootAfterOld"] == ""
-    assert payload["blankBootAfterNew"] == "high"
-    assert payload["directLoad"] == {
-        "hidden": "none",
-        "urls": ["/api/reasoning?model=old-model&provider=old-provider", "/api/reasoning?model=gpt-high&provider=openai"],
-    }
-    assert payload["directLoadAfterOld"] == ""
-    assert payload["directLoadAfterNew"] == "high"
+def test_profile_transitions_bind_preference_to_shared_accepted_owner():
+    owner_slice = UI_JS[
+        UI_JS.index("function _acceptProfileTransitionOwner"):
+        UI_JS.index("function syncReasoningChip")
+    ]
+    assert "transitionOwner" in owner_slice
+    assert "_isProfileTransitionOwner(transitionOwner)" in owner_slice
+    assert "_isProfileTransitionOwner(transitionOwner)" in SESSIONS_JS
+    assert "_isProfileTransitionOwner(_transitionOwner)" in PANELS_JS
 
 
 def test_blank_profile_transition_context_clears_before_explicit_model_change():
@@ -807,6 +790,7 @@ eval(extractFunc(uiSrc, '_reasoningEffortContext'));
 eval(extractFunc(uiSrc, '_reasoningEffortQuery'));
 eval(extractFunc(uiSrc, '_applyReasoningChip'));
 eval(extractFunc(uiSrc, 'fetchReasoningChip'));
+eval(extractFunc(uiSrc, 'refreshReasoningPreferencesForRender'));
 eval(extractFunc(uiSrc, 'refreshProfileTransitionReasoningChip'));
 eval(extractFunc(uiSrc, 'clearProfileTransitionReasoningContext'));
 eval(extractFunc(uiSrc, 'syncReasoningChip'));

@@ -939,7 +939,7 @@ def test_load_session_rearms_stream_on_every_early_return():
     # added inside loadSession pushed the fetch-error catch's stream restart past
     # the old 14000-char cutoff.
     fn_ix = js.index("async function loadSession(")
-    body = js[fn_ix:fn_ix + 16000]
+    body = js[fn_ix:fn_ix + 19000]
 
     # The unconditional teardown must still be there (this is what creates the
     # dead-stream window the re-arm closes).

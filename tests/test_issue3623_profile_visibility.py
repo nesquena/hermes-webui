@@ -114,7 +114,7 @@ def test_profile_dropdown_filters_hidden_profiles_but_preserves_active():
 
 
 def test_profiles_management_panel_still_renders_all_profiles():
-    body = _function_body(_panels_js(), "async function loadProfilesPanel()")
+    body = _function_body(_panels_js(), "async function loadProfilesPanel(transitionOwner)")
 
     assert "for (const p of data.profiles)" in body
     assert "visible !== false" not in body

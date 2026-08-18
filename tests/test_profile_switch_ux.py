@@ -48,7 +48,7 @@ class TestProfileSwitchSpinner:
     def test_optimistic_name_set_before_api_call(self):
         """Chip label must be updated to new name before the API call."""
         fn = self._get_switch_fn()
-        api_call_idx = fn.find("await api('/api/profile/switch'")
+        api_call_idx = fn.find("await _postProfileTransition(_transitionOwner)")
         opt_name_idx = fn.find("_chipLabel.textContent = name")
         assert opt_name_idx != -1, "No optimistic name update found."
         assert opt_name_idx < api_call_idx, (
@@ -97,7 +97,7 @@ class TestParallelizedFetches:
     def test_workspace_refresh_in_background_and_model_catalog_lazy(self):
         """Workspace refresh should run behind completion; model catalog waits for picker open."""
         fn = self._get_switch_fn()
-        assert "_refreshProfileSwitchBackground(_switchGen)" in fn, (
+        assert "_refreshProfileSwitchBackground(_switchGen,_transitionOwner)" in fn, (
             "switchToProfile() must schedule non-visible refreshes after the switch."
         )
         assert "window._modelDropdownReady=null" in self.JS
@@ -119,7 +119,7 @@ class TestParallelizedFetches:
     def test_apply_steps_after_promise_all(self):
         """Model defaults must apply before background catalog refresh starts."""
         fn = self._get_switch_fn()
-        background_idx = fn.find("_refreshProfileSwitchBackground(_switchGen)")
+        background_idx = fn.find("_refreshProfileSwitchBackground(_switchGen,_transitionOwner)")
         apply_model_idx = fn.find("S._pendingProfileModel = modelToUse")
         assert apply_model_idx != -1
         assert background_idx != -1
@@ -134,10 +134,10 @@ class TestParallelizedFetches:
         assert "awaitWorkspaceLoad: workspaceVisible" in fn
         sessions_js = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
         assert "if(options&&options.awaitWorkspaceLoad){" in sessions_js
-        assert "await loadDir('.')" in sessions_js
+        assert "await loadDir('.',{transitionOwner})" in sessions_js
         assert "typeof _deferWorkspaceRefreshForSession==='function'" in sessions_js
-        assert "_deferWorkspaceRefreshForSession(S.session.session_id)" in sessions_js
-        assert "const _dirP=loadDir('.')" in sessions_js
+        assert "_deferWorkspaceRefreshForSession(S.session.session_id,{transitionOwner})" in sessions_js
+        assert "const _dirP=loadDir('.',{transitionOwner})" in sessions_js
         assert "Keep new-chat first paint instant" in sessions_js
 
     def test_cross_profile_empty_session_is_replaced_before_mutation_or_upload(self):
@@ -189,7 +189,7 @@ class TestParallelizedFetches:
             "both profile-switch success branches must expose the new profile's session browser"
         )
         for open_idx in open_calls:
-            render_idx = fn.rfind("await renderSessionList();", 0, open_idx)
+            render_idx = fn.rfind("await renderSessionList({transitionOwner:_transitionOwner});", 0, open_idx)
             assert render_idx != -1 and render_idx < open_idx, (
                 "open the sidebar only after the new profile's session list has rendered"
             )

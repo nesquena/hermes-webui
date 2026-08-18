@@ -56,7 +56,7 @@ def test_switch_panel_lazy_loads_kanban_and_toggles_main_view():
     assert "MAIN_VIEW_PANELS.forEach(p => {" in PANELS
     assert "mainEl.classList.toggle('showing-' + p, nextPanel === p);" in PANELS
     assert "if (nextPanel === 'kanban') await loadKanban();" in PANELS
-    assert "if (_currentPanel === 'kanban') await loadKanban();" in PANELS
+    assert "if (_currentPanel === 'kanban') await loadKanban(undefined,transitionOwner);" in PANELS
 
 
 def test_kanban_frontend_uses_relative_api_endpoints():

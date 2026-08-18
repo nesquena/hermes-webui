@@ -8674,6 +8674,59 @@ def _message_counts_as_renderable_for_window(message) -> bool:
     return bool(role and role != "tool")
 
 
+def _message_has_stable_assistant_reply_for_window(message) -> bool:
+    """Return true for settled assistant prose, not tool/commentary activity."""
+    if not isinstance(message, dict) or str(message.get("role") or "").lower() != "assistant":
+        return False
+    if message.get("tool_calls") or message.get("_partial_tool_calls"):
+        return False
+    content = message.get("content")
+    if isinstance(content, str):
+        return bool(content.strip())
+    if isinstance(content, list):
+        return any(
+            isinstance(part, dict)
+            and str(part.get("type") or "") in {"text", "input_text", "output_text"}
+            and str(part.get("text") or part.get("content") or "").strip()
+            for part in content
+        )
+    return False
+
+
+_COLD_LOAD_SEMANTIC_RAW_ROW_LIMIT = 500
+
+
+def _cold_load_semantic_context_start(source, start_idx: int, last_renderable_idx: int) -> int:
+    """Keep the previous complete exchange beside a tool-heavy active turn.
+
+    A Responses turn can persist hundreds of empty assistant tool/commentary
+    rows. Counting each one as a visible row lets them consume the entire tail
+    budget, so restart cold-load shows only Thinking and hides the latest normal
+    answer. This adds one bounded semantic prefix: the latest user row, the
+    preceding settled assistant reply, and its user row when present.
+    """
+    latest_user_idx = None
+    for idx in range(last_renderable_idx, -1, -1):
+        if isinstance(source[idx], dict) and str(source[idx].get("role") or "").lower() == "user":
+            latest_user_idx = idx
+            break
+    if latest_user_idx is None:
+        return start_idx
+    prior_assistant_idx = None
+    for idx in range(latest_user_idx - 1, -1, -1):
+        if _message_has_stable_assistant_reply_for_window(source[idx]):
+            prior_assistant_idx = idx
+            break
+    if prior_assistant_idx is None or prior_assistant_idx >= start_idx:
+        return start_idx
+    prior_user_idx = None
+    for idx in range(prior_assistant_idx - 1, -1, -1):
+        if isinstance(source[idx], dict) and str(source[idx].get("role") or "").lower() == "user":
+            prior_user_idx = idx
+            break
+    return prior_user_idx if prior_user_idx is not None else prior_assistant_idx
+
+
 def _tool_call_ids_in_messages(messages) -> set:
     """Collect tool-call IDs declared on renderable rows (assistant tool_calls /
     partial tool_calls / Anthropic tool_use content blocks) so trailing
@@ -8767,6 +8820,16 @@ def _message_window_for_display(messages, msg_limit=None, msg_before=None, expan
         if renderable_count >= limit:
             start_idx = idx
             break
+    if expand_renderable and msg_before is None:
+        semantic_start_idx = _cold_load_semantic_context_start(
+            source, start_idx, last_renderable_idx
+        )
+        # Keep the semantic prefix bounded in raw storage coordinates. A single
+        # active turn can contain thousands of hidden tool rows; pulling a very
+        # distant prior exchange into this response would defeat msg_limit and
+        # reintroduce an unbounded cold-load payload.
+        if end_idx - semantic_start_idx <= _COLD_LOAD_SEMANTIC_RAW_ROW_LIMIT:
+            start_idx = semantic_start_idx
     window = source[start_idx:end_idx]
     return window, start_idx
 
@@ -12717,9 +12780,9 @@ def handle_get(handler, parsed) -> bool:
         return handle_transcribe_capability(handler)
 
     if parsed.path == "/api/reasoning":
-        # Current reasoning config (shared source of truth with the CLI —
-        # reads display.show_reasoning and agent.reasoning_effort from
-        # the active profile's config.yaml).
+        # Current reasoning/display config (shared source of truth with the CLI —
+        # reads display.show_reasoning, display.show_commentary, and
+        # agent.reasoning_effort from the active profile's config.yaml).
         query = parse_qs(parsed.query)
         model_id = (query.get("model", [""])[0] or "").strip() or None
         provider_id = (query.get("provider", [""])[0] or "").strip() or None

@@ -28,7 +28,7 @@ def test_cron_panel_loads_gateway_status_for_scheduling_guidance():
     assert "configured gateway URL env var" in panels
     assert "GATEWAY_HEALTH_URL" in panels
     assert "scheduled jobs require the Hermes gateway daemon" in panels
-    assert "loadCronGatewayNotice()" in panels
+    assert "loadCronGatewayNotice(transitionOwner)" in panels
 
 
 def test_docker_docs_explain_single_container_cron_gateway_boundary():

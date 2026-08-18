@@ -112,7 +112,7 @@ def test_inner_handler_bad_response_does_not_emit_double_404(
 
 
 def test_kanban_load_resolves_board_before_board_scoped_requests():
-    boards_pos = PANELS.find("await loadKanbanBoards();")
+    boards_pos = PANELS.find("await loadKanbanBoards(transitionOwner);")
     config_pos = PANELS.find("api('/api/kanban/config' + _kanbanBoardQuery())")
     assert boards_pos != -1
     assert config_pos != -1

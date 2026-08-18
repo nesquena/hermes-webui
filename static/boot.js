@@ -3636,7 +3636,10 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       console.warn('[boot] profile query switch failed', e);
     }
   }
-  if(typeof fetchReasoningChip==='function'&&(!_profileSwitchCompleted||!_profileSwitchChangedProfile)) fetchReasoningChip();
+  if(typeof fetchReasoningChip==='function'&&(!_profileSwitchCompleted||!_profileSwitchChangedProfile)){
+    window._showCommentary=false;
+    await fetchReasoningChip();
+  }
   // Fetch available models without blocking session restore. The static HTML
   // options enough for first paint; the dynamic provider list can settle
   // after the saved session is visible.
@@ -3649,10 +3652,12 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     }
     return true;
   };
-  const _hydrateModelDropdown=({redirectIfUnauth=null}={})=>populateModelDropdown({
+  const _hydrateModelDropdown=({redirectIfUnauth=null,transitionOwner=null}={})=>populateModelDropdown({
     preferProfileDefaultOnFreshBoot:true,
+    transitionOwner,
     ...(redirectIfUnauth?{redirectIfUnauth}:{}),
   }).then(()=>{
+    if(transitionOwner&&typeof _isProfileTransitionOwner==='function'&&!_isProfileTransitionOwner(transitionOwner)) return;
     const sessionModelState=S.session&&S.session.model
       ? {model:S.session.model,model_provider:S.session.model_provider||null}
       : null;
@@ -3688,21 +3693,24 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     if(S.session) syncTopbar();
     else if(typeof syncReasoningChip==='function') syncReasoningChip();
   }).catch(e=>{
+    if(transitionOwner&&typeof _isProfileTransitionOwner==='function'&&!_isProfileTransitionOwner(transitionOwner)) return;
     window._modelDropdownReady=null;
     throw e;
   });
-  const _startModelDropdown=()=>{
+  const _startModelDropdown=(transitionOwner=null)=>{
     const ready=window._modelDropdownReady;
-    if(ready&&typeof ready.then==='function') return ready;
-    const next=_hydrateModelDropdown();
+    if(ready&&typeof ready.then==='function'&&(!transitionOwner||window._modelDropdownReadyOwner===transitionOwner)) return ready;
+    const next=_hydrateModelDropdown({transitionOwner});
     window._modelDropdownReady=next;
+    window._modelDropdownReadyOwner=transitionOwner;
     return next;
   };
-  const _startBootModelDropdown=()=>{
+  const _startBootModelDropdown=(transitionOwner=null)=>{
     const ready=window._modelDropdownReady;
-    if(ready&&typeof ready.then==='function') return ready;
-    const next=_hydrateModelDropdown({redirectIfUnauth:_redirectBootModelDropdownIfUnauth});
+    if(ready&&typeof ready.then==='function'&&(!transitionOwner||window._modelDropdownReadyOwner===transitionOwner)) return ready;
+    const next=_hydrateModelDropdown({redirectIfUnauth:_redirectBootModelDropdownIfUnauth,transitionOwner});
     window._modelDropdownReady=next;
+    window._modelDropdownReadyOwner=transitionOwner;
     return next;
   };
   window._modelDropdownReady=null;

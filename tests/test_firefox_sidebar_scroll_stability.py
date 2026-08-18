@@ -33,9 +33,10 @@ def test_polling_payloads_are_deferred_while_user_scrolls_sidebar():
     assert "async function _runRenderSessionListRefresh(opts, _gen)" in refresh_block
     assert "const deferWhileInteracting=Boolean(opts&&opts.deferWhileInteracting);" in refresh_block
     assert "if(deferWhileInteracting&&_isSessionListUserInteracting())" in refresh_block
-    assert "_pendingSessionListPayload={gen:_gen,sessData,projData,unreadGen};" in refresh_block
+    assert "? {gen:_gen,sessData,projData,unreadGen,transitionOwner}" in refresh_block
+    assert ": {gen:_gen,sessData,projData,unreadGen};" in refresh_block
     assert "_schedulePendingSessionListApply();" in refresh_block
-    assert "_applySessionListPayload(sessData,projData,{unreadGen});" in refresh_block
+    assert "transitionOwner ? {unreadGen,transitionOwner} : {unreadGen}" in refresh_block
     assert "_markPollingCompletionUnreadTransitions(_allSessions);" in apply_block, (
         "deferring sidebar refreshes must preserve background-completion unread semantics"
     )

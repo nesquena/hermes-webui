@@ -405,13 +405,27 @@ class TestReasoningConfigHelpers:
         cfg.set_reasoning_effort('')
 
     def test_get_reasoning_status_defaults_to_show_true(self, tmp_path, monkeypatch):
-        """When config.yaml has no display section, show_reasoning defaults
-        to True (matches CLI default where the setting is opt-in)."""
+        """Absent display flags default on, matching the Agent display contract."""
         import api.config as cfg
         monkeypatch.setattr(cfg, '_get_config_path', lambda: tmp_path / 'config.yaml')
         st = cfg.get_reasoning_status()
         assert st['show_reasoning'] is True
+        assert st['show_commentary'] is True
         assert st['reasoning_effort'] == ''
+
+    def test_get_reasoning_status_exposes_effective_show_commentary(self, tmp_path, monkeypatch):
+        """The reload renderer needs the active profile's effective commentary flag."""
+        import api.config as cfg
+        cfgfile = tmp_path / 'config.yaml'
+        cfgfile.write_text(
+            'display:\n  show_reasoning: true\n  show_commentary: false\n',
+            encoding='utf-8',
+        )
+        monkeypatch.setattr(cfg, '_get_config_path', lambda: cfgfile)
+
+        st = cfg.get_reasoning_status()
+
+        assert st['show_commentary'] is False
 
 
 # ── api/streaming.py — AIAgent receives reasoning_config ──────────────────────

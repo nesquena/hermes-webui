@@ -17,6 +17,7 @@ REPO_ROOT = Path(__file__).parent.parent.resolve()
 PANELS = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 SESSIONS = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 WORKSPACE = (REPO_ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
+UI = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
 
 
@@ -41,7 +42,7 @@ class TestSwitchWiring:
         body = _switch_body()
         skeleton_idx = _show_session_skeleton_call_idx(body)
         # ...and before the awaited /api/profile/switch POST, so stale rows clear immediately
-        assert skeleton_idx < body.index("await api('/api/profile/switch'")
+        assert skeleton_idx < body.index("await _postProfileTransition(_transitionOwner)")
 
     def test_shows_workspace_skeleton_when_panel_open(self):
         body = _switch_body()
@@ -59,7 +60,7 @@ class TestSwitchWiring:
         guard = "if (_switchGen !== _profileSwitchGeneration) return false;"
         # In the non-sessionInProgress branch, the loadDir('.') call must come
         # after an occurrence of the guard.
-        dir_idx = body.index("const dirLoad = loadDir('.');")
+        dir_idx = body.index("const dirLoad = loadDir('.',{transitionOwner:_transitionOwner});")
         guard_before = body.rfind(guard, 0, dir_idx)
         assert guard_before != -1, "loadDir('.') must be preceded by the switch-generation guard"
 
@@ -114,10 +115,10 @@ class TestSwitchWiring:
         # transient-but-eventually-successful switch. Failures surface only through
         # the generation-guarded catch handler, which is the single source of truth.
         body = _switch_body()
-        post_idx = body.index("await api('/api/profile/switch'")
-        # The same api(...) call expression that targets /api/profile/switch must
-        # carry timeoutToast: false. Scope to a small window around the call.
-        window = body[post_idx: post_idx + 300]
+        assert "await _postProfileTransition(_transitionOwner)" in body
+        helper_idx = UI.index("function _postProfileTransition(owner)")
+        # The shared serialized POST helper must retain timeoutToast:false.
+        window = UI[helper_idx: helper_idx + 600]
         assert "timeoutToast: false" in window or "timeoutToast:false" in window.replace(" ", ""), (
             "the /api/profile/switch POST must suppress the generic timeout toast"
         )
@@ -132,7 +133,7 @@ class TestSwitchWiring:
         # Inside the sessionInProgress branch: locate its "await renderSessionList()"
         # then the profile_switched_new_conversation toast; a guard must sit between.
         new_toast_idx = body.index("profile_switched_new_conversation")
-        list_render_before = body.rfind("await renderSessionList();", 0, new_toast_idx)
+        list_render_before = body.rfind("await renderSessionList({transitionOwner:_transitionOwner});", 0, new_toast_idx)
         assert list_render_before != -1
         guard_between = body.find(guard, list_render_before, new_toast_idx)
         assert guard_between != -1, (

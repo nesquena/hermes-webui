@@ -921,12 +921,18 @@ function _appendCronProfileToggle(parent){
   parent.appendChild(wrap);
 }
 
-async function loadCronProfiles(){
+function _profilePanelTransitionCurrent(owner){
+  return !owner||typeof _isProfileTransitionOwner!=='function'||_isProfileTransitionOwner(owner);
+}
+
+async function loadCronProfiles(transitionOwner){
   if (_cronProfilesCache) return _cronProfilesCache;
   try {
     const data = await api('/api/profiles');
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return [];
     _cronProfilesCache = Array.isArray(data.profiles) ? data.profiles : [];
   } catch(e) {
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return [];
     _cronProfilesCache = [];
   }
   return _cronProfilesCache;
@@ -1013,11 +1019,12 @@ function _cronGatewayNoticeHtml(status) {
   `;
 }
 
-async function loadCronGatewayNotice() {
+async function loadCronGatewayNotice(transitionOwner) {
   const box = $('cronGatewayNotice');
   if (!box) return;
   try {
     const status = await api('/api/gateway/status');
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return;
     const html = _cronGatewayNoticeHtml(status);
     if (html) {
       box.innerHTML = html;
@@ -1027,23 +1034,26 @@ async function loadCronGatewayNotice() {
       box.style.display = 'none';
     }
   } catch (_) {
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return;
     box.innerHTML = '';
     box.style.display = 'none';
   }
 }
 
-async function loadCrons(animate) {
+async function loadCrons(animate, transitionOwner) {
   const box = $('cronList');
   const refreshBtn = $('cronRefreshBtn');
-  loadCronGatewayNotice();
+  loadCronGatewayNotice(transitionOwner);
   if (animate && refreshBtn) {
     refreshBtn.style.opacity = '0.5';
     refreshBtn.disabled = true;
   }
   try {
-    await loadCronProfiles();
+    await loadCronProfiles(transitionOwner);
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return;
     const allProfilesQS = _showAllCronProfiles ? '?all_profiles=1' : '';
     const data = await api('/api/crons' + allProfilesQS);
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return;
     _cronList = data.jobs || [];
     _cronOtherProfileCount = Number(data.other_profile_count || 0);
     if (_showAllCronProfiles && !_cronList.some(job => job && job.read_only)) {
@@ -1126,8 +1136,12 @@ async function loadCrons(animate) {
       if (refreshed) _renderCronDetail(refreshed);
       else _clearCronDetail();
     }
-  } catch(e) { box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`; }
+  } catch(e) {
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return;
+    box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`;
+  }
   finally {
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return;
     if (animate && refreshBtn) {
       refreshBtn.style.opacity = '';
       refreshBtn.disabled = false;
@@ -2700,7 +2714,7 @@ function _kanbanUnavailableHtml(err){
   return `<div class="main-view-empty"><div class="main-view-empty-title">${msg}</div></div>`;
 }
 
-async function loadKanban(animate){
+async function loadKanban(animate, transitionOwner){
   const board = $('kanbanBoard');
   const list = $('kanbanList');
   try {
@@ -2708,10 +2722,13 @@ async function loadKanban(animate){
     // Resolve the active board before board-scoped requests. If another CLI or
     // tab archived the previous board, /boards can fall back to default instead
     // of leaving config/board pinned to a ghost slug.
-    await loadKanbanBoards();
+    await loadKanbanBoards(transitionOwner);
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return;
     const config = await api('/api/kanban/config' + _kanbanBoardQuery());
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return;
     let assignees = null;
     try { assignees = await api('/api/kanban/assignees' + _kanbanBoardQuery()); } catch(e) { assignees = null; }
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return;
     _kanbanApplyConfigDefaults(config);
     const filters = _kanbanCurrentFilters();
     const params = new URLSearchParams();
@@ -2722,6 +2739,7 @@ async function loadKanban(animate){
     if (_kanbanCurrentBoard) params.set('board', _kanbanCurrentBoard);
     const path = '/api/kanban/board' + (params.toString() ? '?' + params.toString() : '');
     const data = await api(path);
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return;
     if (data && data.changed === false && _kanbanBoard) { _kanbanRenderBoard(); return; }
     _kanbanBoard = data || {columns: []};
     if ((!_kanbanBoard.columns || !_kanbanBoard.columns.length) && config && config.columns) {
@@ -2737,7 +2755,8 @@ async function loadKanban(animate){
     } catch(_) {}
     _kanbanSetSelectOptions($('kanbanAssigneeFilter'), _kanbanBoard.assignees || (assignees && assignees.assignees) || (config && config.assignees), 'kanban_all_assignees');
     _kanbanSetSelectOptions($('kanbanTenantFilter'), _kanbanBoard.tenants, 'kanban_all_tenants');
-    await loadKanbanStats();
+    await loadKanbanStats(transitionOwner);
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return;
     // Note: PR #1828 (v0.51.20) moved the boards refresh to the start of
     // loadKanban() so the active board is resolved BEFORE board-scoped
     // requests fire. The previous tail-of-function refresh has been removed
@@ -2748,6 +2767,7 @@ async function loadKanban(animate){
     _kanbanStartPolling();
     _kanbanRenderBoard();
   } catch(e) {
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return;
     const html = _kanbanUnavailableHtml(e);
     if (board) board.innerHTML = html;
     if (list) list.innerHTML = html;
@@ -2756,9 +2776,10 @@ async function loadKanban(animate){
 
 function filterKanban(){ _kanbanRenderBoard(); }
 
-async function loadKanbanStats(){
+async function loadKanbanStats(transitionOwner){
   try {
     const stats = await api('/api/kanban/stats' + _kanbanBoardQuery());
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return;
     const el = $('kanbanStats');
     if (!el) return;
     const byStatus = (stats && stats.by_status) || {};
@@ -3905,7 +3926,7 @@ function _kanbanSetSavedBoard(slug){
   } catch(_) {}
 }
 
-async function loadKanbanBoards(){
+async function loadKanbanBoards(transitionOwner){
   // Fetches the boards list and updates the switcher UI. Best-effort —
   // failures hide the switcher rather than blocking the panel from rendering.
   const switcher = document.getElementById('kanbanBoardSwitcher');
@@ -3914,10 +3935,12 @@ async function loadKanbanBoards(){
   try {
     data = await api('/api/kanban/boards');
   } catch(e) {
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return;
     // Hide switcher on error so the user isn't stuck with a half-broken UI.
     switcher.hidden = true;
     return;
   }
+  if(!_profilePanelTransitionCurrent(transitionOwner)) return;
   const boards = (data && data.boards) || [];
   const serverCurrent = (data && data.current) || 'default';
   _kanbanBoardsList = boards;
@@ -4857,18 +4880,25 @@ async function clearConversation() {
 }
 
 // ── Skills panel ──
-async function loadSkills() {
-  if (_skillsData) { renderSkills(_skillsData); return; }
+async function loadSkills(transitionOwner) {
+  if (_skillsData) {
+    if(_profilePanelTransitionCurrent(transitionOwner)) renderSkills(_skillsData);
+    return;
+  }
   const box = $('skillsList');
   try {
     const data = await api('/api/skills');
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return;
     _skillsData = data.skills || [];
     // Prune collapsed state to only keep categories present in fresh data,
     // avoiding stale keys when categories are renamed or removed server-side.
     const liveCats = new Set(_skillsData.map(s => s.category || '(general)'));
     for (const c of _collapsedCats) { if (!liveCats.has(c)) _collapsedCats.delete(c); }
     renderSkills(_skillsData);
-  } catch(e) { box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">Error: ${esc(e.message)}</div>`; }
+  } catch(e) {
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return;
+    box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">Error: ${esc(e.message)}</div>`;
+  }
 }
 
 let _collapsedCats = new Set(); // persisted collapsed state across re-renders
@@ -5481,11 +5511,14 @@ function _renderMemoryEdit(section) {
   if (ta) ta.focus();
 }
 
-async function loadNotesSources(force) {
+async function loadNotesSources(force, transitionOwner) {
   if (_notesSourcesData && !force) return _notesSourcesData;
   try {
-    _notesSourcesData = await api('/api/notes/sources');
+    const data = await api('/api/notes/sources');
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return null;
+    _notesSourcesData = data;
   } catch (e) {
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return null;
     _notesSourcesData = {sources: [], automatic_recall_unchanged: true, error: e && e.message ? e.message : String(e)};
   }
   return _notesSourcesData;
@@ -5724,9 +5757,10 @@ function syncWorkspaceDisplays(){
   }
 }
 
-async function loadWorkspaceList(){
+async function loadWorkspaceList(transitionOwner){
   try{
     const data = await api('/api/workspaces');
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return {workspaces:[],last:''};
     if(typeof syncTerminalBackendState==='function') syncTerminalBackendState(data);
     _workspaceList = data.workspaces || [];
     syncWorkspaceDisplays();
@@ -5985,10 +6019,11 @@ window.addEventListener('resize',()=>{
   if(dd&&dd.classList.contains('open')) _positionComposerWsDropdown();
 });
 
-async function loadWorkspacesPanel(){
+async function loadWorkspacesPanel(transitionOwner){
   const panel=$('workspacesPanel');
   if(!panel)return;
-  const data=await loadWorkspaceList();
+  const data=await loadWorkspaceList(transitionOwner);
+  if(!_profilePanelTransitionCurrent(transitionOwner)) return;
   renderWorkspacesPanel(data.workspaces);
 }
 
@@ -6587,7 +6622,8 @@ function _openProfileDropdownShell(){
   if(tbtn && _profileDropdownTrigger===tbtn) tbtn.classList.add('active');
 }
 
-async function _profileSwitchPanelLoad(){
+async function _profileSwitchPanelLoad(transitionOwner){
+  if(!_profilePanelTransitionCurrent(transitionOwner)) return;
   // Cross-profile cron visibility is an active-profile opt-in; never carry it
   // into the next profile when the Tasks panel wasn't the visible panel.
   _showAllCronProfiles = false;
@@ -6596,21 +6632,24 @@ async function _profileSwitchPanelLoad(){
   _editingCronId = null;
   _cronIsDuplicate = false;
   _clearCronDetail();
-  if (_currentPanel === 'skills') await loadSkills();
-  if (_currentPanel === 'memory') await loadMemory();
-  if (_currentPanel === 'tasks') await loadCrons();
-  if (_currentPanel === 'kanban') await loadKanban();
-  if (_currentPanel === 'profiles') await loadProfilesPanel();
-  if (_currentPanel === 'workspaces') await loadWorkspacesPanel();
+  if (_currentPanel === 'skills') await loadSkills(transitionOwner);
+  if (_currentPanel === 'memory') await loadMemory(undefined,transitionOwner);
+  if (_currentPanel === 'tasks') await loadCrons(undefined,transitionOwner);
+  if (_currentPanel === 'kanban') await loadKanban(undefined,transitionOwner);
+  if (_currentPanel === 'profiles') await loadProfilesPanel(transitionOwner);
+  if (_currentPanel === 'workspaces') await loadWorkspacesPanel(transitionOwner);
 }
 
-function _refreshProfileSwitchBackground(gen){
+function _refreshProfileSwitchBackground(gen,transitionOwner){
   window._modelDropdownReady=null;
-  if (typeof window._ensureModelDropdownReady === 'function') {
-    Promise.resolve(window._ensureModelDropdownReady()).catch(()=>{});
+  if (typeof populateModelDropdown === 'function') {
+    const next=populateModelDropdown({freshness:'session_visit',transitionOwner});
+    window._modelDropdownReady=next;
+    window._modelDropdownReadyOwner=transitionOwner;
+    Promise.resolve(next).catch(()=>{});
   }
-  Promise.resolve(loadWorkspaceList()).then(()=>{
-    if (gen !== _profileSwitchGeneration) return;
+  Promise.resolve(loadWorkspaceList(transitionOwner)).then(()=>{
+    if (gen !== _profileSwitchGeneration||!_profilePanelTransitionCurrent(transitionOwner)) return;
     if (S.session && typeof syncTopbar === 'function') syncTopbar();
   }).catch(()=>{});
   // Reconcile per-profile sidebar tab visibility. hidden_tabs is a per-profile
@@ -6618,7 +6657,7 @@ function _refreshProfileSwitchBackground(gen){
   // would remain in effect under Profile B until the user opens Settings.
   // Stage-394 follow-up to #2636 deep review.
   Promise.resolve(api('/api/settings')).then(function(s){
-    if (gen !== _profileSwitchGeneration) return;
+    if (gen !== _profileSwitchGeneration||!_profilePanelTransitionCurrent(transitionOwner)) return;
     var hidden = (s && Array.isArray(s.hidden_tabs)) ? s.hidden_tabs : [];
     hidden = hidden.filter(function(x){ return typeof x === 'string' && x.trim(); });
     var order = (s && Array.isArray(s.tab_order)) ? s.tab_order : [];
@@ -6640,11 +6679,12 @@ function _refreshProfileSwitchBackground(gen){
   }).catch(function(){});
 }
 
-async function loadProfilesPanel() {
+async function loadProfilesPanel(transitionOwner) {
   const panel = $('profilesPanel');
   if (!panel) return;
   try {
     const data = await api('/api/profiles');
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return;
     _profilesCache = data;
     _profileDropdownWriteStoredCache(data);
     panel.innerHTML = '';
@@ -6714,6 +6754,7 @@ async function loadProfilesPanel() {
       else _clearProfileDetail();
     }
   } catch (e) {
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return;
     panel.innerHTML = `<div style="color:var(--accent);font-size:12px;padding:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`;
   }
 }
@@ -7003,6 +7044,7 @@ async function switchToProfile(name) {
   const _titlebarLabel = $('titlebarProfileLabel');
   const _prevProfileName = S.activeProfile || 'default';
   const _switchGen = ++_profileSwitchGeneration;
+  const _transitionOwner = _beginProfileTransitionOwner(name, 'canonical');
   const _openingExistingSidebarSession = !!(typeof _profileSwitchOpeningExistingSession !== 'undefined' && _profileSwitchOpeningExistingSession);
   if (_chip) { _chip.classList.add('switching'); _chip.disabled = true; }
   if (_titlebarBtn) { _titlebarBtn.classList.add('switching'); _titlebarBtn.disabled = true; }
@@ -7068,8 +7110,21 @@ async function switchToProfile(name) {
     // red error while the real switch completes and renders. The catch block below is
     // the single source of truth for switch failure and is gated on _switchGen, so the
     // error surfaces ONLY when the CURRENT switch genuinely fails (@rodboev review, #4662).
-    const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }), timeoutToast: false });
+    const data = await _postProfileTransition(_transitionOwner);
     if (_switchGen !== _profileSwitchGeneration) return false;
+    if (!data) return false;
+    if (!_acceptProfileTransitionOwner(_transitionOwner, data.active || name)) return false;
+    if (typeof refreshProfileTransitionReasoningChip === 'function') {
+      await refreshProfileTransitionReasoningChip(
+        data.default_model,
+        data.default_model_provider,
+        _transitionOwner
+      );
+    }
+    if (
+      _switchGen !== _profileSwitchGeneration ||
+      !_isProfileTransitionOwner(_transitionOwner)
+    ) return false;
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
@@ -7151,10 +7206,6 @@ async function switchToProfile(name) {
     if (S.session && !sessionInProgress) {
       S.session.profile = data.active || name;
     }
-    if (typeof refreshProfileTransitionReasoningChip === 'function') {
-      refreshProfileTransitionReasoningChip(data.default_model, data.default_model_provider);
-    }
-
     // ── Apply workspace ────────────────────────────────────────────────────
     if (data.default_workspace) {
       // Always store the persistent profile default — used for blank-page display
@@ -7173,6 +7224,7 @@ async function switchToProfile(name) {
             model: S.session.model,
             model_provider: S.session.model_provider||null,
           })});
+          if (!_isProfileTransitionOwner(_transitionOwner)) return false;
           S.session.workspace = data.default_workspace;
         } catch (_) {}
       }
@@ -7188,16 +7240,19 @@ async function switchToProfile(name) {
       // cookie switch. Avoid creating/retagging an intermediate blank chat.
       const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
       if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
-      await renderSessionList();
+      await renderSessionList({transitionOwner:_transitionOwner});
       if (_switchGen !== _profileSwitchGeneration) return false;
+      if (!_isProfileTransitionOwner(_transitionOwner)) return false;
       if (workspaceVisible && typeof clearWorkspaceTreeSkeleton === 'function') clearWorkspaceTreeSkeleton();
       showToast(t('profile_switched', name));
     } else if (sessionInProgress) {
       // The current session has messages and belongs to the previous profile.
       // Start a new session for the new profile so nothing gets cross-tagged.
       const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
-      await newSession(false, {awaitWorkspaceLoad: workspaceVisible, worktree: false});
+      if (!_isProfileTransitionOwner(_transitionOwner)) return false;
+      await newSession(false, {awaitWorkspaceLoad: workspaceVisible, worktree: false, transitionOwner:_transitionOwner});
       if (_switchGen !== _profileSwitchGeneration) return false;
+      if (!_isProfileTransitionOwner(_transitionOwner)) return false;
       // Keep topbar chips (workspace/profile) in sync after creating the
       // new profile-scoped session.
       syncTopbar();
@@ -7205,13 +7260,14 @@ async function switchToProfile(name) {
       // single-threaded so nothing interleaves between this clear and the call, making
       // this render the first allowed to paint the new profile's rows.
       if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
-      await renderSessionList();
-      // Re-check generation after the awaited list render: a newer switch can be
+      await renderSessionList({transitionOwner:_transitionOwner});
+      // Re-check generation after the awaited list render
       // started while renderSessionList() is in flight, and without this guard
       // the superseded switch would clear the newer switch's workspace skeleton
       // and pop a stale toast. Mirrors the no-messages branch guard below.
       // (@rodboev/greptile review, #4662)
       if (_switchGen !== _profileSwitchGeneration) return false;
+      if (!_isProfileTransitionOwner(_transitionOwner)) return false;
       if (typeof _openProfileSwitchSessionBrowser === 'function') _openProfileSwitchSessionBrowser();
       // Safety net: if the new session has no workspace, newSession() won't have
       // painted the file tree — clear the up-front skeleton so it can't strand
@@ -7233,15 +7289,17 @@ async function switchToProfile(name) {
       const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
       // #4671: lift the embargo immediately before the switch-owned render (see above).
       if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
-      await renderSessionList();
-      if (_switchGen !== _profileSwitchGeneration) return;
+      await renderSessionList({transitionOwner:_transitionOwner});
+      if (_switchGen !== _profileSwitchGeneration) return false;
+      if (!_isProfileTransitionOwner(_transitionOwner)) return false;
       if (typeof _openProfileSwitchSessionBrowser === 'function') _openProfileSwitchSessionBrowser();
       syncTopbar();
       // Refresh workspace file tree so the right panel shows the new
       // profile's workspace, not the previous one (#1214).
       if (S.session && S.session.workspace) {
-        const dirLoad = loadDir('.');
+        const dirLoad = loadDir('.',{transitionOwner:_transitionOwner});
         if (workspaceVisible) await dirLoad;
+        if (!_isProfileTransitionOwner(_transitionOwner)) return false;
       } else if (typeof clearWorkspaceTreeSkeleton === 'function') {
         // New profile has no bound workspace — clear the up-front skeleton so it
         // doesn't strand (#4662 Opus gate).
@@ -7250,19 +7308,22 @@ async function switchToProfile(name) {
       showToast(t('profile_switched', name));
     }
 
-    await _profileSwitchPanelLoad();
-    _refreshProfileSwitchBackground(_switchGen);
+    if (!_isProfileTransitionOwner(_transitionOwner)) return false;
+    await _profileSwitchPanelLoad(_transitionOwner);
+    if (!_isProfileTransitionOwner(_transitionOwner)) return false;
+    _refreshProfileSwitchBackground(_switchGen,_transitionOwner);
     return true;
 
   } catch (e) {
     // Revert the optimistic name update on error
-    if (_switchGen === _profileSwitchGeneration && _chipLabel) _chipLabel.textContent = _prevProfileName;
-    if (_switchGen === _profileSwitchGeneration && _titlebarLabel) _titlebarLabel.textContent = _prevProfileName;
-    if (_switchGen === _profileSwitchGeneration) showToast(t('switch_failed') + e.message);
+    const _ownsFailure = _switchGen === _profileSwitchGeneration && _isProfileTransitionOwner(_transitionOwner);
+    if (_ownsFailure && _chipLabel) _chipLabel.textContent = _prevProfileName;
+    if (_ownsFailure && _titlebarLabel) _titlebarLabel.textContent = _prevProfileName;
+    if (_ownsFailure) showToast(t('switch_failed') + e.message);
     // The switch failed, so we're still on the previous profile and its caches
     // are intact — restore the real list/tree so the loading skeletons we showed
     // up front don't strand. (#4662)
-    if (_switchGen === _profileSwitchGeneration) {
+    if (_ownsFailure) {
       // The switch failed; _allSessions still holds the (still-current) previous
       // profile, so clear the skeleton flag and re-render to restore the real list
       // rather than strand the up-front skeleton (#4671). Lift the embargo too so the
@@ -7271,24 +7332,27 @@ async function switchToProfile(name) {
       _sessionListSkeletonActive = false;
       if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
       if (_workspaceVisibleAtStart && S.session && S.session.workspace && typeof loadDir === 'function') {
-        loadDir('.');
+        loadDir('.',{transitionOwner:_transitionOwner});
       } else if (_workspaceVisibleAtStart && typeof clearWorkspaceTreeSkeleton === 'function') {
         // No workspace to restore on the (still-current) previous profile —
         // clear the up-front workspace skeleton so it doesn't strand on a switch
         // failure, mirroring the success-path no-workspace handling (#4662).
         clearWorkspaceTreeSkeleton();
       }
+      if (_chip) { _chip.classList.remove('switching'); _chip.disabled = false; }
+      if (_titlebarBtn) { _titlebarBtn.classList.remove('switching'); _titlebarBtn.disabled = false; }
+      _cancelProfileTransitionOwner(_transitionOwner);
     }
     return false;
   } finally {
     // Always remove loading indicator regardless of success or failure
-    if (_switchGen === _profileSwitchGeneration && _chip) { _chip.classList.remove('switching'); _chip.disabled = false; }
-    if (_switchGen === _profileSwitchGeneration && _titlebarBtn) { _titlebarBtn.classList.remove('switching'); _titlebarBtn.disabled = false; }
+    if (_switchGen === _profileSwitchGeneration && _isProfileTransitionOwner(_transitionOwner) && _chip) { _chip.classList.remove('switching'); _chip.disabled = false; }
+    if (_switchGen === _profileSwitchGeneration && _isProfileTransitionOwner(_transitionOwner) && _titlebarBtn) { _titlebarBtn.classList.remove('switching'); _titlebarBtn.disabled = false; }
     // #4671 safety net: guarantee the session-list embargo is lifted on EVERY exit of the
     // current switch (success paths clear it before their authoritative render; this covers
     // early-returns/throws between skeleton-show and those clears so it can't freeze the
     // sidebar). Guarded by _switchGen so a superseded switch can't lift a newer switch's embargo.
-    if (_switchGen === _profileSwitchGeneration && typeof _setProfileSwitchListEmbargo === 'function') {
+    if (_switchGen === _profileSwitchGeneration && _isProfileTransitionOwner(_transitionOwner) && typeof _setProfileSwitchListEmbargo === 'function') {
       _setProfileSwitchListEmbargo(false);
     }
   }
@@ -7444,19 +7508,21 @@ async function deleteProfile(name) {
 }
 
 // ── Memory panel ──
-async function loadMemory(force) {
+async function loadMemory(force, transitionOwner) {
   const panel = $('memoryPanel');
   try {
     const memoryUrl = S.session && S.session.session_id
       ? `/api/memory?session_id=${encodeURIComponent(S.session.session_id)}`
       : '/api/memory';
     const data = await api(memoryUrl);
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return;
     _memoryData = data;
     if (_currentMemorySection === 'external_notes' && !data.external_notes_enabled) {
       _currentMemorySection = null;
     }
     if (_currentMemorySection === 'external_notes') {
-      await loadNotesSources(!!force);
+      await loadNotesSources(!!force,transitionOwner);
+      if(!_profilePanelTransitionCurrent(transitionOwner)) return;
     }
     if (panel) {
       panel.innerHTML = '';
@@ -7477,6 +7543,7 @@ async function loadMemory(force) {
       _renderMemoryDetail(_currentMemorySection);
     }
   } catch(e) {
+    if(!_profilePanelTransitionCurrent(transitionOwner)) return;
     if (panel) panel.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`;
   }
 }

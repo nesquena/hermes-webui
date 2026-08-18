@@ -76,6 +76,15 @@ let _cronPollGeneration=0;
 const _cronNewJobIds=new Set(['old-profile-job']);
 global.S={{activeProfile:'default'}};
 global.api=async()=>({{active:'alternate',is_default:false}});
+let _profileTransitionOwnerSeq=0,_profileTransitionOwner=null;
+function _beginProfileTransitionOwner(profile,source){{
+  _profileTransitionOwner={{generation:++_profileTransitionOwnerSeq,profile,source,accepted:false}};
+  return _profileTransitionOwner;
+}}
+function _acceptProfileTransitionOwner(owner,profile){{ owner.profile=profile; owner.accepted=true; return owner; }}
+function _isProfileTransitionOwner(owner){{ return owner===_profileTransitionOwner; }}
+function _postProfileTransition(owner){{ return api('/api/profile/switch',{{method:'POST',body:JSON.stringify({{name:owner.profile}})}}); }}
+function _cancelProfileTransitionOwner(owner){{ if(owner===_profileTransitionOwner) _profileTransitionOwner=null; }}
 global.localStorage={{removeItem(){{}}}};
 global.updateCronBadge=()=>{{ _cronUnreadCount=_cronNewJobIds.size; }};
 function _clearCronSessionCompletionUnreadForInactiveProfiles(){{}}
@@ -185,6 +194,15 @@ let renders=0;
 global.S={{activeProfile:'profile-a',activeProfileIsDefault:false}};
 global._allSessions=[];
 global.api=async()=>({{active:'profile-b',is_default:false}});
+let _profileTransitionOwnerSeq=0,_profileTransitionOwner=null;
+function _beginProfileTransitionOwner(profile,source){{
+  _profileTransitionOwner={{generation:++_profileTransitionOwnerSeq,profile,source,accepted:false}};
+  return _profileTransitionOwner;
+}}
+function _acceptProfileTransitionOwner(owner,profile){{ owner.profile=profile; owner.accepted=true; return owner; }}
+function _isProfileTransitionOwner(owner){{ return owner===_profileTransitionOwner; }}
+function _postProfileTransition(owner){{ return api('/api/profile/switch',{{method:'POST',body:JSON.stringify({{name:owner.profile}})}}); }}
+function _cancelProfileTransitionOwner(owner){{ if(owner===_profileTransitionOwner) _profileTransitionOwner=null; }}
 global.updateCronBadge=()=>{{ _cronUnreadCount=_cronNewJobIds.size; }};
 global.renderSessionListFromCache=()=>{{ renders+=1; }};
 function _getSessionViewedCounts(){{ return _sessionViewedCounts; }}

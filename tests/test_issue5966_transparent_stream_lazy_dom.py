@@ -158,6 +158,10 @@ def test_earlier_steps_affordance_is_accessible_and_counted():
 
 def test_reveal_holds_viewport_and_clears_cap_count():
     body = _function_body(UI_JS, "_revealTransparentEarlierSteps")
+    # Reveal uses the same commentary-ownership filter as the initial settled
+    # render, so expanding earlier rows cannot resurrect a commentary echo.
+    assert "_anchorSceneRowsForSettledWorklog(scene,blocks)" in body
+    assert "_anchorSceneRowsForRendering(scene,{settled:true})" not in body
     # Full run mounted -> drop the capped-count stash so the label recomputes.
     assert "removeAttribute('data-transparent-total-tool-count')" in body
     # Viewport compensation: add the inserted height delta to scrollTop.

@@ -92,7 +92,7 @@ class TestClientFallbackSourceShape:
         # Window covers the model-fallback region of newSession(); the function
         # has grown over time (e.g. pre-session toolset staging #4490), so keep
         # the window comfortably larger than the fallback block it guards.
-        body = src[idx:idx + 5000]
+        body = src[idx:idx + 6500]
         assert "#2518" in body, (
             "newSession()'s fallback comment should reference #2518 so the "
             "follow-up provenance survives future refactors."

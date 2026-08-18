@@ -666,7 +666,7 @@ def test_populate_model_dropdown_accepts_session_visit_freshness_and_guards_stal
     assert "modelsUrl.searchParams.set('freshness',opts.freshness)" in body
     assert "const requestSeq=++_modelDropdownRequestSeq" in body
     assert body.count("requestSeq!==_modelDropdownRequestSeq") >= 3
-    assert "_fetchLiveModels(data.active_provider, sel, requestSeq)" in body
+    assert "_fetchLiveModels(data.active_provider, sel, requestSeq, transitionOwner)" in body
     assert live_tail.count("requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq") >= 4
 
 
@@ -680,7 +680,7 @@ def test_load_session_schedules_session_visit_model_refresh_before_message_load(
     guard_helper_idx = body.index("const isActiveModelRefreshSession", model_block_idx)
     promise_idx = body.index("const modelRefreshPromise=_deferSessionSideEffect", model_block_idx)
     ready_idx = body.index("window._modelDropdownReady=modelRefreshPromise", promise_idx)
-    refresh_idx = body.index("populateModelDropdown({freshness:'session_visit'})", promise_idx)
+    refresh_idx = body.index("populateModelDropdown({freshness:'session_visit',transitionOwner})", promise_idx)
 
     assert assign_idx < model_block_idx < message_load_idx < failure_return_idx
     assert model_block_idx < promise_idx < refresh_idx < ready_idx
@@ -702,7 +702,7 @@ def test_session_visit_model_refresh_is_deferred_until_after_first_paint():
     assert "return _afterSessionFirstPaint(()=>" in side_effect_helper
     assert "const modelRefreshPromise=_deferSessionSideEffect" in load_body
     assert "isActiveModelRefreshSession()" in load_body
-    assert "return populateModelDropdown({freshness:'session_visit'});" in load_body
+    assert "return populateModelDropdown({freshness:'session_visit',transitionOwner});" in load_body
 
 
 def test_boot_model_dropdown_clears_cached_ready_on_401():

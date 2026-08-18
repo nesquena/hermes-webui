@@ -245,7 +245,7 @@ class TestWorkspaceChipAfterProfileSwitch(unittest.TestCase):
         self.assertGreater(idx, -1, "sessionInProgress branch must exist in panels.js")
 
         # Slice from that point to cover the relevant block
-        block = PANELS_JS[idx:idx + 1000]
+        block = PANELS_JS[idx:idx + 1600]
 
         # newSession(false, ...) must be called first
         self.assertIn('await newSession(false', block,
@@ -263,7 +263,7 @@ class TestWorkspaceChipAfterProfileSwitch(unittest.TestCase):
         """newSession(false) should apply the pending profile workspace itself."""
         idx = PANELS_JS.find('if (sessionInProgress)')
         self.assertGreater(idx, -1)
-        block = PANELS_JS[idx:idx + 1000]
+        block = PANELS_JS[idx:idx + 1600]
 
         self.assertIn('await newSession(false', block)
         self.assertNotIn('/api/session/update', block,
@@ -274,7 +274,7 @@ class TestWorkspaceChipAfterProfileSwitch(unittest.TestCase):
         """The profile switch path should avoid duplicate workspace persistence."""
         idx = PANELS_JS.find('if (sessionInProgress)')
         self.assertGreater(idx, -1)
-        block = PANELS_JS[idx:idx + 1000]
+        block = PANELS_JS[idx:idx + 1600]
 
         self.assertNotIn('/api/session/update', block,
                          "newSession(false) receives S._profileSwitchWorkspace, so "
@@ -285,10 +285,10 @@ class TestWorkspaceChipAfterProfileSwitch(unittest.TestCase):
         so the chips are correct when the UI re-renders."""
         idx = PANELS_JS.find('if (sessionInProgress)')
         self.assertGreater(idx, -1)
-        block = PANELS_JS[idx:idx + 1000]
+        block = PANELS_JS[idx:idx + 1600]
 
         pos_sync = block.find('syncTopbar()')
-        pos_render = block.find('await renderSessionList()')
+        pos_render = block.find('await renderSessionList({transitionOwner:_transitionOwner})')
         self.assertGreater(pos_sync, -1, "syncTopbar() must exist in block")
         self.assertGreater(pos_render, -1, "renderSessionList() must exist in block")
         self.assertLess(pos_sync, pos_render,

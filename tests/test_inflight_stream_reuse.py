@@ -319,7 +319,7 @@ def test_load_session_attaches_sse_before_auxiliary_work():
         "syncTopbar();",
         "renderMessages(",
         "appendThinking();",
-        "_deferWorkspaceRefreshForSession(sid);",
+        "_deferWorkspaceRefreshForSession(sid,{transitionOwner});",
         "updateQueueBadge(sid);",
         "startApprovalPolling(sid)",
     ):
@@ -899,7 +899,7 @@ def test_load_session_restores_worklog_shell_before_reattach_replay():
     body = _function_body(SESSIONS_JS, "loadSession")
     fallback_pos = body.find("if(!restoredLiveTurn){")
     assert fallback_pos != -1, "loadSession must have a live-turn fallback branch"
-    refresh_pos = body.find("_deferWorkspaceRefreshForSession(sid);", fallback_pos)
+    refresh_pos = body.find("_deferWorkspaceRefreshForSession(sid,{transitionOwner});", fallback_pos)
     assert refresh_pos != -1, "fallback path should still schedule workspace refresh after first paint"
     fallback_block = body[fallback_pos:refresh_pos]
     clear_pos = fallback_block.find("clearLiveToolCards();")
@@ -964,7 +964,7 @@ def test_restore_succeeded_reconnect_skips_unkeyed_restored_tool_duplicates():
     assert "hasRestoredLiveToolRows&&!liveToolReplayId(tc)" in helper_block
     restore_block = body[restore_replay_pos:fallback_pos]
     assert "replayPersistedLiveToolCards({skipUnkeyedRestoredDuplicates:true});" in restore_block
-    refresh_pos = body.find("_deferWorkspaceRefreshForSession(sid);", fallback_pos)
+    refresh_pos = body.find("_deferWorkspaceRefreshForSession(sid,{transitionOwner});", fallback_pos)
     assert refresh_pos != -1, "fallback path should still schedule workspace refresh after first paint"
     assert "replayPersistedLiveToolCards();" in body[fallback_pos:refresh_pos]
 

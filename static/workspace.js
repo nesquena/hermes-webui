@@ -730,6 +730,9 @@ function clearWorkspaceTreeSkeleton(){
 async function loadDir(path, opts={}){
   const preservePreview=!!(opts&&opts.preservePreview);
   const refreshExpanded=!!(opts&&opts.refreshExpanded);
+  const transitionOwner=opts&&opts.transitionOwner||null;
+  const transitionCurrent=()=>!transitionOwner||typeof _isProfileTransitionOwner!=='function'||_isProfileTransitionOwner(transitionOwner);
+  if(!transitionCurrent()) return;
   if(!S.session)return;
   const sessionId=S.session.session_id;
   const treeGen=_wsTreeGen;  // #4671: capture the workspace-tree generation. A profile
@@ -748,7 +751,7 @@ async function loadDir(path, opts={}){
       _workspaceRouteForPath(path, 'list') ||
       `/api/list?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(path||'.')}`
     );
-    if(!S.session||S.session.session_id!==sessionId||treeGen!==_wsTreeGen)return;
+    if(!transitionCurrent()||!S.session||S.session.session_id!==sessionId||treeGen!==_wsTreeGen)return;
     if(data.workspace_recovered&&data.workspace){
       S.session.workspace=String(data.workspace);
       S._dirCache={};
@@ -771,23 +774,27 @@ async function loadDir(path, opts={}){
             .then(dc=>({dirPath,entries:dc.entries||[]}))
             .catch(()=>({dirPath,entries:[]}))
         ));
-        if(!S.session||S.session.session_id!==sessionId||treeGen!==_wsTreeGen)return;
+        if(!transitionCurrent()||!S.session||S.session.session_id!==sessionId||treeGen!==_wsTreeGen)return;
         for(const {dirPath,entries} of results) S._dirCache[dirPath]=entries;
       }
       if(expanded.size>0)renderFileTree();
     }
     if(!preservePreview&&typeof clearPreview==='function'){
       if(typeof _previewDirty!=='undefined'&&_previewDirty){
-        showConfirmDialog({title:t('unsaved_confirm'),message:'',confirmLabel:'Discard',danger:true,focusCancel:true}).then(ok=>{if(ok)clearPreview({keepPanelOpen:true});});
+        showConfirmDialog({title:t('unsaved_confirm'),message:'',confirmLabel:'Discard',danger:true,focusCancel:true}).then(ok=>{
+          if(ok&&transitionCurrent()) clearPreview({keepPanelOpen:true});
+        });
       }else{
         clearPreview({keepPanelOpen:true});
       }
     }else if(preservePreview){
       await refreshOpenPreviewIfMutated();
+      if(!transitionCurrent()) return;
     }
     // Fetch git info for workspace root (non-blocking)
-    if(!path||path==='.') _refreshGitBadge();
+    if(!path||path==='.') _refreshGitBadge(transitionOwner);
   }catch(e){
+    if(!transitionCurrent()) return;
     const grant = _workspaceEscapeGrantForPath(path);
     if(grant && e && e.status===403){
       _clearWorkspaceEscapeGrant(grant.path);
@@ -804,13 +811,15 @@ function refreshWorkspacePanel(){
   loadDir(targetDir,{refreshExpanded:true});
 }
 
-async function _refreshGitBadge(){
+async function _refreshGitBadge(transitionOwner){
+  const transitionCurrent=()=>!transitionOwner||typeof _isProfileTransitionOwner!=='function'||_isProfileTransitionOwner(transitionOwner);
+  if(!transitionCurrent())return;
   const badge=$('gitBadge');
   if(!badge||!S.session)return;
   const sessionId=S.session.session_id;
   try{
     const data=await api(`/api/git-info?session_id=${encodeURIComponent(sessionId)}`);
-    if(!S.session||S.session.session_id!==sessionId)return;
+    if(!transitionCurrent()||!S.session||S.session.session_id!==sessionId)return;
     if(data.git&&data.git.is_git){
       const g=data.git;
       let text=g.branch||'git';
@@ -825,7 +834,7 @@ async function _refreshGitBadge(){
       badge.textContent='';
     }
   }catch(e){
-    if(!S.session||S.session.session_id!==sessionId)return;
+    if(!transitionCurrent()||!S.session||S.session.session_id!==sessionId)return;
     badge.style.display='none';
   }
 }

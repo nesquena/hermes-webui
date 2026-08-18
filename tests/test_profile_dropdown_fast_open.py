@@ -85,7 +85,7 @@ def test_profile_dropdown_closing_invalidates_inflight_refresh():
 
 
 def test_profiles_panel_refresh_updates_dropdown_cache():
-    body = _function_body(PANELS_JS, "async function loadProfilesPanel() {")
+    body = _function_body(PANELS_JS, "async function loadProfilesPanel(transitionOwner) {")
     api_idx = body.index("const data = await api('/api/profiles');")
     cache_idx = body.index("_profileDropdownWriteStoredCache(data);")
     render_idx = body.index("panel.innerHTML = '';")
@@ -101,7 +101,7 @@ def test_profile_dropdown_prefetches_after_page_load():
 def test_poisoned_profile_cache_opens_then_switches_after_fresh_refresh():
     snippets = [
         PANELS_JS[
-            PANELS_JS.index("let _profilesCache = null;") : PANELS_JS.index("async function _profileSwitchPanelLoad(){")
+            PANELS_JS.index("let _profilesCache = null;") : PANELS_JS.index("async function _profileSwitchPanelLoad(transitionOwner){")
         ],
         _function_body(PANELS_JS, "function renderProfileDropdown(data) {"),
         _function_body(PANELS_JS, "function toggleProfileDropdown(e) {"),

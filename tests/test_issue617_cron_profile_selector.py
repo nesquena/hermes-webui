@@ -216,7 +216,7 @@ def test_cron_profile_selector_source_hooks_present():
     css = (REPO / "static" / "style.css").read_text(encoding="utf-8")
     i18n = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
 
-    assert "async function loadCronProfiles()" in panels
+    assert "await loadCronProfiles(transitionOwner);" in panels
     assert "api('/api/profiles')" in panels
     assert "id=\"cronFormProfile\"" in panels
     assert "profile: profile" in panels

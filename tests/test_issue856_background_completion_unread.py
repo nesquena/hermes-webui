@@ -164,7 +164,7 @@ def test_polling_transition_marks_completion_unread_without_sse_done():
     assert "_sessionStreamingById.set(sid, isStreaming);" in transition_block
     assert "const _streamingPollMs = 30000;" in SESSIONS_JS
     # Greptile #5975: apply carries unreadGen so stale pre-switch lists skip mark.
-    assert "_applySessionListPayload(sessData,projData,{unreadGen});" in refresh_block
+    assert "transitionOwner ? {unreadGen,transitionOwner} : {unreadGen}" in refresh_block
     assert "unreadGen" in refresh_block
     assert "_markPollingCompletionUnreadTransitions(_allSessions);" in apply_block
     assert "_allSessions.some(s => _isSessionEffectivelyStreaming(s))" in apply_block, (

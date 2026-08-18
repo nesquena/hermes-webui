@@ -4185,12 +4185,14 @@ def get_reasoning_status(
 
     Keys:
       - show_reasoning: bool — from ``display.show_reasoning`` (default True)
+      - show_commentary: bool — from ``display.show_commentary`` (default True)
       - reasoning_effort: str — from ``agent.reasoning_effort`` ('' = default)
     """
     config_data = _load_yaml_config_file(_get_config_path())
     display_cfg = config_data.get("display") or {}
     agent_cfg = config_data.get("agent") or {}
     show_raw = display_cfg.get("show_reasoning") if isinstance(display_cfg, dict) else None
+    commentary_raw = display_cfg.get("show_commentary") if isinstance(display_cfg, dict) else None
     effort_raw = agent_cfg.get("reasoning_effort") if isinstance(agent_cfg, dict) else None
 
     resolve_model = model_id
@@ -4224,6 +4226,11 @@ def get_reasoning_status(
     return {
         # Match CLI default (True if unset in config.yaml)
         "show_reasoning": bool(show_raw) if isinstance(show_raw, bool) else True,
+        # Match Agent display default. This is presentation-only: persisted
+        # codex_message_items remain unchanged for replay/cache continuity.
+        "show_commentary": (
+            bool(commentary_raw) if isinstance(commentary_raw, bool) else True
+        ),
         # Report the COERCED effort so boot/status/chip read paths agree with
         # what streaming actually sends. (Codex review of the drop-max alignment.)
         "reasoning_effort": coerce_reasoning_effort_for_model(

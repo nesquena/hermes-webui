@@ -65,7 +65,7 @@ class TestLoadCronsAnimateFlag:
 
     def test_load_crons_accepts_animate_param(self):
         js = _read("static/panels.js")
-        assert re.search(r'async function loadCrons\s*\(\s*animate\s*\)', js), (
+        assert re.search(r'async function loadCrons\s*\(\s*animate\s*,\s*transitionOwner\s*\)', js), (
             "loadCrons must accept an `animate` parameter"
         )
 

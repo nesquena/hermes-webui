@@ -61,7 +61,8 @@ def test_row_recovery_maps_group_to_message_scene():
     assert "anchor-scene:" in body
     assert "S.messages" in body
     assert "_anchor_activity_scene" in body
-    assert "_anchorSceneRowsForRendering(scene,{settled:true})" in body
+    assert "_assistantTurnBlocks(group.closest('.assistant-turn'))" in body
+    assert "_anchorSceneRowsForSettledWorklog(scene,blocks)" in body
 
 
 def test_cache_restore_rehydrates_deferred_worklogs():

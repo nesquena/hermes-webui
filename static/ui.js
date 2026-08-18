@@ -3521,6 +3521,8 @@ function _applySessionModelFallback(sel){
 async function populateModelDropdown(opts={}){
   const sel=$('modelSelect');
   if(!sel) return;
+  const transitionOwner=opts&&opts.transitionOwner;
+  const transitionCurrent=()=>!transitionOwner||typeof _isProfileTransitionOwner!=='function'||_isProfileTransitionOwner(transitionOwner);
   // `_activeProvider` is refreshed from the /api/models response below.
   if(typeof _modelDropdownRequestSeq!=='number') _modelDropdownRequestSeq=0;
   if(typeof _modelCatalogFallbackRetried!=='boolean') _modelCatalogFallbackRetried=false;
@@ -3531,6 +3533,7 @@ async function populateModelDropdown(opts={}){
     if(opts&&opts.freshness) modelsUrl.searchParams.set('freshness',opts.freshness);
     const _modelsRes=await fetch(modelsUrl.href,{credentials:'include'});
     if(requestSeq!==_modelDropdownRequestSeq) return;
+    if(!transitionCurrent()) return;
     const customRedirectIfUnauth=opts&&typeof opts.redirectIfUnauth==='function'?opts.redirectIfUnauth:null;
     if(customRedirectIfUnauth){
       if(customRedirectIfUnauth(_modelsRes)) return;
@@ -3538,6 +3541,7 @@ async function populateModelDropdown(opts={}){
     // `_activeProvider` is populated from the /api/models payload below.
     const data=await _modelsRes.json();
     if(requestSeq!==_modelDropdownRequestSeq) return;
+    if(!transitionCurrent()) return;
     window._activeProvider=data.active_provider||null;
     window._defaultModel=data.default_model||null;
     window._configuredModelBadges=data.configured_model_badges||{};
@@ -3644,13 +3648,14 @@ async function populateModelDropdown(opts={}){
     }
     // Kick off a background live-model fetch for the active provider.
     // This runs after the static list is already shown (no blocking flicker).
-    if(data.active_provider && !willRetry) _fetchLiveModels(data.active_provider, sel, requestSeq);
+    if(data.active_provider && !willRetry) _fetchLiveModels(data.active_provider, sel, requestSeq, transitionOwner);
     if(willRetry){
       _modelCatalogFallbackRetried=true;
       populateModelDropdown({...opts,freshness:'session_visit'}).catch(()=>{});
     }
   }catch(e){
     if(requestSeq!==_modelDropdownRequestSeq) return;
+    if(!transitionCurrent()) return;
     // API unavailable -- keep the hardcoded HTML options as fallback
     console.warn('Failed to load models from server:',e.message);
     if(typeof syncModelChip==='function') syncModelChip();
@@ -3663,6 +3668,7 @@ const _liveModelCache={};
 // Used by syncTopbar() to defer model corrections until the fetch completes,
 // preventing premature fallback to the first static model (#1169).
 const _liveModelFetchPending=new Set();
+const _liveModelFetchPendingOwner=new Map();
 
 function _addLiveModelsToSelect(provider, models, sel){
   if(!provider||!models||!models.length||!sel) return 0;
@@ -3763,28 +3769,36 @@ function _addLiveModelsToSelect(provider, models, sel){
   return added;
 }
 
-async function _fetchLiveModels(provider, sel, requestSeq=null){
+async function _fetchLiveModels(provider, sel, requestSeq=null, transitionOwner=null){
+  const transitionCurrent=()=>!transitionOwner||typeof _isProfileTransitionOwner!=='function'||_isProfileTransitionOwner(transitionOwner);
+  if(!transitionCurrent()) return;
   if(!provider||!sel) return;
   if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
   // Already fetched — apply cached models to this select element (#872)
   if(_liveModelCache[provider]){
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
+    if(!transitionCurrent()) return;
     const added=_addLiveModelsToSelect(provider,_liveModelCache[provider],sel);
     if(added>0 && typeof syncModelChip==='function') syncModelChip();
     return;
   }
+  const pendingToken={requestSeq,transitionOwner};
   _liveModelFetchPending.add(provider);
+  _liveModelFetchPendingOwner.set(provider,pendingToken);
   try{
     const url=new URL('api/models/live',document.baseURI||location.href);
     url.searchParams.set('provider',provider);
     const _liveRes=await fetch(url.href,{credentials:'include'});
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
+    if(!transitionCurrent()) return;
     if(_redirectIfUnauth(_liveRes)) return;
     const data=await _liveRes.json();
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
+    if(!transitionCurrent()) return;
     if(!data.models||!data.models.length) return;
     _liveModelCache[provider]=data.models;
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
+    if(!transitionCurrent()) return;
     const added=_addLiveModelsToSelect(provider,data.models,sel);
     if(added>0){
       if(typeof syncModelChip==='function') syncModelChip();
@@ -3793,7 +3807,10 @@ async function _fetchLiveModels(provider, sel, requestSeq=null){
   }catch(e){
     console.debug('[hermes] Live model fetch failed for',provider,e.message);
   }finally{
-    _liveModelFetchPending.delete(provider);
+    if(_liveModelFetchPendingOwner.get(provider)===pendingToken){
+      _liveModelFetchPendingOwner.delete(provider);
+      _liveModelFetchPending.delete(provider);
+    }
   }
 }
 
@@ -5230,40 +5247,110 @@ let _lastReasoningFetchKey=null;
 // a different agent.reasoning_effort) — #4650 review.
 let _reasoningFetchSeq=0;
 
-function fetchReasoningChip(keyOverride){
+// One transition epoch shared by every profile-switch ingress. Ownership starts
+// at invocation (before the POST), so a later ingress also fences rejection and
+// cleanup from an earlier one. The same object is marked accepted after its POST
+// succeeds and is threaded through every nested async publisher.
+let _profileTransitionOwnerSeq=0;
+let _profileTransitionOwner=null;
+let _profileTransitionPostTail=Promise.resolve();
+function _beginProfileTransitionOwner(profile, source){
+  const owner={
+    generation:++_profileTransitionOwnerSeq,
+    profile:String(profile||'default'),
+    source:String(source||'unknown'),
+    accepted:false,
+  };
+  _profileTransitionOwner=owner;
+  return owner;
+}
+function _acceptProfileTransitionOwner(owner, profile){
+  if(!_isProfileTransitionOwner(owner)) return null;
+  owner.profile=String(profile||owner.profile||'default');
+  owner.accepted=true;
+  return owner;
+}
+function _cancelProfileTransitionOwner(owner){
+  if(!_isProfileTransitionOwner(owner)) return false;
+  _profileTransitionOwner=null;
+  return true;
+}
+function _isProfileTransitionOwner(owner){
+  return !!owner&&owner===_profileTransitionOwner&&owner.generation===_profileTransitionOwnerSeq;
+}
+function _currentProfileTransitionOwner(){
+  return _profileTransitionOwner;
+}
+function _currentProfileTransitionEpoch(){
+  return _profileTransitionOwnerSeq;
+}
+function _postProfileTransition(owner){
+  const invoke=()=>{
+    if(!_isProfileTransitionOwner(owner)) return null;
+    return api('/api/profile/switch',{
+      method:'POST',
+      body:JSON.stringify({name:owner.profile}),
+      timeoutToast:false,
+    });
+  };
+  const result=_profileTransitionPostTail.then(invoke,invoke);
+  // Keep the serialization rail alive after both success and rejection. A
+  // later invocation must issue its Set-Cookie response last.
+  _profileTransitionPostTail=result.then(()=>undefined,()=>undefined);
+  return result;
+}
+
+function fetchReasoningChip(keyOverride, transitionOwner){
   // Set the cache key OPTIMISTICALLY before the request so rapid routine syncs
   // while this GET is in flight short-circuit instead of re-dispatching (that
   // in-flight window is exactly where the #4650 storm lived).
   const key=keyOverride===undefined?_reasoningEffortQuery():keyOverride;
   const seq=++_reasoningFetchSeq;
   _lastReasoningFetchKey=key;
-  api('/api/reasoning'+key).then(function(st){
+  return api('/api/reasoning'+key).then(function(st){
     // Ignore a stale/superseded response: only the most recent dispatch may
     // apply, so an older in-flight GET can't poison the current chip (#4650).
-    if(seq!==_reasoningFetchSeq) return;
+    if(seq!==_reasoningFetchSeq) return false;
+    if(transitionOwner&&!_isProfileTransitionOwner(transitionOwner)) return false;
+    window._showCommentary=!st||st.show_commentary!==false;
     _applyReasoningChip((st&&st.reasoning_effort)||'', st||{});
+    return true;
   }).catch(function(){
     // Same staleness guard on failure: a stale error must neither hide the chip
     // nor clear a newer fetch's key. Only the latest dispatch clears the key so
     // routine syncs retry after a genuine transient failure.
-    if(seq!==_reasoningFetchSeq) return;
+    if(seq!==_reasoningFetchSeq) return false;
+    if(transitionOwner&&!_isProfileTransitionOwner(transitionOwner)) return false;
     _lastReasoningFetchKey=null;
     _applyReasoningChip('', {supported_efforts:[], supports_thinking_toggle:false});
+    return false;
   });
 }
 
-function refreshProfileTransitionReasoningChip(model, provider){
-  _profileTransitionReasoningContext={profile:(S&&S.activeProfile)||'default',model,provider};
-  _currentReasoningEffort=null;
-  _currentReasoningEffortsSupported=null;
-  _currentReasoningToggleSupported=undefined;
+function refreshReasoningPreferencesForRender(model, provider, transitionOwner){
+  // Invalidate both the request cache and any older in-flight response, then
+  // fail closed until the active profile's effective display preference is
+  // known. Callers await this before rendering persisted/cached transcript.
   _lastReasoningFetchKey=null;
   ++_reasoningFetchSeq;
-  _applyReasoningChip('', {supported_efforts:[], supports_thinking_toggle:false});
+  window._showCommentary=false;
   const params=new URLSearchParams();
   if(model) params.set('model',model);
   if(provider) params.set('provider',provider);
-  fetchReasoningChip(params.size?'?'+params.toString():undefined);
+  return fetchReasoningChip(params.size?'?'+params.toString():undefined,transitionOwner);
+}
+
+function refreshProfileTransitionReasoningChip(model, provider, transitionOwner){
+  _profileTransitionReasoningContext={
+    profile:(transitionOwner&&transitionOwner.profile)||(S&&S.activeProfile)||'default',
+    model,
+    provider,
+  };
+  _currentReasoningEffort=null;
+  _currentReasoningEffortsSupported=null;
+  _currentReasoningToggleSupported=undefined;
+  _applyReasoningChip('', {supported_efforts:[], supports_thinking_toggle:false});
+  return refreshReasoningPreferencesForRender(model,provider,transitionOwner);
 }
 
 function clearProfileTransitionReasoningContext(){
@@ -11124,10 +11211,44 @@ function _assistantAnchorSceneFinalAnswerText(m){
   const text=scene&&typeof scene.final_answer==='string'?scene.final_answer:'';
   return String(text||'').trim()?text:'';
 }
+function _assistantPersistedCommentaryPayloadText(m){
+  if(!m||m.role!=='assistant') return '';
+  let items=m.codex_message_items;
+  if(typeof items==='string'){
+    try{items=JSON.parse(items);}catch(_){items=[];}
+  }
+  if(!Array.isArray(items)) return '';
+  const parts=[];
+  for(const item of items){
+    if(
+      !item||
+      String(item.type||'').toLowerCase()!=='message'||
+      String(item.role||'').toLowerCase()!=='assistant'||
+      String(item.phase||'').toLowerCase()!=='commentary'
+    ) continue;
+    const content=Array.isArray(item.content)?item.content:[];
+    for(const part of content){
+      if(!part||!['text','input_text','output_text'].includes(String(part.type||''))) continue;
+      const text=String(part.text||part.content||'');
+      if(text.trim()) parts.push(text);
+    }
+  }
+  return parts.join('').trim();
+}
+function _assistantCommentaryPayloadText(m){
+  if(window._showCommentary===false) return '';
+  return _assistantPersistedCommentaryPayloadText(m);
+}
+function _assistantDisplayContentFromMessage(m, rawContent){
+  const existing=String(rawContent||'').trim();
+  if(existing) return existing;
+  return _assistantCommentaryPayloadText(m);
+}
 function _assistantMessageHasVisibleContent(m){
   if(!m||m.role!=='assistant') return false;
   if(_isRecoveryControlMessage(m)) return false;
   if(_assistantAnchorSceneFinalAnswerText(m)) return true;
+  if(_assistantCommentaryPayloadText(m)) return true;
   const content=m.content;
   if(typeof content==='string') return !_isAssistantEmptyPlaceholderContent(m, content)&&!!content.trim();
   if(!Array.isArray(content)) return false;
@@ -11235,16 +11356,19 @@ function _assistantMessageBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs, vis
   const isTurnFinalAssistant=!!(opts&&opts.isTurnFinalAssistant);
   const visibleText=String(visibleContent!==undefined?visibleContent:msgContent(m)||'').trim();
   const hasVisibleText=!!visibleText&&!_isAssistantEmptyPlaceholderContent(m, visibleText);
-  if(m._live) return true;
+  if(m._live) return !hasVisibleText;
   if(hasVisibleText&&m._anchor_activity_scene) return false;
   if(hasVisibleText&&isTurnFinalAssistant) return false;
+  // User-visible commentary/progress is ordinary assistant information even
+  // when it carries activity burst/segment metadata. Those fields describe
+  // chronology; they must not reclassify visible prose as Worklog Thinking.
+  if(hasVisibleText) return false;
   if(m._activityBurstId!==undefined||m._liveSegmentSeq!==undefined) return true;
   const hasToolMetadata=!!(
     (toolCallAssistantIdxs&&toolCallAssistantIdxs.has(rawIdx))||
     (Array.isArray(m.tool_calls)&&m.tool_calls.length)||
     (Array.isArray(m.content)&&m.content.some(p=>p&&typeof p==='object'&&p.type==='tool_use'))
   );
-  if(hasVisibleText) return false;
   if(hasToolMetadata) return true;
   return false;
 }
@@ -12587,7 +12711,8 @@ function _deferredWorklogRowsFromGroup(group){
   const msg=S.messages&&S.messages[Number(m[1])];
   const scene=msg&&msg._anchor_activity_scene;
   if(!scene) return null;
-  return _anchorSceneRowsForRendering(scene,{settled:true});
+  const blocks=_assistantTurnBlocks(group.closest('.assistant-turn'));
+  return _anchorSceneRowsForSettledWorklog(scene,blocks);
 }
 function _rehydrateDeferredWorklogsFromCache(root){
   // After restoring a transcript from _sessionHtmlCache, deferred settled
@@ -13931,13 +14056,63 @@ function _anchorSceneHasErroredTerminalState(scene){
   const state=String(scene&&scene.terminal_state||'').trim().toLowerCase();
   return _ANCHOR_SCENE_ERRORED_TERMINAL_STATES.has(state);
 }
+function _anchorSceneRowsForSettledWorklog(scene, blocks){
+  const rows=_anchorSceneRowsForRendering(scene,{settled:true});
+  const visibleCommentaryTexts=new Set();
+  const commentaryReasoningFallbackTexts=new Set();
+  if(blocks&&blocks.querySelectorAll){
+    blocks.querySelectorAll('[data-visible-commentary="1"]').forEach(node=>{
+      const key=_normalizeThinkingEchoCompare(
+        node.getAttribute('data-raw-text')||node.textContent||''
+      );
+      if(key) visibleCommentaryTexts.add(key);
+    });
+    // The presentation preference may suppress the ordinary commentary owner,
+    // but its exact settled-scene echo must not leak through Worklog. Resolve
+    // source text from the immutable session sidecar via raw message indices;
+    // do not mutate/remove codex_message_items and do not copy private text into
+    // a DOM attribute just to make the ownership decision.
+    blocks.querySelectorAll('.assistant-segment[data-msg-idx]').forEach(node=>{
+      const idx=Number(node.getAttribute('data-msg-idx'));
+      if(!Number.isFinite(idx)||!S||!Array.isArray(S.messages)) return;
+      const key=_normalizeThinkingEchoCompare(
+        _assistantPersistedCommentaryPayloadText(S.messages[idx])
+      );
+      if(key){
+        visibleCommentaryTexts.add(key);
+        const reasoningKey=_normalizeThinkingEchoCompare(
+          _assistantReasoningPayloadText(S.messages[idx])
+        );
+        if(reasoningKey===key) commentaryReasoningFallbackTexts.add(key);
+      }
+    });
+  }
+  if(!visibleCommentaryTexts.size) return rows;
+  // Commentary is ordinary assistant information. Keep tools, true reasoning
+  // and DISTINCT process prose in Worklog. When commentary presentation is off,
+  // an exact reasoning-backed echo becomes Thinking (and therefore obeys the
+  // independent show_thinking preference) instead of leaking as process prose.
+  return rows.flatMap(row=>{
+    if(!row||String(row.role||'')!=='prose') return [row];
+    const key=_normalizeThinkingEchoCompare(row.text||row.content||'');
+    if(!visibleCommentaryTexts.has(key)) return [row];
+    if(
+      window._showCommentary===false&&
+      window._showThinking!==false&&
+      commentaryReasoningFallbackTexts.has(key)
+    ){
+      return [{...row,role:'thinking',kind:'reasoning',display_hint:'collapsed_thinking'}];
+    }
+    return [];
+  });
+}
 function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx){
   if(!message||!message._anchor_activity_scene||!segment) return false;
   if(!_anchorSceneSceneHasWorklogWorthyRows(message._anchor_activity_scene)) return false;
   const blocks=_assistantTurnBlocks(segment.closest('.assistant-turn'));
   if(!blocks) return false;
   const scene=message._anchor_activity_scene;
-  const rows=_anchorSceneRowsForRendering(scene,{settled:true});
+  const rows=_anchorSceneRowsForSettledWorklog(scene,blocks);
   if(!rows.length) return false;
   const lastNonTerminalWorkRowIndex=_anchorSceneLastNonTerminalWorkRowIndex(rows);
   // The assistant segment owns the final answer; pass it so intermediate prose
@@ -13952,7 +14127,7 @@ function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx
   blocks.querySelectorAll('.transparent-earlier-steps[data-anchor-earlier-steps="1"]').forEach(el=>el.remove());
   blocks.querySelectorAll('.assistant-segment[data-msg-idx]').forEach(node=>{
     const idx=Number(node.getAttribute('data-msg-idx'));
-    if(Number.isFinite(idx)&&idx<rawIdx){
+    if(Number.isFinite(idx)&&idx<rawIdx&&node.getAttribute('data-visible-commentary')!=='1'){
       node.classList.add('assistant-segment-worklog-source');
       node.setAttribute('aria-hidden','true');
       node.hidden=true;
@@ -14102,7 +14277,7 @@ function _revealTransparentEarlierSteps(message, segment, rawIdx, affordanceEl){
   const scene=message&&message._anchor_activity_scene;
   const blocks=_assistantTurnBlocks(turnEl);
   if(!scene||!blocks){ if(affordanceEl) affordanceEl.remove(); return; }
-  const rows=_anchorSceneRowsForRendering(scene,{settled:true})||[];
+  const rows=_anchorSceneRowsForSettledWorklog(scene,blocks)||[];
   const lastNonTerminalWorkRowIndex=_anchorSceneLastNonTerminalWorkRowIndex(rows);
   const finalAnswer=String(
     (scene&&typeof scene.final_answer==='string'&&scene.final_answer)
@@ -14270,11 +14445,11 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   const blocks=_assistantTurnBlocks(segment.closest('.assistant-turn'));
   if(!blocks) return false;
   const scene=message._anchor_activity_scene;
-  const rows=_anchorSceneRowsForRendering(scene,{settled:true});
+  const rows=_anchorSceneRowsForSettledWorklog(scene,blocks);
   if(!rows.length) return false;
   blocks.querySelectorAll('.assistant-segment[data-msg-idx]').forEach(node=>{
     const idx=Number(node.getAttribute('data-msg-idx'));
-    if(Number.isFinite(idx)&&idx<rawIdx){
+    if(Number.isFinite(idx)&&idx<rawIdx&&node.getAttribute('data-visible-commentary')!=='1'){
       node.classList.add('assistant-segment-worklog-source');
       node.setAttribute('aria-hidden','true');
       node.hidden=true;
@@ -15336,6 +15511,8 @@ function _messageRenderCacheSignature(){
     hash=Math.imul(hash,16777619)>>>0;
   }
   const messages=Array.isArray(S.messages)?S.messages:[];
+  add(window._showCommentary!==false);
+  add(window._showThinking!==false);
   add(messages.length);
   for(const m of messages){
     if(!m||typeof m!=='object'){ add('missing'); continue; }
@@ -16944,7 +17121,10 @@ function renderMessages(options){
     if(!isUser&&_isMarkerOnlyAssistantCompressionMessage(m)){
       content='**Error:** No response received after context compression. Please retry.';
     }
-    const displayContent=isUser?_stripAttachedFilesMarkerForDisplay(_stripWorkspaceDisplayPrefix(content)):content;
+    const commentaryDisplayText=!isUser?_assistantCommentaryPayloadText(m):'';
+    const isVisibleCommentary=!!(!isUser&&!String(content||'').trim()&&String(commentaryDisplayText||'').trim());
+    const displayContent=isUser?_stripAttachedFilesMarkerForDisplay(_stripWorkspaceDisplayPrefix(content)):_assistantDisplayContentFromMessage(m, content);
+    if(isVisibleCommentary) content=displayContent;
     const rowDisplayContent=displayContent;
     if(!isUser&&_isAssistantEmptyPlaceholderContent(m, displayContent)){
       content='';
@@ -17217,6 +17397,7 @@ function renderMessages(options){
     seg.dataset.sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
     seg.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
     seg.dataset.rawText=String(content).trim();
+    if(isVisibleCommentary) seg.setAttribute('data-visible-commentary','1');
     if(m._activityBurstId!==undefined&&m._activityBurstId!==null) seg.setAttribute('data-activity-burst-id',String(m._activityBurstId));
     if(Number.isFinite(Number(m._liveSegmentSeq))) seg.setAttribute('data-live-segment-seq',String(Number(m._liveSegmentSeq)));
     const messageBelongsInWorklog=!S.busy&&isCompactWorklogMode()&&_assistantMessageBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs, displayContent, {isTurnFinalAssistant});

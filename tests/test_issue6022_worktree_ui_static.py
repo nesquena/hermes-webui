@@ -45,7 +45,7 @@ def test_onboarding_session_sends_explicit_worktree_false():
 def test_profile_switch_session_sends_explicit_worktree_false():
     src = read("static/panels.js")
     assert (
-        "await newSession(false, {awaitWorkspaceLoad: workspaceVisible, worktree: false});"
+        "await newSession(false, {awaitWorkspaceLoad: workspaceVisible, worktree: false, transitionOwner:_transitionOwner});"
         in src
     )
 

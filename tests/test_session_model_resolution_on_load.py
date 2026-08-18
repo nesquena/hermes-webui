@@ -43,10 +43,10 @@ def test_load_session_initial_metadata_request_defers_model_resolution_until_aft
         "loadSession() must not resolve model metadata before assigning S.session; "
         "stale model/provider correction belongs to the deferred path"
     )
-    assert "_resolveSessionModelForDisplaySoon(sid)" in body[body.index(assignment):], (
+    assert "_resolveSessionModelForDisplaySoon(sid,transitionOwner)" in body[body.index(assignment):], (
         "stale persisted model/provider correction must still happen after first paint"
     )
-    assert body.count("_resolveSessionModelForDisplaySoon(sid)") == 1, (
+    assert body.count("_resolveSessionModelForDisplaySoon(sid,transitionOwner)") == 1, (
         "deferred model repair should run once per session switch, not once after "
         "metadata and again after message hydration"
     )
