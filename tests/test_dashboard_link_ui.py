@@ -205,7 +205,7 @@ _DASHBOARD_LINK_DRIVER = textwrap.dedent(
     for (const name of ['_normalizeDashboardEnabledMode','_setDashboardModeForChip','_getDashboardChipRestoreMode']) {
       eval(extractFn(uiSrc, name));
     }
-    for (const name of ['_dashboardBrowserUrl', '_dashboardIsBrowserLoopback', '_dashboardUrlIsLoopback', '_applyDashboardStatus', 'refreshDashboardStatus', 'loadDashboardSettings', 'saveDashboardSettings']) {
+    for (const name of ['_dashboardBrowserUrl', '_dashboardHostIsLoopback', '_dashboardIsBrowserLoopback', '_dashboardUrlIsLoopback', '_applyDashboardStatus', 'refreshDashboardStatus', 'loadDashboardSettings', 'saveDashboardSettings']) {
       let src = extractFn(uiSrc, name);
       if(name === 'saveDashboardSettings'){
         src = src.replace(
@@ -777,10 +777,11 @@ def test_remote_webui_loopback_target_keeps_loopback_warning(target_url):
 
 
 @requires_node
-def test_remote_webui_configured_loopback_url_warns_without_browser_url():
-    # enabled:always with a configured loopback URL (or the generated loopback
-    # fallback) can return a truthy browser_url that still resolves to loopback;
-    # the warning must key off the resolved URL host, not browser_url presence.
+def test_remote_webui_auto_probe_url_only_loopback_target_keeps_warning():
+    # Successful auto-probe arm: the probe returns a resolved URL with no
+    # browser_url field (enabled:always instead emits both url and browser_url).
+    # A loopback probe target must still warn for a remote WebUI — the warning
+    # keys off the resolved URL host, not browser_url presence.
     out = _run_dashboard_link_driver(
         "status-apply",
         mode="always",
@@ -798,7 +799,93 @@ def test_remote_webui_configured_loopback_url_warns_without_browser_url():
 
 
 @requires_node
-@pytest.mark.parametrize("origin_hostname", ["127.0.0.1", "localhost", "[::1]"])
+@pytest.mark.parametrize(
+    "target_url",
+    [
+        "http://127.8.9.10:1234",          # other 127/8 address
+        "http://[::ffff:127.0.0.1]:1234",  # IPv4-mapped IPv6 loopback (dotted)
+        "http://[::ffff:7f00:1]:1234",     # IPv4-mapped IPv6 loopback (hex)
+        "http://myhost.localhost:1234",    # .localhost name (RFC 6761)
+        "http://localhost.:1234",          # terminal hostname dot
+        "http://[::1]:1234",               # IPv6 loopback
+    ],
+)
+def test_remote_webui_loopback_classifier_variants_keep_warning(target_url):
+    # enabled:always producer shape emits both url and browser_url. Every
+    # loopback spelling of the resolved target must keep the warning for a
+    # remote WebUI (tooltip + ARIA).
+    out = _run_dashboard_link_driver(
+        "status-apply",
+        mode="always",
+        env={
+            "DASH_WINDOW_HOSTNAME": "webui.example.test",
+            "DASH_STATUS_RUNNING": "1",
+            "DASH_STATUS_BROWSER_URL": target_url,
+            "DASH_STATUS_URL": target_url,
+        },
+    )
+    assert out["buttonStates"]
+    for state in out["buttonStates"]:
+        assert state["tooltip"] == "Loopback"
+        assert state["ariaLabel"] == "Loopback"
+
+
+@requires_node
+@pytest.mark.parametrize(
+    "target_url",
+    [
+        "https://dashboard.example.test",     # public HTTPS
+        "http://128.0.0.1:1234",              # adjacent public IPv4
+        "http://[::2]:1234",                  # adjacent public IPv6
+        "http://127.0.0.1.example.com:1234",  # DNS name containing loopback prefix
+    ],
+)
+def test_remote_webui_public_boundary_targets_have_normal_tooltip(target_url):
+    # Public boundary controls: addresses adjacent to loopback and DNS names
+    # that merely contain a loopback-looking prefix must not warn.
+    out = _run_dashboard_link_driver(
+        "status-apply",
+        mode="always",
+        env={
+            "DASH_WINDOW_HOSTNAME": "webui.example.test",
+            "DASH_STATUS_RUNNING": "1",
+            "DASH_STATUS_BROWSER_URL": target_url,
+            "DASH_STATUS_URL": target_url,
+        },
+    )
+    assert out["buttonStates"]
+    for state in out["buttonStates"]:
+        assert state["tooltip"] == "Dashboard"
+        assert state["ariaLabel"] == "Dashboard"
+
+
+@requires_node
+@pytest.mark.parametrize("bad_url", ["not a url", "/relative/dashboard"])
+def test_remote_webui_invalid_or_relative_target_urls_do_not_warn(bad_url):
+    # Unparseable/relative targets fall back to the origin-derived URL; the
+    # warning must not fire spuriously and the link must not crash.
+    out = _run_dashboard_link_driver(
+        "status-apply",
+        mode="always",
+        env={
+            "DASH_WINDOW_HOSTNAME": "webui.example.test",
+            "DASH_STATUS_RUNNING": "1",
+            "DASH_STATUS_BROWSER_URL": bad_url,
+            "DASH_STATUS_URL": bad_url,
+            "DASH_STATUS_PORT": "1234",
+        },
+    )
+    assert out["buttonStates"]
+    for state in out["buttonStates"]:
+        assert state["tooltip"] == "Dashboard"
+        assert state["ariaLabel"] == "Dashboard"
+
+
+@requires_node
+@pytest.mark.parametrize(
+    "origin_hostname",
+    ["127.0.0.1", "127.0.0.2", "localhost", "myhost.localhost", "[::1]"],
+)
 def test_loopback_webui_origin_has_no_remote_browser_warning(origin_hostname):
     # Loopback WebUI origin: the operator is on the same machine, so the
     # loopback target is reachable — no remote-browser warning.

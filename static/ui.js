@@ -1671,16 +1671,49 @@ let _dashboardLastNonNeverMode='auto'; // Server-scoped dashboard config keeps t
 let _dashboardSettingsLoadSeq=0;
 let _dashboardSettingsWriteSeq=0;
 
+function _dashboardHostIsLoopback(host){
+  // Canonical loopback classifier shared by the browser origin and the
+  // resolved dashboard target. Normalizes brackets, case, zone ids, and a
+  // terminal hostname dot; classifies IPv4 127/8, IPv6 ::1, IPv4-mapped IPv6
+  // whose embedded IPv4 is 127/8, and localhost/.localhost names (RFC 6761).
+  if(!host) return false;
+  let h=String(host).replace(/^\[|\]$/g,'').toLowerCase();
+  if(h.endsWith('.')) h=h.slice(0,-1);
+  if(h==='localhost'||h.endsWith('.localhost')) return true;
+  const ipv4=/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+  if(ipv4){
+    const octets=ipv4.slice(1).map(Number);
+    return octets.every(o=>o>=0&&o<=255)&&octets[0]===127;
+  }
+  if(h.includes(':')){
+    const zone=h.indexOf('%');
+    if(zone!==-1) h=h.slice(0,zone);
+    if(h==='::1'||h==='0:0:0:0:0:0:0:1') return true;
+    const mapped=/^(?:::ffff:|0:0:0:0:0:ffff:)(.+)$/.exec(h);
+    if(mapped){
+      const tail=mapped[1];
+      const dotted=/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(tail);
+      if(dotted){
+        const octets=dotted.slice(1).map(Number);
+        return octets.every(o=>o>=0&&o<=255)&&octets[0]===127;
+      }
+      const hex=/^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(tail);
+      if(hex) return (parseInt(hex[1],16)>>>8)===127;
+      return false;
+    }
+    return false;
+  }
+  return false;
+}
+
 function _dashboardIsBrowserLoopback(){
-  const host=(window.location.hostname||'').replace(/^\[|\]$/g,'').toLowerCase();
-  return host==='127.0.0.1'||host==='localhost'||host==='::1';
+  return _dashboardHostIsLoopback(window.location.hostname||'');
 }
 
 function _dashboardUrlIsLoopback(url){
   if(!url) return false;
   try{
-    const host=new URL(url).hostname.replace(/^\[|\]$/g,'').toLowerCase();
-    return host==='127.0.0.1'||host==='localhost'||host==='::1';
+    return _dashboardHostIsLoopback(new URL(url).hostname);
   }catch(_){return false;}
 }
 
