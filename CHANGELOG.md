@@ -509,6 +509,8 @@
 
 ### Added
 
+- **Extensions can register a native "Configure" entry point under Settings → Extensions → Installed.** For complex editors that don't fit scalar `settings_schema` fields, a boot-trusted extension can call `ext.settings.registerConfigure(handler)` on the E0 handle to add one native Configure button for its current effective-enabled Installed row, while keeping the editor UI, validation, state, and persistence fully extension-owned. Registration is trust-gated and quarantine-aware, the first handler per extension wins (duplicates return `null`), and it returns an idempotent unregister; the button never appears in Diagnostics and is removed immediately on disable/uninstall. Thanks @franksong2702. (#7111)
+
 - **Each settled assistant turn's footer now shows the model that actually served it.** In transparent-stream mode the turn footer gains a compact model chip (e.g. `8s · claude-opus-4-8 · TTFT 640ms · …`), read *after* the turn completes so a mid-turn fallback shows the real model that answered rather than the one originally requested. The label renders exactly once per turn — a gateway/failover turn keeps its existing routing chip and the additive chip is suppressed — and the footer wraps gracefully at narrow widths and on mobile instead of stretching. The used-model is persisted with the session so it survives a reload. Thanks @franksong2702. (#6113, #6068)
 
 ### Performance

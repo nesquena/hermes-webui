@@ -11,7 +11,12 @@
   const registrations=new Map();
   const turnLifecycleListeners=new Map();
   const turnLifecycleStates=new Map();
+  const configureRegistrations=new Map();
+  const configureQuarantinedIds=new Set();
+  const configureChangeListeners=new Set();
+  const currentExtensionStatus=new Map();
   let trustedSeeded=false;
+  let extensionStatusSeeded=false;
 
   function extensionId(value){
     return String(value||'').trim();
@@ -116,6 +121,7 @@
         name:text(entry&&entry.name,id),
         storage_owned:storageOwned,
         settings_schema:storageOwned?normalizeSchema(entry&&entry.settings_schema):[],
+        effective_enabled:!(entry&&entry.effective_enabled===false),
       });
     }
     return entries;
@@ -135,6 +141,20 @@
       }
       trustedSeeded=true;
     }
+    const previousStatus=new Map(currentExtensionStatus);
+    const nextIds=new Set(entries.map(entry=>entry.id));
+    if(extensionStatusSeeded){
+      for(const id of previousStatus.keys()){
+        if(nextIds.has(id)) continue;
+        configureQuarantinedIds.add(id);
+        notifyConfigureChange(id,'quarantine');
+      }
+    }
+    currentExtensionStatus.clear();
+    for(const entry of entries){
+      currentExtensionStatus.set(entry.id,{effective_enabled:entry.effective_enabled===true});
+    }
+    extensionStatusSeeded=true;
     schemas.clear();
     for(const entry of entries){
       const trusted=trustedExtensions.get(entry.id);
@@ -145,6 +165,14 @@
         storage_owned:trusted.storage_owned===true,
         settings_schema:trusted.storage_owned===true?trusted.settings_schema:[],
       });
+    }
+    for(const [id,record] of configureRegistrations){
+      if(!record||!record.active) continue;
+      const before=previousStatus.get(id);
+      const after=currentExtensionStatus.get(id);
+      if(!before||!after||before.effective_enabled!==after.effective_enabled){
+        notifyConfigureChange(id,'status');
+      }
     }
   }
 
@@ -233,7 +261,7 @@
     return !!(meta&&meta.storage_owned&&Array.isArray(meta.settings_schema)&&meta.settings_schema.length);
   }
 
-  function settingsAccessor(clean,meta,isTrusted){
+  function settingsAccessor(clean,meta,isTrusted,allowConfigureRegistration){
     const schema=supportsSettings(meta)?meta.settings_schema:[];
     const key=settingsKey(clean);
     function current(){
@@ -249,7 +277,7 @@
       const saved=safeWrite(key,overridesFromValues(schema,checked.values));
       return {ok:saved,values:checked.values,errors:saved?{}:{storage:'unavailable'}};
     }
-    return {
+    const accessor={
       extensionId:clean,
       trusted:isTrusted,
       storageOwned:!!meta.storage_owned,
@@ -278,6 +306,10 @@
         return true;
       },
     };
+    if(allowConfigureRegistration===true){
+      accessor.registerConfigure=handler=>registerConfigureHandler(clean,handler);
+    }
+    return accessor;
   }
 
   function settingsForExtension(id){
@@ -350,6 +382,165 @@
     });
   }
 
+  function notifyConfigureChange(id,reason){
+    const change=Object.freeze({id,reason});
+    for(const listener of [...configureChangeListeners]){
+      try{
+        listener(change);
+      }catch(error){
+        if(typeof console!=='undefined'&&typeof console.error==='function'){
+          try{console.error('[Hermes extensions] Configure change listener failed:',error);}catch(_loggingError){}
+        }
+      }
+    }
+  }
+
+  function onConfigureChange(listener){
+    if(typeof listener!=='function') return null;
+    configureChangeListeners.add(listener);
+    let active=true;
+    return function unsubscribe(){
+      if(!active) return false;
+      active=false;
+      configureChangeListeners.delete(listener);
+      return true;
+    };
+  }
+
+  function registerConfigureHandler(clean,handler){
+    if(typeof handler!=='function'||!trustedExtensions.has(clean)||configureQuarantinedIds.has(clean)) return null;
+    if(configureRegistrations.has(clean)) return null;
+    const record={handler,pending:false,active:true};
+    configureRegistrations.set(clean,record);
+    notifyConfigureChange(clean,'registration');
+    let active=true;
+    return function unregister(){
+      if(!active) return false;
+      active=false;
+      record.active=false;
+      if(configureRegistrations.get(clean)===record) configureRegistrations.delete(clean);
+      notifyConfigureChange(clean,'registration');
+      return true;
+    };
+  }
+
+  function configureStateForExtension(id){
+    const clean=extensionId(id);
+    const record=configureRegistrations.get(clean);
+    const status=currentExtensionStatus.get(clean);
+    const available=!!(
+      clean&&record&&record.active&&!configureQuarantinedIds.has(clean)
+      &&status&&status.effective_enabled===true
+    );
+    return {available,pending:available&&record.pending===true};
+  }
+
+  function focusableConfigureTarget(node){
+    if(!node||typeof node.focus!=='function'||node.isConnected===false||node.hidden===true||node.disabled===true) return false;
+    if(typeof node.getAttribute==='function'&&node.getAttribute('aria-disabled')==='true') return false;
+    if(typeof node.closest==='function'&&node.closest('[hidden]')) return false;
+    return true;
+  }
+
+  function focusConfigureTarget(clean,opener){
+    const candidates=[];
+    if(focusableConfigureTarget(opener)) candidates.push(opener);
+    if(typeof document!=='undefined'&&document){
+      if(typeof document.querySelectorAll==='function'){
+        const buttons=document.querySelectorAll('[data-extension-configure-id]');
+        for(const button of buttons){
+          if(button&&button.dataset&&button.dataset.extensionConfigureId===clean&&focusableConfigureTarget(button)){
+            candidates.push(button);
+            break;
+          }
+        }
+      }
+      if(typeof document.querySelector==='function'){
+        const installedTab=document.querySelector('[data-extensions-tab="installed"]');
+        if(focusableConfigureTarget(installedTab)) candidates.push(installedTab);
+      }
+    }
+    for(const candidate of candidates){
+      try{
+        candidate.focus({preventScroll:true});
+        return true;
+      }catch(_focusOptionsError){
+        try{
+          candidate.focus();
+          return true;
+        }catch(_focusError){}
+      }
+    }
+    return false;
+  }
+
+  function reportConfigureFailure(clean,error,onError){
+    if(typeof console!=='undefined'&&typeof console.error==='function'){
+      try{console.error(`[Hermes extensions] ${clean} Configure handler failed:`,error);}catch(_loggingError){}
+    }
+    if(typeof onError==='function'){
+      try{onError(error);}catch(callbackError){
+        if(typeof console!=='undefined'&&typeof console.error==='function'){
+          try{console.error(`[Hermes extensions] ${clean} Configure failure reporter failed:`,callbackError);}catch(_loggingError){}
+        }
+      }
+    }
+  }
+
+  function invokeConfigure(id,options){
+    const clean=extensionId(id);
+    const state=configureStateForExtension(clean);
+    const record=configureRegistrations.get(clean);
+    if(!state.available||state.pending||!record) return false;
+    const opener=options&&options.opener;
+    const onError=options&&options.onError;
+    let settled=false;
+    let failureReported=false;
+    record.pending=true;
+    notifyConfigureChange(clean,'pending');
+
+    function settle(){
+      if(settled) return false;
+      settled=true;
+      record.pending=false;
+      notifyConfigureChange(clean,'pending');
+      focusConfigureTarget(clean,opener);
+      return true;
+    }
+
+    function fail(error){
+      if(!failureReported){
+        failureReported=true;
+        reportConfigureFailure(clean,error,onError);
+      }
+      settle();
+    }
+
+    let result;
+    try{
+      result=record.handler(Object.freeze({opener,restoreFocus:settle}));
+    }catch(error){
+      fail(error);
+      return true;
+    }
+
+    let then;
+    try{
+      then=result!==null&&(typeof result==='object'||typeof result==='function')?result.then:null;
+    }catch(error){
+      fail(error);
+      return true;
+    }
+    if(typeof then==='function'){
+      try{
+        then.call(result,settle,fail);
+      }catch(error){
+        fail(error);
+      }
+    }
+    return true;
+  }
+
   function turnLifecycleKey(sessionId,streamId){
     return `${sessionId}\u0000${streamId}`;
   }
@@ -416,7 +607,7 @@
     if(!trusted) return null;
     const handle=Object.freeze({
       id:clean,
-      settings:settingsAccessor(clean,trusted,true),
+      settings:settingsAccessor(clean,trusted,true,true),
       storage:storageAccessor(clean,trusted),
       events:eventAccessor(clean),
     });
@@ -431,6 +622,9 @@
     settingsForExtension,
     storageForExtension,
     _dispatchTurnLifecycle:dispatchTurnLifecycle,
+    _configureStateForExtension:configureStateForExtension,
+    _invokeConfigure:invokeConfigure,
+    _onConfigureChange:onConfigureChange,
     resetSettingsForExtension(id){return settingsForExtension(id).reset();},
     clearStorageForExtension(id){return storageForExtension(id).clear();},
   };
