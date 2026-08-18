@@ -2997,6 +2997,8 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
     Writes back to config.yaml only if something was actually removed.
     Uses ``_cfg_lock`` to prevent TOCTOU races.
     """
+    provider_id = _canonicalise_provider_id(provider_id)
+
     from api.config import _cfg_lock
 
     try:

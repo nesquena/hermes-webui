@@ -138,6 +138,78 @@ def test_equivalent_mistral_default_save_preserves_custom_base_url(monkeypatch, 
     assert saved["model"]["base_url"] == "https://proxy.example/v1"
 
 
+def test_get_provider_base_url_uses_legacy_provider_config_for_canonical_mistral(monkeypatch):
+    monkeypatch.setattr(config, "cfg", {
+        "providers": {"mistralai": {"base_url": "https://proxy.example/v1/"}},
+        "model": {"provider": "google", "base_url": "https://model.example/v1/"},
+    })
+    assert config._get_provider_base_url("mistral") == "https://proxy.example/v1"
+
+    monkeypatch.setattr(config, "cfg", {
+        "model": {"provider": "mistralai", "base_url": "https://model.example/v1/"},
+    })
+    assert config._get_provider_base_url("mistral") == "https://model.example/v1"
+
+    monkeypatch.setattr(config, "cfg", {
+        "model": {"provider": "google", "base_url": "https://model.example/v1/"},
+    })
+    assert config._get_provider_base_url("mistral") is None
+
+
+def test_remove_provider_key_canonicalizes_legacy_mistralai_request(monkeypatch, tmp_path):
+    import yaml
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump({
+        "model": {"provider": "mistral", "api_key": "active-mistral-key"},
+        "providers": {
+            "mistralai": {"api_key": "legacy-mistral-key"},
+            "mistral": {"api_key": "canonical-mistral-key"},
+            "google": {"api_key": "google-key"},
+        },
+    }), encoding="utf-8")
+    monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+    monkeypatch.setattr(providers, "_get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(providers, "_write_env_file", lambda *_args: None)
+    monkeypatch.setattr(providers, "invalidate_models_cache", lambda: None)
+    monkeypatch.setattr(providers, "invalidate_account_usage_status_cache", lambda _pid: None)
+    monkeypatch.setattr(providers, "invalidate_providers_cache", lambda: None)
+
+    assert providers.remove_provider_key("mistralai")["ok"] is True
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert "api_key" not in saved["providers"]["mistralai"]
+    assert "api_key" not in saved["providers"]["mistral"]
+    assert "api_key" not in saved["model"]
+    assert saved["providers"]["google"]["api_key"] == "google-key"
+
+
+def test_authenticated_codex_roster_preserves_picker_membership(monkeypatch, tmp_path):
+    for authenticated in (True, False):
+        cfgfile = tmp_path / f"codex-{authenticated}.yaml"
+        cfgfile.write_text(
+            "model:\n  provider: google\n  default: gemini-2.5-pro\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(config, "_get_config_path", lambda cfgfile=cfgfile: cfgfile)
+        monkeypatch.setattr(config, "_get_auth_store_path", lambda: tmp_path / "auth.json")
+        monkeypatch.setattr(config, "_read_live_provider_model_ids", lambda _pid: [])
+        monkeypatch.setattr(config, "_thread_local_env_value", lambda name, default="": {
+            "OPENAI_API_KEY": "openai-key",
+        }.get(name, default))
+        _install_hermes_modules(monkeypatch, roster=[
+            {"id": "openai-codex", "authenticated": authenticated},
+            {"id": "openai-api", "authenticated": False},
+        ])
+        config.reload_config()
+        config.invalidate_models_cache()
+
+        catalog = config.get_available_models(force_refresh=True)
+        provider_ids = {group.get("provider_id") for group in catalog["groups"]}
+        assert ("openai-codex" in provider_ids) is authenticated
+        assert "openai-api" not in provider_ids
+        assert catalog["active_provider"] == "google"
+
+
 def test_environment_detection_respects_roster_authentication_matrix(monkeypatch, tmp_path):
     cfgfile = tmp_path / "config.yaml"
     cfgfile.write_text(
