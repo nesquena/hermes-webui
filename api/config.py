@@ -7301,6 +7301,19 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 provider_cfg = _canonical_provider_config(cfg, provider)
                 if isinstance(provider_cfg, dict):
                     api_key = (provider_cfg.get("api_key") or "").strip()
+            if not api_key and provider.startswith("custom:"):
+                named_provider_slug = _named_custom_provider_slug_for_provider(provider, cfg)
+                for custom_entry in _custom_provider_entries(cfg):
+                    if _custom_provider_slug_from_name(custom_entry.get("name")) != named_provider_slug:
+                        continue
+                    api_key = str(custom_entry.get("api_key") or "").strip()
+                    if api_key.startswith("${") and api_key.endswith("}"):
+                        api_key = _thread_local_env_value(api_key[2:-1]).strip()
+                    if not api_key:
+                        key_env = str(custom_entry.get("key_env") or "").strip()
+                        if key_env:
+                            api_key = _thread_local_env_value(key_env).strip()
+                    break
             if not api_key and (provider == "custom" or provider.startswith("custom:")):
                 custom_cfg = _canonical_provider_config(cfg, "custom")
                 if isinstance(custom_cfg, dict):
@@ -7358,6 +7371,10 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     _cp_key_env = str(_cp.get("key_env") or "").strip()
                     if _cp_key_env:
                         _cp_api_key = _thread_local_env_value(_cp_key_env).strip()
+                if not _cp_api_key:
+                    _cp_provider_cfg = _canonical_provider_config(cfg, "custom")
+                    if isinstance(_cp_provider_cfg, dict):
+                        _cp_api_key = str(_cp_provider_cfg.get("api_key") or "").strip()
                 # Fallback: check credential pool for both api_key and base_url
                 if (not _cp_api_key or not _cp_base_url) and _slug:
                     try:
