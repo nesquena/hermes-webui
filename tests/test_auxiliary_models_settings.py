@@ -937,3 +937,50 @@ class TestAuxiliaryModelsBackend:
 
         assert result["status"] == 400
         assert "Unknown auxiliary task slot" in result["error"]
+
+    def test_aux_slot_base_url_uses_selected_provider_not_active_endpoint(
+        self, monkeypatch, tmp_path
+    ):
+        """Overlapping-id sibling fix: persisting an auxiliary slot for a named
+        custom provider must record THAT provider's own base_url, not the active
+        main provider's endpoint.
+
+        Repro: main provider is custom:dogapi (base_url dogapi), and both dogapi
+        and packyapi list 'shared-model'. Selecting custom:packyapi for the vision
+        slot previously persisted {provider: custom:packyapi, base_url: dogapi's}
+        because the base_url was resolved with a bare resolve_model_provider(model)
+        that ignores the selected provider. It must persist packyapi's base_url.
+        """
+        from api import config
+
+        shared_cfg = {
+            "model": {
+                "default": "shared-model",
+                "provider": "custom",
+                "base_url": "https://www.dogapi.cc/v1",
+            },
+            "custom_providers": [
+                {"name": "dogapi", "base_url": "https://www.dogapi.cc/v1",
+                 "models": ["shared-model"]},
+                {"name": "packyapi", "base_url": "https://www.packyapi.ai/v1",
+                 "models": ["shared-model"]},
+            ],
+        }
+
+        config_path = tmp_path / "config.yaml"
+        import yaml
+        config_path.write_text(yaml.safe_dump(shared_cfg), encoding="utf-8")
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+        # base_url resolution reads the in-memory cfg / get_config snapshot.
+        monkeypatch.setattr(config, "cfg", dict(shared_cfg))
+        monkeypatch.setattr(config, "get_config", lambda: dict(shared_cfg))
+
+        config.set_auxiliary_model("vision", "custom:packyapi", "shared-model")
+
+        saved = config._load_yaml_config_file(config_path)["auxiliary"]["vision"]
+        assert saved["provider"] == "custom:packyapi"
+        assert saved["base_url"] == "https://www.packyapi.ai/v1", (
+            f"aux slot must persist the SELECTED provider's base_url, got "
+            f"{saved.get('base_url')!r}"
+        )

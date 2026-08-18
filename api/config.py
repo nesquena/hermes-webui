@@ -2746,7 +2746,28 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         _active_custom_slug = ''
         if isinstance(config_provider, str) and config_provider.startswith('custom:'):
             _active_custom_slug = config_provider
+
+        def _entry_owns_model(entry: dict) -> bool:
+            entry_model = (entry.get('model') or '').strip()
+            ids = set()
+            if entry_model:
+                ids.add(entry_model)
+            ids.update(_configured_model_ids(entry.get('models')))
+            return model_id in ids
+
         if _active_custom_slug:
+            # Prefer the EXACT entry the active endpoint's base_url points at,
+            # not the first entry that merely shares the active slug. Two
+            # distinct provider names can normalize to the same slug (e.g.
+            # "Foo Bar" and "foo-bar" both -> custom:foo-bar). config_provider
+            # was derived from model.base_url via named-slug matching, which
+            # already identified ONE entry — but collapsing that to a slug and
+            # re-scanning by slug would silently return the wrong (earlier)
+            # same-slug entry's base_url. So when a config base_url is present,
+            # match entries by base_url first to recover the exact entry.
+            _norm_active_base = _normalize_base_url_for_match(config_base_url) if config_base_url else ''
+            _base_matches = []
+            _slug_matches = []
             for entry in custom_providers:
                 if not isinstance(entry, dict):
                     continue
@@ -2755,15 +2776,23 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                     continue
                 if _custom_provider_slug_from_name(entry_name) != _active_custom_slug:
                     continue
-                entry_model = (entry.get('model') or '').strip()
-                entry_base_url = (entry.get('base_url') or '').strip()
-                entry_model_ids = set()
-                if entry_model:
-                    entry_model_ids.add(entry_model)
-                entry_model_ids.update(_configured_model_ids(entry.get('models')))
-                if model_id in entry_model_ids:
-                    return model_id, _active_custom_slug, entry_base_url or None
-                break
+                _slug_matches.append(entry)
+                if _norm_active_base and _normalize_base_url_for_match(entry.get('base_url')) == _norm_active_base:
+                    _base_matches.append(entry)
+            # 1) base_url pins exactly one entry -> use it (the precise match).
+            if len(_base_matches) == 1:
+                entry = _base_matches[0]
+                if _entry_owns_model(entry):
+                    return model_id, _active_custom_slug, (entry.get('base_url') or '').strip() or None
+            # 2) no base_url disambiguation, but the slug is unambiguous
+            #    (exactly one entry carries it) -> safe to claim by slug.
+            elif not _norm_active_base and len(_slug_matches) == 1:
+                entry = _slug_matches[0]
+                if _entry_owns_model(entry):
+                    return model_id, _active_custom_slug, (entry.get('base_url') or '').strip() or None
+            # 3) genuine ambiguity (multiple same-slug entries and base_url did
+            #    not resolve to exactly one) -> fail closed: do NOT guess an
+            #    entry. Fall through to the ordered scan below.
         for entry in custom_providers:
             if not isinstance(entry, dict):
                 continue
@@ -4881,8 +4910,28 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
             slot_cfg["provider"] = provider or "auto"
             slot_cfg["model"] = model or ""
             if provider and (provider.startswith("custom:") or provider == "custom"):
+                # Resolve the auxiliary slot's base_url against the SELECTED
+                # provider, not the active main provider. A bare
+                # resolve_model_provider(model) ignores `provider` and routes the
+                # model through whatever main provider is active — so when the
+                # selected auxiliary provider (custom:A) and the active main
+                # provider (custom:B) both list the same model id, the slot was
+                # persisted with provider=custom:A but base_url=B's endpoint
+                # (overlapping-id misroute, sibling of the resolve_model_provider
+                # fix). For a named custom:<slug> selection, look up that
+                # provider's OWN custom_providers[] entry directly. Note we do
+                # NOT route through model_with_provider_context here: the
+                # @custom:<slug>:model form resolves base_url to None (the
+                # @provider path doesn't carry a custom entry's base_url), which
+                # would drop the base_url entirely. Fall back to the bare resolve
+                # only for the unnamed `custom` case, which has no own entry.
                 try:
-                    _, _, resolved_base_url = resolve_model_provider(model)
+                    resolved_base_url = None
+                    if provider.startswith("custom:"):
+                        _cp_key, _cp_base = resolve_custom_provider_connection(provider)
+                        resolved_base_url = _cp_base
+                    if not resolved_base_url:
+                        _, _, resolved_base_url = resolve_model_provider(model)
                     if resolved_base_url:
                         slot_cfg["base_url"] = str(resolved_base_url).strip().rstrip("/")
                 except Exception:

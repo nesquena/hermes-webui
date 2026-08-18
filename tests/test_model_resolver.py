@@ -330,6 +330,92 @@ def test_overlapping_custom_providers_bare_custom_no_base_url_keeps_order():
     )
 
 
+def test_overlapping_custom_providers_normalized_slug_collision_uses_exact_base_url():
+    """Two DISTINCT provider names that normalize to the SAME slug must not
+    collapse to the first same-slug entry — the active base_url pins the exact
+    entry.
+
+    'Foo Bar' and 'foo-bar' both normalize to slug custom:foo-bar. config_provider
+    is derived from model.base_url via named-slug matching, which already picked
+    exactly one entry; collapsing that to a slug and re-scanning by slug would
+    silently return the earlier same-slug entry's base_url. With the active
+    base_url pointing at the SECOND entry (B), resolution must return B, not the
+    first entry's A.
+    """
+    custom_providers = [
+        {'name': 'Foo Bar', 'base_url': 'https://a.example/v1', 'models': ['shared-model']},
+        {'name': 'foo-bar', 'base_url': 'https://b.example/v1', 'models': ['shared-model']},
+    ]
+    model, provider, base_url = _resolve_with_config(
+        'shared-model',
+        provider='custom',
+        base_url='https://b.example/v1',
+        custom_providers=custom_providers,
+    )
+    assert provider == 'custom:foo-bar'
+    assert base_url == 'https://b.example/v1', (
+        f"same-slug collision must resolve by exact base_url, got {base_url!r}"
+    )
+
+
+def test_overlapping_custom_providers_slug_collision_no_base_url_fails_closed():
+    """When two same-slug entries exist and there is NO base_url to disambiguate,
+    the active-slug guard must NOT guess an entry — it fails closed and falls
+    through to the legacy ordered first-match scan (which returns the first
+    same-slug entry's base_url). This proves the guard does not fabricate a
+    resolution under genuine ambiguity.
+    """
+    custom_providers = [
+        {'name': 'Foo Bar', 'base_url': 'https://a.example/v1', 'models': ['shared-model']},
+        {'name': 'foo-bar', 'base_url': 'https://b.example/v1', 'models': ['shared-model']},
+    ]
+    # Active provider is bare 'custom' with no base_url: nothing disambiguates.
+    model, provider, base_url = _resolve_with_config(
+        'shared-model',
+        provider='custom',
+        custom_providers=custom_providers,
+    )
+    # Falls through to the ordered scan -> first entry.
+    assert base_url == 'https://a.example/v1', (
+        f"ambiguous slug with no base_url must fall through to ordered scan, got {base_url!r}"
+    )
+
+
+def test_session_provider_context_routes_handoff_to_session_endpoint_not_active():
+    """Handoff-summary sibling fix: a session pinned to custom:A must resolve
+    through A, not the active custom:B, when both list the same model id.
+
+    The handoff summary path reads s_obj.model + s_obj.model_provider and passes
+    model_with_provider_context(model, model_provider) into resolve_model_provider.
+    This pins the routing behavior that fix relies on: encoding the SESSION's own
+    provider overrides the active endpoint. (The handoff path then backfills
+    base_url from resolve_custom_provider_connection, so base_url=None here is
+    expected and fine.)
+    """
+    custom_providers = [
+        {'name': 'dogapi', 'base_url': 'https://www.dogapi.cc/v1',
+         'models': ['shared-model']},
+        {'name': 'packyapi', 'base_url': 'https://www.packyapi.ai/v1',
+         'models': ['shared-model']},
+    ]
+    old_cfg = dict(config.cfg)
+    config.cfg['model'] = {
+        'default': 'shared-model', 'provider': 'custom',
+        'base_url': 'https://www.dogapi.cc/v1',  # active endpoint = dogapi
+    }
+    config.cfg['custom_providers'] = custom_providers
+    try:
+        # Session is pinned to packyapi even though dogapi is active.
+        encoded = config.model_with_provider_context('shared-model', 'custom:packyapi')
+        model, provider, _base = config.resolve_model_provider(encoded)
+    finally:
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+    assert provider == 'custom:packyapi', (
+        f"session's own provider must win over the active endpoint, got {provider!r}"
+    )
+
+
 # ── #3872: bare ``custom`` provider is a vendor-routing proxy — preserve the
 #    full model id (the prefix is intrinsic). #433's redundant-prefix strip is
 #    scoped to real first-party providers (provider=openai + proxy base_url),

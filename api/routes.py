@@ -26079,14 +26079,28 @@ def _handle_handoff_summary(handler, body):
         resolved_model = None
         resolved_provider = None
         resolved_base_url = None
+        session_model_provider = None
         try:
             from api.models import get_session
             s_obj = get_session(sid)
             resolved_model = getattr(s_obj, "model", None)
+            # Carry the session's OWN selected provider into resolution. Without
+            # it, a bare resolve_model_provider(model) routes the summary through
+            # whatever main provider is active — so a session pinned to custom:A
+            # gets its handoff summary rerouted to the active custom:B when both
+            # providers list the same model id (overlapping-id misroute, sibling
+            # of the resolve_model_provider fix). model_with_provider_context
+            # encodes it as @custom:A:model so the resolver honors the session's
+            # endpoint; base_url is backfilled from that provider's own custom
+            # entry by the resolve_custom_provider_connection block below.
+            session_model_provider = getattr(s_obj, "model_provider", None)
         except Exception:
             pass
 
-        resolved_model, resolved_provider, resolved_base_url = _cfg.resolve_model_provider(resolved_model)
+        model_for_resolution = _cfg.model_with_provider_context(
+            resolved_model, session_model_provider
+        )
+        resolved_model, resolved_provider, resolved_base_url = _cfg.resolve_model_provider(model_for_resolution)
 
         resolved_api_key = None
         try:
