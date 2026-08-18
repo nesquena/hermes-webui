@@ -222,9 +222,42 @@ def test_unmatched_transcript_row_slightly_before_started_at_is_adopted():
     Review 2026-08-18 (CHANGES_REQUESTED): +0.4s drift is adopted, but -0.4s
     made the row look older than the boundary, so the classifier returned i+1
     and the merge inserted a second bubble above the existing row.
+
+    Mirror of the +0.4 case, with attachments: one prompt bubble, existing
+    files kept, placed immediately above the first active-turn output.
     """
-    drifted = {"role": "user", "content": _PROMPT, "timestamp": _T0 - 0.4}
-    result = _probe(drifted, with_live=False)
+    body = f"""
+{_PROBE_TAIL}
+const session={{
+  session_id:'s1',
+  active_stream_id:'stream-1',
+  pending_user_message:{json.dumps(_PROMPT)},
+  pending_started_at:{_T0},
+  pending_attachments:[{{name:'courant.png'}}],
+}};
+const messages={_transcript(
+        {
+            "role": "user",
+            "content": _PROMPT,
+            "timestamp": _T0 - 0.4,
+            "attachments": [{"name": "courant.png"}],
+        },
+        with_live=False,
+    )};
+const merged=_mergePendingSessionMessage(session, messages);
+const idxs=idxsOfPrompt(messages);
+const firstOutput=firstTurnOutputIdx(messages);
+process.stdout.write(JSON.stringify({{
+  merged,
+  promptIdxs: idxs,
+  firstOutputIdx: firstOutput,
+  belowOwnOutput: idxs.length ? (Math.max.apply(null, idxs) > firstOutput && firstOutput >= 0) : false,
+  duplicated: idxs.length > 1,
+  attachmentsByIdx: messages.map(m=>Array.isArray(m&&m.attachments)?m.attachments.map(a=>a&&a.name):null),
+  order: messages.map(m=>`${{m.role}}@${{m.timestamp!==undefined?m.timestamp:'live'}}`),
+}}));
+"""
+    result = _run_probe(body)
     assert not result["duplicated"], (
         "the pending prompt was rendered twice (the transcript row plus a "
         f"materialized copy): {result['order']}"
@@ -236,6 +269,11 @@ def test_unmatched_transcript_row_slightly_before_started_at_is_adopted():
         "the drifted current-turn user row must sit at the turn boundary; "
         f"got indices {result['promptIdxs']} with turn output starting at "
         f"{result['firstOutputIdx']} ({result['order']})"
+    )
+    prompt_idx = result["promptIdxs"][0]
+    assert result["attachmentsByIdx"][prompt_idx] == ["courant.png"], (
+        "adopting the slightly-earlier current-turn row must keep its "
+        f"attachments: {result['attachmentsByIdx']} ({result['order']})"
     )
 
 
