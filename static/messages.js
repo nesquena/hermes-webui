@@ -407,7 +407,24 @@ function enhanceMarkdownTables(root){
     table.setAttribute('data-markdown-table-enhanced','1');
     bodyRows.forEach((row,idx)=>{ row.dataset.markdownTableOriginalIndex=String(idx); });
 
-    if(bodyRows.length>=4&&table.parentElement){
+    // Wrap the table in a horizontal-scroll container so a wide table stays reachable
+    // instead of being clipped by the transcript's overflow-x. Bare Markdown tables had
+    // no scroll escape (only .csv-table-wrap did, and it is excluded above). Idempotent;
+    // the filter/sort controls are inserted ABOVE the scroll area so they stay pinned.
+    let scrollWrap=table.parentElement;
+    if(!(scrollWrap&&scrollWrap.classList&&scrollWrap.classList.contains('markdown-table-scroll'))){
+      const host=table.parentElement;
+      if(host){
+        scrollWrap=document.createElement('div');
+        scrollWrap.className='markdown-table-scroll';
+        host.insertBefore(scrollWrap,table);
+        scrollWrap.appendChild(table);
+      }
+    }
+    const controlAnchor=(scrollWrap&&scrollWrap.classList&&scrollWrap.classList.contains('markdown-table-scroll'))?scrollWrap:table;
+    const controlsHost=controlAnchor.parentElement;
+
+    if(bodyRows.length>=4&&controlsHost){
       const filter=document.createElement('input');
       filter.type='search';
       filter.className='markdown-table-filter';
@@ -421,7 +438,7 @@ function enhanceMarkdownTables(root){
           row.hidden=!!query&&!_markdownTableText(row.textContent).toLowerCase().includes(query);
         });
       });
-      table.parentElement.insertBefore(filter,table);
+      controlsHost.insertBefore(filter,controlAnchor);
     }
 
     Array.from(headerRow.cells||[]).forEach((cell,colIdx)=>{

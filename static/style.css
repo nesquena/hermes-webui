@@ -2427,6 +2427,17 @@
   .msg-body th{background:rgba(255,255,255,.07);padding:6px 10px;text-align:left;font-weight:600;border:1px solid var(--border2);}
   .msg-body td{padding:5px 10px;border:1px solid rgba(255,255,255,.06);}
   .msg-body tr:nth-child(even){background:rgba(255,255,255,.03);}
+  /* Horizontal-scroll wrapper for bare Markdown tables (enhanceMarkdownTables adds it).
+     The wrapper is its OWN scroll container, so a wide table stays reachable even though
+     the transcript ancestors clip overflow-x — the header nowrap above then keeps
+     "Rate" on one line without clipping. Must follow `.msg-body table` so the width/
+     margin overrides win by source order (equal specificity). */
+  .markdown-table-scroll{margin:8px 0;max-width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch;}
+  .markdown-table-scroll>table{width:auto;min-width:100%;margin:0;}
+  /* Undo .msg-body's overflow-wrap:anywhere for cells: wrap at word boundaries so a
+     column forces the wrapper to scroll only when its widest token truly can't fit,
+     instead of being letter-crushed to ~1 char wide. */
+  .markdown-table-scroll th,.markdown-table-scroll td{overflow-wrap:normal;word-break:normal;}
   .markdown-table-filter{display:block;width:min(260px,100%);margin:8px 0 4px;padding:5px 8px;border:1px solid var(--border2);border-radius:6px;background:var(--input-bg);color:var(--text);font:inherit;font-family:var(--font-ui);font-size:12px;}
   .markdown-table-filter:focus{outline:1px solid var(--accent);outline-offset:1px;}
   .markdown-table-sort{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;min-height:20px;padding:0;border:0;background:transparent;color:inherit;font:inherit;font-weight:inherit;text-align:left;cursor:pointer;}
