@@ -2122,6 +2122,9 @@ function _dispatchExtensionTurnLifecycle(type,sessionId,streamId,details={}){
 
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!activeSid||!streamId) return;
+  // Greptile P1: 捕获流式请求发起时的模型（可能用户之后切换下拉框，
+  // 失败冷却必须用实际流式的模型，不能事后重读 composer）。
+  const _streamModelState = _chatPayloadModelState();
   const reconnecting=!!options.reconnecting;
   const _extensionTurnStartedAt=(S.session&&S.session.session_id===activeSid&&Number.isFinite(S.session.pending_started_at))
     ?S.session.pending_started_at
@@ -6609,7 +6612,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const isNoResponse=d.type==='no_response'||d.type==='silent_failure';
           if (typeof _recordModelRouterFailure === 'function' &&
               (isRateLimit || isQuotaExhausted || isAuthMismatch || isGatewayAuthError || isModelNotFound || isNoResponse)) {
-            _recordModelRouterFailure();
+            // Greptile P1: 冷却实际流式请求使用的模型，避免用户切换下拉框后冷却错模型。
+            _recordModelRouterFailure(_streamModelState);
           }
           const label=isCancelled?'Task cancelled':isInterrupted?'Response interrupted':isCompressionExhausted?'Context compression exhausted':isToolLimitReached?'Tool iteration limit reached':isQuotaExhausted?'Out of credits':isRateLimit?'Rate limit reached':isGatewayAuthError?(typeof t==='function'?t('gateway_auth_label'):'Gateway authentication failed'):isAuthMismatch?(typeof t==='function'?t('provider_mismatch_label'):'Provider mismatch'):isModelNotFound?(typeof t==='function'?t('model_not_found_label'):'Model not found'):isNoResponse?'No response from provider':'Error';
           const hint=d.hint?`\n\n*${d.hint}*`:'';
