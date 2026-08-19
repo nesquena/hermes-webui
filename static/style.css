@@ -7211,7 +7211,9 @@ main.main.showing-logs > #mainLogs{display:flex;}
 .chat-content-rtl .msg-body .code-block *,
 .chat-content-rtl .msg-body pre *,
 .chat-content-rtl .pre-header,
-.chat-content-rtl .pre-header *{
+.chat-content-rtl .pre-header *,
+.chat-content-rtl .msg-body table,
+.chat-content-rtl .msg-body table *{
   direction:ltr;
   text-align:left;
   unicode-bidi:isolate;
@@ -7228,9 +7230,13 @@ main.main.showing-logs > #mainLogs{display:flex;}
 /* Sidebar session list titles/previews are rendered outside .msg-body so the
  * automatic per-message direction pass never touches them. Give them bidi
  * resolution and right-aligned-by-default layout to match a predominantly
- * Hebrew session list. */
+ * Hebrew session list. Real rendered classes per static/sessions.js:
+ * .session-title (row title), .session-meta (detailed-density metadata
+ * line), .session-search-preview (matched-content preview line) -- there is
+ * no .session-preview class in the renderer. */
 .chat-content-rtl .session-title,
-.chat-content-rtl .session-preview{
+.chat-content-rtl .session-meta,
+.chat-content-rtl .session-search-preview{
   /* CSS has no direction:auto -- unicode-bidi:plaintext alone makes the
    * browser derive each element's base direction from its first strong
    * character (the same algorithm dir="auto" uses), so direction here is

@@ -1544,7 +1544,11 @@ function _applyAutomaticMessageDirections(root){
       _automaticMessageDirectionObservers.set(body,observer);
     }
   }
-  const blockSelector='p,li,blockquote,h1,h2,h3,h4,h5,h6,ul,ol,table,thead,tbody,tfoot,tr,th,td';
+  // Ordinary Markdown tables are machine-oriented content (column order is
+  // meaningful and must stay stable), not free-form prose -- they belong in
+  // machineSelector below, not here. Only prose/list/heading blocks get
+  // per-element dir="auto".
+  const blockSelector='p,li,blockquote,h1,h2,h3,h4,h5,h6,ul,ol';
   const blocks=scope.matches&&scope.matches(blockSelector)?[scope]:scope.querySelectorAll(blockSelector);
   for(const block of blocks){
     if(block&&typeof block.setAttribute==='function') block.setAttribute('dir','auto');
@@ -1554,6 +1558,7 @@ function _applyAutomaticMessageDirections(root){
     '.katex','.katex-block','.katex-display','.katex-html','.katex-inline',
     '.diff-block','.csv-table-wrap','.csv-table','.skill-file-path',
     '.tool-call-group-body','.process-wakeup-body',
+    'table','thead','tbody','tfoot','tr','th','td',
   ].join(',');
   const machines=scope.matches&&scope.matches(machineSelector)?[scope]:scope.querySelectorAll(machineSelector);
   for(const node of machines){
