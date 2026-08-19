@@ -13169,7 +13169,15 @@ def handle_get(handler, parsed) -> bool:
             ):
                 raw["is_cli_session"] = False
                 raw["read_only"] = True
-            if not raw.get("read_only") and not _truncated:
+            imported_turn_marker = any(
+                isinstance(row, dict) and row.get("_active_turn_token")
+                for row in _all_msgs
+            )
+            if (
+                not raw.get("read_only")
+                and not _truncated
+                and (not raw.get("is_cli_session") or imported_turn_marker)
+            ):
                 from api.session_ops import regeneration_authority, regeneration_state
                 canonical_state = regeneration_state(s)
                 revision = regeneration_authority(

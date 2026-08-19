@@ -235,6 +235,7 @@ def test_chat_start_losing_regeneration_preserves_locked_send_winner(monkeypatch
 
     session = _session()
     session.session_id = "route-race-6611"
+    session.model_explicit_pick_signature = "before-regeneration"
     revision = plan_regeneration(session).revision
     monkeypatch.setattr(models_api, "SESSION_DIR", tmp_path)
     monkeypatch.setattr(models_api, "SESSION_INDEX_FILE", tmp_path / "_index.json")
@@ -289,6 +290,7 @@ def test_chat_start_losing_regeneration_preserves_locked_send_winner(monkeypatch
             "session_id": session.session_id,
             "regenerate": True,
             "regeneration_revision": revision,
+            "explicit_model_pick": True,
         },
     )
     assert captured["status"] == 409
@@ -298,6 +300,7 @@ def test_chat_start_losing_regeneration_preserves_locked_send_winner(monkeypatch
         session.pending_started_at,
         session.pending_user_source,
     ) == ("winner-stream", "winner prompt", 222.0, "webui")
+    assert session.model_explicit_pick_signature == "before-regeneration"
     reloaded = Session.load(session.session_id)
     assert (
         reloaded.active_stream_id,
@@ -305,6 +308,54 @@ def test_chat_start_losing_regeneration_preserves_locked_send_winner(monkeypatch
         reloaded.pending_started_at,
         reloaded.pending_user_source,
     ) == ("winner-stream", "winner prompt", 222.0, "webui")
+
+
+def test_regeneration_lock_winner_blocks_a_later_normal_send(monkeypatch):
+    from api import routes
+
+    session = _session()
+    accepted = threading.Event()
+    normal_checked = threading.Event()
+    normal_result = {}
+
+    monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda **_kwargs: None)
+    monkeypatch.setattr(routes, "_active_run_stream_for_session", lambda *_args: None)
+
+    def accepted_regeneration(value, **_kwargs):
+        value.active_stream_id = "accepted-regeneration"
+        value.pending_user_message = "regenerated prompt"
+        accepted.set()
+
+        def ordinary_send_observer():
+            with routes._get_session_agent_lock(value.session_id):
+                normal_result["active_stream_id"] = value.active_stream_id
+                normal_result["pending_user_message"] = value.pending_user_message
+                normal_checked.set()
+
+        thread = threading.Thread(target=ordinary_send_observer)
+        thread.start()
+        assert not normal_checked.wait(0.05)
+        return {"stream_id": "accepted-regeneration", "session_id": value.session_id}
+
+    monkeypatch.setattr(routes, "_start_regeneration_stream_locked", accepted_regeneration)
+    result = routes._start_chat_stream_for_session(
+        session,
+        msg="ignored",
+        attachments=[],
+        workspace="C:/workspace",
+        model="model",
+        model_provider="provider",
+        external_runtime_owned=False,
+        regeneration=SimpleNamespace(revision="revision"),
+    )
+
+    assert accepted.is_set()
+    assert result["stream_id"] == "accepted-regeneration"
+    assert normal_checked.wait(1)
+    assert normal_result == {
+        "active_stream_id": "accepted-regeneration",
+        "pending_user_message": "regenerated prompt",
+    }
 
 
 def test_prepare_mirrors_active_turn_token_to_context_before_timestamp_mutation(monkeypatch):

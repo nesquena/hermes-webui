@@ -272,13 +272,11 @@ def regeneration_authority(
     if context is not None and list(context or []) != canonical_context:
         return None
     try:
-        turn = resolve_regeneration_turn(
+        resolve_regeneration_turn(
             canonical_rows,
             session=session,
             context=canonical_context,
         )
-        if not _selected_regeneration_turn_owned(session, turn.message):
-            return None
     except RegenerationUnavailable:
         return None
     return regeneration_revision_for(

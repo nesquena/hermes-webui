@@ -31,10 +31,10 @@ def test_get_revision_consumer_delegates_imported_ownership_to_shared_authority(
     from pathlib import Path
 
     source = (Path(__file__).parents[1] / "api" / "routes.py").read_text(encoding="utf-8")
-    get_start = source.index('if not raw.get("read_only") and not _truncated:')
+    get_start = source.index("imported_turn_marker = any(")
     body = source[get_start:get_start + 900]
     assert "regeneration_authority(" in body
-    assert "not raw.get(\"is_cli_session\")" not in body
+    assert "imported_turn_marker" in body
 
 
 def test_private_active_turn_token_never_public():
@@ -142,6 +142,7 @@ def test_writable_imported_session_accepts_only_a_marked_final_user_turn(monkeyp
 def test_get_and_terminal_consumers_emit_imported_marked_revision(monkeypatch):
     from types import SimpleNamespace
     from urllib.parse import urlparse
+    from api import models as models_api
     from api import routes
     from api.process_event_utils import build_active_turn_token
 
@@ -164,6 +165,7 @@ def test_get_and_terminal_consumers_emit_imported_marked_revision(monkeypatch):
     monkeypatch.setattr(routes, "_clear_stale_stream_state", lambda *_args: None)
     monkeypatch.setattr(routes, "_session_requires_cli_metadata_lookup", lambda *_args: False)
     monkeypatch.setattr(routes, "get_state_db_session_messages", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(models_api, "get_state_db_session_messages", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(routes, "_resolve_effective_session_model_for_display", lambda *_args: None)
     monkeypatch.setattr(routes, "_resolve_effective_session_model_provider_for_display", lambda *_args: None)
     monkeypatch.setattr(routes, "j", capture)
@@ -176,6 +178,44 @@ def test_get_and_terminal_consumers_emit_imported_marked_revision(monkeypatch):
     assert captured["status"] == 200
     assert captured["data"]["session"]["regeneration_revision"] == revision
     assert _session_payload_with_full_messages(session)["regeneration_revision"] == revision
+
+
+def test_get_and_terminal_consumers_omit_imported_unowned_revision(monkeypatch):
+    from types import SimpleNamespace
+    from urllib.parse import urlparse
+    from api import models as models_api
+    from api import routes
+
+    session = _session()
+    session.session_source = "desktop"
+    session.is_cli_session = True
+    session.raw_source = "desktop"
+    session.source_tag = "desktop"
+    session.messages[-2]["_source"] = "desktop"
+    captured = {}
+
+    def capture(_handler, data, status=200, **_kwargs):
+        captured["data"] = data
+        captured["status"] = status
+
+    monkeypatch.setattr(routes, "get_session", lambda *_args, **_kwargs: session)
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *_args: True)
+    monkeypatch.setattr(routes, "_clear_stale_stream_state", lambda *_args: None)
+    monkeypatch.setattr(routes, "_session_requires_cli_metadata_lookup", lambda *_args: False)
+    monkeypatch.setattr(routes, "get_state_db_session_messages", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(models_api, "get_state_db_session_messages", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(routes, "_resolve_effective_session_model_for_display", lambda *_args: None)
+    monkeypatch.setattr(routes, "_resolve_effective_session_model_provider_for_display", lambda *_args: None)
+    monkeypatch.setattr(routes, "j", capture)
+
+    routes.handle_get(
+        SimpleNamespace(_safe_webui_print=lambda *_args: None),
+        urlparse(f"/api/session?session_id={session.session_id}&messages=1&resolve_model=0"),
+    )
+
+    assert captured["status"] == 200
+    assert "regeneration_revision" not in captured["data"]["session"]
+    assert "regeneration_revision" not in _session_payload_with_full_messages(session)
 
 
 @pytest.mark.parametrize(
@@ -199,6 +239,7 @@ def test_imported_turn_matrix_rejects_unowned_or_read_only_rows(marker, read_onl
     elif marker:
         session.messages[-2]["_active_turn_token"] = marker
     assert regeneration_authority(session) is expected
+    assert "regeneration_revision" not in _session_payload_with_full_messages(session)
 
 
 def test_fork_child_has_regeneration_authority():
