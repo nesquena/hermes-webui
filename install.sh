@@ -256,36 +256,12 @@ find_installed_agent_dir() {
 
 AGENT_DIR="$(find_installed_agent_dir || echo "")"
 
-if [ -z "$AGENT_DIR" ]; then
-    sub_info "Setting up Hermes Autonomous Agent core engine..."
-    local_script="$(mktemp "${TMPDIR:-/tmp}/hermes_agent_installer.XXXXXX")"
-    TMP_FILES+=("$local_script")
-    local download_ok=0
-    if curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh -o "$local_script"; then
-        chmod 700 "$local_script"
-        if run_with_status "Running official Hermes Agent installer" bash "$local_script"; then
-            download_ok=1
-        fi
-        rm -f "$local_script"
-    fi
-    AGENT_DIR="$(find_installed_agent_dir || echo "")"
-
-    if [ -z "$AGENT_DIR" ] && [ $download_ok -eq 0 ]; then
-        sub_warn "Official installer failed. Attempting fallback clone of Hermes Agent..."
-        if run_with_status "Cloning Hermes Agent core repo" git clone --depth 1 https://github.com/NousResearch/hermes-agent.git "$HERMES_HOME/hermes-agent"; then
-            if [ -f "$HERMES_HOME/hermes-agent/run_agent.py" ]; then
-                AGENT_DIR="$HERMES_HOME/hermes-agent"
-            fi
-        fi
-    fi
-fi
-
 if [ -n "$AGENT_DIR" ] && [ -f "$AGENT_DIR/run_agent.py" ]; then
     sub_success "Hermes Agent Connected: ${C_WHITE}${AGENT_DIR}${C_RESET}"
     AGENT_STATUS_STR="${C_GREEN}Active & Linked${C_RESET}"
 else
-    sub_warn "Hermes Agent core not detected (WebUI will run in standalone / first-run wizard mode)"
-    AGENT_STATUS_STR="${C_YELLOW}Standalone / Onboarding${C_RESET}"
+    sub_info "Hermes Agent runtime discovery will be managed by bootstrap engine"
+    AGENT_STATUS_STR="${C_SKY}Runtime Discovery${C_RESET}"
 fi
 
 # -----------------------------------------------------------------------------
