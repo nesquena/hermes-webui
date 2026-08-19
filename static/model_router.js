@@ -13,10 +13,13 @@
  *   POST /api/model-router/policy    -> merge updates into model-policy.json
  *   POST /api/model-router/failure   -> record upstream failure (cooldown)
  *
- * Model values in this UI use the WebUI's `provider/model` form (e.g.
- * `openai/gpt-5.4-mini`), while the scheduler returns `model` + `provider`
- * separately. `_mrToSelectValue` joins them so a recommendation can be
- * applied by setting `#modelSelect`.
+ * Model values in this UI use the WebUI's selector value form. The scheduler
+ * returns `model` + `provider` separately. When the recommended model is
+ * missing from `#modelSelect`, _applyRecommendation synthesizes an
+ * `@provider:model` route hint (same shape as ui.js
+ * `_ensureModelOptionInDropdown`) so the backend routes through the selected
+ * provider instead of misreading a `provider/model` slash value as an
+ * OpenRouter ID.
  */
 (function () {
   'use strict';
@@ -37,8 +40,37 @@
 
   function _mrToSelectValue(rec) {
     if (!rec || !rec.model) return '';
-    if (rec.provider) return rec.provider + '/' + rec.model;
-    return rec.model;
+    const model = String(rec.model).trim();
+    const provider = String(rec.provider || '').trim();
+    if (!provider) return model;
+    const explicitPrefix = '@' + provider + ':';
+    // 已带 @provider: 前缀的模型直接沿用，避免二次包裹。
+    if (model.toLowerCase().startsWith(explicitPrefix.toLowerCase())) return model;
+    return explicitPrefix + model;
+  }
+
+  // 在现有 <select> 中按 model + provider 精确匹配，避免把 OpenRouter
+  // 组里同名的 `openai/gpt-...` 斜杠项误选为直连 OpenAI 的推荐。
+  function _mrFindOption(sel, rec) {
+    const model = String(rec.model || '').trim();
+    const provider = String(rec.provider || '').trim();
+    if (!model) return '';
+    const injected = _mrToSelectValue(rec);
+    const legacy = provider ? provider + '/' + model : model;
+    for (let i = 0; i < sel.options.length; i++) {
+      const opt = sel.options[i];
+      const value = String(opt.value || '');
+      if (value !== injected && value !== legacy && value !== model) continue;
+      const optProvider = String(
+        (typeof _getOptionProviderId === 'function' ? _getOptionProviderId(opt) : '') || ''
+      ).trim();
+      // 选项有明确 provider 归属时必须与推荐一致；静态兜底选项没有
+      // data-provider，保留旧的 provider/model 值匹配行为。
+      if (optProvider && provider && optProvider.toLowerCase() !== provider.toLowerCase()) continue;
+      if (provider && !optProvider && value !== legacy && value !== model) continue;
+      return value;
+    }
+    return '';
   }
 
   function _currentSessionId() {
@@ -55,20 +87,24 @@
     if (!rec || !rec.model) return false;
     const sel = _el('modelSelect');
     if (!sel) return false;
-    const target = _mrToSelectValue(rec);
-    if (!target) return false;
-    // Build option list if the recommended model isn't present yet (e.g. the
-    // scheduler profile lists models the current provider dropdown lacks).
-    let exists = false;
-    for (let i = 0; i < sel.options.length; i++) {
-      if (sel.options[i].value === target) { exists = true; break; }
-    }
-    if (!exists) {
+    const model = String(rec.model || '').trim();
+    const provider = String(rec.provider || '').trim();
+    if (!model) return false;
+    // 优先选择目录中已存在且 provider 归属一致的选项（例如 active provider
+    // 的裸 model 选项，或非 active provider 的 @provider:model 选项）。
+    let target = _mrFindOption(sel, rec);
+    if (!target) {
+      // 目录里没有该模型：合成 @provider:model 路由提示项，与 ui.js
+      // _ensureModelOptionInDropdown 完全一致。不能用 provider/model 斜杠值——
+      // 当配置 provider 为 openai-codex 时，后端会把 openai/gpt-... 当成
+      // OpenRouter 标识（Greptile P1）。
       const opt = document.createElement('option');
+      target = _mrToSelectValue(rec);
       opt.value = target;
-      opt.dataset.model = rec.model || '';
-      if (rec.provider) opt.dataset.provider = rec.provider;
-      opt.textContent = (rec.provider ? rec.provider + ' ' : '') + rec.model;
+      opt.dataset.model = model;
+      if (provider) opt.dataset.provider = provider;
+      opt.dataset.custom = '1';
+      opt.textContent = (provider ? provider + ' ' : '') + model;
       sel.appendChild(opt);
     }
     if (sel.value !== target) {
