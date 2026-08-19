@@ -8,8 +8,6 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-import pytest
-
 ROOT = Path(__file__).resolve().parents[1]
 SW_JS = (ROOT / "static" / "sw.js").read_text(encoding="utf-8")
 NODE = shutil.which("node")
@@ -17,7 +15,7 @@ NODE = shutil.which("node")
 
 def _run_node(script: str) -> dict:
     if NODE is None:
-        pytest.skip("node executable is required for service-worker presentation checks")
+        raise AssertionError("node executable is required for service-worker presentation checks")
     with tempfile.NamedTemporaryFile("w", suffix=".js", encoding="utf-8", delete=False) as handle:
         handle.write(script)
         script_path = Path(handle.name)

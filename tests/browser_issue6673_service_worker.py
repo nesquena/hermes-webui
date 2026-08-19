@@ -63,34 +63,53 @@ def _records(page):
     return page.evaluate("""async () => (await (await navigator.serviceWorker.ready).getNotifications({tag:'hermes-session-6673'})).map(n => ({id:n.data.eventId, tag:n.tag, renotify:n.renotify, url:n.data.url}))""")
 
 
-def _observe_fallback_notifications(page) -> None:
+def _observe_fallback_notifications(page, *, disable_constructor: bool = False, disable_worker_channel: bool = False, reject_first_registration: bool = False) -> None:
     page.evaluate("""
-      async () => {
+      async ({disableConstructor, disableWorkerChannel, rejectFirstRegistration}) => {
         const NativeNotification = window.Notification;
         let directCount = 0;
         function ObservedNotification(...args) {
           directCount += 1;
           window.__issue6673DirectCount = directCount;
+          if (disableConstructor) throw new TypeError('page constructor unavailable');
           return new NativeNotification(...args);
         }
         Object.setPrototypeOf(ObservedNotification, NativeNotification);
         ObservedNotification.prototype = NativeNotification.prototype;
         window.Notification = ObservedNotification;
+        if (disableWorkerChannel) window.MessageChannel = undefined;
+        window.__issue6673RegistrationShowIds = [];
+        window.__issue6673RegistrationDisplayedIds = [];
+        window.__issue6673RegistrationShowErrors = [];
         const registration = await navigator.serviceWorker.getRegistration();
         if (registration) {
-          const nativeShowNotification = registration.showNotification.bind(registration);
+          const nativeShowNotification = registration.__issue6673NativeShowNotification || registration.showNotification.bind(registration);
+          registration.__issue6673NativeShowNotification = nativeShowNotification;
           let registrationShowCount = 0;
           registration.showNotification = (...args) => {
             registrationShowCount += 1;
             window.__issue6673RegistrationShowCount = registrationShowCount;
-            return nativeShowNotification(...args);
+            window.__issue6673RegistrationShowIds.push(args[1]?.data?.eventId || null);
+            if (rejectFirstRegistration && registrationShowCount === 1) {
+              window.__issue6673TransitionRegistration?.update?.().catch(() => {});
+              const error = new Error('forced transition presentation rejection');
+              window.__issue6673RegistrationShowErrors.push({id: args[1]?.data?.eventId || null, error: String(error)});
+              return Promise.reject(error);
+            }
+            return Promise.resolve(nativeShowNotification(...args)).then(async result => {
+              const displayed = await registration.getNotifications({tag: args[1]?.tag});
+              window.__issue6673RegistrationDisplayedIds.push(...displayed.map(item => item?.data?.eventId || null));
+              return result;
+            }).catch(error => {
+              window.__issue6673RegistrationShowErrors.push({id: args[1]?.data?.eventId || null, error: String(error)});
+              throw error;
+            });
           };
         }
         window.__issue6673DirectCount = 0;
         window.__issue6673RegistrationShowCount = 0;
-        window.__issue6673FallbackCount = 0;
       }
-    """)
+    """, {"disableConstructor": disable_constructor, "disableWorkerChannel": disable_worker_channel, "rejectFirstRegistration": reject_first_registration})
 
 
 def _listen(page) -> None:
@@ -119,8 +138,15 @@ def _listen(page) -> None:
     page.wait_for_function("() => Boolean(window.__issue6673Source?.listeners?.has('approval'))", timeout=15000)
 
 
-def _fallback_count(pages):
-    return sum(page.evaluate("() => window.__issue6673DirectCount + window.__issue6673RegistrationShowCount") for page in pages)
+def _counts(pages):
+    return {
+        "direct": sum(page.evaluate("() => window.__issue6673DirectCount") for page in pages),
+        "registration": sum(page.evaluate("() => window.__issue6673RegistrationShowCount") for page in pages),
+    }
+
+
+def _wait_for_activity(page, delay: int = 1200) -> None:
+    page.wait_for_timeout(delay)
 
 
 def main() -> int:
@@ -130,88 +156,173 @@ def main() -> int:
         print("UNREACHED: playwright is unavailable; browser-service-worker owner proof requires exit 2", file=sys.stderr)
         return 2
     root = Path(__file__).resolve().parents[1]
+    legacy_source = (root / "tests" / "fixtures" / "issue6673_legacy_sw.js").read_text(encoding="utf-8")
     temp = tempfile.TemporaryDirectory(prefix="hermes-6673-browser-", ignore_cleanup_errors=True)
     state = Path(temp.name)
     process = browser = playwright = None
+    blocked_context = legacy_context = None
     try:
         process = _serve(root, state)
         if not _health():
-            print("UNREACHED: served WebUI health check failed", file=sys.stderr)
+            print(json.dumps({"status": "unreached", "reason": "served WebUI health check failed"}))
             return 2
         playwright = sync_playwright().start()
         browser = playwright.chromium.launch(channel="chromium", headless=True, args=["--no-sandbox", "--disable-dev-shm-usage", f"--unsafely-treat-insecure-origin-as-secure={BROWSER_BASE}"])
-        context = browser.new_context(base_url=BROWSER_BASE, permissions=["notifications"], service_workers="block")
-        context.grant_permissions(["notifications"], origin=BROWSER_BASE)
-        page_a = context.new_page()
-        page_b = context.new_page()
-        for page in (page_a, page_b):
-            page.goto("/", wait_until="domcontentloaded")
-            context.grant_permissions(["notifications"], origin=BROWSER_BASE)
-        permission = page_a.evaluate("() => Notification.permission")
+        blocked_context = browser.new_context(base_url=BROWSER_BASE, permissions=["notifications"], service_workers="block")
+        blocked_context.grant_permissions(["notifications"], origin=BROWSER_BASE)
+        blocked_page = blocked_context.new_page()
+        blocked_page.goto("/", wait_until="domcontentloaded")
+        permission = blocked_page.evaluate("() => Notification.permission")
         if permission != "granted":
-            print(json.dumps({"status":"unreached", "reason":"headless Notification permission is not granted", "permission":permission}))
+            print(json.dumps({"status": "unreached", "reason": "headless Notification permission is not granted", "permission": permission}))
             return 2
-        pages = (page_a, page_b)
-        for page in pages:
-            _observe_fallback_notifications(page)
-            _listen(page)
-        _emit(page_a, "stream-6673:1")
-        page_a.wait_for_function("() => window.__issue6673DirectCount + window.__issue6673RegistrationShowCount >= 1", timeout=10000)
-        fallback_before_no_id = _fallback_count(pages)
-        _emit(page_b, "stream-6673:1")
-        page_b.wait_for_timeout(2500)
-        if _fallback_count(pages) != fallback_before_no_id:
-            raise AssertionError({"same_event_page_owner": _fallback_count(pages), "before": fallback_before_no_id})
-        _emit(page_a, "stream-6673:2")
-        page_a.wait_for_function("count => window.__issue6673DirectCount + window.__issue6673RegistrationShowCount > count", arg=fallback_before_no_id, timeout=10000)
-        next_count = _fallback_count(pages)
-        if next_count != fallback_before_no_id + 1:
-            raise AssertionError({"next_event_page_owner": next_count, "before": fallback_before_no_id})
-        _emit(page_a, None)
-        page_a.wait_for_function("count => window.__issue6673DirectCount + window.__issue6673RegistrationShowCount > count", arg=next_count, timeout=10000)
-        if page_a.evaluate("() => window.__issue6673IdentityObservations.at(-1)") is not None:
-            raise AssertionError(page_a.evaluate("() => window.__issue6673IdentityObservations"))
-        context.close()
-        context = browser.new_context(base_url=BROWSER_BASE, permissions=["notifications"])
-        context.grant_permissions(["notifications"], origin=BROWSER_BASE)
-        page_a = context.new_page()
-        page_b = context.new_page()
+        _observe_fallback_notifications(blocked_page)
+        _listen(blocked_page)
+        _emit(blocked_page, "stream-6673:constructor-only")
+        _wait_for_activity(blocked_page)
+        constructor_only = _counts((blocked_page,))
+        if constructor_only["direct"] < 1:
+            raise AssertionError({"constructor_only": constructor_only})
+        blocked_context.close()
+        blocked_context = None
+
+        legacy_context = browser.new_context(base_url=BROWSER_BASE, permissions=["notifications"])
+        legacy_context.grant_permissions(["notifications"], origin=BROWSER_BASE)
+        legacy_context.route("**/sw.js*", lambda route: route.fulfill(status=200, content_type="application/javascript", body=legacy_source))
+        page_a = legacy_context.new_page()
+        page_b = legacy_context.new_page()
         for page in (page_a, page_b):
             page.goto("/", wait_until="domcontentloaded")
-            page.wait_for_function("async () => Boolean((await navigator.serviceWorker.ready).active && navigator.serviceWorker.controller)", timeout=15000)
+            page.wait_for_function("async () => Boolean((await navigator.serviceWorker.ready).active)", timeout=15000)
+            _observe_fallback_notifications(page, disable_constructor=True, disable_worker_channel=True)
+            _listen(page)
+
+        _emit(page_a, "stream-6673:registration-only")
+        _wait_for_activity(page_a)
+        registration_only = {**_counts((page_a,)), "records": _records(page_a)}
+        if not any(record["id"] == "stream-6673:registration-only" for record in registration_only["records"]):
+            raise AssertionError({"registration_only": registration_only})
+        degraded_before = _counts((page_a, page_b))
+        _emit(page_a, "stream-6673:degraded-two-tab")
+        _emit(page_b, "stream-6673:degraded-two-tab")
+        _wait_for_activity(page_a)
+        _wait_for_activity(page_b, 100)
+        degraded_after = _counts((page_a, page_b))
+        degraded_two_tab = {
+            "direct": degraded_after["direct"] - degraded_before["direct"],
+            "registration": degraded_after["registration"] - degraded_before["registration"],
+            "records": _records(page_a),
+        }
+        if degraded_two_tab["direct"] + degraded_two_tab["registration"] != 1:
+            raise AssertionError({"degraded_two_tab": degraded_two_tab})
+        if not any(record["id"] == "stream-6673:degraded-two-tab" for record in degraded_two_tab["records"]):
+            raise AssertionError({"degraded_two_tab": degraded_two_tab})
+        databases = page_a.evaluate("async () => (await indexedDB.databases()).map(item => item.name).filter(Boolean)")
+        source = page_a.evaluate("async () => await (await fetch('/static/messages.js')).text()")
+        registration = page_a.evaluate("""async () => {
+          const old = await navigator.serviceWorker.getRegistration();
+          await old.unregister();
+          const version = encodeURIComponent(window.__HERMES_WEBUI_BUNDLE_VERSION__ || 'test');
+          const current = await navigator.serviceWorker.register('/sw.js?v=' + version + '&issue6673_current=1');
+          await navigator.serviceWorker.ready;
+          window.__issue6673TransitionRegistration = current;
+          return {scriptURL: current.active?.scriptURL || '', state: current.active?.state || ''};
+        }""")
+        legacy_context.unroute("**/sw.js*")
+        _observe_fallback_notifications(page_a, disable_constructor=True, disable_worker_channel=True, reject_first_registration=True)
+        page_a.evaluate("""async () => {
+          const payload = JSON.stringify({description:'Approve the tool call.', session_id:'session-6673'});
+          window.__issue6673Source.emit('approval', payload, 'stream-6673:activation-transition');
+          return true;
+        }""")
+        page_a.wait_for_timeout(3000)
+        page_a.wait_for_function("""() => navigator.serviceWorker.getRegistration().then(reg => Boolean(
+          reg && reg.active && reg.active.state === 'activated' &&
+          reg.active.scriptURL.includes('/sw.js?v=') &&
+          reg.active.scriptURL.includes('issue6673_current=1')
+        ))""", timeout=15000)
+        registration = page_a.evaluate("""async () => {
+          const current = await navigator.serviceWorker.getRegistration();
+          return {scriptURL: current?.active?.scriptURL || '', state: current?.active?.state || ''};
+        }""")
+        activation_transition = {
+            "records": page_a.evaluate("() => window.__issue6673RegistrationDisplayedIds.filter(id => id === 'stream-6673:activation-transition').map(id => ({id}))"),
+            "registrationIds": page_a.evaluate("() => window.__issue6673RegistrationShowIds"),
+        }
+        if not any(record["id"] == "stream-6673:activation-transition" for record in activation_transition["records"]):
+            raise AssertionError({"activation_transition": activation_transition, "counts": _counts((page_a,)), "identities": page_a.evaluate("() => window.__issue6673IdentityObservations"), "errors": page_a.evaluate("() => window.__issue6673RegistrationShowErrors")})
+        page_a.close()
+        page_b.close()
+        page_a = legacy_context.new_page()
+        page_b = legacy_context.new_page()
+        for page in (page_a, page_b):
+            page.goto("/", wait_until="domcontentloaded")
+            page.wait_for_function("async () => Boolean((await navigator.serviceWorker.ready).active && navigator.serviceWorker.controller && navigator.serviceWorker.controller.scriptURL.includes('issue6673_current'))", timeout=15000)
             _observe_fallback_notifications(page)
             _listen(page)
-        _emit(page_a, "stream-6673:3")
-        _emit(page_b, "stream-6673:3")
-        page_a.wait_for_function("async () => (await (await navigator.serviceWorker.ready).getNotifications({tag:'hermes-session-6673'})).some(n => n.data && n.data.eventId === 'stream-6673:3')", timeout=10000)
+        page_a.wait_for_timeout(500)
+        _emit(page_a, "stream-6673:capable-same")
+        _emit(page_b, "stream-6673:capable-same")
+        page_a.wait_for_function("async () => (await (await navigator.serviceWorker.ready).getNotifications({tag:'hermes-session-6673'})).some(n => n.data && n.data.eventId === 'stream-6673:capable-same')", timeout=10000)
         same_event_records = _records(page_a)
-        if [record["id"] for record in same_event_records if record.get("id") == "stream-6673:3"] != ["stream-6673:3"]:
-            raise AssertionError(same_event_records)
-        _emit(page_a, "stream-6673:4")
-        page_a.wait_for_function("async () => (await (await navigator.serviceWorker.ready).getNotifications({tag:'hermes-session-6673'})).some(n => n.data && n.data.eventId === 'stream-6673:4')", timeout=10000)
+        same_event_ids = [record["id"] for record in same_event_records if record.get("id") == "stream-6673:capable-same"]
+        if same_event_ids != ["stream-6673:capable-same"]:
+            raise AssertionError({"capable_same_event": same_event_records})
         page_a.wait_for_timeout(1000)
+        _emit(page_a, "stream-6673:capable-next")
+        page_a.wait_for_timeout(2000)
         records = _records(page_a)
-        source = page_a.evaluate("""async () => await (await fetch('/static/messages.js')).text()""")
-        if "_NOTIFICATION_OWNER_STORE='event-identities'" not in source:
-            raise AssertionError("served notification path is missing the page owner store")
-        if not any(record["id"] == "stream-6673:4" and record["renotify"] for record in records):
-            raise AssertionError(records)
+        if not any(record["id"] == "stream-6673:capable-next" for record in records):
+            raise AssertionError({"next_event": records, "observations": page_a.evaluate("() => window.__issue6673IdentityObservations"), "counts": _counts((page_a, page_b))})
+        if not any(record["id"] == "stream-6673:capable-next" and record["renotify"] for record in records):
+            raise AssertionError({"next_event": records})
         if not all(record["url"].startswith(BROWSER_BASE + "/") for record in records):
-            raise AssertionError(records)
-        print(json.dumps({"status":"passed", "permission":permission, "records":records}))
+            raise AssertionError({"click_data": records})
+        if "indexedDB.open(" not in source or "hermes-notification-failures" not in source:
+            raise AssertionError({"served_source": "page notification owner is absent"})
+        remaining_databases = page_a.evaluate("async () => (await indexedDB.databases()).map(item => item.name).filter(Boolean)")
+        if "hermes-notifications" not in remaining_databases:
+            raise AssertionError({"served_databases": remaining_databases})
+        if not registration or "sw.js?v=" not in registration["scriptURL"] or "issue6673_current=1" not in registration["scriptURL"] or registration["state"] != "activated":
+            raise AssertionError({"updated_registration": registration})
+        if registration_only["registration"] < 1:
+            raise AssertionError({"registration_only": registration_only})
+        if degraded_two_tab["registration"] != 1 or degraded_two_tab["direct"] != 0:
+            raise AssertionError({"degraded_two_tab": degraded_two_tab})
+        result = {
+            "status": "passed",
+            "permission": permission,
+            "constructor_only": constructor_only,
+            "registration_only": registration_only,
+            "degraded_two_tab": degraded_two_tab,
+            "activation_transition": activation_transition,
+            "databases_before_rebuild": databases,
+            "records": records,
+        }
+        print(json.dumps(result))
         return 0
     except Exception as error:
         print(f"REALITY GATE FAILED: {error}", file=sys.stderr)
         return 1
     finally:
-        if browser is not None: browser.close()
-        if playwright is not None: playwright.stop()
+        if legacy_context is not None:
+            legacy_context.close()
+        if blocked_context is not None:
+            blocked_context.close()
+        if browser is not None:
+            browser.close()
+        if playwright is not None:
+            playwright.stop()
         if process is not None:
             process.terminate()
-            try: process.wait(timeout=5)
-            except subprocess.TimeoutExpired: process.kill(); process.wait(timeout=5)
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
             log = getattr(process, "_hermes_log", None)
-            if log is not None: log.close()
+            if log is not None:
+                log.close()
         temp.cleanup()
 
 

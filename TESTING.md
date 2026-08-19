@@ -96,17 +96,22 @@ that breaks the page for everyone).
 `tests/browser_issue6673_service_worker.py` serves the real build, exercises a
 handler-less worker update window, and uses two controlled pages. The pages invoke
 the production `attachLiveStream()` listener with a boundary EventSource, so the
-gate covers listener, sender, versioned worker presenter, displayed-record lookup,
-and click-data composition. During the legacy-worker window, submit one canonical
-event from both pages and require one page-owner delivery, then submit the next
-identity and require one additional delivery. The page owner records `pending`
-before construction and `delivered` after success, releases on constructor
-failure, expires pending ownership, and fails closed on storage ambiguity. A
-worker timeout or lost reply reconciles the exact displayed tag and event id
-before page fallback. The focused presenter protocol test covers worker display
-rejection and retry. Journal-less frames carry no durable SSE id;
-notification-producing payloads use a bounded delivery-only identity so
-controlled pages can coordinate without advancing replay state.
+gate covers listener, sender, worker presenter, displayed-record lookup, and
+click-data composition. It checks registration-only delivery with the page
+constructor unavailable, constructor-only delivery with service workers blocked,
+worker activation, exact same-event suppression, distinct-event re-alert with
+`renotify:true`, degraded two-tab delivery, and the page owner claim. Degraded
+two-tab delivery must produce exactly one registration display; zero or
+duplicate delivery fails the gate. A forced registration rejection during a
+worker transition must retry through the newly activated registration. Journal-less frames carry no durable SSE id;
+notification-producing payloads use a bounded delivery-only identity without
+advancing replay state.
+
+The browser owns the native display boundary. The page claim prevents two
+degraded tabs from both starting an eligible display, while `displaying` keeps
+settlement uncertainty fail closed. The worker suppresses only an exact event
+id in the browser's currently displayed records; all other eligible fallback
+displays use the registration-first presenter.
 
 ```bash
 python tests/browser_issue6673_service_worker.py

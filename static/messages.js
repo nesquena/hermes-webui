@@ -9163,6 +9163,36 @@ function _isValidNotificationIdentity(identity){
     typeof identity.lastEventId==='string'&&identity.lastEventId.length>0&&
     identity.lastEventId.length<=_NOTIFICATION_IDENTITY_MAX_LENGTH;
 }
+function _registrationAfterNotificationTransition(previous){
+  if(!navigator.serviceWorker||typeof navigator.serviceWorker.getRegistration!=='function') return Promise.resolve(null);
+  const previousActive=previous&&previous.active?previous.active:previous;
+  return new Promise(resolve=>{
+    const deadline=Date.now()+2000;
+    const check=()=>{
+      const remaining=deadline-Date.now();
+      if(remaining<=0){resolve(null);return;}
+      let lookup;
+      try{lookup=Promise.resolve(navigator.serviceWorker.getRegistration());}catch(_error){resolve(null);return;}
+      Promise.race([lookup,new Promise(done=>setTimeout(()=>done(null),remaining))]).then(next=>{
+        if(next&&next.active&&next.active!==previousActive&&next.active.state==='activated'&&!next.installing&&!next.waiting){resolve(next);return;}
+        if(Date.now()>=deadline){resolve(null);return;}
+        setTimeout(check,Math.min(50,Math.max(1,deadline-Date.now())));
+      },()=>resolve(null));
+    };
+    check();
+  });
+}
+function _presentNotificationLocally(reg,title,opts){
+  if(reg&&typeof reg.showNotification==='function'){
+    const attemptedActive=reg.active;
+    return Promise.resolve().then(()=>reg.showNotification(title,opts)).then(()=> 'shown').catch(error=>{
+      return _registrationAfterNotificationTransition(attemptedActive).then(next=>next
+        ? _presentNotificationLocally(next,title,opts)
+        : Promise.reject(error));
+    });
+  }
+  return Promise.resolve().then(()=>new Notification(title,opts)).then(()=> 'shown');
+}
 function _presentNotification(active,title,opts,identity){
   if(typeof window.MessageChannel!=='function') return Promise.resolve('unavailable');
   return new Promise(resolve=>{
@@ -9339,7 +9369,7 @@ function _reconcileWorkerTimeout(active,reg,opts,identity,title,body){
     return _workerSupportsNotificationPresentation(active).then(capable=>
       capable===false?_deliverPageNotification(title,body,opts,identity,reg):'ambiguous'
     );
-  }).catch(()=> 'ambiguous');
+  });
 }
 function _deliverPageNotification(title,body,opts,identity,reg){
   return _displayedNotificationMatches(reg,opts,identity).then(displayed=>{
@@ -9348,13 +9378,12 @@ function _deliverPageNotification(title,body,opts,identity,reg){
       if(claim.status!=='claimed')return claim.status;
       return _markPageNotificationDisplaying(identity,claim.token).then(marked=>{
         if(!marked)return 'ambiguous';
-        try{
-          const notification=new Notification(title,opts);
-          return _settlePageNotification(identity,claim.token,'delivered').then(ok=>ok?'shown':'ambiguous');
-        }catch(error){
+        return _presentNotificationLocally(reg,title,opts).then(()=>
+          _settlePageNotification(identity,claim.token,'delivered').then(ok=>ok?'shown':'ambiguous')
+        ).catch(error=>{
           _recordFailedPageNotification(identity,claim.token);
           return _releasePageNotification(identity,claim.token).then(()=>{throw error;});
-        }
+        });
       });
     });
   }).catch(error=>{
@@ -9365,13 +9394,10 @@ function _deliverPageNotification(title,body,opts,identity,reg){
 function _showPwaNotification(title,body,options={}){
   const botName=assistantDisplayName();
   const opts=_notificationOptions(body,options);
-  const direct=()=>new Notification(title||botName,opts);
+  const present=reg=>_presentNotificationLocally(reg,title||botName,opts);
   const identityBearing=_hasNotificationIdentity(options);
   const identity=options&&options.eventIdentity;
-  const deliverDirect=reg=>identityBearing
-    ? _deliverPageNotification(title||botName,body,opts,identity,reg)
-    : (()=>{try{return Promise.resolve(direct());}catch(error){return Promise.reject(error);}})();
-  if(identityBearing&&!_isValidNotificationIdentity(identity)) return direct();
+  const deliverPage=reg=>_deliverPageNotification(title||botName,body,opts,identity,reg);
   // Prefer the service worker (the only path that works in a standalone PWA,
   // notably iOS). Use getRegistration() + a short timeout race rather than
   // navigator.serviceWorker.ready, because `.ready` NEVER settles when no
@@ -9382,23 +9408,22 @@ function _showPwaNotification(title,body,options={}){
     const reg$=Promise.race([
       navigator.serviceWorker.getRegistration().catch(()=>null),
       new Promise(res=>setTimeout(()=>res(null),2000))
-      ]);
+      ]).catch(()=>null);
     return reg$.then(reg=>{
+      if(identityBearing&&!_isValidNotificationIdentity(identity)) return present(reg&&reg.active?reg:null);
       if(identityBearing){
-        if(!reg||!reg.active)return deliverDirect(null);
+        if(!reg||!reg.active)return deliverPage(null);
         return _presentNotification(reg.active,title||botName,opts,identity).then(status=>
           status==='shown'||status==='duplicate'?status:
             status==='ambiguous'
               ? _reconcileWorkerTimeout(reg.active,reg,opts,identity,title||botName,body)
-              : _deliverPageNotification(title||botName,body,opts,identity,reg)
+              : deliverPage(reg)
         );
       }
-      return (reg&&reg.active&&reg.showNotification)
-        ? reg.showNotification(title||botName,opts)
-        : direct();
-    }).catch(()=>identityBearing?deliverDirect(null):direct());
+      return present(reg);
+    });
   }
-  return identityBearing?deliverDirect(null):Promise.resolve(direct());
+  return identityBearing&&_isValidNotificationIdentity(identity)?deliverPage(null):present(null);
 }
 function requestNotificationPermission(){
   if(!('Notification' in window)){
@@ -9434,12 +9459,15 @@ function sendBrowserNotification(title,body,options={}){
   const forceHidden=!!(options&&options.forceHidden);
   if(!force&&!window._notificationsEnabled) return;
   if(!force&&!forceHidden&&!_isBackgroundedForBrowserNotification()) return;
-  if(!('Notification' in window)) return;
+  if(!('Notification' in window)){
+    if(!identityBearing)return;
+    return Promise.resolve(_showPwaNotification(title,body,options)).catch(()=> 'ambiguous');
+  }
   if(Notification.permission==='granted'){
     const delivery=_showPwaNotification(title,body,options);
     return identityBearing
       ? Promise.resolve(delivery).catch(()=> 'ambiguous')
-      : delivery.catch(()=>{try{new Notification(title||assistantDisplayName(),_notificationOptions(body,options));}catch(_err){}});
+      : delivery.catch(()=>{_presentNotificationLocally(null,title||assistantDisplayName(),_notificationOptions(body,options)).catch(()=>{});});
   }else if(Notification.permission==='denied'){
     // Explicit "Send test" (force) deserves feedback instead of a silent no-op.
     if(force&&typeof showToast==='function') showToast(t('notifications_denied'),3500,'error');
@@ -9447,9 +9475,9 @@ function sendBrowserNotification(title,body,options={}){
     return requestNotificationPermission().then(p=>{
       if(p!=='granted')return;
       const delivery=_showPwaNotification(title,body,options);
-      return identityBearing
-        ? Promise.resolve(delivery).catch(()=> 'ambiguous')
-        : delivery.catch(()=>{try{new Notification(title||assistantDisplayName(),_notificationOptions(body,options));}catch(_err){}});
+        return identityBearing
+          ? Promise.resolve(delivery).catch(()=> 'ambiguous')
+          : delivery.catch(()=>{_presentNotificationLocally(null,title||assistantDisplayName(),_notificationOptions(body,options)).catch(()=>{});});
     });
   }
 }

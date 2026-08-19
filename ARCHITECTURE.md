@@ -109,8 +109,8 @@ Browser notification ownership:
                         notification identity when journal persistence fails.
     api/gateway_chat.py Mirrors the streaming delivery-only identity contract.
     static/messages.js  Owns eligibility, canonical or delivery-only identity
-                        capture, payload construction, and the shared page owner
-                        used by registration/direct delivery fallback.
+                        capture, payload construction, and the registration-first
+                        page presentation router.
     static/sw.js        Owns displayed-record duplicate suppression for the
                         versioned presentation protocol.
 
@@ -120,19 +120,24 @@ sequence id. Journal-less notification payloads carry a bounded
 `notification_event_id` for cross-tab coordination; it never becomes the SSE id
 or replay cursor. The worker queries browser-owned displayed records for the
 same tag and exact event id, then calls `showNotification()` only when no exact
-displayed duplicate exists. When worker coordination is unavailable or its reply
-is lost, the page reconciles that exact displayed record before entering its
-origin-shared owner. The page owner stores `pending` and `delivered` records
-keyed by the same tuple, with an owner token and bounded pending expiry. A
-successful constructor commits `delivered`; a constructor failure releases the
-matching pending record. When no capable worker exists, genuinely unopenable
-owner storage before any ownership decision permits exactly one direct native
-constructor attempt. Blocked or upgraded opens, transactions, record ownership,
-token checks, displayed-record lookup, settlement, release, and persistence
-uncertainty fail closed and do not call the native constructor. Journal-less
-frames carry no durable SSE id. Unkeyed manual notifications retain the existing
-service-worker-first path and direct fallback. Notification click routing
-remains owned by the existing `notificationclick` handler.
+displayed duplicate exists. The page then reads the same browser-owned records
+when worker coordination is unavailable, nonterminal, or delayed. An exact
+displayed event id returns `duplicate`; every other result uses one local
+presentation primitive that calls `registration.showNotification()` when the
+registration is callable and otherwise calls `new Notification()`. Unkeyed
+manual notifications use the same registration-first primitive without identity
+deduplication. Journal-less frames carry no durable SSE id. Notification click
+routing remains owned by the existing `notificationclick` handler.
+
+The page uses a small IndexedDB owner record only for the degraded path where a
+service worker cannot conclusively present the event. A claim is marked
+`displaying` before the registration-first presentation, becomes `delivered`
+after success, and stays fail closed when storage or displayed-record lookup is
+ambiguous. Confirmed presentation failure releases the claim so another page
+can retry. Missing owner storage is the only proven-unavailable case that uses
+one direct constructor attempt. The worker's displayed-record lookup remains
+the primary duplicate authority, and permission, visibility, and
+notification-enabled gates still run before this router.
 
 State directory (runtime data, separate from source):
 

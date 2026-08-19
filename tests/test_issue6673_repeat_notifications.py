@@ -15,6 +15,19 @@ ROUTES_PY = (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
 SW_JS = (ROOT / "static" / "sw.js").read_text(encoding="utf-8")
 
 
+def _notification_region() -> str:
+    return MESSAGES_JS[MESSAGES_JS.index("function _notificationOptions"):MESSAGES_JS.index("// ── /btw ephemeral stream")]
+
+
+def _run_node(script: str) -> dict:
+    node = shutil.which("node")
+    if node is None:
+        return {}
+    result = subprocess.run([node, "-e", script], cwd=ROOT, text=True, capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
 def test_identity_capture_uses_only_canonical_journal_ids():
     capture = extract_function(MESSAGES_JS, "_captureNotificationEventIdentity")
     assert "return null" in capture
@@ -24,9 +37,6 @@ def test_identity_capture_uses_only_canonical_journal_ids():
 
 
 def test_identity_capture_preserves_opaque_event_id_bytes():
-    node = shutil.which("node")
-    if node is None:
-        return
     capture = extract_function(MESSAGES_JS, "_captureNotificationEventIdentity")
     script = f"""
 const _NOTIFICATION_IDENTITY_MAX_LENGTH = 512;
@@ -36,48 +46,173 @@ console.log(JSON.stringify({{
   delivery: capture('stream-6673', {{lastEventId:''}}, {{notification_event_id:'stream-6673:delivery:1'}}),
 }}));
 """
-    result = subprocess.run([node, "-e", script], cwd=ROOT, text=True, capture_output=True, check=False)
-    assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout) == {
+    assert _run_node(script) == {
         "raw": {"streamId": "stream-6673", "lastEventId": " opaque-event "},
         "delivery": {"streamId": "stream-6673", "lastEventId": "stream-6673:delivery:1"},
     }
 
 
-def test_page_notification_path_has_shared_owner_and_keeps_delivery_fallback():
-    assert "sw.js?v=__WEBUI_VERSION__&notification_protocol=1" in INDEX_HTML
+def test_transition_registration_lookup_is_deadline_bounded():
+    helper = extract_function(MESSAGES_JS, "_registrationAfterNotificationTransition")
+    script = f"""
+const _registrationAfterNotificationTransition = {helper};
+const navigator = {{serviceWorker: {{getRegistration: () => new Promise(() => {{}})}}}};
+const started = Date.now();
+_registrationAfterNotificationTransition({{state:'activated'}}).then(value =>
+  console.log(JSON.stringify({{value, elapsed: Date.now() - started}}))
+);
+"""
+    result = _run_node(script)
+    assert result["value"] is None
+    assert 1900 <= result["elapsed"] < 2500
+
+
+def test_registration_first_presenter_covers_rows_one_through_twenty_nine():
+    identity = {"streamId": "stream-6673", "lastEventId": "stream-6673:1"}
+    cases = [
+        {"name": "1-exact-duplicate", "worker": "duplicate", "records": [identity], "expected": "duplicate", "registration": 0, "direct": 0},
+        {"name": "2-worker-shown", "worker": "shown", "expected": "shown", "registration": 0, "direct": 0},
+        {"name": "3-worker-invalid-registration", "worker": "invalid", "expected": "shown", "registration": 1, "direct": 0},
+        {"name": "4-worker-invalid-constructor", "worker": "invalid", "registrationAvailable": False, "expected": "shown", "registration": 0, "direct": 1},
+        {"name": "5-nonterminal-exact", "worker": "invalid", "records": [identity], "expected": "duplicate", "registration": 0, "direct": 0},
+        {"name": "6-timeout-exact", "worker": "timeout", "records": [identity], "expected": "duplicate", "registration": 0, "direct": 0},
+        {"name": "7-timeout-registration", "worker": "timeout", "expected": "shown", "registration": 1, "direct": 0},
+        {"name": "8-timeout-constructor", "worker": "timeout", "registrationAvailable": False, "expected": "shown", "registration": 0, "direct": 1},
+        {"name": "9-displayed-records-reject", "worker": "invalid", "recordsReject": True, "expected": "ambiguous", "registration": 0, "direct": 0},
+        {"name": "10-no-message-channel", "channel": False, "expected": "shown", "registration": 1, "direct": 0},
+        {"name": "11-post-message-throws", "postThrow": True, "expected": "shown", "registration": 1, "direct": 0},
+        {"name": "12-registration-inactive", "worker": "invalid", "inactive": True, "expected": "shown", "registration": 0, "direct": 1},
+        {"name": "13-registration-rejects", "registrationReject": True, "expected": "shown", "registration": 0, "direct": 1},
+        {"name": "14-no-service-worker", "noServiceWorker": True, "expected": "shown", "registration": 0, "direct": 1},
+        {"name": "15-registration-only", "worker": "invalid", "channel": False, "constructorAvailable": False, "expected": "shown", "registration": 1, "direct": 0},
+        {"name": "16-both-unavailable", "registrationAvailable": False, "constructorAvailable": False, "expected": "ambiguous", "registration": 0, "direct": 1},
+        {"name": "17-registration-show-rejects", "worker": "invalid", "registrationShowReject": True, "expected": "ambiguous", "registration": 1, "direct": 0},
+        {"name": "18-distinct-event", "worker": "invalid", "records": [{"streamId": "stream-6673", "lastEventId": "stream-6673:older"}], "expected": "shown", "registration": 1, "direct": 0},
+        {"name": "19-delivery-only-identity", "worker": "invalid", "identityMode": "delivery", "expected": "shown", "registration": 1, "direct": 0},
+        {"name": "20-malformed-registration", "identityMode": "invalid", "expected": "shown", "registration": 1, "direct": 0},
+        {"name": "21-malformed-constructor", "identityMode": "invalid", "registrationAvailable": False, "expected": "shown", "registration": 0, "direct": 1},
+        {"name": "22-manual-unkeyed", "unkeyed": True, "expected": "shown", "registration": 1, "direct": 0},
+        {"name": "23-sender-foreground", "sender": True, "expected": "blocked", "registration": 0, "direct": 0},
+        {"name": "24-capable-worker", "worker": "shown", "expected": "shown", "expectedTerminal": "worker", "registration": 0, "direct": 0},
+        {"name": "25-degraded-two-tab", "channel": False, "expected": "shown", "registration": 1, "direct": 0},
+        {"name": "26-malformed-inactive-registration", "identityMode": "invalid", "inactive": True, "expected": "shown", "registration": 0, "direct": 1},
+        {"name": "27-sender-registration-without-page-interface", "sender": True, "force": True, "channel": False, "notificationInterface": False, "constructorAvailable": False, "expected": "shown", "registration": 1, "direct": 0},
+        {"name": "28-sender-disabled", "sender": True, "notificationsEnabled": False, "expected": "blocked", "registration": 0, "direct": 0},
+        {"name": "29-sender-denied", "sender": True, "permission": "denied", "expected": "blocked", "registration": 0, "direct": 0},
+    ]
+    notification_region = _notification_region()
+    driver = textwrap.dedent(
+        """
+        async function runCase(config) {
+          const state = {registrationDisplays: 0, constructorAttempts: 0};
+          const ownerRows = new Map();
+          const ownerKey = key => JSON.stringify(key);
+          const ownerDb = {
+            objectStoreNames: {contains: () => true},
+            close() {},
+            transaction() {
+              const tx = {};
+              const store = {
+                get(key) {
+                  const request = {};
+                  queueMicrotask(() => { request.result = ownerRows.get(ownerKey(key)); request.onsuccess?.(); });
+                  return request;
+                },
+                put(value) {
+                  ownerRows.set(ownerKey([value.streamId, value.lastEventId]), value);
+                  queueMicrotask(() => tx.oncomplete?.());
+                },
+                delete(key) {
+                  ownerRows.delete(ownerKey(key));
+                  queueMicrotask(() => tx.oncomplete?.());
+                },
+              };
+              tx.objectStore = () => store;
+              return tx;
+            },
+          };
+          const indexedDB = {
+            open() {
+              const request = {};
+              queueMicrotask(() => { request.result = ownerDb; request.onupgradeneeded?.(); request.onsuccess?.(); });
+              return request;
+            },
+          };
+          class Port {
+            constructor() { this.peer = null; this.onmessage = null; }
+            postMessage(data) { queueMicrotask(() => this.peer?.onmessage?.({data})); }
+            close() {}
+            start() {}
+          }
+          class MessageChannel {
+            constructor() { this.port1 = new Port(); this.port2 = new Port(); this.port1.peer = this.port2; this.port2.peer = this.port1; }
+          }
+          const identity = config.identityMode === 'delivery'
+            ? {streamId:'stream-6673', lastEventId:'stream-6673:delivery:1'}
+            : {streamId:'stream-6673', lastEventId:'stream-6673:1'};
+          const registration = {
+            active: config.inactive ? null : {postMessage(_data, ports) {
+              if (config.postThrow) throw new Error('post failed');
+              if (config.worker !== 'timeout') queueMicrotask(() => ports?.[0]?.postMessage({status: config.worker || 'invalid'}));
+            }},
+            getNotifications: async () => {
+              if (config.recordsReject) throw new Error('records unavailable');
+              return (config.records || []).map(record => ({data: {eventId: record.lastEventId}}));
+            },
+            showNotification: async () => {
+              state.registrationDisplays += 1;
+              if (config.registrationShowReject) throw new Error('registration display failed');
+            },
+          };
+              const Notification = function () {
+                state.constructorAttempts += 1;
+                if (config.constructorAvailable === false) throw new Error('constructor unavailable');
+                return {};
+              };
+              Notification.permission = config.permission || 'granted';
+          const worker = config.noServiceWorker ? undefined : {
+            getRegistration: () => config.registrationReject ? Promise.reject(new Error('registration unavailable')) : Promise.resolve(config.registrationAvailable === false ? null : registration),
+          };
+          const context = {
+            Promise, Date, Math, JSON, console, setTimeout, clearTimeout, queueMicrotask,
+            ...(config.notificationInterface === false ? {} : {Notification}),
+                window: {MessageChannel: config.channel === false ? undefined : MessageChannel, indexedDB, _notificationsEnabled: config.notificationsEnabled !== false, ...(config.notificationInterface === false ? {} : {Notification})},
+                document: {hidden: config.hidden === true, visibilityState: config.hidden === true ? 'hidden' : 'visible', hasFocus: () => true},
+            navigator: {serviceWorker: worker},
+            location: {origin:'https://webui.test', href:'https://webui.test/'},
+            S: {session: {session_id:'session-6673'}},
+                _sessionUrlForSid: sid => '/?session=' + sid,
+                assistantDisplayName: () => 'Hermes',
+                _isBackgroundedForBrowserNotification: () => false,
+          };
+          vm.createContext(context);
+          vm.runInContext(BLOCK, context);
+          const options = config.unkeyed ? {} : {eventIdentity: config.identityMode === 'invalid' ? {streamId:'', lastEventId:''} : identity};
+          try {
+            const status = await (config.sender
+                  ? context.sendBrowserNotification('Hermes', 'body', {...options, force:config.force === true})
+                  : context._showPwaNotification('Hermes', 'body', options));
+                return {name: config.name, status: status === undefined ? 'blocked' : status, registrationDisplays: state.registrationDisplays, constructorAttempts: state.constructorAttempts};
+          } catch (error) {
+            return {name: config.name, status:'rejected', registrationDisplays: state.registrationDisplays, constructorAttempts: state.constructorAttempts, error:String(error.message || error)};
+          }
+        }
+        const results = [];
+        for (const config of CASES) results.push(await runCase(config));
+        console.log(JSON.stringify(results));
+        """
+    )
+    script = f"const vm = require('vm');\nconst BLOCK = {json.dumps(notification_region)};\nconst CASES = {json.dumps(cases)};\n(async () => {{\n{driver}\n}})().catch(error => {{ console.error(error.stack || error); process.exitCode = 1; }});"
+    results = _run_node(script)
+    assert results
+    for observed, expected in zip(results, cases, strict=True):
+        assert observed["name"] == expected["name"]
+        assert observed["status"] == expected["expected"], observed
+        assert observed["registrationDisplays"] == expected["registration"], observed
+        assert observed["constructorAttempts"] == expected["direct"], observed
     assert "indexedDB.open(" in MESSAGES_JS
-    assert "_NOTIFICATION_OWNER_STORE='event-identities'" in MESSAGES_JS
-    assert "keyPath:['streamId','lastEventId']" in MESSAGES_JS
-    assert "return [identity.streamId,identity.lastEventId]" in MESSAGES_JS
-    assert "state:'pending'" in MESSAGES_JS
-    assert "phase:'claimed'" in MESSAGES_JS
-    assert "_markPageNotificationDisplaying" in MESSAGES_JS
-    assert "phase:'displaying'" in MESSAGES_JS
-    assert "current.phase!=='claimed'" in MESSAGES_JS
-    assert "_notificationFailedPageKeys" in MESSAGES_JS
-    assert "window.BroadcastChannel" in MESSAGES_JS
-    assert "function _ensureNotificationFailureChannel()" in MESSAGES_JS
-    assert "_ensureNotificationFailureChannel();" in MESSAGES_JS
-    assert "_recordFailedPageNotification" in MESSAGES_JS
-    assert "current.token===failedToken" in MESSAGES_JS
-    assert "type:'failed',key,token:failureToken" in MESSAGES_JS
-    assert "state==='delivered'" in MESSAGES_JS
-    assert "phase:'delivered'" in MESSAGES_JS
-    assert "expiresAt" in MESSAGES_JS
-    assert "_settlePageNotification" in MESSAGES_JS
-    assert "_releasePageNotification" in MESSAGES_JS
-    assert "attempts>=2" in MESSAGES_JS
-    assert "state:'failed'" in MESSAGES_JS
-    assert "_settlePageNotification(identity,token,'failed')" in MESSAGES_JS
-    assert "hermes.notification.present" in MESSAGES_JS
-    assert "_displayedNotificationMatches" in MESSAGES_JS
-    assert "_workerSupportsNotificationPresentation" in MESSAGES_JS
-    assert "notification_protocol=1" in MESSAGES_JS
-    assert "fetch(active.scriptURL" not in MESSAGES_JS
-    assert "_reconcileWorkerTimeout" in MESSAGES_JS
-    assert "status==='shown'||status==='duplicate'?status:" in MESSAGES_JS
-    assert "renotify:true" in MESSAGES_JS
+    assert "_claimPageNotification" in MESSAGES_JS
+    assert "hermes-notification-failures" in MESSAGES_JS
 
 
 def test_producers_leave_delivery_frames_without_journal_ids_unkeyed():
@@ -106,7 +241,6 @@ def test_notification_present_protocol_carries_canonical_event_data():
     assert "protocolVersion:1" in MESSAGES_JS
     assert "eventId:identity.lastEventId" in MESSAGES_JS
     assert "data:{url,..." in MESSAGES_JS
-    assert "eventId:identity.lastEventId" in MESSAGES_JS
 
 
 def test_message_channel_uses_window_owned_global():
@@ -114,238 +248,10 @@ def test_message_channel_uses_window_owned_global():
     assert "channel=new window.MessageChannel()" in MESSAGES_JS
 
 
-def test_page_owner_covers_registration_reply_and_storage_failure_modes():
-    assert "if(!reg||!reg.active)return deliverDirect(null);" in MESSAGES_JS
-    assert "_presentNotification(reg.active" in MESSAGES_JS
-    assert "_displayedNotificationMatches(reg,opts,identity)" in MESSAGES_JS
-    assert "capable===false?_deliverPageNotification" in MESSAGES_JS
-    assert "request.onblocked=()=>reject" in MESSAGES_JS
-    assert "tx.onabort=()=>finish('ambiguous')" in MESSAGES_JS
-    assert "current.phase!=='claimed'||Number(current.expiresAt)>Date.now()" in MESSAGES_JS
-    assert "current.state==='pending'&&!failed" in MESSAGES_JS
-    assert "_releasePageNotification(identity,claim.token)" in MESSAGES_JS
-
-
 def test_page_and_worker_share_the_same_event_identity_key():
     assert "eventId:identity.lastEventId" in MESSAGES_JS
     assert "data: {url, eventId}" in SW_JS
     assert "record.data.eventId===identity.lastEventId" in MESSAGES_JS
-
-
-def test_page_owner_allows_one_native_display_and_retries_constructor_failure():
-    node = shutil.which("node")
-    if node is None:
-        return
-    notification_block = MESSAGES_JS[MESSAGES_JS.index("function _notificationOptions"):MESSAGES_JS.index("function requestNotificationPermission")]
-    driver = textwrap.dedent(
-        """
-        (async () => {
-          const identity = {streamId:'stream-6673', lastEventId:'stream-6673:1'};
-          const nextIdentity = {streamId:'stream-6673', lastEventId:'stream-6673:2'};
-          const failedIdentity = {streamId:'stream-6673', lastEventId:'stream-6673:3'};
-          const options = value => _notificationOptions('body', {sid:'session-6673', eventIdentity:value});
-          const sameIdentity = await Promise.all([
-            _deliverPageNotification('Hermes', 'body', options(identity), identity, null),
-            _deliverPageNotification('Hermes', 'body', options(identity), identity, null),
-          ]);
-          const next = await _deliverPageNotification('Hermes', 'body', options(nextIdentity), nextIdentity, null);
-          const failed = await _deliverPageNotification('Hermes', 'body', options(failedIdentity), failedIdentity, null);
-          const retry = await _deliverPageNotification('Hermes', 'body', options(failedIdentity), failedIdentity, null);
-          const timeoutStatus = await _reconcileWorkerTimeout(
-            {scriptURL:'https://webui.test/sw.js?notification_protocol=1'},
-            {getNotifications: async () => []},
-            options(identity), identity, 'Hermes', 'body'
-          );
-          const legacyTimeoutIdentity = {streamId:'stream-6673', lastEventId:'stream-6673:4'};
-          const legacyTimeout = await _reconcileWorkerTimeout(
-            {scriptURL:'https://webui.test/sw.js'},
-            {getNotifications: async () => []},
-            options(legacyTimeoutIdentity), legacyTimeoutIdentity, 'Hermes', 'body'
-          );
-          const persistedFailureIdentity = {streamId:'stream-6673', lastEventId:'stream-6673:5'};
-          notificationState.releaseFailures = 3;
-          const persistedFailure = await _deliverPageNotification('Hermes', 'body', options(persistedFailureIdentity), persistedFailureIdentity, null);
-          _notificationFailedPageKeys.clear();
-          const persistedRetry = await _deliverPageNotification('Hermes', 'body', options(persistedFailureIdentity), persistedFailureIdentity, null);
-          const raceIdentity = {streamId:'stream-6673', lastEventId:'stream-6673:6'};
-          rows.set(JSON.stringify([raceIdentity.streamId, raceIdentity.lastEventId]), {streamId:raceIdentity.streamId, lastEventId:raceIdentity.lastEventId, state:'pending', phase:'displaying', token:'new-token', expiresAt:0});
-          _recordFailedPageNotification(raceIdentity, 'stale-token');
-          const staleMarker = await _claimPageNotification(raceIdentity);
-          rows.delete(JSON.stringify([raceIdentity.streamId, raceIdentity.lastEventId]));
-          _notificationFailedPageKeys.clear();
-          console.log(JSON.stringify({sameIdentity, next, failed, retry, timeoutStatus, legacyTimeout, persistedFailure, persistedRetry, staleMarker, attempts:notificationState.attempts, rows:[...rows.values()]}));
-        })().catch(error => { console.error(error.stack || error); throw error; });
-        """
-    )
-    script = textwrap.dedent(
-        f"""
-        const vm = require('vm');
-        const rows = new Map();
-        const reserved = new Set();
-        const mapKey = key => JSON.stringify(key);
-        const notificationState = {{attempts:0, failFirstDisplay:true, failPersistedDisplay:true, releaseFailures:0}};
-        function makeDb() {{
-          const db = {{
-            objectStoreNames: {{contains: () => true}},
-            transaction() {{
-              const tx = {{oncomplete:null, onerror:null, onabort:null, error:null}};
-              const store = {{
-                get(key) {{
-                  const request = {{result:undefined, onsuccess:null, onerror:null}};
-                  setTimeout(() => {{
-                    request.result = rows.get(mapKey(key));
-                    if (!request.result && reserved.has(mapKey(key))) request.result = {{state:'pending', expiresAt:Date.now()+10000}};
-                    if (!request.result) reserved.add(mapKey(key));
-                    request.onsuccess?.({{target:request}});
-                  }}, 0);
-                  return request;
-                }},
-                put(row) {{ const key = [row.streamId, row.lastEventId]; rows.set(mapKey(key), row); reserved.add(mapKey(key)); }},
-                delete(key) {{
-                  if (notificationState.releaseFailures > 0) {{ notificationState.releaseFailures -= 1; throw new Error('simulated release failure'); }}
-                  rows.delete(mapKey(key)); reserved.delete(mapKey(key));
-                }},
-              }};
-              setTimeout(() => tx.oncomplete?.(), 20);
-              tx.objectStore = () => store;
-              return tx;
-            }},
-            close() {{}},
-          }};
-          return db;
-        }}
-        const indexedDB = {{
-          open() {{
-            const request = {{result:makeDb(), onupgradeneeded:null, onsuccess:null, onerror:null, onblocked:null}};
-            setTimeout(() => {{ request.onupgradeneeded?.({{target:request}}); request.onsuccess?.({{target:request}}); }}, 0);
-            return request;
-          }},
-        }};
-        const context = {{
-          Promise, Date, Math, JSON, console, setTimeout, clearTimeout,
-          indexedDB, rows,
-          notificationState,
-          fetch: async () => {{ throw new Error('capability source fetch is forbidden'); }},
-          Notification: function(title, options) {{
-            notificationState.attempts += 1;
-            if (options.data.eventId === 'stream-6673:3' && notificationState.failFirstDisplay) {{
-              notificationState.failFirstDisplay = false;
-              throw new Error('simulated constructor failure');
-            }}
-            if (options.data.eventId === 'stream-6673:5' && notificationState.failPersistedDisplay) {{
-              notificationState.failPersistedDisplay = false;
-              throw new Error('simulated persistent constructor failure');
-            }}
-            return {{title, options}};
-          }},
-          window: {{indexedDB}},
-          navigator: {{serviceWorker: {{getRegistration: () => Promise.resolve(null)}}}},
-          location: {{origin:'https://webui.test', href:'https://webui.test/'}},
-          S: {{session: {{session_id:'session-6673'}}}},
-          _sessionUrlForSid: sid => '/?session=' + sid,
-          assistantDisplayName: () => 'Hermes',
-        }};
-        vm.runInNewContext({json.dumps(notification_block + driver)}, context);
-        """
-    )
-    result = subprocess.run([node, "-e", script], cwd=ROOT, text=True, capture_output=True, check=False)
-    assert result.returncode == 0, result.stderr
-    observed = json.loads(result.stdout)
-    assert sorted(observed["sameIdentity"]) == ["ambiguous", "shown"], observed
-    assert observed["next"] == "shown", observed
-    assert observed["failed"] == "ambiguous", observed
-    assert observed["retry"] == "shown", observed
-    assert observed["timeoutStatus"] == "ambiguous", observed
-    assert observed["legacyTimeout"] == "shown", observed
-    assert observed["persistedFailure"] == "ambiguous", observed
-    assert observed["persistedRetry"] == "shown", observed
-    assert observed["staleMarker"]["status"] == "ambiguous", observed
-    assert observed["attempts"] == 7, observed
-    assert {row["lastEventId"] for row in observed["rows"]} == {"stream-6673:1", "stream-6673:2", "stream-6673:3", "stream-6673:4", "stream-6673:5"}
-    assert all(row["state"] == "delivered" and row["phase"] == "delivered" for row in observed["rows"]), observed
-
-
-def test_page_owner_attempts_once_when_owner_storage_is_unavailable():
-    node = shutil.which("node")
-    if node is None:
-        return
-    notification_block = MESSAGES_JS[MESSAGES_JS.index("function _notificationOptions"):MESSAGES_JS.index("function requestNotificationPermission")]
-    script = textwrap.dedent(
-        f"""
-        const vm = require('vm');
-        const identity = {{streamId:'stream-6673', lastEventId:'stream-6673:unavailable-storage'}};
-        const syncThrowIdentity = {{streamId:'stream-6673', lastEventId:'stream-6673:sync-throw'}};
-        const requestErrorIdentity = {{streamId:'stream-6673', lastEventId:'stream-6673:request-error'}};
-        const upgradeAbortIdentity = {{streamId:'stream-6673', lastEventId:'stream-6673:upgrade-abort'}};
-        const blockedIdentity = {{streamId:'stream-6673', lastEventId:'stream-6673:blocked'}};
-        const notificationState = {{attempts:0}};
-        const options = _options => _notificationOptions('body', {{sid:'session-6673', eventIdentity:_options}});
-        const context = {{
-          Promise, Date, Math, JSON, console, setTimeout, clearTimeout,
-          notificationState,
-          Notification: function(title, options) {{
-            notificationState.attempts += 1;
-            return {{title, options}};
-          }},
-          window: {{}},
-          navigator: {{serviceWorker: {{getRegistration: () => Promise.resolve(null)}}}},
-          location: {{origin:'https://webui.test', href:'https://webui.test/'}},
-          S: {{session: {{session_id:'session-6673'}}}},
-          _sessionUrlForSid: sid => '/?session=' + sid,
-          assistantDisplayName: () => 'Hermes',
-        }};
-        vm.runInNewContext({json.dumps(notification_block)}, context);
-        context._showPwaNotification('Hermes', 'body', {{eventIdentity:identity}})
-          .then(firstStatus => {{
-            context.window.indexedDB = {{open: () => {{throw new Error('storage unavailable');}}}};
-            return context._showPwaNotification('Hermes', 'body', {{eventIdentity:syncThrowIdentity}})
-              .then(syncStatus => {{
-                context.window.indexedDB = {{
-                  open: () => {{
-                    const request = {{result:undefined, error:new Error('storage unavailable'), onupgradeneeded:null, onsuccess:null, onerror:null, onblocked:null}};
-                    setTimeout(() => request.onerror?.({{target:request}}), 0);
-                    return request;
-                  }},
-                }};
-                return context._showPwaNotification('Hermes', 'body', {{eventIdentity:requestErrorIdentity}})
-                  .then(secondStatus => {{
-                context.window.indexedDB = {{
-                  open: () => {{
-                    const request = {{
-                      result: {{objectStoreNames: {{contains: () => false}}, createObjectStore: () => {{}}}},
-                      error: new Error('AbortError'),
-                      onupgradeneeded:null, onsuccess:null, onerror:null, onblocked:null,
-                    }};
-                    setTimeout(() => {{
-                      request.onupgradeneeded?.({{target:request}});
-                      request.result = undefined;
-                      request.onerror?.({{target:request}});
-                    }}, 0);
-                    return request;
-                  }},
-                }};
-                    return context._showPwaNotification('Hermes', 'body', {{eventIdentity:upgradeAbortIdentity}})
-                      .then(thirdStatus => {{
-                    context.window.indexedDB = {{
-                      open: () => {{
-                        const request = {{result:undefined, error:null, onupgradeneeded:null, onsuccess:null, onerror:null, onblocked:null}};
-                        setTimeout(() => request.onblocked?.({{target:request}}), 0);
-                        return request;
-                      }},
-                    }};
-                    return context._showPwaNotification('Hermes', 'body', {{eventIdentity:blockedIdentity}})
-                        .then(fourthStatus => console.log(JSON.stringify({{firstStatus, syncStatus, secondStatus, thirdStatus, fourthStatus, attempts:notificationState.attempts}})));
-                      }});
-                  }});
-              }});
-          }})
-          .catch(error => {{ console.error(error.stack || error); process.exitCode = 1; }});
-        """
-    )
-    result = subprocess.run([node, "-e", script], cwd=ROOT, text=True, capture_output=True, check=False)
-    assert result.returncode == 0, result.stderr
-    observed = json.loads(result.stdout)
-    assert observed == {"firstStatus": "shown", "syncStatus": "shown", "secondStatus": "ambiguous", "thirdStatus": "ambiguous", "fourthStatus": "ambiguous", "attempts": 2}, observed
 
 
 def test_journal_less_sse_frames_reset_sticky_eventsource_ids():
@@ -363,9 +269,6 @@ def test_worker_presentation_queues_release_settled_tag_state():
 
 
 def test_replay_cursor_accepts_only_current_canonical_positive_ids():
-    node = shutil.which("node")
-    if node is None:
-        return
     cursor = extract_function(MESSAGES_JS, "_rememberRunJournalCursor")
     script = f"""
 const cursor = {cursor};
@@ -380,6 +283,4 @@ for (const value of ['stream-6673:2', 'stream-6673:fallback:3', 'other:4', 'stre
 }}
 console.log(JSON.stringify({{seq:_lastRunJournalSeq, id:_lastRunJournalEventId}}));
 """
-    result = subprocess.run([node, "-e", script], cwd=ROOT, text=True, capture_output=True, check=False)
-    assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout) == {"seq": 4, "id": "stream-6673:4"}
+    assert _run_node(script) == {"seq": 4, "id": "stream-6673:4"}

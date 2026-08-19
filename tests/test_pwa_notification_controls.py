@@ -25,7 +25,8 @@ def _source_between(start_marker: str, end_marker: str) -> str:
 
 def test_browser_notifications_use_service_worker_when_available():
     assert "function _showPwaNotification" in MESSAGES_JS
-    assert "navigator.serviceWorker.ready" in MESSAGES_JS
+    notification_region = _source_between("function _showPwaNotification", "function requestNotificationPermission")
+    assert "navigator.serviceWorker.getRegistration" in notification_region
     assert "reg.showNotification" in MESSAGES_JS
     assert "new Notification" in MESSAGES_JS
     assert "function sendBrowserNotification" in MESSAGES_JS
@@ -134,9 +135,13 @@ def test_presenter_options_are_same_origin_and_in_scope_without_changing_click_r
     assert "samePath(client.url)" in SW_JS
 
 
-def test_page_and_worker_use_displayed_record_presenter_with_page_owner_store():
+def test_page_and_worker_use_one_registration_first_presenter_with_page_owner_fallback():
+    notification_region = MESSAGES_JS[MESSAGES_JS.index("function _notificationOptions"):MESSAGES_JS.index("// ── /btw ephemeral stream")]
     assert "indexedDB.open(" in MESSAGES_JS
-    assert "_NOTIFICATION_OWNER_STORE='event-identities'" in MESSAGES_JS
+    assert "_claimPageNotification" in MESSAGES_JS
+    assert "hermes-notifications" in MESSAGES_JS
+    assert notification_region.count("new Notification(") == 2
+    assert notification_region.count("reg.showNotification(") == 1
     assert "indexedDB.open(" not in SW_JS
     assert "hermes.notification.present" in MESSAGES_JS
     assert "hermes.notification.present" in SW_JS
