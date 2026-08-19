@@ -236,34 +236,56 @@ step_header "Connecting Hermes Agent Core & Memory Bridge"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 mkdir -p "$HERMES_HOME" 2>/dev/null || true
 
-AGENT_DIR=""
-if [ -d "$HERMES_HOME/hermes-agent" ] && [ -f "$HERMES_HOME/hermes-agent/run_agent.py" ]; then
-    AGENT_DIR="$HERMES_HOME/hermes-agent"
-elif [ -d "$REPO_ROOT/../hermes-agent" ] && [ -f "$REPO_ROOT/../hermes-agent/run_agent.py" ]; then
-    AGENT_DIR="$REPO_ROOT/../hermes-agent"
-fi
+find_installed_agent_dir() {
+    local candidates=(
+        "${HERMES_WEBUI_AGENT_DIR:-}"
+        "$HERMES_HOME/hermes-agent"
+        "$REPO_ROOT/../hermes-agent"
+        "$HOME/.hermes/hermes-agent"
+        "$HOME/hermes-agent"
+        "/usr/local/lib/hermes-agent"
+    )
+    for c in "${candidates[@]}"; do
+        if [ -n "$c" ] && [ -f "$c/run_agent.py" ]; then
+            echo "$c"
+            return 0
+        fi
+    done
+    return 1
+}
+
+AGENT_DIR="$(find_installed_agent_dir || echo "")"
 
 if [ -z "$AGENT_DIR" ]; then
     sub_info "Setting up Hermes Autonomous Agent core engine..."
     local_script="$(mktemp "${TMPDIR:-/tmp}/hermes_agent_installer.XXXXXX")"
     TMP_FILES+=("$local_script")
+    local download_ok=0
     if curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh -o "$local_script"; then
         chmod 700 "$local_script"
-        run_with_status "Running official Hermes Agent installer" bash "$local_script" || true
+        if run_with_status "Running official Hermes Agent installer" bash "$local_script"; then
+            download_ok=1
+        fi
         rm -f "$local_script"
     fi
-    [ -d "$HERMES_HOME/hermes-agent" ] && AGENT_DIR="$HERMES_HOME/hermes-agent"
-    
-    if [ -z "$AGENT_DIR" ] && [ ! -d "$HERMES_HOME/hermes-agent" ]; then
-        run_with_status "Cloning Hermes Agent core repo" git clone --depth 1 https://github.com/NousResearch/hermes-agent.git "$HERMES_HOME/hermes-agent"
-        [ -d "$HERMES_HOME/hermes-agent" ] && AGENT_DIR="$HERMES_HOME/hermes-agent"
+    AGENT_DIR="$(find_installed_agent_dir || echo "")"
+
+    if [ -z "$AGENT_DIR" ] && [ $download_ok -eq 0 ]; then
+        sub_warn "Official installer failed. Attempting fallback clone of Hermes Agent..."
+        if run_with_status "Cloning Hermes Agent core repo" git clone --depth 1 https://github.com/NousResearch/hermes-agent.git "$HERMES_HOME/hermes-agent"; then
+            if [ -f "$HERMES_HOME/hermes-agent/run_agent.py" ]; then
+                AGENT_DIR="$HERMES_HOME/hermes-agent"
+            fi
+        fi
     fi
 fi
 
-if [ -n "$AGENT_DIR" ]; then
+if [ -n "$AGENT_DIR" ] && [ -f "$AGENT_DIR/run_agent.py" ]; then
     sub_success "Hermes Agent Connected: ${C_WHITE}${AGENT_DIR}${C_RESET}"
+    AGENT_STATUS_STR="${C_GREEN}Active & Linked${C_RESET}"
 else
-    sub_info "Hermes Agent core ready for runtime discovery"
+    sub_warn "Hermes Agent core not detected (WebUI will run in standalone / first-run wizard mode)"
+    AGENT_STATUS_STR="${C_YELLOW}Standalone / Onboarding${C_RESET}"
 fi
 
 # -----------------------------------------------------------------------------
@@ -307,7 +329,7 @@ echo -e "${C_GREEN}${BOLD}║   ✨  Hermes WebUI Installation Finished Successf
 echo -e "${C_GREEN}${BOLD}╚══════════════════════════════════════════════════════════════════╝${C_RESET}"
 echo ""
 echo -e "  ${C_SKY}${BOLD}● Web Interface :${C_RESET} ${C_WHITE}http://127.0.0.1:8787${C_RESET}"
-echo -e "  ${C_SKY}${BOLD}● Agent Status  :${C_RESET} ${C_GREEN}Active & Linked${C_RESET}"
+echo -e "  ${C_SKY}${BOLD}● Agent Status  :${C_RESET} $AGENT_STATUS_STR"
 echo -e "  ${C_SKY}${BOLD}● State Directory:${C_RESET} ${C_GRAY}$HERMES_HOME${C_RESET}"
 echo ""
 echo -e "${C_PURPLE}${BOLD}Starting server and opening your browser...${C_RESET}"
