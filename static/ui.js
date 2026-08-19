@@ -491,7 +491,7 @@ async function startCompressionRecovery(btn){
     if(!sid) throw new Error('Compression recovery did not return a session.');
     try{localStorage.setItem('hermes-webui-session',sid);}catch(_){}
     if(typeof loadSession==='function') await loadSession(sid,{preserveActiveInput:false});
-    else if(data.session){S.session=data.session;S.messages=data.session.messages||[];syncTopbar();renderMessages();}
+    else if(data.session){S.session=data.session;if(typeof _preserveDefaultModelSentinel==='function')_preserveDefaultModelSentinel(S.session);S.messages=data.session.messages||[];syncTopbar();renderMessages();}
     if(typeof renderSessionList==='function') await renderSessionList();
     if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(sid);
     if(typeof showToast==='function') showToast((data&&data.message)||'Started focused continuation.',3000,'success');
@@ -2942,6 +2942,123 @@ function _getOptionProviderId(opt){
   if(value.startsWith('@') && value.includes(':')) return value.slice(1,value.lastIndexOf(':'));
   return '';
 }
+/** Refresh window._defaultModel from the server so that __default__
+ * sentinel sessions pick up admin default-model changes immediately,
+ * not only on page reload. Called before send() when the session
+ * model is '__default__'. On failure the stale cached default is kept
+ * and a warning is logged for diagnostics. */
+async function _refreshDefaultModelCache(){
+  try{
+    const settingsUrl=new URL('api/settings',document.baseURI||location.href);
+    const res=await fetch(settingsUrl.href,{credentials:'include'});
+    if(!res.ok){
+      console.warn('[default-model] /api/settings returned',res.status);
+      return false;
+    }
+    const data=await res.json();
+    // A provider is optional: an unset provider lets the backend resolve its
+    // configured default. Model + provider are still updated together, and a
+    // missing provider explicitly clears any stale provider cache.
+    if(!Object.prototype.hasOwnProperty.call(data,'default_model')){
+      console.warn('[default-model] /api/settings response lacks default model');
+      return false;
+    }
+    window._defaultModel=data.default_model||null;
+    window._activeProvider=Object.prototype.hasOwnProperty.call(data,'default_model_provider')
+      ?(data.default_model_provider||null)
+      :null;
+    return true;
+  }catch(e){
+    console.warn('[default-model] failed to refresh default model:',e.message||e);
+    return false;
+  }
+}
+// ── Default (auto) model session tracking ──────────────────────────────
+// Sessions set to "Default (auto)" store `model_selection_mode: "auto"` as a
+// server-owned session attribute. This survives browser switches, cleared site
+// data, and the 200-entry localStorage prune. The server returns
+// `model = "__default__"` in the response when model_selection_mode is "auto",
+// so the sentinel is restored from server data on every load.
+//
+// The legacy localStorage map (`hermes-webui-default-sessions`) is kept as a
+// one-time migration aid. On first load of a session with no server-side
+// model_selection_mode, the localStorage entry is promoted to the server.
+// After that, the server is authoritative.
+function _defaultModelSessionsKey(){ return 'hermes-webui-default-sessions'; }
+function _readDefaultModelSessions(){
+  try{
+    const raw=localStorage.getItem(_defaultModelSessionsKey());
+    return raw?JSON.parse(raw):{};
+  }catch(_){ return {}; }
+}
+function _writeDefaultModelSessions(map){
+  try{
+    // Prune: keep the map bounded (cap 200, oldest entries dropped) so a
+    // long-lived browser doesn't accumulate stale session ids forever.
+    const entries=Object.entries(map);
+    if(entries.length>200){
+      map=Object.fromEntries(entries.slice(-200));
+    }
+    localStorage.setItem(_defaultModelSessionsKey(),JSON.stringify(map));
+  }catch(_){}
+}
+/** Set the active session to "Default (auto)" mode. Persists to server. */
+function _setDefaultModelSession(sid){
+  if(!sid) return;
+  if(S.session && S.session.session_id===sid){
+    S.session.model_selection_mode='auto';
+    S.session.model='__default__';
+    S.session.model_provider=null;
+    // Also write to legacy localStorage for migration of sessions that may
+    // be loaded on an older server that doesn't return model_selection_mode.
+    const map=_readDefaultModelSessions();
+    map[String(sid)]=true;
+    _writeDefaultModelSessions(map);
+  }
+}
+/** Clear "Default (auto)" mode from the active session. */
+function _clearDefaultModelSession(sid){
+  if(!sid) return;
+  if(S.session && S.session.session_id===sid){
+    S.session.model_selection_mode=null;
+  }
+  // Clear legacy localStorage entry
+  const map=_readDefaultModelSessions();
+  delete map[String(sid)];
+  _writeDefaultModelSessions(map);
+}
+/** Check if the session is in "Default (auto)" mode. */
+function _isDefaultModelSession(sid){
+  if(!sid) return false;
+  // Server-side field is authoritative.
+  if(S.session && S.session.session_id===sid){
+    if(S.session.model_selection_mode==='auto') return true;
+    if(S.session.model==='__default__') return true;
+    // Server sent a concrete model with no auto mode; the session is NOT
+    // "Default (auto)".  Never fall through to localStorage, which can
+    // carry a stale entry from cross-browser explicit-model changes or
+    // from a previous session that was later toggled to explicit.  The
+    // server's persisted model is the truth (greptile review).
+    return false;
+  }
+  // Legacy localStorage migration aid: only used when S.session hasn't
+  // been loaded for this sid yet (edge case during session creation).
+  return !!_readDefaultModelSessions()[String(sid)];
+}
+/** Restore the __default__ sentinel on a session that was set to
+ * "Default (auto)". Call after every S.session replacement from server
+ * data (SSE events, session re-fetch, page reload).
+ * The server already sets model to __default__ when model_selection_mode
+ * is "auto", but this helper ensures backward compatibility with older
+ * server versions that don't return model_selection_mode. */
+function _preserveDefaultModelSentinel(session){
+  if(!session||!session.session_id) return session;
+  if(_isDefaultModelSession(session.session_id)){
+    session.model='__default__';
+    session.model_provider=null;
+  }
+  return session;
+}
 function _providerFromModelValue(modelId){
   const value=String(modelId||'').trim();
   if(value.startsWith('@')&&value.includes(':')) return value.slice(1,value.lastIndexOf(':'));
@@ -3048,6 +3165,11 @@ function _captureModelDropdownSelection(sel){
   return {model:String(sel.value||''),model_provider:null};
 }
 function _modelProviderForSend(modelId){
+  // __default__ sessions carry no provider — route through the active provider
+  // so chat/start takes the fast path instead of a cold catalog rebuild.
+  if(S&&S.session&&S.session.model==='__default__'){
+    return (typeof window!=='undefined'&&window._activeProvider)||null;
+  }
   const sessionProvider=(S&&S.session&&S.session.model_provider)||null;
   if(sessionProvider) return sessionProvider;
   const model=String(modelId||'').trim();
@@ -3206,7 +3328,7 @@ function _clearPendingSessionModel(sessionId){
 function _deliberateSessionModelPick(sessionId){
   if(!S.session||S.session.session_id!==sessionId) return null;
   const model=String(S.session.model||'').trim();
-  if(!model) return null;
+  if(!model||model==='__default__') return null;
   // Require SESSION-OWNED provider evidence — a stored model_provider on the
   // session itself. Do NOT infer a provider from the model string: an
   // unreachable/renamed model like "@removed:mistral-large" with no stored
@@ -3255,6 +3377,12 @@ function _applyPendingSessionModelForSession(sessionId){
   if(!S.session||S.session.session_id!==sessionId) return false;
   const pending=_readPendingSessionModel(sessionId);
   if(!pending) return false;
+  // "Default (auto)" sessions: only accept a pending pick that IS __default__.
+  // A stale resolved-model pick must not clobber the sentinel.
+  if(S.session.model==='__default__'&&pending.model!=='__default__'){
+    _clearPendingSessionModel(sessionId);
+    return false;
+  }
   const sameModel=String(S.session.model||'')===pending.model;
   const sameProvider=String(S.session.model_provider||'')===String(pending.model_provider||'');
   if(sameModel&&sameProvider){
@@ -3597,6 +3725,14 @@ async function populateModelDropdown(opts={}){
     // Clear existing options
     sel.innerHTML='';
     _dynamicModelLabels={};
+    // Add "Default (auto)" as the first option — dynamically resolves to
+    // whatever the profile default model is at send time.
+    const _defaultOpt=document.createElement('option');
+    _defaultOpt.value='__default__';
+    _defaultOpt.textContent='Default (auto)';
+    _defaultOpt.dataset.default='1';
+    sel.appendChild(_defaultOpt);
+    _dynamicModelLabels['__default__']='Default (auto)';
     for(const g of groups){
       const og=document.createElement('optgroup');
       og.label=g.provider;
@@ -7276,6 +7412,7 @@ function _stripDottedModelPrefix(bare){
 }
 function getModelLabel(modelId){
   if(!modelId) return 'Unknown';
+  if(modelId==='__default__') return 'Default (auto)';
   const rawId=String(modelId||'');
   // Preserve custom gateway model IDs exactly as configured.
   // Examples:
@@ -8338,11 +8475,13 @@ function setBusy(v){
         S.pendingFiles=Array.isArray(next.files)?[...next.files]:[];
         // Restore model from queued item (sent in /api/chat/start payload)
         // Note: profile is NOT restored — full profile switch requires server interaction
-        if(next.model&&S.session&&next.model!==S.session.model){
+        // __default__ sessions re-resolve the default at send time, so a queued
+        // resolved model must not clobber the sentinel.
+        if(next.model&&S.session&&S.session.model!=='__default__'&&next.model!==S.session.model){
           S.session.model=next.model;
         }
-        if(next.model_provider&&S.session) S.session.model_provider=next.model_provider;
-        if(next.model&&S.session){
+        if(next.model_provider&&S.session&&S.session.model!=='__default__') S.session.model_provider=next.model_provider;
+        if(next.model&&S.session&&S.session.model!=='__default__'){
           if(typeof _applyModelToDropdown==='function'&&$('modelSelect')) _applyModelToDropdown(next.model,$('modelSelect'),S.session.model_provider||null);
           if(typeof syncModelChip==='function') syncModelChip();
         }

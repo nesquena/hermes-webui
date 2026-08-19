@@ -96,7 +96,11 @@ function _markActiveSessionViewedOnReturn() {
 }
 
 function _chatPayloadModel(){
-  return S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'';
+  const sessionModel=S.session&&S.session.model;
+  // __default__ sentinel: dynamically resolve to the current profile default
+  // model, so "Default (auto)" sessions follow admin default-model changes.
+  if(sessionModel==='__default__') return window._defaultModel||'';
+  return sessionModel||($('modelSelect')&&$('modelSelect').value)||'';
 }
 
 function _chatPayloadModelProvider(model){
@@ -1767,6 +1771,19 @@ async function send(){
   let modelStateForPostStart;
   let explicitPickForPostStart;
   try{
+    // __default__ must resolve from a fresh server routing pair. Do not silently
+    // send a stale model/provider pair when that refresh fails; the normal
+    // chat/start failure path restores the draft and leaves the user retryable.
+    // Guard: a session switch during the async refresh must not mix routing
+    // state across conversations (greptile review on cr-2).
+    if(S.session&&S.session.model==='__default__'){
+      const refreshed=typeof _refreshDefaultModelCache==='function'
+        &&await _refreshDefaultModelCache();
+      if(!refreshed) throw new Error('Could not refresh the current default model. Please retry.');
+      if(S.session.session_id!==activeSid){
+        throw new Error('Session changed during default model resolution. Please retry.');
+      }
+    }
     const _modelState=_chatPayloadModelState();
     modelStateForPostStart=_modelState;
     const _pendingPick=(typeof _readPendingSessionModel==='function')
@@ -1806,7 +1823,8 @@ async function send(){
       profile:S.activeProfile||S.session.profile||'default',
       explicit_model_pick:_explicitPick||undefined,
       attachments:uploaded.length?uploaded:undefined,
-      moa_config:_pendingMoaConfig?true:undefined
+      moa_config:_pendingMoaConfig?true:undefined,
+      model_selection_mode:S.session&&S.session.model_selection_mode||undefined
     })});
     _pendingMoaConfig=null;
     postStartData = startData;
@@ -1895,11 +1913,16 @@ async function send(){
       if(_explicitPick && _sentModel && startData.effective_model!==_sentModel && typeof showToast==='function'){
         showToast('Model '+_sentModel+' changed to '+startData.effective_model+' — profile provider mismatch', 5000);
       }
-      S.session.model=startData.effective_model;
+      // Preserve the __default__ sentinel so "Default (auto)" sessions
+      // dynamically follow admin default-model changes (#custom).
+      if(S.session.model!=='__default__'){
+        S.session.model=startData.effective_model;
+      }
       S.session.model_provider=startData.effective_model_provider||S.session.model_provider||null;
-      localStorage.setItem('hermes-webui-model', startData.effective_model);
-      if(typeof _writePersistedModelState==='function') _writePersistedModelState(startData.effective_model,S.session.model_provider||null);
-      if($('modelSelect')) _applyModelToDropdown(startData.effective_model, $('modelSelect'),S.session.model_provider||null);
+      const _storeModel=S.session.model||'';
+      localStorage.setItem('hermes-webui-model', _storeModel);
+      if(typeof _writePersistedModelState==='function') _writePersistedModelState(_storeModel,S.session.model_provider||null);
+      if($('modelSelect')) _applyModelToDropdown(S.session.model, $('modelSelect'),S.session.model_provider||null);
       if(typeof syncTopbar==='function') syncTopbar();
     }else if(startData&&startData.effective_model_provider && S.session){
       S.session.model_provider=startData.effective_model_provider;
@@ -6139,7 +6162,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const _prevCost=(S.session&&S.session.estimated_cost)||0;
           const _prevCacheRead=(S.session&&S.session.cache_read_tokens)||0;
           const _prevCacheWrite=(S.session&&S.session.cache_write_tokens)||0;
-          S.session=d.session;S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
+          S.session=d.session;if(typeof _preserveDefaultModelSentinel==='function')_preserveDefaultModelSentinel(S.session);S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
           // #4720: reset _oldestIdx (full-load symmetry; keeps the #4613 anchor aligned).
           if(typeof _oldestIdx!=='undefined')_oldestIdx=d.session._messages_offset||0;
           S.messages=_filterRecoveryControlMessages(S.messages || []);
@@ -6577,6 +6600,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             if(typeof showToast==='function') showToast('Stream recovery signal received. Restoring transcript...',3500,'error');
           } else if(d.session&&typeof d.session==='object'){
             S.session=d.session;
+            if(typeof _preserveDefaultModelSentinel==='function')_preserveDefaultModelSentinel(S.session);
             const _nextMsgs3018=(d.session.messages||[]).filter(m=>m&&m.role);
             _attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);
             S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
@@ -6816,7 +6840,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           && !((typeof _isMessageReaderUnpinned==='function')
             ? _isMessageReaderUnpinned()
             : (typeof _messageUserUnpinned!=='undefined' && _messageUserUnpinned));
-        S.session=sessionPayload;
+        S.session=sessionPayload;if(typeof _preserveDefaultModelSentinel==='function')_preserveDefaultModelSentinel(S.session);
         const _nextMsgs3018=(sessionPayload.messages||[]).filter(m=>m&&m.role);
         _attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);
         S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
@@ -6961,6 +6985,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         S.activeStreamId=null;
         clearLiveToolCards();if(!assistantText)removeThinking();
         S.session=session;
+        if(typeof _preserveDefaultModelSentinel==='function')_preserveDefaultModelSentinel(S.session);
         const _nextMsgs3018=(session.messages||[]).filter(m=>m&&m.role);
         const _currentMessages=Array.isArray(S.messages)?S.messages:[];
         const _currentVisibleMessages=_filterRecoveryControlMessages(_currentMessages || []);

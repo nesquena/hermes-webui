@@ -1435,7 +1435,14 @@ async function newSession(flash, options={}){
     }else if(window._defaultModel){
       // Configured default wins over stale picker/persisted state even with no
       // loaded session (deleting the last session left S.session null + stale picker) (#4728).
-      newModelState={model:window._defaultModel,model_provider:null};
+      // If the dropdown shows "Default (auto)", send the __default__ sentinel so
+      // the session dynamically picks up future default-model changes.
+      const _ddValue=modelSelForNew&&modelSelForNew.value;
+      if(_ddValue==='__default__'){
+        newModelState={model:'__default__',model_provider:null};
+      }else{
+        newModelState={model:window._defaultModel,model_provider:null};
+      }
       usingConfiguredDefault=true;
     }else if(modelSelForNew&&modelSelForNew.value&&typeof _modelStateForSelect==='function'){
       newModelState=_modelStateForSelect(modelSelForNew,modelSelForNew.value);
@@ -1444,6 +1451,7 @@ async function newSession(flash, options={}){
     }
     if(newModelState&&newModelState.model){
       reqBody.model=newModelState.model;
+      reqBody.model_selection_mode=newModelState.model==='__default__'?'auto':null;
       // Cold-start / picker-without-provider fallback: when the dropdown option's
       // data-provider is empty/'default' or the persisted state predates provider
       // tracking, newModelState.model_provider is null. POST /api/session/new's
@@ -1492,6 +1500,13 @@ async function newSession(flash, options={}){
       _clearEmptyComposerModelOverride();
     }
     S.session=data.session;S.messages=data.session.messages||[];
+    // If the new session was created with "Default (auto)", mark it so the
+    // __default__ sentinel survives server round-trips.
+    if(newModelState&&newModelState.model==='__default__'){
+      if(typeof _setDefaultModelSession==='function')_setDefaultModelSession(S.session.session_id);
+      S.session.model='__default__';
+      S.session.model_provider=null;
+    }
     S._pendingSessionToolsets=null;
     if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
@@ -1974,6 +1989,7 @@ async function loadSession(sid){
     return loadSession(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
   }
   S.session=data.session;
+  if(typeof _preserveDefaultModelSentinel==='function')_preserveDefaultModelSentinel(S.session);
   if(typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();
   // Loading a real existing session abandons any pre-session toolset override
   // staged on the empty composer before any deferred refresh work runs.
@@ -2969,6 +2985,7 @@ function _resolveSessionModelForDisplaySoon(sid){
       if(!model||!S.session||S.session.session_id!==sid) return;
       S.session.model=model;
       S.session.model_provider=provider||null;
+      if(typeof _preserveDefaultModelSentinel==='function')_preserveDefaultModelSentinel(S.session);
       const resolvedContextLength=data.session.context_length||S.session.context_length||0;
       S.session.context_length=resolvedContextLength;
       S.session.threshold_tokens=data.session.threshold_tokens||0;
