@@ -1298,8 +1298,9 @@ def profile_env_for_background_worker(
     log = logger_override or logger
     raw_profile = session if isinstance(session, str) else getattr(session, "profile", "")
     profile = str(raw_profile or "").strip()
-    if not profile or profile == "default":
-        yield
+    if not profile or _is_root_profile(profile):
+        with _root_home_override_scope():
+            yield
         return
 
     try:
@@ -1487,13 +1488,11 @@ def profile_env_for_active_request_readonly(
     environment first. It also sets a context-local Hermes-home override so
     agent-side auth-store reads stay on the active profile without mutating
     process-global ``os.environ``.
-
-    No-ops for the default/root profile, which is the common single-profile
-    deployment case.
     """
     profile = (get_active_profile_name() or "").strip()
     if not profile or _is_root_profile(profile):
-        yield
+        with _root_home_override_scope():
+            yield
         return
     try:
         from api.config import _clear_thread_env, _set_thread_env, _thread_ctx
@@ -1590,7 +1589,8 @@ def profile_env_for_active_request(
     """
     profile = (get_active_profile_name() or "").strip()
     if not profile or _is_root_profile(profile):
-        yield
+        with _root_home_override_scope():
+            yield
         return
     with profile_env_for_background_worker(
         profile, purpose, logger_override=logger_override
@@ -1620,7 +1620,9 @@ def profile_scope_for_detached_worker(
     valid) into the worker, then enter this scope at the top of the worker body.
     It sets the request-profile TLS for this (worker) thread and applies the
     profile env via ``profile_env_for_background_worker``, restoring both on exit.
-    No-op for the default/root profile.
+    The default/root path installs the explicit root-home ContextVar override
+    instead of no-opping, so a named→default switch cannot leave the old named
+    home active inside the scope (#6857).
 
     Unlike ``profile_env_for_active_request`` (which reads the *current* thread's
     TLS and must NOT clear it — the request thread keeps using it after the call),
@@ -1629,7 +1631,8 @@ def profile_scope_for_detached_worker(
     """
     name = (profile_name or "").strip()
     if not name or _is_root_profile(name):
-        yield
+        with _root_home_override_scope():
+            yield
         return
     set_request_profile(name)
     try:
