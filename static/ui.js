@@ -2904,13 +2904,46 @@ function _deduplicateModelPickerOptions(sel,selectedValue){
     for(const candidates of byIdentity.values()){
       if(candidates.length<2) continue;
       const selected=candidates.find(opt=>opt.value===selectedValue);
+      // Prefer the REAL catalog row (no data-custom) over any synthetic
+      // injected duplicate: a restored OpenRouter preset must collapse back
+      // onto "openrouter/@preset/<name>", not onto the injected
+      // "@openrouter:@preset/<name>" row (#6936 round-trip). Only when a
+      // synthetic row is actually present: live-model custom proxies
+      // ("@custom:llm-proxy:x-ai/grok-4.5") carry no data-custom and must
+      // keep the routable-survivor rule (#5989).
+      const synthetic=candidates.find(opt=>opt.dataset&&opt.dataset.custom==='1');
+      const realRow=synthetic?candidates.find(opt=>!(opt.dataset&&opt.dataset.custom==='1')):null;
       const routable=candidates.find(opt=>String(opt.value||'').startsWith('@'));
-      const survivor=selected||routable||candidates[0];
+      const survivor=selected||realRow||routable||candidates[0];
       for(const opt of candidates){
         if(opt===survivor) continue;
         group.removeChild(opt);
         removed++;
       }
+    }
+  }
+  // Synthetic rows injected by _ensureModelOptionInDropdown are appended
+  // directly to the <select> (outside any optgroup). If the real catalog row
+  // with the same canonical identity exists inside an optgroup, drop the
+  // orphan so "one option remains" after reconcile (#6936 round-trip).
+  const orphans=Array.from(sel.children||[]).filter(opt=>opt&&opt.tagName==='OPTION'&&opt.dataset&&opt.dataset.custom==='1');
+  for(const orphan of orphans){
+    const identity=typeof _modelPickerCanonicalIdentity==='function'
+      ?_modelPickerCanonicalIdentity(orphan.value,_getOptionProviderId(orphan)||'')
+      :_modelPickerOptionIdentity(orphan.value,_getOptionProviderId(orphan));
+    if(!identity) continue;
+    const realTwin=(()=>{
+      for(const group of sel.querySelectorAll('optgroup')){
+        const twin=Array.from(group.children||[]).find(opt=>opt&&opt.tagName==='OPTION'
+          &&!(opt.dataset&&opt.dataset.custom==='1')
+          &&_modelPickerOptionIdentity(opt.value,_getOptionProviderId(opt))===identity);
+        if(twin) return twin;
+      }
+      return null;
+    })();
+    if(realTwin){
+      if(sel.removeChild) sel.removeChild(orphan);
+      removed++;
     }
   }
   return removed;
@@ -3239,6 +3272,30 @@ function _findModelInDropdown(modelId, sel, preferredProviderId){
     explicitProvider=rawModel.slice(1,rawModel.lastIndexOf(':'));
   }
   const preferred=String(preferredProviderId||explicitProvider||'').toLowerCase();
+  // 0.5 Provider-aware canonical (model, provider) identity — the SAME key the
+  // outgoing path (_modelStateForSelect), dedup and the selected-row check use.
+  // A restored preset "@preset/<name>" (provider "openrouter") and the real
+  // catalog option "openrouter/@preset/<name>" (provider "openrouter") resolve
+  // to ONE identity, so reverse lookup re-finds the catalog row instead of
+  // falling through to synthetic injection (@openrouter:@preset/<name>).
+  // Prefer the real catalog row (no data-custom) when it exists (#6936).
+  if(typeof _modelPickerCanonicalIdentity==='function'){
+    const canonicalTarget=_modelPickerCanonicalIdentity(modelId,preferredProviderId||explicitProvider||'');
+    if(canonicalTarget){
+      const canonicalMatches=options.filter(o=>{
+        const oProv=String(_getOptionProviderId(o)||'').toLowerCase();
+        if(preferred && oProv && oProv!==preferred) return false;
+        return _modelPickerCanonicalIdentity(o.value,oProv||'')===canonicalTarget;
+      });
+      if(canonicalMatches.length){
+        const distinctProviders=new Set(canonicalMatches.map(o=>String(_getOptionProviderId(o)||'').toLowerCase()));
+        if(preferred || distinctProviders.size===1){
+          const realRow=canonicalMatches.find(o=>!(o.dataset&&o.dataset.custom==='1'));
+          return (realRow||canonicalMatches[0]).value;
+        }
+      }
+    }
+  }
   if(preferred){
     if(preferred==='custom'||preferred.startsWith('custom:')){
       // A slash is part of a custom endpoint's upstream model ID, not a
@@ -4309,7 +4366,23 @@ function renderModelDropdown(){
     const _provider=String((m&&m.providerId)||(m&&m.badge&&m.badge.provider)||((typeof _providerFromModelValue==='function')?_providerFromModelValue(m&&m.value):'')||'').trim();
     return (_provider&&_provider!=='default')?_provider:null;
   };
-  const _isSelectedModelRow=(m)=>String((m&&m.value)||'')===String((_selectedModelState&&_selectedModelState.model)||(sel&&sel.value)||'')&&String(_modelProviderForSelectedBadge(m)||'')===String((_selectedModelState&&_selectedModelState.model_provider)||'');
+  // Same provider-aware semantic (model, provider) identity the outgoing,
+  // reverse and dedup paths use: the real catalog row
+  // "openrouter/@preset/<name>" matches a selected state of
+  // "@preset/<name>" + provider "openrouter", so it is marked active and gets
+  // the Selected badge instead of staying unhighlighted (#6936 round-trip).
+  const _isSelectedModelRow=(m)=>{
+    const rowValue=String((m&&m.value)||'');
+    const rowProvider=String(_modelProviderForSelectedBadge(m)||'');
+    const selModel=String((_selectedModelState&&_selectedModelState.model)||(sel&&sel.value)||'');
+    const selProvider=String((_selectedModelState&&_selectedModelState.model_provider)||'');
+    if(typeof _modelPickerCanonicalIdentity==='function'&&rowProvider.toLowerCase()===selProvider.toLowerCase()){
+      try{
+        if(_modelPickerCanonicalIdentity(rowValue,rowProvider||null)===_modelPickerCanonicalIdentity(selModel,selProvider||null)) return true;
+      }catch(_e){}
+    }
+    return rowValue===selModel&&rowProvider.toLowerCase()===selProvider.toLowerCase();
+  };
   const _selectedModelBadge=(m)=>_isSelectedModelRow(m)
     ?`<span class="model-opt-badge model-opt-badge--selected">${esc(t('model_badge_selected')||'Selected')}</span>`
     :'';
