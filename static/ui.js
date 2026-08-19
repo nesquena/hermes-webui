@@ -10598,6 +10598,21 @@ async function _readHealthServerIdentity() {
     return null;
   }
 }
+function _handleAgentRuntimeStaleResponse(payload){
+  if(!payload||payload.type!=='agent_runtime_stale'||payload.restart_scheduled!==true) return null;
+  if(window._agentRuntimeRestartWaitStarted) return window._agentRuntimeRestartWaitPromise||null;
+  const baselineServerIdentity=_healthResponseServerIdentity({
+    server_started_at:payload.server_started_at,
+    uptime_seconds:null,
+  });
+  window._agentRuntimeRestartWaitStarted=true;
+  window._agentRuntimeRestartWaitPromise=_waitForServerThenReload({
+    baselineServerIdentity,
+    interval:2000,
+    maxMs:Number.POSITIVE_INFINITY,
+  });
+  return window._agentRuntimeRestartWaitPromise;
+}
 async function forceUpdate(btn){
   const target=btn&&btn.dataset.target;
   if(!target) return;

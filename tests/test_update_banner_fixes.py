@@ -489,6 +489,58 @@ class TestScheduleRestart:
             "process recompiles from fresh source"
         )
 
+    def test_schedule_restart_rechecks_readiness_after_active_work_drain(
+        self, monkeypatch
+    ):
+        """Agent transaction state and revision are checked at point of re-exec."""
+        import api.updates as upd
+
+        events = []
+        execv_called = threading.Event()
+
+        def restart_ready():
+            events.append("agent-ready")
+            return True
+
+        def wait_for_work(*_args, **_kwargs):
+            events.append("work-drained")
+            return {"restart_blocked": False}
+
+        def fake_execv(_exe, _args):
+            events.append("execv")
+            execv_called.set()
+
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setattr(upd, "_wait_until_restart_safe", wait_for_work)
+        monkeypatch.setattr(os, "execv", fake_execv)
+
+        scheduled = upd._schedule_restart(delay=0, restart_ready=restart_ready)
+
+        assert scheduled is True
+        assert execv_called.wait(timeout=2)
+        assert events == [
+            "agent-ready",
+            "work-drained",
+            "agent-ready",
+            "agent-ready",
+            "execv",
+        ]
+
+    def test_schedule_restart_reports_thread_start_failure(self, monkeypatch):
+        """A restart that could not be scheduled must not be reported as scheduled."""
+        import api.updates as upd
+
+        class BrokenThread:
+            def __init__(self, **_kwargs):
+                pass
+
+            def start(self):
+                raise RuntimeError("thread unavailable")
+
+        monkeypatch.setattr(upd.threading, "Thread", BrokenThread)
+
+        assert upd._schedule_restart(delay=0) is False
+
 
 class TestApplyUpdateRestartSafety:
     """Self-update must not re-exec while chat streams are active."""
@@ -666,6 +718,36 @@ class TestSuccessfulUpdateReturnsRestartScheduled:
         assert result.get('restart_scheduled') is True, (
             "successful update must set restart_scheduled: True"
         )
+
+    def test_apply_update_fails_closed_when_restart_cannot_be_scheduled(
+        self, tmp_path, monkeypatch
+    ):
+        """An applied update cannot claim success without its required restart."""
+        import api.updates as upd
+
+        (tmp_path / '.git').mkdir()
+
+        def fake_run(args, cwd, timeout=10):
+            if args[0] in {'fetch', 'tag'}:
+                return '', True
+            if args[:2] == ['status', '--porcelain']:
+                return '', True
+            if args[:2] == ['rev-parse', '--abbrev-ref']:
+                return 'origin/master', True
+            if args[0] == 'pull':
+                return 'Already up to date.', True
+            return '', True
+
+        monkeypatch.setattr(upd, '_run_git', fake_run)
+        monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
+        monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
+        monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: False)
+
+        result = upd.apply_update('webui')
+
+        assert result['ok'] is False
+        assert result['restart_scheduled'] is False
+        assert 'updated' in result['message']
 
     def test_apply_update_pulls_latest_release_tag_when_updates_are_release_based(
         self, tmp_path, monkeypatch
@@ -2264,6 +2346,98 @@ if (!fallback || fallback.serverStartedAt !== null || fallback.uptimeSeconds !==
 if (_healthResponseServerIdentity({{ server_started_at: null, uptime_seconds: null }}) !== null) {{
   throw new Error('expected null identity when /health exposes neither started_at nor uptime');
 }}
+"""
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    def test_api_routes_scheduled_stale_runtime_to_restart_generation_wait(self):
+        """Error and status responses share the stale-runtime recovery hook."""
+        api_fn = extract_js_function(read('static/workspace.js'), 'api')
+        script = f"""
+let observed = null;
+let requestCount = 0;
+global.document = {{ baseURI: 'http://127.0.0.1:8788/' }};
+global.location = {{ href: 'http://127.0.0.1:8788/', pathname: '/', search: '' }};
+global.window = {{ location: global.location }};
+global._handleAgentRuntimeStaleResponse = payload => {{ observed = payload; }};
+global.fetch = async () => {{
+  requestCount += 1;
+  const body = {{
+    error: 'restart pending',
+    type: 'agent_runtime_stale',
+    retryable: true,
+    restart_scheduled: true,
+    server_started_at: 1234.5,
+  }};
+  return {{
+    ok: requestCount > 1,
+    status: requestCount > 1 ? 200 : 409,
+    statusText: requestCount > 1 ? 'OK' : 'Conflict',
+    headers: {{ get: () => 'application/json' }},
+    text: async () => JSON.stringify(body),
+    json: async () => body,
+  }};
+}};
+{api_fn}
+(async () => {{
+  try {{
+    await api('/api/chat/start', {{ retries: 0, timeoutMs: 0 }});
+    throw new Error('expected stale-runtime request to reject');
+  }} catch (err) {{
+    if (err.message === 'expected stale-runtime request to reject') throw err;
+    if (err.status !== 409) throw new Error('expected HTTP 409 context');
+  }}
+  if (!observed || observed.server_started_at !== 1234.5) {{
+    throw new Error('stale-runtime error did not reach generation wait hook');
+  }}
+  observed = null;
+  const status = await api('/api/session/compress/status', {{ retries: 0, timeoutMs: 0 }});
+  if (!status || !observed || observed.server_started_at !== 1234.5) {{
+    throw new Error('stale-runtime status did not reach generation wait hook');
+  }}
+}})().catch(err => {{ console.error(err.stack || err.message); process.exit(1); }});
+"""
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    def test_stale_runtime_wait_ignores_old_generation_then_reloads_new_generation(self):
+        """Automatic recovery verifies the replacement process before reloading."""
+        src = read('static/ui.js')
+        normalize_fn = extract_js_function(src, '_normalizeHealthServerIdentity')
+        identity_fn = extract_js_function(src, '_healthResponseServerIdentity')
+        wait_fn = extract_js_function(src, '_waitForServerThenReload')
+        stale_fn = extract_js_function(src, '_handleAgentRuntimeStaleResponse')
+        script = f"""
+let now = 0;
+let reloads = 0;
+let fetches = 0;
+const responses = [
+  {{ status: 'ok', server_started_at: '1234.5', uptime_seconds: 20 }},
+  {{ status: 'ok', server_started_at: '1235.5', uptime_seconds: 1 }},
+];
+global.window = {{}};
+global.document = {{ baseURI: 'http://127.0.0.1:8788/' }};
+global.location = {{ reload: () => {{ reloads += 1; }} }};
+global.$ = () => null;
+global.Date = {{ now: () => now }};
+global.setTimeout = (cb, ms) => {{ now += ms || 0; cb(); return 0; }};
+global.fetch = async () => {{
+  fetches += 1;
+  const data = responses.shift();
+  if (!data) throw new Error('unexpected extra health probe');
+  return {{ ok: true, json: async () => data }};
+}};
+{normalize_fn}
+{identity_fn}
+{wait_fn}
+{stale_fn}
+(async () => {{
+  await _handleAgentRuntimeStaleResponse({{
+    type: 'agent_runtime_stale',
+    restart_scheduled: true,
+    server_started_at: 1234.5,
+  }});
+  if (fetches !== 2) throw new Error('expected old generation to be ignored');
+  if (reloads !== 1) throw new Error('expected reload after replacement generation');
+}})().catch(err => {{ console.error(err.stack || err.message); process.exit(1); }});
 """
         subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
 

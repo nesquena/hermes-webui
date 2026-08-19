@@ -36,6 +36,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
 from api.agent_runtime import (
     AgentRuntimeChangedError,
+    agent_runtime_stale_payload,
     ensure_agent_runtime_current,
     require_ai_agent_class,
 )
@@ -22320,11 +22321,7 @@ def _agent_runtime_barrier_response(
     try:
         ensure_agent_runtime_current()
     except AgentRuntimeChangedError as exc:
-        return {
-            "error": str(exc),
-            "type": "agent_runtime_stale",
-            "retryable": True,
-        }
+        return agent_runtime_stale_payload(exc)
     return None
 
 
@@ -24435,11 +24432,7 @@ def _handle_git_commit_message(handler, body):
     except GitWorkspaceError as e:
         return _git_bad(handler, e)
     except AgentRuntimeChangedError as e:
-        return j(handler, {
-            "error": str(e),
-            "type": "agent_runtime_stale",
-            "retryable": True,
-        }, status=409)
+        return j(handler, agent_runtime_stale_payload(e), status=409)
     except Exception as e:
         logger.exception("git commit message generation failed")
         return bad(handler, _sanitize_error(e), 500)
@@ -24472,11 +24465,7 @@ def _handle_git_commit_message_selected(handler, body):
     except GitWorkspaceError as e:
         return _git_bad(handler, e)
     except AgentRuntimeChangedError as e:
-        return j(handler, {
-            "error": str(e),
-            "type": "agent_runtime_stale",
-            "retryable": True,
-        }, status=409)
+        return j(handler, agent_runtime_stale_payload(e), status=409)
     except Exception as e:
         logger.exception("selected git commit message generation failed")
         return bad(handler, _sanitize_error(e), 500)
@@ -26033,6 +26022,10 @@ def _manual_compression_status_payload(job):
             payload["type"] = job["error_type"]
         if job.get("retryable") is not None:
             payload["retryable"] = bool(job["retryable"])
+        if job.get("restart_scheduled") is not None:
+            payload["restart_scheduled"] = bool(job["restart_scheduled"])
+        if job.get("server_started_at") is not None:
+            payload["server_started_at"] = job["server_started_at"]
     elif status == "cancelled":
         payload["ok"] = False
         payload["error"] = job.get("error") or "Compression cancelled"
@@ -26069,6 +26062,8 @@ def _run_manual_compression_job(sid, body):
                         "error_status": status,
                         "error_type": (payload or {}).get("type"),
                         "retryable": (payload or {}).get("retryable"),
+                        "restart_scheduled": (payload or {}).get("restart_scheduled"),
+                        "server_started_at": (payload or {}).get("server_started_at"),
                         "updated_at": now,
                     }
                 )
@@ -26082,16 +26077,19 @@ def _run_manual_compression_job(sid, body):
                 )
     except AgentRuntimeChangedError as exc:
         logger.warning("Manual compression worker found stale Agent runtime for session %s", sid)
+        stale_payload = agent_runtime_stale_payload(exc)
         with _MANUAL_COMPRESSION_JOBS_LOCK:
             job = _MANUAL_COMPRESSION_JOBS.get(sid)
             if job:
                 job.update(
                     {
                         "status": "error",
-                        "error": str(exc),
+                        "error": stale_payload["error"],
                         "error_status": 409,
-                        "error_type": "agent_runtime_stale",
-                        "retryable": True,
+                        "error_type": stale_payload["type"],
+                        "retryable": stale_payload["retryable"],
+                        "restart_scheduled": stale_payload.get("restart_scheduled"),
+                        "server_started_at": stale_payload.get("server_started_at"),
                         "updated_at": time.time(),
                     }
                 )
@@ -26149,11 +26147,7 @@ def _handle_session_compress_start(handler, body):
     except AgentRuntimeChangedError as exc:
         return j(
             handler,
-            {
-                "error": str(exc),
-                "type": "agent_runtime_stale",
-                "retryable": True,
-            },
+            agent_runtime_stale_payload(exc),
             status=409,
         )
 
@@ -26517,11 +26511,7 @@ def _handle_session_compress(handler, body):
             },
         )
     except AgentRuntimeChangedError as e:
-        return j(handler, {
-            "error": str(e),
-            "type": "agent_runtime_stale",
-            "retryable": True,
-        }, status=409)
+        return j(handler, agent_runtime_stale_payload(e), status=409)
     except Exception as e:
         logger.warning("Manual session compression failed: %s", e)
         return bad(handler, f"Compression failed: {_sanitize_error(e)}")
@@ -27182,11 +27172,7 @@ def _handle_handoff_summary(handler, body):
             "fallback": fallback,
         })
     except AgentRuntimeChangedError as e:
-        return j(handler, {
-            "error": str(e),
-            "type": "agent_runtime_stale",
-            "retryable": True,
-        }, status=409)
+        return j(handler, agent_runtime_stale_payload(e), status=409)
     except Exception as e:
         logger.warning("Handoff summary generation failed: %s", e)
         summary_text = _fallback_handoff_summary(msgs)
