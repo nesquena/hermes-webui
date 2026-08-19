@@ -1055,3 +1055,40 @@ class TestAuxiliaryModelsBackend:
             f"aux slot must persist the SELECTED provider's base_url, got "
             f"{saved.get('base_url')!r}"
         )
+
+    def test_aux_slot_custom_provider_slug_collision_fails_closed(self, monkeypatch, tmp_path):
+        """Saving a named custom auxiliary model whose slug collides with another
+        config entry must fail closed, not silently persist the wrong endpoint.
+
+        The inline base_url resolution added for the deadlock fix shares the same
+        all-entry uniqueness helper, so a custom:foo-bar save with colliding
+        'Foo Bar' + 'foo-bar' entries raises AmbiguousCustomProviderError and
+        writes nothing (the slot stays 'auto'). Operates on the in-scope
+        config_data, so it remains lock-safe.
+        """
+        import yaml
+
+        from api import config
+
+        shared_cfg = {
+            "auxiliary": {"vision": {"provider": "auto", "model": ""}},
+            "custom_providers": [
+                {"name": "Foo Bar", "base_url": "https://a.example/v1"},
+                {"name": "foo-bar", "base_url": "https://b.example/v1",
+                 "models": ["shared-model"]},
+            ],
+        }
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(yaml.safe_dump(shared_cfg), encoding="utf-8")
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+
+        with pytest.raises(config.AmbiguousCustomProviderError):
+            config.set_auxiliary_model("vision", "custom:foo-bar", "shared-model")
+
+        # The ambiguous save must not have persisted: the slot stays 'auto'.
+        saved = config._load_yaml_config_file(config_path)["auxiliary"]["vision"]
+        assert saved.get("provider") == "auto", (
+            f"ambiguous aux save must not persist, got {saved!r}"
+        )

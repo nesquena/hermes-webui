@@ -2619,17 +2619,72 @@ def _get_provider_cfg(provider_id) -> dict:
 class AmbiguousCustomProviderError(ValueError):
     """Raised when two+ custom_providers[] entries normalize to the same slug.
 
-    ``resolve_model_provider()`` returns a provider SLUG (``custom:<slug>``),
-    and the downstream credential lookup (``resolve_custom_provider_connection``)
-    resolves the API key by scanning ``custom_providers[]`` for the FIRST entry
-    matching that slug — independent of the base_url. So when two distinct
-    provider names normalize to the same slug (e.g. ``Foo Bar`` and ``foo-bar``
-    both -> ``custom:foo-bar``) and both list the requested model, returning the
-    slug would silently pair one entry's endpoint with another entry's
-    credential. Rather than guess, we fail closed and surface the collision so
-    the user can rename one provider. Subclasses ``ValueError`` so existing
-    ``except ValueError`` / broad-``except`` fallbacks continue to catch it.
+    A custom provider is identified downstream by a SLUG (``custom:<slug>``):
+    ``resolve_model_provider()`` returns it, and the credential lookup
+    (``resolve_custom_provider_connection``) resolves the API key + base_url by
+    scanning ``custom_providers[]`` for the FIRST entry whose name normalizes to
+    that slug — independent of model ownership or the endpoint chosen earlier. So
+    when two distinct provider names normalize to the same slug (e.g. ``Foo Bar``
+    and ``foo-bar`` both -> ``custom:foo-bar``), consuming the slug on ANY path
+    could pair one entry's endpoint with another entry's credential — including
+    the asymmetric case where only one of the colliding entries lists the
+    requested model. Rather than guess, every slug-only boundary fails closed and
+    surfaces the collision so the user can rename one provider. Subclasses
+    ``ValueError`` so existing ``except ValueError`` / broad-``except`` fallbacks
+    continue to catch it.
     """
+
+
+def _custom_provider_slug_key(value: object) -> str:
+    """Canonical slug key for custom-provider identity/collision detection.
+
+    Mirrors the normalization used at the credential boundary
+    (``resolve_custom_provider_connection``): lowercase, ``_``/space -> ``-``,
+    collapse repeats, strip. Accepts either a bare provider name or a
+    ``custom:<slug>`` id (the ``custom:`` prefix is stripped first) so every
+    slug-only path agrees on which entries share an identity.
+    """
+    raw = str(value or "").strip().lower()
+    if raw.startswith("custom:"):
+        raw = raw.split(":", 1)[1].strip()
+    s = raw.replace("_", "-").replace(" ", "-")
+    while "--" in s:
+        s = s.replace("--", "-")
+    return s.strip("-")
+
+
+def _unique_custom_provider_entry(custom_providers: object, slug_key: str) -> dict | None:
+    """Return the single named ``custom_providers`` entry matching ``slug_key``.
+
+    Pure and lock-safe: operates only on the passed-in list, so it can be called
+    while holding ``_cfg_lock`` (unlike ``get_config()``-based resolvers).
+
+    Membership is built from ALL named entries, INDEPENDENT of model ownership,
+    because slug-only credential resolution scans every same-slug entry and
+    returns the first match. Raises ``AmbiguousCustomProviderError`` when 2+
+    entries share the key so an endpoint and an API key can never be resolved
+    from different entries on any path. Returns the matching entry, or ``None``
+    when no entry matches.
+    """
+    if not slug_key or not isinstance(custom_providers, list):
+        return None
+    matches: list[dict] = []
+    for entry in custom_providers:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            continue
+        if _custom_provider_slug_key(name) == slug_key:
+            matches.append(entry)
+    if len(matches) >= 2:
+        names = [str(e.get("name") or "").strip() for e in matches]
+        raise AmbiguousCustomProviderError(
+            f"Custom providers {names!r} all normalize to the same provider slug "
+            f"{slug_key!r}; an endpoint and API key could be resolved from "
+            f"different entries. Rename one so each custom provider has a unique slug."
+        )
+    return matches[0] if matches else None
 
 
 def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) -> tuple:
@@ -2771,47 +2826,25 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             ids.update(_configured_model_ids(entry.get('models')))
             return model_id in ids
 
-        # Map each normalized custom slug -> the entries that OWN this model.
-        # A slug with >=2 owning entries is a normalized-slug COLLISION. Because
-        # resolve_model_provider() returns only a slug and credentials are later
-        # resolved from that slug alone (resolve_custom_provider_connection picks
-        # the FIRST same-slug entry regardless of base_url), such a slug can
-        # never be returned safely — endpoint and API key could come from
-        # different entries. Fail closed on any collision instead of guessing.
-        _owning_by_slug: dict[str, list[dict]] = {}
-        for entry in custom_providers:
-            if not isinstance(entry, dict):
-                continue
-            entry_name = (entry.get('name') or '').strip()
-            if not entry_name or not _entry_owns_model(entry):
-                continue
-            _owning_by_slug.setdefault(
-                _custom_provider_slug_from_name(entry_name), []
-            ).append(entry)
-
-        def _ambiguity_error(slug: str) -> AmbiguousCustomProviderError:
-            names = [(e.get('name') or '').strip() for e in _owning_by_slug.get(slug, [])]
-            return AmbiguousCustomProviderError(
-                f"Custom providers {names!r} all normalize to provider slug "
-                f"{slug!r} and list model {model_id!r}; the endpoint and API key "
-                f"would be resolved from different entries. Rename one custom "
-                f"provider so each has a unique slug."
-            )
-
+        # Collision safety: before returning ANY custom:<slug>, reject a slug
+        # that maps to multiple config entries. Membership is built from ALL
+        # named entries (not just those that own this model): the credential
+        # lookup scans every same-slug entry and first-matches independent of
+        # ownership, so even an asymmetric collision (only one colliding entry
+        # lists the model) could pair one entry's endpoint with another entry's
+        # credential. _unique_custom_provider_entry() raises on >=2.
         if _active_custom_slug:
-            _slug_owners = _owning_by_slug.get(_active_custom_slug, [])
-            # >=2 owning entries share the active slug -> credential-unsafe.
-            if len(_slug_owners) >= 2:
-                raise _ambiguity_error(_active_custom_slug)
-            # Exactly one owning entry carries the active slug -> authoritative,
-            # even when model.base_url is stale/absent or points at a different
-            # endpoint. An explicit, unambiguous named provider must never lose
-            # to config order: a stale URL is not evidence to discard it.
-            if len(_slug_owners) == 1:
-                entry = _slug_owners[0]
+            entry = _unique_custom_provider_entry(
+                custom_providers, _custom_provider_slug_key(_active_custom_slug)
+            )
+            # Exactly one entry carries the active slug AND owns the model ->
+            # authoritative, even when model.base_url is stale/absent or points at
+            # a different endpoint. An explicit, unambiguous named provider must
+            # never lose to config order: a stale URL is not evidence to discard
+            # it. If the active provider doesn't list this model (or isn't
+            # configured), fall through to the ordered ownership scan below.
+            if entry is not None and _entry_owns_model(entry):
                 return model_id, _active_custom_slug, (entry.get('base_url') or '').strip() or None
-            # 0 owners: the active named provider doesn't list this model ->
-            # fall through to the ordered ownership scan below.
         for entry in custom_providers:
             if not isinstance(entry, dict):
                 continue
@@ -2824,10 +2857,12 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             entry_model_ids.update(_configured_model_ids(entry.get('models')))
             if entry_name and model_id in entry_model_ids:
                 provider_hint = _custom_provider_slug_from_name(entry_name)
-                # Same collision guard on the bare-'custom' / fall-through path:
-                # a slug shared by >=2 owning entries can't pin credentials.
-                if len(_owning_by_slug.get(provider_hint, [])) >= 2:
-                    raise _ambiguity_error(provider_hint)
+                # Same all-entry collision guard on the bare-'custom' /
+                # fall-through path: a slug shared by >=2 config entries can't
+                # pin credentials, so fail closed before returning it.
+                _unique_custom_provider_entry(
+                    custom_providers, _custom_provider_slug_key(entry_name)
+                )
                 return model_id, provider_hint, entry_base_url or None
 
     # Check user-defined providers (config.yaml → providers:).
@@ -2887,6 +2922,16 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
     parsed_provider_hint = _parse_provider_qualified_model_id(model_id)
     if parsed_provider_hint is not None:
         bare_model, provider_hint = parsed_provider_hint
+        if provider_hint.startswith("custom:"):
+            # Session/send/handoff shapes encode the provider as
+            # @custom:<slug>:model and reach here after the ownership scan only
+            # saw the ENCODED string. Apply the same all-entry uniqueness check
+            # before returning the slug so the downstream credential lookup can't
+            # first-match a different colliding entry (raises on >=2).
+            _unique_custom_provider_entry(
+                cfg.get('custom_providers', []),
+                _custom_provider_slug_key(provider_hint),
+            )
         if (
             provider_hint.startswith("custom:")
             and config_base_url
@@ -3091,13 +3136,7 @@ def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, st
     if not pid.startswith("custom:"):
         return None, None
 
-    def _slugify(value: str) -> str:
-        s = str(value or "").strip().lower().replace("_", "-").replace(" ", "-")
-        while "--" in s:
-            s = s.replace("--", "-")
-        return s.strip("-")
-
-    slug = _slugify(pid.split(":", 1)[1].strip())
+    slug = _custom_provider_slug_key(pid)
     if not slug:
         return None, None
 
@@ -3125,18 +3164,13 @@ def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, st
     if not isinstance(custom_providers, list):
         custom_providers = []
 
-    for entry in custom_providers:
-        if not isinstance(entry, dict):
-            continue
-        name = str(entry.get("name") or "").strip()
-        if not name:
-            continue
-        entry_slug = _slugify(name)
-        if entry_slug != slug:
-            continue
-
-        base_url = str(entry.get("base_url") or "").strip() or None
-        api_key = _resolve_key(entry.get("api_key"), entry.get("key_env"), pid)
+    # Fail closed when the slug maps to multiple entries (raises); otherwise use
+    # the single matching entry. Shared with resolve_model_provider so endpoint
+    # and credential are always resolved from the SAME entry.
+    matched_entry = _unique_custom_provider_entry(custom_providers, slug)
+    if matched_entry is not None:
+        base_url = str(matched_entry.get("base_url") or "").strip() or None
+        api_key = _resolve_key(matched_entry.get("api_key"), matched_entry.get("key_env"), pid)
         return api_key, base_url
 
     # If exactly one custom provider is configured, use it as a pragmatic
@@ -4948,39 +4982,36 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
                 # @provider path doesn't carry a custom entry's base_url), which
                 # would drop the base_url entirely. Fall back to the bare resolve
                 # only for the unnamed `custom` case, which has no own entry.
-                try:
-                    resolved_base_url = None
-                    if provider.startswith("custom:"):
-                        # Resolve the selected provider's base_url from the
-                        # config_data already loaded under _cfg_lock above. Do
-                        # NOT call resolve_custom_provider_connection() /
-                        # get_config() here: they re-acquire the non-reentrant
-                        # _cfg_lock we already hold, self-deadlocking whenever the
-                        # cache is stale or the profile path changed. Mirror the
-                        # slug matching of resolve_custom_provider_connection
-                        # against the in-scope dict instead.
-                        def _aux_slugify(value: str) -> str:
-                            s = str(value or "").strip().lower().replace("_", "-").replace(" ", "-")
-                            while "--" in s:
-                                s = s.replace("--", "-")
-                            return s.strip("-")
-
-                        _want_slug = _aux_slugify(provider.split(":", 1)[1])
-                        _cp_entries = config_data.get("custom_providers", [])
-                        if _want_slug and isinstance(_cp_entries, list):
-                            for _cp in _cp_entries:
-                                if not isinstance(_cp, dict):
-                                    continue
-                                _cp_name = str(_cp.get("name") or "").strip()
-                                if _cp_name and _aux_slugify(_cp_name) == _want_slug:
-                                    resolved_base_url = str(_cp.get("base_url") or "").strip() or None
-                                    break
-                    if not resolved_base_url:
+                resolved_base_url = None
+                if provider.startswith("custom:"):
+                    # Resolve the selected provider's base_url from the
+                    # config_data already loaded under _cfg_lock above. Do NOT
+                    # call resolve_custom_provider_connection() / get_config()
+                    # here: they re-acquire the non-reentrant _cfg_lock we
+                    # already hold, self-deadlocking whenever the cache is stale
+                    # or the profile path changed. Use the shared uniqueness
+                    # helper on the in-scope dict so this slug-only save fails
+                    # closed on a collision (raises AmbiguousCustomProviderError)
+                    # exactly like every other path — otherwise the ambiguity
+                    # would be swallowed and the wrong endpoint persisted.
+                    _cp_match = _unique_custom_provider_entry(
+                        config_data.get("custom_providers", []),
+                        _custom_provider_slug_key(provider),
+                    )
+                    if _cp_match is not None:
+                        resolved_base_url = str(_cp_match.get("base_url") or "").strip() or None
+                if not resolved_base_url:
+                    # Best-effort fallback for the unnamed `custom` case (no own
+                    # entry). Keep it non-fatal for unexpected errors, but let a
+                    # genuine ambiguity propagate so the save fails closed.
+                    try:
                         _, _, resolved_base_url = resolve_model_provider(model)
-                    if resolved_base_url:
-                        slot_cfg["base_url"] = str(resolved_base_url).strip().rstrip("/")
-                except Exception:
-                    pass
+                    except AmbiguousCustomProviderError:
+                        raise
+                    except Exception:
+                        resolved_base_url = None
+                if resolved_base_url:
+                    slot_cfg["base_url"] = str(resolved_base_url).strip().rstrip("/")
             if advanced is not None:
                 try:
                     _apply_advanced_model_options(slot_cfg, advanced)

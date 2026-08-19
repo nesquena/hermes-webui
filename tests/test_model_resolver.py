@@ -438,6 +438,88 @@ def test_session_provider_context_routes_handoff_to_session_endpoint_not_active(
     )
 
 
+def test_overlapping_custom_providers_asymmetric_collision_fails_closed():
+    """ASYMMETRIC normalized-slug collision must fail closed too.
+
+    Reviewer-reproduced shape: entry A ('Foo Bar') appears FIRST and does NOT
+    list 'shared-model'; entry B ('foo-bar') lists it and is the active endpoint.
+    Both normalize to custom:foo-bar. Ownership-only collision detection would
+    see just B and happily return B's endpoint + custom:foo-bar — but the
+    credential lookup scans by slug and first-matches A, pairing B's endpoint
+    with A's credential. Membership must be built from ALL named entries
+    (ownership-independent), so this raises.
+    """
+    custom_providers = [
+        {'name': 'Foo Bar', 'base_url': 'https://a.example/v1'},  # first, NON-owner
+        {'name': 'foo-bar', 'base_url': 'https://b.example/v1', 'models': ['shared-model']},
+    ]
+    with pytest.raises(config.AmbiguousCustomProviderError):
+        _resolve_with_config(
+            'shared-model',
+            provider='custom',
+            base_url='https://b.example/v1',  # active endpoint = B
+            custom_providers=custom_providers,
+        )
+
+
+def test_overlapping_custom_providers_asymmetric_collision_bare_custom_fails_closed():
+    """Same asymmetric collision on the bare-'custom', no-base_url ordered-scan
+    path: the owning entry B is returned as custom:foo-bar, but non-owner A
+    shares the slug, so the ordered scan must also fail closed.
+    """
+    custom_providers = [
+        {'name': 'Foo Bar', 'base_url': 'https://a.example/v1'},  # first, NON-owner
+        {'name': 'foo-bar', 'base_url': 'https://b.example/v1', 'models': ['shared-model']},
+    ]
+    with pytest.raises(config.AmbiguousCustomProviderError):
+        _resolve_with_config(
+            'shared-model',
+            provider='custom',
+            custom_providers=custom_providers,
+        )
+
+
+def test_provider_qualified_custom_hint_collision_fails_closed():
+    """The @custom:<slug>:model qualified path (session/send/handoff shape via
+    model_with_provider_context) must apply the same all-entry uniqueness check.
+
+    Without it, the qualified return hands back custom:foo-bar and the credential
+    backfill first-matches the wrong entry. Uses the asymmetric shape so the
+    check cannot rely on model ownership of the encoded string.
+    """
+    custom_providers = [
+        {'name': 'Foo Bar', 'base_url': 'https://a.example/v1'},  # first, NON-owner
+        {'name': 'foo-bar', 'base_url': 'https://b.example/v1', 'models': ['shared-model']},
+    ]
+    old_cfg = dict(config.cfg)
+    config.cfg['model'] = {
+        'default': 'shared-model', 'provider': 'custom',
+        'base_url': 'https://a.example/v1',
+    }
+    config.cfg['custom_providers'] = custom_providers
+    try:
+        encoded = config.model_with_provider_context('shared-model', 'custom:foo-bar')
+        with pytest.raises(config.AmbiguousCustomProviderError):
+            config.resolve_model_provider(encoded)
+    finally:
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+
+
+def test_resolve_custom_provider_connection_collision_fails_closed(monkeypatch):
+    """The credential boundary itself must fail closed on a slug collision so an
+    endpoint and API key can never be resolved from different entries — even when
+    called directly (e.g. the handoff/context-length credential backfill).
+    """
+    custom_providers = [
+        {'name': 'Foo Bar', 'base_url': 'https://a.example/v1', 'api_key': 'key-A'},
+        {'name': 'foo-bar', 'base_url': 'https://b.example/v1', 'api_key': 'key-B'},
+    ]
+    monkeypatch.setattr(config, 'get_config', lambda: {'custom_providers': custom_providers})
+    with pytest.raises(config.AmbiguousCustomProviderError):
+        config.resolve_custom_provider_connection('custom:foo-bar')
+
+
 # ── #3872: bare ``custom`` provider is a vendor-routing proxy — preserve the
 #    full model id (the prefix is intrinsic). #433's redundant-prefix strip is
 #    scoped to real first-party providers (provider=openai + proxy base_url),
