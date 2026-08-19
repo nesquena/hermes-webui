@@ -1376,12 +1376,6 @@ async function send(){
   const literalSlash=!!(options&&options.literalSlash);
   let text=$('msg').value.trim();
   if(!text&&!S.pendingFiles.length&&!_pendingSelections.length){_sendInProgress=false;_sendInProgressSid=null;return;}
-  // Model scheduler: if enabled (settings master + composer auto), fetch a
-  // recommendation and apply it to the model selector before building the
-  // payload. Never blocks sending; failures keep the current model.
-  if(typeof window.ModelRouter!=='undefined'&&window.ModelRouter&&typeof window.ModelRouter.beforeSend==='function'){
-    try{await window.ModelRouter.beforeSend(text);}catch(_e){}
-  }
   // Don't send while an inline message edit is active
   if(document.querySelector('.msg-edit-area')){_sendInProgress=false;_sendInProgressSid=null;return;}
   _flushSelectionBlocksToComposer();
@@ -1617,8 +1611,18 @@ async function send(){
   }
   if(!S.session){await newSession();await renderSessionList();}
 
+  // Greptile P1: 在 model-router await 之前锁定本次 send 的所属会话。
+  // 若 /recommend 请求期间用户切换会话，后续草稿清理、上传与
+  // /api/chat/start 仍必须发往发起会话，而不是新切换的会话。
   const activeSid=S.session.session_id;
   _sendInProgressSid=activeSid;
+
+  // Model scheduler: 若开关启用（设置总开关 + composer Auto），发送前获取
+  // 推荐并应用到模型下拉。该调用不阻塞发送，失败保持当前模型。
+  // 此 await 已从 send() 开头移到会话锁定之后（Greptile P1）。
+  if(typeof window.ModelRouter!=='undefined'&&window.ModelRouter&&typeof window.ModelRouter.beforeSend==='function'){
+    try{await window.ModelRouter.beforeSend(text);}catch(_e){}
+  }
 
   // Salvage of #4750 (@harryazj): capture the composer text and clear the
   // textarea NOW — immediately after capture and BEFORE the uploadPendingFiles()

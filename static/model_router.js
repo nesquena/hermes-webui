@@ -66,6 +66,8 @@
     if (!exists) {
       const opt = document.createElement('option');
       opt.value = target;
+      opt.dataset.model = rec.model || '';
+      if (rec.provider) opt.dataset.provider = rec.provider;
       opt.textContent = (rec.provider ? rec.provider + ' ' : '') + rec.model;
       sel.appendChild(opt);
     }
@@ -105,8 +107,11 @@
   async function beforeSend(text) {
     if (!_masterOn || !_composerAuto) return;
     if (!text || !text.trim()) return;
+    const ownerSid = _currentSessionId();
     const rec = await _recommend(text);
-    if (rec) _applyRecommendation(rec);
+    // Greptile P1: 仅当用户仍停留在发起 send 的会话时才应用推荐，避免
+    // /recommend 返回时用户已切换会话，导致迟到推荐覆盖错误会话的模型。
+    if (rec && ownerSid === _currentSessionId()) _applyRecommendation(rec);
   }
 
   // ── master switch (settings) ──────────────────────────────────────────
