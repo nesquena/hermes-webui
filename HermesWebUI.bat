@@ -18,28 +18,33 @@ echo.
 
 cd /d "%~dp0"
 
-echo [1/5] Checking Python Runtime...
+echo [1/5] Checking Python Runtime (Python 3.11+ required)...
 set "PYTHON_CMD="
 
-where python >nul 2>&1
-if %ERRORLEVEL% equ 0 (
-    for /f "tokens=*" %%i in ('where python') do (
-        if not defined PYTHON_CMD set "PYTHON_CMD=%%i"
+:: Check python candidates and verify version >= 3.11
+for %%P in (python3.13 python3.12 python3.11 python py) do (
+    if not defined PYTHON_CMD (
+        %%P -c "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)" >nul 2>&1
+        if !ERRORLEVEL! equ 0 (
+            set "PYTHON_CMD=%%P"
+        )
     )
 )
 
 if not defined PYTHON_CMD (
-    where py >nul 2>&1
-    if %ERRORLEVEL% equ 0 set "PYTHON_CMD=py"
-)
-
-if not defined PYTHON_CMD (
-    echo [*] Python not found. Installing Python 3.12 automatically via winget...
+    echo [*] Compatible Python 3.11+ not found. Installing Python 3.12 via winget...
     winget install -e --id Python.Python.3.12 --silent --accept-package-agreements --accept-source-agreements
     set "PATH=%LOCALAPPDATA%\Programs\Python\Python312;%LOCALAPPDATA%\Programs\Python\Python312\Scripts;%PATH%"
-    set "PYTHON_CMD=python"
+    python -c "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)" >nul 2>&1
+    if !ERRORLEVEL! equ 0 (
+        set "PYTHON_CMD=python"
+    ) else (
+        echo [!] Could not verify Python 3.11+. Please install Python 3.11, 3.12, or 3.13 manually.
+        pause
+        exit /b 1
+    )
 )
-echo [OK] Python runtime ready.
+echo [OK] Python runtime verified: !PYTHON_CMD!
 
 echo.
 echo [2/5] Checking Git...
@@ -73,22 +78,20 @@ if not exist ".venv" (
 )
 
 set "VENV_PYTHON=%~dp0.venv\Scripts\python.exe"
-set "VENV_PIP=%~dp0.venv\Scripts\pip.exe"
 
 if not exist "%VENV_PYTHON%" (
     set "VENV_PYTHON=%PYTHON_CMD%"
-    set "VENV_PIP=pip"
 )
 
 echo [*] Updating packages and dependencies...
-"%VENV_PIP%" install --quiet --upgrade pip setuptools wheel
+"%VENV_PYTHON%" -m pip install --quiet --upgrade pip setuptools wheel
 if exist "requirements.txt" (
-    "%VENV_PIP%" install --quiet -r requirements.txt
+    "%VENV_PYTHON%" -m pip install --quiet -r requirements.txt
 )
 if exist "%HERMES_DIR%\requirements.txt" (
-    "%VENV_PIP%" install --quiet -r "%HERMES_DIR%\requirements.txt"
+    "%VENV_PYTHON%" -m pip install --quiet -r "%HERMES_DIR%\requirements.txt"
 )
-"%VENV_PIP%" install --quiet psutil edge-tts python-docx openpyxl python-pptx
+"%VENV_PYTHON%" -m pip install --quiet psutil edge-tts python-docx openpyxl python-pptx
 
 echo [OK] All dependencies successfully installed.
 

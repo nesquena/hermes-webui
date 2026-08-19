@@ -33,6 +33,15 @@ C_WHITE='\033[38;5;255m'
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_ROOT"
 
+# Cleanup trap for temporary files
+TMP_FILES=()
+cleanup_on_exit() {
+    for f in "${TMP_FILES[@]:-}"; do
+        [ -f "$f" ] && rm -f "$f" 2>/dev/null || true
+    done
+}
+trap cleanup_on_exit EXIT
+
 # Pre-defined Total Steps
 TOTAL_STEPS=5
 CURRENT_STEP=0
@@ -79,22 +88,38 @@ sub_error() {
 run_with_status() {
     local msg=$1
     shift
+    local log_file
+    log_file="$(mktemp "${TMPDIR:-/tmp}/hermes_install_log.XXXXXX")"
+    TMP_FILES+=("$log_file")
+    local status=0
+
     if [ -t 1 ]; then
         local spin='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
         local i=0
-        "$@" >/dev/null 2>&1 &
+        "$@" >"$log_file" 2>&1 &
         local pid=$!
         while kill -0 "$pid" 2>/dev/null; do
             i=$(( (i+1) % 10 ))
             printf "\r  \033[38;5;51m%s\033[0m \033[38;5;244m%s...\033[0m" "${spin:$i:1}" "$msg"
             sleep 0.08
         done
-        wait "$pid" 2>/dev/null || true
+        wait "$pid" || status=$?
         printf "\r\033[K"
     else
         echo -e "  ${C_SKY}➜${C_RESET} ${C_GRAY}${msg}...${C_RESET}"
-        "$@" >/dev/null 2>&1 || true
+        "$@" >"$log_file" 2>&1 || status=$?
     fi
+
+    if [ $status -ne 0 ]; then
+        if [ -s "$log_file" ]; then
+            echo -e "  ${C_RED}${BOLD}✖ Step failed:${C_RESET} ${C_WHITE}$msg${C_RESET}"
+            sed 's/^/    /' "$log_file" | tail -n 20 >&2
+        fi
+        rm -f "$log_file"
+        return $status
+    fi
+    rm -f "$log_file"
+    return 0
 }
 
 # -----------------------------------------------------------------------------
@@ -220,10 +245,12 @@ fi
 
 if [ -z "$AGENT_DIR" ]; then
     sub_info "Setting up Hermes Autonomous Agent core engine..."
-    run_with_status "Checking Hermes Agent" curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh -o /tmp/hermes_install.sh
-    if [ -f /tmp/hermes_install.sh ]; then
-        bash /tmp/hermes_install.sh >/dev/null 2>&1 || true
-        rm -f /tmp/hermes_install.sh
+    local_script="$(mktemp "${TMPDIR:-/tmp}/hermes_agent_installer.XXXXXX")"
+    TMP_FILES+=("$local_script")
+    if curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh -o "$local_script"; then
+        chmod 700 "$local_script"
+        run_with_status "Running official Hermes Agent installer" bash "$local_script" || true
+        rm -f "$local_script"
     fi
     [ -d "$HERMES_HOME/hermes-agent" ] && AGENT_DIR="$HERMES_HOME/hermes-agent"
     
@@ -266,7 +293,8 @@ if [ -f "$REPO_ROOT/requirements.txt" ]; then
     run_with_status "Installing WebUI dependencies" env -u PYTHONPATH "$VENV_PYTHON" -m pip install --quiet -r "$REPO_ROOT/requirements.txt"
 fi
 
-run_with_status "Installing optional companion parsers" env -u PYTHONPATH "$VENV_PYTHON" -m pip install --quiet psutil edge-tts python-docx openpyxl python-pptx
+# Optional companion parsers (warning on failure, non-fatal)
+run_with_status "Installing optional companion parsers" env -u PYTHONPATH "$VENV_PYTHON" -m pip install --quiet psutil edge-tts python-docx openpyxl python-pptx || true
 
 sub_success "All packages and UI dependencies verified & ready"
 
