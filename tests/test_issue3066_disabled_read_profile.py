@@ -161,3 +161,58 @@ def test_normalize_disabled_set_handles_edge_cases():
     assert _normalize_disabled_set(["a", "b"]) == {"a", "b"}
     assert _normalize_disabled_set([" spaced ", "  "]) == {"spaced"}
     assert _normalize_disabled_set([]) == set()
+
+
+def test_disabled_read_decodes_json_array_string(tmp_path, monkeypatch):
+    """Issue #7120: skills.disabled stored as a JSON-array string (the shape
+    produced by `hermes config set skills.disabled ...`) must decode to the
+    real names, not one literal entry."""
+    from api import routes
+
+    config_path = tmp_path / "config.yaml"
+    _write_config(config_path, {"skills": {"disabled": '["skill-x", "skill-y"]'}})
+    monkeypatch.setattr("api.routes._get_config_path", lambda: config_path)
+
+    result = routes._get_disabled_skill_names_for_profile()
+    assert result == {"skill-x", "skill-y"}
+
+
+def test_disabled_read_platform_webui_decodes_json_array_string(tmp_path, monkeypatch):
+    """Issue #7120: platform_disabled.webui stored as a JSON-array string is
+    decoded the same way as the global disabled list."""
+    from api import routes
+
+    config_path = tmp_path / "config.yaml"
+    _write_config(config_path, {
+        "skills": {
+            "disabled": ["global-disabled"],
+            "platform_disabled": {"webui": '["webui-disabled-a", "webui-disabled-b"]'},
+        }
+    })
+    monkeypatch.setattr("api.routes._get_config_path", lambda: config_path)
+
+    result = routes._get_disabled_skill_names_for_profile()
+    assert result == {"webui-disabled-a", "webui-disabled-b"}
+    assert "global-disabled" not in result
+
+
+@requires_agent_modules
+def test_skills_list_disabled_decodes_json_array_string(tmp_path, monkeypatch):
+    """Issue #7120: the Skills panel (skills list endpoint) must report both
+    skills as disabled when config.yaml stores disabled as a JSON-array string."""
+    from api import routes
+
+    skills_dir = tmp_path / "skills"
+    _write_skill(skills_dir, "skill-a")
+    _write_skill(skills_dir, "skill-b")
+
+    config_path = tmp_path / "config.yaml"
+    _write_config(config_path, {"skills": {"disabled": '["skill-a", "skill-b"]'}})
+    monkeypatch.setattr("api.routes._get_config_path", lambda: config_path)
+    monkeypatch.setattr("api.routes._active_skills_dir", lambda: skills_dir)
+
+    result = routes._skills_list_from_dir(skills_dir)
+    skills = {s["name"]: s for s in result["skills"]}
+
+    assert skills["skill-a"]["disabled"] is True
+    assert skills["skill-b"]["disabled"] is True

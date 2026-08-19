@@ -817,12 +817,52 @@ def _get_disabled_skill_names_for_profile() -> set:
     return _normalize_disabled_set(skills_cfg.get("disabled"))
 
 
+def _parse_config_string_list(value) -> list:
+    """Decode a config value that may hold a JSON-array string into a list.
+
+    ``hermes config set`` (and JSON-mode editor saves) store lists as quoted
+    JSON strings (``'[\"a\",\"b\"]'`` or the Python-literal ``\"['a']\"``), so a
+    disabled list read from ``config.yaml`` can arrive as a single string
+    instead of a YAML list. Treating it as one literal name makes the Skills
+    panel show every skill as enabled and makes the toggle write a destructive
+    single-entry list (hermes-webui#7120).
+
+    Reuses ``agent.skill_utils.parse_config_string_list`` (hermes-agent #86661
+    fix) when the bundled agent source is importable, and mirrors its logic
+    otherwise so the two surfaces cannot drift. A scalar string still means one
+    name.
+    """
+    try:
+        from agent.skill_utils import parse_config_string_list
+
+        return parse_config_string_list(value)
+    except ImportError:
+        pass
+    import ast
+
+    if value is None:
+        return []
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.startswith("["):
+            try:
+                parsed = ast.literal_eval(stripped)
+            except (ValueError, SyntaxError):
+                parsed = None
+            if isinstance(parsed, list):
+                return [str(item) for item in parsed]
+        return [value]
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [str(item) for item in value]
+    return []
+
+
 def _normalize_disabled_set(values) -> set:
     """Normalize a YAML disabled list into a set of stripped strings."""
     if values is None:
         return set()
     if isinstance(values, str):
-        values = [values]
+        values = _parse_config_string_list(values)
     return {str(v).strip() for v in values if str(v).strip()}
 
 
@@ -26841,7 +26881,7 @@ def _normalize_names_list(names) -> list[str]:
     if names is None:
         return []
     if isinstance(names, str):
-        names = [names]
+        names = _parse_config_string_list(names)
     elif not isinstance(names, list):
         names = list(names) if names else []
     return list(dict.fromkeys(str(d).strip() for d in names if str(d).strip()))
