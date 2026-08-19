@@ -9101,6 +9101,11 @@ async function loadSettingsPanel(){
           window.ModelRouter.setMaster(this.checked);
         }
       };
+      // Sync the runtime master switch even when the checkbox is only
+      // hydrated (covers the case where the composer toggle didn't load yet).
+      if(typeof window.ModelRouter!=='undefined'&&window.ModelRouter&&typeof window.ModelRouter.setMaster==='function'){
+        window.ModelRouter.setMaster(modelSchedulerCb.checked);
+      }
     }
     if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
     // Workspace panel default-open toggle (localStorage-backed)

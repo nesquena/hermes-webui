@@ -41,9 +41,14 @@
     return rec.model;
   }
 
-  function _currentSelectValue() {
-    const sel = _el('modelSelect');
-    return sel ? sel.value : '';
+  function _currentSessionId() {
+    return (typeof S !== 'undefined' && S.session && S.session.session_id) || '';
+  }
+
+  // Cache key must isolate by text + session so a recommendation made for one
+  // message (or one session) is never reused for a different one within TTL.
+  function _cacheKey(text) {
+    return _currentSessionId() + '\n' + String(text || '').slice(0, 4000);
   }
 
   function _applyRecommendation(rec) {
@@ -80,14 +85,15 @@
 
   async function _recommend(text) {
     if (!_masterOn) return null;
-    if (_lastRecommend && (Date.now() - _lastRecommend.ts) < TTL_MS) {
+    const key = _cacheKey(text);
+    if (_lastRecommend && _lastRecommend._key === key && (Date.now() - _lastRecommend.ts) < TTL_MS) {
       return _lastRecommend;
     }
     try {
       const qs = new URLSearchParams({ text: String(text || '').slice(0, 4000) });
       const data = await api('/api/model-router/recommend?' + qs.toString(), { timeoutMs: 5000 });
       if (data && data.model) {
-        _lastRecommend = Object.assign({}, data, { ts: Date.now() });
+        _lastRecommend = Object.assign({}, data, { ts: Date.now(), _key: key });
         return _lastRecommend;
       }
     } catch (_e) { /* network/5xx: keep current model, never block sending */ }
@@ -116,7 +122,10 @@
 
   function setMaster(on) {
     _masterOn = !!on;
-    if (!_masterOn) _composerAuto = false;
+    if (!_masterOn) {
+      _composerAuto = false;
+      _lastRecommend = null; // never reuse a stale recommendation after disable
+    }
     _syncComposerToggleVisibility();
   }
 
@@ -124,7 +133,8 @@
   function _syncComposerToggleVisibility() {
     const wrap = _el('modelRouterComposerWrap');
     if (!wrap) return;
-    wrap.style.display = _masterOn ? '' : 'none';
+    // Keep inline-flex so the toggle stays on the same line as the model chip.
+    wrap.style.display = _masterOn ? 'inline-flex' : 'none';
     const cb = _el('modelRouterComposerAuto');
     if (cb) cb.checked = _composerAuto;
   }

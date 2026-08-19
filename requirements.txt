@@ -13,9 +13,10 @@
 pyyaml>=6.0
 cryptography>=42.0
 # OPTIONAL: Model scheduler (Settings -> Model scheduler) needs `model-scheduler`.
-# It is intentionally NOT a hard dependency — the scheduler endpoints return
-# a clear "model_scheduler not installed" error when it's absent. The feature
-# is off by default. Install it only if you want per-message model
+# It is intentionally NOT a hard dependency — when it is absent the scheduler
+# stays disabled and endpoints degrade gracefully (status/recommend return a
+# clear "model-scheduler not installed" payload; policy updates return 503).
+# The feature is off by default. Install it only if you want per-message model
 # recommendation based on task difficulty, free-quota and peak hours:
 #   pip install model-scheduler>=0.2.0
 # OPTIONAL: Office workspace preview/edit support needs these parsers.

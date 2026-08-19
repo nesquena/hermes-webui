@@ -9817,6 +9817,7 @@ _SETTINGS_BOOL_KEYS = {
     "workspace_todos_tab",
     "api_redact_enabled",
     "session_jump_buttons",
+    "model_scheduler_enabled",
     "render_user_markdown",
     "large_text_paste_as_attachment",
     "project_quick_create_buttons",

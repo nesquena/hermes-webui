@@ -113,18 +113,50 @@ def get_status() -> dict:
 
 
 def get_policy() -> dict:
-    """Return full policy: enabled, schedule, models, quota window."""
-    ms = _require_lib()
-    return {
-        "enabled": bool(ms.get_policy().get("enabled", False)),
-        "schedule": ms.get_policy().get("schedule") or [],
-        "models": ms.list_models(),
-        "quota_window_hours": ms.QUOTA_WINDOW_SECONDS // 3600,
-    }
+    """Return full policy: enabled, schedule, models, quota window.
+
+    `enabled` reflects the effective master state (Settings switch AND the
+    policy file flag). Degrades gracefully when the library is not installed.
+    """
+    ms = _load_lib()
+    if ms is None:
+        return {
+            "enabled": False,
+            "schedule": [],
+            "models": [],
+            "quota_window_hours": 0,
+            "error": "model-scheduler not installed",
+        }
+    try:
+        p = ms.get_policy()
+        try:
+            from api.config import load_settings
+            master_on = bool(load_settings().get("model_scheduler_enabled", False))
+        except Exception:  # pragma: no cover - defensive
+            master_on = False
+        return {
+            "enabled": bool(master_on and p.get("enabled", False)),
+            "schedule": p.get("schedule") or [],
+            "models": ms.list_models(),
+            "quota_window_hours": ms.QUOTA_WINDOW_SECONDS // 3600,
+        }
+    except Exception:
+        logger.exception("model-scheduler get_policy failed")
+        return {
+            "enabled": False,
+            "schedule": [],
+            "models": [],
+            "quota_window_hours": 0,
+            "error": "policy load failed",
+        }
 
 
 def update_policy(updates: dict) -> dict:
-    """Merge updates into model-policy.json (JSON override)."""
+    """Merge updates into model-policy.json (JSON override).
+
+    Raises RuntimeError when the library is not installed (route layer maps
+    it to a clear 503); returns the merged policy dict on success.
+    """
     ms = _require_lib()
     return ms.update_policy(updates)
 

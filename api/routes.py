@@ -12652,7 +12652,11 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/model-router/policy":
         from api import model_router
-        return j(handler, model_router.get_policy())
+        try:
+            return j(handler, model_router.get_policy())
+        except Exception:
+            logger.exception("model-router get_policy failed")
+            return bad(handler, "policy load failed", status=500)
 
     if parsed.path == "/api/model-router/recommend":
         from api import model_router
@@ -15993,6 +15997,9 @@ def handle_post(handler, parsed) -> bool:
             updates = body if isinstance(body, dict) else {}
             policy = model_router.update_policy(updates)
             return j(handler, policy)
+        except RuntimeError as exc:
+            # model-scheduler library not installed -> clear 503, not a 500.
+            return bad(handler, str(exc), status=503)
         except (TypeError, ValueError) as exc:
             return bad(handler, str(exc), status=400)
         except Exception:

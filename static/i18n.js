@@ -667,6 +667,8 @@ const LOCALES = {
     settings_desc_workspace_todos_tab: 'When enabled, a Todos tab appears in the workspace panel. The sidebar Todos panel remains available.',
     settings_label_session_jump_buttons: 'Show session jump buttons',
     settings_desc_session_jump_buttons: 'Show floating Start and End buttons while reading long session histories.',
+    settings_label_model_scheduler: 'Model scheduler',
+    settings_desc_model_scheduler: 'When enabled, recommend a model per message based on task difficulty, free-quota and peak hours (see model-policy.json). Off by default.',
     settings_label_terminal_auto_expand: 'Auto-expand terminal on output',
     settings_desc_terminal_auto_expand: 'Expand the collapsed terminal panel automatically when a running command emits new output.',
 
