@@ -521,18 +521,26 @@ def test_earlier_identical_prompt_with_different_attachments_is_not_swallowed():
     and the current attachment was lost (the earlier row already had one, so the
     adoption branch dropped the pending attachment on the floor).
     """
-    for label, earlier_ts in (
-        ("milliseconds", json.dumps((_EPOCH - 3600) * 1000)),
-        ("ISO string", json.dumps("2025-08-17T09:00:00Z")),
+    for label, earlier_ts, expected_current_idx in (
+        # Comparable timestamps: the earlier row is strictly older than the
+        # boundary, so the current prompt is inserted AT the turn boundary (2).
+        ("milliseconds", json.dumps((_EPOCH - 3600) * 1000), 2),
+        ("ISO string", json.dumps("2025-08-17T09:00:00Z"), 2),
+        # Untimed is the third format the review named. With no comparable
+        # timestamp the classifier must fail closed (-1) rather than adopt the
+        # row, so the merge keeps the prior append behaviour (tail index 4).
+        # Either way the earlier turn keeps its own bubble and attachment.
+        ("untimed", None, 4),
     ):
+        ts_js = f", timestamp:{earlier_ts}" if earlier_ts is not None else ""
         result = _run_epoch_probe(
-            f"""  {{role:'user', content:{json.dumps(_PROMPT)}, timestamp:{earlier_ts}, attachments:[{{name:'ancien.png'}}]}},
-  {{role:'assistant', content:'reponse precedente', timestamp:{earlier_ts}}},
+            f"""  {{role:'user', content:{json.dumps(_PROMPT)}{ts_js}, attachments:[{{name:'ancien.png'}}]}},
+  {{role:'assistant', content:'reponse precedente'{ts_js}}},
 """,
             attachments=[{"name": "nouveau.pdf"}],
         )
         assert result["merged"] is True, (label, result["order"])
-        assert result["promptIdxs"] == [0, 2], (
+        assert result["promptIdxs"] == [0, expected_current_idx], (
             f"[{label}] both the earlier identical prompt and the current one "
             f"must keep their own bubbles: {result['order']}"
         )
@@ -540,7 +548,79 @@ def test_earlier_identical_prompt_with_different_attachments_is_not_swallowed():
             f"[{label}] the earlier turn's attachment must survive untouched: "
             f"{result['attachmentsByIdx']}"
         )
-        assert result["attachmentsByIdx"][2] == ["nouveau.pdf"], (
+        assert result["attachmentsByIdx"][expected_current_idx] == ["nouveau.pdf"], (
             f"[{label}] the current turn's attachment must not be lost: "
             f"{result['attachmentsByIdx']}"
+        )
+
+
+def test_uncomparable_timestamp_formats_never_declare_the_window_active():
+    """Timestamps that `_timestampSeconds` rejects must fail closed, not be
+    silently treated as at/after the boundary.
+
+    `_timestampSeconds` returns null for out-of-Date-range, zero and negative
+    epochs. A classifier that only guarded `undefined`/`null` would let these
+    fall through as "not older than the boundary", satisfy the every-settled-row
+    test and return index 0 — inserting the current prompt above real history,
+    the exact shape the review reproduced with ISO/millisecond rows.
+    """
+    for label, ts_js in (
+        ("out-of-range numeric", "1e20"),
+        ("zero epoch", "0"),
+        ("negative epoch", "-5"),
+        ("non-date string", "'pas une date'"),
+    ):
+        result = _run_epoch_probe(
+            f"""  {{role:'user', content:'prompt precedent', timestamp:{ts_js}}},
+  {{role:'assistant', content:'reponse precedente', timestamp:{ts_js}}},
+"""
+        )
+        assert result["merged"] is True, (label, result["order"])
+        assert result["promptIdxs"] == [4], (
+            f"[{label}] an uncomparable timestamp must fail closed to the prior "
+            f"append behaviour, never index 0: {result['order']}"
+        )
+        assert result["order"][0].startswith("user@"), (label, result["order"])
+
+
+def test_boundary_normalizes_iso_and_millisecond_pending_started_at():
+    """`pending_started_at` itself is normalized, not just the row timestamps.
+
+    The sidecar boundary can arrive as an ISO string or a millisecond epoch. An
+    un-normalized boundary compared against seconds-based rows makes ALL history
+    look newer (ISO -> NaN, ms -> huge), which is the same reorder defect from
+    the other side of the comparison.
+    """
+    history = f"""  {{role:'user', content:'prompt precedent', timestamp:{_EPOCH - 3600}}},
+  {{role:'assistant', content:'reponse precedente', timestamp:{_EPOCH - 3540}}},
+"""
+    for label, started_at in (
+        ("ISO string", json.dumps("2025-08-17T10:00:00Z")),
+        ("milliseconds", json.dumps(_EPOCH * 1000)),
+        ("seconds", json.dumps(_EPOCH)),
+    ):
+        body = f"""
+const session={{
+  session_id:'s1',
+  active_stream_id:'stream-1',
+  pending_user_message:{json.dumps(_PROMPT)},
+  pending_started_at:{started_at},
+  pending_attachments:[],
+}};
+const messages=[
+{history}  {{role:'assistant', content:'je verifie X', timestamp:{_EPOCH + 10}}},
+  {{role:'tool', content:'{{}}', timestamp:{_EPOCH + 11}}},
+];
+const merged=_mergePendingSessionMessage(session, messages);
+process.stdout.write(JSON.stringify({{
+  merged,
+  promptIdxs: messages.reduce((out,m,i)=>{{ if(m&&m.role==='user'&&String(m.content||'')==={json.dumps(_PROMPT)}) out.push(i); return out; }}, []),
+  order: messages.map(m=>`${{m.role}}@${{m.timestamp!==undefined?m.timestamp:'untimed'}}`),
+}}));
+"""
+        result = _run_probe(body)
+        assert result["merged"] is True, (label, result["order"])
+        assert result["promptIdxs"] == [2], (
+            f"[{label}] pending_started_at must be normalized before comparison "
+            f"so history stays above the current prompt: {result['order']}"
         )
