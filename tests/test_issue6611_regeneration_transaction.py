@@ -100,7 +100,6 @@ def test_locked_stale_plan_does_not_restore_a_request_time_snapshot(monkeypatch)
     from api import routes
 
     session = _session()
-    request_snapshot = copy.deepcopy(session.__dict__)
     session.active_stream_id = "accepted-after-browser-validation"
     current_state = copy.deepcopy(session.__dict__)
 
@@ -129,7 +128,6 @@ def test_locked_unexpected_plan_error_does_not_restore_a_request_time_snapshot(m
     from api import routes
 
     session = _session()
-    request_snapshot = copy.deepcopy(session.__dict__)
     session.active_stream_id = "accepted-after-browser-validation"
     current_state = copy.deepcopy(session.__dict__)
 
@@ -165,7 +163,7 @@ def test_locked_preacceptance_exception_restores_the_transaction_snapshot(monkey
         raise RuntimeError("prepare failed")
 
     monkeypatch.setattr(routes, "_prepare_chat_start_session_for_stream", fail_prepare)
-    with pytest.raises(RuntimeError, match="prepare failed") as raised:
+    with pytest.raises(RuntimeError, match="prepare failed"):
         routes._start_regeneration_stream_locked(
             session,
             turn=plan.turn,
