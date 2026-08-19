@@ -96,4 +96,11 @@ def test_measurement_burst_not_reset_by_cycle_key_change():
     # Repeated keys terminate the burst; unseen keys proceed.
     assert "if(_messageVirtualMeasurementSeenKeys.includes(cycleKey)){" in body
     assert "_messageVirtualMeasurementSeenKeys.push(cycleKey);" in body
-    assert "_messageVirtualMeasurementRenderPending=true;" in body
+    # The internal-measurement origin travels WITH the scheduled render request
+    # (threaded through both rAF layers), never as a global consumable flag that
+    # a coalesced external render could steal (#6717 re-gate MUST-FIX 2).
+    assert "origin:'internal'" in body
+    assert "_messageVirtualMeasurementRenderPending" not in UI_JS
+    # Absolute per-burst ceiling: even an all-distinct key sequence terminates,
+    # bounding the seen-key memory (#6717 re-gate MUST-FIX 1).
+    assert "MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS" in UI_JS

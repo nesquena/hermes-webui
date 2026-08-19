@@ -1,5 +1,6 @@
 """Regression coverage for issue #500 transcript virtualization."""
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -1113,7 +1114,7 @@ let _messageVirtualWindowKey = 'old-key';
 let _messageVirtualMeasurementCycleKey = 'old-cycle';
 let _messageVirtualMeasurementSeenKeys = ['stale-key'];
 let _messageVirtualMeasurementBurstActive = true;
-let _messageVirtualMeasurementRenderPending = true;
+let _messageVirtualRenderQueuedOrigin = 'internal';
 const MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHT = 140;
 // #4367 introduced per-role default heights; the combined _clearMessageVirtualHeightCache
 // resets the estimate via _messageVirtualDefaultHeightForRole('default'), so the harness
@@ -1131,7 +1132,7 @@ console.log(JSON.stringify({
   timerCleared: timerCleared,
   seenKeys: _messageVirtualMeasurementSeenKeys,
   burstActive: _messageVirtualMeasurementBurstActive,
-  renderPending: _messageVirtualMeasurementRenderPending,
+  queuedOrigin: _messageVirtualRenderQueuedOrigin,
 }));
 """
     metrics = json.loads(_run_node(source))
@@ -1155,9 +1156,9 @@ console.log(JSON.stringify({
         "_clearMessageVirtualHeightCache must end any active measurement burst: "
         f"burstActive {metrics['burstActive']}"
     )
-    assert metrics["renderPending"] is False, (
-        "_clearMessageVirtualHeightCache must clear the internal-measurement "
-        f"provenance marker: renderPending {metrics['renderPending']}"
+    assert metrics["queuedOrigin"] is None, (
+        "_clearMessageVirtualHeightCache must clear any queued internal-measurement "
+        f"provenance: queuedOrigin {metrics['queuedOrigin']}"
     )
 
 
@@ -1174,7 +1175,18 @@ def _measurement_burst_harness(scenario_js: str) -> str:
     where the overlap/convergence regressions lived.
     """
     js = UI_JS_PATH.read_text(encoding="utf-8")
-    return _extract_func_script(js) + """
+    cap_match = re.search(
+        r"MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS\s*=\s*(\d+)", js
+    )
+    assert cap_match, (
+        "MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS must be defined in ui.js "
+        "(absolute per-burst cap, #6717 re-gate)"
+    )
+    cap = int(cap_match.group(1))
+    return _extract_func_script(js) + (
+        "// Absolute per-burst ceiling, read from production ui.js (#6717 re-gate).\n"
+        f"const MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS = {cap};\n"
+    ) + """
 // ── queued-rAF harness ────────────────────────────────────────────────────────
 let renderLog = [];                 // every renderMessages call: {internal, preserveScroll}
 let rafQueue = [];
@@ -1185,7 +1197,7 @@ let _messageVirtualWindowKey = '';
 let _messageVirtualMeasurementCycleKey = '';
 let _messageVirtualMeasurementSeenKeys = [];
 let _messageVirtualMeasurementBurstActive = false;
-let _messageVirtualMeasurementRenderPending = false;
+let _messageVirtualRenderQueuedOrigin = null;
 let _messageVirtualScrollActive = false;
 let _messageVirtualDeferredMeasurement = null;
 let _scrollbarDragActive = false;
@@ -1246,7 +1258,7 @@ console.log(JSON.stringify({
   internal: renderLog.filter(r => r.internal).length,
   burstActive: _messageVirtualMeasurementBurstActive,
   seenKeys: _messageVirtualMeasurementSeenKeys,
-  renderPending: _messageVirtualMeasurementRenderPending,
+  queuedOrigin: _messageVirtualRenderQueuedOrigin,
 }));
 """)
     metrics = json.loads(_run_node(source))
@@ -1266,9 +1278,9 @@ console.log(JSON.stringify({
         "termination must clear the seen-key memory: "
         f"seenKeys {metrics['seenKeys']}"
     )
-    assert metrics["renderPending"] is False, (
-        "no internal render may remain pending after termination: "
-        f"renderPending {metrics['renderPending']}"
+    assert metrics["queuedOrigin"] is None, (
+        "no internal render may remain queued after termination: "
+        f"queuedOrigin {metrics['queuedOrigin']}"
     )
 
 
@@ -1290,7 +1302,7 @@ console.log(JSON.stringify({
   lastInternal: renderLog[renderLog.length - 1].internal,
   burstActive: _messageVirtualMeasurementBurstActive,
   seenKeys: _messageVirtualMeasurementSeenKeys,
-  renderPending: _messageVirtualMeasurementRenderPending,
+  queuedOrigin: _messageVirtualRenderQueuedOrigin,
 }));
 """)
     metrics = json.loads(_run_node(source))
@@ -1311,9 +1323,9 @@ console.log(JSON.stringify({
         "settlement must end the burst: "
         f"burstActive {metrics['burstActive']}"
     )
-    assert metrics["seenKeys"] == [] and metrics["renderPending"] is False, (
-        "settlement must clear the seen-key memory and any pending marker: "
-        f"seenKeys {metrics['seenKeys']}, renderPending {metrics['renderPending']}"
+    assert metrics["seenKeys"] == [] and metrics["queuedOrigin"] is None, (
+        "settlement must clear the seen-key memory and any queued provenance: "
+        f"seenKeys {metrics['seenKeys']}, queuedOrigin {metrics['queuedOrigin']}"
     )
 
 
@@ -1328,6 +1340,12 @@ def test_overlapping_external_append_receives_fresh_budget():
     Phase 1: the append lands between the two rAF layers and measures key B
     (already seen in the stale burst). Only the external reset lets B proceed;
     without it the repeated key would terminate the append's cycle immediately.
+    The stale layer-2 callback (queued for the DEAD burst) must then degrade to
+    an UNMARKED render — the append's own measurement must not revive an
+    internal marker onto it, because the provenance belongs to the queued
+    render, not to a global flag (#6717 re-gate MUST-FIX 2) — and the fresh
+    cycle it starts completes with its own internal render, so the append is
+    never starved of retries.
     Phase 2: an external render that measures SETTLED lands while a layer-2
     callback is pending; the stale callback must then degrade to an UNMARKED
     render (the external reset consumed its provenance), and the fresh cycle it
@@ -1338,7 +1356,8 @@ renderMessages({});            // R0 external: burst starts, seen=[B], L1 queued
 flushRaf();                    // L1 fires -> L2 (internal callback) now pending
 renderMessages({});            // R1 EXTERNAL APPEND lands before L2 fires:
                                // resets the burst -> fresh cycle, seen=[B] again
-flushRaf(); flushRaf();        // stale L2 joins the fresh cycle (R2), then R3 settles
+flushRaf(); flushRaf();        // stale L2 fires UNMARKED (R2, external won),
+                               // fresh cycle completes (R3 internal) -> settles
 renderMessages({});            // R4 external: new cycle, L1 queued
 flushRaf();                    // L1 fires -> L2 (internal callback) now pending
 renderMessages({});            // R5 external scroll-settle: resets the burst,
@@ -1350,12 +1369,13 @@ console.log(JSON.stringify({
   renders: renderLog.length,
   internal: renderLog.filter(r => r.internal).length,
   appendExternal: renderLog[1].internal,
-  appendCycleInternal: renderLog[2].internal && renderLog[3].internal,
+  staleL2Unmarked: renderLog[2].internal,
+  postAppendCycleInternal: renderLog[3].internal,
   staleCallbackUnmarked: renderLog[6].internal,
   postResetCycleInternal: renderLog[7].internal,
   burstActive: _messageVirtualMeasurementBurstActive,
   seenKeys: _messageVirtualMeasurementSeenKeys,
-  renderPending: _messageVirtualMeasurementRenderPending,
+  queuedOrigin: _messageVirtualRenderQueuedOrigin,
 }));
 """)
     metrics = json.loads(_run_node(source))
@@ -1367,10 +1387,16 @@ console.log(JSON.stringify({
     assert metrics["appendExternal"] is False, (
         "the append is an unmarked external render"
     )
-    assert metrics["appendCycleInternal"] is True, (
-        "the append's cycle must proceed with its own internal renders "
-        "(fresh budget — the repeated key B was not treated as oscillation "
-        "because the external render reset the burst)"
+    assert metrics["staleL2Unmarked"] is False, (
+        "the stale layer-2 callback (queued for the burst the append reset) "
+        "must degrade to an UNMARKED render: the append's own measurement "
+        "must not revive an internal marker onto it — provenance belongs to "
+        "the queued render, external wins (#6717 re-gate MUST-FIX 2)"
+    )
+    assert metrics["postAppendCycleInternal"] is True, (
+        "the fresh cycle after the degraded stale callback must complete with "
+        "its own internal render (fresh budget — the repeated key B was not "
+        "treated as oscillation because the external render reset the burst)"
     )
     assert metrics["staleCallbackUnmarked"] is False, (
         "external provenance must override the pending internal callback: the "
@@ -1385,7 +1411,126 @@ console.log(JSON.stringify({
         "the fresh cycles must end settled: "
         f"burstActive {metrics['burstActive']}"
     )
-    assert metrics["seenKeys"] == [] and metrics["renderPending"] is False, (
-        "settlement must clear the seen-key memory and any pending marker: "
-        f"seenKeys {metrics['seenKeys']}, renderPending {metrics['renderPending']}"
+    assert metrics["seenKeys"] == [] and metrics["queuedOrigin"] is None, (
+        "settlement must clear the seen-key memory and any queued provenance: "
+        f"seenKeys {metrics['seenKeys']}, queuedOrigin {metrics['queuedOrigin']}"
+    )
+
+
+def test_all_distinct_keys_terminate_burst_with_bounded_storage():
+    """#6717 re-gate MUST-FIX 1: an ALL-DISTINCT monotonic key sequence
+    (A->B->C->D->... never repeating) must still terminate. The seen-key rule
+    alone only ends the burst on a REPEATED key, so a browser emitting a
+    never-repeating geometry would loop without limit — the #6654 CPU-runaway
+    class under a different trigger — while _messageVirtualMeasurementSeenKeys
+    grows without bound (memory). The absolute per-burst cap ends the burst
+    regardless of key novelty and bounds the seen-key collection to the cap.
+    Driven through the real two-rAF-layer chain with MORE distinct keys than
+    the cap, and asserting the burst stops at exactly the cap with no rAF left
+    queued and the seen-key memory cleared."""
+    source = _measurement_burst_harness("""
+measurePlan = [];
+for(let i=0;i<40;i++) measurePlan.push('K'+i);  // 40 distinct keys, well over the cap
+renderMessages({});            // external trigger: starts the burst
+for(let i=0;i<40;i++) flushRaf();  // drain both rAF layers repeatedly
+console.log(JSON.stringify({
+  renders: renderLog.length,
+  internal: renderLog.filter(r => r.internal).length,
+  burstActive: _messageVirtualMeasurementBurstActive,
+  seenKeys: _messageVirtualMeasurementSeenKeys,
+  queuedOrigin: _messageVirtualRenderQueuedOrigin,
+  rafPending: rafQueue.length,
+  cap: MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS,
+}));
+""")
+    metrics = json.loads(_run_node(source))
+    cap = metrics["cap"]
+    assert metrics["internal"] == cap, (
+        "an all-distinct sequence must be cut off by the absolute per-burst "
+        f"cap: {metrics['internal']} internal renders (expected exactly {cap})"
+    )
+    assert metrics["renders"] == cap + 1, (
+        "the all-distinct burst must terminate after the cap (1 external + cap "
+        f"internal renders): {metrics['renders']} renders (expected {cap + 1})"
+    )
+    assert metrics["rafPending"] == 0, (
+        "no rAF may remain queued after the cap ends the burst: "
+        f"rafPending {metrics['rafPending']}"
+    )
+    assert metrics["burstActive"] is False, (
+        "the cap must end the burst: "
+        f"burstActive {metrics['burstActive']}"
+    )
+    assert metrics["seenKeys"] == [], (
+        "termination must clear the seen-key memory (bounded storage — at most "
+        f"cap keys were ever retained): seenKeys {metrics['seenKeys']}"
+    )
+    assert metrics["queuedOrigin"] is None, (
+        "no internal provenance may remain queued after the cap ends the burst: "
+        f"queuedOrigin {metrics['queuedOrigin']}"
+    )
+
+
+def test_queued_raf_external_scroll_wins_provenance():
+    """#6717 re-gate MUST-FIX 2: when an external render (user scroll /
+    scroll-settle) overlaps a QUEUED internal rAF, the render that actually
+    fires must be treated as EXTERNAL. The old global consumable flag
+    (_messageVirtualMeasurementRenderPending) could be consumed by an
+    unrelated render, marking external renders as internal so the burst was
+    never reset — leaving stale virtual-window / spacer geometry until the
+    next unrelated render.
+
+    Sequence: external R0 measures A (L2 queued internal); an external R1
+    lands while L2 is pending — it resets the burst, measures B, and its own
+    layer-1 rAF COALESCES into the pending L2 (the early-return path where
+    the old flag leaked). The L2 that fires must be UNMARKED — external
+    provenance wins — so the A it measures starts a fresh burst instead of
+    terminating on the repeated key with zero retry queued."""
+    source = _measurement_burst_harness("""
+measurePlan = ['A','B','A', undefined];
+renderMessages({});            // R0 external: measures A -> burst, L1 queued
+flushRaf();                    // L1 -> L2 queued with internal provenance
+renderMessages({});            // R1 EXTERNAL scroll lands while L2 pending:
+                               // resets the burst, measures B -> L1 queued
+flushRaf();                    // B's L1 coalesces into the pending L2 (no new rAF)
+flushRaf();                    // L2 fires -> must be UNMARKED (external won),
+                               // measures A -> fresh burst -> L1 queued
+flushRaf(); flushRaf();        // A's fresh cycle: L2 internal render -> settles
+console.log(JSON.stringify({
+  renders: renderLog.length,
+  internal: renderLog.filter(r => r.internal).length,
+  r0External: renderLog[0].internal,
+  r1External: renderLog[1].internal,
+  coalescedL2Unmarked: renderLog[2].internal,
+  freshCycleInternal: renderLog[3].internal,
+  burstActive: _messageVirtualMeasurementBurstActive,
+  seenKeys: _messageVirtualMeasurementSeenKeys,
+  queuedOrigin: _messageVirtualRenderQueuedOrigin,
+}));
+""")
+    metrics = json.loads(_run_node(source))
+    assert metrics["renders"] == 4, (
+        "the scroll overlap chain must run to completion: "
+        f"{metrics['renders']} renders (expected 4)"
+    )
+    assert metrics["r0External"] is False and metrics["r1External"] is False, (
+        "R0 and R1 are unmarked external renders"
+    )
+    assert metrics["coalescedL2Unmarked"] is False, (
+        "the queued internal rAF must degrade to an UNMARKED render when an "
+        "external request coalesced into it — external provenance wins and an "
+        "internal marker must never survive onto an external render"
+    )
+    assert metrics["freshCycleInternal"] is True, (
+        "the fresh cycle started by the degraded render must complete with its "
+        "own internal render: the repeated A key must NOT terminate it because "
+        "the burst was reset (zero retry queued would leave stale geometry)"
+    )
+    assert metrics["burstActive"] is False, (
+        "the fresh cycle must end settled: "
+        f"burstActive {metrics['burstActive']}"
+    )
+    assert metrics["seenKeys"] == [] and metrics["queuedOrigin"] is None, (
+        "settlement must clear the seen-key memory and any queued provenance: "
+        f"seenKeys {metrics['seenKeys']}, queuedOrigin {metrics['queuedOrigin']}"
     )

@@ -543,6 +543,16 @@ function _messageVirtualDefaultHeightForRole(role){
 // that REPEATS means the browser is oscillating (A->B->A->B) and the burst
 // terminates. Keys repeat only when geometry flaps, so legitimate convergence
 // is never capped while oscillation is always bounded.
+// Absolute per-burst ceiling (#6717 re-gate): the seen-key rule alone only
+// ends the burst on a REPEATED key, so a browser emitting a monotonically
+// changing geometry (A->B->C->D->... never repeating) would still loop without
+// limit — the #6654 CPU-runaway class under a different trigger — and the
+// seen-key collection would grow without bound (memory). A distinct-key
+// convergence realistically settles in a handful of frames, so this
+// conservative cap (the historical MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS
+// was 2) ends the burst regardless of key novelty AND bounds the seen-key
+// memory to the cap. Reset through _resetMessageVirtualMeasurementBurst().
+const MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS=12;
 let _messageVirtualMeasurementSeenKeys=[];
 let _messageRenderWindowSid=null;
 let _messageRenderWindowSize=MESSAGE_RENDER_WINDOW_DEFAULT;
@@ -555,12 +565,18 @@ let _messageVirtualScrollRaf=0;
 let _messageVirtualWindowKey='';
 let _messageVirtualMeasurementCycleKey='';
 let _messageVirtualMeasurementBurstActive=false;
-// Provenance marker: true while an internally measurement-scheduled render is
-// queued in the rAF layers. renderMessages() resets the burst on every
-// UNMARKED (externally initiated) render trigger, so a message append /
-// scroll-settle / other overlapping external render always starts a fresh
-// cycle even when an internal measurement callback is still pending.
-let _messageVirtualMeasurementRenderPending=false;
+// Provenance of the QUEUED virtualized render: 'internal' while the pending
+// rAF was requested by the internal measurement chain, 'external' for any
+// other trigger (user scroll / scroll-settle / message append / session
+// load). The origin lives on the QUEUED render itself, NOT in a global
+// consumable flag: when an internal and an external request coalesce into one
+// rAF, _scheduleMessageVirtualizedRender lets EXTERNAL win, so a render that
+// fires after any external trigger is never mis-attributed as internal
+// (#6717 re-gate). renderMessages() resets the burst on every UNMARKED
+// (externally initiated) render trigger, so an overlapping external render
+// always starts a fresh cycle even when an internal measurement callback is
+// still pending.
+let _messageVirtualRenderQueuedOrigin=null;
 let _messageVirtualScrollActive=false;
 let _messageVirtualScrollSettleTimer=0;
 let _messageVirtualDeferredMeasurement=null;
@@ -735,7 +751,9 @@ function _messageVirtualMeasurementCycleKeyFor(windowMetrics){
 function _resetMessageVirtualMeasurementBurst(){
   _messageVirtualMeasurementSeenKeys=[];
   _messageVirtualMeasurementBurstActive=false;
-  _messageVirtualMeasurementRenderPending=false;
+  // Strip any pending internal provenance: an external reset must never let
+  // an internal marker survive onto a render that fires later (#6717 re-gate).
+  _messageVirtualRenderQueuedOrigin=null;
 }
 function _scheduleMessageVirtualMeasurementRefresh(windowMetrics){
   if(_messageVirtualScrollActive){
@@ -761,6 +779,16 @@ function _scheduleMessageVirtualMeasurementRefresh(windowMetrics){
     _messageVirtualMeasurementSeenKeys=[];
     _messageVirtualMeasurementBurstActive=true;
   }
+  // Absolute per-burst cap (#6717 re-gate): even an ALL-DISTINCT monotonic
+  // key sequence (A->B->C->D->... never repeating) must terminate — a repeated
+  // key is not the only way the burst can end. This also bounds the seen-key
+  // collection to the cap (memory). Distinct-key convergence settles in a
+  // handful of frames, so the cap is far above any legitimate multi-pass
+  // reflow while still closing the #6654 CPU-runaway class.
+  if(_messageVirtualMeasurementSeenKeys.length>=MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS){
+    _resetMessageVirtualMeasurementBurst();
+    return;
+  }
   if(_messageVirtualMeasurementSeenKeys.includes(cycleKey)){
     // Repeated key: the window is oscillating, not converging. End the burst
     // (no further internal re-render is scheduled), so the next externally
@@ -769,12 +797,13 @@ function _scheduleMessageVirtualMeasurementRefresh(windowMetrics){
     return;
   }
   _messageVirtualMeasurementSeenKeys.push(cycleKey);
-  // Provenance marker for the internal measurement chain: the render we are
-  // scheduling must reach renderMessages() marked as internal (threaded
-  // through BOTH rAF layers via _scheduleMessageVirtualizedRender) so it
-  // preserves the burst instead of resetting it.
-  _messageVirtualMeasurementRenderPending=true;
-  requestAnimationFrame(()=>{ _scheduleMessageVirtualizedRender(true); });
+  // The internal-measurement origin travels WITH the scheduled render request
+  // (threaded through BOTH rAF layers into renderMessages), so coalescing can
+  // never consume a stale global marker onto an unrelated render. When an
+  // external request coalesces into the queued rAF, EXTERNAL wins and the
+  // render that fires degrades to an unmarked (burst-resetting) render
+  // (#6717 re-gate).
+  requestAnimationFrame(()=>{ _scheduleMessageVirtualizedRender(true,{origin:'internal'}); });
 }
 function _markMessageVirtualMeasurementsSettled(windowMetrics){
   _messageVirtualMeasurementCycleKey=_messageVirtualMeasurementCycleKeyFor(windowMetrics);
@@ -1494,7 +1523,7 @@ function _rememberRenderedUserRowIntrinsicHeights(){
     }
   }
 }
-function _scheduleMessageVirtualizedRender(force){
+function _scheduleMessageVirtualizedRender(force, request){
   const container=$('messages');
   const inner=$('msgInner');
   if(!container||!inner) return;
@@ -1506,16 +1535,28 @@ function _scheduleMessageVirtualizedRender(force){
     _messageVirtualWindowKey=nextKey;
     return;
   }
-  if(_messageVirtualScrollRaf) return;
+  // The request carries its own origin: the internal measurement chain passes
+  // {origin:'internal'} (see _scheduleMessageVirtualMeasurementRefresh);
+  // every other caller is external by default.
+  const requestOrigin=(request&&request.origin==='internal')?'internal':'external';
+  if(_messageVirtualScrollRaf){
+    // Coalescing into an already-queued rAF: the queued render is shared, so
+    // merge the provenance. EXTERNAL always wins — the render that actually
+    // fires must reset the burst, and an internal marker must never survive
+    // onto an external render (#6717 re-gate). An internal request joining a
+    // queued render never downgrades an already-external one.
+    if(requestOrigin==='external') _messageVirtualRenderQueuedOrigin='external';
+    return;
+  }
+  _messageVirtualRenderQueuedOrigin=requestOrigin;
   _messageVirtualScrollRaf=requestAnimationFrame(()=>{
     _messageVirtualScrollRaf=0;
-    // Consume the internal-measurement provenance marker (set by
-    // _scheduleMessageVirtualMeasurementRefresh before the first rAF layer and
-    // threaded through it into this second rAF layer). If an EXTERNAL render
-    // reset the burst meanwhile, this callback degrades to an unmarked render
-    // and starts a fresh measurement cycle instead of continuing a stale one.
-    const internalMeasurement=_messageVirtualMeasurementRenderPending;
-    _messageVirtualMeasurementRenderPending=false;
+    // The provenance belongs to THIS queued render: it was set when the render
+    // was scheduled (and possibly flipped to 'external' by a coalesced
+    // external request). Consume it here — no global consumable flag that an
+    // unrelated render could steal (#6717 re-gate).
+    const internalMeasurement=_messageVirtualRenderQueuedOrigin==='internal';
+    _messageVirtualRenderQueuedOrigin=null;
     const liveVisWithIdx=_getVisibleMessagesWithIdx();
     const liveWindow=_currentMessageVirtualWindow(liveVisWithIdx,_messageVirtualKeepTailCount());
     const liveKey=_messageVirtualWindowKeyFor(liveWindow);
