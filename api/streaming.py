@@ -1532,12 +1532,14 @@ def _active_turn_authority(session, stream_id, msg_text):
     pending_text = getattr(session, 'pending_user_message', None)
     return {
         'token': build_active_turn_token(stream_id, getattr(session, 'pending_started_at', None)),
+        'stream_id': str(stream_id or ''),
         'text': pending_text if pending_text is not None else msg_text,
         'timestamp': getattr(session, 'pending_started_at', None),
         'source': getattr(session, 'pending_user_source', None) or 'webui',
         'attachments': copy.deepcopy(getattr(session, 'pending_attachments', None) or []),
         'current_turn_user_idx': None,
         'turn_id': '',
+        'run_id': str(getattr(session, 'pending_run_id', '') or '').strip(),
     }
 
 
@@ -1562,6 +1564,9 @@ def _resolve_active_turn_authority(identity, *, result=None, agent=None):
         _result_turn_id = str(result.get('turn_id') or '').strip()
         if _result_turn_id:
             resolved['turn_id'] = _result_turn_id
+        _result_run_id = str(result.get('run_id') or '').strip()
+        if _result_run_id:
+            resolved['run_id'] = _result_run_id
     if agent is not None:
         if resolved.get('current_turn_user_idx') is None:
             _agent_idx = _coerce_current_turn_user_idx(
@@ -1573,6 +1578,14 @@ def _resolve_active_turn_authority(identity, *, result=None, agent=None):
             _agent_turn_id = str(getattr(agent, '_current_turn_id', '') or '').strip()
             if _agent_turn_id:
                 resolved['turn_id'] = _agent_turn_id
+        if not resolved.get('run_id'):
+            _agent_run_id = str(
+                getattr(agent, '_current_run_id', '')
+                or getattr(agent, '_run_id', '')
+                or ''
+            ).strip()
+            if _agent_run_id:
+                resolved['run_id'] = _agent_run_id
     return resolved
 
 
@@ -5826,6 +5839,86 @@ def _message_replay_key(msg):
     return (*key, sidecar) if sidecar is not None else key
 
 
+_PROCESS_WAKEUP_MISSING = object()
+_PROCESS_WAKEUP_REASONING_KEYS = (
+    'reasoning_content',
+    'reasoning',
+    '_reasoning',
+    'thinking',
+)
+
+
+def _canonical_process_wakeup_value(value):
+    """Return a type- and presence-preserving JSON-safe value for replay keys."""
+    if value is _PROCESS_WAKEUP_MISSING:
+        return ('missing',)
+    if value is None:
+        return ('none',)
+    if isinstance(value, bool):
+        return ('bool', value)
+    if isinstance(value, int):
+        return ('int', value)
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError('non-finite value is not stable for replay comparison')
+        return ('float', repr(value))
+    if isinstance(value, str):
+        return ('str', value)
+    if isinstance(value, list):
+        return ('list', tuple(_canonical_process_wakeup_value(item) for item in value))
+    if isinstance(value, dict):
+        items = []
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError('non-string dict key is not stable for replay comparison')
+            items.append((key, _canonical_process_wakeup_value(item)))
+        items.sort(key=lambda pair: pair[0])
+        return ('dict', tuple(items))
+    raise TypeError(f'unsupported value type: {type(value).__name__}')
+
+
+def _serialize_process_wakeup_value(value):
+    """Serialize one canonical replay value, failing closed for unstable input."""
+    return json.dumps(
+        _canonical_process_wakeup_value(value),
+        ensure_ascii=False,
+        separators=(',', ':'),
+        sort_keys=True,
+        allow_nan=False,
+    )
+
+
+def _process_wakeup_replay_key(msg):
+    """Return a lossless key for the destructive wakeup-arc comparison."""
+    if not isinstance(msg, dict):
+        return None
+    try:
+        return json.dumps(
+            {
+                'role': _canonical_process_wakeup_value(
+                    msg.get('role', _PROCESS_WAKEUP_MISSING)
+                ),
+                # ``in`` is intentional: a missing content field is not None.
+                'content': _canonical_process_wakeup_value(
+                    msg['content'] if 'content' in msg else _PROCESS_WAKEUP_MISSING
+                ),
+                'tool_call_id': _canonical_process_wakeup_value(
+                    msg.get('tool_call_id') or msg.get('tool_use_id') or ''
+                ),
+                'tool_calls': _canonical_process_wakeup_value(
+                    msg.get('tool_calls', [])
+                ),
+            },
+            ensure_ascii=False,
+            separators=(',', ':'),
+            sort_keys=True,
+            allow_nan=False,
+        )
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        # Destructive replay cleanup must never guess about an unstable value.
+        return None
+
+
 def _strip_replayed_prefix(existing_messages, candidates):
     """Drop a candidate prefix that is already the suffix of existing_messages.
 
@@ -5843,6 +5936,251 @@ def _strip_replayed_prefix(existing_messages, candidates):
         if left == right:
             return candidates[overlap:]
     return candidates
+
+
+def _message_identity_component(message, keys):
+    """Resolve one identity component, rejecting conflicting aliases."""
+    if not isinstance(message, dict):
+        return ''
+    values = {
+        str(message.get(key)).strip()
+        for key in keys
+        if key in message and message.get(key) is not None
+        and str(message.get(key)).strip()
+    }
+    if len(values) > 1:
+        return None
+    return next(iter(values), '')
+
+
+def _message_stream_id(message):
+    """Return only explicit stream identity; never fall back to run identity."""
+    return _message_identity_component(
+        message,
+        ('_recovered_stream_id', '_stream_id', 'stream_id'),
+    )
+
+
+def _message_run_id(message):
+    """Return only explicit run identity; never fall back to stream identity."""
+    return _message_identity_component(
+        message,
+        ('_recovered_run_id', '_run_id', 'run_id'),
+    )
+
+
+def _message_turn_id(message):
+    """Return only explicit turn identity, rejecting conflicting aliases."""
+    return _message_identity_component(
+        message,
+        ('_recovered_turn_id', '_turn_id', 'turn_id'),
+    )
+
+
+def _process_wakeup_arc_closed(rows, start, end, stream_id):
+    """Verify one canonical assistant/tool arc before its owned final row."""
+    segment = list(rows or [])[start:end + 1]
+    if not segment or any(
+        not isinstance(row, dict) or row.get('role') not in {'assistant', 'tool'}
+        for row in segment
+    ):
+        return False
+    final = segment[-1]
+    if (
+        final.get('role') != 'assistant'
+        or final.get('_partial')
+        or not _assistant_message_has_final_visible_text(final)
+        or _message_stream_id(final) != str(stream_id or '')
+        or final.get('tool_calls')
+    ):
+        return False
+
+    pending_calls = []
+    seen_calls = set()
+    for row in segment[:-1]:
+        if row.get('role') == 'assistant':
+            tool_calls = row.get('tool_calls')
+            if not isinstance(tool_calls, list) or not tool_calls or pending_calls:
+                return False
+            row_calls = []
+            for call in tool_calls:
+                if not isinstance(call, dict):
+                    return False
+                call_id = str(call.get('id') or call.get('call_id') or '').strip()
+                if not call_id or call_id in seen_calls or call_id in row_calls:
+                    return False
+                row_calls.append(call_id)
+                seen_calls.add(call_id)
+            pending_calls.extend(row_calls)
+        elif row.get('role') == 'tool':
+            result_id = str(
+                row.get('tool_call_id') or row.get('tool_use_id') or ''
+            ).strip()
+            if not result_id or not pending_calls or result_id != pending_calls[0]:
+                return False
+            pending_calls.pop(0)
+        else:
+            return False
+    return bool(seen_calls) and not pending_calls
+
+
+def _transfer_process_wakeup_reasoning_metadata(source_rows, target_rows):
+    """Transfer matched reasoning fields before destructive replay deletion."""
+    if len(source_rows) != len(target_rows):
+        return False
+    staged = []
+    try:
+        for source, target in zip(source_rows, target_rows, strict=True):
+            if (
+                not isinstance(source, dict)
+                or not isinstance(target, dict)
+                or _process_wakeup_replay_key(source) is None
+                or _process_wakeup_replay_key(source) != _process_wakeup_replay_key(target)
+            ):
+                return False
+            for field in _PROCESS_WAKEUP_REASONING_KEYS:
+                source_has = field in source
+                target_has = field in target
+                source_key = _serialize_process_wakeup_value(
+                    source[field] if source_has else _PROCESS_WAKEUP_MISSING
+                )
+                target_key = _serialize_process_wakeup_value(
+                    target[field] if target_has else _PROCESS_WAKEUP_MISSING
+                )
+                if source_has and target_has and source_key != target_key:
+                    return False
+                if source_has and not target_has:
+                    staged.append((target, field, copy.deepcopy(source[field])))
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        return False
+    for target, field, value in staged:
+        target[field] = value
+    return True
+
+
+def _strip_replayed_process_wakeup_arc(previous_display, candidates, active_identity):
+    """Drop one exact closed replay arc displaced before its active checkpoint."""
+    previous = list(previous_display or [])
+    if (
+        not isinstance(active_identity, dict)
+        or active_identity.get('source') != 'process_wakeup'
+    ):
+        return previous
+    stream_id = str(active_identity.get('stream_id') or '').strip()
+    if not stream_id or not active_identity.get('token'):
+        return previous
+    candidate_rows = list(candidates or [])
+    active_index = next(
+        (
+            index
+            for index, row in enumerate(candidate_rows)
+            if _active_turn_token_matches(row, active_identity)
+        ),
+        None,
+    )
+    if active_index is None:
+        return previous
+    final_index = next(
+        (
+            index
+            for index, row in enumerate(
+                candidate_rows[active_index + 1:], active_index + 1
+            )
+            if isinstance(row, dict)
+            and row.get('role') == 'assistant'
+            and not row.get('_partial')
+            and _assistant_message_has_final_visible_text(row)
+            and _message_stream_id(row) == stream_id
+        ),
+        None,
+    )
+    if final_index is None or not _process_wakeup_arc_closed(
+        candidate_rows,
+        active_index + 1,
+        final_index,
+        stream_id,
+    ):
+        return previous
+    candidate_final = candidate_rows[final_index]
+    arc = candidate_rows[active_index + 1:final_index + 1]
+    arc_keys = [_process_wakeup_replay_key(row) for row in arc]
+    if not arc_keys or any(key is None for key in arc_keys):
+        return previous
+    matching_windows = []
+    for index in range(len(previous) - len(arc_keys) + 1):
+        previous_keys = [
+            _process_wakeup_replay_key(row)
+            for row in previous[index:index + len(arc_keys)]
+        ]
+        if (
+            all(key is not None for key in previous_keys)
+            and previous_keys == arc_keys
+        ):
+            matching_windows.append(index)
+    if len(matching_windows) != 1:
+        return previous
+    start = matching_windows[0]
+    old_final_index = start + len(arc_keys) - 1
+    if (
+        not isinstance(previous[old_final_index], dict)
+        or previous[old_final_index].get('role') != 'assistant'
+        or previous[old_final_index].get('_partial')
+        or not _assistant_message_has_final_visible_text(previous[old_final_index])
+        or _message_stream_id(previous[old_final_index]) != stream_id
+    ):
+        return previous
+    old_final = previous[old_final_index]
+    active_turn_id = _message_turn_id(active_identity)
+    candidate_turn_id = _message_turn_id(candidate_final)
+    old_turn_id = _message_turn_id(old_final)
+    if (
+        active_turn_id is None
+        or candidate_turn_id is None
+        or old_turn_id is None
+        or not active_turn_id
+        or not candidate_turn_id
+        or not old_turn_id
+        or len({active_turn_id, candidate_turn_id, old_turn_id}) != 1
+    ):
+        return previous
+    active_stream_id = _message_stream_id(active_identity)
+    candidate_stream_id = _message_stream_id(candidate_final)
+    old_stream_id = _message_stream_id(old_final)
+    if (
+        active_stream_id is None
+        or candidate_stream_id is None
+        or old_stream_id is None
+        or not active_stream_id
+        or not candidate_stream_id
+        or not old_stream_id
+        or len({active_stream_id, candidate_stream_id, old_stream_id}) != 1
+        or active_stream_id != stream_id
+    ):
+        return previous
+    active_run_id = _message_run_id(active_identity)
+    candidate_run_id = _message_run_id(candidate_final)
+    old_run_id = _message_run_id(old_final)
+    run_ids = (active_run_id, candidate_run_id, old_run_id)
+    if any(run_id is None for run_id in run_ids):
+        return previous
+    if (
+        not all(run_ids)
+        or len(set(run_ids)) != 1
+    ):
+        return previous
+    checkpoint_indices = [
+        index for index, row in enumerate(previous)
+        if _active_turn_token_matches(row, active_identity)
+    ]
+    if checkpoint_indices and (
+        len(checkpoint_indices) != 1
+        or start + len(arc_keys) != checkpoint_indices[0]
+    ):
+        return previous
+    old_arc = previous[start:old_final_index + 1]
+    if not _transfer_process_wakeup_reasoning_metadata(old_arc, arc):
+        return previous
+    return previous[:start] + previous[old_final_index + 1:]
 
 
 def _looks_like_replayed_session_arc_summary(previous_msg, candidate_msg):
@@ -6752,6 +7090,12 @@ def _merge_display_messages_after_agent_result(
                 previous_context=previous_context,
             )
         candidates = turn_candidates
+
+    # Phase 0 of the process-wakeup replay settlement contract: display merge
+    # runs before terminal classification and persistence, so it cannot
+    # authorize destructive history cleanup. A future prepare -> classify ->
+    # commit path must live after durable normal completion and must not
+    # re-enable deletion here with a caller-provided boolean.
 
     merged = previous_display[:]
     seen = {_message_identity(m) for m in merged}

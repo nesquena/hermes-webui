@@ -70,3 +70,6 @@ First-time contributor RFCs should be discussed in an issue before opening a PR.
 - [`session-sse-contract-v1.md`](session-sse-contract-v1.md) — #4812 Proposed
   contract vocabulary, replay identity, event taxonomy, cursor/resume semantics,
   and implementation gates for `GET /api/sessions/{session_id}/events`.
+- [`process-wakeup-replay-settlement.md`](process-wakeup-replay-settlement.md)
+  — #6749 / #6758 Proposed identity, terminal-authorization, semantic-equality,
+  and atomic-commit contract for destructive process-wakeup replay settlement.
