@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 
 _PUBLIC_MESSAGE_INTERNAL_FIELDS = frozenset({
     "api_content",
+    "codex_reasoning_items",
+    "codex_message_items",
     "_state_db_row_id",
     "_db_row_id",
     "state_db_row_id",

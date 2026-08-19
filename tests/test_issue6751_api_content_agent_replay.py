@@ -419,6 +419,52 @@ def test_issue6751_provider_projection_still_strips_api_content_by_default():
     assert sanitized == [{"role": "user", "content": "same visible text"}]
 
 
+def test_issue6751_codex_replay_items_are_agent_only_and_deep_copied(monkeypatch):
+    import api.config as config
+    from api.helpers import redact_session_data
+    from api.streaming import _sanitize_messages_for_agent, _sanitize_messages_for_api
+
+    reasoning_items = [{"id": "reasoning-1", "details": {"token": "opaque"}}]
+    message_items = [{"id": "message-1", "text": "opaque"}]
+    messages = [
+        {
+            "role": "assistant",
+            "content": "answer",
+            "codex_reasoning_items": reasoning_items,
+            "codex_message_items": message_items,
+        },
+        {
+            "role": "user",
+            "content": "question",
+            "codex_reasoning_items": [{"id": "wrong-role-reasoning"}],
+            "codex_message_items": [{"id": "wrong-role-message"}],
+        },
+    ]
+
+    agent_history = _sanitize_messages_for_agent(messages)
+    assert agent_history[0]["codex_reasoning_items"] == reasoning_items
+    assert agent_history[0]["codex_message_items"] == message_items
+    assert "codex_reasoning_items" not in agent_history[1]
+    assert "codex_message_items" not in agent_history[1]
+
+    agent_history[0]["codex_reasoning_items"][0]["details"]["token"] = "mutated"
+    assert reasoning_items[0]["details"]["token"] == "opaque"
+    agent_history[0]["codex_message_items"][0]["text"] = "mutated"
+    assert message_items[0]["text"] == "opaque"
+
+    assert all(
+        "codex_reasoning_items" not in message and "codex_message_items" not in message
+        for message in _sanitize_messages_for_api(messages)
+    )
+
+    monkeypatch.setattr(config, "load_settings", lambda: {"api_redact_enabled": False})
+    public = redact_session_data({"messages": messages})
+    assert all(
+        "codex_reasoning_items" not in message and "codex_message_items" not in message
+        for message in public["messages"]
+    )
+
+
 def test_issue6751_sync_chat_agent_receives_original_api_content_bytes(monkeypatch, tmp_path):
     """The production sync route must hand the Agent the original wire text."""
     import api.config as config
