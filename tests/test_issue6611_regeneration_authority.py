@@ -1,3 +1,5 @@
+import pytest
+
 from api.helpers import redact_session_data
 from api.models import Session
 from api.session_ops import (
@@ -23,6 +25,16 @@ def test_all_terminal_payloads_carry_fresh_revision():
     payload = _session_payload_with_full_messages(session)
     assert payload["regeneration_revision"] == regeneration_authority(session, rows=session.messages)
     assert payload["regeneration_revision"] == regeneration_revision_for(session.messages, session=session, context=session.context_messages)
+
+
+def test_get_revision_consumer_delegates_imported_ownership_to_shared_authority():
+    from pathlib import Path
+
+    source = (Path(__file__).parents[1] / "api" / "routes.py").read_text(encoding="utf-8")
+    get_start = source.index('if not raw.get("read_only") and not _truncated:')
+    body = source[get_start:get_start + 900]
+    assert "regeneration_authority(" in body
+    assert "not raw.get(\"is_cli_session\")" not in body
 
 
 def test_private_active_turn_token_never_public():
@@ -99,6 +111,52 @@ def test_parent_or_foreign_source_refuses_authority():
         assert exc.code == "regeneration_read_only"
     else:
         raise AssertionError("foreign source was accepted")
+
+
+def test_writable_imported_session_accepts_only_a_marked_final_user_turn(monkeypatch, tmp_path):
+    from api.process_event_utils import build_active_turn_token
+    from api import models as models_api
+
+    session = _session()
+    session.session_source = "cli"
+    session.is_cli_session = True
+    session.active_stream_id = "imported-stream"
+    session.pending_started_at = 123.0
+    token = build_active_turn_token(session.active_stream_id, session.pending_started_at)
+    session.active_stream_id = None
+    session.pending_started_at = None
+    session.messages[-2]["_active_turn_token"] = token
+    monkeypatch.setattr(models_api, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models_api, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    session.save(touch_updated_at=False)
+    session = Session.load(session.session_id)
+    revision = regeneration_authority(session)
+    assert revision
+    assert resolve_regeneration_turn(session, expected_revision=revision).message["content"] == "p"
+    assert _session_payload_with_full_messages(session)["regeneration_revision"] == revision
+
+
+@pytest.mark.parametrize(
+    "marker,read_only,expected",
+    [(None, False, None), ("bad-token", False, None), ("valid-earlier", False, None), ("valid-final", True, None)],
+)
+def test_imported_turn_matrix_rejects_unowned_or_read_only_rows(marker, read_only, expected):
+    from api.process_event_utils import build_active_turn_token
+
+    session = _session()
+    session.session_source = "desktop"
+    session.is_cli_session = True
+    session.read_only = read_only
+    valid = build_active_turn_token("imported-stream", 123.0)
+    if marker == "valid-earlier":
+        session.messages[-2]["_active_turn_token"] = valid
+        session.messages.append({"role": "user", "content": "foreign", "_source": "desktop"})
+        session.messages.append({"role": "assistant", "content": "foreign answer"})
+    elif marker == "valid-final":
+        session.messages[-2]["_active_turn_token"] = valid
+    elif marker:
+        session.messages[-2]["_active_turn_token"] = marker
+    assert regeneration_authority(session) is expected
 
 
 def test_fork_child_has_regeneration_authority():

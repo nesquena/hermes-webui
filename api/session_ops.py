@@ -11,6 +11,7 @@ import logging
 import uuid
 import copy
 import hashlib
+import math
 from dataclasses import dataclass
 from contextlib import nullcontext
 from bisect import bisect_left
@@ -44,6 +45,42 @@ def _regeneration_source_class(value):
 
 def _regeneration_source_allowed(value):
     return _regeneration_source_class(value) in {"webui", "fork"}
+
+
+def _selected_regeneration_turn_owned(session, row) -> bool:
+    """Accept only a final row whose provenance proves WebUI ownership."""
+    if getattr(session, "read_only", False) or not isinstance(row, dict):
+        return False
+    session_source = _regeneration_source_class(getattr(session, "session_source", None))
+    raw_sources = (
+        getattr(session, "raw_source", None),
+        getattr(session, "source_tag", None),
+    )
+    if any(source and not _regeneration_source_allowed(source) for source in raw_sources):
+        return False
+    row_source = row.get("_source") or row.get("source")
+    if row_source and not _regeneration_source_allowed(row_source):
+        return False
+    if session_source == "fork":
+        return bool(
+            getattr(session, "parent_session_id", None)
+            and row.get("_fork_child_turn") == getattr(session, "session_id", None)
+        )
+    if session_source not in {"", "webui"} or getattr(session, "is_cli_session", False):
+        token = row.get("_active_turn_token")
+        if not isinstance(token, str) or not token.strip() or ":" not in token:
+            return False
+        stream_id, started_at = token.rsplit(":", 1)
+        try:
+            started = float(started_at)
+        except (TypeError, ValueError):
+            return False
+        from api.process_event_utils import build_active_turn_token
+        if not math.isfinite(started) or started <= 0:
+            return False
+        if build_active_turn_token(stream_id, started) != token:
+            return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -213,12 +250,7 @@ def regeneration_authority(
     canonical_state=None,
 ):
     """Mint a revision only for a complete, writable, canonical transcript."""
-    if not full_transcript or getattr(session, "read_only", False) or getattr(session, "is_cli_session", False):
-        return None
-    source = getattr(session, "session_source", None) or getattr(session, "raw_source", None) or getattr(session, "source_tag", None)
-    if source and not _regeneration_source_allowed(source):
-        return None
-    if _regeneration_source_class(source) == "fork" and not getattr(session, "parent_session_id", None):
+    if not full_transcript:
         return None
     if getattr(session, "active_stream_id", None) or getattr(session, "pending_user_message", None):
         return None
@@ -231,11 +263,13 @@ def regeneration_authority(
     if context is not None and list(context or []) != canonical_context:
         return None
     try:
-        resolve_regeneration_turn(
+        turn = resolve_regeneration_turn(
             canonical_rows,
             session=session,
             context=canonical_context,
         )
+        if not _selected_regeneration_turn_owned(session, turn.message):
+            return None
     except RegenerationUnavailable:
         return None
     return regeneration_revision_for(
@@ -274,20 +308,6 @@ def resolve_regeneration_turn(
         revision = regeneration_revision_for(rows, session=session, context=context)
         if expected_revision is not None and expected_revision != revision:
             raise RegenerationUnavailable("stale_regeneration_revision")
-        if getattr(session, "read_only", False) or getattr(session, "is_cli_session", False):
-            raise RegenerationUnavailable("regeneration_read_only", 403)
-        raw_sources = (
-            getattr(session, "raw_source", None),
-            getattr(session, "source_tag", None),
-        )
-        normalized_sources = {
-            str(raw_source or "").strip().lower()
-            for raw_source in (*raw_sources, getattr(session, "session_source", None))
-        }
-        if any(source and not _regeneration_source_allowed(source) for source in normalized_sources):
-            raise RegenerationUnavailable("regeneration_read_only", 403)
-        if _regeneration_source_class(getattr(session, "session_source", None)) == "fork" and not getattr(session, "parent_session_id", None):
-            raise RegenerationUnavailable("regeneration_read_only", 403)
         if getattr(session, "active_stream_id", None):
             raise RegenerationUnavailable("session_active")
         if getattr(session, "pending_user_message", None):
@@ -326,13 +346,7 @@ def resolve_regeneration_turn(
             ):
                 raise RegenerationUnavailable("no_regenerable_turn", 400)
             row = rows[index]
-            if (
-                _regeneration_source_class(getattr(session, "session_source", None)) == "fork"
-                and row.get("_fork_child_turn") != getattr(session, "session_id", None)
-            ):
-                raise RegenerationUnavailable("regeneration_read_only", 403)
-            row_source = row.get("_source") or row.get("source")
-            if row_source and not _regeneration_source_allowed(row_source):
+            if not _selected_regeneration_turn_owned(session, row):
                 raise RegenerationUnavailable("regeneration_read_only", 403)
             content = _extract_text(row.get("content", ""))
             if content:

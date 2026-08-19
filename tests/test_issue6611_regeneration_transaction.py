@@ -1,5 +1,6 @@
 import copy
 import queue
+import threading
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -95,29 +96,6 @@ def test_noop_rejection_does_not_need_persisted_rollback():
     assert session.__dict__ == snapshot
 
 
-def test_early_stale_cleanup_mutation_is_restored_before_rejected_start():
-    session = _session()
-    snapshot = snapshot_regeneration_state(session)
-    session.active_stream_id = "stale-stream"
-    session.pending_started_at = 123.0
-    session.model_explicit_pick_signature = "before"
-
-    def early_cleanup(value):
-        value.active_stream_id = None
-        value.pending_started_at = None
-
-    early_cleanup(session)
-    restore_regeneration_state(session, snapshot)
-    assert session.__dict__ == snapshot
-    source = (Path(__file__).parents[1] / "api" / "routes.py").read_text(encoding="utf-8")
-    chat_start = source.index("def _handle_chat_start(")
-    snapshot_offset = source.index("regeneration_snapshot = snapshot_regeneration_state(s)", chat_start)
-    cleanup_offset = source.index("_clear_stale_stream_state(s)", snapshot_offset)
-    assert snapshot_offset < cleanup_offset
-    assert "regeneration_snapshot = snapshot_regeneration_state(s)" in source[cleanup_offset:]
-    assert "regeneration_persisted_mutation = False" in source[cleanup_offset:]
-
-
 def test_locked_stale_plan_does_not_restore_a_request_time_snapshot(monkeypatch):
     from api import routes
 
@@ -142,10 +120,8 @@ def test_locked_stale_plan_does_not_restore_a_request_time_snapshot(monkeypatch)
         source="webui",
         moa_config=None,
         backend_is_gateway=False,
-        transaction_snapshot=request_snapshot,
     )
     assert result["code"] == "stale_regeneration_revision"
-    assert result["_regeneration_locked_plan_rejected"] is True
     assert session.__dict__ == current_state
 
 
@@ -174,8 +150,7 @@ def test_locked_unexpected_plan_error_does_not_restore_a_request_time_snapshot(m
             source="webui",
             moa_config=None,
             backend_is_gateway=False,
-            transaction_snapshot=request_snapshot,
-        )
+    )
     assert session.__dict__ == current_state
 
 
@@ -203,9 +178,7 @@ def test_locked_preacceptance_exception_restores_the_transaction_snapshot(monkey
             source="webui",
             moa_config=None,
             backend_is_gateway=False,
-            transaction_snapshot=before,
         )
-    assert raised.value._regeneration_preacceptance_restored is True
     assert session.__dict__ == before
 
 
@@ -249,7 +222,6 @@ def test_locked_postacceptance_workspace_exception_does_not_restore_turn(monkeyp
             source="webui",
             moa_config=None,
             backend_is_gateway=False,
-            transaction_snapshot=before,
         )
     assert raised.value._regeneration_accepted is True
     assert session.active_stream_id is not None
@@ -438,4 +410,72 @@ def test_locked_start_always_replans_after_browser_validation():
     assert "plan = plan_regeneration(" in body
     assert "expected_revision=turn.revision" in body
     assert "lock_held=True" in body
-    assert "hasattr(turn, \"canonical_rows\")" not in body
+
+
+def test_regeneration_preview_has_no_request_snapshot_or_outer_restore_owner():
+    source = (Path(__file__).parents[1] / "api" / "routes.py").read_text(encoding="utf-8")
+    chat_start = source.index("def _handle_chat_start(")
+    chat_end = source.index("def _resolve_chat_workspace_with_recovery", chat_start)
+    body = source[chat_start:chat_end]
+    assert "regeneration_snapshot = snapshot_regeneration_state" not in body
+    assert "transaction_snapshot" not in body
+    assert "_restore_regeneration_preacceptance" not in body
+    regeneration_preview = body[body.index('if body.get("regenerate") is True:'):body.index('diag.stage("normalize_message")')]
+    assert "_clear_stale_stream_state" not in regeneration_preview
+    assert "model_explicit_pick_signature" not in regeneration_preview
+
+
+def test_concurrent_normal_winner_survives_regeneration_409_in_memory_and_after_reload(monkeypatch, tmp_path):
+    from api import routes
+    from api import models as models_api
+
+    session = _session()
+    session.session_id = "race-6611"
+    session.active_stream_id = "stale-stream"
+    session.pending_user_message = "stale prompt"
+    session.pending_started_at = 111.0
+    session.pending_user_source = "webui"
+    monkeypatch.setattr(models_api, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models_api, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    session.save(touch_updated_at=False)
+
+    winner_started = threading.Event()
+    winner_finished = threading.Event()
+
+    def stale_plan(*_args, **_kwargs):
+        def normal_winner():
+            winner_started.set()
+            session.active_stream_id = "winner-stream"
+            session.pending_user_message = "winner prompt"
+            session.pending_started_at = 222.0
+            session.pending_user_source = "webui"
+            session.save(touch_updated_at=False)
+            winner_finished.set()
+
+        threading.Thread(target=normal_winner).start()
+        assert winner_started.wait(1)
+        assert winner_finished.wait(1)
+        raise RegenerationUnavailable("stale_regeneration_revision")
+
+    monkeypatch.setattr("api.session_ops.plan_regeneration", stale_plan)
+    result = routes._start_regeneration_stream_locked(
+        session,
+        turn=SimpleNamespace(revision="old-revision"),
+        workspace="C:/workspace",
+        model="model",
+        model_provider="provider",
+        normalized_model=False,
+        diag=None,
+        goal_related=False,
+        source="webui",
+        moa_config=None,
+        backend_is_gateway=False,
+    )
+    assert result["_status"] == 409
+    assert (session.active_stream_id, session.pending_user_message, session.pending_started_at, session.pending_user_source) == (
+        "winner-stream", "winner prompt", 222.0, "webui"
+    )
+    reloaded = Session.load(session.session_id)
+    assert (reloaded.active_stream_id, reloaded.pending_user_message, reloaded.pending_started_at, reloaded.pending_user_source) == (
+        "winner-stream", "winner prompt", 222.0, "webui"
+    )

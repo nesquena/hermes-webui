@@ -13169,7 +13169,7 @@ def handle_get(handler, parsed) -> bool:
             ):
                 raw["is_cli_session"] = False
                 raw["read_only"] = True
-            if not raw.get("read_only") and not raw.get("is_cli_session") and not _truncated:
+            if not raw.get("read_only") and not _truncated:
                 from api.session_ops import regeneration_authority, regeneration_state
                 canonical_state = regeneration_state(s)
                 revision = regeneration_authority(
@@ -21933,7 +21933,6 @@ def _start_regeneration_stream_locked(
     source: str,
     moa_config,
     backend_is_gateway: bool,
-    transaction_snapshot=None,
 ):
     """Commit a retained-row regeneration before releasing its real worker."""
     from api.session_ops import (
@@ -21944,9 +21943,6 @@ def _start_regeneration_stream_locked(
         snapshot_regeneration_state,
     )
 
-    # The route-time snapshot protects validation/preparation failures before
-    # this lock. Once the lock is held, it may be stale; locked rollback starts
-    # from the state that produced the locked plan.
     try:
         plan = plan_regeneration(
             s, expected_revision=turn.revision, lock_held=True
@@ -21957,15 +21953,8 @@ def _start_regeneration_stream_locked(
             "error": str(exc),
             "code": exc.code,
             "_status": exc.status,
-            "_regeneration_locked_plan_rejected": True,
         }
-    except Exception as exc:
-        # The plan read is side-effect free. Do not let the route restore its
-        # older request snapshot over a concurrent accepted session state.
-        exc._regeneration_skip_outer_rollback = True
-        raise
-    # plan_regeneration is read-only. Take the complete rollback snapshot only
-    # after its lock-scoped revision and authority checks have succeeded.
+    # Snapshot only after lock-held authority validation, before mutation.
     snapshot = snapshot_regeneration_state(s)
     if compression_recovery_payload_for_session(s):
         clear_compression_recovery(s)
@@ -22040,7 +22029,6 @@ def _start_regeneration_stream_locked(
                 "error": "Session changed while regeneration was being prepared.",
                 "code": "stale_regeneration_revision",
                 "_status": 409,
-                "_regeneration_locked_plan_rejected": True,
             }
         retained_user = s.messages[-1]
         msg = turn.message_text
@@ -22150,7 +22138,6 @@ def _start_regeneration_stream_locked(
                     "Failed to close compensated turn journal event",
                     exc_info=True,
                 )
-        exc._regeneration_preacceptance_restored = True
         raise
 
     release_worker.set()
@@ -22308,7 +22295,6 @@ def _start_chat_stream_for_session(
     moa_config=None,
     external_runtime_owned: bool | None = None,
     regeneration=None,
-    transaction_snapshot=None,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn."""
     if external_runtime_owned is None:
@@ -22390,7 +22376,6 @@ def _start_chat_stream_for_session(
                         source=source,
                         moa_config=moa_config,
                         backend_is_gateway=backend_is_gateway,
-                        transaction_snapshot=transaction_snapshot,
                     )
                 stream_id = uuid.uuid4().hex
                 diag.stage("save_pending_state") if diag else None
@@ -22524,7 +22509,6 @@ def _chat_start_response_from_run_start(result):
         "error",
         "code",
         "active_stream_id",
-        "_regeneration_locked_plan_rejected",
         "_status",
     ):
         if key in payload:
@@ -22561,7 +22545,6 @@ def _start_run(
     moa_config=None,
     gateway_chat_enabled: bool | None = None,
     regeneration=None,
-    transaction_snapshot=None,
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
 
@@ -22606,7 +22589,6 @@ def _start_run(
                 moa_config=moa_config,
                 external_runtime_owned=gateway_chat_enabled,
                 regeneration=regeneration,
-                transaction_snapshot=transaction_snapshot,
             )
 
         def _legacy_adapter_factory():
@@ -22649,7 +22631,6 @@ def _start_run(
         moa_config=moa_config,
         external_runtime_owned=gateway_chat_enabled,
         regeneration=regeneration,
-        transaction_snapshot=transaction_snapshot,
     )
 
 
@@ -23317,12 +23298,8 @@ def _handle_chat_start(handler, body, diag=None):
         if stale_response is not None:
             return j(handler, stale_response, status=409)
         diag.stage("get_session") if diag else None
-        regeneration_snapshot = None
         try:
             s = _get_or_materialize_session(body["session_id"], refresh_cli_messages=True)
-            if body.get("regenerate") is True:
-                from api.session_ops import snapshot_regeneration_state
-                regeneration_snapshot = snapshot_regeneration_state(s)
         except KeyError:
             # No WebUI sidecar. If this is a foreign-origin session (CLI,
             # TUI, Desktop) with recoverable state.db messages, claim it by
@@ -23375,9 +23352,6 @@ def _handle_chat_start(handler, body, diag=None):
                     500,
                 )
             s = synth
-            if body.get("regenerate") is True:
-                from api.session_ops import snapshot_regeneration_state
-                regeneration_snapshot = snapshot_regeneration_state(s)
             try:
                 with LOCK:
                     SESSIONS[s.session_id] = s
@@ -23389,19 +23363,6 @@ def _handle_chat_start(handler, body, diag=None):
                 pass
         except PermissionError:
             return bad(handler, "Read-only imported sessions cannot be continued from WebUI", 403)
-        regeneration_persisted_mutation = False
-        def _restore_regeneration_preacceptance():
-            if regeneration_snapshot is not None:
-                from api.session_ops import restore_regeneration_state
-                restore_regeneration_state(s, regeneration_snapshot)
-                if regeneration_persisted_mutation:
-                    try:
-                        s.save(touch_updated_at=False)
-                    except Exception:
-                        logger.exception("Failed to persist rejected regeneration rollback for %s", s.session_id)
-        def _reject_regeneration(response):
-            _restore_regeneration_preacceptance()
-            return response
         diag.stage("validate_profile") if diag else None
         requested_profile = str(body.get("profile") or "").strip()
         active_profile = _get_active_profile_name()
@@ -23433,19 +23394,8 @@ def _handle_chat_start(handler, body, diag=None):
         regeneration = None
         if body.get("regenerate") is True:
             if any(key in body for key in ("message", "attachments", "keep_count", "prompt", "prompt_index")):
-                return _reject_regeneration(j(handler, {"error": "regeneration accepts only regeneration_revision", "code": "invalid_regeneration_request"}, status=400))
-            stale_stream_id = getattr(s, "active_stream_id", None)
-            if stale_stream_id and not _active_stream_blocks_chat_start(s, stale_stream_id):
-                if _clear_stale_stream_state(s):
-                    # The cleanup is a real persisted repair. A later stale
-                    # rejection must preserve that repair, not restore the
-                    # pre-cleanup request snapshot.
-                    from api.session_ops import snapshot_regeneration_state
-
-                    regeneration_snapshot = snapshot_regeneration_state(s)
-                    regeneration_persisted_mutation = False
+                return j(handler, {"error": "regeneration accepts only regeneration_revision", "code": "invalid_regeneration_request"}, status=400)
             if not isinstance(body.get("regeneration_revision"), str):
-                _restore_regeneration_preacceptance()
                 return j(handler, {"error": "regeneration_revision is required", "code": "stale_regeneration_revision"}, status=409)
             try:
                 from api.session_ops import plan_regeneration, RegenerationUnavailable
@@ -23453,7 +23403,6 @@ def _handle_chat_start(handler, body, diag=None):
                     s, expected_revision=body["regeneration_revision"]
                 )
             except RegenerationUnavailable as exc:
-                _restore_regeneration_preacceptance()
                 return j(handler, {"error": str(exc), "code": exc.code}, status=exc.status)
             msg = regeneration.turn.message_text
             attachments = copy.deepcopy(regeneration.turn.attachments)[:20]
@@ -23463,13 +23412,13 @@ def _handle_chat_start(handler, body, diag=None):
         diag.stage("normalize_message") if diag else None
         msg = str(msg if msg is not None else body.get("message", "")).strip()
         if not msg:
-            return _reject_regeneration(bad(handler, "message is required"))
+            return bad(handler, "message is required")
         diag.stage("normalize_attachments") if diag else None
         if attachments is None:
             attachments = _normalize_chat_attachments(body.get("attachments") or [])[:20]
         recovery = compression_recovery_payload_for_session(s)
         if recovery and not attachments and is_generic_continuation_intent(msg):
-            return _reject_regeneration(j(
+            return j(
                 handler,
                 {
                     "error": "This session exhausted context compression. Start a focused continuation, then describe the next narrow task.",
@@ -23479,7 +23428,7 @@ def _handle_chat_start(handler, body, diag=None):
                     "session_id": getattr(s, "session_id", body["session_id"]),
                 },
                 status=409,
-            ))
+            )
         diag.stage("resolve_workspace") if diag else None
         try:
             if regeneration is not None:
@@ -23487,9 +23436,9 @@ def _handle_chat_start(handler, body, diag=None):
             else:
                 workspace = _resolve_chat_workspace_with_recovery(s, body.get("workspace"))
         except WorkspaceBindingPersistenceError as e:
-            return _reject_regeneration(bad(handler, str(e), 500))
+            return bad(handler, str(e), 500)
         except ValueError as e:
-            return _reject_regeneration(bad(handler, str(e)))
+            return bad(handler, str(e))
         requested_model = body.get("model") or s.model
         requested_provider = (
             body.get("model_provider")
@@ -23503,13 +23452,13 @@ def _handle_chat_start(handler, body, diag=None):
         gateway_chat_enabled = webui_gateway_chat_enabled(config_snapshot)
         if body.get("moa_config"):
             if gateway_chat_enabled:
-                return _reject_regeneration(bad(handler, "MoA override is unavailable on gateway-backed sessions", 409))
+                return bad(handler, "MoA override is unavailable on gateway-backed sessions", 409)
             from api.commands import resolve_moa_config
 
             try:
                 moa_config = resolve_moa_config()
             except RuntimeError as e:
-                return _reject_regeneration(bad(handler, str(e), 503))
+                return bad(handler, str(e), 503)
         diag.stage("resolve_model_provider") if diag else None
         model, model_provider, normalized_model = _resolve_compatible_session_model_state(
             requested_model,
@@ -23528,7 +23477,7 @@ def _handle_chat_start(handler, body, diag=None):
         # compares). This survives same-model follow-up sends (the onchange marker
         # is one-shot) yet can't outlive a real switch.
         try:
-            if explicit_model_pick:
+            if explicit_model_pick and regeneration is None:
                 from api.models import model_explicit_pick_signature as _mk_sig
                 s.model_explicit_pick_signature = _mk_sig(model, model_provider)
         except Exception:
@@ -23564,14 +23513,14 @@ def _handle_chat_start(handler, body, diag=None):
                 or model != configured_default
                 or explicit_model_pick
             ):
-                return _reject_regeneration(bad(handler, "MoA override is unavailable on gateway-backed sessions", 409))
+                return bad(handler, "MoA override is unavailable on gateway-backed sessions", 409)
         elif model_provider == "moa" and moa_config is None:
             from api.commands import resolve_moa_config
 
             try:
                 moa_config = resolve_moa_config(model)
             except RuntimeError as e:
-                return _reject_regeneration(bad(handler, str(e), 503))
+                return bad(handler, str(e), 503)
         # NOTE: runtime-adapter selection is delegated to _start_run (shared
         # with start_session_turn so both entry points behave identically
         # under runtime_adapter_enabled() / runtime_adapter_runner_enabled()
@@ -23588,7 +23537,6 @@ def _handle_chat_start(handler, body, diag=None):
             "diag": diag,
             "gateway_chat_enabled": gateway_chat_enabled,
             "regeneration": regeneration,
-            "transaction_snapshot": regeneration_snapshot,
         }
         if not gateway_chat_enabled and moa_config is not None:
             start_run_kwargs["moa_config"] = moa_config
@@ -23608,7 +23556,6 @@ def _handle_chat_start(handler, body, diag=None):
         if recovery and regeneration is None:
             recovery_cleared_for_start = copy.deepcopy(recovery)
             clear_compression_recovery(s)
-            regeneration_persisted_mutation = True
         try:
             response = _start_run(
                 s,
@@ -23616,30 +23563,21 @@ def _handle_chat_start(handler, body, diag=None):
             )
         except Exception as exc:
             if not getattr(exc, "_regeneration_accepted", False):
-                if (
-                    regeneration_snapshot is not None
-                    and not getattr(exc, "_regeneration_skip_outer_rollback", False)
-                    and not getattr(exc, "_regeneration_preacceptance_restored", False)
-                ):
-                    _restore_regeneration_preacceptance()
                 _restore_cleared_recovery()
             raise
         # Map adapter-selection NotImplementedError (501) onto the legacy
         # bad-request response shape that this route exposed historically
         # before the helper extraction.
-        locked_plan_rejected = bool(response.pop("_regeneration_locked_plan_rejected", False))
         if response.get("_status") == 501 and "error" in response:
-            restore_err = None if locked_plan_rejected else _restore_cleared_recovery()
+            restore_err = _restore_cleared_recovery()
             if restore_err is not None:
                 return bad(handler, f"failed to restore compression recovery: {_sanitize_error(restore_err)}", 500)
             return j(handler, {"error": response["error"]}, status=501)
         status = int(response.pop("_status", 200) or 200)
-        if status >= 400 and recovery_cleared_for_start is not None and not locked_plan_rejected:
+        if status >= 400 and recovery_cleared_for_start is not None:
             restore_err = _restore_cleared_recovery()
             if restore_err is not None:
                 return bad(handler, f"failed to restore compression recovery: {_sanitize_error(restore_err)}", 500)
-        if status >= 400 and regeneration_snapshot is not None and not locked_plan_rejected:
-            _restore_regeneration_preacceptance()
         diag.stage("response_write") if diag else None
         return j(handler, response, status=status)
     finally:
