@@ -1628,10 +1628,6 @@ async function send(){
   const activeSid=S.session.session_id;
   _sendInProgressSid=activeSid;
   const sessionAtSend=S.session; // 引用捕获（不是复制），用于 await 后 fail-closed 守卫
-  // Greptile P1: activeSid 锁定后立即捕获发起请求时的模型状态（会话 A）。
-  // 后续 /api/chat/start 失败处理必须使用该捕获值，不能等 catch 时重读
-  // 全局 S（此时用户可能已切到会话 B，导致冷却错误模型）。
-  const failedModelState = _chatPayloadModelState();
 
   // Model scheduler: 若开关启用（设置总开关 + composer Auto），发送前获取
   // 推荐并应用到模型下拉。该调用不阻塞发送，失败保持当前模型。
@@ -1647,6 +1643,11 @@ async function send(){
     if(typeof showToast==='function') showToast('Conversation switched while sending; message not sent.',2500);
     return;
   }
+
+  // Greptile P1: beforeSend 之后（推荐模型已应用、会话未变）捕获实际发送
+  // 的模型状态。不能更早——beforeSend 可能把模型从 A 切到 B，早捕获会
+  // 冷却旧模型；也不能等失败时重读全局 S（用户可能已切会话）。
+  const failedModelState = _chatPayloadModelState();
 
   // Salvage of #4750 (@harryazj): capture the composer text and clear the
   // textarea NOW — immediately after capture and BEFORE the uploadPendingFiles()
