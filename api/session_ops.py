@@ -52,21 +52,25 @@ def _selected_regeneration_turn_owned(session, row) -> bool:
     if getattr(session, "read_only", False) or not isinstance(row, dict):
         return False
     session_source = _regeneration_source_class(getattr(session, "session_source", None))
+    imported_session = bool(
+        getattr(session, "is_cli_session", False)
+        or session_source not in {"", "webui", "fork"}
+    )
     raw_sources = (
         getattr(session, "raw_source", None),
         getattr(session, "source_tag", None),
     )
-    if any(source and not _regeneration_source_allowed(source) for source in raw_sources):
-        return False
     row_source = row.get("_source") or row.get("source")
-    if row_source and not _regeneration_source_allowed(row_source):
-        return False
     if session_source == "fork":
+        if any(source and not _regeneration_source_allowed(source) for source in raw_sources):
+            return False
+        if row_source and not _regeneration_source_allowed(row_source):
+            return False
         return bool(
             getattr(session, "parent_session_id", None)
             and row.get("_fork_child_turn") == getattr(session, "session_id", None)
         )
-    if session_source not in {"", "webui"} or getattr(session, "is_cli_session", False):
+    if imported_session:
         token = row.get("_active_turn_token")
         if not isinstance(token, str) or not token.strip() or ":" not in token:
             return False
@@ -79,6 +83,11 @@ def _selected_regeneration_turn_owned(session, row) -> bool:
         if not math.isfinite(started) or started <= 0:
             return False
         if build_active_turn_token(stream_id, started) != token:
+            return False
+    else:
+        if any(source and not _regeneration_source_allowed(source) for source in raw_sources):
+            return False
+        if row_source and not _regeneration_source_allowed(row_source):
             return False
     return True
 

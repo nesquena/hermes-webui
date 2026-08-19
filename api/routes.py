@@ -23299,7 +23299,10 @@ def _handle_chat_start(handler, body, diag=None):
             return j(handler, stale_response, status=409)
         diag.stage("get_session") if diag else None
         try:
-            s = _get_or_materialize_session(body["session_id"], refresh_cli_messages=True)
+            s = _get_or_materialize_session(
+                body["session_id"],
+                refresh_cli_messages=body.get("regenerate") is not True,
+            )
         except KeyError:
             # No WebUI sidecar. If this is a foreign-origin session (CLI,
             # TUI, Desktop) with recoverable state.db messages, claim it by

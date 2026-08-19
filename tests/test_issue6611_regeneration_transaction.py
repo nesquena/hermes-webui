@@ -228,13 +228,16 @@ def test_locked_postacceptance_workspace_exception_does_not_restore_turn(monkeyp
     assert session.__dict__ != before
 
 
-def test_chat_start_outer_exception_restores_regeneration_preacceptance(monkeypatch):
+def test_chat_start_losing_regeneration_preserves_locked_send_winner(monkeypatch, tmp_path):
     from api import routes
+    from api import models as models_api
     import api.runtime_adapter as runtime_adapter
 
     session = _session()
+    session.session_id = "route-race-6611"
     revision = plan_regeneration(session).revision
-    before = copy.deepcopy(session.__dict__)
+    monkeypatch.setattr(models_api, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models_api, "SESSION_INDEX_FILE", tmp_path / "_index.json")
     monkeypatch.setattr(runtime_adapter, "runtime_adapter_runner_enabled", lambda: False)
     monkeypatch.setattr(routes, "_get_or_materialize_session", lambda *_args, **_kwargs: session)
     monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda **_kwargs: None)
@@ -248,20 +251,60 @@ def test_chat_start_outer_exception_restores_regeneration_preacceptance(monkeypa
     monkeypatch.setattr(routes, "_repair_foreign_session_model_provider", lambda *_args, **_kwargs: "provider")
     monkeypatch.setattr(routes, "compression_recovery_payload_for_session", lambda *_args: None)
 
-    def fail_start(*_args, **_kwargs):
-        raise RuntimeError("start failed before acceptance")
+    winner_started = threading.Event()
+    winner_finished = threading.Event()
 
-    monkeypatch.setattr(routes, "_start_run", fail_start)
-    with pytest.raises(RuntimeError, match="start failed before acceptance"):
-        routes._handle_chat_start(
-            None,
-            {
-                "session_id": session.session_id,
-                "regenerate": True,
-                "regeneration_revision": revision,
-            },
-        )
-    assert session.__dict__ == before
+    def lose_after_locked_send(*_args, **_kwargs):
+        def normal_send_winner():
+            with routes._get_session_agent_lock(session.session_id):
+                session.active_stream_id = "winner-stream"
+                session.pending_user_message = "winner prompt"
+                session.pending_started_at = 222.0
+                session.pending_user_source = "webui"
+                session.save(touch_updated_at=False)
+                winner_started.set()
+                winner_finished.set()
+
+        thread = threading.Thread(target=normal_send_winner)
+        thread.start()
+        assert winner_started.wait(1)
+        assert winner_finished.wait(1)
+        thread.join(timeout=1)
+        return {
+            "error": "stale regeneration revision",
+            "code": "stale_regeneration_revision",
+            "_status": 409,
+        }
+
+    captured = {}
+    monkeypatch.setattr(routes, "_start_run", lose_after_locked_send)
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda _handler, data, status=200, **_kwargs: captured.update(data=data, status=status),
+    )
+    routes._handle_chat_start(
+        None,
+        {
+            "session_id": session.session_id,
+            "regenerate": True,
+            "regeneration_revision": revision,
+        },
+    )
+    assert captured["status"] == 409
+    assert (
+        session.active_stream_id,
+        session.pending_user_message,
+        session.pending_started_at,
+        session.pending_user_source,
+    ) == ("winner-stream", "winner prompt", 222.0, "webui")
+    reloaded = Session.load(session.session_id)
+    assert (
+        reloaded.active_stream_id,
+        reloaded.pending_user_message,
+        reloaded.pending_started_at,
+        reloaded.pending_user_source,
+    ) == ("winner-stream", "winner prompt", 222.0, "webui")
 
 
 def test_prepare_mirrors_active_turn_token_to_context_before_timestamp_mutation(monkeypatch):

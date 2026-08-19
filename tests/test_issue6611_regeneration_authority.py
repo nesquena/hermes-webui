@@ -120,6 +120,9 @@ def test_writable_imported_session_accepts_only_a_marked_final_user_turn(monkeyp
     session = _session()
     session.session_source = "cli"
     session.is_cli_session = True
+    session.raw_source = "cli"
+    session.source_tag = "cli"
+    session.messages[-2]["_source"] = "cli"
     session.active_stream_id = "imported-stream"
     session.pending_started_at = 123.0
     token = build_active_turn_token(session.active_stream_id, session.pending_started_at)
@@ -133,6 +136,45 @@ def test_writable_imported_session_accepts_only_a_marked_final_user_turn(monkeyp
     revision = regeneration_authority(session)
     assert revision
     assert resolve_regeneration_turn(session, expected_revision=revision).message["content"] == "p"
+    assert _session_payload_with_full_messages(session)["regeneration_revision"] == revision
+
+
+def test_get_and_terminal_consumers_emit_imported_marked_revision(monkeypatch):
+    from types import SimpleNamespace
+    from urllib.parse import urlparse
+    from api import routes
+    from api.process_event_utils import build_active_turn_token
+
+    session = _session()
+    session.session_source = "desktop"
+    session.is_cli_session = True
+    session.raw_source = "desktop"
+    session.source_tag = "desktop"
+    session.messages[-2]["_source"] = "desktop"
+    session.messages[-2]["_active_turn_token"] = build_active_turn_token("imported-stream", 123.0)
+    revision = regeneration_authority(session)
+    captured = {}
+
+    def capture(_handler, data, status=200, **_kwargs):
+        captured["data"] = data
+        captured["status"] = status
+
+    monkeypatch.setattr(routes, "get_session", lambda *_args, **_kwargs: session)
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *_args: True)
+    monkeypatch.setattr(routes, "_clear_stale_stream_state", lambda *_args: None)
+    monkeypatch.setattr(routes, "_session_requires_cli_metadata_lookup", lambda *_args: False)
+    monkeypatch.setattr(routes, "get_state_db_session_messages", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(routes, "_resolve_effective_session_model_for_display", lambda *_args: None)
+    monkeypatch.setattr(routes, "_resolve_effective_session_model_provider_for_display", lambda *_args: None)
+    monkeypatch.setattr(routes, "j", capture)
+
+    routes.handle_get(
+        SimpleNamespace(_safe_webui_print=lambda *_args: None),
+        urlparse(f"/api/session?session_id={session.session_id}&messages=1&resolve_model=0"),
+    )
+
+    assert captured["status"] == 200
+    assert captured["data"]["session"]["regeneration_revision"] == revision
     assert _session_payload_with_full_messages(session)["regeneration_revision"] == revision
 
 
