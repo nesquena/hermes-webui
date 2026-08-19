@@ -121,6 +121,65 @@ def test_override_is_cleared_after_worker_exits(tmp_path, monkeypatch):
     assert hermes_constants.get_hermes_home_override() is None
 
 
+@pytest.mark.skipif(
+    not HAS_OVERRIDE,
+    reason="requires the v0.18.0 override to assert root-home scoping",
+)
+def test_default_root_scopes_install_canonical_root_home_override(tmp_path, monkeypatch):
+    """#6857 re-gate: default/root scopes must pin the canonical root home.
+
+    After a named→default switch (or an active-profile delete), the in-process
+    resolver can keep seeing the old named home. Each default/root scope must
+    install the explicit root-home ContextVar override while entered, then
+    restore the PREVIOUS (named) token on exit — including on exception.
+    """
+    root_home = str(profiles_api.get_hermes_home_for_profile(""))
+    named_home = _seed_profile_home(tmp_path, "alpha", provider="anthropic", model="claude-x")
+
+    # Start with a NAMED-home override installed (stale named state).
+    named_token = hermes_constants.set_hermes_home_override(str(named_home))
+    try:
+        assert hermes_constants.get_hermes_home_override() == str(named_home)
+        monkeypatch.setattr(profiles_api, "get_active_profile_name", lambda: "default")
+
+        scopes = [
+            (
+                "profile_env_for_background_worker",
+                lambda: profiles_api.profile_env_for_background_worker(""),
+            ),
+            (
+                "profile_env_for_active_request_readonly",
+                lambda: profiles_api.profile_env_for_active_request_readonly(),
+            ),
+            (
+                "profile_env_for_active_request",
+                lambda: profiles_api.profile_env_for_active_request(),
+            ),
+            (
+                "profile_scope_for_detached_worker",
+                lambda: profiles_api.profile_scope_for_detached_worker("default"),
+            ),
+        ]
+
+        for label, factory in scopes:
+            with factory():
+                # The resolver sees the canonical root home inside the scope.
+                assert hermes_constants.get_hermes_home_override() == root_home, label
+                assert hermes_constants.get_hermes_home() == Path(root_home), label
+            # The PREVIOUS (named) token is restored on exit.
+            assert hermes_constants.get_hermes_home_override() == str(named_home), label
+
+        # And on exception: entering the scope then raising must also restore.
+        for label, factory in scopes:
+            with pytest.raises(RuntimeError):
+                with factory():
+                    assert hermes_constants.get_hermes_home_override() == root_home, label
+                    raise RuntimeError("boom")
+            assert hermes_constants.get_hermes_home_override() == str(named_home), label
+    finally:
+        hermes_constants.reset_hermes_home_override(named_token)
+
+
 def test_graceful_degradation_resolver_is_optional():
     """On an agent WITHOUT the override, the resolver returns None and the CM
     falls back to the pre-existing os.environ mirror — never raises. We assert
