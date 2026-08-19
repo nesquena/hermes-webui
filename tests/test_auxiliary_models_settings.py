@@ -984,3 +984,74 @@ class TestAuxiliaryModelsBackend:
             f"aux slot must persist the SELECTED provider's base_url, got "
             f"{saved.get('base_url')!r}"
         )
+
+    def test_aux_slot_custom_provider_base_url_no_deadlock(self, monkeypatch, tmp_path):
+        """Regression: saving a named custom auxiliary model must not self-deadlock.
+
+        set_auxiliary_model() holds the non-reentrant _cfg_lock while resolving
+        the selected custom provider's base_url. The pre-fix code called
+        resolve_custom_provider_connection() -> get_config() ->
+        reload_config_if_stale(), which re-acquires _cfg_lock and hangs forever
+        whenever the config cache is stale or the profile path changed. This test
+        uses the REAL get_config (only reload_config, which runs AFTER the lock is
+        released, is stubbed) and forces get_config()'s reload branch, then runs
+        the call on a watchdog thread that fails the test if it hangs.
+        """
+        import threading
+
+        import yaml
+
+        from api import config
+
+        shared_cfg = {
+            "model": {
+                "default": "shared-model",
+                "provider": "custom",
+                "base_url": "https://www.dogapi.cc/v1",
+            },
+            "custom_providers": [
+                {"name": "dogapi", "base_url": "https://www.dogapi.cc/v1",
+                 "models": ["shared-model"]},
+                {"name": "packyapi", "base_url": "https://www.packyapi.ai/v1",
+                 "models": ["shared-model"]},
+            ],
+        }
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(yaml.safe_dump(shared_cfg), encoding="utf-8")
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        # reload_config runs AFTER _cfg_lock is released; stub it so the test
+        # doesn't mutate global module state. get_config stays REAL — that is the
+        # path the pre-fix code re-entered while holding the lock.
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+        # Force the reload branch inside the real get_config the pre-fix code
+        # called: a mismatched cached path makes path_changed True.
+        monkeypatch.setattr(config, "_cfg_path", None, raising=False)
+
+        result_box: dict = {}
+        error_box: dict = {}
+
+        def _run():
+            try:
+                result_box["r"] = config.set_auxiliary_model(
+                    "vision", "custom:packyapi", "shared-model"
+                )
+            except Exception as exc:  # pragma: no cover - surfaced via join
+                error_box["e"] = exc
+
+        worker = threading.Thread(target=_run, daemon=True)
+        worker.start()
+        worker.join(timeout=10)
+        assert not worker.is_alive(), (
+            "set_auxiliary_model deadlocked while resolving a custom provider "
+            "base_url under _cfg_lock"
+        )
+        if "e" in error_box:
+            raise error_box["e"]
+
+        saved = config._load_yaml_config_file(config_path)["auxiliary"]["vision"]
+        assert saved["provider"] == "custom:packyapi"
+        assert saved["base_url"] == "https://www.packyapi.ai/v1", (
+            f"aux slot must persist the SELECTED provider's base_url, got "
+            f"{saved.get('base_url')!r}"
+        )

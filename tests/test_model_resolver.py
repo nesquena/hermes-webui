@@ -330,54 +330,76 @@ def test_overlapping_custom_providers_bare_custom_no_base_url_keeps_order():
     )
 
 
-def test_overlapping_custom_providers_normalized_slug_collision_uses_exact_base_url():
-    """Two DISTINCT provider names that normalize to the SAME slug must not
-    collapse to the first same-slug entry — the active base_url pins the exact
-    entry.
+def test_overlapping_custom_providers_normalized_slug_collision_fails_closed():
+    """Two DISTINCT provider names that normalize to the SAME slug must fail
+    closed, even when the active base_url pins one exact entry.
 
-    'Foo Bar' and 'foo-bar' both normalize to slug custom:foo-bar. config_provider
-    is derived from model.base_url via named-slug matching, which already picked
-    exactly one entry; collapsing that to a slug and re-scanning by slug would
-    silently return the earlier same-slug entry's base_url. With the active
-    base_url pointing at the SECOND entry (B), resolution must return B, not the
-    first entry's A.
+    'Foo Bar' and 'foo-bar' both normalize to slug custom:foo-bar. Even with the
+    active base_url pointing at the SECOND entry (B), resolve_model_provider can
+    only return the shared slug custom:foo-bar. The downstream credential lookup
+    (resolve_custom_provider_connection) then resolves the API key from the FIRST
+    same-slug entry (A) regardless of base_url — so endpoint B would be paired
+    with credential A. Rather than emit that broken pairing, resolution must
+    raise so the collision surfaces to the user.
     """
     custom_providers = [
         {'name': 'Foo Bar', 'base_url': 'https://a.example/v1', 'models': ['shared-model']},
         {'name': 'foo-bar', 'base_url': 'https://b.example/v1', 'models': ['shared-model']},
     ]
-    model, provider, base_url = _resolve_with_config(
-        'shared-model',
-        provider='custom',
-        base_url='https://b.example/v1',
-        custom_providers=custom_providers,
-    )
-    assert provider == 'custom:foo-bar'
-    assert base_url == 'https://b.example/v1', (
-        f"same-slug collision must resolve by exact base_url, got {base_url!r}"
-    )
+    with pytest.raises(config.AmbiguousCustomProviderError):
+        _resolve_with_config(
+            'shared-model',
+            provider='custom',
+            base_url='https://b.example/v1',
+            custom_providers=custom_providers,
+        )
 
 
 def test_overlapping_custom_providers_slug_collision_no_base_url_fails_closed():
     """When two same-slug entries exist and there is NO base_url to disambiguate,
-    the active-slug guard must NOT guess an entry — it fails closed and falls
-    through to the legacy ordered first-match scan (which returns the first
-    same-slug entry's base_url). This proves the guard does not fabricate a
-    resolution under genuine ambiguity.
+    resolution must fail closed rather than silently guessing the first entry.
+    The ordered scan would return the shared slug custom:foo-bar, whose credential
+    lookup can't be pinned to a single entry — so it raises instead.
     """
     custom_providers = [
         {'name': 'Foo Bar', 'base_url': 'https://a.example/v1', 'models': ['shared-model']},
         {'name': 'foo-bar', 'base_url': 'https://b.example/v1', 'models': ['shared-model']},
     ]
     # Active provider is bare 'custom' with no base_url: nothing disambiguates.
+    with pytest.raises(config.AmbiguousCustomProviderError):
+        _resolve_with_config(
+            'shared-model',
+            provider='custom',
+            custom_providers=custom_providers,
+        )
+
+
+def test_overlapping_custom_providers_explicit_slug_wins_over_stale_base_url():
+    """An explicitly selected named custom provider with a UNIQUE slug must win
+    even when model.base_url is stale and points at neither entry.
+
+    A (dogapi) is written first; B (packyapi) is explicitly selected. Both own
+    'shared-model'. model.base_url is set to a THIRD, stale URL that matches no
+    entry. The explicit, unambiguous provider B must be authoritative — a stale
+    URL is not evidence to demote it to config order (which would return A).
+    """
+    custom_providers = [
+        {'name': 'dogapi', 'base_url': 'https://www.dogapi.cc/v1',
+         'models': ['shared-model']},
+        {'name': 'packyapi', 'base_url': 'https://www.packyapi.ai/v1',
+         'models': ['shared-model']},
+    ]
     model, provider, base_url = _resolve_with_config(
         'shared-model',
-        provider='custom',
+        provider='custom:packyapi',
+        base_url='https://stale.example/v1',  # stale: matches neither entry
         custom_providers=custom_providers,
     )
-    # Falls through to the ordered scan -> first entry.
-    assert base_url == 'https://a.example/v1', (
-        f"ambiguous slug with no base_url must fall through to ordered scan, got {base_url!r}"
+    assert provider == 'custom:packyapi', (
+        f"explicit provider must win over stale base_url + config order, got {provider!r}"
+    )
+    assert base_url == 'https://www.packyapi.ai/v1', (
+        f"must use the selected provider's own base_url, got {base_url!r}"
     )
 
 

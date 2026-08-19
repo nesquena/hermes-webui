@@ -2616,6 +2616,22 @@ def _get_provider_cfg(provider_id) -> dict:
     return provider_cfg if isinstance(provider_cfg, dict) else {}
 
 
+class AmbiguousCustomProviderError(ValueError):
+    """Raised when two+ custom_providers[] entries normalize to the same slug.
+
+    ``resolve_model_provider()`` returns a provider SLUG (``custom:<slug>``),
+    and the downstream credential lookup (``resolve_custom_provider_connection``)
+    resolves the API key by scanning ``custom_providers[]`` for the FIRST entry
+    matching that slug — independent of the base_url. So when two distinct
+    provider names normalize to the same slug (e.g. ``Foo Bar`` and ``foo-bar``
+    both -> ``custom:foo-bar``) and both list the requested model, returning the
+    slug would silently pair one entry's endpoint with another entry's
+    credential. Rather than guess, we fail closed and surface the collision so
+    the user can rename one provider. Subclasses ``ValueError`` so existing
+    ``except ValueError`` / broad-``except`` fallbacks continue to catch it.
+    """
+
+
 def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) -> tuple:
     """Resolve model name, provider, and base_url for AIAgent.
 
@@ -2736,8 +2752,8 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         # same bare model id (e.g. dogapi and packyapi both advertise
         # 'claude-sonnet-5'), a plain first-match scan routes on config WRITE
         # ORDER — silently hijacking the model to whichever entry appears first,
-        # regardless of the active provider/base_url the user actually configured.
-        # If the ACTIVE provider is itself a named custom provider (config_provider
+        # regardless of the active provider the user actually configured. If the
+        # ACTIVE provider is itself a named custom provider (config_provider
         # resolved to 'custom:<slug>', including via model.base_url → named-slug
         # matching), prefer THAT entry when it also owns the model, so an explicit
         # active endpoint wins over an overlapping earlier entry. Falls through to
@@ -2755,44 +2771,47 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             ids.update(_configured_model_ids(entry.get('models')))
             return model_id in ids
 
+        # Map each normalized custom slug -> the entries that OWN this model.
+        # A slug with >=2 owning entries is a normalized-slug COLLISION. Because
+        # resolve_model_provider() returns only a slug and credentials are later
+        # resolved from that slug alone (resolve_custom_provider_connection picks
+        # the FIRST same-slug entry regardless of base_url), such a slug can
+        # never be returned safely — endpoint and API key could come from
+        # different entries. Fail closed on any collision instead of guessing.
+        _owning_by_slug: dict[str, list[dict]] = {}
+        for entry in custom_providers:
+            if not isinstance(entry, dict):
+                continue
+            entry_name = (entry.get('name') or '').strip()
+            if not entry_name or not _entry_owns_model(entry):
+                continue
+            _owning_by_slug.setdefault(
+                _custom_provider_slug_from_name(entry_name), []
+            ).append(entry)
+
+        def _ambiguity_error(slug: str) -> AmbiguousCustomProviderError:
+            names = [(e.get('name') or '').strip() for e in _owning_by_slug.get(slug, [])]
+            return AmbiguousCustomProviderError(
+                f"Custom providers {names!r} all normalize to provider slug "
+                f"{slug!r} and list model {model_id!r}; the endpoint and API key "
+                f"would be resolved from different entries. Rename one custom "
+                f"provider so each has a unique slug."
+            )
+
         if _active_custom_slug:
-            # Prefer the EXACT entry the active endpoint's base_url points at,
-            # not the first entry that merely shares the active slug. Two
-            # distinct provider names can normalize to the same slug (e.g.
-            # "Foo Bar" and "foo-bar" both -> custom:foo-bar). config_provider
-            # was derived from model.base_url via named-slug matching, which
-            # already identified ONE entry — but collapsing that to a slug and
-            # re-scanning by slug would silently return the wrong (earlier)
-            # same-slug entry's base_url. So when a config base_url is present,
-            # match entries by base_url first to recover the exact entry.
-            _norm_active_base = _normalize_base_url_for_match(config_base_url) if config_base_url else ''
-            _base_matches = []
-            _slug_matches = []
-            for entry in custom_providers:
-                if not isinstance(entry, dict):
-                    continue
-                entry_name = (entry.get('name') or '').strip()
-                if not entry_name:
-                    continue
-                if _custom_provider_slug_from_name(entry_name) != _active_custom_slug:
-                    continue
-                _slug_matches.append(entry)
-                if _norm_active_base and _normalize_base_url_for_match(entry.get('base_url')) == _norm_active_base:
-                    _base_matches.append(entry)
-            # 1) base_url pins exactly one entry -> use it (the precise match).
-            if len(_base_matches) == 1:
-                entry = _base_matches[0]
-                if _entry_owns_model(entry):
-                    return model_id, _active_custom_slug, (entry.get('base_url') or '').strip() or None
-            # 2) no base_url disambiguation, but the slug is unambiguous
-            #    (exactly one entry carries it) -> safe to claim by slug.
-            elif not _norm_active_base and len(_slug_matches) == 1:
-                entry = _slug_matches[0]
-                if _entry_owns_model(entry):
-                    return model_id, _active_custom_slug, (entry.get('base_url') or '').strip() or None
-            # 3) genuine ambiguity (multiple same-slug entries and base_url did
-            #    not resolve to exactly one) -> fail closed: do NOT guess an
-            #    entry. Fall through to the ordered scan below.
+            _slug_owners = _owning_by_slug.get(_active_custom_slug, [])
+            # >=2 owning entries share the active slug -> credential-unsafe.
+            if len(_slug_owners) >= 2:
+                raise _ambiguity_error(_active_custom_slug)
+            # Exactly one owning entry carries the active slug -> authoritative,
+            # even when model.base_url is stale/absent or points at a different
+            # endpoint. An explicit, unambiguous named provider must never lose
+            # to config order: a stale URL is not evidence to discard it.
+            if len(_slug_owners) == 1:
+                entry = _slug_owners[0]
+                return model_id, _active_custom_slug, (entry.get('base_url') or '').strip() or None
+            # 0 owners: the active named provider doesn't list this model ->
+            # fall through to the ordered ownership scan below.
         for entry in custom_providers:
             if not isinstance(entry, dict):
                 continue
@@ -2805,6 +2824,10 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             entry_model_ids.update(_configured_model_ids(entry.get('models')))
             if entry_name and model_id in entry_model_ids:
                 provider_hint = _custom_provider_slug_from_name(entry_name)
+                # Same collision guard on the bare-'custom' / fall-through path:
+                # a slug shared by >=2 owning entries can't pin credentials.
+                if len(_owning_by_slug.get(provider_hint, [])) >= 2:
+                    raise _ambiguity_error(provider_hint)
                 return model_id, provider_hint, entry_base_url or None
 
     # Check user-defined providers (config.yaml → providers:).
@@ -4928,8 +4951,30 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
                 try:
                     resolved_base_url = None
                     if provider.startswith("custom:"):
-                        _cp_key, _cp_base = resolve_custom_provider_connection(provider)
-                        resolved_base_url = _cp_base
+                        # Resolve the selected provider's base_url from the
+                        # config_data already loaded under _cfg_lock above. Do
+                        # NOT call resolve_custom_provider_connection() /
+                        # get_config() here: they re-acquire the non-reentrant
+                        # _cfg_lock we already hold, self-deadlocking whenever the
+                        # cache is stale or the profile path changed. Mirror the
+                        # slug matching of resolve_custom_provider_connection
+                        # against the in-scope dict instead.
+                        def _aux_slugify(value: str) -> str:
+                            s = str(value or "").strip().lower().replace("_", "-").replace(" ", "-")
+                            while "--" in s:
+                                s = s.replace("--", "-")
+                            return s.strip("-")
+
+                        _want_slug = _aux_slugify(provider.split(":", 1)[1])
+                        _cp_entries = config_data.get("custom_providers", [])
+                        if _want_slug and isinstance(_cp_entries, list):
+                            for _cp in _cp_entries:
+                                if not isinstance(_cp, dict):
+                                    continue
+                                _cp_name = str(_cp.get("name") or "").strip()
+                                if _cp_name and _aux_slugify(_cp_name) == _want_slug:
+                                    resolved_base_url = str(_cp.get("base_url") or "").strip() or None
+                                    break
                     if not resolved_base_url:
                         _, _, resolved_base_url = resolve_model_provider(model)
                     if resolved_base_url:
