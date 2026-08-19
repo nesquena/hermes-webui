@@ -8487,6 +8487,7 @@ function _appearancePayloadFromUi(){
     session_jump_buttons: !!($('settingsSessionJumpButtons')||{}).checked,
     session_endless_scroll: !!($('settingsSessionEndlessScroll')||{}).checked,
     auto_scroll_follow: !!($('settingsAutoScrollFollow')||{}).checked,
+    model_scheduler_enabled: !!($('settingsModelScheduler')||{}).checked,
     render_user_markdown: !!($('settingsRenderUserMarkdown')||{}).checked,
     large_text_paste_as_attachment: !!($('settingsLargeTextPasteAsAttachment')||{}).checked,
     project_quick_create_buttons: !!($('settingsProjectQuickCreate')||{}).checked,
@@ -9089,6 +9090,16 @@ async function loadSettingsPanel(){
         window._sessionJumpButtonsEnabled=this.checked;
         if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
         _scheduleAppearanceAutosave();
+      };
+    }
+    const modelSchedulerCb=$('settingsModelScheduler');
+    if(modelSchedulerCb){
+      modelSchedulerCb.checked=!!settings.model_scheduler_enabled;
+      modelSchedulerCb.onchange=function(){
+        _scheduleAppearanceAutosave();
+        if(typeof window.ModelRouter!=='undefined'&&window.ModelRouter&&typeof window.ModelRouter.setMaster==='function'){
+          window.ModelRouter.setMaster(this.checked);
+        }
       };
     }
     if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();

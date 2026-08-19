@@ -1376,6 +1376,12 @@ async function send(){
   const literalSlash=!!(options&&options.literalSlash);
   let text=$('msg').value.trim();
   if(!text&&!S.pendingFiles.length&&!_pendingSelections.length){_sendInProgress=false;_sendInProgressSid=null;return;}
+  // Model scheduler: if enabled (settings master + composer auto), fetch a
+  // recommendation and apply it to the model selector before building the
+  // payload. Never blocks sending; failures keep the current model.
+  if(typeof window.ModelRouter!=='undefined'&&window.ModelRouter&&typeof window.ModelRouter.beforeSend==='function'){
+    try{await window.ModelRouter.beforeSend(text);}catch(_e){}
+  }
   // Don't send while an inline message edit is active
   if(document.querySelector('.msg-edit-area')){_sendInProgress=false;_sendInProgressSid=null;return;}
   _flushSelectionBlocksToComposer();
