@@ -356,7 +356,8 @@ def test_observer_microtask_token_owned():
 def test_fallback_stops_when_all_loaded():
     """Fallback RAF must stop rescheduling when all rows are loaded."""
     fn = _extract_fn(SESSIONS_JS, "_setupTouchSentinel")
-    assert "l>=t" in fn, "Fallback must check loaded>=total and stop"
+    assert "s2<=0&&l2>=t2" in fn or "start<=0&&end>=total" in SESSIONS_JS, \
+        "Fallback must treat the touch interval as complete only when start==0 and end>=total"
     # Terminal/stale returns must clear the owner's RAF handle — not just return
     assert "owner.raf=0" in fn, \
         "Terminal/stale RAF returns must clear the owner's RAF handle"
@@ -444,6 +445,164 @@ console.log(JSON.stringify({{
     assert result["persistedEnd"] == result["end"]
 
 
+@_node_tests
+def test_bounded_touch_interval_loads_upward_then_downward():
+    """A bounded active touch interval must be materializable in both directions.
+
+    Starts with rows [40,80) painted. The first owner-qualified continuous RAF
+    prepends [0,40), clears the before spacer, and preserves row identity/order.
+    A later bottom-boundary RAF appends [80,120), clears the after spacer, and
+    marks the interval complete. This is the concrete gap from the re-gate:
+    completion is start==0 AND end==total, not merely end==total.
+    """
+    total = 120
+    flat_rows = [{"group": {"label": "G"}, "session": {"session_id": f"s{i}"}} for i in range(total)]
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + f"""
+let rafCallbacks = [];
+let rafSchedules = 0;
+global.requestAnimationFrame = function(fn) {{ rafSchedules++; rafCallbacks.push(fn); return rafSchedules; }};
+global.cancelAnimationFrame = function() {{}};
+function _isTouchPrimary() {{ return true; }}
+
+const list = makeList();
+list.clientHeight = 520;
+list.scrollHeight = {total} * SESSION_VIRTUAL_ROW_HEIGHT;
+list.scrollTop = 40 * SESSION_VIRTUAL_ROW_HEIGHT;
+
+const gw = makeEl('div');
+gw.className = 'session-date-group';
+gw.setAttribute('data-group-label', 'G');
+const body = makeBodyThatTracksItems(list);
+body.className = 'session-date-body';
+gw.appendChild(body);
+list._groups['G'] = gw;
+list.children.push(gw);
+const before = _sessionVirtualSpacer(40 * SESSION_VIRTUAL_ROW_HEIGHT, 'before');
+const after = _sessionVirtualSpacer(40 * SESSION_VIRTUAL_ROW_HEIGHT, 'after');
+body.appendChild(before);
+for (let i = 40; i < 80; i++) body.appendChild(makeSessionItem('s' + i));
+body.appendChild(after);
+list._sentinel = makeEl('div');
+list._sentinel.style.display = '';
+list.children.push(list._sentinel);
+
+_sessionTouchGen = 1;
+_sessionTouchStartIndex = 40;
+_sessionTouchLoadedCount = 80;
+_sessionTouchTotalCount = {total};
+_sessionTouchListEl = list;
+_touchRenderState = {{
+  gen: 1,
+  list: list,
+  flatRows: {json.dumps(flat_rows)},
+  renderOneSession: function(s) {{ return makeSessionItem(s.session_id); }},
+  activeSid: 's60',
+  itemHeight: SESSION_VIRTUAL_ROW_HEIGHT,
+}};
+
+_scheduleContinuousBatch();
+for (const cb of rafCallbacks.splice(0)) cb();
+const afterUpSpacer = body.children.find(c => c.dataset && c.dataset['virtual-spacer'] === 'after');
+const afterUp = {{
+  start: _sessionTouchStartIndex,
+  end: _sessionTouchLoadedCount,
+  count: list._items.length,
+  sids: list._items.map(i => i.dataset.sid),
+  beforeSpacer: !!body.children.find(c => c.dataset && c.dataset['virtual-spacer'] === 'before'),
+  afterHeight: afterUpSpacer && afterUpSpacer.style.height,
+  sentinelShown: list._sentinel.style.display !== 'none',
+}};
+
+// Move to the loaded-end boundary and append the suffix.
+list.scrollTop = (_sessionTouchLoadedCount * SESSION_VIRTUAL_ROW_HEIGHT) - list.clientHeight;
+_scheduleContinuousBatch();
+for (const cb of rafCallbacks.splice(0)) cb();
+const finalSids = list._items.map(i => i.dataset.sid);
+const result = {{
+  afterUp: afterUp,
+  finalStart: _sessionTouchStartIndex,
+  finalEnd: _sessionTouchLoadedCount,
+  finalCount: list._items.length,
+  finalUnique: new Set(finalSids).size,
+  finalOrdered: finalSids.every((sid, idx) => sid === 's' + idx),
+  finalBeforeSpacer: !!body.children.find(c => c.dataset && c.dataset['virtual-spacer'] === 'before'),
+  finalAfterSpacer: !!body.children.find(c => c.dataset && c.dataset['virtual-spacer'] === 'after'),
+  sentinelHidden: list._sentinel.style.display === 'none',
+}};
+console.log(JSON.stringify(result));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["afterUp"]["start"] == 0
+    assert result["afterUp"]["end"] == 80
+    assert result["afterUp"]["count"] == 80
+    assert result["afterUp"]["sids"] == [f"s{i}" for i in range(80)]
+    assert result["afterUp"]["beforeSpacer"] is False
+    assert result["afterUp"]["afterHeight"] == str(40 * 52) + "px"
+    assert result["afterUp"]["sentinelShown"] is True
+    assert result["finalStart"] == 0
+    assert result["finalEnd"] == total
+    assert result["finalCount"] == total
+    assert result["finalUnique"] == total
+    assert result["finalOrdered"] is True
+    assert result["finalBeforeSpacer"] is False
+    assert result["finalAfterSpacer"] is False
+    assert result["sentinelHidden"] is True
+
+
+@_node_tests
+def test_stale_continuous_raf_cannot_clear_newer_owner():
+    """Continuous batch RAFs are owner-qualified like scroll RAFs.
+
+    A stale RAF from owner A must not clear owner B's latch/handle. This catches
+    the exact follow-on defect where the global scheduled flag was cleared before
+    generation/token/list ownership was checked.
+    """
+    flat_rows = [{"group": {"label": "G"}, "session": {"session_id": f"s{i}"}} for i in range(120)]
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + f"""
+let rafCallbacks = [];
+let rafSchedules = 0;
+global.requestAnimationFrame = function(fn) {{ rafSchedules++; rafCallbacks.push(fn); return rafSchedules; }};
+global.cancelAnimationFrame = function() {{}};
+function _isTouchPrimary() {{ return true; }}
+const list = makeList();
+list.clientHeight = 520;
+list.scrollTop = 60 * SESSION_VIRTUAL_ROW_HEIGHT - list.clientHeight;
+list._sentinel = makeEl('div');
+list._sentinel.style.display = '';
+_sessionTouchGen = 1;
+_sessionTouchStartIndex = 0;
+_sessionTouchLoadedCount = 60;
+_sessionTouchTotalCount = 120;
+_sessionTouchListEl = list;
+_touchRenderState = {{gen:1,list:list,flatRows:{json.dumps(flat_rows)},renderOneSession:function(s){{return makeSessionItem(s.session_id);}},itemHeight:SESSION_VIRTUAL_ROW_HEIGHT}};
+
+_scheduleContinuousBatch();
+const ownerA = _touchContinuousBatchOwner;
+const staleCb = rafCallbacks.shift();
+const ownerB = {{gen:2, list:list, token:999, raf:4242, direction:'down'}};
+_touchContinuousBatchOwner = ownerB;
+_touchContinuousBatchScheduled = true;
+_sessionTouchGen = 2;
+_touchBatchToken = 999;
+staleCb();
+console.log(JSON.stringify({{
+  ownerBCurrent: _touchContinuousBatchOwner === ownerB,
+  scheduledStillTrue: _touchContinuousBatchScheduled === true,
+  ownerBRaf: ownerB.raf,
+  loadedUnchanged: _sessionTouchLoadedCount === 60,
+}}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["ownerBCurrent"] is True
+    assert result["scheduledStillTrue"] is True
+    assert result["ownerBRaf"] == 4242
+    assert result["loadedUnchanged"] is True
+
+
 def _run_node_vm(source: str) -> str:
     with tempfile.NamedTemporaryFile(
         "w", suffix=".cjs", encoding="utf-8", dir=ROOT, delete=False
@@ -506,6 +665,18 @@ function makeEl(tag) {
       child._parent = this; this.children.push(child); return child;
     },
     insertBefore(child, ref) {
+      if (child && child.tagName === '#document-fragment') {
+        const kids = child.children.slice();
+        const idx = this.children.indexOf(ref);
+        const at = idx >= 0 ? idx : this.children.length;
+        for (let i = 0; i < kids.length; i++) {
+          const k = kids[i];
+          k._parent = this;
+          this.children.splice(at + i, 0, k);
+        }
+        child.children = [];
+        return child;
+      }
       child._parent = this;
       const idx = this.children.indexOf(ref);
       if (idx >= 0) this.children.splice(idx, 0, child);
@@ -538,13 +709,24 @@ function makeEl(tag) {
         }
         return null;
       }
-      // .session-virtual-spacer[data-virtual-spacer="after"]
-      m = sel.match(/^\.([\w-]+)\[([\w-]+)="([\w-]+)"\]$/);
+      // .session-item[data-sid]
+      m = sel.match(/^\.([\w-]+)\[([\w-]+)\]$/);
       if (m) {
         for (var i = 0; i < this.children.length; i++) {
           var c = this.children[i];
+          const key = m[2].replace(/^data-/, '').replace(/-([a-z])/g, function(_, ch) { return ch.toUpperCase(); });
+          if (c.className && c.className.indexOf(m[1]) >= 0 && c.dataset && c.dataset[key]) return c;
+        }
+        return null;
+      }
+      // .session-virtual-spacer[data-virtual-spacer="after"]
+      m = sel.match(/^\.([\w-]+)\[([\w-]+)="([\w-]+)"\]$/);
+      if (m) {
+        const key = m[2].replace(/^data-/, '').replace(/-([a-z])/g, function(_, ch) { return ch.toUpperCase(); });
+        for (var i = 0; i < this.children.length; i++) {
+          var c = this.children[i];
           if (c.className && c.className.indexOf(m[1]) >= 0 &&
-              c.dataset && c.dataset[m[2].replace(/-/g,'')] === m[3]) return c;
+              c.dataset && c.dataset[key] === m[3]) return c;
         }
         return null;
       }
@@ -583,7 +765,7 @@ function makeList() {
   };
   list.querySelectorAll = function(sel) {
     if (sel === '.session-item[data-sid]') return this._items.slice();
-    if (sel === '.session-date-group') return Object.values(this._groups);
+    if (sel === '.session-date-group' || sel === '.session-date-group[data-group-label]') return Object.values(this._groups);
     if (sel === '.session-virtual-spacer[data-virtual-spacer="after"]') {
       return this._afterSpacers || [];
     }
@@ -633,6 +815,27 @@ function makeBodyThatTracksItems(list) {
     if (child.dataset && child.dataset.sid) list._items.push(child);
     return child;
   };
+  body.insertBefore = function(child, ref) {
+    const idx = this.children.indexOf(ref);
+    const at = idx >= 0 ? idx : this.children.length;
+    if (child && child.tagName === '#document-fragment') {
+      const kids = child.children.slice();
+      for (let i = 0; i < kids.length; i++) {
+        const k = kids[i];
+        k._parent = this;
+        this.children.splice(at + i, 0, k);
+      }
+      child.children = [];
+    } else {
+      child._parent = this;
+      this.children.splice(at, 0, child);
+    }
+    list._items = [];
+    for (const c of this.children) {
+      if (c.dataset && c.dataset.sid) list._items.push(c);
+    }
+    return child;
+  };
   return body;
 }
 
@@ -672,6 +875,7 @@ let _touchSentinelObserver = null;
 let _touchBatchPending = false;
 let _touchBatchToken = 0;
 let _touchContinuousBatchScheduled = false;
+let _touchContinuousBatchOwner = null;
 let _sessionTouchStartIndex = 0;
 let _touchScrollOwner = null;
 const SESSION_TOUCH_BATCH_SIZE = 40;
@@ -687,6 +891,7 @@ function _sessionVirtualSpacer(h, pos) {
   const sp = makeEl('div');
   sp.className = 'session-virtual-spacer';
   sp.dataset['virtual-spacer'] = pos;
+  sp.dataset.virtualSpacer = pos;
   sp.style.height = h + 'px';
   return sp;
 }
@@ -711,6 +916,8 @@ function _invalidateTouchRender() {
   _sessionTouchLoadedCount = 0;
   _sessionTouchTotalCount = 0;
   _touchBatchPending = false;
+  if (_touchContinuousBatchOwner && _touchContinuousBatchOwner.raf) cancelAnimationFrame(_touchContinuousBatchOwner.raf);
+  _touchContinuousBatchOwner = null;
   _touchContinuousBatchScheduled = false;
   _sessionTouchGen++;
   _touchBatchToken++;
@@ -721,8 +928,11 @@ eval(extractFunc('_createTouchGroupWrapper'));
 eval(extractFunc('_updateTouchGroupSpacers'));
 eval(extractFunc('_updateTouchSentinel'));
 eval(extractFunc('_touchLoadedBoundaryNearViewport'));
+eval(extractFunc('_touchStartBoundaryNearViewport'));
+eval(extractFunc('_touchNextBatchDirection'));
 eval(extractFunc('_scheduleContinuousBatch'));
 eval(extractFunc('_appendTouchBatch'));
+eval(extractFunc('_prependTouchBatch'));
 eval(extractFunc('_ensureTouchSentinelObserver'));
 """
 
@@ -3516,6 +3726,12 @@ const itemsAfterA = list._items.length;
 _setupTouchSentinel(list, {total}, flatRows, renderOne, null, 60);
 const ownerB = _touchScrollOwner;
 const listenersAfterB = list._scrollListeners.length;
+// Clear setup-owned continuous callbacks; this scenario is only about firing
+// A's stale handler after B is installed.
+rafCallbacks = [];
+rafSchedules = 0;
+_touchContinuousBatchOwner = null;
+_touchContinuousBatchScheduled = false;
 
 // B must be a different owner object
 if (ownerB === ownerA) throw new Error('owner B must differ from owner A');
@@ -3558,6 +3774,8 @@ console.log(JSON.stringify({{
   bListenersUntouched: bListenersAfter === bListenersBefore,
   ownerBStillCurrent: _touchScrollOwner === ownerB,
   itemsUntouched: itemsAfterStaleFire === itemsBeforeStaleFire,
+  itemsBeforeStaleFire: itemsBeforeStaleFire,
+  itemsAfterStaleFire: itemsAfterStaleFire,
   staleHandlerArmedNoRaf: rafSchedules === 0,  // A's handler must not arm RAF
   scrollListenersRemoved: scrollListenersRemoved,
 }}));
@@ -3665,6 +3883,14 @@ const origRenderOne = function(session, isPinned) {{
 _setupTouchSentinel(list, {total}, flatRows, origRenderOne, null, 60);
 
 const observer = _touchSentinelObserver;
+
+// Setup may arm one owner-qualified continuous frame when the boundary is
+// already near. This scenario isolates observer+scroll same-turn coalescing, so
+// clear setup-owned callbacks before firing those events.
+rafSchedules = 0;
+rafCallbacks = [];
+_touchContinuousBatchOwner = null;
+_touchContinuousBatchScheduled = false;
 
 // Fire observer intersection (simulates sentinel entering viewport)
 if (observer && observer._fire) observer._fire(true);

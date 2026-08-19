@@ -5383,6 +5383,7 @@ let _touchBatchPending=false;
 let _sessionTouchGen=0; // generation token — bumped on profile/filter changes
 let _touchBatchToken=0; // monotonic token for token-owned microtask work
 let _touchContinuousBatchScheduled=false;
+let _touchContinuousBatchOwner=null; // explicit owner: {gen,list,token,raf,direction}
 let _sessionTouchStartIndex=0; // first canonical row currently present in the touch DOM window
 // Single explicit scroll-owner record: {gen, list, handler, raf, token}.
 // Replaces the former split globals (_touchScrollHandler + _touchScrollFallbackRaf).
@@ -5423,6 +5424,10 @@ function _invalidateTouchRender(){
   _sessionTouchLoadedCount=0;
   _sessionTouchTotalCount=0;
   _touchBatchPending=false;
+  if(_touchContinuousBatchOwner&&_touchContinuousBatchOwner.raf){
+    try{cancelAnimationFrame(_touchContinuousBatchOwner.raf);}catch(_){}
+  }
+  _touchContinuousBatchOwner=null;
   _touchContinuousBatchScheduled=false;
   _sessionTouchGen++; // bump generation to invalidate stale observer callbacks
   _touchBatchToken++; // invalidate any pending token-owned microtask
@@ -5497,6 +5502,27 @@ function _touchLoadedBoundaryNearViewport(list, state, lookahead){
   // group bodies can sit in the viewport.
   const loadedBoundary=loaded*itemHeight;
   return (loadedBoundary-scrollTop-viewportHeight)<=margin;
+}
+
+function _touchStartBoundaryNearViewport(list, state, lookahead){
+  if(!list||!state) return false;
+  const start=Math.min((state.flatRows&&state.flatRows.length)||0, Math.max(0, Number(_sessionTouchStartIndex)||0));
+  if(start<=0) return false;
+  const itemHeight=Math.max(1, Number(state.itemHeight)||SESSION_VIRTUAL_ROW_HEIGHT);
+  const scrollTop=Math.max(0, Number(list.scrollTop)||0);
+  const margin=Math.max(0, Number(lookahead)||200);
+  // The first rendered row lives after the before-spacer height. When the
+  // viewport approaches that boundary, prepend the previous canonical batch so
+  // a bounded deep-active touch window can be scrolled upward into real rows
+  // instead of a permanent blank spacer.
+  const startBoundary=start*itemHeight;
+  return (scrollTop-startBoundary)<=margin;
+}
+
+function _touchNextBatchDirection(list, state, lookahead){
+  if(_touchStartBoundaryNearViewport(list, state, lookahead)) return 'up';
+  if(_touchLoadedBoundaryNearViewport(list, state, lookahead)) return 'down';
+  return '';
 }
 
 /// Append new session rows to the list without wiping existing DOM.
@@ -5656,12 +5682,13 @@ function _appendTouchBatch(){
       target.body.appendChild(fragmentsByGroup[target.label]);
     }
   }
-  // Commit the loaded count only after all fragments are in the live DOM.
+  // Commit the loaded end only after all fragments are in the live DOM.
   _sessionTouchLoadedCount=targetEnd;
-  // Update per-group spacers for the newly loaded rows.
-  _updateTouchGroupSpacers(list, state, targetEnd);
-  // Update sentinel visibility.
-  _updateTouchSentinel(list, total, targetEnd);
+  // Update per-group spacers for the newly loaded interval.
+  _updateTouchGroupSpacers(list, state, oldStart, targetEnd);
+  // Update sentinel visibility. A bounded deep-active window is complete only
+  // when BOTH the prefix and suffix have been materialized.
+  _updateTouchSentinel(list, total, oldStart, targetEnd);
   // After a successful append, the per-group spacers shrink and the sentinel
   // may still be intersecting — but the IntersectionObserver does NOT re-fire
   // when the sentinel's position changes without a scroll event. Schedule a
@@ -5673,46 +5700,143 @@ function _appendTouchBatch(){
   _scheduleContinuousBatch();
 }
 
-/// Recompute per-group bottom spacers after an append. Each group's "after"
-/// spacer reflects the remaining unloaded rows in that group — so unloaded
-/// rows from an early group appear inside that group, not after later groups.
-function _updateTouchGroupSpacers(list, state, loadedCount){
+/// Prepend new session rows to the list without wiping existing DOM.
+/// This is the upward counterpart to _appendTouchBatch(): a bounded deep-active
+/// touch window starts at [start,end), so scrolling upward must materialize
+/// [start-BATCH,start) transactionally and shrink the per-group before-spacers.
+function _prependTouchBatch(){
+  const state=_touchRenderState;
+  if(!state||state.gen!==_sessionTouchGen) return;
+  const list=state.list;
+  if(!list||list!==_sessionTouchListEl) return;
   const total=state.flatRows.length;
-  // Count unloaded rows per group.
-  const groupUnloaded={};
-  for(let i=loadedCount;i<total;i++){
+  const oldStart=Math.min(total, Math.max(0, Number(_sessionTouchStartIndex)||0));
+  const oldLoaded=Math.min(total, Math.max(oldStart, Number(_sessionTouchLoadedCount)||0));
+  const targetStart=Math.max(0, oldStart-SESSION_TOUCH_BATCH_SIZE);
+  if(targetStart>=oldStart) return; // nothing to prepend
+  const existingItems=list.querySelectorAll('.session-item[data-sid]');
+  const expectedExisting=Math.max(0, oldLoaded-oldStart);
+  if(existingItems.length!==expectedExisting){
+    _invalidateTouchRender();
+    _sessionTouchStartIndex=0;
+    _sessionTouchLoadedCount=0;
+    renderSessionListFromCache();
+    return;
+  }
+  for(let i=0;i<expectedExisting;i++){
+    const domSid=existingItems[i]&&existingItems[i].dataset.sid;
+    const stateIdx=oldStart+i;
+    const stateSid=state.flatRows[stateIdx]&&state.flatRows[stateIdx].session&&state.flatRows[stateIdx].session.session_id;
+    if(domSid!==stateSid){
+      _invalidateTouchRender();
+      _sessionTouchStartIndex=0;
+      _sessionTouchLoadedCount=0;
+      renderSessionListFromCache();
+      return;
+    }
+  }
+  const renderOne=state.renderOneSession;
+  if(typeof renderOne!=='function') return;
+  const fragmentsByGroup={};
+  const groupOrder=[];
+  try{
+    for(let i=targetStart;i<oldStart;i++){
+      const row=state.flatRows[i];
+      if(!row||!row.session||!row.group) return;
+      const g=row.group;
+      const label=g.label;
+      if(!fragmentsByGroup[label]){
+        fragmentsByGroup[label]=document.createDocumentFragment();
+        groupOrder.push(label);
+      }
+      const node=renderOne(row.session, Boolean(g.isPinned));
+      if(!node) return;
+      fragmentsByGroup[label].appendChild(node);
+    }
+  }catch(e){
+    return;
+  }
+  const commitTargets=[];
+  for(const label of groupOrder){
+    const wrapper=list.querySelector('.session-date-group[data-group-label="'+CSS.escape(label)+'"]');
+    if(!wrapper) return;
+    const body=wrapper.querySelector('.session-date-body');
+    if(!body) return;
+    const beforeSpacer=body.querySelector('.session-virtual-spacer[data-virtual-spacer="before"]');
+    commitTargets.push({body:body, beforeSpacer:beforeSpacer, label:label});
+  }
+  // Attach in canonical increasing row order. In each group, rows before the
+  // current window belong immediately after the before-spacer (or at body start
+  // if no spacer remains), before any already-rendered session rows.
+  for(const target of commitTargets){
+    const firstSession=target.body.querySelector('.session-item[data-sid]');
+    const insertBeforeEl=firstSession||target.body.querySelector('.session-virtual-spacer[data-virtual-spacer="after"]')||null;
+    if(insertBeforeEl) target.body.insertBefore(fragmentsByGroup[target.label], insertBeforeEl);
+    else target.body.appendChild(fragmentsByGroup[target.label]);
+  }
+  _sessionTouchStartIndex=targetStart;
+  _updateTouchGroupSpacers(list, state, targetStart, oldLoaded);
+  _updateTouchSentinel(list, total, targetStart, oldLoaded);
+  _scheduleContinuousBatch();
+}
+
+/// Recompute per-group top/bottom spacers after the touch interval changes.
+/// Each group's "before" spacer reflects rows before start; each "after"
+/// spacer reflects rows at/after end. Completion is the full [0,total) interval.
+function _updateTouchGroupSpacers(list, state, startIndex, endIndex){
+  const total=state.flatRows.length;
+  const start=Math.min(total, Math.max(0, Number(startIndex)||0));
+  const end=Math.min(total, Math.max(start, Number(endIndex)||0));
+  const groupBefore={};
+  const groupAfter={};
+  for(let i=0;i<total;i++){
     const row=state.flatRows[i];
     if(!row||!row.group) continue;
     const label=row.group.label;
-    groupUnloaded[label]=(groupUnloaded[label]||0)+1;
+    if(i<start) groupBefore[label]=(groupBefore[label]||0)+1;
+    else if(i>=end) groupAfter[label]=(groupAfter[label]||0)+1;
   }
-  // Update each group's after-spacer.
   const groupWrappers=list.querySelectorAll('.session-date-group[data-group-label]');
   for(const gw of groupWrappers){
     const label=gw.getAttribute('data-group-label');
     const body=gw.querySelector('.session-date-body');
     if(!body) continue;
-    let spacer=body.querySelector('.session-virtual-spacer[data-virtual-spacer="after"]');
-    const unloaded=groupUnloaded[label]||0;
-    if(unloaded>0){
-      const h=unloaded*SESSION_VIRTUAL_ROW_HEIGHT;
-      if(spacer){
-        spacer.style.height=h+'px';
+    let beforeSpacer=body.querySelector('.session-virtual-spacer[data-virtual-spacer="before"]');
+    const beforeCount=groupBefore[label]||0;
+    if(beforeCount>0){
+      const h=beforeCount*SESSION_VIRTUAL_ROW_HEIGHT;
+      if(beforeSpacer){
+        beforeSpacer.style.height=h+'px';
       }else{
-        spacer=_sessionVirtualSpacer(h,'after');
-        body.appendChild(spacer);
+        beforeSpacer=_sessionVirtualSpacer(h,'before');
+        body.insertBefore(beforeSpacer, body.firstChild||null);
       }
-    }else if(spacer){
-      spacer.remove();
+    }else if(beforeSpacer){
+      beforeSpacer.remove();
+    }
+    let afterSpacer=body.querySelector('.session-virtual-spacer[data-virtual-spacer="after"]');
+    const afterCount=groupAfter[label]||0;
+    if(afterCount>0){
+      const h=afterCount*SESSION_VIRTUAL_ROW_HEIGHT;
+      if(afterSpacer){
+        afterSpacer.style.height=h+'px';
+      }else{
+        afterSpacer=_sessionVirtualSpacer(h,'after');
+        body.appendChild(afterSpacer);
+      }
+    }else if(afterSpacer){
+      afterSpacer.remove();
     }
   }
 }
 
-/// Update sentinel visibility after an append.
-function _updateTouchSentinel(list, total, loadedCount){
+/// Update sentinel visibility after an interval change.
+function _updateTouchSentinel(list, total, startIndex, endIndex){
   const sentinel=list.querySelector('[data-touch-sentinel]');
   if(!sentinel) return;
-  if(loadedCount>=total){
+  const start=Math.max(0, Number(startIndex)||0);
+  const end=Math.min(total, Math.max(start, Number(endIndex)||0));
+  if(start<=0&&end>=total){
     sentinel.style.display='none';
     if(_touchSentinelObserver) _touchSentinelObserver.unobserve(sentinel);
   }else{
@@ -5734,29 +5858,42 @@ function _updateTouchSentinel(list, total, loadedCount){
 /// batch per frame/task: a 10K-session list can no longer be synchronously
 /// drained by a non-yielding Promise chain before the browser paints.
 function _scheduleContinuousBatch(){
-  if(_touchContinuousBatchScheduled) return;
+  if(_touchContinuousBatchOwner) return;
   const state=_touchRenderState;
   if(!state||state.gen!==_sessionTouchGen) return;
   const list=state.list;
   if(!list||list!==_sessionTouchListEl) return;
   const total=state.flatRows.length;
-  if(_sessionTouchLoadedCount>=total) return;
+  const start=Math.max(0, Number(_sessionTouchStartIndex)||0);
+  const end=Math.min(total, Math.max(start, Number(_sessionTouchLoadedCount)||0));
+  if(start<=0&&end>=total) return;
   const sentinel=list.querySelector('[data-touch-sentinel]');
   if(!sentinel || sentinel.style.display==='none') return;
-  if(!_touchLoadedBoundaryNearViewport(list, state, 200)) return;
-  _touchContinuousBatchScheduled=true;
-  const capturedGen=_sessionTouchGen;
+  const direction=_touchNextBatchDirection(list, state, 200);
+  if(!direction) return;
   const token=++_touchBatchToken;
-  requestAnimationFrame(()=>{
-    _touchContinuousBatchScheduled=false;
-    if(capturedGen!==_sessionTouchGen) return;
-    if(token!==_touchBatchToken) return;
+  const owner={gen:_sessionTouchGen, list:list, token:token, raf:0, direction:direction};
+  _touchContinuousBatchOwner=owner;
+  _touchContinuousBatchScheduled=true;
+  owner.raf=requestAnimationFrame(()=>{
+    // Clear/cancel only this exact continuous owner. A stale RAF from an old
+    // bounded window must not erase a newer generation's scheduled latch.
+    if(_touchContinuousBatchOwner===owner){
+      _touchContinuousBatchOwner=null;
+      _touchContinuousBatchScheduled=false;
+      owner.raf=0;
+    }
+    if(_touchContinuousBatchOwner&&_touchContinuousBatchOwner!==owner) return;
+    if(owner.gen!==_sessionTouchGen) return;
+    if(owner.token!==_touchBatchToken) return;
     if(!_sessionTouchListEl||_sessionTouchListEl!==list) return;
-    if(!_touchLoadedBoundaryNearViewport(list, state, 200)) return;
+    const liveDirection=_touchNextBatchDirection(list, state, 200);
+    if(liveDirection!==direction) return;
     if(_touchBatchPending) return;
     _touchBatchPending=true;
     try{
-      _appendTouchBatch();
+      if(direction==='up') _prependTouchBatch();
+      else _appendTouchBatch();
     }finally{
       if(token===_touchBatchToken) _touchBatchPending=false;
     }
@@ -5894,17 +6031,18 @@ function _setupTouchSentinel(list, total, flatRows, renderOneSession, activeSid,
       const el=_sessionTouchListEl;
       const t=_sessionTouchTotalCount||0;
       const l=_sessionTouchLoadedCount||0;
-      if(l>=t) return;
-      if(!_touchLoadedBoundaryNearViewport(el, _touchRenderState, 200)) return;
-      if(_touchBatchPending||_touchContinuousBatchScheduled) return;
+      const direction=_touchNextBatchDirection(el, _touchRenderState, 200);
+      if(!direction) return;
+      if(_touchBatchPending||_touchContinuousBatchOwner) return;
       const token=++_touchBatchToken;
       owner.token=token;
       _touchBatchPending=true;
       const capturedGen=ownerGen;
       Promise.resolve().then(()=>{
         // Revalidate the FULL ownership contract immediately before mutation:
-        // owner identity, generation, list identity, token, loaded/total,
-        // and near-bottom geometry. Only if ALL still hold do we append.
+        // owner identity, generation, list identity, token, interval completion,
+        // and the same near-boundary geometry/direction. Only if ALL still hold
+        // do we mutate.
         if(_touchScrollOwner!==owner) {
           if(token===_touchBatchToken) _touchBatchPending=false;
           return;
@@ -5919,24 +6057,31 @@ function _setupTouchSentinel(list, total, flatRows, renderOneSession, activeSid,
         }
         if(token!==_touchBatchToken) return;
         const t2=_sessionTouchTotalCount||0;
-        const l2=_sessionTouchLoadedCount||0;
-        if(l2>=t2) {
+        const s2=Math.max(0, Number(_sessionTouchStartIndex)||0);
+        const l2=Math.min(t2, Math.max(s2, Number(_sessionTouchLoadedCount)||0));
+        if(s2<=0&&l2>=t2) {
           if(token===_touchBatchToken) _touchBatchPending=false;
           return;
         }
         const el2=_sessionTouchListEl;
-        if(!_touchLoadedBoundaryNearViewport(el2, _touchRenderState, 200)) {
+        if(_touchNextBatchDirection(el2, _touchRenderState, 200)!==direction) {
           if(token===_touchBatchToken) _touchBatchPending=false;
           return;
         }
-        try{_appendTouchBatch();}
-        finally{ if(token===_touchBatchToken) _touchBatchPending=false; }
+        try{
+          if(direction==='up') _prependTouchBatch();
+          else _appendTouchBatch();
+        }finally{ if(token===_touchBatchToken) _touchBatchPending=false; }
       });
     });
   };
   owner.handler=scrollHandler;
   _touchScrollOwner=owner;
   try{list.addEventListener('scroll',scrollHandler,{passive:true});}catch(_){}
+  // If a caller-composed render anchored a bounded active window at an already
+  // near-boundary position, arm exactly one owner-qualified frame now. Ordinary
+  // idle setup still schedules nothing because _touchNextBatchDirection() is empty.
+  _scheduleContinuousBatch();
 }
 
 function _schedulePendingSessionListApply(){
@@ -8692,9 +8837,16 @@ function renderSessionListFromCache(){
     activeIndex:shouldMoveSidebarToActive?activeIndex:-1,
   });
   let virtualAnchorScrollTop=null;
-  if(shouldMoveSidebarToActive&&virtualWindow.virtualized){
+  if(shouldMoveSidebarToActive&&(virtualWindow.virtualized||virtualWindow.batched)){
     list.dataset.sessionVirtualActiveAnchor=activeSidForSidebar;
-    virtualAnchorScrollTop=virtualWindow.topPad;
+    if(virtualWindow.batched){
+      const viewportHeight=list.clientHeight||520;
+      const activeTop=activeIndex*SESSION_VIRTUAL_ROW_HEIGHT;
+      const maxScroll=Math.max(0, (flatSessionRows.length*SESSION_VIRTUAL_ROW_HEIGHT)-viewportHeight);
+      virtualAnchorScrollTop=Math.max(0, Math.min(maxScroll, activeTop-Math.floor(viewportHeight/2)+Math.floor(SESSION_VIRTUAL_ROW_HEIGHT/2)));
+    }else{
+      virtualAnchorScrollTop=virtualWindow.topPad;
+    }
   }else if(activeSidForSidebar){
     list.dataset.sessionVirtualActiveAnchor=activeSidForSidebar;
   }else{
