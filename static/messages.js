@@ -9216,16 +9216,22 @@ function _recordFailedPageNotification(identity,token){
     _notificationFailureChannel.postMessage({type:'failed',key,token:failureToken});
   }catch(_error){ }
 }
+function _notificationOwnerStorageUnavailable(){
+  const error=new Error('notification owner storage unavailable');
+  error._notificationOwnerStorageUnavailable=true;
+  return error;
+}
 function _openNotificationOwnerDb(){
-  if(!window.indexedDB||typeof window.indexedDB.open!=='function') return Promise.reject(new Error('notification owner storage unavailable'));
+  if(!window.indexedDB||typeof window.indexedDB.open!=='function') return Promise.reject(_notificationOwnerStorageUnavailable());
   return new Promise((resolve,reject)=>{
     let request;
-    try{request=window.indexedDB.open(_NOTIFICATION_OWNER_DB,_NOTIFICATION_OWNER_VERSION);}catch(error){reject(error);return;}
+    let upgradeFailed=false;
+    try{request=window.indexedDB.open(_NOTIFICATION_OWNER_DB,_NOTIFICATION_OWNER_VERSION);}catch(_error){reject(_notificationOwnerStorageUnavailable());return;}
     request.onupgradeneeded=()=>{
-      try{if(!request.result.objectStoreNames.contains(_NOTIFICATION_OWNER_STORE)) request.result.createObjectStore(_NOTIFICATION_OWNER_STORE,{keyPath:['streamId','lastEventId']});}catch(error){reject(error);}
+      try{if(!request.result.objectStoreNames.contains(_NOTIFICATION_OWNER_STORE)) request.result.createObjectStore(_NOTIFICATION_OWNER_STORE,{keyPath:['streamId','lastEventId']});}catch(error){upgradeFailed=true;reject(error);}
     };
     request.onsuccess=()=>resolve(request.result);
-    request.onerror=()=>reject(request.error||new Error('notification owner storage failed'));
+    request.onerror=()=>reject(request.error||((!upgradeFailed&&!request.result)?_notificationOwnerStorageUnavailable():new Error('notification owner storage failed')));
     request.onblocked=()=>reject(new Error('notification owner storage blocked'));
   });
 }
@@ -9278,7 +9284,7 @@ function _markPageNotificationDisplaying(identity,token){
       tx.onerror=()=>finish(false);
       tx.onabort=()=>finish(false);
     }catch(_error){finish(false);}
-  }));
+  })).catch(()=>false);
 }
 function _settlePageNotification(identity,token,state){
   const key=_notificationOwnerKey(identity);
@@ -9303,7 +9309,7 @@ function _settlePageNotification(identity,token,state){
       tx.onerror=()=>finish(false);
       tx.onabort=()=>finish(false);
     }catch(_error){finish(false);}
-  }));
+  })).catch(()=>false);
 }
 function _releasePageNotification(identity,token){
   let attempts=0;
@@ -9352,7 +9358,10 @@ function _deliverPageNotification(title,body,opts,identity,reg){
         }
       });
     });
-  }).catch(()=> 'ambiguous');
+  }).catch(error=>{
+    if(!error||!error._notificationOwnerStorageUnavailable)return 'ambiguous';
+    try{new Notification(title,opts);return 'shown';}catch(_error){return 'ambiguous';}
+  });
 }
 function _showPwaNotification(title,body,options={}){
   const botName=assistantDisplayName();

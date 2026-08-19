@@ -125,8 +125,11 @@ is lost, the page reconciles that exact displayed record before entering its
 origin-shared owner. The page owner stores `pending` and `delivered` records
 keyed by the same tuple, with an owner token and bounded pending expiry. A
 successful constructor commits `delivered`; a constructor failure releases the
-matching pending record. Open, blocked, transaction, token, and persistence
-ambiguity fail closed and do not call the native constructor. Journal-less
+matching pending record. When no capable worker exists, genuinely unopenable
+owner storage before any ownership decision permits exactly one direct native
+constructor attempt. Blocked or upgraded opens, transactions, record ownership,
+token checks, displayed-record lookup, settlement, release, and persistence
+uncertainty fail closed and do not call the native constructor. Journal-less
 frames carry no durable SSE id. Unkeyed manual notifications retain the existing
 service-worker-first path and direct fallback. Notification click routing
 remains owned by the existing `notificationclick` handler.

@@ -265,6 +265,43 @@ def test_page_owner_allows_one_native_display_and_retries_constructor_failure():
     assert all(row["state"] == "delivered" and row["phase"] == "delivered" for row in observed["rows"]), observed
 
 
+def test_page_owner_attempts_once_when_owner_storage_is_unavailable():
+    node = shutil.which("node")
+    if node is None:
+        return
+    notification_block = MESSAGES_JS[MESSAGES_JS.index("function _notificationOptions"):MESSAGES_JS.index("function requestNotificationPermission")]
+    script = textwrap.dedent(
+        f"""
+        const vm = require('vm');
+        const identity = {{streamId:'stream-6673', lastEventId:'stream-6673:unavailable-storage'}};
+        const notificationState = {{attempts:0}};
+        const options = _options => _notificationOptions('body', {{sid:'session-6673', eventIdentity:_options}});
+        const context = {{
+          Promise, Date, Math, JSON, console, setTimeout, clearTimeout,
+          notificationState,
+          Notification: function(title, options) {{
+            notificationState.attempts += 1;
+            return {{title, options}};
+          }},
+          window: {{}},
+          navigator: {{serviceWorker: {{getRegistration: () => Promise.resolve(null)}}}},
+          location: {{origin:'https://webui.test', href:'https://webui.test/'}},
+          S: {{session: {{session_id:'session-6673'}}}},
+          _sessionUrlForSid: sid => '/?session=' + sid,
+          assistantDisplayName: () => 'Hermes',
+        }};
+        vm.runInNewContext({json.dumps(notification_block)}, context);
+        context._deliverPageNotification('Hermes', 'body', context._notificationOptions('body', {{eventIdentity:identity}}), identity, null)
+          .then(status => console.log(JSON.stringify({{status, attempts:notificationState.attempts}})))
+          .catch(error => {{ console.error(error.stack || error); process.exitCode = 1; }});
+        """
+    )
+    result = subprocess.run([node, "-e", script], cwd=ROOT, text=True, capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr
+    observed = json.loads(result.stdout)
+    assert observed == {"status": "shown", "attempts": 1}, observed
+
+
 def test_journal_less_sse_frames_reset_sticky_eventsource_ids():
     assert "def _sse_with_reset_id" in ROUTES_PY
     session_start = ROUTES_PY.index("def _handle_session_run_journal_stream_for_session")
