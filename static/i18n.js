@@ -154,6 +154,13 @@ const LOCALES = {
     regen_failed: 'Regenerate failed: ',
     reconnect_active: 'A response is still being generated. Reload when ready?',
     reconnect_finished: 'A response was in progress when you last left. Messages may have updated.',
+    // Per-message delete (companion to /api/session/message/delete, #6737).
+    // The confirmation string spells out the pair-scope consequence so the
+    // user understands the turn-pair collapse before they click OK.
+    delete_message: 'Delete message',
+    delete_confirm: 'Delete this message and its turn-pair? This cannot be undone.',
+    delete_done: 'Deleted messages:',
+    delete_failed: 'Delete failed: ',
     // approval card
     approval_heading: 'Approval required',
     approval_desc_prefix: 'Dangerous command detected',

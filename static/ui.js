@@ -16992,6 +16992,16 @@ function renderMessages(options){
     const undoBtn  = isLastAssistant ? `<button class="msg-action-btn" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo',13)}</button>` : '';
     const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}</button>` : '';
     const copyBtn  = `<button class="msg-copy-btn msg-action-btn" title="${t('copy')}" onclick="copyMsg(this)">${li('copy',13)}</button>`;
+    // Per-message delete (companion to /api/session/message/delete; the
+    // truncate-keep counterpart is PR #6740). Available on every user/assistant
+    // row that has a stable server-side id. Server-side default scope is "pair"
+    // — deleting a user prompt also drops the assistant response on the other
+    // side of the turn, preventing the "dangling user turn" pathology some
+    // providers reject on next resend (see #6737 context).
+    const _hasDeleteId = !!(m && (typeof m.id === 'string') && m.id);
+    const deleteBtn = _hasDeleteId
+      ? `<button class="msg-action-btn msg-delete-btn" title="${t('delete_message')}" onclick="deleteMessage(this)">${li('trash-2',13)}</button>`
+      : '';
     const readOnlySession=typeof _isReadOnlySession==='function'
       ? _isReadOnlySession(S.session)
       : !!(S.session&&(S.session.read_only||S.session.is_read_only));
@@ -17016,7 +17026,7 @@ function renderMessages(options){
     const questionJumpBtn = (_qJumpTarget!==undefined&&_qJumpTarget!==null)
       ? _questionJumpButtonHtml(_qJumpTarget, assistantRawIdxByQuestionRawIdx.get(_qJumpTarget)??rawIdx)
       : '';
-    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${retryBtn}</span>${questionJumpBtn}</div>`;
+    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${deleteBtn}${retryBtn}</span>${questionJumpBtn}</div>`;
 
     if(_isContextCompactionMessage(m)){
       continue;
@@ -19311,6 +19321,68 @@ async function regenerateResponse(btn) {
     $('msg').value = lastUserText;
     await send();
   } catch(e) { setStatus(t('regen_failed') + e.message); }
+}
+
+// Per-message delete (companion to /api/session/message/delete). Truncate
+// keeps a prefix; this drops a single row (or its adjacent turn-pair) by
+// identity while preserving the rest of the conversation. The server-side
+// default scope is "pair" — deleting a user prompt also drops the assistant
+// response on the other side of the turn, preventing the "dangling user
+// turn" pathology some providers reject on next resend (see #6737 context).
+// Same gate pattern as editMessage / regenerateResponse: !S.busy, fetch the
+// row by data-msg-idx, lazy-load the full history before resolving the
+// server-side id, then drop the rows whose index lands inside the deleted
+// set.
+async function deleteMessage(btn) {
+  if(!S.session || S.busy) return;
+  const row = btn.closest('[data-msg-idx]');
+  if(!row) return;
+  // Read the windowed index (for the local splice) and the server-side id
+  // (for the API call) BEFORE we lazy-load the full history — both numbers
+  // are valid only while the current render is current.
+  const rawIdx = parseInt(row.dataset.msgIdx, 10);
+  if(Number.isNaN(rawIdx)) return;
+  const target = S.messages[rawIdx];
+  if(!target || typeof target.id !== 'string' || !target.id) return;
+  const initialSid = S.session.session_id;
+  // Confirmation: deleting a turn is destructive (pair scope drops the
+  // follow-up too). Ask before mutating. The native dialog is intentional
+  // — we want zero-dependency, zero-css reliance, and the action is rare.
+  if(!window.confirm(t('delete_confirm'))) return;
+  if(typeof _ensureAllMessagesLoaded==='function'){
+    await _ensureAllMessagesLoaded();
+  }
+  if(!S.session || S.session.session_id !== initialSid) return;
+  // After lazy-load the indices may have shifted; re-resolve the target by
+  // server-side id and rebase the dropped row set on the new indices.
+  const reloaded = S.messages.findIndex(m => m && m.id === target.id);
+  if(reloaded < 0) return;
+  const dropIds = new Set([target.id]);
+  const targetRole = S.messages[reloaded].role;
+  if(targetRole === 'user'){
+    const next = S.messages[reloaded + 1];
+    if(next && next.role === 'assistant' && typeof next.id === 'string'){
+      dropIds.add(next.id);
+    }
+  } else if(targetRole === 'assistant'){
+    const prev = S.messages[reloaded - 1];
+    if(prev && prev.role === 'user' && typeof prev.id === 'string'){
+      dropIds.add(prev.id);
+    }
+  }
+  try {
+    const resp = await api('/api/session/message/delete', {method:'POST', body:JSON.stringify({
+      session_id: initialSid,
+      message_id: target.id,
+      scope: 'pair',
+    })});
+    if(!S.session || S.session.session_id !== initialSid) return;
+    // Apply the same drop set locally so the renderer matches the server
+    // BEFORE the next renderMessages() walks S.messages.
+    S.messages = S.messages.filter(m => !(m && typeof m.id === 'string' && dropIds.has(m.id)));
+    renderMessages();
+    setStatus(t('delete_done') + ' ' + (resp && resp.removed_message_ids ? resp.removed_message_ids.length : dropIds.size));
+  } catch(e) { setStatus(t('delete_failed') + e.message); }
 }
 
 // postProcessRenderedMessages() runs one frame AFTER the render + JS scroll

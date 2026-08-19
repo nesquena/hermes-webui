@@ -15427,6 +15427,61 @@ def handle_post(handler, parsed) -> bool:
             },
         )
 
+    if parsed.path == "/api/session/message/delete":
+        # Per-message delete — sibling of /api/session/truncate. Truncate
+        # keeps a prefix; this drops a single row (or its adjacent turn-pair)
+        # by identity while preserving the rest of the conversation. The
+        # backend (api/session_ops.delete_message) uses the same
+        # signature-match logic as truncate_context_for_display_keep to keep
+        # s.messages + s.context_messages aligned. See
+        # https://github.com/nesquena/hermes-webui/issues/6737 (PR #6740 is
+        # the truncate counterpart; this PR is the per-message delete).
+        try:
+            require(body, "session_id")
+        except ValueError as e:
+            return bad(handler, str(e))
+        if _session_is_subagent_view_only(body["session_id"]):
+            return bad(handler, "Subagent sessions are view-only and cannot be modified from WebUI", 400)
+        message_id = body.get("message_id")
+        if not isinstance(message_id, str) or not message_id:
+            return bad(handler, "Missing required field(s): message_id")
+        scope = body.get("scope", "pair")
+        if scope not in ("single", "pair"):
+            return bad(handler, "scope must be 'single' or 'pair'")
+        try:
+            from api.session_ops import delete_message
+            result = delete_message(body["session_id"], message_id, scope)
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+        except ValueError as e:
+            return bad(handler, str(e), 400)
+        # Re-fetch the session post-mutation so the public projection reflects
+        # the new messages list, not the snapshot we held at the start of the
+        # call. mirrors the pattern in /api/session/truncate above.
+        try:
+            s = get_session(body["session_id"])
+        except KeyError:
+            return bad(handler, "Session not found after delete", 404)
+        from api.config import _evict_session_agent
+        _evict_session_agent(body["session_id"])
+        logger.info(
+            "message_delete %s: dropped ids=%s, context=%d, messages %d->%d",
+            body["session_id"], result["removed_message_ids"],
+            result["removed_context_count"],
+            result["old_message_count"], result["new_message_count"],
+        )
+        return j(
+            handler,
+            {
+                "ok": True,
+                "removed_message_ids": result["removed_message_ids"],
+                "removed_context_count": result["removed_context_count"],
+                "session": public_session_projection(
+                    s.compact() | {"messages": s.messages}
+                ),
+            },
+        )
+
     if parsed.path == "/api/session/branch":
         # Fork a conversation from any message point (#465).
         # Accepts: {session_id, keep_count?, title?}
