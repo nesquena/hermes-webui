@@ -1542,14 +1542,18 @@ def _read_text_bounded(
     if tail:
         # Drop the partial first line at the seek boundary — BUT only if doing so
         # leaves something behind. If the whole window is a single line (no
-        # newline, or the only newline is the trailing one), the first line is a
-        # COMPLETE line (the seek landed on a line boundary) and must be kept;
-        # dropping it would return empty and lose the only content. With the
-        # one-byte-earlier window, a leading "\n" means the first line is complete
-        # and only that byte is stripped.
+        # newline, or the only newline is the trailing one), we keep it only to
+        # avoid returning an empty window; completeness is not proven there.
+        # With the one-byte-earlier window, a leading "\n" means the first line
+        # is complete and only that byte is stripped.
         nl = text.find("\n")
         if nl >= 0 and nl + 1 < len(text):
             text = text[nl + 1:]
+        else:
+            # No interior newline to strip — clamp to the last max_bytes bytes to
+            # honor the documented "up to max_bytes" bound. Beware: raw[-0:] is
+            # the whole raw, so guard max_bytes > 0 explicitly. (#6141 r11)
+            text = raw[-max_bytes:].decode("utf-8", errors="replace") if max_bytes > 0 else ""
     return text, True, True
 
 
@@ -1570,13 +1574,14 @@ def _read_cron_output_bounded(
       Head and tail are read from the SAME descriptor against the SAME pinned
       size, so a replacement between two separate opens cannot combine
       frontmatter from inode A with a response body from inode B.
-    - Head and tail byte ranges are DISJOINT: head = ``[0, cap)``. When
-      ``size > 2*cap`` the tail starts at ``size - cap - 1`` (the gap case) — the
-      head ends at ``cap-1`` and the tail begins one byte earlier than today so the
-      boundary byte (immediately before the tail) is included in the tail window,
-      making first-line completeness provable; when ``size <= 2*cap`` the tail
-      starts at ``cap`` (the adjacent case) and begins exactly where the head
-      ended. The returned body therefore never contains more bytes than the source.
+    - Head and tail byte ranges are DISJOINT: in the adjacent case (``size <=
+      2*cap``) head = ``[0, cap)``. When ``size > 2*cap`` the tail starts at
+      ``size - cap - 1`` (the gap case) — the head ends at ``cap-1`` and the tail
+      begins one byte earlier than before this change so the boundary byte
+      (immediately before the tail) is included in the tail window, making
+      first-line completeness provable; when ``size <= 2*cap`` the tail starts at
+      ``cap`` (the adjacent case) and begins exactly where the head ended. The
+      returned body therefore never contains more bytes than the source.
     - The first tail line is dropped only when it is PROVEN PARTIAL. When the byte
       immediately before the tail on this descriptor is a newline (the tail boundary
       landed exactly on a line boundary), the first tail line is complete and kept:
@@ -1654,15 +1659,15 @@ def _read_cron_output_bounded(
                 return raw.decode("utf-8", errors="replace"), True, True, bytes_read, False
             return raw.decode("utf-8", errors="replace"), False, True, bytes_read, False
         # Over cap: read DISJOINT head + tail from this one descriptor.
-        gap_case = False  # init for safety
         if size > 2 * cap:
             # Gap case (middle omitted): shift both windows one byte — the
             # head gives up its last byte and the tail starts one byte
             # earlier, INCLUDING the boundary byte — so first-line
             # completeness at the tail boundary is provable from bytes
             # already read. Total planned bytes are unchanged (2*cap).
+            # Clamp head_len to prevent read(-1) at degenerate caps. (#6141 r11)
             gap_case = True
-            head_len = cap - 1
+            head_len = max(0, cap - 1)
             tail_start = size - cap - 1
             tail_len = cap + 1
         else:

@@ -1104,9 +1104,9 @@ def test_read_cron_output_bounded_partial_failure_preserves_head_bytes(tmp_path,
         f"consumed head bytes must be preserved on partial failure; got "
         f"bytes_read={bytes_read}"
     )
-    assert bytes_read >= _FILE_READ_MAX_BYTES - 1, (
-        f"head read (~1 cap; gap-case head is cap-1 since r10) must be charged; "
-        f"got {bytes_read}"
+    assert bytes_read == _FILE_READ_MAX_BYTES - 1, (
+        f"head read (~1 cap; gap-case head is cap-1 since r10) must be charged exactly; "
+        f"got {bytes_read}, expected {_FILE_READ_MAX_BYTES - 1}"
     )
 
 
@@ -1571,9 +1571,9 @@ def test_read_cron_output_bounded_gap_boundary_newline_keeps_first_line(tmp_path
     assert "GAP_LINE_TWO_ZETA" in txt, (
         f"second line after gap boundary must be kept; got:\n{txt[:300]}"
     )
-    # Budget sanity: bytes_read <= 2*cap (gap case total is exactly 2*cap)
-    assert bytes_read <= 2 * cap, (
-        f"bytes_read must stay within 2*cap ({2*cap}); got {bytes_read}"
+    # Budget sanity: bytes_read == 2*cap (gap case total is exactly 2*cap)
+    assert bytes_read == 2 * cap, (
+        f"bytes_read must equal 2*cap ({2*cap}); got {bytes_read}"
     )
     assert truncated is True, "file exceeds cap, must be truncated"
 
@@ -1652,4 +1652,97 @@ def test_read_text_bounded_tail_mode_boundary_newline_keeps_first_line(tmp_path)
     # The boundary byte (newline) should be stripped, not duplicated
     assert text.startswith("TAIL_LINE_ONE_EPS"), (
         f"text should start with first line (boundary byte stripped); got:\n{text[:100]}"
+    )
+
+
+def test_read_cron_output_bounded_degenerate_zero_cap_reads_bounded(tmp_path):
+    """Round-11 (self-review): degenerate cap=0 must not read unbounded. The gap
+    branch at cap=0 would set head_len = -1, causing fh.read(-1) to slurp the
+    whole file. Fix: clamp head_len = max(0, cap - 1). Fixture: ~3 MiB file with
+    max_bytes=0 → assert bytes_read <= 1; with budget=0 → assert declined. (#6141 r11)"""
+    from api.routes import _read_cron_output_bounded
+
+    # Write a ~3 MiB file (well past any reasonable cap)
+    big = tmp_path / "big.md"
+    big.write_text("## Response\n" + ("B" * (3 * 1024 * 1024)), encoding="utf-8")
+    size_before = big.stat().st_size
+    assert size_before > 3 * 1024 * 1024, f"file should be >3 MiB; got {size_before}"
+
+    # Test 1: max_bytes=0 must read at most 1 byte (boundary byte only)
+    text, truncated, ok, bytes_read, declined = _read_cron_output_bounded(big, max_bytes=0)
+    assert bytes_read <= 1, (
+        f"degenerate cap=0 must read at most 1 byte (boundary), not the whole file; "
+        f"got bytes_read={bytes_read}"
+    )
+    assert len(text) < 100, (
+        f"text returned must be tiny (<100 chars) when cap=0; got len={len(text)}"
+    )
+
+    # Test 2: max_bytes=0 with budget=0 must decline (planned=1 > budget=0)
+    text, truncated, ok, bytes_read, declined = _read_cron_output_bounded(
+        big, max_bytes=0, budget=0
+    )
+    assert ok is False, (
+        f"cap=0 with budget=0 must decline (ok=False); got ok={ok}"
+    )
+    assert declined is True, (
+        f"cap=0 with budget=0 must set declined=True; got declined={declined}"
+    )
+    assert bytes_read == 0, (
+        f"declined read must consume 0 bytes; got bytes_read={bytes_read}"
+    )
+
+
+def test_read_text_bounded_tail_mode_never_exceeds_cap(tmp_path):
+    """Round-11 (self-review): tail mode must NEVER return more than max_bytes
+    chars. When the drop guard declines to strip (no interior newline, or only
+    a trailing newline), the old code returned max_bytes+1 chars. Fix: re-derive
+    from the last max_bytes bytes in the non-stripped path. Fixtures: (i) single-
+    line no-newline file, (ii) window with only a trailing newline. Both must
+    return <= max_bytes chars. (#6141 r11)"""
+    from api.routes import _read_text_bounded
+
+    # Fixture (i): single-line no-newline file (no interior newline possible)
+    f1 = tmp_path / "single_no_newline.txt"
+    payload1 = b"Z" * 100
+    f1.write_bytes(payload1)
+    max_bytes = 10
+
+    text1, trunc1, ok1 = _read_text_bounded(f1, max_bytes=max_bytes, tail=True)
+    assert len(text1) <= max_bytes, (
+        f"single-line no-newline file must return <= {max_bytes} chars; "
+        f"got len={len(text1)}"
+    )
+    # Should be exactly max_bytes (last max_bytes bytes of the 100-byte file)
+    assert len(text1) == max_bytes, (
+        f"expected exactly {max_bytes} chars from last-{max_bytes} slice; "
+        f"got len={len(text1)}"
+    )
+
+    # Fixture (ii): tail window has only a trailing newline (interior newline absent)
+    # Content: b"junk" + b"A"*7 + b"\n" with max_bytes=10
+    # - File size > max_bytes, so we take the tail
+    # - Tail window is last 10 bytes: b"AAAAAAA\n" (7 A's + newline + trailing junk)
+    # Wait, we need the WINDOW to have only a trailing newline, meaning
+    # no interior newline exists. Let's construct:
+    # File: b"junk" + b"A"*7 + b"\n" → total = 4 + 7 + 1 = 12 bytes
+    # max_bytes=10: tail starts at 12 - 10 - 1 = 1 (one byte early)
+    # Window: positions 1-11 = b"unk" + b"A"*7 + b"\n" = 10 bytes
+    # This window has ONE trailing newline, no interior newline
+    f2 = tmp_path / "trailing_newline_only.txt"
+    payload2 = b"junk" + b"A" * 7 + b"\n"  # 12 bytes total
+    f2.write_bytes(payload2)
+    max_bytes2 = 10
+
+    text2, trunc2, ok2 = _read_text_bounded(f2, max_bytes=max_bytes2, tail=True)
+    assert len(text2) <= max_bytes2, (
+        f"window with only trailing newline must return <= {max_bytes2} chars; "
+        f"got len={len(text2)}"
+    )
+    # The clamped result should be the last max_bytes2 bytes (b"AAAAAAA\n" = 8 bytes)
+    # after the fix clamps raw[-max_bytes2:] which is 10 bytes but decode might vary
+    # Let's just assert the bound
+    assert len(text2.encode("utf-8")) <= max_bytes2, (
+        f"UTF-8 byte length must also be <= {max_bytes2}; got "
+        f"{len(text2.encode('utf-8'))}"
     )
