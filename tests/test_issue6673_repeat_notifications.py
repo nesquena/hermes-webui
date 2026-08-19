@@ -274,6 +274,7 @@ def test_page_owner_attempts_once_when_owner_storage_is_unavailable():
         f"""
         const vm = require('vm');
         const identity = {{streamId:'stream-6673', lastEventId:'stream-6673:unavailable-storage'}};
+        const requestErrorIdentity = {{streamId:'stream-6673', lastEventId:'stream-6673:request-error'}};
         const notificationState = {{attempts:0}};
         const options = _options => _notificationOptions('body', {{sid:'session-6673', eventIdentity:_options}});
         const context = {{
@@ -291,15 +292,25 @@ def test_page_owner_attempts_once_when_owner_storage_is_unavailable():
           assistantDisplayName: () => 'Hermes',
         }};
         vm.runInNewContext({json.dumps(notification_block)}, context);
-        context._deliverPageNotification('Hermes', 'body', context._notificationOptions('body', {{eventIdentity:identity}}), identity, null)
-          .then(status => console.log(JSON.stringify({{status, attempts:notificationState.attempts}})))
+        context._showPwaNotification('Hermes', 'body', {{eventIdentity:identity}})
+          .then(firstStatus => {{
+            context.window.indexedDB = {{
+              open: () => {{
+                const request = {{result:undefined, error:new Error('storage unavailable'), onupgradeneeded:null, onsuccess:null, onerror:null, onblocked:null}};
+                setTimeout(() => request.onerror?.({{target:request}}), 0);
+                return request;
+              }},
+            }};
+            return context._showPwaNotification('Hermes', 'body', {{eventIdentity:requestErrorIdentity}})
+              .then(secondStatus => console.log(JSON.stringify({{firstStatus, secondStatus, attempts:notificationState.attempts}})));
+          }})
           .catch(error => {{ console.error(error.stack || error); process.exitCode = 1; }});
         """
     )
     result = subprocess.run([node, "-e", script], cwd=ROOT, text=True, capture_output=True, check=False)
     assert result.returncode == 0, result.stderr
     observed = json.loads(result.stdout)
-    assert observed == {"status": "shown", "attempts": 1}, observed
+    assert observed == {"firstStatus": "shown", "secondStatus": "shown", "attempts": 2}, observed
 
 
 def test_journal_less_sse_frames_reset_sticky_eventsource_ids():

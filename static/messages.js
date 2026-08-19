@@ -9231,7 +9231,9 @@ function _openNotificationOwnerDb(){
       try{if(!request.result.objectStoreNames.contains(_NOTIFICATION_OWNER_STORE)) request.result.createObjectStore(_NOTIFICATION_OWNER_STORE,{keyPath:['streamId','lastEventId']});}catch(error){upgradeFailed=true;reject(error);}
     };
     request.onsuccess=()=>resolve(request.result);
-    request.onerror=()=>reject(request.error||((!upgradeFailed&&!request.result)?_notificationOwnerStorageUnavailable():new Error('notification owner storage failed')));
+    request.onerror=()=>reject(upgradeFailed||request.result
+      ? (request.error||new Error('notification owner storage failed'))
+      : _notificationOwnerStorageUnavailable());
     request.onblocked=()=>reject(new Error('notification owner storage blocked'));
   });
 }
