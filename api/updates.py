@@ -80,14 +80,43 @@ _UPDATE_FREEZE_DRAINED = threading.Condition(_UPDATE_FREEZE_LOCK)
 _frozen = False
 _freeze_generation = 0
 _active_readers = 0
-# Exception-safety tracker (issue #6992 re-gate): set by the apply internals
-# immediately before the first working-tree-mutating git command. The apply
-# wrappers consult it on the exception path — if no mutation may have started
-# the served tree is still coherent and the freeze can be released; once
-# mutation may have started the freeze must persist (or the process must be
-# replaced) so mixed-revision bytes are never exposed. Reset at each wrapper
-# entry; updates are serialized by _apply_lock.
-_update_mutation_may_have_started = False
+# Per-attempt mutation lifecycle authority (issue #6992 re-gate).
+#
+# Replaces the earlier global-boolean tracker with a structured per-attempt
+# lifecycle owned by the exact freeze generation token. Both update wrappers
+# (and the WebUI-mutating clear-lock retry) share ONE authority for
+# exceptions and ordinary failure returns: `_settle_update_lifecycle()`.
+#
+# States (transitions all under ``_apply_lock``, reset at each wrapper entry):
+#   IDLE              — no update attempt in flight (or freeze never acquired)
+#   FROZEN            — freeze acquired + drain complete; NO mutating git
+#                       command has run yet (pre-mutation)
+#   MUTATION_STARTED  — at least one tree-mutating git command has run
+#                       (checkout/clean/reset, stash/pull/restore); the served
+#                       tree may be mixed-revision
+#   COHERENT_RECOVERY — mutation started but the tree was VERIFIED coherent
+#                       again (stash restored, or reset --hard completed)
+#   REPLACEMENT_OWNED — a bounded replacement (restart) is scheduled or
+#                       guaranteed; the freeze is owned by the replacement
+#
+# Unfreeze rules (do NOT infer coherence from the absence of restart_scheduled):
+#   pre-mutation (IDLE/FROZEN)  → generation-unfreeze, tree untouched
+#   COHERENT_RECOVERY           → generation-unfreeze, rollback verified
+#   MUTATION_STARTED, no verify → NEVER unfreeze into a possibly-mixed tree:
+#                                 transfer ownership to a bounded replacement
+#                                 (_schedule_restart) or keep the freeze
+#                                 (fail-closed terminal outcome)
+#   REPLACEMENT_OWNED           → freeze persists until the replacement runs
+class _MutationLifecycle:
+    IDLE = 0
+    FROZEN = 1
+    MUTATION_STARTED = 2
+    COHERENT_RECOVERY = 3
+    REPLACEMENT_OWNED = 4
+
+
+_mutation_state = _MutationLifecycle.IDLE
+_mutation_token = 0  # freeze generation that owns the current attempt
 # Bounded drain: a pathological reader (e.g. a client stalling mid-download
 # while we hold a ticket) must not hang the update forever. When the bound is
 # reached the update FAILS CLOSED: freeze_static_serving() raises
@@ -392,7 +421,41 @@ def apply_clear_lock(target: str) -> dict:
             # to stable (Codex gate: _apply_update_inner defaults to stable).
             with _cache_lock:
                 _update_cache['checked_at'] = 0
-            retry_result = _apply_update_inner(target, _read_update_channel())
+            # The retry re-runs the WebUI-mutating apply path, so it gets the
+            # same per-attempt freeze lifecycle authority as apply_update()
+            # (issue #6992 re-gate): freeze before the first mutating git
+            # command, settle on every exception AND ordinary failure return.
+            freeze_token = None
+            if target == 'webui':
+                _reset_mutation_lifecycle()
+                try:
+                    try:
+                        freeze_token = freeze_static_serving()
+                        _mark_freeze_acquired(freeze_token)
+                    except StaticFreezeDrainTimeoutError as exc:
+                        unfreeze_static_serving(exc.token)
+                        _reset_mutation_lifecycle()
+                        retry_result = {
+                            'ok': False,
+                            'message': str(exc),
+                            'target': target,
+                            'drain_timeout': True,
+                            'retryable': True,
+                        }
+                        retry_result = dict(retry_result)
+                        retry_result['lock_recovery'] = {
+                            'action': 'no-lock-found',
+                            'manual_command': manual_command,
+                            'other_locks': inv['other_locks'],
+                        }
+                        return retry_result
+                    retry_result = _apply_update_inner(target, _read_update_channel())
+                    _settle_update_lifecycle(freeze_token, retry_result)
+                except Exception:
+                    _settle_update_lifecycle(freeze_token)
+                    raise
+            else:
+                retry_result = _apply_update_inner(target, _read_update_channel())
             retry_result = dict(retry_result)
             retry_result['lock_recovery'] = {
                 'action': 'no-lock-found',
@@ -2153,6 +2216,129 @@ def end_static_read() -> None:
         _UPDATE_FREEZE_DRAINED.notify_all()
 
 
+# ── Per-attempt mutation lifecycle authority (issue #6992 re-gate) ──────────
+#
+# Shared by apply_force_update(), apply_update() and the WebUI-mutating
+# clear-lock retry. All calls below happen under ``_apply_lock`` (updates are
+# serialized), so the module-level state is safe. The lifecycle is reset at
+# each wrapper entry and transitions as the apply internals run mutating git
+# commands or verify a coherent rollback.
+
+
+def _reset_mutation_lifecycle() -> None:
+    """Start a fresh per-attempt lifecycle (call at wrapper entry)."""
+    global _mutation_state, _mutation_token
+    _mutation_state = _MutationLifecycle.IDLE
+    _mutation_token = 0
+
+
+def _mark_freeze_acquired(freeze_token: int) -> None:
+    """Record that the freeze was acquired and the drain completed.
+
+    Pre-mutation: from here until the first mutating git command the served
+    tree is still untouched, so a failure may generation-unfreeze.
+    """
+    global _mutation_state, _mutation_token
+    _mutation_state = _MutationLifecycle.FROZEN
+    _mutation_token = freeze_token
+
+
+def _mark_mutation_started() -> None:
+    """Transition FROZEN → MUTATION_STARTED (first tree-mutating git command).
+
+    Idempotent — only the first transition matters; agent-only attempts
+    (never frozen) stay IDLE and are unaffected.
+    """
+    global _mutation_state
+    if _mutation_state == _MutationLifecycle.FROZEN:
+        _mutation_state = _MutationLifecycle.MUTATION_STARTED
+
+
+def _mark_coherent_recovery() -> None:
+    """Record a VERIFIED clean rollback (tree coherent again).
+
+    Called only when the tree has been verified coherent (e.g. stash
+    restored, or reset --hard completed). After this a failure may
+    generation-unfreeze; without it the freeze must persist or be replaced.
+    """
+    global _mutation_state
+    if _mutation_state == _MutationLifecycle.MUTATION_STARTED:
+        _mutation_state = _MutationLifecycle.COHERENT_RECOVERY
+
+
+def _mark_replacement_owned() -> None:
+    """Record that a bounded replacement (restart) is scheduled/guaranteed.
+
+    The freeze is owned by the replacement process from here on; this attempt
+    must never unfreeze it.
+    """
+    global _mutation_state
+    if _mutation_state in (
+        _MutationLifecycle.FROZEN,
+        _MutationLifecycle.MUTATION_STARTED,
+        _MutationLifecycle.COHERENT_RECOVERY,
+    ):
+        _mutation_state = _MutationLifecycle.REPLACEMENT_OWNED
+
+
+def _settle_update_lifecycle(freeze_token, response=None) -> None:
+    """Shared exception/failure authority for the update wrappers.
+
+    Called under ``_apply_lock`` on BOTH ordinary failure returns (with the
+    response) and exceptions (``response=None``), with this attempt's freeze
+    token. Decides whether the freeze may be released:
+
+    * ``freeze_token is None`` — no freeze was acquired (agent target or
+      no-op before freeze); nothing to do.
+    * Success (``restart_scheduled``) — freeze persists until the scheduled
+      replacement; ownership transfers to it.
+    * Pre-mutation (IDLE/FROZEN) — tree untouched, generation-unfreeze.
+    * COHERENT_RECOVERY — rollback verified, generation-unfreeze.
+    * MUTATION_STARTED without verified recovery — NEVER unfreeze into a
+      possibly-mixed tree: transfer ownership to a bounded replacement
+      (``_schedule_restart``). If even that fails, keep the freeze
+      (fail-closed terminal outcome: 503 until a later update or manual
+      restart).
+    * REPLACEMENT_OWNED — freeze persists; nothing to do.
+
+    Coherence is NEVER inferred from the absence of ``restart_scheduled``:
+    a returned partial-mutation failure keeps the freeze unless a verified
+    rollback was recorded.
+    """
+    if freeze_token is None:
+        return
+    if response is not None and response.get('restart_scheduled'):
+        _mark_replacement_owned()
+        return
+    if _mutation_state in (
+        _MutationLifecycle.IDLE,
+        _MutationLifecycle.FROZEN,
+        _MutationLifecycle.COHERENT_RECOVERY,
+    ):
+        unfreeze_static_serving(freeze_token)
+        _reset_mutation_lifecycle()
+        return
+    if _mutation_state == _MutationLifecycle.MUTATION_STARTED:
+        # Mutation may have started with no verified rollback: the served
+        # tree may be mixed-revision. Never unfreeze into it — guarantee a
+        # process replacement (restart thread, or synchronous fallback that
+        # replaces the process and never returns).
+        try:
+            _schedule_restart()
+            _mark_replacement_owned()
+        except Exception:
+            # Both the thread start and the synchronous fallback failed:
+            # keep the freeze (fail-closed — 503 rather than mixed immutable
+            # bytes). A later update or manual restart clears it.
+            logger.exception(
+                'update: failed to schedule replacement after mutation error; '
+                'freeze persists (fail-closed)'
+            )
+        return
+    # REPLACEMENT_OWNED: freeze persists until the replacement process starts.
+
+
+
 def apply_force_update(target: str, channel=None) -> dict:
     """Discard local changes for the requested update target.
 
@@ -2181,11 +2367,10 @@ def apply_force_update(target: str, channel=None) -> dict:
     if not _apply_lock.acquire(blocking=False):
         return {'ok': False, 'message': 'Update already in progress'}
     freeze_token = None
-    # Fresh per-invocation mutation tracking (issue #6992 re-gate): set by
-    # _locked() right before the first mutating git command; read by the
-    # exception handler below to decide whether the freeze may be released.
-    global _update_mutation_may_have_started
-    _update_mutation_may_have_started = False
+    # Fresh per-attempt mutation lifecycle (issue #6992 re-gate): reset at
+    # wrapper entry; transitions are made by the apply internals at the exact
+    # points the tree mutates or is verified coherent.
+    _reset_mutation_lifecycle()
 
     def _locked(channel: str) -> dict:
         if target == 'webui':
@@ -2262,10 +2447,10 @@ def apply_force_update(target: str, channel=None) -> dict:
                 'refused_rewind': True,
             }
         # From here on the served checkout may be mutated in place
-        # (checkout ./ clean / reset --hard) — mark it so an exception on
-        # this path can never unfreeze into a possibly-mixed tree (issue
-        # #6992).
-        _mark_update_mutation_started()
+        # (checkout ./ clean / reset --hard) — mark it so an exception or
+        # returned partial-mutation failure on this path can never unfreeze
+        # into a possibly-mixed tree (issue #6992).
+        _mark_mutation_started()
         if not _discard_local_changes(path, compare_ref):
             return {'ok': False, 'message': f'Force reset to {compare_ref} failed'}
 
@@ -2283,6 +2468,10 @@ def apply_force_update(target: str, channel=None) -> dict:
                 }
 
         _schedule_restart()
+        # Ownership of the freeze transfers to the scheduled replacement
+        # (issue #6992): a later exception in this attempt must never unfreeze
+        # or re-schedule.
+        _mark_replacement_owned()
 
         response = {
             'ok': True,
@@ -2302,6 +2491,7 @@ def apply_force_update(target: str, channel=None) -> dict:
         if target == 'webui':
             try:
                 freeze_token = freeze_static_serving()
+                _mark_freeze_acquired(freeze_token)
             except StaticFreezeDrainTimeoutError as exc:
                 # Fail-closed (issue #6992): a reader that did not drain within
                 # the bound means we MUST NOT mutate — the old process could
@@ -2310,6 +2500,7 @@ def apply_force_update(target: str, channel=None) -> dict:
                 # freeze generation (a newer update's freeze stays intact) and
                 # return a retryable non-success; no git command has run.
                 unfreeze_static_serving(exc.token)
+                _reset_mutation_lifecycle()
                 return {
                     'ok': False,
                     'message': str(exc),
@@ -2320,11 +2511,13 @@ def apply_force_update(target: str, channel=None) -> dict:
         response = _locked(channel)
         # Lifecycle (issue #6992): on SUCCESS the freeze persists until the
         # scheduled restart replaces this process (static stays 503 through
-        # the restart-delay window); failure / no-op lifts it here — BEFORE
+        # the restart-delay window). Failures and no-ops are settled by the
+        # shared authority — it generation-unfreezes pre-mutation/verified-
+        # rollback attempts and keeps the freeze (or transfers ownership to a
+        # bounded replacement) when mutation may have started. Runs BEFORE
         # releasing _apply_lock, so a waiting handoff update can never observe
         # our unfreeze racing with its own freeze.
-        if freeze_token is not None and not response.get('restart_scheduled'):
-            unfreeze_static_serving(freeze_token)
+        _settle_update_lifecycle(freeze_token, response)
         return response
     except Exception:
         # Exception-safety for the freeze lifecycle (issue #6992 re-gate):
@@ -2333,30 +2526,11 @@ def apply_force_update(target: str, channel=None) -> dict:
         # _schedule_restart's restart thread failing to start, after the
         # checkout was already updated) would leave /static/* frozen at 503
         # until a restart or another successful update — server.py keeps the
-        # process alive on the 500. Decide by mutation state:
-        if freeze_token is not None:
-            if not _update_mutation_may_have_started:
-                # Pre-mutation failure: the served tree is untouched, so
-                # release ONLY this caller's freeze generation and let
-                # static serving resume (the request surfaces the 500).
-                unfreeze_static_serving(freeze_token)
-            else:
-                # Mutation may already have started: NEVER unfreeze into a
-                # possibly-mixed tree. Guarantee process replacement before
-                # static assets are exposed again. _schedule_restart either
-                # starts the restart thread or — if that fails — replaces the
-                # process synchronously; it does not return without a
-                # replacement being guaranteed.
-                try:
-                    _schedule_restart()
-                except Exception:
-                    # Both the thread start and the synchronous fallback
-                    # failed: keep the freeze (fail-closed — 503 rather than
-                    # mixed immutable bytes). A later update or manual
-                    # restart clears it.
-                    logger.exception(
-                        'force_update: failed to schedule restart after update error'
-                    )
+        # process alive on the 500. The shared authority decides by the
+        # per-attempt lifecycle state (pre-mutation / coherent rollback →
+        # generation-unfreeze; mutation may have started → bounded
+        # replacement or fail-closed freeze).
+        _settle_update_lifecycle(freeze_token)
         raise
     finally:
         _apply_lock.release()
@@ -2374,6 +2548,10 @@ def apply_update(target, channel=None):
     if not _apply_lock.acquire(blocking=False):
         return {'ok': False, 'message': 'Update already in progress'}
     freeze_token = None
+    # Fresh per-attempt mutation lifecycle (issue #6992 re-gate); transitions
+    # are made by _apply_update_inner at the exact points the tree mutates or
+    # is verified coherent.
+    _reset_mutation_lifecycle()
     try:
         # Freeze /static/* serving while this checkout is being mutated in
         # place (issue #6992): set the flag and DRAIN in-flight readers before
@@ -2382,6 +2560,7 @@ def apply_update(target, channel=None):
         if target == 'webui':
             try:
                 freeze_token = freeze_static_serving()
+                _mark_freeze_acquired(freeze_token)
             except StaticFreezeDrainTimeoutError as exc:
                 # Fail-closed (issue #6992): a reader that did not drain within
                 # the bound means we MUST NOT mutate — the old process could
@@ -2390,6 +2569,7 @@ def apply_update(target, channel=None):
                 # freeze generation (a newer update's freeze stays intact) and
                 # return a retryable non-success; no git command has run.
                 unfreeze_static_serving(exc.token)
+                _reset_mutation_lifecycle()
                 return {
                     'ok': False,
                     'message': str(exc),
@@ -2400,12 +2580,23 @@ def apply_update(target, channel=None):
         response = _apply_update_inner(target, channel)
         # Lifecycle (issue #6992): on SUCCESS the freeze persists until the
         # scheduled restart replaces this process (static stays 503 through
-        # the restart-delay window); failure / no-op lifts it here — BEFORE
+        # the restart-delay window). Failures and no-ops are settled by the
+        # shared authority — it generation-unfreezes pre-mutation/verified-
+        # rollback attempts and keeps the freeze (or transfers ownership to a
+        # bounded replacement) when mutation may have started. Runs BEFORE
         # releasing _apply_lock, so a waiting handoff update can never observe
         # our unfreeze racing with its own freeze.
-        if freeze_token is not None and not response.get('restart_scheduled'):
-            unfreeze_static_serving(freeze_token)
+        _settle_update_lifecycle(freeze_token, response)
         return response
+    except Exception:
+        # Exception-safety for the freeze lifecycle (issue #6992 re-gate): an
+        # unexpected exception after freeze_static_serving() must never leave
+        # static serving permanently 503. The shared authority decides by the
+        # per-attempt lifecycle state (pre-mutation / coherent rollback →
+        # generation-unfreeze; mutation may have started → bounded replacement
+        # or fail-closed freeze).
+        _settle_update_lifecycle(freeze_token)
+        raise
     finally:
         _apply_lock.release()
 
@@ -2427,6 +2618,9 @@ def _restore_stash_after_pull_failure(
     """
     _, pop_ok = _run_git(['stash', 'pop'], path)
     if pop_ok:
+        # Stash restored — the served tree is back to the pre-update state
+        # (verified rollback), so a failure may generation-unfreeze.
+        _mark_coherent_recovery()
         return ('Local modifications were restored from the temporary stash.')
 
     # `git stash pop` failed -- could be that the working tree changed under
@@ -2434,6 +2628,7 @@ def _restore_stash_after_pull_failure(
     _, apply_ok = _run_git(['stash', 'apply'], path)
     if apply_ok:
         _, _ = _run_git(['stash', 'drop'], path)
+        _mark_coherent_recovery()
         return ('Local modifications were restored from the temporary stash.')
 
     detail = (pull_out or '').strip()[:200]
@@ -2523,8 +2718,16 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
     if status_out:
         _, ok = _run_git(['stash', 'push', '-m', 'hermes-update-autostash'], path)
         if not ok:
+            # git stash push is atomic: a failure leaves the served tree
+            # untouched, so this stays pre-mutation (FROZEN) and the wrapper
+            # may generation-unfreeze.
             return {'ok': False, 'message': 'Failed to stash local changes'}
         stashed = True
+        # First tree-mutating command confirmed (stash push moved the user's
+        # changes out of the served tree) — from here on a failure must never
+        # unfreeze into a possibly-mixed tree unless a rollback is verified
+        # (issue #6992).
+        _mark_mutation_started()
 
     # Pull with ff-only (no merge commits).
     # Split tracking refs like 'origin/main' into separate remote + branch
@@ -2535,6 +2738,9 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
         pull_args.extend([remote, branch])
     else:
         pull_args.extend(['origin', compare_ref])
+    # Pull mutates the served tree (idempotent — no-op if already marked by
+    # the stash push above; agent-only attempts stay IDLE).
+    _mark_mutation_started()
     pull_out, pull_ok = _run_git(pull_args, path, timeout=30)
     if not pull_ok:
         if _is_git_lock_error(pull_out):
@@ -2571,6 +2777,9 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
                 _, drop_ok = _run_git(['stash', 'drop'], path)
                 restored_stash = True
                 stash_drop_failed = not drop_ok
+                # Stash re-applied — the served tree is back to the pre-update
+                # state (verified rollback), so a failure may unfreeze.
+                _mark_coherent_recovery()
             else:
                 _, reset_ok = _run_git(['reset', '--hard', 'HEAD'], path)
                 if not reset_ok:
@@ -2589,6 +2798,10 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
                     if diverged_failure:
                         response['diverged'] = True
                     return response
+                # reset --hard HEAD completed — the served tree is back to the
+                # pre-update HEAD (verified rollback), so a failure may
+                # unfreeze.
+                _mark_coherent_recovery()
                 response = {
                     'ok': False,
                     'message': (
@@ -2692,6 +2905,9 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
                         'gateway_restart': gateway_result.get('status'),
                     }
             _schedule_restart()
+            # Ownership of the freeze transfers to the scheduled replacement
+            # (issue #6992).
+            _mark_replacement_owned()
             response = {
                 'ok': True,
                 'message': (
@@ -2736,6 +2952,9 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
     # setTimeout(() => location.reload(), 1500) on success, so the page reload
     # and the restart land at roughly the same time.
     _schedule_restart()
+    # Ownership of the freeze transfers to the scheduled replacement
+    # (issue #6992).
+    _mark_replacement_owned()
     message = f'{target} updated successfully'
     if stash_drop_failed:
         message += (
