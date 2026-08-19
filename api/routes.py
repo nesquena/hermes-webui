@@ -269,6 +269,7 @@ _CRON_OUTPUT_HEADER_CONTEXT = 200
 # to the cap and flagged truncated so a client can fetch the full file another
 # way. The cap is on BYTES read, not chars.
 _FILE_READ_MAX_BYTES = 512 * 1024
+_CRON_TRUNCATION_DIVIDER = "\n\n--- [output truncated: large section omitted] ---\n\n"
 _MESSAGING_RAW_SOURCES = {str(s).strip().lower() for s in MESSAGING_SOURCES}
 _MESSAGING_SESSION_METADATA_CACHE: dict[str, object] = {
     "path": None,
@@ -1441,6 +1442,39 @@ def _cron_response_marker_index(text: str) -> int:
     return min(candidates) if candidates else -1
 
 
+def _split_response_marker_prefix(head_raw: bytes, tail_raw: bytes) -> str:
+    """Return the head-side prefix of a Response heading that provably straddled
+    the exact head/tail boundary of ADJACENT windows, else ``""``.
+
+    Proof requirements (all must hold):
+    (a) Adjacent windows via the caller — the caller only invokes this helper
+        when ``not gap_case`` so head and tail touch in the true file.
+    (b) A FULL head read via the caller — ``len(head_raw) == head_len`` so the
+        head bytes represent the exact file prefix up to the boundary.
+    (c) The heading fragment begins at a line start in the head — either
+        ``k == len(head_raw)`` (the entire head is the prefix: the file itself
+        starts with the heading) OR the byte immediately before the prefix is a
+        newline (``head_raw[-(k + 1):-(k)] == b"\\n"``).
+    When satisfied, the head's final bytes equal a proper non-empty prefix of a
+    Response heading AND the tail's first bytes equal the matching remainder —
+    their concatenation reconstructs real source bytes, never invented ones.
+    Gap windows or short head reads cannot prove a split. (#6141 r12 #1, R1)
+    """
+    for heading in ("## Response", "# Response"):
+        for k in range(1, len(heading)):
+            prefix = heading[:k].encode("ascii")
+            suffix = heading[k:].encode("ascii")
+            if head_raw.endswith(prefix) and tail_raw.startswith(suffix):
+                # Accept only if the prefix starts a line in the head file bytes.
+                if k == len(head_raw):
+                    # Entire head is the prefix — the file itself starts with heading.
+                    return heading[:k]
+                if head_raw[-(k + 1) : -k] == b"\n":
+                    # Byte immediately before the prefix is a newline.
+                    return heading[:k]
+    return ""
+
+
 def _cron_output_content_window(text: str, limit: int = _CRON_OUTPUT_CONTENT_LIMIT) -> str:
     """Return a bounded cron output window that preserves useful response text.
 
@@ -1588,6 +1622,13 @@ def _read_cron_output_bounded(
       in the gap case that byte is the tail window's own first byte; in the adjacent
       case it is the head's last byte (when the head read was full — a short read
       leaves it unproven, so we fail closed and drop). (#6141 r10)
+    - Split-marker repair exception: when a ``## Response`` or ``# Response`` heading
+      provably straddles the adjacent boundary (head ends with a prefix AND tail starts
+      with the matching remainder, the prefix begins at a line start, AND the head
+      read was full), the prefix is reattached to the tail BEFORE the partial-line
+      drop, repairing the complete heading and skipping the drop for that line. This
+      reconstruction is only performed when the split is proven; markerless output
+      keeps literal bytes (no heading is ever synthesized). (#6141 r12, R1, R2, R7)
     - Every read is capped (no unbounded ``fh.read()``).
     - The returned ``bytes_read`` is the actual byte count consumed from THIS
       descriptor (the disjoint head + tail windows, derived from the pinned
@@ -1604,9 +1645,9 @@ def _read_cron_output_bounded(
     failure returns ``("", False, False, 0, False)``; on budget decline (the
     file was readable but its bounded windows exceed the remaining allowance)
     returns ``("", False, False, 0, True)``. The ``declined`` flag lets the
-    cron batch distinguish a budget decline (mark truncated, stop — remaining
-    allowance insufficient for this and later large files) from a real I/O
-    failure (continue — a later smaller file may still fit). (#6141 r5 #3)
+    cron batch distinguish a budget decline (mark truncated and continue — a
+    later smaller file may still fit the remaining allowance) from a real I/O
+    failure (continue — a later smaller file may still fit). (#6141 r5 #3, r12 #2)
     """
     try:
         fh = open(path, "rb")
@@ -1709,36 +1750,51 @@ def _read_cron_output_bounded(
         fh.close()
     head_text = head_raw.decode("utf-8", errors="replace")
     tail_text = tail_raw.decode("utf-8", errors="replace")
-    # Drop the first tail line only when it is a PROVEN partial. The first
-    # tail line is proven COMPLETE when the byte immediately before it on
-    # this descriptor is a newline (the tail boundary landed exactly on a
-    # line boundary): in the gap case that byte is the tail window's own
-    # first byte; in the adjacent case it is the head's last byte (when the
-    # head read was full — a short read leaves it unproven, so we fail
-    # closed and drop). (#6141 r10)
-    if gap_case:
-        boundary_newline = tail_raw[:1] == b"\n"
-        if boundary_newline and tail_text.startswith("\n"):
-            tail_text = tail_text[1:]  # keep the complete first line
+    # Repair a Response heading that provably straddled the boundary BEFORE the
+    # partial-first-line drop: the tail-side heading remainder ("onse...") is
+    # itself a split line the drop would discard. Only adjacent windows can
+    # prove a split — their concatenation is the file's true byte sequence.
+    # A short head read (shrink-during-read) cannot prove adjacency, so the
+    # proof requires BOTH adjacent case AND a full head read equal to head_len.
+    # (#6141 r12 #1, R2)
+    split_marker_prefix = (
+        _split_response_marker_prefix(head_raw, tail_raw)
+        if not gap_case and len(head_raw) == head_len
+        else ""
+    )
+    if split_marker_prefix:
+        # The repaired first tail line IS the complete heading — no partial
+        # first line remains to drop.
+        tail_text = split_marker_prefix + tail_text
     else:
-        boundary_newline = len(head_raw) == head_len and head_raw[-1:] == b"\n"
-    if not boundary_newline:
-        tnl = tail_text.find("\n")
-        if tnl >= 0 and tnl + 1 < len(tail_text):
-            tail_text = tail_text[tnl + 1:]
-    marker_idx = _cron_response_marker_index(head_text)
+        # Drop the first tail line only when it is a PROVEN partial. The first
+        # tail line is proven COMPLETE when the byte immediately before it on
+        # this descriptor is a newline (the tail boundary landed exactly on a
+        # line boundary): in the gap case that byte is the tail window's own
+        # first byte; in the adjacent case it is the head's last byte (when the
+        # head read was full — a short read leaves it unproven, so we fail
+        # closed and drop). (#6141 r10)
+        if gap_case:
+            boundary_newline = tail_raw[:1] == b"\n"
+            if boundary_newline and tail_text.startswith("\n"):
+                tail_text = tail_text[1:]  # keep the complete first line
+        else:
+            boundary_newline = len(head_raw) == head_len and head_raw[-1:] == b"\n"
+        if not boundary_newline:
+            tnl = tail_text.find("\n")
+            if tnl >= 0 and tnl + 1 < len(tail_text):
+                tail_text = tail_text[tnl + 1:]
     marker_in_tail = _cron_response_marker_index(tail_text) >= 0
     if marker_in_tail:
         # Tail carries the marker (and therefore the complete body at EOF).
         tm = _cron_response_marker_index(tail_text)
         tail_text = tail_text[tm:]  # keep marker + body from the tail
-    elif tail_text.strip() and marker_idx < 0:
-        # Marker not in tail AND not in head: the seek split it — re-inject.
-        # Safe: a body at EOF implies a marker preceded it.
-        tail_text = "## Response\n" + tail_text
+    # No real marker in either window (markerless script/failed output, or the
+    # marker sits wholly in the omitted gap): keep the bounded bytes literal.
+    # Never synthesize a semantic heading the source never had. (#6141 r12 #1)
     return (
         head_text.rstrip()
-        + "\n\n--- [output truncated: large section omitted] ---\n\n"
+        + _CRON_TRUNCATION_DIVIDER
         + tail_text,
         True,
         True,
@@ -21452,6 +21508,9 @@ def _cron_output_snippet(text: str, limit: int = 600) -> str:
         if line.startswith("## Response") or line.startswith("# Response"):
             response_idx = i
             break
+    if response_idx < 0 and _CRON_TRUNCATION_DIVIDER in text:
+        text = text.split(_CRON_TRUNCATION_DIVIDER, 1)[1]
+        lines = text.split("\n")
     body = ("\n".join(lines[response_idx + 1:]) if response_idx >= 0 else "\n".join(lines)).strip()
     return body[:limit] or "(empty)"
 
@@ -21528,13 +21587,18 @@ def _handle_cron_output(handler, parsed):
                 spent += bytes_read
                 # Distinguish I/O failure from budget decline (#6141 r5 #3):
                 # - declined=True: the file was readable but its bounded windows
-                #   exceeded the remaining allowance. Mark truncated and stop —
-                #   remaining files would also decline.
+                #   exceeded the remaining allowance. Mark truncated and continue — a
+                #   later smaller file may still fit the remaining allowance.
                 # - declined=False: a real open/fstat/read failure. Continue to
                 #   the next file (a later smaller file may still fit).
                 if declined:
+                    # Files are ordered by mtime, not size — a decline only
+                    # proves THIS file's windows exceed the remaining allowance.
+                    # Keep scanning: a later smaller file may still fit. True
+                    # exhaustion (remaining <= 0) is the top-of-loop stop.
+                    # (#6141 r12 #2)
                     truncated_files = True
-                    break
+                    continue
                 logger.debug("Skipped cron output file %s (read failure)", f)
                 continue
             entry = {"filename": f.name, "content": _cron_output_content_window(txt)}

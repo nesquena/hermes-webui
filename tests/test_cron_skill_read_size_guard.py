@@ -964,8 +964,9 @@ def test_cron_batch_no_reader_call_after_budget_exhaustion(monkeypatch, tmp_path
     assert calls_after_exhaustion == [] or all(
         not d for _, d in calls_after_exhaustion
     ), (
-        f"no reader call after exhaustion (only I/O failures may appear after "
-        f"budget remains); got {calls_after_exhaustion}"
+        f"no reader call after exhaustion (declines and I/O failures may appear "
+        f"while budget remains, but NO reader call after remaining <= 0); "
+        f"got {calls_after_exhaustion}"
     )
     # The batch is marked truncated (some files were skipped).
     assert body.get("truncated") is True, (
@@ -1746,3 +1747,451 @@ def test_read_text_bounded_tail_mode_never_exceeds_cap(tmp_path):
         f"UTF-8 byte length must also be <= {max_bytes2}; got "
         f"{len(text2.encode('utf-8'))}"
     )
+
+
+# ── Round 12: remove marker fabrication + decline-stop ───────────────────────────
+
+
+def test_cron_output_markerless_never_fabricates_response_heading(monkeypatch, tmp_path):
+    """Markerless oversized output (script-style, no heading anywhere) must never have
+    ## Response synthesized. The bounded tail survives literally in both content and
+    snippet (with divider preference), and exactly one divider appears. (#6141 r12)"""
+    from api.routes import _read_cron_output_bounded, _cron_output_snippet, _CRON_TRUNCATION_DIVIDER
+
+    out_dir = tmp_path / "cron-out" / "job1"
+    out_dir.mkdir(parents=True)
+
+    # Adjacent case: file slightly over cap, no marker anywhere
+    cap = _FILE_READ_MAX_BYTES
+    markerless_content = b"#!/bin/bash\necho 'no marker here'\n" + b"A" * (cap + 1000)
+    (out_dir / "run-adjacent.md").write_bytes(markerless_content)
+
+    txt_adj, trunc_adj, ok_adj, bytes_adj, declined_adj = _read_cron_output_bounded(
+        out_dir / "run-adjacent.md"
+    )
+    assert ok_adj and not declined_adj
+    assert trunc_adj
+    # No fabricated ## Response anywhere
+    assert "## Response" not in txt_adj
+    assert "# Response" not in txt_adj
+    # Final tail line (last A's) survives in content
+    assert txt_adj.endswith("A" * 40)  # last few A's present
+    # Exactly one divider occurrence
+    assert txt_adj.count(_CRON_TRUNCATION_DIVIDER) == 1
+    # Snippet prefers post-divider region (the tail A's, not head padding)
+    snippet_adj = _cron_output_snippet(txt_adj)
+    assert "A" * 20 in snippet_adj  # tail A's visible in snippet
+    assert "#!/bin/bash" not in snippet_adj  # head padding not in snippet
+
+    # Gap case: file > 2*cap, no marker anywhere
+    gap_content = b"#!/bin/bash\necho 'no marker here'\n" + b"B" * (2 * cap + 5000)
+    (out_dir / "run-gap.md").write_bytes(gap_content)
+
+    txt_gap, trunc_gap, ok_gap, bytes_gap, declined_gap = _read_cron_output_bounded(
+        out_dir / "run-gap.md"
+    )
+    assert ok_gap and not declined_gap
+    assert trunc_gap
+    # No fabricated ## Response anywhere
+    assert "## Response" not in txt_gap
+    assert "# Response" not in txt_gap
+    # Final tail line (last B's) survives in content
+    assert txt_gap.endswith("B" * 40)  # last few B's present
+    # Exactly one divider occurrence
+    assert txt_gap.count(_CRON_TRUNCATION_DIVIDER) == 1
+    # Snippet prefers post-divider region (the tail B's)
+    snippet_gap = _cron_output_snippet(txt_gap)
+    assert "B" * 20 in snippet_gap  # tail B's visible in snippet
+    assert "#!/bin/bash" not in snippet_gap  # head padding not in snippet
+
+
+def test_cron_output_split_marker_repaired_only_when_proven(monkeypatch, tmp_path):
+    """A split Response marker is repaired ONLY in the adjacent case where head/tail
+    boundaries provably concatenate to the real heading. In the gap case (windows not
+    adjacent), even a pseudo-split pattern is NOT repaired — proving the guard. (#6141 r12)"""
+    from api.routes import (
+        _read_cron_output_bounded,
+        _cron_output_snippet,
+        _split_response_marker_prefix,
+    )
+
+    out_dir = tmp_path / "cron-out" / "job1"
+    out_dir.mkdir(parents=True)
+    cap = _FILE_READ_MAX_BYTES
+
+    # (a) Adjacent split: head ends with "\n## Resp", tail starts with "onse\n..."
+    # Byte-exact construction: frontmatter fills to cap, marker straddles the boundary
+    frontmatter = "# Cron\n"
+    filler_len = cap - len(frontmatter.encode("utf-8")) - len("\n## Resp".encode("utf-8"))
+    head_portion = frontmatter.encode("utf-8") + b"F" * filler_len + b"\n## Resp"
+    tail_portion = b"onse\nActual reply body here.\n"
+    (out_dir / "run-adjacent-split.md").write_bytes(head_portion + tail_portion)
+
+    # Verify split-marker detection works
+    assert _split_response_marker_prefix(head_portion, tail_portion) == "## Resp"
+
+    txt_adj, trunc_adj, ok_adj, bytes_adj, declined_adj = _read_cron_output_bounded(
+        out_dir / "run-adjacent-split.md"
+    )
+    assert ok_adj and not declined_adj
+    assert trunc_adj
+    # After repair, "## Response" appears exactly once (the reconstructed marker)
+    assert txt_adj.count("## Response") == 1
+    # Body survives in content
+    assert "Actual reply body here." in txt_adj
+    # Snippet shows the body (marker found, so divider preference irrelevant)
+    snippet_adj = _cron_output_snippet(txt_adj)
+    assert "Actual reply body here." in snippet_adj
+
+    # (b) Gap pseudo-split: file > 2*cap engineered so head ends with "## Resp"
+    # but windows are NOT adjacent — NO repair, only fragment remains.
+    # In gap case, head reads 0..(cap-2), tail reads (size - cap - 1)..end.
+    # The windows are NOT adjacent, so even if head ends with "## Resp"
+    # and tail starts with "onse", the helper should not detect a valid split
+    # because those bytes don't actually touch in the file.
+    gap_head_len = cap - 1  # gap case: head gives up one byte
+    # The fragment must sit at a LINE START so ONLY the gap guard blocks the
+    # repair — a mid-line fragment would be rejected by the line-start check
+    # and mask a removed gap guard.
+    gap_filler_len = (
+        gap_head_len - len(frontmatter.encode("utf-8")) - 1 - len("## Resp".encode("utf-8"))
+    )
+    gap_head = (
+        frontmatter.encode("utf-8") + b"G" * gap_filler_len + b"\n## Resp"
+    )
+    assert len(gap_head) == cap - 1, len(gap_head)
+    # For gap case, create a file > 2*cap with gap region
+    gap_size = 5000
+    gap_middle = b"X" * gap_size  # ensures gap > 0
+    # The pseudo-split must align to BOTH window edges: head ends with
+    # "## Resp" AND the tail window's FIRST bytes are "onse". The tail window
+    # is [size-cap-1, size), so the after-gap content must be exactly cap+1
+    # bytes ending at EOF and starting with "onse" — only then does removing
+    # the gap guard produce a (wrong) repair this test must catch.
+    gap_tail_lead = b"onse\nGap file body.\n"
+    tail_content = gap_tail_lead + b"Y" * (cap + 1 - len(gap_tail_lead))
+    assert len(tail_content) == cap + 1, len(tail_content)
+    total_gap_file = gap_head + gap_middle + tail_content
+    assert len(total_gap_file) > 2 * cap, f"Gap file too small: {len(total_gap_file)}"
+    (out_dir / "run-gap-pseudo.md").write_bytes(total_gap_file)
+    # Byte-exact alignment proof: head window ends with the marker prefix and
+    # the tail window (last cap+1 bytes) starts with the marker remainder,
+    # yet the windows are NOT adjacent (5000-byte gap) — so the raw pattern
+    # matches but the concatenation is NOT the file's true byte sequence.
+    assert total_gap_file[cap - 1 - len(b"## Resp"):cap - 1] == b"## Resp"
+    assert total_gap_file[len(total_gap_file) - cap - 1:].startswith(b"onse")
+
+    txt_gap, trunc_gap, ok_gap, bytes_gap, declined_gap = _read_cron_output_bounded(
+        out_dir / "run-gap-pseudo.md"
+    )
+    assert ok_gap and not declined_gap
+    assert trunc_gap
+    # NO complete "## Response" in output (only the fragment " Resp" in head)
+    assert "## Response" not in txt_gap
+    assert "# Response" not in txt_gap
+    # The fragment " Resp" may appear, but not as a complete heading
+    # Gap file body survives in tail
+    assert "Gap file body." in txt_gap
+
+
+def test_cron_output_marker_placements_preserve_single_real_marker(monkeypatch, tmp_path):
+    """Marker wholly in head, wholly in tail, or entirely in the omitted gap — each
+    case yields at most one complete marker in output and never fabricates a heading. (#6141 r12)"""
+    from api.routes import _read_cron_output_bounded
+
+    out_dir = tmp_path / "cron-out" / "job1"
+    out_dir.mkdir(parents=True)
+    cap = _FILE_READ_MAX_BYTES
+    marker = b"## Response\nMarker body.\n"
+
+    # Case 1: Marker wholly in head (total > cap, marker in [0, cap) window)
+    # Pad past cap to exercise window branch, keep marker well before cap boundary
+    head_content = b"# Cron\n" + b"A" * (cap - 100) + b"\n" + marker
+    (out_dir / "run-marker-in-head.md").write_bytes(head_content + b"tail padding\n" + b"X" * 1000)
+
+    txt1, trunc1, ok1, bytes1, declined1 = _read_cron_output_bounded(
+        out_dir / "run-marker-in-head.md"
+    )
+    assert ok1 and not declined1
+    assert trunc1 is True, "Case 1 must exercise window branch (total > cap)"
+    # Exactly one marker (head's marker, no fabrication)
+    assert txt1.count("## Response") == 1
+    assert "Marker body." in txt1
+
+    # Case 2: Marker wholly in tail (total > cap, marker in tail window)
+    # Adjacent case: the tail window starts at exactly cap, so the head padding
+    # must be EXACTLY cap bytes for the marker to land past the boundary.
+    head_padding = b"# Cron\n" + b"B" * (cap - len(b"# Cron\n") - 1) + b"\n"
+    assert len(head_padding) == cap, len(head_padding)
+    tail_content = b"extra\n" + marker + b"more body\n"
+    # Marker starts at cap + len("extra\n") — inside the tail window [cap, size)
+    (out_dir / "run-marker-in-tail.md").write_bytes(head_padding + tail_content + b"Y" * 1000)
+
+    txt2, trunc2, ok2, bytes2, declined2 = _read_cron_output_bounded(
+        out_dir / "run-marker-in-tail.md"
+    )
+    assert ok2 and not declined2
+    assert trunc2 is True, "Case 2 must exercise window branch (total > cap)"
+    # Exactly one marker (tail's marker, no fabrication)
+    assert txt2.count("## Response") == 1
+    assert "Marker body." in txt2
+
+    # Case 3: Marker entirely in the omitted gap (file > 2*cap, marker in middle)
+    # Gap case parameters: head reads (cap - 1) bytes, tail reads (cap + 1) bytes
+    # Marker must be positioned in the gap region only (not in head or tail)
+    head_len = cap - 1
+    tail_len = cap + 1
+    # Head content: exactly head_len bytes, no marker
+    head_prefix = b"# Cron\n"
+    head_fill_len = head_len - len(head_prefix)
+    head_only = head_prefix + b"C" * head_fill_len
+    assert len(head_only) == head_len, f"Head size {len(head_only)} != expected {head_len}"
+    # Gap marker positioned strictly in the gap
+    gap_marker = b"## Response\nGap marker body.\n"
+    # Tail content: tail_len bytes, no marker
+    tail_prefix = b"# Tail\n"
+    tail_fill_len = tail_len - len(tail_prefix)
+    tail_only = tail_prefix + b"D" * tail_fill_len
+    assert len(tail_only) == tail_len, f"Tail size {len(tail_only)} != expected {tail_len}"
+    # Verify the marker is in the gap region only
+    marker_start = len(head_only)
+    marker_end = marker_start + len(gap_marker)
+    total_size = len(head_only) + len(gap_marker) + len(tail_only)
+    tail_start_in_file = total_size - tail_len
+    assert total_size > 2 * cap, f"Test fixture too small: {total_size} <= {2 * cap}"
+    assert marker_start >= head_len, f"Marker starts at {marker_start} which is < head_len {head_len}"
+    assert marker_end <= tail_start_in_file, f"Marker ends at {marker_end} which is > tail_start {tail_start_in_file}"
+    (out_dir / "run-marker-in-gap.md").write_bytes(head_only + gap_marker + tail_only)
+
+    txt3, trunc3, ok3, bytes3, declined3 = _read_cron_output_bounded(
+        out_dir / "run-marker-in-gap.md"
+    )
+    assert ok3 and not declined3
+    # Zero complete markers (marker in gap is omitted, no fabrication)
+    assert "## Response" not in txt3
+    assert "# Response" not in txt3
+
+
+def test_cron_batch_decline_continues_to_later_smaller_file(monkeypatch, tmp_path):
+    """When a file exceeds the remaining budget, the batch declines it but continues
+    scanning — a later smaller file may still fit. Only true exhaustion stops. (#6141 r12)"""
+    import os
+    import time
+
+    from api.routes import _read_cron_output_bounded
+
+    out_dir = tmp_path / "cron-out" / "job1"
+    out_dir.mkdir(parents=True)
+    _stub_cron_jobs(monkeypatch, output_dir=tmp_path / "cron-out")
+
+    cap = _FILE_READ_MAX_BYTES
+    now = time.time()
+
+    # Schedule files newest-first by mtime:
+    # run-a: 2.0 * cap (admitted: first-file rule, no budget check)
+    # run-b: 1.5 * cap (admitted: fits in 2*cap remaining after run-a)
+    # run-c: 0.75 * cap (declined: exceeds ~0.25*cap remaining after run-a+b)
+    # run-d: 64 bytes (admitted: fits in remaining budget after run-a+b, run-c declined)
+    files = {
+        "run-a.md": (int(2.0 * cap), "A"),
+        "run-b.md": (int(1.5 * cap), "B"),
+        "run-c.md": (int(0.75 * cap), "C"),
+        "run-d.md": (64, "D"),
+    }
+
+    physical_reads = {}  # track actual bytes physically read
+
+    def instrumented_read(path, *, max_bytes=cap, budget=None):
+        result = _read_cron_output_bounded(path, max_bytes=max_bytes, budget=budget)
+        txt, trunc, ok, bytes_read, declined = result
+        # Record physical read even on decline (the reader may have probed)
+        physical_reads[path.name] = physical_reads.get(path.name, 0) + bytes_read
+        return result
+
+    monkeypatch.setattr(routes, "_read_cron_output_bounded", instrumented_read)
+
+    # Create files with staggered mtimes (newest first)
+    for i, (fname, (size, content_char)) in enumerate(files.items()):
+        fpath = out_dir / fname
+        # Create content of exactly `size` bytes using the character + newlines
+        line = f"{content_char} content\n"
+        line_bytes = len(line.encode("utf-8"))
+        num_lines = int(size // line_bytes) + 1
+        content = (line * num_lines)
+        # Trim to exact size by bytes
+        content_bytes = content.encode("utf-8")
+        content_bytes = content_bytes[:size]
+        actual_size = len(content_bytes)
+        assert actual_size == size, f"File {fname} size mismatch: {actual_size} != {size}"
+        fpath.write_bytes(content_bytes)
+        # Newest first: run-a is newest
+        mtime = now - (i * 10)
+        os.utime(fpath, (mtime, mtime))
+
+    handler = _JSONHandler()
+    routes._handle_cron_output(
+        handler, SimpleNamespace(query="job_id=job1&limit=10")
+    )
+
+    body = _payload(handler)
+    assert handler.status == 200
+    assert body.get("truncated") is True
+
+    outputs = body["outputs"]
+    filenames = [entry["filename"] for entry in outputs]
+
+    # run-a, run-b, run-d present, newest-first relative order preserved
+    assert "run-a.md" in filenames
+    assert "run-b.md" in filenames
+    assert "run-d.md" in filenames
+    assert filenames.index("run-a.md") < filenames.index("run-b.md") < filenames.index("run-d.md"), (
+        f"returned rows must preserve newest-first order; got {filenames}"
+    )
+
+    # run-c absent (declined, zero physical reads)
+    assert "run-c.md" not in filenames
+    assert physical_reads.get("run-c.md", 0) == 0, "declined file performed zero physical reads"
+
+    # Total physical reads <= 4*cap (run-a + run-b + run-d, run-c declined without reads)
+    total_physical = sum(physical_reads.values())
+    assert total_physical <= 4 * cap, f"total physical reads {total_physical} exceeded 4*cap"
+
+
+def test_cron_output_midline_marker_fragment_not_promoted(monkeypatch, tmp_path):
+    """A mid-line marker fragment must NOT be promoted to a recognized heading.
+    Fixture: adjacent case, head ends with prose ending in '## Resp' (mid-line),
+    tail starts with 'onse...' - the helper rejects the split because the
+    prefix doesn't start a line. Output has zero complete markers and the
+    second tail line survives (partial-first-line drop still works). (#6141 r12 R6a)"""
+    from api.routes import _read_cron_output_bounded, _cron_response_marker_index
+
+    out_dir = tmp_path / "cron-out" / "job1"
+    out_dir.mkdir(parents=True)
+    cap = _FILE_READ_MAX_BYTES
+
+    # Adjacent case: head window is EXACTLY cap bytes and ends with a MID-LINE
+    # "## Resp" (preceded by X padding, not a newline); the tail starts with
+    # "onse..." so concatenating would produce the "## Response" substring —
+    # the helper must reject the split because the fragment is not at a line
+    # start. (A head shorter than cap would leave the fragment outside the
+    # window and the test could pass vacuously.)
+    head_portion = (
+        b"# Cron\nsee PPP in docs: "
+        + b"X" * (cap - len(b"# Cron\nsee PPP in docs: ") - len(b"## Resp"))
+        + b"## Resp"
+    )
+    assert len(head_portion) == cap, len(head_portion)
+    tail_portion = b"onse continues the text\nsecond line\nmore body\n" + b"Y" * 1950
+    assert len(head_portion) + len(tail_portion) <= 2 * cap  # adjacent branch
+    (out_dir / "run-midline-split.md").write_bytes(head_portion + tail_portion)
+
+    txt, trunc, ok, bytes_read, declined = _read_cron_output_bounded(
+        out_dir / "run-midline-split.md"
+    )
+    assert ok and not declined
+    assert trunc
+
+    # NO complete "## Response" marker in output (the concatenation "## Resp"+"onse"
+    # creates the substring "## Response continues the text" but that's NOT a
+    # complete heading - it lacks the terminating newline).
+    assert _cron_response_marker_index(txt) == -1, "Marker index must be -1 (no complete marker)"
+
+    # Verify the whole file also has no marker (truth)
+    with open(out_dir / "run-midline-split.md", "rb") as f:
+        whole_file = f.read().decode("utf-8", errors="replace")
+    assert _cron_response_marker_index(whole_file) == -1, "Whole file truth: no complete marker"
+
+    # Second line survives (partial-first-line drop still works)
+    assert "second line" in txt, "Second tail line must survive after partial-first-line drop"
+
+
+def test_cron_output_short_head_read_does_not_repair_marker(monkeypatch, tmp_path):
+    """A short head read (shrink-during-read) must NOT repair a marker split.
+    Fixture: adjacent case with cap=128 via max_bytes param; file = 188 bytes.
+    The marker fragment is at a LINE START in the true file ("\n## Resp" at
+    [53,60)), so the line-start check PASSES on the short head — only the
+    full-head-read requirement can block the (wrong) repair of non-contiguous
+    windows. First read returns 60 bytes ending exactly at "## Resp".
+    Output has zero complete markers. (#6141 r12 R6b, MF)"""
+    from api.routes import _read_cron_output_bounded
+
+    out_dir = tmp_path / "cron-out" / "job1"
+    out_dir.mkdir(parents=True)
+    small_cap = 128  # Small cap for test fixture
+    # True layout: F*52 | "\n## Resp" [53,60) | Z*68 [60,128) | "onse..." [128,188)
+    # The marker NEVER exists contiguously: a full head read [0,128) ends with
+    # Z's; only the SHORT 60-byte read ends with the fragment.
+    head_portion = b"F" * 52 + b"\n## Resp" + b"Z" * 68
+    assert len(head_portion) == small_cap
+    tail_portion = b"onse\nTail body after mutation.\n" + b"T" * 29
+    file_content = head_portion + tail_portion
+    assert len(file_content) == 188, f"File size {len(file_content)} != 188"
+
+    (out_dir / "run-short-head.md").write_bytes(file_content)
+
+    # Wrap open to simulate short read (shrink-during-read)
+    original_open = open
+    read_counts = {}
+
+    def short_open(path, *args, **kwargs):
+        fh = original_open(path, *args, **kwargs)
+        if "run-short-head" in str(path):
+            original_read = fh.read
+
+            def short_read(size=-1):
+                if "run-short-head" not in read_counts:
+                    read_counts["run-short-head"] = 0
+                    # First read returns 60 bytes (F*52 + "\n## Resp") — a
+                    # shrink-during-head-read that ends exactly at the fragment
+                    return original_read(60)
+                else:
+                    # Subsequent reads return full amount
+                    return original_read(size)
+
+            fh.read = short_read
+        return fh
+
+    monkeypatch.setattr("builtins.open", short_open)
+
+    txt, trunc, ok, bytes_read, declined = _read_cron_output_bounded(
+        out_dir / "run-short-head.md", max_bytes=small_cap
+    )
+    assert ok and not declined
+    # Short read means bytes_read < planned, so file appears truncated
+    # (The exact trunc behavior depends on implementation, but no repair should occur)
+    assert txt.count("## Response") == 0, "Short head read must not repair marker split"
+
+
+def test_split_response_marker_prefix_requires_line_start():
+    """Unit test: _split_response_marker_prefix accepts only line-start prefixes.
+    - Legit '\n## Resp' + 'onse...' → '## Resp'
+    - Mid-line 'see ## Resp' + 'onse...' → '' (rejected)
+    - Whole-head-prefix b'## Resp' (k == len) → '## Resp' (file starts with marker)
+    - b'issue #' + b' Response...' → '' (k=1 h1 trap rejected)
+    - Legit h1 '\n#' + ' Response...' → '#' (single-# heading at line start) (#6141 r12 R6c)"""
+    from api.routes import _split_response_marker_prefix
+
+    # Legit case: prefix starts at line boundary
+    head = b"some text\n## Resp"
+    tail = b"onse\nbody"
+    assert _split_response_marker_prefix(head, tail) == "## Resp", "Legit newline prefix should be accepted"
+
+    # Mid-line case: prefix does NOT start at line boundary
+    head_midline = b"see PPP in docs: ## Resp"
+    tail_midline = b"onse\nbody"
+    assert _split_response_marker_prefix(head_midline, tail_midline) == "", "Mid-line prefix should be rejected"
+
+    # Whole-head-prefix case: entire head is the prefix (file starts with heading)
+    head_whole = b"## Resp"
+    tail_whole = b"onse\nbody"
+    assert _split_response_marker_prefix(head_whole, tail_whole) == "## Resp", "Whole-head prefix should be accepted"
+
+    # k=1 h1 trap: '#' + ' Response' looks like a split but '#' is mid-line in "issue #"
+    head_trap = b"issue #"
+    tail_trap = b" Response\nbody"
+    assert _split_response_marker_prefix(head_trap, tail_trap) == "", "Mid-line # in 'issue #' should be rejected"
+
+    # Legit h1 single-# case at line start
+    head_h1 = b"text\n#"
+    tail_h1 = b" Response\nbody"
+    assert _split_response_marker_prefix(head_h1, tail_h1) == "#", "Legit h1 newline prefix should be accepted"
