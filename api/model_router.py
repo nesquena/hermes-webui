@@ -9,7 +9,6 @@ every public function degrades to a clear "not installed" response.
 
 from __future__ import annotations
 
-import inspect
 import logging
 from pathlib import Path
 
@@ -146,6 +145,10 @@ def recommend(text: str, message_count: int = 0, session_id: str | None = None) 
 
     Enforces the settings master switch on the backend: when it is off, no
     recommendation is produced even if model-policy.json has "enabled": true.
+
+    model-scheduler v0.2.1 supports the `session_id` keyword directly, so it
+    is passed through without signature probing. None/empty session_id means
+    the library does not add the field to the recommendation result.
     """
     if not _master_enabled():
         return _degraded("model scheduler disabled")
@@ -158,16 +161,7 @@ def recommend(text: str, message_count: int = 0, session_id: str | None = None) 
         messages = 0
     session_id = str(session_id or "") or None
     try:
-        kwargs = {"message_count": messages}
-        if session_id:
-            # Newer model-scheduler accepts session_id; older versions only
-            # accept message_count. Pass it only when the signature allows.
-            try:
-                if "session_id" in inspect.signature(ms.recommend_for_session).parameters:
-                    kwargs["session_id"] = session_id
-            except (TypeError, ValueError):
-                pass
-        return ms.recommend_for_session(text, **kwargs)
+        return ms.recommend_for_session(text, message_count=messages, session_id=session_id)
     except Exception:
         logger.exception("model-scheduler recommend failed")
         return _degraded("recommendation unavailable")
@@ -187,10 +181,13 @@ def record_failure(model: str, provider: str | None = None) -> None:
 def to_upstream_model_key(model: str, provider: str) -> str:
     """Convert scheduler {model, provider} to the WebUI model-selector value.
 
-    The WebUI's model selector uses `provider/model` values (e.g.
-    `openai/gpt-5.4-mini`), while the scheduler uses `id@provider`. This
-    helper produces the value that `$('modelSelect')` expects.
+    Thin forwarding to model-scheduler v0.2.1 `format_selector_key`
+    (`provider/model`). When the library is not installed, falls back to the
+    same inline `provider/model` conversion so the helper never raises.
     """
+    ms = _load_lib()
+    if ms is not None:
+        return ms.format_selector_key(model, provider)
     model = str(model or "").strip()
     provider = str(provider or "").strip()
     if not model:
@@ -201,7 +198,15 @@ def to_upstream_model_key(model: str, provider: str) -> str:
 
 
 def parse_upstream_model_key(value: str) -> tuple[str, str | None]:
-    """Inverse of to_upstream_model_key: `provider/model` -> (model, provider)."""
+    """Inverse of to_upstream_model_key: `provider/model` -> (model, provider).
+
+    Thin forwarding to model-scheduler v0.2.1 `parse_selector_key`. When the
+    library is not installed, falls back to the same inline partition("/")
+    logic so the helper never raises.
+    """
+    ms = _load_lib()
+    if ms is not None:
+        return ms.parse_selector_key(value)
     value = str(value or "").strip()
     if not value:
         return "", None
