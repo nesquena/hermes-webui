@@ -1616,12 +1616,21 @@ async function send(){
   // /api/chat/start 仍必须发往发起会话，而不是新切换的会话。
   const activeSid=S.session.session_id;
   _sendInProgressSid=activeSid;
+  const sessionAtSend=S.session; // 引用捕获（不是复制），用于 await 后 fail-closed 守卫
 
   // Model scheduler: 若开关启用（设置总开关 + composer Auto），发送前获取
   // 推荐并应用到模型下拉。该调用不阻塞发送，失败保持当前模型。
   // 此 await 已从 send() 开头移到会话锁定之后（Greptile P1）。
   if(typeof window.ModelRouter!=='undefined'&&window.ModelRouter&&typeof window.ModelRouter.beforeSend==='function'){
     try{await window.ModelRouter.beforeSend(text);}catch(_e){}
+  }
+
+  // Greptile: await 期间用户切换会话 → 中止本次发送（fail closed），
+  // 避免后续代码用新会话的全局 S 状态发送旧会话的消息。
+  if(S.session!==sessionAtSend||S.session.session_id!==activeSid){
+    _sendInProgress=false;_sendInProgressSid=null;
+    if(typeof showToast==='function') showToast('Conversation switched while sending; message not sent.',2500);
+    return;
   }
 
   // Salvage of #4750 (@harryazj): capture the composer text and clear the
