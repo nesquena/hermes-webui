@@ -63,6 +63,22 @@ def _records(page):
     return page.evaluate("""async () => (await (await navigator.serviceWorker.ready).getNotifications({tag:'hermes-session-6673'})).map(n => ({id:n.data.eventId, tag:n.tag, renotify:n.renotify, url:n.data.url}))""")
 
 
+def _owner_row(page, event_id: str):
+    return page.evaluate("""
+      async eventId => new Promise((resolve, reject) => {
+        const request = indexedDB.open('hermes-notifications', 1);
+        request.onerror = () => reject(request.error || new Error('owner db open failed'));
+        request.onsuccess = () => {
+          const db = request.result;
+          const tx = db.transaction('event-identities', 'readonly');
+          const get = tx.objectStore('event-identities').get(['stream-6673', eventId]);
+          get.onerror = () => reject(get.error || new Error('owner row read failed'));
+          get.onsuccess = () => resolve(get.result || null);
+        };
+      })
+    """, event_id)
+
+
 def _observe_fallback_notifications(page, *, disable_constructor: bool = False, disable_worker_channel: bool = False, reject_first_registration: bool = False) -> None:
     page.evaluate("""
       async ({disableConstructor, disableWorkerChannel, rejectFirstRegistration}) => {
@@ -278,8 +294,42 @@ def main() -> int:
             raise AssertionError({"next_event": records})
         if not all(record["url"].startswith(BROWSER_BASE + "/") for record in records):
             raise AssertionError({"click_data": records})
-        if "indexedDB.open(" not in source or "hermes-notification-failures" not in source:
+        if "indexedDB.open(" not in source or "NOTIFICATION_OWNER_LEASE_MS" not in source or "BroadcastChannel" in source:
             raise AssertionError({"served_source": "page notification owner is absent"})
+        exact_expired_id = "stream-6673:browser-exact-expired-lease"
+        page_a.evaluate("""
+          async eventId => {
+            const registration = await navigator.serviceWorker.getRegistration();
+            await registration.__issue6673NativeShowNotification('Done', {
+              body: 'body', tag: 'hermes-session-6673', renotify: true,
+              data: {eventId, url: location.href},
+            });
+            await new Promise((resolve, reject) => {
+              const request = indexedDB.open('hermes-notifications', 1);
+              request.onerror = () => reject(request.error || new Error('owner db open failed'));
+              request.onsuccess = () => {
+                const db = request.result;
+                const tx = db.transaction('event-identities', 'readwrite');
+                tx.objectStore('event-identities').put({
+                  streamId: 'stream-6673', lastEventId: eventId, state: 'pending',
+                  phase: 'presenting', token: 'browser-expired-token', expiresAt: Date.now() - 1,
+                });
+                tx.oncomplete = resolve;
+                tx.onerror = () => reject(tx.error || new Error('owner seed failed'));
+              };
+            });
+          }
+        """, exact_expired_id)
+        _observe_fallback_notifications(page_a, disable_constructor=True, disable_worker_channel=True)
+        _emit(page_a, exact_expired_id)
+        _wait_for_activity(page_a)
+        exact_expired_lease = {
+            "registration": page_a.evaluate("() => window.__issue6673RegistrationShowCount"),
+            "records": [record for record in _records(page_a) if record["id"] == exact_expired_id],
+            "row": _owner_row(page_a, exact_expired_id),
+        }
+        if exact_expired_lease["registration"] != 0 or len(exact_expired_lease["records"]) != 1:
+            raise AssertionError({"exact_expired_lease": exact_expired_lease})
         remaining_databases = page_a.evaluate("async () => (await indexedDB.databases()).map(item => item.name).filter(Boolean)")
         if "hermes-notifications" not in remaining_databases:
             raise AssertionError({"served_databases": remaining_databases})
@@ -296,6 +346,7 @@ def main() -> int:
             "registration_only": registration_only,
             "degraded_two_tab": degraded_two_tab,
             "activation_transition": activation_transition,
+            "exact_expired_lease": exact_expired_lease,
             "databases_before_rebuild": databases,
             "records": records,
         }

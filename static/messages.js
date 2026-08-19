@@ -9128,19 +9128,8 @@ const _NOTIFICATION_IDENTITY_MAX_LENGTH=512;
 const _NOTIFICATION_OWNER_DB='hermes-notifications';
 const _NOTIFICATION_OWNER_STORE='event-identities';
 const _NOTIFICATION_OWNER_VERSION=1;
-const _NOTIFICATION_OWNER_PENDING_TTL_MS=10000;
-const _notificationFailedPageKeys=new Map();
-let _notificationFailureChannel=null;
-function _ensureNotificationFailureChannel(){
-  if(_notificationFailureChannel||typeof window.BroadcastChannel!=='function')return;
-  try{
-    _notificationFailureChannel=new window.BroadcastChannel('hermes-notification-failures');
-    _notificationFailureChannel.onmessage=event=>{
-      if(event&&event.data&&event.data.type==='failed'&&typeof event.data.key==='string'&&typeof event.data.token==='string') _notificationFailedPageKeys.set(event.data.key,event.data.token);
-    };
-  }catch(_error){ }
-}
-_ensureNotificationFailureChannel();
+const NOTIFICATION_PRESENT_DEADLINE_MS=2000;
+const NOTIFICATION_OWNER_LEASE_MS=NOTIFICATION_PRESENT_DEADLINE_MS*4;
 function _captureNotificationEventIdentity(streamId,event,payload){
   const lastEventId=String(event&&event.lastEventId||'');
   const deliveryEventId=String(payload&&payload.notification_event_id||'');
@@ -9167,7 +9156,7 @@ function _registrationAfterNotificationTransition(previous){
   if(!navigator.serviceWorker||typeof navigator.serviceWorker.getRegistration!=='function') return Promise.resolve(null);
   const previousActive=previous&&previous.active?previous.active:previous;
   return new Promise(resolve=>{
-    const deadline=Date.now()+2000;
+    const deadline=Date.now()+NOTIFICATION_PRESENT_DEADLINE_MS;
     const check=()=>{
       const remaining=deadline-Date.now();
       if(remaining<=0){resolve(null);return;}
@@ -9221,7 +9210,7 @@ function _presentNotification(active,title,opts,identity){
         finish(status||'unavailable');
       };
       if(typeof channel.port1.start==='function')channel.port1.start();
-      timer=setTimeout(()=>finish('ambiguous'),2000);
+      timer=setTimeout(()=>finish('ambiguous'),NOTIFICATION_PRESENT_DEADLINE_MS);
       active.postMessage({
         type:'hermes.notification.present',
         protocolVersion:1,
@@ -9235,17 +9224,6 @@ function _presentNotification(active,title,opts,identity){
   });
 }
 function _notificationOwnerKey(identity){return [identity.streamId,identity.lastEventId];}
-function _notificationFailedPageKey(identity){return JSON.stringify(_notificationOwnerKey(identity));}
-function _recordFailedPageNotification(identity,token){
-  const key=_notificationFailedPageKey(identity);
-  const failureToken=String(token||'');
-  _notificationFailedPageKeys.set(key,failureToken);
-  try{
-    if(typeof window.BroadcastChannel!=='function')return;
-    _ensureNotificationFailureChannel();
-    _notificationFailureChannel.postMessage({type:'failed',key,token:failureToken});
-  }catch(_error){ }
-}
 function _notificationOwnerStorageUnavailable(){
   const error=new Error('notification owner storage unavailable');
   error._notificationOwnerStorageUnavailable=true;
@@ -9260,60 +9238,47 @@ function _openNotificationOwnerDb(){
       try{if(!request.result.objectStoreNames.contains(_NOTIFICATION_OWNER_STORE)) request.result.createObjectStore(_NOTIFICATION_OWNER_STORE,{keyPath:['streamId','lastEventId']});}catch(error){reject(error);}
     };
     request.onsuccess=()=>resolve(request.result);
-    request.onerror=()=>reject(request.error||new Error('notification owner storage failed'));
-    request.onblocked=()=>reject(new Error('notification owner storage blocked'));
+    request.onerror=()=>reject(_notificationOwnerStorageUnavailable());
+    request.onblocked=()=>reject(_notificationOwnerStorageUnavailable());
+  }).catch(error=>{
+    if(error&&error._notificationOwnerStorageUnavailable)throw error;
+    throw _notificationOwnerStorageUnavailable();
   });
 }
-function _claimPageNotification(identity){
+function _notificationOwnerToken(){
+  return `${Date.now()}:${Math.random().toString(36).slice(2)}`;
+}
+function _leasePageNotification(identity){
   const key=_notificationOwnerKey(identity);
-  const token=`${Date.now()}:${Math.random().toString(36).slice(2)}`;
+  const token=_notificationOwnerToken();
   return _openNotificationOwnerDb().then(db=>new Promise(resolve=>{
     let settled=false;
-    const finish=status=>{if(!settled){settled=true;try{db.close();}catch(_error){ }resolve({status,token});}};
+    let lease=null;
+    const finish=(status,details={})=>{if(!settled){settled=true;try{db.close();}catch(_error){ }resolve({status,token,...details});}};
     let tx;
     try{
       tx=db.transaction(_NOTIFICATION_OWNER_STORE,'readwrite');
       const store=tx.objectStore(_NOTIFICATION_OWNER_STORE);
       const read=store.get(key);
-      read.onerror=()=>finish('ambiguous');
+      read.onerror=()=>finish('unavailable');
       read.onsuccess=()=>{
         const current=read.result;
+        const now=Date.now();
         if(current&&current.state==='delivered'){finish('duplicate');return;}
-        const failedToken=_notificationFailedPageKeys.get(_notificationFailedPageKey(identity));
-        const failed=current&&current.state==='pending'&&current.token===failedToken;
-        if(current&&current.state==='pending'&&!failed&&(
-          current.phase!=='claimed'||Number(current.expiresAt)>Date.now()
-        )){finish('ambiguous');return;}
-        try{store.put({streamId:identity.streamId,lastEventId:identity.lastEventId,state:'pending',phase:'claimed',token,expiresAt:Date.now()+_NOTIFICATION_OWNER_PENDING_TTL_MS});}
-        catch(_error){finish('ambiguous');}
+        const expiresAt=Number(current&&current.expiresAt);
+        const peerLease=current&&current.state==='pending'&&
+          (current.phase==='claimed'||current.phase==='presenting')&&
+          Number.isFinite(expiresAt)&&expiresAt>now;
+        if(peerLease){finish('defer',{expiresAt});return;}
+        lease={streamId:identity.streamId,lastEventId:identity.lastEventId,state:'pending',phase:'presenting',token,expiresAt:now+NOTIFICATION_OWNER_LEASE_MS};
+        try{store.put(lease);}
+        catch(_error){finish('unavailable');}
       };
-      tx.oncomplete=()=>{if(!settled){_notificationFailedPageKeys.delete(_notificationFailedPageKey(identity));finish('claimed');}};
-      tx.onerror=()=>finish('ambiguous');
-      tx.onabort=()=>finish('ambiguous');
-    }catch(_error){finish('ambiguous');}
-  }));
-}
-function _markPageNotificationDisplaying(identity,token){
-  const key=_notificationOwnerKey(identity);
-  return _openNotificationOwnerDb().then(db=>new Promise(resolve=>{
-    let settled=false;
-    const finish=ok=>{if(!settled){settled=true;try{db.close();}catch(_error){ }resolve(!!ok);}};
-    try{
-      const tx=db.transaction(_NOTIFICATION_OWNER_STORE,'readwrite');
-      const store=tx.objectStore(_NOTIFICATION_OWNER_STORE);
-      const read=store.get(key);
-      read.onerror=()=>finish(false);
-      read.onsuccess=()=>{
-        const current=read.result;
-        if(!current||current.state!=='pending'||current.token!==token){finish(false);return;}
-        try{store.put({...current,phase:'displaying',expiresAt:0});}
-        catch(_error){finish(false);}
-      };
-      tx.oncomplete=()=>finish(true);
-      tx.onerror=()=>finish(false);
-      tx.onabort=()=>finish(false);
-    }catch(_error){finish(false);}
-  })).catch(()=>false);
+      tx.oncomplete=()=>{if(lease&&!settled)finish('lease', {lease});};
+      tx.onerror=()=>finish('unavailable');
+      tx.onabort=()=>finish('unavailable');
+    }catch(_error){finish('unavailable');}
+  })).catch(()=>({status:'unavailable',token}));
 }
 function _settlePageNotification(identity,token,state){
   const key=_notificationOwnerKey(identity);
@@ -9330,8 +9295,8 @@ function _settlePageNotification(identity,token,state){
         if(!current||current.state!=='pending'||current.token!==token){finish(false);return;}
         try{
           if(state==='delivered') store.put({...current,state,phase:'delivered',expiresAt:0});
-          else if(state==='failed') store.put({...current,state:'failed',phase:'failed',expiresAt:0});
-          else store.delete(key);
+          else if(state==='released') store.delete(key);
+          else finish(false);
         }catch(_error){finish(false);}
       };
       tx.oncomplete=()=>finish(true);
@@ -9341,19 +9306,7 @@ function _settlePageNotification(identity,token,state){
   })).catch(()=>false);
 }
 function _releasePageNotification(identity,token){
-  let attempts=0;
-  const release=()=>_settlePageNotification(identity,token,'released').catch(()=>false).then(ok=>{
-    if(ok){_notificationFailedPageKeys.delete(_notificationFailedPageKey(identity));return true;}
-    if(attempts>=2){
-      return _settlePageNotification(identity,token,'failed').then(marked=>{
-        if(marked)_notificationFailedPageKeys.delete(_notificationFailedPageKey(identity));
-        return marked;
-      }).catch(()=>false);
-    }
-    attempts+=1;
-    return release();
-  });
-  return release();
+  return _settlePageNotification(identity,token,'released').catch(()=>false);
 }
 function _displayedNotificationMatches(reg,opts,identity){
   if(!reg||typeof reg.getNotifications!=='function') return Promise.resolve(false);
@@ -9371,24 +9324,72 @@ function _reconcileWorkerTimeout(active,reg,opts,identity,title,body){
     );
   });
 }
+function _presentPageNotificationLease(title,body,opts,identity,reg,lease){
+  return _displayedNotificationMatches(reg,opts,identity).then(displayed=>{
+    if(displayed){
+      return _releasePageNotification(identity,lease.token).then(()=> 'duplicate');
+    }
+    return _presentNotificationLocally(reg,title,opts).then(()=>
+      _settlePageNotification(identity,lease.token,'delivered').then(()=> 'shown')
+    ).catch(()=>_releasePageNotification(identity,lease.token).then(()=> 'ambiguous'));
+  }).catch(()=>_releasePageNotification(identity,lease.token).then(()=> 'ambiguous'));
+}
+function _presentWithoutPageLease(title,body,opts,identity,reg){
+  return _displayedNotificationMatches(reg,opts,identity).then(displayed=>
+    displayed?'duplicate':_presentNotificationLocally(reg,title,opts).then(()=> 'shown')
+  ).catch(()=> 'ambiguous');
+}
+function _displayedNotificationMatchesBounded(reg,opts,identity,timeoutMs){
+  if(!reg||typeof reg.getNotifications!=='function') return Promise.resolve(false);
+  return Promise.race([
+    _displayedNotificationMatches(reg,opts,identity).catch(()=>false),
+    new Promise(resolve=>setTimeout(()=>resolve(false),Math.max(0,timeoutMs)))
+  ]);
+}
+function _retryPageNotificationAfterLease(title,body,opts,identity,reg){
+  return _displayedNotificationMatchesBounded(reg,opts,identity,NOTIFICATION_PRESENT_DEADLINE_MS).then(displayed=>{
+    if(displayed)return 'duplicate';
+    return _leasePageNotification(identity).then(lease=>{
+      if(lease.status==='duplicate')return 'duplicate';
+      if(lease.status==='unavailable')return _presentWithoutPageLease(title,body,opts,identity,reg);
+      if(lease.status!=='lease')return 'ambiguous';
+      return _presentPageNotificationLease(title,body,opts,identity,reg,lease);
+    });
+  }).catch(()=> 'ambiguous');
+}
+function _awaitPageNotificationLease(title,body,opts,identity,reg,expiresAt){
+  const deadline=Number(expiresAt);
+  const retry=()=>_retryPageNotificationAfterLease(title,body,opts,identity,reg);
+  if(!Number.isFinite(deadline))return Promise.resolve('ambiguous');
+  if(!reg||typeof reg.getNotifications!=='function'){
+    return new Promise(resolve=>setTimeout(resolve,Math.max(0,deadline-Date.now()))).then(retry);
+  }
+  const wait=()=>_displayedNotificationMatchesBounded(reg,opts,identity,Math.min(50,Math.max(0,deadline-Date.now()))).then(displayed=>{
+    if(displayed)return 'duplicate';
+    const remaining=deadline-Date.now();
+    if(remaining<=0)return retry();
+    return new Promise(resolve=>setTimeout(resolve,Math.min(50,remaining))).then(wait);
+  }).catch(()=>{
+    const remaining=deadline-Date.now();
+    if(remaining<=0)return retry();
+    return new Promise(resolve=>setTimeout(resolve,Math.min(50,remaining))).then(wait);
+  });
+  return wait();
+}
 function _deliverPageNotification(title,body,opts,identity,reg){
   return _displayedNotificationMatches(reg,opts,identity).then(displayed=>{
     if(displayed)return 'duplicate';
-    return _claimPageNotification(identity).then(claim=>{
-      if(claim.status!=='claimed')return claim.status;
-      return _markPageNotificationDisplaying(identity,claim.token).then(marked=>{
-        if(!marked)return 'ambiguous';
-        return _presentNotificationLocally(reg,title,opts).then(()=>
-          _settlePageNotification(identity,claim.token,'delivered').then(ok=>ok?'shown':'ambiguous')
-        ).catch(error=>{
-          _recordFailedPageNotification(identity,claim.token);
-          return _releasePageNotification(identity,claim.token).then(()=>{throw error;});
-        });
-      });
+    return _leasePageNotification(identity).then(lease=>{
+      if(lease.status==='duplicate')return 'duplicate';
+      if(lease.status==='defer')return _awaitPageNotificationLease(title,body,opts,identity,reg,lease.expiresAt);
+      if(lease.status==='unavailable')return _presentWithoutPageLease(title,body,opts,identity,reg);
+      if(lease.status!=='lease')return 'ambiguous';
+      return _presentPageNotificationLease(title,body,opts,identity,reg,lease);
     });
   }).catch(error=>{
-    if(!error||!error._notificationOwnerStorageUnavailable)return 'ambiguous';
-    return _presentNotificationLocally(reg,title,opts).catch(()=> 'ambiguous');
+    return error&&error._notificationOwnerStorageUnavailable
+      ? _presentWithoutPageLease(title,body,opts,identity,reg)
+      : 'ambiguous';
   });
 }
 function _showPwaNotification(title,body,options={}){

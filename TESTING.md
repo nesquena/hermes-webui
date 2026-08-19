@@ -94,24 +94,31 @@ that breaks the page for everyone).
 ## Repeat notification ownership gate (#6673)
 
 `tests/browser_issue6673_service_worker.py` serves the real build, exercises a
-handler-less worker update window, and uses two controlled pages. The pages invoke
+handler-less worker update window, and uses controlled pages. The pages invoke
 the production `attachLiveStream()` listener with a boundary EventSource, so the
 gate covers listener, sender, worker presenter, displayed-record lookup, and
 click-data composition. It checks registration-only delivery with the page
 constructor unavailable, constructor-only delivery with service workers blocked,
 worker activation, exact same-event suppression, distinct-event re-alert with
-`renotify:true`, degraded two-tab delivery, and the page owner claim. Degraded
-two-tab delivery must produce exactly one registration display; zero or
-duplicate delivery fails the gate. A forced registration rejection during a
-worker transition must retry through the newly activated registration. Journal-less frames carry no durable SSE id;
-notification-producing payloads use a bounded delivery-only identity without
-advancing replay state.
+`renotify:true`, degraded two-tab delivery, and expired-lease displayed-record
+precedence against the served registration. Degraded two-tab delivery must
+produce exactly one registration display; zero or duplicate delivery fails the
+gate. A forced registration rejection during a worker transition must retry
+through the newly activated registration. The deterministic teardown proof
+forces presentation and release settlement failure, closes the owner context,
+and verifies fresh-context recovery; the native browser gate covers the
+registration-owned displayed-record side of that contract. Journal-less
+frames carry no durable SSE id; notification-producing payloads use a bounded
+delivery-only identity without advancing replay state.
 
-The browser owns the native display boundary. The page claim prevents two
-degraded tabs from both starting an eligible display, while `displaying` keeps
-settlement uncertainty fail closed. The worker suppresses only an exact event
-id in the browser's currently displayed records; all other eligible fallback
-displays use the registration-first presenter.
+The browser owns the native display boundary. The page's finite `presenting`
+lease prevents concurrent degraded tabs from both starting an eligible display
+for the lease window, while browser-owned displayed records outrank lease
+expiry. Failed settlement remains recoverable, and a bounded duplicate is
+accepted when a constructor display cannot be observed by the browser or
+durably settled. The worker suppresses only an exact event id in the browser's
+currently displayed records; all other eligible fallback displays use the
+registration-first presenter.
 
 ```bash
 python tests/browser_issue6673_service_worker.py

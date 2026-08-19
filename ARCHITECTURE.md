@@ -130,14 +130,26 @@ deduplication. Journal-less frames carry no durable SSE id. Notification click
 routing remains owned by the existing `notificationclick` handler.
 
 The page uses a small IndexedDB owner record only for the degraded path where a
-service worker cannot conclusively present the event. A claim is marked
-`displaying` before the registration-first presentation, becomes `delivered`
-after success, and stays fail closed when storage or displayed-record lookup is
-ambiguous. Confirmed presentation failure releases the claim so another page
-can retry. Missing owner storage is the only proven-unavailable case that uses
-one direct constructor attempt. The worker's displayed-record lookup remains
-the primary duplicate authority, and permission, visibility, and
-notification-enabled gates still run before this router.
+service worker cannot conclusively present the event. The record is an advisory
+`presenting` lease with a finite expiry, or a terminal `delivered` record after
+successful presentation. A transaction returns `duplicate` for a delivered
+row, `defer` only for an unexpired peer lease, and replaces expired or legacy
+transient rows with a new token and lease. Every settlement checks that token,
+so a late page cannot release or deliver a replacement lease. Exact
+browser-owned displayed records are checked before leasing, while waiting, and
+before presentation; they outrank lease expiry. Owner-storage failure means
+coordination is unavailable, not that the notification displayed, so the
+existing registration-first presenter remains the fallback. Permission,
+visibility, and notification-enabled gates still run before this router.
+
+Presentation and settlement are separate browser boundaries. A successful
+presentation returns `shown` even when the terminal settlement write fails,
+leaving only the finite lease for later recovery. A rejected presentation
+returns `ambiguous`; a failed release cannot create a permanent suppression
+record because the lease expires. When a constructor notification may have
+displayed but no browser-owned record or durable settlement exists, one bounded
+duplicate is accepted after lease expiry. Permanent suppression is not an
+accepted outcome.
 
 State directory (runtime data, separate from source):
 

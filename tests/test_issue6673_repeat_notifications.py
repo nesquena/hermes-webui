@@ -68,6 +68,7 @@ console.log(JSON.stringify({{
 def test_transition_registration_lookup_is_deadline_bounded():
     helper = extract_function(MESSAGES_JS, "_registrationAfterNotificationTransition")
     script = f"""
+const NOTIFICATION_PRESENT_DEADLINE_MS = 2000;
 const _registrationAfterNotificationTransition = {helper};
 const navigator = {{serviceWorker: {{getRegistration: () => new Promise(() => {{}})}}}};
 const started = Date.now();
@@ -114,9 +115,9 @@ def test_registration_first_presenter_covers_rows_one_through_thirty_four():
         {"name": "29-sender-denied", "sender": True, "permission": "denied", "expected": "blocked", "registration": 0, "direct": 0},
         {"name": "30-registration-present-missing-indexeddb", "worker": "invalid", "channel": False, "indexedDBAvailable": False, "constructorAvailable": False, "expected": "shown", "registration": 1, "direct": 0},
         {"name": "31-no-worker-no-indexeddb-boundary", "channel": False, "indexedDBAvailable": False, "registrationAvailable": False, "constructorAvailable": False, "ownerBoundary": "no-shared-owner", "expected": "ambiguous", "registration": 0, "direct": 1},
-        {"name": "32-owner-storage-request-error", "worker": "invalid", "indexedDBMode": "request-error", "expected": "ambiguous", "registration": 0, "direct": 0},
-        {"name": "33-owner-storage-upgrade-abort", "worker": "invalid", "indexedDBMode": "upgrade-abort", "expected": "ambiguous", "registration": 0, "direct": 0},
-        {"name": "34-owner-storage-blocked", "worker": "invalid", "indexedDBMode": "blocked", "expected": "ambiguous", "registration": 0, "direct": 0},
+        {"name": "32-owner-storage-request-error", "worker": "invalid", "indexedDBMode": "request-error", "expected": "shown", "registration": 1, "direct": 0},
+        {"name": "33-owner-storage-upgrade-abort", "worker": "invalid", "indexedDBMode": "upgrade-abort", "expected": "shown", "registration": 1, "direct": 0},
+        {"name": "34-owner-storage-blocked", "worker": "invalid", "indexedDBMode": "blocked", "expected": "shown", "registration": 1, "direct": 0},
     ]
     notification_region = _notification_region()
     driver = textwrap.dedent(
@@ -124,6 +125,7 @@ def test_registration_first_presenter_covers_rows_one_through_thirty_four():
         async function runCase(config) {
           if (config.twoContexts) {
             const ownerRows = new Map();
+            const displayed = [];
             const transactionQueue = [];
             let transactionActive = false;
             const ownerKey = key => JSON.stringify(key);
@@ -172,8 +174,8 @@ def test_registration_first_presenter_covers_rows_one_through_thirty_four():
             const makeContext = state => {
               const registration = {
                 active: {postMessage() {}},
-                getNotifications: async () => [],
-                showNotification: async () => { state.registrationDisplays += 1; },
+                getNotifications: async () => displayed,
+                showNotification: async (_title, options) => { state.registrationDisplays += 1; displayed.push({data: {eventId: options?.data?.eventId}}); },
               };
               const Notification = function () {
                 state.constructorAttempts += 1;
@@ -338,14 +340,260 @@ def test_registration_first_presenter_covers_rows_one_through_thirty_four():
         if expected.get("ownerBoundary"):
             assert observed["ownerBoundary"] == expected["ownerBoundary"], observed
         if expected.get("twoContexts"):
-            assert sorted(observed["statuses"]) == ["ambiguous", "shown"], observed
+            assert sorted(observed["statuses"]) == ["duplicate", "shown"], observed
             assert len(observed["ownerEvents"]) == 1, observed
             assert observed["ownerEvents"][0]["streamId"] == "stream-6673", observed
             assert observed["ownerEvents"][0]["lastEventId"] == "stream-6673:1", observed
             assert observed["ownerEvents"][0]["state"] == "delivered", observed
     assert "indexedDB.open(" in MESSAGES_JS
-    assert "_claimPageNotification" in MESSAGES_JS
-    assert "hermes-notification-failures" in MESSAGES_JS
+    assert "_leasePageNotification" in MESSAGES_JS
+    assert "NOTIFICATION_OWNER_LEASE_MS" in MESSAGES_JS
+    assert "BroadcastChannel" not in MESSAGES_JS
+    assert "_markPageNotificationDisplaying" not in MESSAGES_JS
+
+
+def _run_page_owner_matrix(cases):
+    driver = textwrap.dedent(
+        """
+        const keyOf = key => JSON.stringify(key);
+        function makeContext(config, shared, label) {
+          const {clock, rows, displayed} = shared;
+          const metrics = {ownerOpens: 0, registrationDisplays: 0, constructorDisplays: 0};
+          const shouldReject = Array.isArray(config.rejectLabels) && config.rejectLabels.includes(label);
+          const db = {
+            objectStoreNames: {contains: () => true},
+            close() {},
+            transaction() {
+              if (config.storageMode === 'transaction-error') throw new Error('transaction failed');
+              const tx = {};
+              const store = {
+                get(key) {
+                  const request = {};
+                  queueMicrotask(() => {
+                    if (config.storageMode === 'async-error') { request.onerror?.(); return; }
+                    request.result = rows.get(keyOf(key));
+                    request.onsuccess?.();
+                  });
+                  return request;
+                },
+                put(value) {
+                  if (config.storageMode === 'sync-put-error') throw new Error('put failed');
+                  queueMicrotask(() => {
+                    if (value.phase === 'delivered' && config.failDeliveredWrites > 0) {
+                      config.failDeliveredWrites -= 1;
+                      tx.onerror?.();
+                      return;
+                    }
+                    rows.set(keyOf([value.streamId, value.lastEventId]), value);
+                    tx.oncomplete?.();
+                  });
+                },
+                delete(key) {
+                  queueMicrotask(() => {
+                    if (config.failReleaseWrites > 0) {
+                      config.failReleaseWrites -= 1;
+                      tx.onerror?.();
+                      return;
+                    }
+                    rows.delete(keyOf(key));
+                    tx.oncomplete?.();
+                  });
+                },
+              };
+              tx.objectStore = () => store;
+              return tx;
+            },
+          };
+          const indexedDB = {
+            open() {
+              metrics.ownerOpens += 1;
+              if (config.storageMode === 'sync-open-error') throw new Error('open failed');
+              const request = {};
+              queueMicrotask(() => {
+                if (config.storageMode === 'request-error') { request.error = new Error('request failed'); request.onerror?.(); return; }
+                if (config.storageMode === 'blocked') { request.onblocked?.(); return; }
+                request.result = db;
+                request.onupgradeneeded?.();
+                if (config.storageMode === 'upgrade-abort') { request.error = new Error('upgrade aborted'); request.onerror?.(); return; }
+                request.onsuccess?.();
+              });
+              return request;
+            },
+          };
+          class Port {
+            constructor() { this.peer = null; this.onmessage = null; }
+            postMessage(data) { queueMicrotask(() => this.peer?.onmessage?.({data})); }
+            close() {}
+            start() {}
+          }
+          class MessageChannel {
+            constructor() { this.port1 = new Port(); this.port2 = new Port(); this.port1.peer = this.port2; this.port2.peer = this.port1; }
+          }
+          const workerActive = config.worker === 'capable' ? {
+            scriptURL: 'https://webui.test/sw.js?notification_protocol=1',
+            postMessage(_data, ports) { queueMicrotask(() => ports?.[0]?.postMessage({status: config.workerStatus || 'shown'})); },
+          } : config.worker === 'invalid' ? {scriptURL: 'https://webui.test/sw.js', postMessage() {}} : null;
+          const registration = {
+            active: workerActive,
+            getNotifications: async () => displayed,
+            showNotification: async (_title, options) => {
+              metrics.registrationDisplays += 1;
+              if (shouldReject) throw new Error('registration presentation rejected');
+              displayed.push({data: {eventId: options?.data?.eventId}});
+            },
+          };
+          const Notification = function () {
+            metrics.constructorDisplays += 1;
+            if (shouldReject) throw new Error('constructor presentation rejected');
+            return {};
+          };
+          Notification.permission = 'granted';
+          const timer = (callback, delay) => setTimeout(() => { clock.now += Number(delay) || 0; callback(); }, 0);
+          const windowObject = {
+            MessageChannel: config.worker === 'capable' ? MessageChannel : undefined,
+            indexedDB: config.storageMode === 'missing' ? undefined : indexedDB,
+            Notification,
+            _notificationsEnabled: true,
+          };
+          const context = {
+            Promise, Date: {now: () => clock.now}, Math, JSON, console, setTimeout: timer, clearTimeout, queueMicrotask,
+            Notification, window: windowObject,
+            document: {hidden: false, visibilityState: 'visible', hasFocus: () => true},
+            navigator: {serviceWorker: {getRegistration: () => Promise.resolve(registration)}},
+            location: {origin: 'https://webui.test', href: 'https://webui.test/'},
+            S: {session: {session_id: 'session-6673'}},
+            _sessionUrlForSid: sid => '/?session=' + sid,
+            assistantDisplayName: () => 'Hermes',
+            _isBackgroundedForBrowserNotification: () => false,
+          };
+          vm.createContext(context);
+          vm.runInContext(BLOCK, context);
+          return {context, metrics};
+        }
+        function seedRow(shared, config, identity) {
+          if (config.seed) shared.rows.set(keyOf([identity.streamId, identity.lastEventId]), {...config.seed});
+        }
+        async function runCase(config) {
+          const identity = {streamId: 'stream-6673', lastEventId: config.eventId || ('stream-6673:' + config.name)};
+          const shared = {clock: {now: config.clock || 100000}, rows: new Map(), displayed: []};
+          seedRow(shared, config, identity);
+          if (config.displayed) shared.displayed.push(...config.displayed.map(eventId => ({data: {eventId}})));
+          if (config.kind === 'token') {
+            const first = makeContext(config, shared, 'A');
+            const firstLease = await first.context._leasePageNotification(identity);
+            shared.clock.now += 8001;
+            const second = makeContext(config, shared, 'B');
+            const secondLease = await second.context._leasePageNotification(identity);
+            const staleRelease = await first.context._settlePageNotification(identity, firstLease.token, 'released');
+            const staleDelivered = await first.context._settlePageNotification(identity, firstLease.token, 'delivered');
+            return {name: config.name, firstLease, secondLease, staleRelease, staleDelivered, row: shared.rows.get(keyOf([identity.streamId, identity.lastEventId])), ownerOpens: first.metrics.ownerOpens + second.metrics.ownerOpens};
+          }
+          if (config.kind === 'teardown') {
+            const first = makeContext(config, shared, 'A');
+            const firstStatus = await first.context._showPwaNotification('Hermes', 'body', {eventIdentity: identity});
+            const firstRow = shared.rows.get(keyOf([identity.streamId, identity.lastEventId]));
+            first.context.window = null;
+            shared.clock.now += 8001;
+            const second = makeContext(config, shared, 'B');
+            const secondStatus = await second.context._showPwaNotification('Hermes', 'body', {eventIdentity: identity});
+            return {name: config.name, firstStatus, secondStatus, firstDisplays: first.metrics.constructorDisplays + first.metrics.registrationDisplays, secondDisplays: second.metrics.constructorDisplays + second.metrics.registrationDisplays, firstRow, row: shared.rows.get(keyOf([identity.streamId, identity.lastEventId])), ownerOpens: first.metrics.ownerOpens + second.metrics.ownerOpens};
+          }
+          if (config.kind === 'settlement') {
+            const first = makeContext(config, shared, 'A');
+            const firstStatus = await first.context._showPwaNotification('Hermes', 'body', {eventIdentity: identity});
+            const firstRow = shared.rows.get(keyOf([identity.streamId, identity.lastEventId]));
+            shared.clock.now += 8001;
+            const second = makeContext(config, shared, 'B');
+            const secondStatus = await second.context._showPwaNotification('Hermes', 'body', {eventIdentity: identity});
+            return {name: config.name, firstStatus, secondStatus, firstDisplays: first.metrics.constructorDisplays, secondDisplays: second.metrics.constructorDisplays, firstRow, row: shared.rows.get(keyOf([identity.streamId, identity.lastEventId])), ownerOpens: first.metrics.ownerOpens + second.metrics.ownerOpens};
+          }
+          if (config.kind === 'wait') {
+            const started = globalThis.Date.now();
+            const context = makeContext(config, shared, 'A');
+            const status = await context.context._showPwaNotification('Hermes', 'body', {eventIdentity: identity});
+            return {name: config.name, status, elapsed: globalThis.Date.now() - started, displays: context.metrics.registrationDisplays, row: shared.rows.get(keyOf([identity.streamId, identity.lastEventId])), ownerOpens: context.metrics.ownerOpens};
+          }
+          const context = makeContext(config, shared, 'A');
+          const status = config.kind === 'worker' ? await context.context._showPwaNotification('Hermes', 'body', {eventIdentity: identity}) : await context.context._showPwaNotification('Hermes', 'body', {eventIdentity: identity});
+          return {name: config.name, status, registrationDisplays: context.metrics.registrationDisplays, constructorDisplays: context.metrics.constructorDisplays, ownerOpens: context.metrics.ownerOpens, row: shared.rows.get(keyOf([identity.streamId, identity.lastEventId])), token: shared.rows.get(keyOf([identity.streamId, identity.lastEventId]))?.token};
+        }
+        const results = [];
+        for (const config of CASES) results.push(await runCase(config));
+        console.log(JSON.stringify(results));
+        """
+    )
+    script = f"const vm = require('vm');\nconst BLOCK = {json.dumps(_notification_region())};\nconst CASES = {json.dumps(cases)};\n(async () => {{\n{driver}\n}})().catch(error => {{ console.error(error.stack || error); process.exitCode = 1; }});"
+    return _run_node(script)
+
+
+def test_page_owner_lease_proof_matrix():
+    cases = [
+        {"name": "expired-lease-reclaim", "kind": "expired", "worker": "invalid", "seed": {"streamId": "stream-6673", "lastEventId": "stream-6673:expired-lease", "state": "pending", "phase": "presenting", "token": "old", "expiresAt": 99999}},
+        {"name": "exact-displayed-record-precedence", "kind": "displayed-expired", "worker": "invalid", "displayed": ["stream-6673:exact-displayed-record-precedence"], "seed": {"streamId": "stream-6673", "lastEventId": "stream-6673:exact-displayed-record-precedence", "state": "pending", "phase": "presenting", "token": "old", "expiresAt": 99999}},
+        {"name": "successful-display-settlement-failure", "kind": "settlement", "worker": "none", "failDeliveredWrites": 1},
+        {"name": "late-token-protection", "kind": "token", "worker": "none"},
+        {"name": "bounded-lease-wait", "kind": "wait", "worker": "invalid", "seed": {"streamId": "stream-6673", "lastEventId": "stream-6673:bounded-lease-wait", "state": "pending", "phase": "presenting", "token": "old", "expiresAt": 100025}},
+        {"name": "legacy-displaying-row-migration", "kind": "legacy", "worker": "invalid", "seed": {"streamId": "stream-6673", "lastEventId": "stream-6673:legacy-displaying-row-migration", "state": "pending", "phase": "displaying", "token": "old", "expiresAt": 0}},
+        {"name": "legacy-failed-row-migration", "kind": "legacy", "worker": "invalid", "seed": {"streamId": "stream-6673", "lastEventId": "stream-6673:legacy-failed-row-migration", "state": "failed", "phase": "failed", "token": "old", "expiresAt": 0}},
+        {"name": "worker-shown-no-page-owner", "kind": "worker", "worker": "capable", "workerStatus": "shown"},
+        {"name": "worker-duplicate-no-page-owner", "kind": "worker", "worker": "capable", "workerStatus": "duplicate"},
+    ]
+    results = _run_page_owner_matrix(cases)
+    observed = {item["name"]: item for item in results}
+    expired = observed["expired-lease-reclaim"]
+    assert expired["status"] == "shown" and expired["registrationDisplays"] == 1, expired
+    assert expired["row"]["state"] == "delivered" and expired["row"]["token"] != "old", expired
+    exact = observed["exact-displayed-record-precedence"]
+    assert exact["status"] == "duplicate" and exact["registrationDisplays"] == 0 and exact["ownerOpens"] == 0, exact
+    settlement = observed["successful-display-settlement-failure"]
+    assert settlement["firstStatus"] == "shown" and settlement["firstRow"]["phase"] == "presenting", settlement
+    assert settlement["secondStatus"] == "shown" and settlement["row"]["state"] == "delivered", settlement
+    token = observed["late-token-protection"]
+    assert token["firstLease"]["status"] == "lease" and token["secondLease"]["status"] == "lease", token
+    assert token["staleRelease"] is False and token["staleDelivered"] is False, token
+    assert token["row"]["token"] == token["secondLease"]["token"] and token["row"]["phase"] == "presenting", token
+    waited = observed["bounded-lease-wait"]
+    assert waited["status"] == "shown" and waited["displays"] == 1 and waited["elapsed"] < 1000, waited
+    assert waited["row"]["state"] == "delivered", waited
+    for name in ("legacy-displaying-row-migration", "legacy-failed-row-migration"):
+        legacy = observed[name]
+        assert legacy["status"] == "shown" and legacy["row"]["state"] == "delivered" and legacy["token"] != "old", legacy
+    for name, status in (("worker-shown-no-page-owner", "shown"), ("worker-duplicate-no-page-owner", "duplicate")):
+        worker = observed[name]
+        assert worker["status"] == status and worker["ownerOpens"] == 0 and worker["registrationDisplays"] == 0, worker
+
+
+def test_page_owner_storage_failure_routes_through_presenter():
+    cases = [
+        {"name": "missing", "kind": "storage", "worker": "invalid", "storageMode": "missing"},
+        {"name": "blocked", "kind": "storage", "worker": "invalid", "storageMode": "blocked"},
+        {"name": "request-error", "kind": "storage", "worker": "invalid", "storageMode": "request-error"},
+        {"name": "upgrade-abort", "kind": "storage", "worker": "invalid", "storageMode": "upgrade-abort"},
+        {"name": "async-error", "kind": "storage", "worker": "invalid", "storageMode": "async-error"},
+        {"name": "sync-open-error", "kind": "storage", "worker": "invalid", "storageMode": "sync-open-error"},
+        {"name": "transaction-error", "kind": "storage", "worker": "invalid", "storageMode": "transaction-error"},
+        {"name": "sync-put-error", "kind": "storage", "worker": "invalid", "storageMode": "sync-put-error"},
+    ]
+    results = _run_page_owner_matrix(cases)
+    for observed in results:
+        assert observed["status"] == "shown", observed
+        assert observed["registrationDisplays"] == 1, observed
+        assert observed.get("row") is None, observed
+
+
+def test_page_owner_teardown_reproduction_recovers_on_head():
+    results = _run_page_owner_matrix([{
+        "name": "teardown-reproduction",
+        "kind": "teardown",
+        "worker": "none",
+        "rejectLabels": ["A"],
+        "failReleaseWrites": 1,
+    }])
+    observed = results[0]
+    assert observed["firstStatus"] == "ambiguous", observed
+    assert observed["firstRow"]["phase"] == "presenting" and observed["firstRow"]["expiresAt"] > 0, observed
+    assert observed["secondStatus"] == "shown" and observed["secondDisplays"] == 1, observed
+    assert observed["row"]["state"] == "delivered", observed
 
 
 def test_producers_leave_delivery_frames_without_journal_ids_unkeyed():
