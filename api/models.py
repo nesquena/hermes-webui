@@ -1205,6 +1205,8 @@ class Session:
                  pending_attachments=None,
                  pending_started_at=None,
                  pending_user_source: str=None,
+                 pending_queue_item_id: str | None=None,
+                 pending_queue_client_id: str | None=None,
                  context_messages=None,
                  compression_anchor_visible_idx=None,
                  compression_anchor_message_key=None,
@@ -1290,6 +1292,8 @@ class Session:
         self.pending_attachments = pending_attachments or []
         self.pending_started_at = pending_started_at
         self.pending_user_source = pending_user_source
+        self.pending_queue_item_id = pending_queue_item_id
+        self.pending_queue_client_id = pending_queue_client_id
         self.context_messages = context_messages if isinstance(context_messages, list) else []
         self.compression_anchor_visible_idx = compression_anchor_visible_idx
         self.compression_anchor_message_key = compression_anchor_message_key
@@ -1387,6 +1391,13 @@ class Session:
             )
         if touch_updated_at:
             self.updated_at = time.time()
+        # Queue correlation is meaningful only while this session owns a
+        # pending turn. Clearing it at the persistence boundary prevents stale
+        # queue ids from making startup recovery treat an unsubmitted item as
+        # already started.
+        if not self.active_stream_id and not self.pending_user_message:
+            self.pending_queue_item_id = None
+            self.pending_queue_client_id = None
         # Write metadata fields first so load_metadata_only() can read them
         # without parsing the full messages array (which may be 400KB+).
         # Fields are listed in the order they should appear in the JSON file.
@@ -1397,6 +1408,7 @@ class Session:
             'cache_read_tokens', 'cache_write_tokens',
             'personality', 'active_stream_id',
             'pending_user_message', 'pending_attachments', 'pending_started_at', 'pending_user_source',
+            'pending_queue_item_id', 'pending_queue_client_id',
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
             'compression_anchor_summary', 'pre_compression_snapshot',
             'context_engine', 'compression_anchor_engine', 'compression_anchor_mode',

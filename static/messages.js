@@ -8195,6 +8195,17 @@ function startSessionStream(sid) {
         }
       } catch (_) {}
     });
+    es.addEventListener('session_queue_changed', e => {
+      try {
+        const d = JSON.parse(e.data || '{}');
+        if ((d.session_id || sid) !== sid) return;
+        if (typeof syncBackendSessionQueue === 'function') {
+          void syncBackendSessionQueue(sid).catch(err => {
+            if (typeof showToast === 'function') showToast('Could not refresh queued messages: '+(err&&err.message||err), null, 'error');
+          });
+        }
+      } catch (_) {}
+    });
     // ── Defect B: live-view of server-initiated (Option Z) turns ──────────
     // The drain thread starts the wakeup turn server-side and the server
     // fans a `server_turn_started` {stream_id} frame onto this per-session
@@ -8209,6 +8220,9 @@ function startSessionStream(sid) {
         const evSid = d.session_id || sid;
         const streamId = String(d.stream_id || '');
         if (!streamId || evSid !== sid) return;
+        if (d.queue_item_id && typeof _removeServerQueuedEntry === 'function') {
+          _removeServerQueuedEntry(sid, String(d.queue_item_id), String(d.queue_client_id || ''));
+        }
         // `recovered` marks an on-subscribe replay from the server: the tab
         // (re)connected to /api/session/stream AFTER the original
         // fire-and-forget server_turn_started had already been broadcast, so

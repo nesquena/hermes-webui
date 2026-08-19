@@ -389,16 +389,36 @@ def test_gateway_approval_event_translation():
     assert _gateway_runs_approval_event({}) is None
 
 
-def test_gateway_runs_api_streaming_parses_real_run_events():
+def test_gateway_runs_api_streaming_parses_real_run_events(monkeypatch):
     """The runs-API bridge must parse the real gateway event payloads."""
     from api.config import STREAM_PARTIAL_TEXT, STREAM_REASONING_TEXT
     from api.gateway_chat import _STREAM_RUN_IDS, _run_gateway_runs_api_streaming
 
     events = []
     requests = []
+    external_admissions = []
+    external_marks = []
     stream_id = "sid-real-runs"
     STREAM_PARTIAL_TEXT[stream_id] = ""
     STREAM_REASONING_TEXT[stream_id] = ""
+    from api import session_queue
+
+    monkeypatch.setattr(
+        session_queue,
+        "mark_external_admission",
+        lambda session_id, item_id, local_stream_id, admission_id, **kwargs: external_admissions.append(
+            (session_id, item_id, local_stream_id, admission_id, kwargs, len(requests))
+        )
+        or True,
+    )
+    monkeypatch.setattr(
+        session_queue,
+        "mark_external_run",
+        lambda session_id, item_id, local_stream_id, run_id, **kwargs: external_marks.append(
+            (session_id, item_id, local_stream_id, run_id, kwargs)
+        )
+        or True,
+    )
 
     class _JsonResponse:
         def __init__(self, payload):
@@ -456,6 +476,8 @@ def test_gateway_runs_api_streaming_parses_real_run_events():
                     {"role": "assistant", "content": "earlier reply"},
                 ],
                 body_extras={"provider": "anthropic"},
+                queue_item_id="queue-item-1",
+                queue_attempt_id="attempt-1",
                 put_gateway_event=lambda event, data: events.append((event, data)),
                 cancel_event=threading.Event(),
             )
@@ -474,6 +496,21 @@ def test_gateway_runs_api_streaming_parses_real_run_events():
     assert run_body["provider"] == "anthropic"
     assert run_body["session_id"] == "sess1"
     assert "messages" not in run_body
+    assert len(external_admissions) == 1
+    admission = external_admissions[0]
+    assert admission[:3] == ("sess1", "queue-item-1", stream_id)
+    assert admission[3]
+    assert admission[4] == {"attempt_id": "attempt-1"}
+    assert admission[5] == 0, "external admission must be durable before the POST"
+    assert external_marks == [
+        (
+            "sess1",
+            "queue-item-1",
+            stream_id,
+            "run-abc",
+            {"admission_id": admission[3], "attempt_id": "attempt-1"},
+        )
+    ]
 
     assert final_text == "Hello"
     assert usage["input_tokens"] == 3
@@ -485,6 +522,48 @@ def test_gateway_runs_api_streaming_parses_real_run_events():
     assert events[2] == ("token", {"text": "Hello"})
     import api.route_approvals as approvals
     assert approvals.gateway_pending_mirror("sess1", run_id="run-abc") is None
+
+
+def test_gateway_runs_api_stops_remote_run_when_queue_binding_is_lost(monkeypatch):
+    from api import gateway_chat, session_queue
+
+    stopped = []
+
+    class _JsonResponse:
+        def read(self, _limit=None):
+            return b'{"run_id":"run-orphan"}'
+
+        def __iter__(self):
+            return iter(())
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    monkeypatch.setattr(session_queue, "mark_external_admission", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(session_queue, "mark_external_run", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(gateway_chat, "stop_gateway_run", lambda run_id: stopped.append(run_id) or True)
+
+    with patch("urllib.request.urlopen", return_value=_JsonResponse()):
+        with pytest.raises(RuntimeError, match="lost external run ownership"):
+            gateway_chat._run_gateway_runs_api_streaming(
+                session_id="sess-orphan",
+                msg_text="hi",
+                model="test-model",
+                workspace="/tmp",
+                stream_id="stream-orphan",
+                base_url="http://gw:8642",
+                api_key="secret",
+                prefill_messages=[],
+                body_extras={},
+                queue_item_id="queue-orphan",
+                put_gateway_event=lambda *_args: None,
+                cancel_event=threading.Event(),
+            )
+
+    assert stopped == ["run-orphan"]
 
 
 def test_live_empty_ingress_id_stays_fifo_under_capability_v1():
@@ -1807,16 +1886,16 @@ def test_start_chat_stream_clears_gateway_run_state_when_thread_start_fails(monk
     monkeypatch.setattr(routes, "threading", SimpleNamespace(Thread=_BoomThread))
 
     with patch("api.turn_journal.append_turn_journal_event", return_value={}):
-        with pytest.raises(RuntimeError, match="thread start failed"):
-            routes._start_chat_stream_for_session(
-                session,
-                msg="hi",
-                attachments=[],
-                workspace="/tmp",
-                model="test-model",
-                external_runtime_owned=True,
-            )
+        response = routes._start_chat_stream_for_session(
+            session,
+            msg="hi",
+            attachments=[],
+            workspace="/tmp",
+            model="test-model",
+            external_runtime_owned=True,
+        )
 
+    assert response == {"error": "failed to start agent worker", "_status": 500}
     assert gateway_chat.gateway_run_id_pending(recorded["stream_id"]) is False
     assert recorded["stream_id"] not in getattr(gateway_chat, "_STREAM_RUN_LIFECYCLE", {})
 

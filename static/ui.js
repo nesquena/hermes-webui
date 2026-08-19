@@ -208,6 +208,8 @@ function _getSessionQueue(sid, create=false){
   if(!SESSION_QUEUES[sid]&&create) SESSION_QUEUES[sid]=[];
   return SESSION_QUEUES[sid]||[];
 }
+const _QUEUE_ACK_IN_FLIGHT=new Set();
+function _queueAckKey(sid,clientId){return String(sid||'')+'\n'+String(clientId||'');}
 function _queueStorageKey(sid){
   return 'hermes-queue-'+sid;
 }
@@ -251,15 +253,129 @@ function queueSessionMessage(sid, payload){
   if(!sid||!payload) return 0;
   const q=_getSessionQueue(sid,true);
   // Stamp created_at so the restore path can detect stale entries (agent already responded)
-  const entry={...payload, _queued_at: Date.now()};
+  const entry={...payload, _queued_at: Date.now(), _client_queue_id: (Date.now().toString(36)+'-'+Math.random().toString(36).slice(2))};
   q.push(entry);
   _persistSessionQueueStorage(sid,q);
+  _backendAcknowledgeQueuedMessage(sid, entry);
   return q.length;
+}
+function _queuedEntryHasBrowserOnlyFiles(entry){
+  const files=entry&&Array.isArray(entry.files)?entry.files:[];
+  return files.some(f=>f&&typeof File!=='undefined'&&f instanceof File);
+}
+function _findQueuedEntryByClientId(sid, clientId){
+  const q=_getSessionQueue(sid,false);
+  const idx=q.findIndex(e=>e&&e._client_queue_id===clientId);
+  return {q,idx,entry:idx>=0?q[idx]:null};
+}
+function _findQueuedEntryIndex(queue, target){
+  if(!Array.isArray(queue)||!target)return -1;
+  const serverId=String(target._server_queue_id||'');
+  if(serverId){
+    const index=queue.findIndex(entry=>entry&&String(entry._server_queue_id||'')===serverId);
+    if(index>=0)return index;
+  }
+  const clientId=String(target._client_queue_id||'');
+  if(clientId){
+    const index=queue.findIndex(entry=>entry&&String(entry._client_queue_id||'')===clientId);
+    if(index>=0)return index;
+  }
+  return queue.indexOf(target);
+}
+function _deleteBackendQueuedItem(sid, serverId){
+  if(!sid||!serverId||typeof fetch!=='function')return Promise.resolve(false);
+  return fetch(new URL('api/session/queue/delete',document.baseURI||location.href).href,{
+    method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({session_id:sid,id:serverId}),
+  }).then(async r=>{
+    if(r.ok)return true;
+    let data={};try{data=await r.json();}catch(_){}
+    throw new Error(data.error||'queue_delete_failed');
+  });
+}
+async function _backendAcknowledgeQueuedMessage(sid, entry, attempt=0, recoverPending=false){
+  if(!sid||!entry||entry._server_owned||(entry._server_pending&&!recoverPending))return;
+  const clientId=String(entry._client_queue_id||'');
+  if(!clientId)return;
+  const ackKey=_queueAckKey(sid,clientId);
+  if(_QUEUE_ACK_IN_FLIGHT.has(ackKey))return;
+  if(_queuedEntryHasBrowserOnlyFiles(entry)){
+    entry._server_error='Attachments could not be queued durably; remove this item and resend';
+    _persistSessionQueueStorage(sid,_getSessionQueue(sid,false));
+    delete _queueRenderKeys[sid];updateQueueBadge(sid);
+    return;
+  }
+  const text=String(entry.text||entry.message||entry.content||'').trim();
+  if(!text)return;
+  _QUEUE_ACK_IN_FLIGHT.add(ackKey);
+  entry._server_pending=true;
+  _persistSessionQueueStorage(sid,_getSessionQueue(sid,false));
+  const body={
+    session_id:sid,
+    text,
+    attachments:Array.isArray(entry.attachments)?entry.attachments:[],
+    model:entry.model||'',
+    model_provider:entry.model_provider||null,
+    profile:entry.profile||S.activeProfile||'default',
+    client_queue_id:clientId,
+  };
+  try{
+    const r=await fetch(new URL('api/session/queue',document.baseURI||location.href).href,{
+      method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(body),
+    });
+    let data={};try{data=await r.json();}catch(_){}
+    const ok=r.ok;
+    const found=_findQueuedEntryByClientId(sid,clientId);
+    if(found.idx<0){
+      if(ok&&data&&data.item&&data.item.id)await _deleteBackendQueuedItem(sid,data.item.id).catch(()=>{});
+      return;
+    }
+    if(ok&&data&&data.item&&data.item.id){
+      found.q[found.idx]={...found.entry,_server_pending:false,_server_owned:true,
+        _server_queue_id:data.item.id,_server_state:data.item.state||'queued',_server_error:data.item.error||'',_server_ack_attempts:0};
+    }else{
+      found.q[found.idx]={...found.entry,_server_pending:false,
+        _server_error:(data&&data.error)||'queue_ack_failed',_server_ack_attempts:attempt+1};
+    }
+    _persistSessionQueueStorage(sid,found.q);
+    delete _queueRenderKeys[sid];
+    updateQueueBadge(sid);
+  }catch(_){
+    await syncBackendSessionQueue(sid).catch(()=>{});
+    const found=_findQueuedEntryByClientId(sid,clientId);
+    if(found.idx<0)return;
+    if(found.entry&&found.entry._server_owned)return;
+    found.q[found.idx]={...found.entry,_server_pending:false,_server_error:'queue_ack_failed',_server_ack_attempts:attempt+1};
+    _persistSessionQueueStorage(sid,found.q);
+    delete _queueRenderKeys[sid];
+    updateQueueBadge(sid);
+    if(attempt<2)setTimeout(()=>_backendAcknowledgeQueuedMessage(sid,found.q[found.idx],attempt+1),250*(attempt+1));
+  }finally{
+    _QUEUE_ACK_IN_FLIGHT.delete(ackKey);
+  }
+}
+function _removeServerQueuedEntry(sid, serverId, clientId=''){
+  if(!sid||(!serverId&&!clientId))return false;
+  const q=_getSessionQueue(sid,false);
+  const idx=q.findIndex(e=>e&&(
+    (serverId&&e._server_queue_id===serverId)||
+    (clientId&&e._client_queue_id===clientId)
+  ));
+  if(idx<0)return false;
+  q.splice(idx,1);
+  if(!q.length){delete SESSION_QUEUES[sid];_clearPersistedSessionQueue(sid);}
+  else _persistSessionQueueStorage(sid,q);
+  delete _queueRenderKeys[sid];
+  updateQueueBadge(sid);
+  return true;
 }
 function shiftQueuedSessionMessage(sid){
   const q=_getSessionQueue(sid,false);
   if(!q.length) return null;
-  const next=q.shift();
+  const idx=q.findIndex(e=>!(e&&(_serverEntryOwnedOrPending(e))));
+  if(idx<0)return null;
+  const next=q.splice(idx,1)[0];
   if(!q.length){
     delete SESSION_QUEUES[sid];
     _clearPersistedSessionQueue(sid);
@@ -268,8 +384,93 @@ function shiftQueuedSessionMessage(sid){
   }
   return next;
 }
+function _serverEntryOwnedOrPending(entry){
+  // Every entry minted by queueSessionMessage is awaiting or has acquired
+  // backend ownership. Never fall back to the legacy browser-side drain on an
+  // ambiguous acknowledgement or mutation failure.
+  return !!(entry&&(entry._client_queue_id||entry._server_owned||entry._server_pending));
+}
 function getQueuedSessionCount(sid){
   return _getSessionQueue(sid,false).length;
+}
+async function syncBackendSessionQueue(sid){
+  if(!sid||typeof fetch!=='function')return [];
+  const generations=syncBackendSessionQueue._generations||(syncBackendSessionQueue._generations={});
+  const generation=(generations[sid]||0)+1;
+  generations[sid]=generation;
+  const r=await fetch(new URL('api/session/queue?session_id='+encodeURIComponent(sid),document.baseURI||location.href).href,{credentials:'include'});
+  if(!r.ok)throw new Error('queue_sync_failed');
+  const data=await r.json();
+  if(!data||!Array.isArray(data.items))throw new Error('queue_sync_invalid');
+  if(generations[sid]!==generation)return _getSessionQueue(sid,false);
+  let local=_getSessionQueue(sid,false);
+  if(!local.length){
+    const persisted=_readPersistedSessionQueue(sid);
+    if(persisted.length){SESSION_QUEUES[sid]=persisted;local=persisted;}
+  }
+  const byServerId=new Map();
+  const byClientId=new Map();
+  local.forEach(entry=>{
+    if(entry&&entry._server_queue_id)byServerId.set(String(entry._server_queue_id),entry);
+    if(entry&&entry._client_queue_id)byClientId.set(String(entry._client_queue_id),entry);
+  });
+  const authoritative=[];
+  const consumed=new Set();
+  for(const item of data.items){
+    const id=String(item&&item.id||'');
+    if(!id)continue;
+    const clientId=String(item&&item.client_queue_id||'');
+    let prior=(clientId&&byClientId.get(clientId))||byServerId.get(id)||null;
+    // Compatibility for queue files created before client ids existed. New
+    // acknowledgements always reconcile by stable client_queue_id.
+    if(!prior&&!clientId){
+      prior=local.find(entry=>entry&&entry._server_pending&&!consumed.has(entry)&&
+        String(entry.text||entry.message||entry.content||'').trim()===String(item.text||'').trim())||null;
+    }
+    if(prior)consumed.add(prior);
+    if(String(item.state||'queued')==='started')continue;
+    authoritative.push({
+      ...(prior||{}),
+      text:String(item.text||''),
+      files:[],
+      attachments:Array.isArray(item.attachments)?item.attachments:[],
+      model:item.model||'',
+      model_provider:item.model_provider||null,
+      profile:item.profile||S.activeProfile||'default',
+      _queued_at:Math.round((Number(item.created_at)||Date.now()/1000)*1000),
+      _client_queue_id:clientId||(prior&&prior._client_queue_id)||'',
+      _server_owned:true,
+      _server_pending:false,
+      _server_queue_id:id,
+      _server_state:item.state||'queued',
+      _server_error:item.error||'',
+      _server_blocked:item.state==='blocked'||!!item.blocked,
+    });
+  }
+  // Preserve only browser-owned entries whose acknowledgement has not yet
+  // been authoritatively observed. Server-owned order comes exclusively from
+  // the backend response.
+  const browserOwned=local.filter(entry=>entry&&!entry._server_owned&&!consumed.has(entry));
+  const reconciled=authoritative.concat(browserOwned);
+  if(reconciled.length){SESSION_QUEUES[sid]=reconciled;_persistSessionQueueStorage(sid,reconciled);}
+  else{delete SESSION_QUEUES[sid];_clearPersistedSessionQueue(sid);}
+  delete _queueRenderKeys[sid];
+  updateQueueBadge(sid);
+  const recoveries=browserOwned.filter(entry=>{
+    const clientId=String(entry&&entry._client_queue_id||'');
+    const attempts=Number(entry&&entry._server_ack_attempts)||0;
+    return clientId&&attempts<3&&!_QUEUE_ACK_IN_FLIGHT.has(_queueAckKey(sid,clientId));
+  }).map(entry=>{
+    entry._server_pending=false;
+    return _backendAcknowledgeQueuedMessage(
+      sid,entry,Number(entry._server_ack_attempts)||0,true
+    );
+  });
+  if(recoveries.length){
+    _persistSessionQueueStorage(sid,reconciled);
+    await Promise.all(recoveries);
+  }
+  return _getSessionQueue(sid,false);
 }
 function _compressionSessionLock(){
   return window._compressionLockSid||null;
@@ -8384,12 +8585,27 @@ function _clearQueueCardDisplay(sid){
   _updateQueuePill(sid,0);
 }
 
+async function _postBackendQueueMutation(sid, operation, payload={}){
+  const r=await fetch(new URL('api/session/queue/'+operation,document.baseURI||location.href).href,{
+    method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({session_id:sid,...payload}),
+  });
+  let data={};try{data=await r.json();}catch(_){}
+  if(!r.ok)throw new Error(data.error||('queue_'+operation+'_failed'));
+  await syncBackendSessionQueue(sid);
+  return data;
+}
+
 function _renderQueueChips(sid){
   const card=document.getElementById('queueCard');
   const inner=document.getElementById('queueChips');
   if(!card||!inner) return;
   const q=_getSessionQueue(sid,false);
-  const key=q.map(e=>{const t=e&&(e.text||e.message||e.content||'');return(e&&e._queued_at||0)+':'+t.length+':'+t.slice(0,20);}).join('|');
+  const key=q.map((e,index)=>{
+    const t=e&&(e.text||e.message||e.content||'');
+    const identity=e&&(e._server_queue_id||e._client_queue_id)||('local-'+index+'-'+(e&&e._queued_at||0));
+    return identity+':'+(e&&e._server_state||'')+':'+t.length+':'+t.slice(0,20);
+  }).join('|');
   if(key===(_queueRenderKeys[sid]||'')&&key!='') return;
   // Skip re-render if user is actively editing inside the queue panel
   if(inner.contains(document.activeElement)&&document.activeElement!==inner) return;
@@ -8442,11 +8658,23 @@ function _renderQueueChips(sid){
     const actions=document.createElement('span');
     actions.className='queue-card-header-actions';
     const hasFiles=q.some(e=>e&&Array.isArray(e.files)&&e.files.length>0);
+    const allServerMutable=q.every(e=>e&&e._server_owned&&e._server_queue_id&&
+      (!e._server_state||e._server_state==='queued'||e._server_state==='blocked'));
     const mergeBtn=document.createElement('button');
     mergeBtn.className='queue-card-btn';
     mergeBtn.title='Combine all into one message'+(hasFiles?' — attachments will be removed':'');
     mergeBtn.innerHTML=li('layers',12)+'Combine';
-    mergeBtn.onclick=()=>{
+    mergeBtn.disabled=!allServerMutable&&q.some(e=>e&&e._server_owned);
+    mergeBtn.onclick=async()=>{
+      if(allServerMutable){
+        try{
+          await _postBackendQueueMutation(sid,'combine',{ordered_ids:q.map(e=>e._server_queue_id)});
+        }catch(err){
+          if(typeof showToast==='function')showToast('Could not combine queued messages: '+(err&&err.message||err),null,'error');
+          await syncBackendSessionQueue(sid).catch(()=>{});
+        }
+        return;
+      }
       const _doMerge=(snapshot)=>{
         const combined=snapshot.map(e=>e&&(e.text||e.message||e.content||'')).filter(Boolean).join('\n\n');
         const liveQ=_getSessionQueue(sid,false);
@@ -8461,15 +8689,28 @@ function _renderQueueChips(sid){
       if(hasFiles){
         if(typeof showToast==='function') showToast('Attachments on queued items will be removed',2600,'warning');
       }
+      const snapshot=[..._getSessionQueue(sid,false)];
+
       // Merge from current live queue (no delay — snapshot + defer caused data-loss races)
-      _doMerge([..._getSessionQueue(sid,false)]);
+      _doMerge(snapshot);
     };
     const clearBtn=document.createElement('button');
     clearBtn.className='queue-card-icon-btn';
     clearBtn.title='Clear all queued messages';
     clearBtn.setAttribute('aria-label','Clear all queued messages');
     clearBtn.innerHTML=li('x',13);
-    clearBtn.onclick=()=>{q.length=0;_saveAndRefresh();};
+    clearBtn.disabled=!allServerMutable&&q.some(e=>e&&e._server_owned);
+    clearBtn.onclick=async()=>{
+      if(allServerMutable){
+        try{await _postBackendQueueMutation(sid,'clear');}
+        catch(err){
+          if(typeof showToast==='function')showToast('Could not clear queued messages: '+(err&&err.message||err),null,'error');
+          await syncBackendSessionQueue(sid).catch(()=>{});
+        }
+        return;
+      }
+      q.length=0;_saveAndRefresh();
+    };
     actions.appendChild(mergeBtn);
     actions.appendChild(clearBtn);
     // Hide button — collapses flyout entirely; queue pill re-shows it
@@ -8490,25 +8731,40 @@ function _renderQueueChips(sid){
     inner.appendChild(header);
   }
 
-  let _dragTs=null;  // use _queued_at timestamp — survives re-renders, not an index
+  let _dragEntry=null;
   q.forEach((entry,i)=>{
-    const _entryTs=entry&&entry._queued_at;
     const entryText=entry&&(entry.text||entry.message||entry.content||'');
     const _files=entry&&Array.isArray(entry.files)?entry.files.filter(Boolean):[];
+    const _serverState=entry&&entry._server_state||'';
+    const _entryMutable=!_serverState||_serverState==='queued'||_serverState==='blocked';
     const row=document.createElement('div');
     row.className='queue-card-row';
     row.setAttribute('role','listitem');
-    row.setAttribute('draggable','true');
-    row.ondragstart=(e)=>{if(_entryTs==null) return;_dragTs=_entryTs;row.style.opacity='.4';e.dataTransfer.effectAllowed='move';};
+    row.setAttribute('data-queue-item-id',String(entry&&entry._server_queue_id||entry&&entry._client_queue_id||''));
+    row.setAttribute('draggable',_entryMutable?'true':'false');
+    row.ondragstart=(e)=>{_dragEntry=entry;row.style.opacity='.4';e.dataTransfer.effectAllowed='move';};
     row.ondragend=()=>{row.style.opacity='';};
     row.ondragover=(e)=>{e.preventDefault();row.style.background='var(--hover-bg)';};
     row.ondragleave=()=>{row.style.background='';};
-    row.ondrop=(e)=>{
+    row.ondrop=async(e)=>{
       e.preventDefault();row.style.background='';
-      if(_dragTs!=null&&_dragTs!==_entryTs){
-        const fromIdx=q.findIndex(e=>e&&e._queued_at===_dragTs);
-        if(fromIdx!==-1&&fromIdx!==i){const moved=q.splice(fromIdx,1)[0];q.splice(i,0,moved);}
-        _dragTs=null;_saveAndRefresh();
+      if(_dragEntry&&_findQueuedEntryIndex(_getSessionQueue(sid,false),_dragEntry)!==_findQueuedEntryIndex(_getSessionQueue(sid,false),entry)){
+        const liveQ=_getSessionQueue(sid,false);
+        const fromIdx=_findQueuedEntryIndex(liveQ,_dragEntry);
+        const toIdx=_findQueuedEntryIndex(liveQ,entry);
+        if(fromIdx!==-1&&toIdx!==-1&&fromIdx!==toIdx){
+          const planned=[...liveQ];const moved=planned.splice(fromIdx,1)[0];planned.splice(toIdx,0,moved);
+          const backendOwned=planned.every(item=>item&&item._server_owned&&item._server_queue_id&&
+            (!item._server_state||item._server_state==='queued'||item._server_state==='blocked'));
+          if(backendOwned){
+            try{await _postBackendQueueMutation(sid,'reorder',{ordered_ids:planned.map(item=>item._server_queue_id)});}
+            catch(err){
+              if(typeof showToast==='function')showToast('Could not reorder queued messages: '+(err&&err.message||err),null,'error');
+              await syncBackendSessionQueue(sid).catch(()=>{});
+            }
+          }else{liveQ.length=0;liveQ.push(...planned);_saveAndRefresh();}
+        }
+        _dragEntry=null;
       }
     };
     // Drag handle
@@ -8519,22 +8775,31 @@ function _renderQueueChips(sid){
     // Inline-editable text
     const msgSpan=document.createElement('span');
     msgSpan.className='queue-card-text';
-    msgSpan.setAttribute('contenteditable','true');
+    msgSpan.setAttribute('contenteditable',_entryMutable?'true':'false');
     msgSpan.setAttribute('role','textbox');
     msgSpan.setAttribute('aria-label','Queued message — edit in place');
     msgSpan.textContent=entryText||(_files.length?'':'—');
     msgSpan.setAttribute('draggable','false');
     msgSpan.onfocus=()=>{msgSpan.style.overflow='auto';msgSpan.style.whiteSpace='pre-wrap';msgSpan.style.textOverflow='clip';};
-    msgSpan.onblur=()=>{
+    msgSpan.onblur=async()=>{
       msgSpan.style.overflow='';msgSpan.style.whiteSpace='';msgSpan.style.textOverflow='';
       const newText=msgSpan.textContent.trim();
       if(newText===''&&!_files.length){ msgSpan.textContent=entryText||'—'; return; }
       if(newText!==entryText){
         const liveQ=_getSessionQueue(sid,false);
-        const idx=_entryTs!=null?liveQ.findIndex(e=>e&&e._queued_at===_entryTs):i;
+        const idx=_findQueuedEntryIndex(liveQ,entry);
         if(idx!==-1){
-          liveQ[idx]={...liveQ[idx],text:newText};
-          _persistSessionQueueStorage(sid,liveQ);
+          if(liveQ[idx]._server_owned&&liveQ[idx]._server_queue_id){
+            try{await _postBackendQueueMutation(sid,'update',{id:liveQ[idx]._server_queue_id,text:newText});}
+            catch(err){
+              msgSpan.textContent=entryText||'—';
+              if(typeof showToast==='function')showToast('Could not edit queued message: '+(err&&err.message||err),null,'error');
+              await syncBackendSessionQueue(sid).catch(()=>{});
+            }
+          }else{
+            liveQ[idx]={...liveQ[idx],text:newText};
+            _persistSessionQueueStorage(sid,liveQ);
+          }
           delete _queueRenderKeys[sid];
           updateQueueBadge(sid);
         }
@@ -8544,6 +8809,19 @@ function _renderQueueChips(sid){
     // Compact badges (files, model, profile)
     const badges=document.createElement('span');
     badges.className='queue-card-badges';
+    if(_serverState&&_serverState!=='queued'){
+      const stateBadge=document.createElement('span');
+      stateBadge.className='queue-card-state queue-card-state-'+_serverState;
+      stateBadge.textContent=_serverState==='starting'?'Starting…':(_serverState==='blocked'?'Needs attention':'Queued');
+      stateBadge.title=entry._server_error||('Queue state: '+_serverState);
+      badges.appendChild(stateBadge);
+    }else if(entry&&entry._server_error){
+      const stateBadge=document.createElement('span');
+      stateBadge.className='queue-card-state queue-card-state-error';
+      stateBadge.textContent='Sync failed';
+      stateBadge.title=entry._server_error;
+      badges.appendChild(stateBadge);
+    }
     if(_files.length>0){
       const fb=document.createElement('span');
       fb.className='queue-card-file-badge';
@@ -8568,11 +8846,24 @@ function _renderQueueChips(sid){
     delBtn.setAttribute('aria-label',typeof t==='function'?t('queued_cancel'):'Remove queued message');
     delBtn.setAttribute('draggable','false');
     delBtn.title='Remove from queue';
+    delBtn.disabled=!_entryMutable;
     delBtn.innerHTML=li('x',13);
-    delBtn.onclick=()=>{
+    delBtn.onclick=async()=>{
+      delBtn.blur();
       const liveQ=_getSessionQueue(sid,false);
-      const idx=_entryTs!=null?liveQ.findIndex(e=>e&&e._queued_at===_entryTs):i;
-      if(idx!==-1) liveQ.splice(idx,1);
+      const idx=_findQueuedEntryIndex(liveQ,entry);
+      if(idx!==-1){
+        const removed=liveQ[idx];
+        if(removed&&removed._server_owned&&removed._server_queue_id){
+          try{await _deleteBackendQueuedItem(sid,removed._server_queue_id);await syncBackendSessionQueue(sid);}
+          catch(err){
+            if(typeof showToast==='function')showToast('Could not remove queued message: '+(err&&err.message||err),null,'error');
+            await syncBackendSessionQueue(sid).catch(()=>{});
+          }
+          return;
+        }
+        liveQ.splice(idx,1);
+      }
       if(!liveQ.length){delete SESSION_QUEUES[sid];_clearPersistedSessionQueue(sid);}
       else{SESSION_QUEUES[sid]=[...liveQ];_persistSessionQueueStorage(sid,liveQ);}
       delete _queueRenderKeys[sid];
