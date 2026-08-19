@@ -2624,6 +2624,32 @@ def _build_session_list_cache_payload(
     }
 
 
+def _server_tz_offset() -> str:
+    """Return the Hermes-configured timezone offset string (e.g. "+0800", "-0330").
+
+    The process/container zone (``time.strftime("%z")``) may be UTC while the
+    Hermes timezone (``HERMES_TIMEZONE`` env var or the ``timezone`` key in
+    config.yaml, resolved via ``hermes_time``) is configured to something else —
+    the WebUI must display server-side timestamps in the *Hermes* zone, not the
+    container's. Prefer ``hermes_time.now()`` and fall back to the process zone;
+    never return an empty string.
+    """
+    try:
+        from hermes_time import now as _hermes_now
+        offset = _hermes_now().strftime("%z")
+        if offset:
+            return offset
+    except Exception:
+        pass
+    try:
+        offset = time.strftime("%z")
+        if offset:
+            return offset
+    except Exception:
+        pass
+    return "+0000"
+
+
 def _session_list_payload_to_response(payload: dict) -> dict:
     safe_merged = []
     runtime_rows = _session_list_cache_overlay_runtime_rows(payload.get("sessions", []) or [])
@@ -2660,7 +2686,7 @@ def _session_list_payload_to_response(payload: dict) -> dict:
         "active_profile": payload.get("active_profile"),
         "other_profile_count": int(payload.get("other_profile_count", 0)),
         "server_time": time.time(),
-        "server_tz": time.strftime("%z"),
+        "server_tz": _server_tz_offset(),
     }
     if "webui_session_count" in payload:
         response["webui_session_count"] = int(payload.get("webui_session_count", 0))
