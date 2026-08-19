@@ -7532,6 +7532,12 @@ function _captureApprovalResponseOwner() {
     _approvalDisplayedOwner.sid !== sid ||
     _approvalDisplayedOwner.approvalId !== approvalId
   ) return null;
+  // The snapshot comes from the RENDERED card (`_approvalDisplayedOwner`, set
+  // in showApprovalCard AFTER the dismissed/belongs-to-session early returns),
+  // never from the mutable pending map: the map can hold a successor that
+  // never rendered (a cross-tab-dismissed B is stored by _rememberApprovalPending
+  // and then suppressed), so reading the map here would snapshot B while the
+  // user is looking at A.
   return {..._approvalDisplayedOwner, generation: _loadSessionGeneration};
 }
 
@@ -7630,6 +7636,14 @@ function showApprovalCard(pending, pendingCount) {
   _approvalSessionId = sid;
   _approvalCurrentId = pending.approval_id || null;
   _approvalDisplayedOwner = _approvalOwnerForPending(sid, pending);
+  // The rendered card's logical identity — the ONLY valid basis for the
+  // click-time snapshot. The per-session pending map can hold a successor that
+  // never rendered (e.g. a cross-tab-dismissed B is stored by
+  // _rememberApprovalPending above and then suppressed by the early returns),
+  // so the snapshot must reflect what the user is actually looking at here.
+  if (_approvalDisplayedOwner) {
+    _approvalDisplayedOwner.displayedKey = _approvalLogicalKey(sid, pending);
+  }
   _approvalSignature = sig;
   // Show "1 of N" counter when multiple approvals are queued
   const counter = $("approvalCounter");
@@ -7667,8 +7681,17 @@ function showApprovalCard(pending, pendingCount) {
   if (typeof syncTopbar === 'function') syncTopbar();
 }
 
-function dismissApprovalCard() {
+async function dismissApprovalCard() {
   const sid = _approvalSessionId;
+  const owner = _captureApprovalResponseOwner();
+  // #7091: reconcile the dismiss target against the authoritative head so a
+  // stale render-time transport id can't leave the X appearing to do nothing.
+  const reconciled = await _reconcileApprovalToHead(owner);
+  if (reconciled === "rerender") return;
+  // Post-await ownership guard: the reconcile is an await, so a session switch
+  // (or card change) during it must not let this dismissal hide or mark a
+  // newer session's card. Fail closed when the owner is no longer current.
+  if (owner && !_approvalResponseOwnerIsCurrent(owner)) return;
   if (_approvalCurrentId) _markApprovalDismissed(sid, _approvalCurrentId);
   hideApprovalCard(true);
   if (sid) _clearApprovalPendingForSession(sid);
@@ -7734,6 +7757,49 @@ function _restoreFailedApprovalResponse(owner, errMsg) {
   if (typeof setStatus === "function") setStatus(errMsg);
 }
 
+// A gateway-owned (mirror) approval whose gateway run has been retired cannot
+// be answered: the server rejects it with `gateway_run_unavailable` (HTTP 409).
+// We must NOT blindly clear the card here, because the head may have advanced
+// to a successor (B) between our reconcile GET and this respond POST — clearing
+// would hide B's live, still-actionable card. So re-fetch the head: if a
+// successor is pending, re-render it and keep it actionable; only a true orphan
+// (nothing pending) is cleared.
+function _isGatewayUnavailableOrphan(owner, info) {
+  if (!owner || !owner.mirrorToken || !info) return false;
+  const code = String(info.code || "").toLowerCase();
+  const text = String(info.error || info.message || "").toLowerCase();
+  return code.indexOf("gateway_run_unavailable") === 0 ||
+    text.indexOf("gateway_run_unavailable") >= 0 ||
+    text.indexOf("active run is unavailable") >= 0;
+}
+
+async function _handleGatewayUnavailable(owner, errMsg) {
+  const isCurrent = _approvalResponseOwnerIsCurrent(owner);
+  _releaseApprovalResponseOwner(owner);
+  if (!isCurrent) return false;
+  _setApprovalControlsDisabled(null, false);
+  let data = null;
+  try {
+    data = await api("/api/approval/pending?session_id=" + encodeURIComponent(owner.sid), {timeoutToast: false});
+  } catch (_) {
+    // Best-effort: cannot re-fetch the head; restore the local projection so a
+    // successor is not lost, and let the poll re-sync.
+    _renderPendingApprovalForActiveSession();
+    return false;
+  }
+  const head = (data && data.pending) || null;
+  if (head) {
+    // A successor (or the same head) is pending: keep the card actionable.
+    showApprovalForSession(owner.sid, head, (data && data.pending_count) || 1);
+  } else if (!!(S.session && S.session.session_id === owner.sid)) {
+    // True orphan: nothing pending and we are still on the owner's session.
+    _clearApprovalPendingForSession(owner.sid);
+    hideApprovalCard(true);
+    if (typeof showToast === "function") showToast(errMsg, 5000);
+  }
+  return false;
+}
+
 function _applyApprovalYoloProjection(result) {
   if (!result || typeof result.yolo_enabled !== "boolean") return;
   _yoloEnabled = result.yolo_enabled;
@@ -7760,7 +7826,32 @@ async function respondApproval(choice, options = {}) {
   _approvalResponding = {...owner, choice};
   _approvalResponding.controlChoice = controlChoice;
   _setApprovalControlsDisabled(controlChoice, true);
+  // #7091: the card's transport approval_id can be stale at click time (the
+  // chat-stream SSE producer and the 1.5s fallback poll both render the card,
+  // and the server head may have advanced past what the last render wrote).
+  // Reconcile against the authoritative head before POSTing so the first click
+  // resolves instead of being burned by the #527 stale-id guard. Best-effort:
+  // on fetch failure we fall back to the captured id and the server guard
+  // remains the backstop.
+  const reconciled = await _reconcileApprovalToHead(owner);
+  if (reconciled === "rerender") {
+    _releaseApprovalResponseOwner(owner);
+    _setApprovalControlsDisabled(null, false);
+    return false;
+  }
+  // Post-await ownership guard: the reconcile is an await, so the user can
+  // switch sessions (or the card can change) while it is in flight. Never let
+  // this click fire against a session the user has navigated away from; fail
+  // closed. The post-POST check below stays as a belt-and-suspenders guard.
+  if (!_approvalResponseOwnerIsCurrent(owner)) {
+    _releaseApprovalResponseOwner(owner);
+    _setApprovalControlsDisabled(null, false);
+    return false;
+  }
   try {
+    // The reconcile may have advanced owner.approvalId to the head's transport
+    // id; the POST must carry the authoritative value, not the stale capture.
+    const approvalId = owner.approvalId;
     const result = await api("/api/approval/respond", {
       method: "POST",
       body: JSON.stringify({
@@ -7810,6 +7901,12 @@ async function respondApproval(choice, options = {}) {
       return options.yolo ? result : true;
     }
     const errMsg = (result && result.error) || "Approval response not accepted.";
+    // A retired gateway run cannot be answered; re-sync to the head so a live
+    // successor stays actionable and only a true orphan is cleared.
+    if (_isGatewayUnavailableOrphan(owner, result)) {
+      await _handleGatewayUnavailable(owner, errMsg);
+      return false;
+    }
     _restoreFailedApprovalResponse(owner, errMsg);
     return false;
   } catch(e) {
@@ -7825,9 +7922,123 @@ async function respondApproval(choice, options = {}) {
       return false;
     }
     if (options.yolo) _applyApprovalYoloProjection(errorPayload);
+    // A retired gateway run cannot be answered; re-sync to the head so a live
+    // successor stays actionable and only a true orphan is cleared.
+    if (_isGatewayUnavailableOrphan(owner, errorPayload)) {
+      await _handleGatewayUnavailable(owner, errMsg);
+      return false;
+    }
     _restoreFailedApprovalResponse(owner, errMsg);
     return false;
   }
+}
+
+// ── #7091: reconcile the card's transport id against the server head ─────────
+// The approval card's `approval_id` is written by whichever producer rendered
+// last (the chat-stream SSE 'approval' event or the 1.5s fallback poll). If the
+// server head advanced between render and click, the card holds a stale
+// transport id and the click is rejected by the #527 stale-id guard. We cannot
+// fix that by blindly trusting the head: in the queued case the user may still
+// be looking at approval A after the server advanced to approval B, and
+// auto-transferring the click to B would approve a command the user never
+// selected. So we reconcile by LOGICAL identity — everything the user can see
+// plus the request/run/mirror ownership fields, minus the volatile
+// `approval_id` — and only adopt the head's id when it proves to be the same
+// approval the card is showing.
+function _approvalLogicalKey(sid, pending) {
+  if (!sid || !pending) return null;
+  const keys = pending.pattern_keys || (pending.pattern_key ? [pending.pattern_key] : []);
+  const desc = (pending.description || "") + (keys.length ? " [" + keys.join(", ") + "]" : "");
+  return JSON.stringify({
+    sid,
+    desc,
+    cmd: pending.command || "",
+    run_id: String(pending.run_id || "").trim(),
+    mirror_token: String(pending._gateway_mirror_token || "").trim(),
+  });
+}
+
+// Reconcile the visible card against the server-authoritative head for the
+// session. Returns:
+//   'same'        — the head is the same logical approval as the card (or
+//                   nothing is pending, or the head cannot be identified): the
+//                   caller may act. When the transport id advanced, the card
+//                   state and `owner.approvalId` are updated to the head's id
+//                   so the click completes once.
+//   'rerender'    — the head is a DIFFERENT logical approval: the card has been
+//                   re-rendered to the head (or hidden when the head was
+//                   already dismissed) and the caller MUST NOT act; a fresh
+//                   deliberate click is required.
+//   'unavailable' — the best-effort /api/approval/pending fetch failed; the
+//                   caller falls back to the captured id (the #527 server
+//                   guard remains the backstop).
+async function _reconcileApprovalToHead(owner) {
+  const sid = owner ? owner.sid : _approvalSessionId;
+  if (!sid) return "unavailable";
+  let data = null;
+  try {
+    data = await api("/api/approval/pending?session_id=" + encodeURIComponent(sid), {timeoutToast: false});
+  } catch (_) {
+    return "unavailable";
+  }
+  const head = (data && data.pending) || null;
+  const count = (data && data.pending_count) || 1;
+  // The fetch is an await, so the user may have switched sessions while it ran.
+  // Never mutate or hide a different session's card here. The caller's own
+  // post-await ownership check still bails on a switch, but this keeps the
+  // reconcile from writing the wrong globals (or hiding the new session's card)
+  // before that check runs.
+  const stillOnSession = !!(S.session && S.session.session_id === sid);
+  // No pending head: the local path resolves an orphan with {ok:true,
+  // stale_cleared}, so the caller still submits and the server guard decides.
+  // A mirror-owned respond is NOT cleared here even without a local head,
+  // because the gateway is authoritative and the respond can still succeed
+  // (the retired-run case is cleared in the respond failure path).
+  if (!head) return "same";
+  const headKey = _approvalLogicalKey(sid, head);
+  const pendingEntry = _approvalPendingBySession.get(sid);
+  // Compare the head against the captured RENDER-time key when an owner was
+  // captured. Never fall back to the mutable map in that case, even when the
+  // captured key is null (fail closed -> rerender): the map can hold a
+  // successor that never rendered. The map is only a fallback for callers
+  // that did not capture an owner.
+  let displayedKey = null;
+  if (owner && owner.displayedKey) {
+    displayedKey = owner.displayedKey;
+  } else if (!owner) {
+    displayedKey = _approvalLogicalKey(sid, pendingEntry && pendingEntry.pending);
+  }
+  const sameLogical = !!(headKey && head.approval_id && displayedKey && headKey === displayedKey);
+  if (sameLogical) {
+    // Only adopt when we are still on the reconcile's session AND the original
+    // owner is still current (the visible card did not change under the await).
+    // Otherwise the head matches the snapshot but a newer render owns the card;
+    // fail closed and require a fresh deliberate click.
+    if (stillOnSession && (!owner || _approvalResponseOwnerIsCurrent(owner))) {
+      const currentId = owner ? owner.approvalId : _approvalCurrentId;
+      if (head.approval_id !== currentId) {
+        _approvalCurrentId = head.approval_id;
+        if (_approvalDisplayedOwner) {
+          _approvalDisplayedOwner = {..._approvalDisplayedOwner, approvalId: head.approval_id};
+        }
+        if (owner) owner.approvalId = head.approval_id;
+        if (_approvalResponding) _approvalResponding.approvalId = head.approval_id;
+        if (pendingEntry && pendingEntry.pending) {
+          pendingEntry.pending = {...pendingEntry.pending, ...head};
+        }
+      }
+    }
+    return "same";
+  }
+  // Different logical approval — never auto-transfer the click. Re-render the
+  // authoritative head and require a fresh deliberate click; if the head was
+  // already dismissed the render is suppressed and the stale card is hidden.
+  showApprovalForSession(sid, head, count);
+  // Only hide if we are still on the reconcile's session. After a session
+  // switch, _approvalCurrentId belongs to the NEW session, so an unguarded
+  // hide would hide that session's card.
+  if (stillOnSession && _approvalCurrentId !== head.approval_id) hideApprovalCard(true);
+  return "rerender";
 }
 
 function startApprovalPolling(sid) {

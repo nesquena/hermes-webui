@@ -65,8 +65,11 @@ def test_approval_card_yolo_resumes_current_prompt_with_one_webui_request():
         "(async()=>{",
         " const ok=await toggleYoloFromApproval();",
         " if(!ok) throw new Error('action failed');",
-        " if(calls.length!==1) throw new Error('expected one request '+JSON.stringify(calls));",
-        " const [path,body]=calls[0];",
+        " // #7091: respondApproval first reconciles the transport id against the",
+        " // authoritative head (best-effort GET), then issues exactly ONE respond POST.",
+        " if(calls.length!==2) throw new Error('expected reconcile GET + one respond '+JSON.stringify(calls));",
+        " if(calls[0][0]!=='/api/approval/pending?session_id=browser-session') throw new Error('expected reconcile GET first '+JSON.stringify(calls[0]));",
+        " const [path,body]=calls[1];",
         " if(path!=='/api/approval/respond') throw new Error('wrong endpoint '+path);",
         " if(JSON.stringify(body)!==JSON.stringify({session_id:'browser-session',choice:'once',approval_id:'approval-1',run_id:'run-1',mirror_token:'mirror-1',yolo:true})) throw new Error('wrong body '+JSON.stringify(body));",
         " if(!_yoloEnabled) throw new Error('UI state not enabled');",
@@ -1829,7 +1832,7 @@ def _run_card_yolo_owner_scenario(scenario):
         " await new Promise(resolve=>setTimeout(resolve,0));",
         " if(scenario==='poll-cleared-success'){",
         "  if(!ok)throw new Error('retired polling projection discarded valid success');",
-        "  if(calls.length!==1)throw new Error('valid response made extra requests '+JSON.stringify(calls));",
+        "  if(calls.length!==2)throw new Error('valid response made extra requests '+JSON.stringify(calls));",
         "  if(_approvalPendingBySession.has(ownerSid))throw new Error('polling projection was recreated');",
         "  if(_approvalResponding!==null)throw new Error('response owner was not released');",
         "  if(cardHideMutations!==1||pendingClears!==0||cardRenders!==0)throw new Error('wrong retired-owner cleanup '+JSON.stringify({cardHideMutations,pendingClears,cardRenders}));",
@@ -1839,8 +1842,8 @@ def _run_card_yolo_owner_scenario(scenario):
         " }",
         " if(scenario==='case-distinct-pending'){",
         "  if(!ok)throw new Error('owned response reported failure');",
-        "  if(calls.length!==2)throw new Error('expected response plus requery '+JSON.stringify(calls));",
-        "  if(calls[0].body.approval_id!==approvalId)throw new Error('approval ID changed '+JSON.stringify(calls[0].body));",
+        "  if(calls.length!==3)throw new Error('expected reconcile + response plus requery '+JSON.stringify(calls));",
+        "  if(calls[1].body.approval_id!==approvalId)throw new Error('approval ID changed '+JSON.stringify(calls[1].body));",
         "  const successor=_approvalPendingBySession.get(ownerSid);",
         "  if(!successor||successor.pending.approval_id!==approvalId.toLowerCase())throw new Error('case-distinct pending successor was cleared');",
         "  if(JSON.stringify(controlWrites)!==JSON.stringify([true,true,true,true]))throw new Error('response changed successor controls '+JSON.stringify(controlWrites));",
@@ -1855,8 +1858,8 @@ def _run_card_yolo_owner_scenario(scenario):
         "  if(calls.length!==0)throw new Error('inactive card posted '+JSON.stringify(calls));",
         "  if(controlWrites.length!==0)throw new Error('inactive card changed controls '+JSON.stringify(controlWrites));",
         " }else{",
-        "  if(calls.length!==1)throw new Error('stale response made extra requests '+JSON.stringify(calls));",
-        "  if(calls[0].body.approval_id!==approvalId)throw new Error('approval ID changed '+JSON.stringify(calls[0].body));",
+        "  if(calls.length!==2)throw new Error('stale response made extra requests '+JSON.stringify(calls));",
+        "  if(calls[1].body.approval_id!==approvalId)throw new Error('approval ID changed '+JSON.stringify(calls[1].body));",
         "  if(JSON.stringify(controlWrites)!==JSON.stringify([true,true,true,true]))throw new Error('stale response changed controls '+JSON.stringify(controlWrites));",
         " }",
         " if(_approvalResponding!==null)throw new Error('response owner was not released');",
@@ -1907,3 +1910,474 @@ def test_card_yolo_keeps_same_id_different_mirror_successor_untouched():
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
 def test_card_yolo_accepts_success_after_polling_retires_projection():
     _run_card_yolo_owner_scenario("poll-cleared-success")
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_approval_reconciles_stale_transport_id_for_same_logical_approval():
+    """#7091 direction 1: same logical approval, changed transport id.
+
+    respondApproval must adopt the authoritative head's `approval_id` (same
+    displayed content + same run/mirror ownership) and complete the original
+    click once — the respond POST must carry the head's id, not the stale
+    render-time one.
+    """
+    messages_js = (pathlib.Path(__file__).resolve().parents[1] / "static" / "messages.js").read_text()
+
+    def extract(name, end_marker):
+        start = messages_js.index(f"async function {name}(")
+        return messages_js[start:messages_js.index(end_marker, start)]
+
+    script = "\n".join([
+        "const calls=[]; let showApprovalCalls=0; let hideApprovalCalls=0;",
+        "const S={session:{session_id:'browser-session'}};",
+        "let _approvalSessionId='browser-session';",
+        "let _approvalCurrentId='approval-1';",
+        "let _loadSessionGeneration=1;",
+        "let _approvalResponding=null;",
+        "let _approvalClearedOwner=null;",
+        "let _approvalDisplayedOwner={sid:'browser-session',approvalId:'approval-1',runId:'run-1',mirrorToken:'mirror-1',displayedKey:'{\"sid\":\"browser-session\",\"desc\":\"\",\"cmd\":\"\",\"run_id\":\"run-1\",\"mirror_token\":\"mirror-1\"}'};",
+        "let _yoloEnabled=false;",
+        "const _approvalPendingBySession=new Map([['browser-session',{pending:{approval_id:'approval-1',run_id:'run-1',_gateway_mirror_token:'mirror-1'}}]]);",
+        "const api=async(path,opts={})=>{",
+        " calls.push([path,opts.body?JSON.parse(opts.body):null]);",
+        " if(path.startsWith('/api/approval/pending'))return {pending:{approval_id:'approval-1-updated',run_id:'run-1',_gateway_mirror_token:'mirror-1'},pending_count:1};",
+        " return {ok:true,yolo_enabled:true};",
+        "};",
+        "const showApprovalForSession=(sid,pending,count)=>{showApprovalCalls+=1;};",
+        "const hideApprovalCard=()=>{hideApprovalCalls+=1;};",
+        "const $=()=>({disabled:false,classList:{contains:v=>v==='visible',add(){},remove(){}}});",
+        "const t=k=>k; const showToast=()=>{}; const setStatus=()=>{};",
+        "const _unmarkApprovalDismissed=()=>{};",
+        "const _setApprovalControlsDisabled=()=>{}; const _clearApprovalPendingForSession=()=>{};",
+        "const _updateYoloPill=()=>{};",
+        _js_block(messages_js, "function _approvalMirrorOwnerFor(", "\nfunction _setApprovalControlsDisabled"),
+        _js_block(messages_js, "function _applyApprovalYoloProjection(", "\nfunction toggleApprovalCardCollapsed"),
+        extract("respondApproval", "\nfunction startApprovalPolling"),
+        extract("toggleYoloFromApproval", "\n// ── Approval polling"),
+        "(async()=>{",
+        " const ok=await toggleYoloFromApproval();",
+        " if(!ok) throw new Error('action failed');",
+        " if(calls.length!==2) throw new Error('expected reconcile GET + one respond '+JSON.stringify(calls));",
+        " if(!calls[0][0].startsWith('/api/approval/pending')) throw new Error('expected reconcile GET first '+JSON.stringify(calls[0]));",
+        " const [path,body]=calls[1];",
+        " if(path!=='/api/approval/respond') throw new Error('wrong endpoint '+path);",
+        " if(body.approval_id!=='approval-1-updated') throw new Error('stale transport id was not reconciled '+JSON.stringify(body));",
+        " if(body.run_id!=='run-1'||body.mirror_token!=='mirror-1') throw new Error('logical owner fields changed '+JSON.stringify(body));",
+        " if(!_yoloEnabled) throw new Error('UI state not enabled');",
+        " if(showApprovalCalls!==0) throw new Error('same-logical approval must not re-render');",
+        " if(hideApprovalCalls!==1) throw new Error('card must hide after success');",
+        "})().catch(e=>{console.error(e.stack||e);process.exit(1)});",
+    ])
+    result = subprocess.run([shutil.which("node"), "-e", script], text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_approval_never_auto_transfers_click_to_different_logical_approval():
+    """#7091 direction 2: queued A→B while A is still visible.
+
+    The head is a DIFFERENT logical approval (different command): the click
+    must NOT be transferred to it. The card re-renders to the head and a fresh
+    deliberate click is required — no respond POST is issued for the first
+    click.
+    """
+    messages_js = (pathlib.Path(__file__).resolve().parents[1] / "static" / "messages.js").read_text()
+
+    def extract(name, end_marker):
+        start = messages_js.index(f"async function {name}(")
+        return messages_js[start:messages_js.index(end_marker, start)]
+
+    script = "\n".join([
+        "const calls=[]; let showApprovalCalls=[]; let hideApprovalCalls=0;",
+        "const S={session:{session_id:'browser-session'}};",
+        "let _approvalSessionId='browser-session';",
+        "let _approvalCurrentId='approval-1';",
+        "let _loadSessionGeneration=1;",
+        "let _approvalResponding=null;",
+        "let _approvalClearedOwner=null;",
+        "let _approvalDisplayedOwner={sid:'browser-session',approvalId:'approval-1',runId:'run-1',mirrorToken:'mirror-1'};",
+        "let _yoloEnabled=false;",
+        "const _approvalPendingBySession=new Map([['browser-session',{pending:{approval_id:'approval-1',run_id:'run-1',_gateway_mirror_token:'mirror-1'}}]]);",
+        "const api=async(path,opts={})=>{",
+        " calls.push([path,opts.body?JSON.parse(opts.body):null]);",
+        " if(path.startsWith('/api/approval/pending'))return {pending:{approval_id:'approval-2',command:'rm -rf /tmp/other',description:'other command',pattern_key:'other',pattern_keys:['other'],run_id:'run-1',_gateway_mirror_token:'mirror-1'},pending_count:1};",
+        " throw new Error('respond must not be called for a different logical approval');",
+        "};",
+        "const showApprovalForSession=(sid,pending,count)=>{showApprovalCalls.push(pending);_approvalCurrentId=pending.approval_id||null;};",
+        "const hideApprovalCard=()=>{hideApprovalCalls+=1;};",
+        "const $=()=>({disabled:false,classList:{contains:v=>v==='visible',add(){},remove(){}}});",
+        "const t=k=>k; const showToast=()=>{}; const setStatus=()=>{};",
+        "const _unmarkApprovalDismissed=()=>{};",
+        "const _setApprovalControlsDisabled=()=>{}; const _clearApprovalPendingForSession=()=>{};",
+        "const _updateYoloPill=()=>{};",
+        _js_block(messages_js, "function _approvalMirrorOwnerFor(", "\nfunction _setApprovalControlsDisabled"),
+        _js_block(messages_js, "function _applyApprovalYoloProjection(", "\nfunction toggleApprovalCardCollapsed"),
+        extract("respondApproval", "\nfunction startApprovalPolling"),
+        extract("toggleYoloFromApproval", "\n// ── Approval polling"),
+        "(async()=>{",
+        " const ok=await toggleYoloFromApproval();",
+        " if(ok) throw new Error('different-logical click must not succeed');",
+        " if(calls.length!==1) throw new Error('expected only the reconcile GET '+JSON.stringify(calls));",
+        " if(!calls[0][0].startsWith('/api/approval/pending')) throw new Error('expected reconcile GET');",
+        " if(showApprovalCalls.length!==1) throw new Error('card was not re-rendered to the head '+JSON.stringify(showApprovalCalls));",
+        " if(showApprovalCalls[0].approval_id!=='approval-2') throw new Error('re-render must show the authoritative head');",
+        " if(hideApprovalCalls!==0) throw new Error('re-rendered head must stay visible for a fresh click');",
+        " if(_approvalResponding!==null) throw new Error('response owner was not released');",
+        " if(_yoloEnabled!==false) throw new Error('YOLO must not be projected for a different approval');",
+        "})().catch(e=>{console.error(e.stack||e);process.exit(1)});",
+    ])
+    result = subprocess.run([shutil.which("node"), "-e", script], text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_reconcile_await_session_switch_blocks_stale_respond_and_dismiss():
+    """#7091 edge case: the reconcile is an await, so a session switch can happen
+    while it is in flight. The captured owner must be re-checked after the await:
+    neither respondApproval (no POST) nor dismissApprovalCard (no dismiss/hide)
+    may act on the session the user navigated away to.
+    """
+    messages_js = (pathlib.Path(__file__).resolve().parents[1] / "static" / "messages.js").read_text()
+
+    def extract(name, end_marker):
+        start = messages_js.index(f"async function {name}(")
+        return messages_js[start:messages_js.index(end_marker, start)]
+
+    script = "\n".join([
+        "const calls=[]; const dismissed=[]; let hideCount=0; let pendingClears=0; let controlReset=0;",
+        "let _approvalSessionId='session-a'; let _approvalCurrentId='approval-a';",
+        "let _loadSessionGeneration=1; let _approvalResponding=null; let _approvalClearedOwner=null; let _yoloEnabled=false;",
+        "let _approvalHideTimer=null; let _approvalVisibleSince=0; let _approvalSignature='sig-a';",
+        "let S={session:{session_id:'session-a'}};",
+        "let _approvalDisplayedOwner={sid:'session-a',approvalId:'approval-a',runId:'',mirrorToken:''};",
+        "const _approvalPendingBySession=new Map([['session-a',{pending:{approval_id:'approval-a'}}]]);",
+        # The reconcile pending GET switches to session-b mid-await.
+        "const api=async(path,opts={})=>{",
+        " calls.push(path);",
+        " if(path.startsWith('/api/approval/pending')){",
+        "  S.session={session_id:'session-b'};",
+        "  _approvalSessionId='session-b'; _approvalCurrentId='approval-b';",
+        "  _approvalDisplayedOwner={sid:'session-b',approvalId:'approval-b',runId:'',mirrorToken:''};",
+        "  return {pending:null};",
+        " }",
+        " throw new Error('respond POST must not fire when the session switched during reconcile');",
+        "};",
+        "const visible=()=>true;",
+        "const $=()=>({disabled:false,classList:{contains:visible,add(){},remove(){}}});",
+        "const t=k=>k; const showToast=()=>{}; const setStatus=()=>{};",
+        "const _unmarkApprovalDismissed=()=>{};",
+        "const _markApprovalDismissed=(sid,id)=>{dismissed.push([sid,id]);};",
+        "const _clearApprovalPendingForSession=sid=>{pendingClears+=1;};",
+        "const hideApprovalCard=()=>{hideCount+=1;};",
+        "const showApprovalForSession=()=>{};",
+        "const _setApprovalControlsDisabled=()=>{controlReset+=1;};",
+        "const _renderPendingApprovalForActiveSession=()=>{};",
+        "const _restoreFailedApprovalResponse=()=>{}; const _applyApprovalYoloProjection=()=>{};",
+        "const _updateYoloPill=()=>{};",
+        _js_block(messages_js, "function _approvalMirrorOwnerFor(", "\nfunction _setApprovalControlsDisabled"),
+        extract("dismissApprovalCard", "\nfunction _syncApprovalCollapseButton"),
+        extract("respondApproval", "\nfunction startApprovalPolling"),
+        "(async()=>{",
+        # Part A: respond must NOT issue a POST (only the reconcile GET happened).
+        " const ok=await respondApproval('once');",
+        " if(ok) throw new Error('respond should fail when the session switched during reconcile');",
+        " if(calls.length!==1) throw new Error('respond issued a POST after session switch '+JSON.stringify(calls));",
+        " if(!calls[0].startsWith('/api/approval/pending')) throw new Error('only the reconcile GET should run '+JSON.stringify(calls));",
+        " if(_approvalResponding!==null) throw new Error('response owner was not released');",
+        " if(controlReset<1) throw new Error('controls were not re-enabled');",
+        # Part B: dismiss must not mark/hide/clear the NEW session's card.
+        " calls.length=0; dismissed.length=0; hideCount=0; pendingClears=0; controlReset=0;",
+        " S.session={session_id:'session-a'}; _approvalSessionId='session-a'; _approvalCurrentId='approval-a';",
+        " _approvalDisplayedOwner={sid:'session-a',approvalId:'approval-a',runId:'',mirrorToken:''};",
+        " await dismissApprovalCard();",
+        " if(dismissed.length!==0) throw new Error('dismiss marked the switched session '+JSON.stringify(dismissed));",
+        " if(hideCount!==0) throw new Error('dismiss hid the switched session card');",
+        " if(pendingClears!==0) throw new Error('dismiss cleared the switched session pending');",
+        "})().catch(e=>{console.error(e.stack||e);process.exit(1)});",
+    ])
+    result = subprocess.run([shutil.which("node"), "-e", script], text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_reconcile_does_not_hide_newer_session_card_on_switch():
+    """#7091 P1: when the reconcile's fetch runs while the user switches to a
+    different session, the rerender branch must not hide the NEW session's card
+    or mutate its approval globals.
+    """
+    messages_js = (pathlib.Path(__file__).resolve().parents[1] / "static" / "messages.js").read_text()
+
+    def extract(name, end_marker):
+        start = messages_js.index(f"async function {name}(")
+        return messages_js[start:messages_js.index(end_marker, start)]
+
+    script = "\n".join([
+        "const calls=[]; let hideCount=0; let rendered=0;",
+        "let S={session:{session_id:'session-a'}};",
+        "let _loadSessionGeneration=1; let _approvalSessionId='session-a'; let _approvalCurrentId='approval-a';",
+        "let _approvalResponding=null; let _approvalClearedOwner=null;",
+        "let _approvalDisplayedOwner={sid:'session-a',approvalId:'approval-a',runId:'run-1',mirrorToken:'mirror-1'};",
+        "const _approvalPendingBySession=new Map([['session-a',{pending:{approval_id:'approval-a',run_id:'run-1',_gateway_mirror_token:'mirror-1'}}]]);",
+        # api returns a DIFFERENT logical head (rerender branch) and switches session mid-fetch.
+        "const api=async(path,opts={})=>{",
+        " calls.push(path);",
+        " if(path.startsWith('/api/approval/pending')){",
+        "  S.session={session_id:'session-b'};",
+        "  _approvalSessionId='session-b'; _approvalCurrentId='approval-b';",
+        "  _approvalDisplayedOwner={sid:'session-b',approvalId:'approval-b',runId:'',mirrorToken:''};",
+        "  return {pending:{approval_id:'approval-x',command:'rm -rf /tmp/x',description:'x',pattern_key:'x',pattern_keys:['x'],run_id:'run-1',_gateway_mirror_token:'mirror-1'},pending_count:1};",
+        " }",
+        " return {ok:true};",
+        "};",
+        "const showApprovalForSession=(sid,pending,count)=>{ if(S.session&&S.session.session_id===sid){rendered+=1;_approvalCurrentId=pending.approval_id||null;} };",
+        "const hideApprovalCard=()=>{hideCount+=1;};",
+        "const $=()=>({disabled:false,classList:{contains:v=>v==='visible',add(){},remove(){}}});",
+        "const t=k=>k; const showToast=()=>{}; const setStatus=()=>{};",
+        _js_block(messages_js, "function _approvalMirrorOwnerFor(", "\nfunction _setApprovalControlsDisabled"),
+        extract("respondApproval", "\nfunction startApprovalPolling"),
+        "(async()=>{",
+        " const r=await _reconcileApprovalToHead({sid:'session-a',approvalId:'approval-a',runId:'run-1',mirrorToken:'mirror-1',generation:1});",
+        " if(r!=='rerender') throw new Error('expected rerender '+r);",
+        " if(hideCount!==0) throw new Error('reconcile hid the NEW session card '+hideCount);",
+        " if(_approvalCurrentId!=='approval-b') throw new Error('reconcile mutated the new session current id '+_approvalCurrentId);",
+        " if(_approvalDisplayedOwner.approvalId!=='approval-b') throw new Error('reconcile mutated the new session displayed owner');",
+        "})().catch(e=>{console.error(e.stack||e);process.exit(1)});",
+    ])
+    result = subprocess.run([shutil.which("node"), "-e", script], text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_gateway_run_unavailable_clears_orphan_card():
+    """#7091 P1: a retired gateway run (gateway_run_unavailable) makes a mirror
+    card an unresolvable orphan. The respond failure path must CLEAR it (hide +
+    drop pending + re-enable + toast), not restore a card that will keep
+    failing.
+    """
+    messages_js = (pathlib.Path(__file__).resolve().parents[1] / "static" / "messages.js").read_text()
+
+    def extract(name, end_marker):
+        start = messages_js.index(f"async function {name}(")
+        return messages_js[start:messages_js.index(end_marker, start)]
+
+    script = "\n".join([
+        "const calls=[]; let hideCount=0; let pendingClears=0; let controlReset=0; let restoreCount=0; const toasts=[];",
+        "let S={session:{session_id:'session-a'}};",
+        "let _loadSessionGeneration=1; let _approvalSessionId='session-a'; let _approvalCurrentId='approval-a';",
+        "let _approvalResponding=null; let _approvalClearedOwner=null; let _yoloEnabled=false;",
+        "let _approvalDisplayedOwner={sid:'session-a',approvalId:'approval-a',runId:'run-1',mirrorToken:'mirror-1'};",
+        "const _approvalPendingBySession=new Map([['session-a',{pending:{approval_id:'approval-a',run_id:'run-1',_gateway_mirror_token:'mirror-1'}}]]);",
+        # api: pending GET -> null (no head); respond -> gateway_run_unavailable.
+        "const api=async(path,opts={})=>{",
+        " calls.push(path);",
+        " if(path.startsWith('/api/approval/pending'))return {pending:null};",
+        " return {ok:false,code:'gateway_run_unavailable',error:'Gateway approval could not be relayed because the active run is unavailable'};",
+        "};",
+        "const visible=()=>true;",
+        "const $=()=>({disabled:false,classList:{contains:visible,add(){},remove(){}}});",
+        "const t=k=>k; const showToast=msg=>toasts.push(msg); const setStatus=()=>{};",
+        "const _unmarkApprovalDismissed=()=>{};",
+        "const _clearApprovalPendingForSession=sid=>{pendingClears+=1;_approvalPendingBySession.delete(sid);};",
+        "const hideApprovalCard=()=>{hideCount+=1;};",
+        "const showApprovalForSession=()=>{};",
+        "const _setApprovalControlsDisabled=()=>{controlReset+=1;};",
+        "const _restoreFailedApprovalResponse=()=>{restoreCount+=1;};",
+        "const _renderPendingApprovalForActiveSession=()=>{restoreCount+=1;};",
+        "const _updateYoloPill=()=>{};",
+        _js_block(messages_js, "function _approvalMirrorOwnerFor(", "\nfunction _setApprovalControlsDisabled"),
+        _js_block(messages_js, "function _isGatewayUnavailableOrphan(", "\nfunction _applyApprovalYoloProjection"),
+        extract("respondApproval", "\nfunction startApprovalPolling"),
+        "(async()=>{",
+        " const ok=await respondApproval('once');",
+        " if(ok) throw new Error('gateway orphan respond should fail');",
+        " if(restoreCount!==0) throw new Error('orphan card was restored instead of cleared');",
+        " if(hideCount!==1) throw new Error('orphan card was not hidden '+hideCount);",
+        " if(pendingClears!==1) throw new Error('orphan pending was not cleared '+pendingClears);",
+        " if(controlReset<1) throw new Error('controls were not re-enabled');",
+        " if(toasts.length<1) throw new Error('no feedback toast');",
+        "})().catch(e=>{console.error(e.stack||e);process.exit(1)});",
+    ])
+    result = subprocess.run([shutil.which("node"), "-e", script], text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_gateway_run_unavailable_keeps_live_successor():
+    """#7091 P1: a retired gateway run (gateway_run_unavailable) must not hide a
+    live successor that became pending after the reconcile GET. The handler
+    re-fetches the head and re-renders the successor instead of clearing/hiding
+    the card.
+    """
+    messages_js = (pathlib.Path(__file__).resolve().parents[1] / "static" / "messages.js").read_text()
+
+    def extract(name, end_marker):
+        start = messages_js.index(f"async function {name}(")
+        return messages_js[start:messages_js.index(end_marker, start)]
+
+    script = "\n".join([
+        "const calls=[]; let hideCount=0; let pendingClears=0; let controlReset=0; let restoreCount=0; let rendered=[]; const toasts=[];",
+        "let S={session:{session_id:'session-a'}};",
+        "let _loadSessionGeneration=1; let _approvalSessionId='session-a'; let _approvalCurrentId='approval-a';",
+        "let _approvalResponding=null; let _approvalClearedOwner=null; let _yoloEnabled=false;",
+        "let _approvalDisplayedOwner={sid:'session-a',approvalId:'approval-a',runId:'run-1',mirrorToken:'mirror-1'};",
+        "const _approvalPendingBySession=new Map([['session-a',{pending:{approval_id:'approval-a',run_id:'run-1',_gateway_mirror_token:'mirror-1'}}]]);",
+        # First pending GET (reconcile) -> null; the re-fetch in the handler -> successor B.
+        "let pendingCalls=0;",
+        "const api=async(path,opts={})=>{",
+        " calls.push(path);",
+        " if(path.startsWith('/api/approval/pending')){",
+        "  pendingCalls+=1;",
+        "  if(pendingCalls===1)return {pending:null};",
+        "  return {pending:{approval_id:'approval-b',command:'rm -rf /tmp/b',description:'b',pattern_key:'b',pattern_keys:['b'],run_id:'run-2',_gateway_mirror_token:'mirror-2'},pending_count:1};",
+        " }",
+        " return {ok:false,code:'gateway_run_unavailable',error:'Gateway approval could not be relayed because the active run is unavailable'};",
+        "};",
+        "const visible=()=>true;",
+        "const $=()=>({disabled:false,classList:{contains:visible,add(){},remove(){}}});",
+        "const t=k=>k; const showToast=msg=>toasts.push(msg); const setStatus=()=>{};",
+        "const _unmarkApprovalDismissed=()=>{};",
+        "const _clearApprovalPendingForSession=sid=>{pendingClears+=1;};",
+        "const hideApprovalCard=()=>{hideCount+=1;};",
+        "const showApprovalForSession=(sid,pending,count)=>{rendered.push(pending&&pending.approval_id);_approvalCurrentId=pending&&pending.approval_id;};",
+        "const _setApprovalControlsDisabled=()=>{controlReset+=1;};",
+        "const _restoreFailedApprovalResponse=()=>{restoreCount+=1;};",
+        "const _renderPendingApprovalForActiveSession=()=>{restoreCount+=1;};",
+        "const _updateYoloPill=()=>{};",
+        _js_block(messages_js, "function _approvalMirrorOwnerFor(", "\nfunction _setApprovalControlsDisabled"),
+        _js_block(messages_js, "function _isGatewayUnavailableOrphan(", "\nfunction _applyApprovalYoloProjection"),
+        extract("respondApproval", "\nfunction startApprovalPolling"),
+        "(async()=>{",
+        " const ok=await respondApproval('once');",
+        " if(ok) throw new Error('gateway orphan respond should fail');",
+        " if(restoreCount!==0) throw new Error('orphan path should not restore '+restoreCount);",
+        " if(hideCount!==0) throw new Error('live successor card was hidden '+hideCount);",
+        " if(pendingClears!==0) throw new Error('live successor pending was cleared '+pendingClears);",
+        " if(rendered.length!==1||rendered[0]!=='approval-b') throw new Error('successor B was not re-rendered '+JSON.stringify(rendered));",
+        " if(controlReset<1) throw new Error('controls were not re-enabled');",
+        " if(toasts.length!==0) throw new Error('a true-orphan toast should not fire when a successor is pending '+JSON.stringify(toasts));",
+        "})().catch(e=>{console.error(e.stack||e);process.exit(1)});",
+    ])
+    result = subprocess.run([shutil.which("node"), "-e", script], text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_click_on_a_never_resolves_same_session_successor_b():
+    """#7091 (developer review): a click captured on approval A must never
+    resolve a same-session successor B that renders into the pending map while
+    the reconcile GET is in flight. The head is compared against the click-time
+    snapshot, so B re-renders and requires a fresh click, and A's click sends
+    NO response POST.
+    """
+    messages_js = (pathlib.Path(__file__).resolve().parents[1] / "static" / "messages.js").read_text()
+
+    def extract(name, end_marker):
+        start = messages_js.index(f"async function {name}(")
+        return messages_js[start:messages_js.index(end_marker, start)]
+
+    script = "\n".join([
+        "const calls=[]; let rendered=[]; let controlReset=0;",
+        "let S={session:{session_id:'session-a'}};",
+        "let _loadSessionGeneration=1; let _approvalSessionId='session-a'; let _approvalCurrentId='approval-a';",
+        "let _approvalResponding=null; let _approvalClearedOwner=null; let _yoloEnabled=false;",
+        "let _approvalDisplayedOwner={sid:'session-a',approvalId:'approval-a',runId:'run-1',mirrorToken:'mirror-1'};",
+        "const _approvalPendingBySession=new Map([['session-a',{pending:{approval_id:'approval-a',run_id:'run-1',_gateway_mirror_token:'mirror-1'}}]]);",
+        # The reconcile GET renders a same-session successor B (producer) and returns B.
+        "let got=false;",
+        "const api=async(path,opts={})=>{",
+        " calls.push(path);",
+        " if(path.startsWith('/api/approval/pending')){",
+        "  if(!got){",
+        "   got=true;",
+        "   _approvalPendingBySession.set('session-a',{pending:{approval_id:'approval-b',command:'rm -rf /tmp/b',description:'b',pattern_key:'b',pattern_keys:['b'],run_id:'run-2',_gateway_mirror_token:'mirror-2'}});",
+        "   _approvalDisplayedOwner={sid:'session-a',approvalId:'approval-b',runId:'run-2',mirrorToken:'mirror-2'};",
+        "   _approvalCurrentId='approval-b';",
+        "   rendered.push('producer-b');",
+        "  }",
+        "  return {pending:{approval_id:'approval-b',command:'rm -rf /tmp/b',description:'b',pattern_key:'b',pattern_keys:['b'],run_id:'run-2',_gateway_mirror_token:'mirror-2'},pending_count:1};",
+        " }",
+        " throw new Error('A click must not POST when a same-session successor rendered mid-GET');",
+        "};",
+        "const visible=()=>true;",
+        "const $=()=>({disabled:false,classList:{contains:visible,add(){},remove(){}}});",
+        "const t=k=>k; const showToast=()=>{}; const setStatus=()=>{};",
+        "const _unmarkApprovalDismissed=()=>{};",
+        "const _clearApprovalPendingForSession=()=>{};",
+        "const hideApprovalCard=()=>{};",
+        "const showApprovalForSession=(sid,pending,count)=>{rendered.push(pending&&pending.approval_id);};",
+        "const _setApprovalControlsDisabled=()=>{controlReset+=1;};",
+        "const _renderPendingApprovalForActiveSession=()=>{};",
+        "const _restoreFailedApprovalResponse=()=>{}; const _applyApprovalYoloProjection=()=>{};",
+        "const _updateYoloPill=()=>{};",
+        _js_block(messages_js, "function _approvalMirrorOwnerFor(", "\nfunction _setApprovalControlsDisabled"),
+        _js_block(messages_js, "function _isGatewayUnavailableOrphan(", "\nfunction _applyApprovalYoloProjection"),
+        extract("respondApproval", "\nfunction startApprovalPolling"),
+        "(async()=>{",
+        " const ok=await respondApproval('once');",
+        " if(ok) throw new Error('A click must not succeed when B rendered mid-GET');",
+        " if(calls.length!==1) throw new Error('expected only the reconcile GET, no POST '+JSON.stringify(calls));",
+        " if(!calls[0].startsWith('/api/approval/pending')) throw new Error('only the reconcile GET should run');",
+        " if(_approvalResponding!==null) throw new Error('response owner was not released');",
+        " if(controlReset<1) throw new Error('controls were not re-enabled');",
+        " if(rendered.length<1||rendered[rendered.length-1]!=='approval-b') throw new Error('B was not rendered for a fresh click '+JSON.stringify(rendered));",
+        "})().catch(e=>{console.error(e.stack||e);process.exit(1)});",
+    ])
+    result = subprocess.run([shutil.which("node"), "-e", script], text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_capture_sources_rendered_card_not_map_with_dismissed_successor():
+    """#7091 (developer re-gate): the capture must source the snapshot from the
+    RENDERED card, not the mutable pending map. A cross-tab-dismissed successor
+    B is stored in the map by _rememberApprovalPending and then suppressed from
+    rendering, leaving A visibly rendered with B in the map. A's click must not
+    resolve B. A and B share run/mirror owners so the owner fields cannot save
+    the day; only the rendered-key snapshot can.
+    """
+    messages_js = (pathlib.Path(__file__).resolve().parents[1] / "static" / "messages.js").read_text()
+
+    def extract(name, end_marker):
+        start = messages_js.index(f"async function {name}(")
+        return messages_js[start:messages_js.index(end_marker, start)]
+
+    script = "\n".join([
+        "const calls=[]; let rendered=[]; let controlReset=0;",
+        "let S={session:{session_id:'session-a'}};",
+        "let _loadSessionGeneration=1; let _approvalSessionId='session-a'; let _approvalCurrentId='approval-a';",
+        "let _approvalResponding=null; let _approvalClearedOwner=null; let _yoloEnabled=false;",
+        # A is the visibly rendered card, with its render-time logical key.
+        "let _approvalDisplayedOwner={sid:'session-a',approvalId:'approval-a',runId:'run-1',mirrorToken:'mirror-1',displayedKey:'{\"sid\":\"session-a\",\"desc\":\"\",\"cmd\":\"\",\"run_id\":\"run-1\",\"mirror_token\":\"mirror-1\"}'};",
+        # The MAP holds a dismissed successor B (same run/mirror, different command) that never rendered.
+        "const _approvalPendingBySession=new Map([['session-a',{pending:{approval_id:'approval-b',command:'rm -rf /tmp/b',description:'b',pattern_key:'b',pattern_keys:['b'],run_id:'run-1',_gateway_mirror_token:'mirror-1'}}]]);",
+        "const api=async(path,opts={})=>{",
+        " calls.push(path);",
+        " if(path.startsWith('/api/approval/pending'))return {pending:{approval_id:'approval-b',command:'rm -rf /tmp/b',description:'b',pattern_key:'b',pattern_keys:['b'],run_id:'run-1',_gateway_mirror_token:'mirror-1'},pending_count:1};",
+        " throw new Error('A click must not POST approval-b when B never rendered');",
+        "};",
+        "const visible=()=>true;",
+        "const $=()=>({disabled:false,classList:{contains:visible,add(){},remove(){}}});",
+        "const t=k=>k; const showToast=()=>{}; const setStatus=()=>{};",
+        "const _unmarkApprovalDismissed=()=>{};",
+        "const _clearApprovalPendingForSession=()=>{};",
+        "const hideApprovalCard=()=>{};",
+        "const showApprovalForSession=(sid,pending,count)=>{rendered.push(pending&&pending.approval_id);};",
+        "const _setApprovalControlsDisabled=()=>{controlReset+=1;};",
+        "const _renderPendingApprovalForActiveSession=()=>{};",
+        "const _restoreFailedApprovalResponse=()=>{}; const _applyApprovalYoloProjection=()=>{};",
+        "const _updateYoloPill=()=>{};",
+        _js_block(messages_js, "function _approvalMirrorOwnerFor(", "\nfunction _setApprovalControlsDisabled"),
+        _js_block(messages_js, "function _isGatewayUnavailableOrphan(", "\nfunction _applyApprovalYoloProjection"),
+        extract("respondApproval", "\nfunction startApprovalPolling"),
+        "(async()=>{",
+        " const ok=await respondApproval('once');",
+        " if(ok) throw new Error('A click must not succeed when the map holds a never-rendered B');",
+        " if(calls.length!==1) throw new Error('expected only the reconcile GET, no POST '+JSON.stringify(calls));",
+        " if(!calls[0].startsWith('/api/approval/pending')) throw new Error('only the reconcile GET should run');",
+        " if(_approvalResponding!==null) throw new Error('response owner was not released');",
+        " if(controlReset<1) throw new Error('controls were not re-enabled');",
+        " if(rendered.length<1||rendered[rendered.length-1]!=='approval-b') throw new Error('B was not rendered for a fresh click '+JSON.stringify(rendered));",
+        "})().catch(e=>{console.error(e.stack||e);process.exit(1)});",
+    ])
+    result = subprocess.run([shutil.which("node"), "-e", script], text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
