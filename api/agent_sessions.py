@@ -307,47 +307,84 @@ def is_cli_session_row_visible(row: dict) -> bool:
     return _count_user_turns(row) >= CLI_MIN_UNTITLED_USER_MESSAGE_COUNT
 
 
-def _has_model_config_branch_identity(row: dict | None) -> bool:
-    """Return True when ``model_config`` marks ``row`` as a fork/delegate child.
+def _model_config_lineage_marker(row: dict | None) -> tuple[str, str | None]:
+    """Return ``(state, marker)`` for a row's ``model_config`` branch identity.
 
     Hermes Agent records branch/delegate lineage inside ``model_config``
     (``_delegate_from`` is authoritative, ``_branched_from`` marks manual
     branches); ``session_source == 'fork'`` is only the legacy fallback for
-    rows created before those markers existed. Such children must remain
-    separate lineages even when the parent's compression boundary overlaps
-    their start timestamp.
+    rows created before those markers existed.
 
-    Markers only count as a fork when they point at ``parent_session_id``.
-    Compression copies ``model_config`` onto the continuation
-    (``publish_compression_child`` callers pass
-    ``agent._session_init_model_config``), so a delegate's continuation
-    carries ``_delegate_from=<the delegate's own parent>``. Presence-only
-    matching would treat that real continuation as a fork.
+    ``state`` is one of:
 
-    Fail closed: a non-empty ``model_config`` that cannot be parsed as a JSON
-    object is ambiguous identity evidence — treat the row as a boundary, not a
-    compression continuation.
+    - ``'none'`` — no ``model_config``, or a parsed object carrying no branch
+      marker. There is no fork/delegate identity to honor.
+    - ``'marker'`` — a usable marker id is returned alongside.
+    - ``'unknown'`` — identity evidence exists but cannot be trusted: the
+      payload is not JSON, is not a JSON object, or the marker value is not a
+      non-empty string. Callers must fail closed on this state (treat the row
+      as a lineage boundary, never as a compression continuation).
+
+    ``model_config`` is a TEXT JSON column, so parsing stays tolerant: hostile
+    or truncated payloads yield ``'unknown'`` instead of raising.
     """
     if not row:
-        return False
+        return ('none', None)
     raw = row.get('model_config')
-    if raw in (None, ''):
-        return False
-    if isinstance(raw, str):
+    if raw is None or raw == '':
+        return ('none', None)
+    if isinstance(raw, (str, bytes, bytearray)):
         try:
             parsed = json.loads(raw)
         except (TypeError, ValueError):
-            return True
+            return ('unknown', None)
     else:
         parsed = raw
     if not isinstance(parsed, dict):
+        return ('unknown', None)
+    # _delegate_from is authoritative; _branched_from marks manual branches.
+    for key in ('_delegate_from', '_branched_from'):
+        if key not in parsed:
+            continue
+        value = parsed.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, str) or not value.strip():
+            return ('unknown', None)
+        return ('marker', value.strip())
+    return ('none', None)
+
+
+def _is_model_config_branch_boundary(parent: dict | None, child: dict | None) -> bool:
+    """Return True when ``child``'s ``model_config`` identity forbids stitching.
+
+    Genuine Agent branches must stay separate lineages even when the parent's
+    compression boundary overlaps their start timestamp, so this is consulted
+    before the rotation tolerance is applied.
+
+    Compression copies ``model_config`` verbatim onto the replacement session
+    (``publish_compression_child`` callers pass
+    ``agent._session_init_model_config``), so a delegate's own continuation
+    inherits ``_delegate_from=<the delegate's parent>``. Presence-only matching
+    would wrong-split that real continuation. An inherited marker is therefore
+    preserved as a continuation **only** when it matches the parent's own
+    identity; anything else is ambiguous lineage evidence and fails closed.
+    """
+    state, marker = _model_config_lineage_marker(child)
+    if state == 'unknown':
         return True
-    parent_id = row.get('parent_session_id')
-    branched = parsed.get('_branched_from')
-    delegated = parsed.get('_delegate_from')
-    if parent_id:
-        return branched == parent_id or delegated == parent_id
-    return branched is not None or delegated is not None
+    if state == 'none':
+        return False
+    # A marker naming the direct parent is a real fork/delegate of that parent.
+    parent_id = (child or {}).get('parent_session_id') or (parent or {}).get('id')
+    if parent_id and marker == str(parent_id):
+        return True
+    parent_state, parent_marker = _model_config_lineage_marker(parent)
+    # Inherited identity: compression copied the parent's own marker forward.
+    if parent_state == 'marker' and parent_marker == marker:
+        return False
+    # Marker points somewhere neither this parent nor its identity explains.
+    return True
 
 
 def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
@@ -370,9 +407,9 @@ def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
         return False
     # Branch/delegate identity lives in model_config in production
     # (_delegate_from authoritative, _branched_from for manual branches).
-    # Markers only count when they point at the child's direct parent;
-    # inherited markers on a compression child must not split the lineage.
-    if _has_model_config_branch_identity(child):
+    # An inherited marker on a compression child must not split the lineage,
+    # but ambiguous or unexplained identity fails closed as a boundary.
+    if _is_model_config_branch_boundary(parent, child):
         return False
     parent_source = str(parent.get('source') or '').strip().lower()
     child_source = str(child.get('source') or '').strip().lower()

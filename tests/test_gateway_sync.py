@@ -641,6 +641,96 @@ def test_compression_overlap_tolerance_rejects_model_config_branch_identity():
     )
 
 
+def test_model_config_branch_identity_is_fail_closed_on_hostile_payloads():
+    """Unusable model_config identity must never widen the compression stitch.
+
+    model_config is a TEXT JSON column, so the reader has to survive hostile or
+    truncated payloads. Any evidence it cannot fully trust — non-object JSON,
+    non-string marker values, empty markers, or a marker naming a session that
+    is neither the direct parent nor the parent's own inherited identity — is
+    ambiguous lineage and must fail closed as a boundary rather than raise.
+    """
+    from api.agent_sessions import _is_continuation_session
+
+    parent = {
+        'id': 'fc_parent',
+        'source': 'webui',
+        'ended_at': 200.0,
+        'end_reason': 'compression',
+    }
+    base_child = {
+        'id': 'fc_child',
+        'source': 'webui',
+        'started_at': 199.7,
+        'parent_session_id': 'fc_parent',
+    }
+
+    # Non-string / unusable marker values are ambiguous, not "absent".
+    for hostile in (
+        {'_delegate_from': 123},
+        {'_delegate_from': ['fc_parent']},
+        {'_delegate_from': {'id': 'fc_parent'}},
+        {'_branched_from': True},
+        {'_branched_from': '   '},
+        {'_delegate_from': ''},
+    ):
+        assert not _is_continuation_session(
+            parent, {**base_child, 'model_config': json.dumps(hostile)}
+        ), hostile
+
+    # Truncated / non-JSON payloads stay fail-closed and must not raise.
+    for raw in ('{not-json', '[]', '"a string"', '17', 'null', '{"a":'):
+        assert not _is_continuation_session(
+            parent, {**base_child, 'model_config': raw}
+        ), raw
+
+    # A marker naming an unrelated session the parent cannot explain is
+    # ambiguous lineage evidence -> boundary.
+    assert not _is_continuation_session(
+        parent,
+        {**base_child, 'model_config': json.dumps({'_delegate_from': 'somewhere_else'})},
+    )
+
+    # An explicit JSON null marker carries no identity -> continuation allowed.
+    assert _is_continuation_session(
+        parent,
+        {**base_child, 'model_config': json.dumps({'_delegate_from': None})},
+    )
+
+
+def test_model_config_fork_child_survives_tolerance_without_session_source():
+    """The exact review vector: fork identity ONLY in model_config, inside 1s.
+
+    The legacy ``session_source == 'fork'`` guard cannot see this child, so
+    before the model_config identity check the 1s compression tolerance would
+    stitch a genuine branch into the parent's lineage.
+    """
+    from api.agent_sessions import _is_continuation_session
+
+    parent = {
+        'id': 'tol_parent',
+        'source': 'webui',
+        'ended_at': 500.0,
+        'end_reason': 'compression',
+    }
+
+    for marker in ('_delegate_from', '_branched_from'):
+        # Deep inside the tolerance window, and with NO session_source at all.
+        child = {
+            'id': f'tol_child_{marker}',
+            'source': 'webui',
+            'started_at': 499.5,
+            'parent_session_id': 'tol_parent',
+            'model_config': json.dumps({marker: 'tol_parent'}),
+        }
+        assert 'session_source' not in child
+        assert not _is_continuation_session(parent, child), marker
+
+        # The same row without the marker is a plain rotation -> continuation.
+        plain = {k: v for k, v in child.items() if k != 'model_config'}
+        assert _is_continuation_session(parent, plain), marker
+
+
 def test_model_config_branch_child_stays_separate_lineage_in_sidebar_projection():
     """A fork/delegate child inside the overlap window keeps its own sidebar row."""
     from api.agent_sessions import _project_agent_session_rows
