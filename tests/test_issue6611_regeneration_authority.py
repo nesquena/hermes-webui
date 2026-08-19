@@ -1,3 +1,8 @@
+import json
+import shutil
+import subprocess
+from pathlib import Path
+
 import pytest
 
 from api.helpers import redact_session_data
@@ -10,6 +15,10 @@ from api.session_ops import (
     resolve_regeneration_turn,
 )
 from api.streaming import _session_payload_with_full_messages
+from tests.js_source_extract import extract_function
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _session():
@@ -99,6 +108,56 @@ def test_public_active_turn_marker_matches_only_the_active_user_row():
     assert "_active_turn_user" not in public["messages"][0]
     assert public["context_messages"][1]["_active_turn_user"] is True
     assert "_active_turn_token" not in str(public)
+
+
+def test_public_active_turn_marker_is_consumed_by_browser_with_timestamp_drift():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required for the browser projection probe")
+
+    from api.process_event_utils import build_active_turn_token
+
+    stream_id = "projection-browser-stream"
+    started_at = 123.5
+    token = build_active_turn_token(stream_id, started_at)
+    public = redact_session_data(
+        {
+            "active_stream_id": stream_id,
+            "pending_started_at": started_at,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "same prompt",
+                    "timestamp": 100.0,
+                    "_active_turn_token": token,
+                }
+            ],
+        }
+    )
+    projected = public["messages"][0]
+    assert projected["_active_turn_user"] is True
+    assert "_active_turn_token" not in projected
+
+    ui_source = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+    functions = "\n".join(
+        extract_function(ui_source, name)
+        for name in (
+            "_messageTimestampSeconds",
+            "_activeTurnTokenMatches",
+            "_pendingActiveTurnUserMessage",
+        )
+    )
+    script = f"""
+const _PENDING_ACTIVE_TURN_TS_EPSILON=1e-6;
+{functions}
+const messages={json.dumps([projected])};
+const session={{active_stream_id:{json.dumps(stream_id)},pending_started_at:{started_at + 1}}};
+const selected=_pendingActiveTurnUserMessage(messages,session);
+if(selected!==messages[0]) throw new Error('projected active row was not selected');
+process.stdout.write(JSON.stringify({{marker:selected._active_turn_user,token:selected._active_turn_token||null}}));
+"""
+    result = subprocess.run([node, "-e", script], text=True, capture_output=True, check=True)
+    assert json.loads(result.stdout) == {"marker": True, "token": None}
 
 
 def test_parent_or_foreign_source_refuses_authority():

@@ -10826,14 +10826,14 @@ function _activeTurnTokenMatches(msg, session){
  * same text twice in a row (a plain "继续" follow-up) legitimately gets two
  * identical user turns, and matching on text would swallow the new one. The
  * discriminator is therefore exact identity, never proximity: the active turn's
- * row either carries the server-stamped `_active_turn_token` (stream_id +
- * started_at — unique to this turn), or its timestamp equals `pending_started_at`
- * within a precision-only epsilon that absorbs float/state.db drift but never a
- * full second. A whole-second (or sub-second) mismatch is ambiguous and returns
- * null so the caller materializes the pending turn — the transient duplicate is
- * harmless, hiding a turn + moving its attachments is not. Text equality is
- * still required downstream, so a false match needs identical text AND an exact
- * identity signal.
+ * public row carries `_active_turn_user`, while private rows carry the server-
+ * stamped `_active_turn_token` (stream_id + started_at — unique to this turn),
+ * or their timestamp equals `pending_started_at` within a precision-only epsilon
+ * that absorbs float/state.db drift but never a full second. A whole-second (or
+ * sub-second) mismatch is ambiguous and returns null so the caller materializes
+ * the pending turn — the transient duplicate is harmless, hiding a turn + moving
+ * its attachments is not. Text equality is still required downstream, so a false
+ * match needs identical text AND an exact identity signal.
  */
 function _pendingActiveTurnUserMessage(messages, session){
   const startedAt=Number(session?.pending_started_at);
@@ -10843,6 +10843,8 @@ function _pendingActiveTurnUserMessage(messages, session){
     const msg=list[i];
     if(!msg||String(msg.role||'')!=='user') continue;
     if(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(msg)) continue;
+    // Public projections replace the private token with this authoritative marker.
+    if(msg._active_turn_user===true) return msg;
     // Unambiguous: the row carries the active turn's exact token
     // (stream_id + started_at) stamped by the server's eager-checkpoint path.
     if(typeof _activeTurnTokenMatches==='function'&&_activeTurnTokenMatches(msg,session)) return msg;
