@@ -140,8 +140,9 @@ def test_page_and_worker_use_one_registration_first_presenter_with_page_owner_fa
     assert "indexedDB.open(" in MESSAGES_JS
     assert "_claimPageNotification" in MESSAGES_JS
     assert "hermes-notifications" in MESSAGES_JS
-    assert notification_region.count("new Notification(") == 2
+    assert notification_region.count("new Notification(") == 1
     assert notification_region.count("reg.showNotification(") == 1
+    assert "_notificationOwnerStorageUnavailable)return 'ambiguous';\n    return _presentNotificationLocally(reg,title,opts).catch(()=> 'ambiguous');" in notification_region
     assert "indexedDB.open(" not in SW_JS
     assert "hermes.notification.present" in MESSAGES_JS
     assert "hermes.notification.present" in SW_JS

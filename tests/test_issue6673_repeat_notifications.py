@@ -3,6 +3,7 @@
 import json
 import shutil
 import subprocess
+import tempfile
 import textwrap
 from pathlib import Path
 
@@ -23,9 +24,21 @@ def _run_node(script: str) -> dict:
     node = shutil.which("node")
     if node is None:
         return {}
-    result = subprocess.run([node, "-e", script], cwd=ROOT, text=True, capture_output=True, check=False)
-    assert result.returncode == 0, result.stderr
-    return json.loads(result.stdout)
+    temporary_script = None
+    if len(script) > 7000:
+        with tempfile.NamedTemporaryFile("w", suffix=".cjs", encoding="utf-8", delete=False) as handle:
+            handle.write(script)
+            temporary_script = Path(handle.name)
+        command = [node, str(temporary_script)]
+    else:
+        command = [node, "-e", script]
+    try:
+        result = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, check=False)
+        assert result.returncode == 0, result.stderr
+        return json.loads(result.stdout)
+    finally:
+        if temporary_script is not None:
+            temporary_script.unlink(missing_ok=True)
 
 
 def test_identity_capture_uses_only_canonical_journal_ids():
@@ -67,7 +80,7 @@ _registrationAfterNotificationTransition({{state:'activated'}}).then(value =>
     assert 1900 <= result["elapsed"] < 2500
 
 
-def test_registration_first_presenter_covers_rows_one_through_twenty_nine():
+def test_registration_first_presenter_covers_rows_one_through_thirty_four():
     identity = {"streamId": "stream-6673", "lastEventId": "stream-6673:1"}
     cases = [
         {"name": "1-exact-duplicate", "worker": "duplicate", "records": [identity], "expected": "duplicate", "registration": 0, "direct": 0},
@@ -94,16 +107,110 @@ def test_registration_first_presenter_covers_rows_one_through_twenty_nine():
         {"name": "22-manual-unkeyed", "unkeyed": True, "expected": "shown", "registration": 1, "direct": 0},
         {"name": "23-sender-foreground", "sender": True, "expected": "blocked", "registration": 0, "direct": 0},
         {"name": "24-capable-worker", "worker": "shown", "expected": "shown", "expectedTerminal": "worker", "registration": 0, "direct": 0},
-        {"name": "25-degraded-two-tab", "channel": False, "expected": "shown", "registration": 1, "direct": 0},
+        {"name": "25-degraded-two-context-shared-owner", "twoContexts": True, "channel": False, "constructorAvailable": False, "expected": "shown", "registration": 1, "direct": 0},
         {"name": "26-malformed-inactive-registration", "identityMode": "invalid", "inactive": True, "expected": "shown", "registration": 0, "direct": 1},
         {"name": "27-sender-registration-without-page-interface", "sender": True, "force": True, "channel": False, "notificationInterface": False, "constructorAvailable": False, "expected": "shown", "registration": 1, "direct": 0},
         {"name": "28-sender-disabled", "sender": True, "notificationsEnabled": False, "expected": "blocked", "registration": 0, "direct": 0},
         {"name": "29-sender-denied", "sender": True, "permission": "denied", "expected": "blocked", "registration": 0, "direct": 0},
+        {"name": "30-registration-present-missing-indexeddb", "worker": "invalid", "channel": False, "indexedDBAvailable": False, "constructorAvailable": False, "expected": "shown", "registration": 1, "direct": 0},
+        {"name": "31-no-worker-no-indexeddb-boundary", "channel": False, "indexedDBAvailable": False, "registrationAvailable": False, "constructorAvailable": False, "ownerBoundary": "no-shared-owner", "expected": "ambiguous", "registration": 0, "direct": 1},
+        {"name": "32-owner-storage-request-error", "worker": "invalid", "indexedDBMode": "request-error", "expected": "ambiguous", "registration": 0, "direct": 0},
+        {"name": "33-owner-storage-upgrade-abort", "worker": "invalid", "indexedDBMode": "upgrade-abort", "expected": "ambiguous", "registration": 0, "direct": 0},
+        {"name": "34-owner-storage-blocked", "worker": "invalid", "indexedDBMode": "blocked", "expected": "ambiguous", "registration": 0, "direct": 0},
     ]
     notification_region = _notification_region()
     driver = textwrap.dedent(
         """
         async function runCase(config) {
+          if (config.twoContexts) {
+            const ownerRows = new Map();
+            const transactionQueue = [];
+            let transactionActive = false;
+            const ownerKey = key => JSON.stringify(key);
+            const pumpTransaction = () => {
+              if (transactionActive || !transactionQueue.length) return;
+              transactionActive = true;
+              const {tx, request, key} = transactionQueue.shift();
+              queueMicrotask(() => {
+                request.result = ownerRows.get(ownerKey(key));
+                request.onsuccess?.();
+                queueMicrotask(() => {
+                  if (tx.write?.kind === 'put') ownerRows.set(ownerKey([tx.write.value.streamId, tx.write.value.lastEventId]), tx.write.value);
+                  if (tx.write?.kind === 'delete') ownerRows.delete(ownerKey(tx.write.key));
+                  tx.oncomplete?.();
+                  transactionActive = false;
+                  pumpTransaction();
+                });
+              });
+            };
+            const ownerDb = {
+              objectStoreNames: {contains: () => true},
+              close() {},
+              transaction() {
+                const tx = {write: null};
+                const store = {
+                  get(key) {
+                    const request = {};
+                    transactionQueue.push({tx, request, key});
+                    pumpTransaction();
+                    return request;
+                  },
+                  put(value) { tx.write = {kind: 'put', value}; },
+                  delete(key) { tx.write = {kind: 'delete', key}; },
+                };
+                tx.objectStore = () => store;
+                return tx;
+              },
+            };
+            const indexedDB = {
+              open() {
+                const request = {};
+                queueMicrotask(() => { request.result = ownerDb; request.onupgradeneeded?.(); request.onsuccess?.(); });
+                return request;
+              },
+            };
+            const makeContext = state => {
+              const registration = {
+                active: {postMessage() {}},
+                getNotifications: async () => [],
+                showNotification: async () => { state.registrationDisplays += 1; },
+              };
+              const Notification = function () {
+                state.constructorAttempts += 1;
+                if (config.constructorAvailable === false) throw new Error('constructor unavailable');
+                return {};
+              };
+              Notification.permission = 'granted';
+              const context = {
+                Promise, Date, Math, JSON, console, setTimeout, clearTimeout, queueMicrotask,
+                Notification,
+                window: {MessageChannel: undefined, indexedDB, _notificationsEnabled: true, Notification},
+                document: {hidden: false, visibilityState: 'visible', hasFocus: () => true},
+                navigator: {serviceWorker: {getRegistration: () => Promise.resolve(registration)}},
+                location: {origin: 'https://webui.test', href: 'https://webui.test/'},
+                S: {session: {session_id: 'session-6673'}},
+                _sessionUrlForSid: sid => '/?session=' + sid,
+                assistantDisplayName: () => 'Hermes',
+                _isBackgroundedForBrowserNotification: () => false,
+              };
+              vm.createContext(context);
+              vm.runInContext(BLOCK, context);
+              return context;
+            };
+            const states = [{registrationDisplays: 0, constructorAttempts: 0}, {registrationDisplays: 0, constructorAttempts: 0}];
+            const contexts = states.map(makeContext);
+            const options = {eventIdentity: {streamId: 'stream-6673', lastEventId: 'stream-6673:1'}};
+            const statuses = await Promise.all(contexts.map(context => context._showPwaNotification('Hermes', 'body', options)));
+            return {
+              name: config.name,
+              status: statuses.includes('shown') ? 'shown' : statuses[0],
+              statuses,
+              registrationDisplays: states.reduce((total, state) => total + state.registrationDisplays, 0),
+              constructorAttempts: states.reduce((total, state) => total + state.constructorAttempts, 0),
+              ownerEvents: [...ownerRows.values()],
+              ownerBoundary: 'shared-owner',
+            };
+          }
           const state = {registrationDisplays: 0, constructorAttempts: 0};
           const ownerRows = new Map();
           const ownerKey = key => JSON.stringify(key);
@@ -134,7 +241,14 @@ def test_registration_first_presenter_covers_rows_one_through_twenty_nine():
           const indexedDB = {
             open() {
               const request = {};
-              queueMicrotask(() => { request.result = ownerDb; request.onupgradeneeded?.(); request.onsuccess?.(); });
+              queueMicrotask(() => {
+                if (config.indexedDBMode === 'request-error') { request.error = new Error('owner storage request failed'); request.onerror?.(); return; }
+                if (config.indexedDBMode === 'blocked') { request.onblocked?.(); return; }
+                request.result = ownerDb;
+                request.onupgradeneeded?.();
+                if (config.indexedDBMode === 'upgrade-abort') { request.result = undefined; request.error = new Error('owner storage upgrade aborted'); request.onerror?.(); return; }
+                request.onsuccess?.();
+              });
               return request;
             },
           };
@@ -153,7 +267,10 @@ def test_registration_first_presenter_covers_rows_one_through_twenty_nine():
           const registration = {
             active: config.inactive ? null : {postMessage(_data, ports) {
               if (config.postThrow) throw new Error('post failed');
-              if (config.worker !== 'timeout') queueMicrotask(() => ports?.[0]?.postMessage({status: config.worker || 'invalid'}));
+              if (config.worker !== 'timeout') {
+                state.terminalPath = 'worker';
+                queueMicrotask(() => ports?.[0]?.postMessage({status: config.worker || 'invalid'}));
+              }
             }},
             getNotifications: async () => {
               if (config.recordsReject) throw new Error('records unavailable');
@@ -173,10 +290,16 @@ def test_registration_first_presenter_covers_rows_one_through_twenty_nine():
           const worker = config.noServiceWorker ? undefined : {
             getRegistration: () => config.registrationReject ? Promise.reject(new Error('registration unavailable')) : Promise.resolve(config.registrationAvailable === false ? null : registration),
           };
+          const windowObject = {
+                MessageChannel: config.channel === false ? undefined : MessageChannel,
+                _notificationsEnabled: config.notificationsEnabled !== false,
+                ...(config.notificationInterface === false ? {} : {Notification}),
+          };
+          if (config.indexedDBAvailable !== false) windowObject.indexedDB = indexedDB;
           const context = {
             Promise, Date, Math, JSON, console, setTimeout, clearTimeout, queueMicrotask,
             ...(config.notificationInterface === false ? {} : {Notification}),
-                window: {MessageChannel: config.channel === false ? undefined : MessageChannel, indexedDB, _notificationsEnabled: config.notificationsEnabled !== false, ...(config.notificationInterface === false ? {} : {Notification})},
+                window: windowObject,
                 document: {hidden: config.hidden === true, visibilityState: config.hidden === true ? 'hidden' : 'visible', hasFocus: () => true},
             navigator: {serviceWorker: worker},
             location: {origin:'https://webui.test', href:'https://webui.test/'},
@@ -192,7 +315,7 @@ def test_registration_first_presenter_covers_rows_one_through_twenty_nine():
             const status = await (config.sender
                   ? context.sendBrowserNotification('Hermes', 'body', {...options, force:config.force === true})
                   : context._showPwaNotification('Hermes', 'body', options));
-                return {name: config.name, status: status === undefined ? 'blocked' : status, registrationDisplays: state.registrationDisplays, constructorAttempts: state.constructorAttempts};
+                return {name: config.name, status: status === undefined ? 'blocked' : status, registrationDisplays: state.registrationDisplays, constructorAttempts: state.constructorAttempts, terminalPath: state.terminalPath, ownerBoundary: config.ownerBoundary};
           } catch (error) {
             return {name: config.name, status:'rejected', registrationDisplays: state.registrationDisplays, constructorAttempts: state.constructorAttempts, error:String(error.message || error)};
           }
@@ -210,6 +333,16 @@ def test_registration_first_presenter_covers_rows_one_through_twenty_nine():
         assert observed["status"] == expected["expected"], observed
         assert observed["registrationDisplays"] == expected["registration"], observed
         assert observed["constructorAttempts"] == expected["direct"], observed
+        if expected.get("expectedTerminal"):
+            assert observed["terminalPath"] == expected["expectedTerminal"], observed
+        if expected.get("ownerBoundary"):
+            assert observed["ownerBoundary"] == expected["ownerBoundary"], observed
+        if expected.get("twoContexts"):
+            assert sorted(observed["statuses"]) == ["ambiguous", "shown"], observed
+            assert len(observed["ownerEvents"]) == 1, observed
+            assert observed["ownerEvents"][0]["streamId"] == "stream-6673", observed
+            assert observed["ownerEvents"][0]["lastEventId"] == "stream-6673:1", observed
+            assert observed["ownerEvents"][0]["state"] == "delivered", observed
     assert "indexedDB.open(" in MESSAGES_JS
     assert "_claimPageNotification" in MESSAGES_JS
     assert "hermes-notification-failures" in MESSAGES_JS

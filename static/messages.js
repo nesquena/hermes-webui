@@ -9388,7 +9388,7 @@ function _deliverPageNotification(title,body,opts,identity,reg){
     });
   }).catch(error=>{
     if(!error||!error._notificationOwnerStorageUnavailable)return 'ambiguous';
-    try{new Notification(title,opts);return 'shown';}catch(_error){return 'ambiguous';}
+    return _presentNotificationLocally(reg,title,opts).catch(()=> 'ambiguous');
   });
 }
 function _showPwaNotification(title,body,options={}){
