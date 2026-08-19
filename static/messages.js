@@ -114,10 +114,13 @@ function _chatPayloadModelState(){
   return {model,model_provider:_chatPayloadModelProvider(model)};
 }
 
-function _recordModelRouterFailure() {
+function _recordModelRouterFailure(modelState) {
   if (typeof window.ModelRouter === 'undefined' || !window.ModelRouter || typeof window.ModelRouter.recordFailure !== 'function') return;
   try {
-    const _ms = _chatPayloadModelState();
+    // Greptile P1: 优先用发起请求时捕获的模型状态（会话 A），
+    // 避免失败处理时用户已切到会话 B 而冷却错误模型；
+    // 无参调用（流式 apperror）兜底重读当前会话模型，保持原行为。
+    const _ms = modelState || _chatPayloadModelState();
     window.ModelRouter.recordFailure(_ms.model, _ms.model_provider);
   } catch (_e) { /* cooldown delivery must never break error UI */ }
 }
@@ -1625,6 +1628,10 @@ async function send(){
   const activeSid=S.session.session_id;
   _sendInProgressSid=activeSid;
   const sessionAtSend=S.session; // 引用捕获（不是复制），用于 await 后 fail-closed 守卫
+  // Greptile P1: activeSid 锁定后立即捕获发起请求时的模型状态（会话 A）。
+  // 后续 /api/chat/start 失败处理必须使用该捕获值，不能等 catch 时重读
+  // 全局 S（此时用户可能已切到会话 B，导致冷却错误模型）。
+  const failedModelState = _chatPayloadModelState();
 
   // Model scheduler: 若开关启用（设置总开关 + composer Auto），发送前获取
   // 推荐并应用到模型下拉。该调用不阻塞发送，失败保持当前模型。
@@ -1891,7 +1898,9 @@ async function send(){
     stopClarifyPolling();
     // 非流式 /api/chat/start 失败：通知 model scheduler 记录 failure cooldown。
     // 404 会话失效已在前方 return；active-stream 冲突由 conflictActiveStream 排除。
-    if (!conflictActiveStream && typeof _recordModelRouterFailure === 'function') _recordModelRouterFailure();
+    // Greptile P1: 传入 send() 捕获的 failedModelState（会话 A 的模型），
+    // 避免失败处理时重读全局 S 而冷却用户刚切换到的会话 B 的模型。
+    if (!conflictActiveStream && typeof _recordModelRouterFailure === 'function') _recordModelRouterFailure(failedModelState);
     // Only hide approval card if it belongs to the session that just finished
     if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard(true);removeThinking();
     if(!_clarifySessionId || _clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
