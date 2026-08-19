@@ -1030,11 +1030,44 @@ def safe_resolve_ws(root: Path, requested: str) -> Path:
 _DIR_FD_OK = os.open in getattr(os, "supports_dir_fd", set())
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+# O_PATH opens a directory fd WITHOUT requiring read permission on the
+# directory itself (only search on its parents). Retained root/intermediate
+# directory fds are used purely as openat anchors, never read, so O_PATH is
+# both sufficient and required to keep a valid 0111 (search-only) allowed
+# root / intermediate servable: the pre-change direct leaf open needed only
+# search on ancestors, and an O_RDONLY open of such a directory would fail
+# with EACCES (403). Falls back to 0 on platforms without O_PATH, where the
+# callers use O_RDONLY instead. (#6988 round 4.)
+_O_PATH = getattr(os, "O_PATH", 0)
 # Windows opens files in TEXT mode by default (CRLF translation); every leaf
 # fd that reaches os.read / response serving must be opened in BINARY mode so
 # media bytes, ETag digests and Content-Lengths are never corrupted. No-op
 # (0) on POSIX. (#6988 round 3.)
 _O_BINARY = getattr(os, "O_BINARY", 0)
+
+
+def _dir_component_flags() -> int:
+    """Flags for retained root/intermediate DIRECTORY descriptors.
+
+    O_PATH | O_DIRECTORY | O_NOFOLLOW when O_PATH is available (no read
+    permission needed on the directory itself), falling back to
+    O_RDONLY | O_DIRECTORY | O_NOFOLLOW on platforms without O_PATH. The
+    returned fd is only ever used as a dir_fd anchor for the openat walk,
+    never read directly.
+    """
+    base = _O_PATH if _O_PATH else os.O_RDONLY
+    return base | _O_DIRECTORY | _O_NOFOLLOW
+
+
+def _leaf_flags(*, want_directory: bool) -> int:
+    """Flags for the FINAL (leaf) component: always readable.
+
+    O_RDONLY | O_NOFOLLOW | O_BINARY (+ O_DIRECTORY when the leaf is a
+    directory). O_PATH is never used for the leaf — the fd is returned to
+    callers that read/scan it (file bytes, os.scandir), and an O_PATH fd
+    cannot be read.
+    """
+    return os.O_RDONLY | _O_NOFOLLOW | (_O_DIRECTORY if want_directory else 0) | _O_BINARY
 
 
 def open_anchored_fd(workspace: Path, target: Path, *, want_dir: bool) -> int:
@@ -1067,12 +1100,25 @@ def open_anchored_fd(workspace: Path, target: Path, *, want_dir: bool) -> int:
     # collapsed any symlinks to REACH it, e.g. macOS /tmp -> /private/tmp), so its
     # final component is legitimately a real directory — O_NOFOLLOW here only fires
     # if the root itself was raced into a symlink after resolve() (escape attempt).
-    fd = os.open(str(root_resolved), os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW)
+    # When the target IS the root (empty rel_parts), the root fd is the returned
+    # LEAF the caller reads (e.g. os.scandir in list_dir) — keep it O_RDONLY.
+    # Otherwise it is a retained anchor used only as dir_fd: O_PATH when
+    # available, so a search-only (0111) allowed root stays openable.
+    if rel_parts:
+        fd = os.open(str(root_resolved), _dir_component_flags())
+    else:
+        fd = os.open(str(root_resolved), os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW)
     try:
         for i, part in enumerate(rel_parts):
             is_last = i == len(rel_parts) - 1
             want_directory = (not is_last) or want_dir
-            flags = os.O_RDONLY | _O_NOFOLLOW | (_O_DIRECTORY if want_directory else 0) | _O_BINARY
+            # Intermediate components are retained anchors (dir_fd only):
+            # O_PATH when available. The FINAL component is the readable leaf
+            # (file bytes, or the directory the caller scans) — never O_PATH.
+            if is_last:
+                flags = _leaf_flags(want_directory=want_directory)
+            else:
+                flags = _dir_component_flags()
             try:
                 nfd = os.open(part, flags, dir_fd=fd)
             except OSError:
@@ -1125,7 +1171,14 @@ def open_anchored_fd_from_root(root_fd: int, rel_parts, *, want_dir: bool) -> in
         for i, part in enumerate(rel_parts):
             is_last = i == len(rel_parts) - 1
             want_directory = (not is_last) or want_dir
-            flags = os.O_RDONLY | _O_NOFOLLOW | (_O_DIRECTORY if want_directory else 0) | _O_BINARY
+            # Intermediate components are retained anchors (dir_fd only):
+            # O_PATH when available, so a search-only (0111) intermediate
+            # stays traversable. The FINAL component is the readable leaf
+            # (file bytes, or the directory the caller scans) — never O_PATH.
+            if is_last:
+                flags = _leaf_flags(want_directory=want_directory)
+            else:
+                flags = _dir_component_flags()
             try:
                 nfd = os.open(part, flags, dir_fd=fd)
             except OSError:

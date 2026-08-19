@@ -18720,7 +18720,18 @@ def _open_allowed_root_fd(root: Path) -> int | None:
     directory (fail closed — never fall through to a pathname open).
     """
     try:
-        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        # Retained root descriptor: used only as a dir_fd anchor for the
+        # serve-time walk, never read. O_PATH | O_DIRECTORY | O_NOFOLLOW when
+        # O_PATH is available — opening the directory with O_RDONLY would
+        # require READ permission on the root directory itself, regressing a
+        # valid search-only (0111) allowed root from HTTP 200 (pre-change
+        # direct leaf open needed only search on ancestors) to HTTP 403.
+        # Falls back to O_RDONLY on platforms without O_PATH. (#6988 round 4.)
+        flags = (
+            (getattr(os, "O_PATH", 0) or os.O_RDONLY)
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
         return os.open(str(root), flags)
     except OSError:
         return None
@@ -18757,8 +18768,16 @@ def _open_verified_leaf_fd(target: Path) -> int | None:
     if not rel.parts:
         return None
     try:
+        # Filesystem anchor (e.g. "/" on POSIX): retained and used only as a
+        # dir_fd for the component walk, never read. O_PATH when available —
+        # no read permission needed on the anchor directory itself, and the
+        # walk stays identical (openat + O_NOFOLLOW). O_RDONLY fallback on
+        # platforms without O_PATH. (#6988 round 4.)
         root_fd = os.open(
-            str(anchor), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            str(anchor),
+            (getattr(os, "O_PATH", 0) or os.O_RDONLY)
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
         )
     except OSError:
         return None

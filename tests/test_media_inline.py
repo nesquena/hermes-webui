@@ -1401,6 +1401,120 @@ class TestMediaEndpointUnit(unittest.TestCase):
                 "MEDIA_ALLOWED_ROOTS media outside Hermes roots must still serve",
             )
 
+    def test_media_serves_readable_leaf_under_0111_search_only_root(self):
+        """#6988 review round 4: retained root/intermediate DIRECTORY fds must
+        open with O_PATH | O_DIRECTORY | O_NOFOLLOW (no READ permission needed
+        on the directory itself — only search on its parents). The pre-change
+        direct leaf open needed only search on ancestors, so a readable media
+        file beneath a valid 0111 (search-only) allowed root and nested
+        intermediate must keep serving HTTP 200 with the exact bytes (and 206
+        for Range), never regress to 403.
+
+        An O_RDONLY open of the 0111 root/intermediate fails with EACCES for
+        non-root users, which is exactly the regression this test guards:
+        with the retained root fd opened O_RDONLY, the authorization-time
+        retention open itself fails and the route returns 403.
+
+        Permissions are restored in ``finally`` so the TemporaryDirectory
+        cleanup can traverse and remove the tree.
+        """
+        from api import routes
+
+        if not hasattr(os, "O_PATH"):
+            self.skipTest("O_PATH unavailable on this platform")
+        if os.name == "nt":
+            self.skipTest("POSIX mode bits unavailable on Windows")
+
+        class _CaptureHandler:
+            def __init__(self, headers=None):
+                self.status = None
+                self.headers = headers or {}
+                self.sent_headers = {}
+                self.body = bytearray()
+                self.wfile = self
+            def send_response(self, code):
+                self.status = code
+            def send_header(self, name, value):
+                self.sent_headers[name] = value
+            def end_headers(self):
+                pass
+            def write(self, b):
+                self.body.extend(b)
+            def flush(self):
+                pass
+
+        png_bytes = (
+            b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01'
+            b'\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00'
+            b'\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82'
+        )
+        with tempfile.TemporaryDirectory() as home:
+            # Traversable by the testing user AND by a non-root drop (the
+            # 0111 search-only bits on the allowed root/intermediate are the
+            # point of this test; the parent must not add an unrelated
+            # EACCES). TemporaryDirectory creates 0700 by default.
+            home_path = pathlib.Path(home)
+            home_path.chmod(0o755)
+            hermes_home = home_path / ".hermes"
+            hermes_home.mkdir(parents=True)
+            ws = hermes_home / "workspace"
+            ws.mkdir(parents=True)
+            state_dir = hermes_home / "webui-state"
+            state_dir.mkdir(parents=True)
+            # Valid allowed root via MEDIA_ALLOWED_ROOTS, with a NESTED
+            # intermediate — both search-only (0111), leaf readable (0644).
+            allowed_root = home_path / "media_0111"
+            intermediate = allowed_root / "nested"
+            intermediate.mkdir(parents=True)
+            leaf = intermediate / "shot.png"
+            leaf.write_bytes(png_bytes)
+            leaf.chmod(0o644)
+            try:
+                allowed_root.chmod(0o111)
+                intermediate.chmod(0o111)
+
+                env = {
+                    "HERMES_HOME": str(hermes_home),
+                    "MEDIA_ALLOWED_ROOTS": str(allowed_root),
+                }
+                request_path = (
+                    "path=" + urllib.parse.quote(str(leaf.resolve())) + "&inline=1"
+                )
+                with mock.patch.dict(os.environ, env), \
+                     mock.patch.object(routes, "get_last_workspace", lambda: str(ws)), \
+                     mock.patch("api.auth.is_auth_enabled", lambda: False), \
+                     mock.patch("api.config.STATE_DIR", state_dir), \
+                     mock.patch("api.profiles._DEFAULT_HERMES_HOME", hermes_home):
+                    # Full request: HTTP 200 with the exact bytes.
+                    h1 = _CaptureHandler()
+                    routes._handle_media(h1, SimpleNamespace(
+                        query=request_path, path="/api/media"))
+                    self.assertEqual(
+                        h1.status, 200,
+                        "readable leaf below 0111 search-only root+intermediate "
+                        "must serve full HTTP 200 (O_PATH on retained dir fds)")
+                    self.assertEqual(
+                        bytes(h1.body), png_bytes,
+                        "full response body must be the exact media bytes")
+                    # Range request: HTTP 206 with the exact slice.
+                    h2 = _CaptureHandler({"Range": "bytes=4-11"})
+                    routes._handle_media(h2, SimpleNamespace(
+                        query=request_path, path="/api/media"))
+                    self.assertEqual(
+                        h2.status, 206,
+                        "Range on a leaf below 0111 dirs must serve HTTP 206")
+                    self.assertEqual(
+                        bytes(h2.body), png_bytes[4:12],
+                        "206 body must be the exact requested byte slice")
+                    self.assertEqual(
+                        h2.sent_headers.get("Content-Range"),
+                        f"bytes 4-11/{len(png_bytes)}",
+                        "206 must carry the exact Content-Range")
+            finally:
+                # Restore permissions so TemporaryDirectory cleanup works.
+                allowed_root.chmod(0o755)
+                intermediate.chmod(0o755)
+
     def test_media_endpoints_advertise_byte_range_support(self):
         routes_src = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
         self.assertIn("Accept-Ranges", routes_src)
