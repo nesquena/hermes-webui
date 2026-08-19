@@ -6,12 +6,26 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 import types
 
 import pytest
 
 
 REPO = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(autouse=True)
+def _isolate_automatic_restart(monkeypatch):
+    """Keep revision-guard unit tests from starting a real restart worker."""
+    from api import agent_runtime
+
+    monkeypatch.setattr(agent_runtime, "_AUTO_RESTART_SCHEDULED", False)
+    monkeypatch.setattr(
+        agent_runtime,
+        "_delegate_webui_restart",
+        lambda *, restart_ready: True,
+    )
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -64,6 +78,7 @@ from api import agent_runtime
 
 agent_dir = Path(__file__).parent / "hermes-agent"
 assert agent_runtime._AGENT_DIR == agent_dir.resolve()
+agent_runtime._delegate_webui_restart = lambda **_kwargs: True
 assert streaming._get_ai_agent().revision == "before"
 
 (agent_dir / "run_agent.py").write_text(
@@ -85,14 +100,14 @@ try:
 except RuntimeError as exc:
     message = str(exc)
     assert "Hermes Agent was updated" in message
-    assert "Restart Hermes WebUI" in message
+    assert "WebUI will restart" in message
 else:
     raise AssertionError("stale in-process AIAgent was reused after its source revision changed")
 
 try:
     agent_runtime.require_ai_agent_class()
 except agent_runtime.AgentRuntimeChangedError as exc:
-    assert "Restart Hermes WebUI" in str(exc)
+    assert "WebUI will restart" in str(exc)
 else:
     raise AssertionError("unguarded AIAgent import was allowed after its source revision changed")
 """.strip()
@@ -247,6 +262,224 @@ def test_known_revision_becoming_unreadable_fails_closed(monkeypatch):
         agent_runtime.ensure_agent_runtime_current()
 
 
+def test_live_agent_update_marker_blocks_restart_readiness(monkeypatch, tmp_path):
+    """A fresh marker owned by a live PID means the Agent update is active."""
+    from api import agent_runtime
+
+    hermes_home = tmp_path / "hermes-home"
+    agent_root = tmp_path / "hermes-agent"
+    hermes_home.mkdir()
+    agent_root.mkdir()
+    (hermes_home / ".hermes-update-in-progress").write_text(
+        f"{os.getpid()}\n{time.time()}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(agent_runtime, "_HERMES_HOME", hermes_home)
+    monkeypatch.setattr(agent_runtime, "_AGENT_SOURCE_DIR", agent_root)
+    monkeypatch.setattr(agent_runtime, "_AGENT_PYTHON", None)
+
+    assert agent_runtime._agent_update_transaction_state() == "active"
+
+
+def test_dead_or_over_age_agent_update_marker_is_stale(monkeypatch, tmp_path):
+    """A dead or over-age owner must not wedge automatic restart forever."""
+    from api import agent_runtime
+
+    hermes_home = tmp_path / "hermes-home"
+    agent_root = tmp_path / "hermes-agent"
+    hermes_home.mkdir()
+    agent_root.mkdir()
+    marker = hermes_home / ".hermes-update-in-progress"
+    monkeypatch.setattr(agent_runtime, "_HERMES_HOME", hermes_home)
+    monkeypatch.setattr(agent_runtime, "_AGENT_SOURCE_DIR", agent_root)
+    monkeypatch.setattr(agent_runtime, "_AGENT_PYTHON", None)
+
+    marker.write_text(f"99999999\n{time.time()}\n", encoding="utf-8")
+    monkeypatch.setattr(agent_runtime, "_pid_is_alive", lambda _pid: False)
+    assert agent_runtime._agent_update_transaction_state() == "complete"
+
+    marker.write_text(
+        f"{os.getpid()}\n{time.time() - agent_runtime._AGENT_UPDATE_MAX_AGE_SECONDS - 1}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(agent_runtime, "_pid_is_alive", lambda _pid: True)
+    assert agent_runtime._agent_update_transaction_state() == "complete"
+
+
+@pytest.mark.parametrize(
+    "marker_name",
+    [".update-incomplete", ".lazy-refresh-incomplete"],
+)
+def test_agent_recovery_markers_block_automatic_restart(
+    monkeypatch, tmp_path, marker_name
+):
+    """Agent recovery owns venv health; WebUI waits for its marker to clear."""
+    from api import agent_runtime
+
+    hermes_home = tmp_path / "hermes-home"
+    agent_root = tmp_path / "hermes-agent"
+    hermes_home.mkdir()
+    agent_root.mkdir()
+    (agent_root / marker_name).write_text("incomplete\n", encoding="utf-8")
+    monkeypatch.setattr(agent_runtime, "_HERMES_HOME", hermes_home)
+    monkeypatch.setattr(agent_runtime, "_AGENT_SOURCE_DIR", agent_root)
+    monkeypatch.setattr(agent_runtime, "_AGENT_PYTHON", None)
+
+    assert agent_runtime._agent_update_transaction_state() == "incomplete"
+
+
+def test_unreadable_agent_update_state_fails_closed(monkeypatch):
+    """An unreadable marker is unknown, never proof that restart is safe."""
+    from api import agent_runtime
+
+    class UnreadableMarker:
+        def read_text(self, **_kwargs):
+            raise PermissionError("denied")
+
+    assert agent_runtime._read_live_agent_update(UnreadableMarker()) == "unknown"
+
+
+def test_unknown_recovery_marker_state_blocks_final_revision_read(monkeypatch):
+    """Unknown recovery state cannot be treated as a completed transaction."""
+    from api import agent_runtime
+
+    revision_reads = []
+    monkeypatch.setattr(agent_runtime, "_AGENT_SOURCE_DIR", Path("/loaded-agent"))
+    monkeypatch.setattr(agent_runtime, "_AGENT_PYTHON", None)
+    monkeypatch.setattr(
+        agent_runtime,
+        "_read_live_agent_update",
+        lambda _marker: "absent",
+    )
+    monkeypatch.setattr(agent_runtime, "_marker_presence", lambda _marker: "unknown")
+    monkeypatch.setattr(
+        agent_runtime,
+        "_read_agent_revision",
+        lambda *_args, **_kwargs: revision_reads.append(True) or "revision",
+    )
+
+    assert agent_runtime._agent_restart_readiness() == "unknown"
+    assert revision_reads == []
+
+
+@pytest.mark.parametrize("final_revision", ["loaded-revision", "changed-revision"])
+def test_restart_readiness_requires_completed_transaction_and_final_revision(
+    monkeypatch, final_revision
+):
+    """A completed update may keep, roll back, or change the final revision."""
+    from api import agent_runtime
+
+    revision_reads = []
+    monkeypatch.setattr(
+        agent_runtime,
+        "_agent_update_transaction_state",
+        lambda: "complete",
+    )
+    monkeypatch.setattr(agent_runtime, "_AGENT_SOURCE_DIR", Path("/loaded-agent"))
+    monkeypatch.setattr(
+        agent_runtime,
+        "_AGENT_MODULE_PATH",
+        Path("/loaded-agent/run_agent.py"),
+    )
+    monkeypatch.setattr(
+        agent_runtime,
+        "_read_agent_revision",
+        lambda *_args, **_kwargs: revision_reads.append(True) or final_revision,
+    )
+
+    assert agent_runtime._agent_restart_readiness() == "ready"
+    assert revision_reads == [True]
+
+
+def test_restart_wait_survives_active_update_then_uses_changed_final_revision(
+    monkeypatch,
+):
+    """A rollback or second revision change is resolved by the final Git read."""
+    from api import agent_runtime
+
+    states = iter(("active", "complete"))
+    sleeps = []
+    revisions = []
+    monkeypatch.setattr(
+        agent_runtime,
+        "_agent_update_transaction_state",
+        lambda: next(states),
+    )
+    monkeypatch.setattr(agent_runtime, "_AGENT_SOURCE_DIR", Path("/loaded-agent"))
+    monkeypatch.setattr(
+        agent_runtime,
+        "_AGENT_MODULE_PATH",
+        Path("/loaded-agent/run_agent.py"),
+    )
+    monkeypatch.setattr(
+        agent_runtime,
+        "_read_agent_revision",
+        lambda *_args, **_kwargs: (
+            revisions.append("rolled-back-or-changed") or "final-revision"
+        ),
+    )
+    monkeypatch.setattr(agent_runtime.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    assert agent_runtime._wait_for_agent_restart_ready(poll_seconds=0.25) is True
+    assert sleeps == [0.25]
+    assert revisions == ["rolled-back-or-changed"]
+
+
+def test_stale_runtime_delegates_to_safe_restart_with_generation(monkeypatch):
+    """The stale response starts one safe restart and exposes its baseline generation."""
+    from api import agent_runtime
+
+    delegated = []
+    monkeypatch.setattr(agent_runtime, "_AGENT_REVISION", "loaded-revision")
+    monkeypatch.setattr(
+        agent_runtime,
+        "_read_agent_revision",
+        lambda *_args, **_kwargs: "changed-revision",
+    )
+    monkeypatch.setattr(agent_runtime, "_AUTO_RESTART_SCHEDULED", False)
+    monkeypatch.setattr(agent_runtime, "_SERVER_STARTED_AT", 1234.5)
+    monkeypatch.setattr(
+        agent_runtime,
+        "_delegate_webui_restart",
+        lambda *, restart_ready: delegated.append(restart_ready) or True,
+    )
+
+    with pytest.raises(agent_runtime.AgentRuntimeChangedError) as caught:
+        agent_runtime.ensure_agent_runtime_current()
+
+    payload = agent_runtime.agent_runtime_stale_payload(caught.value)
+    assert payload["restart_scheduled"] is True
+    assert payload["server_started_at"] == 1234.5
+    assert delegated == [agent_runtime._wait_for_agent_restart_ready]
+
+
+def test_stale_runtime_scheduler_failure_fails_closed(monkeypatch):
+    """A failed Thread.start is reported and remains retryable; it is not success."""
+    from api import agent_runtime
+
+    monkeypatch.setattr(agent_runtime, "_AGENT_REVISION", "loaded-revision")
+    monkeypatch.setattr(
+        agent_runtime,
+        "_read_agent_revision",
+        lambda *_args, **_kwargs: "changed-revision",
+    )
+    monkeypatch.setattr(agent_runtime, "_AUTO_RESTART_SCHEDULED", False)
+    monkeypatch.setattr(agent_runtime, "_SERVER_STARTED_AT", 1234.5)
+    monkeypatch.setattr(
+        agent_runtime,
+        "_delegate_webui_restart",
+        lambda *, restart_ready: False,
+    )
+
+    with pytest.raises(agent_runtime.AgentRuntimeChangedError) as caught:
+        agent_runtime.ensure_agent_runtime_current()
+
+    payload = agent_runtime.agent_runtime_stale_payload(caught.value)
+    assert payload["restart_scheduled"] is False
+    assert payload["server_started_at"] == 1234.5
+    assert agent_runtime._AUTO_RESTART_SCHEDULED is False
+
+
 def test_import_recapture_cannot_downgrade_known_revision(monkeypatch, tmp_path: Path):
     """A second unreadable revision read must not erase a known identity."""
     from api import agent_runtime
@@ -353,6 +586,54 @@ def test_runner_flag_does_not_bypass_webui_owned_hidden_turns(monkeypatch):
         "type": "agent_runtime_stale",
         "retryable": True,
     }
+
+
+def test_runtime_barrier_exposes_scheduled_restart_generation(monkeypatch):
+    """The browser receives the generation needed to verify the replacement."""
+    from api import agent_runtime, routes
+
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: False)
+    monkeypatch.setattr(routes, "get_config", lambda: {})
+    monkeypatch.setattr(
+        routes,
+        "ensure_agent_runtime_current",
+        lambda: (_ for _ in ()).throw(
+            agent_runtime.AgentRuntimeChangedError(
+                "restart pending",
+                restart_scheduled=True,
+                server_started_at=1234.5,
+            )
+        ),
+    )
+
+    assert routes._agent_runtime_barrier_response(runner_local_owned=False) == {
+        "error": "restart pending",
+        "type": "agent_runtime_stale",
+        "retryable": True,
+        "restart_scheduled": True,
+        "server_started_at": 1234.5,
+    }
+
+
+def test_async_stale_runtime_status_preserves_restart_generation():
+    """A background job's 200 status response keeps automatic restart metadata."""
+    from api import routes
+
+    payload = routes._manual_compression_status_payload(
+        {
+            "session_id": "session-1",
+            "status": "error",
+            "error": "restart pending",
+            "error_status": 409,
+            "error_type": "agent_runtime_stale",
+            "retryable": True,
+            "restart_scheduled": True,
+            "server_started_at": 1234.5,
+        }
+    )
+
+    assert payload["restart_scheduled"] is True
+    assert payload["server_started_at"] == 1234.5
 
 
 def test_chat_start_rejects_stale_runtime_before_session_materialization(monkeypatch):

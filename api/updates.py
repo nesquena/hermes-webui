@@ -1710,7 +1710,7 @@ def _purge_agent_pycache(repo_dir: Path) -> None:
         pass
 
 
-def _schedule_restart(delay: float = 2.0) -> None:
+def _schedule_restart(delay: float = 2.0, *, restart_ready=None) -> bool:
     """Re-exec this process after *delay* seconds.
 
     Called after a successful update so that the freshly-pulled code is
@@ -1729,6 +1729,11 @@ def _schedule_restart(delay: float = 2.0) -> None:
     stream and leaving the second repo in an unknown partial state.
     Blocking on ``_apply_lock`` before ``os.execv`` means a pending
     second update always completes before the restart happens.
+
+    ``restart_ready`` is an optional fail-closed readiness callback for callers
+    that own an additional transaction. It may wait, but must return ``True``
+    before re-exec. The callback is checked around active-work drain and again
+    after cache cleanup so the value proved at the point of restart is current.
     """
     import os
     import sys
@@ -1736,6 +1741,14 @@ def _schedule_restart(delay: float = 2.0) -> None:
     def _do():
         import time
         time.sleep(delay)
+        if restart_ready is not None:
+            try:
+                if restart_ready() is not True:
+                    logger.error("Self-restart readiness check failed closed")
+                    return
+            except Exception:
+                logger.exception("Self-restart readiness check failed")
+                return
         # Hold _apply_lock through os.execv so no new update can start between
         # the lock-release and the process replacement.  Any in-flight update
         # finishes first (since it holds the lock), and then the process is
@@ -1746,6 +1759,16 @@ def _schedule_restart(delay: float = 2.0) -> None:
         # released atomically by the kernel.
         with _apply_lock:
             _wait_until_restart_safe()
+            if restart_ready is not None:
+                try:
+                    if restart_ready() is not True:
+                        logger.error(
+                            "Self-restart readiness changed during active-work drain"
+                        )
+                        return
+                except Exception:
+                    logger.exception("Final self-restart readiness check failed")
+                    return
             # Purge bytecode caches so the new process imports from
             # current source.  Without this, Python may serve stale .pyc
             # files whose mtime matches the just-pulled .py files,
@@ -1754,6 +1777,14 @@ def _schedule_restart(delay: float = 2.0) -> None:
             if _AGENT_DIR is not None:
                 _purge_agent_pycache(Path(_AGENT_DIR))
             _purge_agent_pycache(REPO_ROOT)
+            if restart_ready is not None:
+                try:
+                    if restart_ready() is not True:
+                        logger.error("Immediate self-restart readiness check failed")
+                        return
+                except Exception:
+                    logger.exception("Immediate self-restart readiness check failed")
+                    return
             try:
                 # Re-exec into the just-pulled image.
                 #
@@ -1836,7 +1867,28 @@ def _schedule_restart(delay: float = 2.0) -> None:
                 # process supervisor (start.sh / Docker) restarts us.
                 os._exit(0)
 
-    threading.Thread(target=_do, daemon=True).start()
+    try:
+        threading.Thread(target=_do, daemon=True).start()
+    except (OSError, RuntimeError):
+        logger.exception("Could not start WebUI self-restart worker")
+        return False
+    return True
+
+
+def _restart_schedule_failure_response(target, gateway_result=None):
+    """Report an applied update honestly when its required restart was not queued."""
+    response = {
+        "ok": False,
+        "message": (
+            f"{target} was updated, but Hermes WebUI could not schedule its "
+            "required self-restart. Restart Hermes WebUI manually before continuing."
+        ),
+        "target": target,
+        "restart_scheduled": False,
+    }
+    if target == "agent" and isinstance(gateway_result, dict):
+        response["gateway_restart"] = gateway_result.get("status")
+    return response
 
 
 def _ensure_gateway_restart_for_agent_update() -> tuple[bool, dict]:
@@ -2059,7 +2111,11 @@ def apply_force_update(target: str, channel=None) -> dict:
                     'gateway_restart': gateway_result.get('status'),
                 }
 
-        _schedule_restart()
+        if _schedule_restart() is False:
+            return _restart_schedule_failure_response(
+                target,
+                gateway_result if target == 'agent' else None,
+            )
 
         response = {
             'ok': True,
@@ -2372,7 +2428,11 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
                         'target': target,
                         'gateway_restart': gateway_result.get('status'),
                     }
-            _schedule_restart()
+            if _schedule_restart() is False:
+                return _restart_schedule_failure_response(
+                    target,
+                    gateway_result if target == 'agent' else None,
+                )
             response = {
                 'ok': True,
                 'message': (
@@ -2416,7 +2476,11 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
     # the process replaces itself.  The client already does
     # setTimeout(() => location.reload(), 1500) on success, so the page reload
     # and the restart land at roughly the same time.
-    _schedule_restart()
+    if _schedule_restart() is False:
+        return _restart_schedule_failure_response(
+            target,
+            gateway_result if target == 'agent' else None,
+        )
     message = f'{target} updated successfully'
     if stash_drop_failed:
         message += (
