@@ -9225,16 +9225,12 @@ function _openNotificationOwnerDb(){
   if(!window.indexedDB||typeof window.indexedDB.open!=='function') return Promise.reject(_notificationOwnerStorageUnavailable());
   return new Promise((resolve,reject)=>{
     let request;
-    let upgradeAttempted=false;
     try{request=window.indexedDB.open(_NOTIFICATION_OWNER_DB,_NOTIFICATION_OWNER_VERSION);}catch(_error){reject(_notificationOwnerStorageUnavailable());return;}
     request.onupgradeneeded=()=>{
-      upgradeAttempted=true;
       try{if(!request.result.objectStoreNames.contains(_NOTIFICATION_OWNER_STORE)) request.result.createObjectStore(_NOTIFICATION_OWNER_STORE,{keyPath:['streamId','lastEventId']});}catch(error){reject(error);}
     };
     request.onsuccess=()=>resolve(request.result);
-    request.onerror=()=>reject(upgradeAttempted||request.result
-      ? (request.error||new Error('notification owner storage failed'))
-      : _notificationOwnerStorageUnavailable());
+    request.onerror=()=>reject(request.error||new Error('notification owner storage failed'));
     request.onblocked=()=>reject(new Error('notification owner storage blocked'));
   });
 }

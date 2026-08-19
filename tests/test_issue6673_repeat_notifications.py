@@ -274,6 +274,7 @@ def test_page_owner_attempts_once_when_owner_storage_is_unavailable():
         f"""
         const vm = require('vm');
         const identity = {{streamId:'stream-6673', lastEventId:'stream-6673:unavailable-storage'}};
+        const syncThrowIdentity = {{streamId:'stream-6673', lastEventId:'stream-6673:sync-throw'}};
         const requestErrorIdentity = {{streamId:'stream-6673', lastEventId:'stream-6673:request-error'}};
         const upgradeAbortIdentity = {{streamId:'stream-6673', lastEventId:'stream-6673:upgrade-abort'}};
         const blockedIdentity = {{streamId:'stream-6673', lastEventId:'stream-6673:blocked'}};
@@ -296,15 +297,18 @@ def test_page_owner_attempts_once_when_owner_storage_is_unavailable():
         vm.runInNewContext({json.dumps(notification_block)}, context);
         context._showPwaNotification('Hermes', 'body', {{eventIdentity:identity}})
           .then(firstStatus => {{
-            context.window.indexedDB = {{
-              open: () => {{
-                const request = {{result:undefined, error:new Error('storage unavailable'), onupgradeneeded:null, onsuccess:null, onerror:null, onblocked:null}};
-                setTimeout(() => request.onerror?.({{target:request}}), 0);
-                return request;
-              }},
-            }};
-            return context._showPwaNotification('Hermes', 'body', {{eventIdentity:requestErrorIdentity}})
-              .then(secondStatus => {{
+            context.window.indexedDB = {{open: () => {{throw new Error('storage unavailable');}}}};
+            return context._showPwaNotification('Hermes', 'body', {{eventIdentity:syncThrowIdentity}})
+              .then(syncStatus => {{
+                context.window.indexedDB = {{
+                  open: () => {{
+                    const request = {{result:undefined, error:new Error('storage unavailable'), onupgradeneeded:null, onsuccess:null, onerror:null, onblocked:null}};
+                    setTimeout(() => request.onerror?.({{target:request}}), 0);
+                    return request;
+                  }},
+                }};
+                return context._showPwaNotification('Hermes', 'body', {{eventIdentity:requestErrorIdentity}})
+                  .then(secondStatus => {{
                 context.window.indexedDB = {{
                   open: () => {{
                     const request = {{
@@ -320,8 +324,8 @@ def test_page_owner_attempts_once_when_owner_storage_is_unavailable():
                     return request;
                   }},
                 }};
-                return context._showPwaNotification('Hermes', 'body', {{eventIdentity:upgradeAbortIdentity}})
-                  .then(thirdStatus => {{
+                    return context._showPwaNotification('Hermes', 'body', {{eventIdentity:upgradeAbortIdentity}})
+                      .then(thirdStatus => {{
                     context.window.indexedDB = {{
                       open: () => {{
                         const request = {{result:undefined, error:null, onupgradeneeded:null, onsuccess:null, onerror:null, onblocked:null}};
@@ -330,7 +334,8 @@ def test_page_owner_attempts_once_when_owner_storage_is_unavailable():
                       }},
                     }};
                     return context._showPwaNotification('Hermes', 'body', {{eventIdentity:blockedIdentity}})
-                      .then(fourthStatus => console.log(JSON.stringify({{firstStatus, secondStatus, thirdStatus, fourthStatus, attempts:notificationState.attempts}})));
+                        .then(fourthStatus => console.log(JSON.stringify({{firstStatus, syncStatus, secondStatus, thirdStatus, fourthStatus, attempts:notificationState.attempts}})));
+                      }});
                   }});
               }});
           }})
@@ -340,7 +345,7 @@ def test_page_owner_attempts_once_when_owner_storage_is_unavailable():
     result = subprocess.run([node, "-e", script], cwd=ROOT, text=True, capture_output=True, check=False)
     assert result.returncode == 0, result.stderr
     observed = json.loads(result.stdout)
-    assert observed == {"firstStatus": "shown", "secondStatus": "shown", "thirdStatus": "ambiguous", "fourthStatus": "ambiguous", "attempts": 2}, observed
+    assert observed == {"firstStatus": "shown", "syncStatus": "shown", "secondStatus": "ambiguous", "thirdStatus": "ambiguous", "fourthStatus": "ambiguous", "attempts": 2}, observed
 
 
 def test_journal_less_sse_frames_reset_sticky_eventsource_ids():
