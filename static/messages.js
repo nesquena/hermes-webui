@@ -2006,6 +2006,12 @@ const _STREAM_NOTIFICATION_BACKGROUND={};
 // keeps the prior state when the streamId matches. One idempotent
 // visibilitychange listener (never leaks) flips wasHidden on all active entries.
 const _STREAM_WAS_HIDDEN={};
+// Greptile P1: per-stream 捕获的流式请求模型状态。key 为 session id，
+// entry {streamId, modelState}；streamId 是服务端流式请求的唯一标识，
+// 同一条流重连必须复用原始捕获值，不能重读 composer。生命周期与
+// _STREAM_WAS_HIDDEN 一致：terminal/done 路径随 _clearStreamHidden 清理，
+// 新 streamId attach 时覆盖旧值。
+const _STREAM_MODEL_STATE={};
 let _streamHiddenTrackerBound=false;
 function _bindStreamHiddenTracker(){
   if(_streamHiddenTrackerBound||typeof document==='undefined'||typeof document.addEventListener!=='function') return;
@@ -2023,6 +2029,10 @@ function _clearStreamHidden(sid, streamId){
   if(!e) return;
   if(streamId&&e.streamId&&e.streamId!==streamId) return;
   delete _STREAM_WAS_HIDDEN[sid];
+  // Greptile P1: per-stream 模型状态与 hidden tracker 同生命周期，一并清理，
+  // 避免流结束后残留旧 stream 的捕获值。
+  const _m=_STREAM_MODEL_STATE[sid];
+  if(_m && (!streamId || !_m.streamId || _m.streamId===streamId)) delete _STREAM_MODEL_STATE[sid];
 }
 function _clearStreamNotificationBackground(sid, streamId){
   if(!sid) return;
@@ -2122,10 +2132,19 @@ function _dispatchExtensionTurnLifecycle(type,sessionId,streamId,details={}){
 
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!activeSid||!streamId) return;
-  // Greptile P1: 捕获流式请求发起时的模型（可能用户之后切换下拉框，
-  // 失败冷却必须用实际流式的模型，不能事后重读 composer）。
-  const _streamModelState = _chatPayloadModelState();
   const reconnecting=!!options.reconnecting;
+  // Greptile P1: 流式请求发起时捕获模型，避免用户切换下拉框后冷却错模型。
+  // 同一 streamId 的重连必须复用原始捕获值：服务端实际流式请求仍用发起时的
+  // 模型 A，而 composer 此时可能已切到 B；重新捕获会把失败冷却到健康的 B。
+  const _existingStreamModelEntry = _STREAM_MODEL_STATE[activeSid];
+  const _storedStreamModel = _existingStreamModelEntry && _existingStreamModelEntry.streamId===streamId
+    ? _existingStreamModelEntry.modelState
+    : null;
+  const _streamModelState = _storedStreamModel || _chatPayloadModelState();
+  // 只有新 streamId（或首次 attach）才捕获并存根；同一条流保持原始捕获值。
+  if(!_storedStreamModel){
+    _STREAM_MODEL_STATE[activeSid]={streamId, modelState:_streamModelState};
+  }
   const _extensionTurnStartedAt=(S.session&&S.session.session_id===activeSid&&Number.isFinite(S.session.pending_started_at))
     ?S.session.pending_started_at
     :Date.now()/1000;
