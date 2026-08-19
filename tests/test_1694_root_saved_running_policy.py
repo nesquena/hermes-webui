@@ -105,7 +105,7 @@ def test_root_archived_saved_session_clears_stale_localstorage_pointer():
     helper_pos = block.find("_savedSessionSidebarOnlyState")
     clear_guard = "if(savedSidebarOnlyState.archived)"
     guard_pos = block.find(clear_guard, helper_pos)
-    clear_pos = block.find("localStorage.removeItem('hermes-webui-session')", guard_pos)
+    clear_pos = block.find("_forgetActiveSession()", guard_pos)
     render_pos = block.find("await renderSessionList()", helper_pos)
     load_pos = block.find("await loadSession(saved, {preserveActiveInput:true})")
     assert guard_pos > helper_pos, "archived sidebar-only path must be distinguished"

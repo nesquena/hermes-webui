@@ -1198,7 +1198,10 @@ def test_reload_recovery_persists_durable_inflight_state(cleanup_test_sessions):
     messages_src = (REPO_ROOT / "static/messages.js").read_text()
     sessions_src = (REPO_ROOT / "static/sessions.js").read_text()
 
-    assert "const INFLIGHT_STATE_KEY = 'hermes-webui-inflight-state'" in ui_src
+    # The inflight snapshot key is now tab-scoped (multi-tab isolation): the
+    # base name is still the same, with a per-tab suffix appended at runtime.
+    assert "const INFLIGHT_STATE_KEY_BASE = 'hermes-webui-inflight-state'" in ui_src
+    assert "function _inflightStateKey()" in ui_src
     assert "function saveInflightState(sid, state)" in ui_src
     assert "function loadInflightState(sid, streamId)" in ui_src
     assert "function clearInflightState(sid)" in ui_src
