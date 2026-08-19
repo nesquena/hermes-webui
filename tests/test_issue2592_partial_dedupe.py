@@ -1,6 +1,7 @@
 import copy
 import json
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -498,11 +499,68 @@ def test_same_sid_saves_publish_one_complete_generation_in_both_orders(
     )
     generations = {"one": one, "two": two}
     second_generation = "two" if first_generation == "one" else "one"
+    sidecar_path = session_dir / "shared-save-authority.json"
     first_reached_index = threading.Event()
     release_first = threading.Event()
-    second_started = threading.Event()
+    second_attempted_entry = threading.Event()
+    second_observed_contention = threading.Event()
+    first_generation_completed = threading.Event()
+    publication_reached = {
+        ("first", "sidecar"): threading.Event(),
+        ("first", "index"): threading.Event(),
+        ("second", "sidecar"): threading.Event(),
+        ("second", "index"): threading.Event(),
+    }
+    publication_before_first_completion = []
+    errors = []
+    real_authority = models._session_save_authority(one.session_id)
+    real_safe_replace = models._safe_replace
     real_write_index = models._write_session_index
-    first_thread_id = {"value": None}
+    first_thread_id: dict[str, int | None] = {"value": None}
+    second_thread_id: dict[str, int | None] = {"value": None}
+
+    class ObservedAuthority:
+        """Expose a real failed try-acquire before the second writer blocks."""
+
+        def __enter__(self):
+            current = threading.get_ident()
+            if current == second_thread_id["value"]:
+                second_attempted_entry.set()
+                if real_authority.acquire(blocking=False):
+                    return self
+                second_observed_contention.set()
+            real_authority.acquire()
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            if threading.get_ident() == first_thread_id["value"]:
+                # The complete first generation (sidecar plus index) is still
+                # protected here; publish this observation before unlocking it.
+                first_generation_completed.set()
+            real_authority.release()
+
+    def observed_authority(session_id):
+        assert session_id == one.session_id
+        return ObservedAuthority()
+
+    def tracked_safe_replace(src, dst):
+        current = threading.get_ident()
+        writer = None
+        if current == first_thread_id["value"]:
+            writer = "first"
+        elif current == second_thread_id["value"]:
+            writer = "second"
+        destination = Path(dst)
+        sink = None
+        if destination == sidecar_path:
+            sink = "sidecar"
+        elif destination == index_file:
+            sink = "index"
+        if writer is not None and sink is not None:
+            publication_reached[(writer, sink)].set()
+            if writer == "second" and not first_generation_completed.is_set():
+                publication_before_first_completion.append(sink)
+        return real_safe_replace(src, dst)
 
     def gated_write_index(*args, **kwargs):
         if threading.get_ident() == first_thread_id["value"]:
@@ -510,29 +568,59 @@ def test_same_sid_saves_publish_one_complete_generation_in_both_orders(
             assert release_first.wait(timeout=2)
         return real_write_index(*args, **kwargs)
 
+    monkeypatch.setattr(models, "_session_save_authority", observed_authority)
+    monkeypatch.setattr(models, "_safe_replace", tracked_safe_replace)
     monkeypatch.setattr(models, "_write_session_index", gated_write_index)
 
     def save_first():
         first_thread_id["value"] = threading.get_ident()
-        generations[first_generation].save(touch_updated_at=False)
+        try:
+            generations[first_generation].save(touch_updated_at=False)
+        except BaseException as exc:
+            errors.append(("first", exc))
 
     def save_second():
-        second_started.set()
-        generations[second_generation].save(touch_updated_at=False)
+        second_thread_id["value"] = threading.get_ident()
+        try:
+            generations[second_generation].save(touch_updated_at=False)
+        except BaseException as exc:
+            errors.append(("second", exc))
 
     first = threading.Thread(target=save_first)
     second = threading.Thread(target=save_second)
     first.start()
-    assert first_reached_index.wait(timeout=2)
-    second.start()
-    assert second_started.wait(timeout=2)
-    release_first.set()
-    first.join(timeout=2)
-    second.join(timeout=2)
+    try:
+        assert first_reached_index.wait(timeout=2)
+        # The first generation is paused after reaching sidecar publication but
+        # before reaching index publication, while still owning the SID fence.
+        assert publication_reached[("first", "sidecar")].is_set()
+        assert not publication_reached[("first", "index")].is_set()
+
+        second.start()
+        assert second_attempted_entry.wait(timeout=2)
+        assert second_observed_contention.wait(timeout=2)
+        assert second.is_alive()
+        # This is the remaining concurrency oracle: the second writer has made
+        # a real failed try-acquire on the SID authority, yet cannot reach
+        # EITHER publication sink while the first generation is paused.
+        assert not publication_reached[("second", "sidecar")].is_set()
+        assert not publication_reached[("second", "index")].is_set()
+    finally:
+        release_first.set()
+        first.join(timeout=2)
+        if second.ident is not None:
+            second.join(timeout=2)
+
     assert not first.is_alive()
     assert not second.is_alive()
+    assert not errors
+    assert first_generation_completed.is_set()
+    for sink in ("sidecar", "index"):
+        assert publication_reached[("first", sink)].is_set()
+        assert publication_reached[("second", sink)].is_set()
+    assert publication_before_first_completion == []
 
-    sidecar = json.loads((session_dir / "shared-save-authority.json").read_text(encoding="utf-8"))
+    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
     index = json.loads(index_file.read_text(encoding="utf-8"))
     row = next(entry for entry in index if entry["session_id"] == "shared-save-authority")
     expected = generations[second_generation]
