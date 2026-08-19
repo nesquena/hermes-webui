@@ -145,3 +145,30 @@ def test_remote_terminal_workspace_rejects_embedded_nullbyte_in_cwd(monkeypatch)
     normal_path = f"{REMOTE_CWD}/projects/demo"
 
     assert workspace._remote_terminal_workspace_candidate(normal_path) is None
+
+
+def test_remote_terminal_linux_home_preserves_path_without_macos_synthetic_resolution(monkeypatch):
+    """Remote Linux /home/<user> paths must not resolve to /System/Volumes/Data/home/<user> on macOS."""
+    monkeypatch.setattr(
+        api_config,
+        "get_config",
+        lambda: _remote_config(terminal={"backend": "ssh", "cwd": "/home/developer"}),
+    )
+
+    real_resolve = workspace._resolve_path
+
+    def fake_resolve(p):
+        p_str = str(p)
+        if p_str == "/home/developer" or p_str.startswith("/home/developer/"):
+            return Path(f"/System/Volumes/Data{p_str}")
+        return real_resolve(p)
+
+    monkeypatch.setattr(workspace, "_resolve_path", fake_resolve)
+
+    assert workspace.validate_workspace_to_add("/home/developer") == Path("/home/developer")
+    assert workspace.resolve_trusted_workspace("/home/developer") == Path("/home/developer")
+    assert workspace.get_profile_default_workspace() == "/home/developer"
+    assert workspace._clean_workspace_list([{"path": "/home/developer", "name": "Dev"}]) == [
+        {"path": "/home/developer", "name": "Dev"}
+    ]
+
