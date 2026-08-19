@@ -12658,17 +12658,6 @@ def handle_get(handler, parsed) -> bool:
             logger.exception("model-router get_policy failed")
             return bad(handler, "policy load failed", status=500)
 
-    if parsed.path == "/api/model-router/recommend":
-        from api import model_router
-        qs = parse_qs(parsed.query or "")
-        text = qs.get("text", [""])[0]
-        messages_raw = qs.get("messages", ["0"])[0]
-        try:
-            messages = max(0, int(messages_raw))
-        except (TypeError, ValueError):
-            messages = 0
-        return j(handler, model_router.recommend(text, message_count=messages))
-
     if parsed.path == "/api/dashboard/status":
         from api import dashboard_probe
 
@@ -15990,7 +15979,18 @@ def handle_post(handler, parsed) -> bool:
         except (ValueError, FileExistsError, RuntimeError) as e:
             return bad(handler, str(e))
 
-    # ── Model scheduler (model-router): policy update + failure cooldown ──
+    # ── Model scheduler (model-router): recommend + policy update + failure cooldown ──
+    if parsed.path == "/api/model-router/recommend":
+        from api import model_router
+        payload = body if isinstance(body, dict) else {}
+        text = str(payload.get("text") or "")
+        try:
+            messages = max(0, int(payload.get("message_count", 0)))
+        except (TypeError, ValueError):
+            messages = 0
+        session_id = str(payload.get("session_id") or "") or None
+        return j(handler, model_router.recommend(text, message_count=messages, session_id=session_id))
+
     if parsed.path == "/api/model-router/policy":
         from api import model_router
         try:

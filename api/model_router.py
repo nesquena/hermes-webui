@@ -17,12 +17,14 @@ the normal Hermes path. A standalone OpenAI-compatible proxy (`model-scheduler
 serve`) is available in the library for multi-client scenarios, but is out of
 scope here.
 
-The scheduler is OFF by default; enable it in the WebUI model panel or by
-setting `"enabled": true` in model-policy.json.
+The scheduler is OFF by default; enable it in Settings -> Model scheduler
+(`model_scheduler_enabled` in settings.json). The `enabled` field in
+model-policy.json is informational and does not gate the scheduler.
 """
 
 from __future__ import annotations
 
+import inspect
 import logging
 from pathlib import Path
 
@@ -84,39 +86,45 @@ def _configure() -> None:
         logger.debug("model_scheduler.configure_state_dir failed", exc_info=True)
 
 
+def _master_enabled() -> bool:
+    """Return the WebUI settings master switch state."""
+    try:
+        from api.config import load_settings
+        return bool(load_settings().get("model_scheduler_enabled", False))
+    except Exception:  # pragma: no cover - defensive
+        return False
+
+
 def get_status() -> dict:
     """Return scheduler on/off + schedule + quota window summary.
 
-    The master switch lives in WebUI settings (`model_scheduler_enabled`),
-    NOT in model-policy.json. The policy file's `enabled` field only takes
-    effect when the settings switch is also on — so the feature stays off
-    by default for every user until they opt in from Settings.
+    The master switch is the WebUI settings key `model_scheduler_enabled`;
+    it is the only authority for `enabled`. The policy file's `enabled`
+    field no longer participates in the gate. On degraded paths (library
+    missing / policy load failure) `enabled` is False, which matches the
+    default (scheduler off) and keeps the UI honest without leaking errors.
     """
     ms = _load_lib()
     if ms is None:
         return {"enabled": False, "schedule": [], "error": "model-scheduler not installed"}
-    try:
-        from api.config import load_settings
-        master_on = bool(load_settings().get("model_scheduler_enabled", False))
-    except Exception:  # pragma: no cover - defensive
-        master_on = False
     try:
         p = ms.get_policy()
     except Exception:
         logger.exception("model-scheduler get_policy failed")
         return {"enabled": False, "schedule": [], "error": "policy load failed"}
     return {
-        "enabled": bool(master_on and p.get("enabled", False)),
+        "enabled": _master_enabled(),
         "schedule": p.get("schedule") or [],
         "quota_window_hours": ms.QUOTA_WINDOW_SECONDS // 3600,
     }
 
 
 def get_policy() -> dict:
-    """Return full policy: enabled, schedule, models, quota window.
+    """Return full policy: schedule, models, quota window.
 
-    `enabled` reflects the effective master state (Settings switch AND the
-    policy file flag). Degrades gracefully when the library is not installed.
+    `enabled` reflects the WebUI settings master switch only. The policy
+    file's `enabled` field is preserved for compatibility but does not
+    gate the scheduler.
     """
     ms = _load_lib()
     if ms is None:
@@ -129,13 +137,8 @@ def get_policy() -> dict:
         }
     try:
         p = ms.get_policy()
-        try:
-            from api.config import load_settings
-            master_on = bool(load_settings().get("model_scheduler_enabled", False))
-        except Exception:  # pragma: no cover - defensive
-            master_on = False
         return {
-            "enabled": bool(master_on and p.get("enabled", False)),
+            "enabled": _master_enabled(),
             "schedule": p.get("schedule") or [],
             "models": ms.list_models(),
             "quota_window_hours": ms.QUOTA_WINDOW_SECONDS // 3600,
@@ -161,8 +164,25 @@ def update_policy(updates: dict) -> dict:
     return ms.update_policy(updates)
 
 
-def recommend(text: str, message_count: int = 0) -> dict:
-    """Recommend a model for a session/message. Never raises."""
+def recommend(text: str, message_count: int = 0, session_id: str | None = None) -> dict:
+    """Recommend a model for a session/message. Never raises.
+
+    Enforces the settings master switch (`model_scheduler_enabled`) on the
+    backend: when it is off, no recommendation is produced even if
+    model-policy.json has ``"enabled": true``.
+    """
+    if not _master_enabled():
+        return {
+            "model": "",
+            "provider": "",
+            "reason": "model scheduler disabled",
+            "tier": "",
+            "cost": "paid",
+            "difficulty": 0,
+            "urgent": False,
+            "peak": False,
+            "key": "",
+        }
     ms = _load_lib()
     if ms is None:
         return {
@@ -181,8 +201,18 @@ def recommend(text: str, message_count: int = 0) -> dict:
         messages = max(0, int(message_count or 0))
     except (TypeError, ValueError):
         messages = 0
+    session_id = str(session_id or "") or None
     try:
-        return ms.recommend_for_session(text, message_count=messages)
+        kwargs = {"message_count": messages}
+        if session_id:
+            # 新版本 model-scheduler 接受 session_id；旧版本仅接受
+            # message_count。这里按签名决定是否透传，避免 TypeError。
+            try:
+                if "session_id" in inspect.signature(ms.recommend_for_session).parameters:
+                    kwargs["session_id"] = session_id
+            except (TypeError, ValueError):
+                pass
+        return ms.recommend_for_session(text, **kwargs)
     except Exception:
         logger.exception("model-scheduler recommend failed")
         return {

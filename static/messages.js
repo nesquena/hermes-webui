@@ -114,6 +114,14 @@ function _chatPayloadModelState(){
   return {model,model_provider:_chatPayloadModelProvider(model)};
 }
 
+function _recordModelRouterFailure() {
+  if (typeof window.ModelRouter === 'undefined' || !window.ModelRouter || typeof window.ModelRouter.recordFailure !== 'function') return;
+  try {
+    const _ms = _chatPayloadModelState();
+    window.ModelRouter.recordFailure(_ms.model, _ms.model_provider);
+  } catch (_e) { /* cooldown delivery must never break error UI */ }
+}
+
 function _deferStreamErrorIfOffline(){
   if(typeof isOfflineBannerVisible==='function' && isOfflineBannerVisible()){
     setComposerStatus(t('offline_stream_waiting'));
@@ -1881,6 +1889,9 @@ async function send(){
     delete INFLIGHT[activeSid];
     stopApprovalPolling();
     stopClarifyPolling();
+    // 非流式 /api/chat/start 失败：通知 model scheduler 记录 failure cooldown。
+    // 404 会话失效已在前方 return；active-stream 冲突由 conflictActiveStream 排除。
+    if (!conflictActiveStream && typeof _recordModelRouterFailure === 'function') _recordModelRouterFailure();
     // Only hide approval card if it belongs to the session that just finished
     if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard(true);removeThinking();
     if(!_clarifySessionId || _clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
@@ -6586,6 +6597,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const isToolLimitReached=d.type==='tool_limit_reached';
           isRecoveryControlMessage=isInterrupted && (d.recovery_control===true || _streamRecoveryControlMessageText(d.message));
           const isNoResponse=d.type==='no_response'||d.type==='silent_failure';
+          if (typeof _recordModelRouterFailure === 'function' &&
+              (isRateLimit || isQuotaExhausted || isAuthMismatch || isGatewayAuthError || isModelNotFound || isNoResponse)) {
+            _recordModelRouterFailure();
+          }
           const label=isCancelled?'Task cancelled':isInterrupted?'Response interrupted':isCompressionExhausted?'Context compression exhausted':isToolLimitReached?'Tool iteration limit reached':isQuotaExhausted?'Out of credits':isRateLimit?'Rate limit reached':isGatewayAuthError?(typeof t==='function'?t('gateway_auth_label'):'Gateway authentication failed'):isAuthMismatch?(typeof t==='function'?t('provider_mismatch_label'):'Provider mismatch'):isModelNotFound?(typeof t==='function'?t('model_not_found_label'):'Model not found'):isNoResponse?'No response from provider':'Error';
           const hint=d.hint?`\n\n*${d.hint}*`:'';
           const details=d.details?String(d.details).replace(/```/g,'`\u200b``'):'';
