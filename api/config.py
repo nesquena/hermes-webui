@@ -9210,6 +9210,405 @@ def unregister_stream_owner(stream_id: str) -> None:
 SESSION_WRITEBACK_OWNERS: dict = {}
 SESSION_WRITEBACK_OWNERS_LOCK = threading.Lock()
 
+# A cancelled generation can outlive the eager ``STREAMS``/``active_stream_id``
+# cleanup by a Stop request.  Keep one small, exact-stream record until every
+# event that was admitted before the cancel barrier has finished its durable
+# journal append and the worker has reached teardown.  The record is shared by
+# the local and Gateway event bridges so they cannot grow subtly different
+# check-then-append lifecycles.
+STREAM_CANCEL_GENERATIONS: dict[tuple[str, str], dict] = {}
+STREAM_CANCEL_GENERATIONS_LOCK = threading.Lock()
+
+# Only these journal events have a visible assistant/tool projection that the
+# cancellation reconciler can materialize.  Keep the count on the exact
+# generation so an admitted publication that is not visible to a later read
+# cannot be mistaken for a quiescent, empty turn.
+_STREAM_CANCEL_RECOVERABLE_PUBLICATION_EVENTS = frozenset({
+    "token",
+    "reasoning",
+    "interim_assistant",
+    "tool",
+    "tool_complete",
+})
+
+
+def _record_stream_cancel_publication(record: dict, event: str) -> None:
+    if event in _STREAM_CANCEL_RECOVERABLE_PUBLICATION_EVENTS:
+        record["admitted_recovery_events"] = (
+            int(record.get("admitted_recovery_events") or 0) + 1
+        )
+
+# A failed final cancellation reconciliation has no future event guaranteed to
+# wake it up.  Keep one short-lived owner per exact generation so the recovery
+# path can perform a bounded amount of work without introducing a process-wide
+# polling loop or an unbounded queue.  The owner is retired on success or when
+# the bounded retry budget is exhausted.
+STREAM_CANCEL_RECONCILIATION_RETRY_OWNERS: dict[tuple[str, str], dict] = {}
+STREAM_CANCEL_RECONCILIATION_RETRY_OWNERS_LOCK = threading.Lock()
+STREAM_CANCEL_RECONCILIATION_DEAD_LETTERS: list[dict] = []
+STREAM_CANCEL_RECONCILIATION_DEAD_LETTERS_LOCK = threading.Lock()
+STREAM_CANCEL_RECONCILIATION_DEAD_LETTER_CAP = 100
+
+
+def _stream_cancel_generation_key(session_id: str, stream_id: str):
+    session_id = str(session_id or "").strip()
+    stream_id = str(stream_id or "").strip()
+    if not session_id or not stream_id:
+        return None
+    return (session_id, stream_id)
+
+
+def begin_stream_cancel_generation(session_id: str, stream_id: str) -> bool:
+    """Arm exact-stream cancellation ownership before signalling the worker."""
+    key = _stream_cancel_generation_key(session_id, stream_id)
+    if key is None:
+        return False
+    with STREAM_CANCEL_GENERATIONS_LOCK:
+        with SESSION_WRITEBACK_OWNERS_LOCK:
+            if SESSION_WRITEBACK_OWNERS.get(key[0]) != key[1]:
+                return False
+        record = STREAM_CANCEL_GENERATIONS.setdefault(
+            key,
+            {
+                "session_id": key[0],
+                "stream_id": key[1],
+                "cancel_requested": False,
+                "inflight": 0,
+                "worker_done": False,
+                "turn_start": None,
+                "reconcile_started": False,
+                "success_committed": False,
+                "success_teardown": False,
+                "admitted_recovery_events": 0,
+            },
+        )
+        if record.get("success_committed"):
+            # A durable success boundary already won.  Do not turn a late Stop
+            # into a new cancellation generation; the success teardown owns
+            # retirement of this exact stream and must leave any successor claim
+            # untouched.
+            return False
+        record["cancel_requested"] = True
+    return True
+
+
+def register_stream_cancel_state(session_id: str, stream_id: str, cancel_event) -> bool:
+    """Register a worker's cancellation primitive after the stream is captured.
+
+    Worker startup can be cancelled after it has captured its queue but before
+    it has constructed this event.  Install the event and its live buffers
+    while holding the stream lock, then re-check the exact cancellation
+    generation before releasing that lock.  The cancel path either sees the
+    installed event and sets it, or this re-check observes the generation it
+    armed while the worker was not yet registered.
+    """
+    key = _stream_cancel_generation_key(session_id, stream_id)
+    if key is None or cancel_event is None:
+        return False
+    cancelled = False
+    with STREAMS_LOCK:
+        CANCEL_FLAGS[stream_id] = cancel_event
+        STREAM_PARTIAL_TEXT[stream_id] = ''  # start accumulating partial text (#893)
+        STREAM_REASONING_TEXT[stream_id] = ''  # start accumulating reasoning trace (#1361 §A)
+        STREAM_LIVE_TOOL_CALLS[stream_id] = []  # start accumulating tool calls (#1361 §B)
+        with STREAM_CANCEL_GENERATIONS_LOCK:
+            record = STREAM_CANCEL_GENERATIONS.get(key)
+            cancelled = bool(record and record.get("cancel_requested"))
+            if cancelled:
+                cancel_event.set()
+    return cancelled
+
+
+def set_stream_cancel_turn_start(session_id: str, stream_id: str, turn_start) -> None:
+    """Remember the cancelled user-row boundary for exact journal recovery."""
+    key = _stream_cancel_generation_key(session_id, stream_id)
+    if key is None:
+        return
+    with STREAM_CANCEL_GENERATIONS_LOCK:
+        record = STREAM_CANCEL_GENERATIONS.setdefault(
+            key,
+            {
+                "session_id": key[0],
+                "stream_id": key[1],
+                "cancel_requested": False,
+                "inflight": 0,
+                "worker_done": False,
+                "turn_start": None,
+                "reconcile_started": False,
+                "success_committed": False,
+                "success_teardown": False,
+                "admitted_recovery_events": 0,
+            },
+        )
+        record["turn_start"] = turn_start
+
+
+def admit_stream_publication(
+    session_id: str,
+    stream_id: str,
+    event: str,
+    *,
+    cancelled: bool = False,
+    success_committed: bool = False,
+):
+    """Atomically admit one SSE event or reject it at the cancel barrier.
+
+    A token is returned for an event whose journal append must be allowed to
+    finish.  ``None`` means an untracked legacy/direct-worker publication; a
+    falsey non-None token means the event was rejected.  Production route
+    admissions have a writeback owner and therefore always use a tracked token.
+    """
+    key = _stream_cancel_generation_key(session_id, stream_id)
+    if key is None:
+        return False if cancelled and not success_committed and event not in ("cancel", "apperror") else None
+    with STREAM_CANCEL_GENERATIONS_LOCK:
+        with SESSION_WRITEBACK_OWNERS_LOCK:
+            current_owner = SESSION_WRITEBACK_OWNERS.get(key[0])
+        record = STREAM_CANCEL_GENERATIONS.get(key)
+        if record is not None and record.get("success_committed"):
+            # A successful worker remains the authoritative producer until its
+            # teardown retires this exact generation.  Keep late callbacks
+            # tracked even if a successor has already replaced the session's
+            # current owner; once retirement starts, reject new admissions.
+            if record.get("success_teardown"):
+                return None if event in ("cancel", "apperror") else False
+            record["inflight"] += 1
+            _record_stream_cancel_publication(record, event)
+            return key
+        if record is not None and record.get("cancel_requested"):
+            if record.get("discarded"):
+                if event in ("cancel", "apperror"):
+                    return None
+                return False
+            if (
+                (record.get("reconcile_started") or cancelled)
+                and not success_committed
+                and event not in ("cancel", "apperror")
+            ):
+                return False
+            record["inflight"] += 1
+            _record_stream_cancel_publication(record, event)
+            return key
+        if current_owner != key[1]:
+            if cancelled and not success_committed and event not in ("cancel", "apperror"):
+                return False
+            return None
+        record = STREAM_CANCEL_GENERATIONS.setdefault(
+            key,
+            {
+                "session_id": key[0],
+                "stream_id": key[1],
+                "cancel_requested": False,
+                "inflight": 0,
+                "worker_done": False,
+                "turn_start": None,
+                "reconcile_started": False,
+                "success_committed": False,
+                "success_teardown": False,
+                "admitted_recovery_events": 0,
+            },
+        )
+        if (
+            record.get("cancel_requested")
+            and (record.get("reconcile_started") or cancelled)
+            and not success_committed
+            and event not in ("cancel", "apperror")
+        ):
+            return False
+        record["inflight"] += 1
+        _record_stream_cancel_publication(record, event)
+        return key
+
+
+def finish_stream_publication(token) -> bool:
+    """Release a publication token and report whether final reconciliation is ready."""
+    if not token:
+        return False
+    with STREAM_CANCEL_GENERATIONS_LOCK:
+        record = STREAM_CANCEL_GENERATIONS.get(tuple(token))
+        if record is None:
+            return False
+        record["inflight"] = max(0, int(record.get("inflight") or 0) - 1)
+        if (
+            record.get("success_committed")
+            and record.get("success_teardown")
+            and record.get("worker_done")
+            and not record.get("inflight")
+        ):
+            STREAM_CANCEL_GENERATIONS.pop(tuple(token), None)
+            with SESSION_WRITEBACK_OWNERS_LOCK:
+                if SESSION_WRITEBACK_OWNERS.get(token[0]) == token[1]:
+                    SESSION_WRITEBACK_OWNERS.pop(token[0], None)
+        elif record.get("discarded") and not record.get("inflight"):
+            STREAM_CANCEL_GENERATIONS.pop(tuple(token), None)
+            with SESSION_WRITEBACK_OWNERS_LOCK:
+                if SESSION_WRITEBACK_OWNERS.get(token[0]) == token[1]:
+                    SESSION_WRITEBACK_OWNERS.pop(token[0], None)
+        ready = bool(
+            record.get("cancel_requested")
+            and not record.get("success_committed")
+            and record.get("worker_done")
+            and not record.get("inflight")
+            and not record.get("reconcile_started")
+        )
+    return ready
+
+
+def mark_stream_success_committed(session_id: str, stream_id: str) -> bool:
+    """Atomically commit success unless cancellation already won the race."""
+    key = _stream_cancel_generation_key(session_id, stream_id)
+    if key is None:
+        return False
+    with STREAM_CANCEL_GENERATIONS_LOCK:
+        record = STREAM_CANCEL_GENERATIONS.setdefault(
+            key,
+            {
+                "session_id": key[0],
+                "stream_id": key[1],
+                "cancel_requested": False,
+                "inflight": 0,
+                "worker_done": False,
+                "turn_start": None,
+                "reconcile_started": False,
+                "success_committed": False,
+                "success_teardown": False,
+                "admitted_recovery_events": 0,
+            },
+        )
+        if record.get("cancel_requested"):
+            return False
+        record["success_committed"] = True
+    return True
+
+
+def retire_stream_cancel_generation_after_success(session_id: str, stream_id: str) -> bool:
+    """Retire a late cancellation generation after successful writeback.
+
+    A Stop can arm cancellation after the worker has durably committed its
+    successful transcript but before teardown.  That generation must remain
+    owned until every publication admitted before teardown drains; it must not
+    run cancellation reconciliation over the successful transcript.  Once
+    quiescent, remove only the exact old generation and compare-and-clear its
+    old owner so a successor claim is preserved.
+    """
+    key = _stream_cancel_generation_key(session_id, stream_id)
+    if key is None:
+        return False
+    retired = False
+    with STREAM_CANCEL_GENERATIONS_LOCK:
+        record = STREAM_CANCEL_GENERATIONS.get(key)
+        if record is None or not record.get("success_committed"):
+            return False
+        record["success_teardown"] = True
+        record["worker_done"] = True
+        if not record.get("inflight"):
+            STREAM_CANCEL_GENERATIONS.pop(key, None)
+            retired = True
+            with SESSION_WRITEBACK_OWNERS_LOCK:
+                if SESSION_WRITEBACK_OWNERS.get(key[0]) == key[1]:
+                    SESSION_WRITEBACK_OWNERS.pop(key[0], None)
+    return retired
+
+
+def mark_stream_worker_done(session_id: str, stream_id: str) -> bool:
+    """Mark a cancelled worker done and report whether its journal is quiescent."""
+    key = _stream_cancel_generation_key(session_id, stream_id)
+    if key is None:
+        return False
+    with STREAM_CANCEL_GENERATIONS_LOCK:
+        record = STREAM_CANCEL_GENERATIONS.get(key)
+        if record is None:
+            return False
+        if record.get("success_committed"):
+            return False
+        record["worker_done"] = True
+        return bool(
+            record.get("cancel_requested")
+            and not record.get("inflight")
+            and not record.get("reconcile_started")
+        )
+
+
+def claim_stream_cancel_reconciliation(session_id: str, stream_id: str) -> dict | None:
+    """Claim one final exact-stream reconciliation after all producers quiesce."""
+    key = _stream_cancel_generation_key(session_id, stream_id)
+    if key is None:
+        return None
+    with STREAM_CANCEL_GENERATIONS_LOCK:
+        record = STREAM_CANCEL_GENERATIONS.get(key)
+        if record is None or not record.get("cancel_requested"):
+            return None
+        # A successful writeback wins any late Stop race.  Its exact generation
+        # is retired by the success teardown path; it must never be handed to
+        # the cancellation reconciler, which would splice a cancel marker over
+        # the already-committed transcript.
+        if record.get("success_committed"):
+            return None
+        if not record.get("worker_done") or record.get("inflight") or record.get("reconcile_started"):
+            return None
+        # The cancel worker may reach teardown before cancel_stream() has won
+        # the session lock and materialized the owning user turn.  Do not let
+        # that worker claim reconciliation against an unset boundary: journal
+        # recovery would otherwise be inserted before the cancelled user row.
+        # cancel_stream() records turn_start during its cleanup and retries the
+        # shared claim after its durable save below.
+        if record.get("turn_start") is None:
+            return None
+        # The session writeback map is the *current* owner, not the owner of
+        # this already-admitted publication generation.  A successor may be
+        # admitted as soon as cancel_stream() clears active_stream_id, while a
+        # producer from this generation is still inside append_sse_event().
+        # Keep the exact old record claimable until that append and worker
+        # teardown have quiesced; the reconciler writes only the old turn's
+        # journal rows and never clears successor state.
+        record["reconcile_started"] = True
+        return dict(record)
+
+
+def complete_stream_cancel_reconciliation(session_id: str, stream_id: str, *, success: bool) -> None:
+    """Retire or reopen the cancellation generation after its durable save."""
+    key = _stream_cancel_generation_key(session_id, stream_id)
+    if key is None:
+        return
+    with STREAM_CANCEL_GENERATIONS_LOCK:
+        record = STREAM_CANCEL_GENERATIONS.get(key)
+        if record is None:
+            return
+        if success:
+            STREAM_CANCEL_GENERATIONS.pop(key, None)
+        else:
+            record["reconcile_started"] = False
+
+
+def stream_cancel_generation_pending(session_id: str, stream_id: str) -> bool:
+    """Return whether cancellation ownership must remain live for this stream."""
+    key = _stream_cancel_generation_key(session_id, stream_id)
+    if key is None:
+        return False
+    with STREAM_CANCEL_GENERATIONS_LOCK:
+        record = STREAM_CANCEL_GENERATIONS.get(key)
+        return bool(record and record.get("cancel_requested"))
+
+
+def retire_stream_cancel_generation(session_id: str, stream_id: str) -> None:
+    """Discard an ephemeral generation without recreating its Session.
+
+    Ephemeral turns still use the event bridge, so an admitted append must
+    finish before the writeback owner is released, but no final Session save
+    may run after the transient session has been removed.
+    """
+    key = _stream_cancel_generation_key(session_id, stream_id)
+    if key is None:
+        return
+    with STREAM_CANCEL_GENERATIONS_LOCK:
+        record = STREAM_CANCEL_GENERATIONS.get(key)
+        if record is None:
+            return
+        record["discarded"] = True
+        record["reconcile_started"] = True
+        if not record.get("inflight"):
+            STREAM_CANCEL_GENERATIONS.pop(key, None)
+
 
 def register_session_writeback_owner(session_id: str, stream_id: str) -> None:
     """Record the stream that currently owns a session's writeback."""
@@ -9217,8 +9616,11 @@ def register_session_writeback_owner(session_id: str, stream_id: str) -> None:
     stream_id = str(stream_id or "").strip()
     if not session_id or not stream_id:
         return
-    with SESSION_WRITEBACK_OWNERS_LOCK:
-        SESSION_WRITEBACK_OWNERS[session_id] = stream_id
+    # Keep the publication barrier ahead of the writeback map so a successor
+    # admission cannot race an old producer's final owner check.
+    with STREAM_CANCEL_GENERATIONS_LOCK:
+        with SESSION_WRITEBACK_OWNERS_LOCK:
+            SESSION_WRITEBACK_OWNERS[session_id] = stream_id
 
 
 def session_writeback_owner(session_id: str) -> str | None:
@@ -9238,9 +9640,166 @@ def clear_session_writeback_owner_if_owned(session_id: str, stream_id: str) -> N
     stream_id = str(stream_id or "").strip()
     if not session_id or not stream_id:
         return
-    with SESSION_WRITEBACK_OWNERS_LOCK:
-        if SESSION_WRITEBACK_OWNERS.get(session_id) == stream_id:
-            SESSION_WRITEBACK_OWNERS.pop(session_id, None)
+    key = _stream_cancel_generation_key(session_id, stream_id)
+    with STREAM_CANCEL_GENERATIONS_LOCK:
+        record = STREAM_CANCEL_GENERATIONS.get(key) if key is not None else None
+        if record is not None and record.get("success_committed"):
+            if not record.get("success_teardown") or record.get("inflight"):
+                return
+            STREAM_CANCEL_GENERATIONS.pop(key, None)
+            record = None
+        if record is not None and record.get("cancel_requested"):
+            if record.get("discarded") and not record.get("inflight"):
+                STREAM_CANCEL_GENERATIONS.pop(key, None)
+                record = None
+            else:
+                return
+        if record is not None and record.get("cancel_requested"):
+            return
+        if record is not None:
+            STREAM_CANCEL_GENERATIONS.pop(key, None)
+        with SESSION_WRITEBACK_OWNERS_LOCK:
+            if SESSION_WRITEBACK_OWNERS.get(session_id) == stream_id:
+                SESSION_WRITEBACK_OWNERS.pop(session_id, None)
+
+
+def begin_stream_cancel_reconciliation_retry(
+    session_id: str,
+    stream_id: str,
+    *,
+    attempts: int = 1,
+) -> bool:
+    """Claim the one bounded retry owner for an exact cancelled generation."""
+    key = _stream_cancel_generation_key(session_id, stream_id)
+    if key is None:
+        return False
+    try:
+        attempts = max(1, int(attempts))
+    except (TypeError, ValueError):
+        attempts = 1
+    with STREAM_CANCEL_RECONCILIATION_RETRY_OWNERS_LOCK:
+        if key in STREAM_CANCEL_RECONCILIATION_RETRY_OWNERS:
+            return False
+        STREAM_CANCEL_RECONCILIATION_RETRY_OWNERS[key] = {
+            "session_id": key[0],
+            "stream_id": key[1],
+            "attempts": attempts,
+            "started_at": time.time(),
+        }
+    return True
+
+
+def update_stream_cancel_reconciliation_retry_attempts(
+    session_id: str,
+    stream_id: str,
+    attempts: int,
+) -> bool:
+    """Update retry-attempt diagnostics while retaining the exact owner."""
+    key = _stream_cancel_generation_key(session_id, stream_id)
+    if key is None:
+        return False
+    try:
+        attempts = max(1, int(attempts))
+    except (TypeError, ValueError):
+        attempts = 1
+    with STREAM_CANCEL_RECONCILIATION_RETRY_OWNERS_LOCK:
+        owner = STREAM_CANCEL_RECONCILIATION_RETRY_OWNERS.get(key)
+        if owner is None:
+            return False
+        owner["attempts"] = attempts
+    return True
+
+
+def stream_cancel_reconciliation_retry_owner(
+    session_id: str,
+    stream_id: str,
+) -> dict | None:
+    """Return a copy of the exact retry owner, if one is still active."""
+    key = _stream_cancel_generation_key(session_id, stream_id)
+    if key is None:
+        return None
+    with STREAM_CANCEL_RECONCILIATION_RETRY_OWNERS_LOCK:
+        owner = STREAM_CANCEL_RECONCILIATION_RETRY_OWNERS.get(key)
+        return dict(owner) if isinstance(owner, dict) else None
+
+
+def finish_stream_cancel_reconciliation_retry(
+    session_id: str,
+    stream_id: str,
+) -> None:
+    """Release a retry owner after a successful or externally retired attempt."""
+    key = _stream_cancel_generation_key(session_id, stream_id)
+    if key is None:
+        return
+    with STREAM_CANCEL_RECONCILIATION_RETRY_OWNERS_LOCK:
+        STREAM_CANCEL_RECONCILIATION_RETRY_OWNERS.pop(key, None)
+
+
+def note_stream_cancel_reconciliation_failure(
+    session_id: str,
+    stream_id: str,
+    error: BaseException | str,
+) -> None:
+    """Attach a bounded failure diagnostic to the exact generation record."""
+    key = _stream_cancel_generation_key(session_id, stream_id)
+    if key is None:
+        return
+    error_type = type(error).__name__ if isinstance(error, BaseException) else "Exception"
+    error_message = str(error)[:256]
+    with STREAM_CANCEL_GENERATIONS_LOCK:
+        record = STREAM_CANCEL_GENERATIONS.get(key)
+        if record is not None:
+            record["last_error_type"] = error_type
+            record["last_error_message"] = error_message
+
+
+def dead_letter_stream_cancel_reconciliation(
+    session_id: str,
+    stream_id: str,
+    *,
+    attempts: int,
+    error_type: str | None = None,
+    error_message: str | None = None,
+) -> None:
+    """Retire one exact failed generation and append a bounded diagnostic.
+
+    The run journal is deliberately untouched: it remains the durable source
+    for a later normal lazy-recovery read.  Compare-and-clear the old owner so
+    a successor stream's claim survives.
+    """
+    key = _stream_cancel_generation_key(session_id, stream_id)
+    if key is None:
+        return
+    try:
+        attempts = max(1, int(attempts))
+    except (TypeError, ValueError):
+        attempts = 1
+    with STREAM_CANCEL_GENERATIONS_LOCK:
+        record = STREAM_CANCEL_GENERATIONS.pop(key, None)
+        if record is not None:
+            error_type = error_type or record.get("last_error_type")
+            error_message = error_message or record.get("last_error_message")
+        with SESSION_WRITEBACK_OWNERS_LOCK:
+            if SESSION_WRITEBACK_OWNERS.get(key[0]) == key[1]:
+                SESSION_WRITEBACK_OWNERS.pop(key[0], None)
+    # Keep the exact retry owner present until the generation and its
+    # compare-and-clear owner have both retired.  A natural teardown callback
+    # that races this boundary therefore cannot observe a free retry key and
+    # re-claim a generation that is already being dead-lettered.
+    finish_stream_cancel_reconciliation_retry(*key)
+    diagnostic = {
+        "session_id": key[0],
+        "stream_id": key[1],
+        "attempts": attempts,
+        "error_type": str(error_type or "Exception")[:128],
+        "error_message": str(error_message or "")[:256],
+        "recorded_at": time.time(),
+    }
+    with STREAM_CANCEL_RECONCILIATION_DEAD_LETTERS_LOCK:
+        STREAM_CANCEL_RECONCILIATION_DEAD_LETTERS.append(diagnostic)
+        del STREAM_CANCEL_RECONCILIATION_DEAD_LETTERS[
+            :-STREAM_CANCEL_RECONCILIATION_DEAD_LETTER_CAP
+        ]
 
 
 # ── Gateway capability cache ─────────────────────────────────────────────────

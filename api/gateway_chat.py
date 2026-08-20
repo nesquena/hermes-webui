@@ -1,6 +1,7 @@
 """Default-off Hermes Gateway bridge for browser-originated chat turns."""
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -26,6 +27,14 @@ from api.config import (
     _get_session_agent_lock,
     _parse_provider_qualified_model_id,
     clear_session_writeback_owner_if_owned,
+    admit_stream_publication,
+    finish_stream_publication,
+    register_stream_cancel_state,
+    set_stream_cancel_turn_start,
+    mark_stream_worker_done,
+    mark_stream_success_committed,
+    retire_stream_cancel_generation_after_success,
+    stream_cancel_generation_pending,
     coerce_reasoning_effort_for_model,
     gateway_approval_unavailable_reason,
     gateway_supports_approval,
@@ -923,6 +932,10 @@ def _run_gateway_chat_streaming(
     if q is None:
         _finish_gateway_run_starting(stream_id, result="fallback")
         _clear_gateway_run_starting(stream_id)
+        if mark_stream_worker_done(session_id, stream_id):
+            from api.streaming import _reconcile_cancelled_stream_generation
+
+            _reconcile_cancelled_stream_generation(session_id, stream_id)
         # Cancelled before the worker started; release the owner entry the route
         # layer registered so STREAM_SESSION_OWNERS does not leak (no teardown finally runs).
         unregister_stream_owner(stream_id)
@@ -947,40 +960,49 @@ def _run_gateway_chat_streaming(
         run_journal = None
         logger.debug("Failed to initialize gateway run journal for stream %s", stream_id, exc_info=True)
     cancel_event = threading.Event()
-    with STREAMS_LOCK:
-        CANCEL_FLAGS[stream_id] = cancel_event
-        STREAM_PARTIAL_TEXT[stream_id] = ""
-        STREAM_REASONING_TEXT[stream_id] = ""
-        STREAM_LIVE_TOOL_CALLS[stream_id] = []
+    register_stream_cancel_state(session_id, stream_id, cancel_event)
 
     success_writeback_committed = False
     runs_api_pending_marked = True
 
     def put_gateway_event(event, data):
-        if cancel_event.is_set() and not success_writeback_committed and event not in ("cancel", "error", "apperror"):
+        publication_token = admit_stream_publication(
+            session_id,
+            stream_id,
+            event,
+            cancelled=cancel_event.is_set(),
+            success_committed=success_writeback_committed,
+        )
+        if publication_token is False:
             return
-        if event == "apperror" and isinstance(data, dict):
-            data = data.copy()
-            data.setdefault("session_id", session_id)
-        event_id = None
-        if run_journal is not None:
-            try:
-                journaled = run_journal.append_sse_event(event, data)
-                event_id = (journaled or {}).get("event_id") if isinstance(journaled, dict) else None
-                if event_id:
-                    STREAM_LAST_EVENT_ID[stream_id] = event_id
-            except Exception:
-                logger.debug("Failed to append gateway event %s for stream %s", event, stream_id, exc_info=True)
-        if event_id and hasattr(q, "note_last_event_id"):
-            try:
-                q.note_last_event_id(event_id)
-            except Exception:
-                logger.debug("Failed to note gateway event_id %s for stream %s", event_id, stream_id, exc_info=True)
         try:
-            queue_item = (event, data, event_id) if event_id and hasattr(q, "subscribe_with_snapshot") else (event, data)
-            q.put_nowait(queue_item)
-        except Exception:
-            logger.debug("Failed to put gateway event to queue")
+            if event == "apperror" and isinstance(data, dict):
+                data = data.copy()
+                data.setdefault("session_id", session_id)
+            event_id = None
+            if run_journal is not None:
+                try:
+                    journaled = run_journal.append_sse_event(event, data)
+                    event_id = (journaled or {}).get("event_id") if isinstance(journaled, dict) else None
+                    if event_id:
+                        STREAM_LAST_EVENT_ID[stream_id] = event_id
+                except Exception:
+                    logger.debug("Failed to append gateway event %s for stream %s", event, stream_id, exc_info=True)
+            if event_id and hasattr(q, "note_last_event_id"):
+                try:
+                    q.note_last_event_id(event_id)
+                except Exception:
+                    logger.debug("Failed to note gateway event_id %s for stream %s", event, stream_id, exc_info=True)
+            try:
+                queue_item = (event, data, event_id) if event_id and hasattr(q, "subscribe_with_snapshot") else (event, data)
+                q.put_nowait(queue_item)
+            except Exception:
+                logger.debug("Failed to put gateway event to queue")
+        finally:
+            if finish_stream_publication(publication_token):
+                from api.streaming import _reconcile_cancelled_stream_generation
+
+                _reconcile_cancelled_stream_generation(session_id, stream_id)
 
     s = None
     final_text = ""
@@ -988,6 +1010,9 @@ def _run_gateway_chat_streaming(
     usage = {"input_tokens": 0, "output_tokens": 0, "estimated_cost": 0}
     try:
         s = get_session(session_id)
+        if cancel_event.is_set():
+            put_gateway_event("cancel", {"message": "Cancelled before start"})
+            return
         from api.config import get_config  # imported lazily to avoid config-cycle churn
 
         cfg = get_config()
@@ -1296,6 +1321,23 @@ def _run_gateway_chat_streaming(
             saved_reasoning = STREAM_REASONING_TEXT.get(stream_id, "")
             if saved_reasoning:
                 assistant_msg["reasoning"] = saved_reasoning
+            success_previous_messages = copy.deepcopy(getattr(s, "messages", None) or [])
+            success_previous_context = copy.deepcopy(
+                getattr(s, "context_messages", None)
+                or getattr(s, "messages", None)
+                or []
+            )
+            success_previous_tools = copy.deepcopy(getattr(s, "tool_calls", None) or [])
+            success_previous_active_stream_id = getattr(s, "active_stream_id", None)
+            success_previous_pending_user = getattr(s, "pending_user_message", None)
+            success_previous_pending_attachments = copy.deepcopy(
+                getattr(s, "pending_attachments", None) or []
+            )
+            success_previous_pending_started = getattr(s, "pending_started_at", None)
+            success_previous_pending_source = getattr(s, "pending_user_source", None)
+            success_previous_pause = copy.deepcopy(
+                getattr(s, "process_wakeup_pause", None) or {}
+            )
             previous_messages = list(getattr(s, "messages", None) or [])
             stored_context = getattr(s, "context_messages", None)
             previous_context = list(
@@ -1303,7 +1345,6 @@ def _run_gateway_chat_streaming(
                 if isinstance(stored_context, list) and (regeneration or stored_context)
                 else getattr(s, "messages", None) or []
             )
-            previous_process_wakeup_pause = dict(getattr(s, "process_wakeup_pause", {}) or {})
             # Stamp stable ids on the two new rows (shared with the display merge
             # below) so display and model-context copies share an id for the
             # fork/truncate aligner (#context-message-stable-id).
@@ -1354,6 +1395,19 @@ def _run_gateway_chat_streaming(
                         if latest_text == msg_norm:
                             display = display[:-1]
                 s.messages = display + [user_msg, assistant_msg]
+
+            success_turn_start = None
+            try:
+                from api.streaming import _coerce_current_turn_user_idx, _find_current_user_turn
+
+                success_turn_start = _find_current_user_turn(s.messages, msg_text)
+                if not isinstance(success_turn_start, int):
+                    success_turn_start = _coerce_current_turn_user_idx(None)
+            except Exception:
+                logger.debug("Failed to resolve gateway success turn boundary", exc_info=True)
+            if isinstance(success_turn_start, int):
+                set_stream_cancel_turn_start(session_id, stream_id, success_turn_start)
+
             s.active_stream_id = None
             s.pending_user_message = None
             s.pending_attachments = None
@@ -1363,15 +1417,29 @@ def _run_gateway_chat_streaming(
             s.model = model
             s.model_provider = model_provider
 
-            def _restore_cancelled_success_writeback():
-                if pending_source == "process_wakeup":
-                    s.context_messages = previous_context
-                    s.messages = previous_messages
-                    s.process_wakeup_pause = dict(previous_process_wakeup_pause)
-                elif previous_process_wakeup_pause:
-                    s.process_wakeup_pause = dict(previous_process_wakeup_pause)
-                else:
-                    clear_process_wakeup_pause(s, reason="run_completed")
+            def _restore_cancelled_success_writeback(*, durable_success=False):
+                """Settle a cancelled success race without erasing durable WebUI output."""
+                if durable_success and pending_source == "webui":
+                    # The assistant answer is already on disk. A late Stop may
+                    # restore a process-wakeup pause, but it must not roll back
+                    # a completed WebUI transcript to the pre-turn snapshot.
+                    s.process_wakeup_pause = copy.deepcopy(success_previous_pause)
+                    s.save()
+                    put_gateway_event("cancel", {"message": "Cancelled by user"})
+                    return
+                s.messages = copy.deepcopy(success_previous_messages)
+                s.context_messages = copy.deepcopy(success_previous_context)
+                s.tool_calls = copy.deepcopy(success_previous_tools)
+                s.active_stream_id = success_previous_active_stream_id or stream_id
+                s.pending_user_message = success_previous_pending_user
+                s.pending_attachments = copy.deepcopy(success_previous_pending_attachments)
+                s.pending_started_at = success_previous_pending_started
+                s.pending_user_source = success_previous_pending_source
+                s.process_wakeup_pause = copy.deepcopy(success_previous_pause)
+                if pending_source != "process_wakeup":
+                    from api.streaming import _materialize_pending_user_turn_before_error
+
+                    _materialize_pending_user_turn_before_error(s)
                 s.save()
                 put_gateway_event("cancel", {"message": "Cancelled by user"})
 
@@ -1386,7 +1454,14 @@ def _run_gateway_chat_streaming(
                 return
             s.save()
             if cancel_event.is_set():
-                _restore_cancelled_success_writeback()
+                _restore_cancelled_success_writeback(
+                    durable_success=not stream_cancel_generation_pending(session_id, stream_id),
+                )
+                return
+            if not mark_stream_success_committed(session_id, stream_id):
+                _restore_cancelled_success_writeback(
+                    durable_success=not stream_cancel_generation_pending(session_id, stream_id),
+                )
                 return
             success_writeback_committed = True
         try:
@@ -1486,6 +1561,16 @@ def _run_gateway_chat_streaming(
         if runs_api_pending_marked and gateway_run_id_pending(stream_id):
             _finish_gateway_run_starting(stream_id)
         _clear_gateway_run_starting(stream_id)
+        if success_writeback_committed:
+            # Success wins a late Stop race.  Retire only this exact old
+            # generation after any already-admitted publication drains; the
+            # shared helper compare-and-clears only the old owner, preserving
+            # a successor claim and bypassing cancellation reconciliation.
+            retire_stream_cancel_generation_after_success(session_id, stream_id)
+        elif mark_stream_worker_done(session_id, stream_id):
+            from api.streaming import _reconcile_cancelled_stream_generation
+
+            _reconcile_cancelled_stream_generation(session_id, stream_id)
         unregister_stream_owner(stream_id)
         unregister_active_run(stream_id)
         # Release the writeback-owner entry the route layer registered for this

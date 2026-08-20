@@ -869,6 +869,92 @@ def _append_recovered_context_projection(
     context_messages: list,
     recovered: dict,
 ) -> None:
+    def _recovered_identity(message):
+        if not isinstance(message, dict):
+            return None
+        for field in (
+            '_recovered_event_id',
+            '_recovered_segment_id',
+            '_journal_event_id',
+        ):
+            value = message.get(field)
+            if value is not None and str(value).strip():
+                return str(value)
+        return None
+
+    def _user_identity(message):
+        if not isinstance(message, dict) or message.get('role') != 'user':
+            return None
+        token = message.get('_active_turn_token')
+        if token:
+            return ('token', str(token))
+        timestamp = message.get('timestamp')
+        if timestamp is None:
+            timestamp = message.get('_ts')
+        attachments = message.get('attachments') or []
+        try:
+            attachments_key = json.dumps(
+                attachments, ensure_ascii=False, sort_keys=True, default=str,
+            )
+        except Exception:
+            attachments_key = str(attachments)
+        return (
+            'user',
+            _normalize_journal_recovery_text(message.get('content')),
+            timestamp,
+            message.get('_source') or 'webui',
+            attachments_key,
+        )
+
+    def _owner_identity(messages, message_index):
+        if not isinstance(message_index, int):
+            return None
+        for owner_index in range(min(message_index, len(messages) - 1), -1, -1):
+            owner = messages[owner_index]
+            if isinstance(owner, dict) and owner.get('role') == 'user':
+                return _user_identity(owner)
+        return None
+
+    def _recovered_owner_identity(message):
+        if not isinstance(message, dict) or message.get('role') == 'user':
+            return _user_identity(message)
+        messages = getattr(session, 'messages', None) or []
+        target_index = None
+        recovered_event_id = _recovered_identity(message)
+        recovered_stream_id = message.get('_recovered_stream_id')
+        recovered_text = _normalize_journal_recovery_text(message.get('content'))
+        for candidate_index in range(len(messages) - 1, -1, -1):
+            candidate = messages[candidate_index]
+            if not isinstance(candidate, dict) or candidate.get('role') != 'assistant':
+                continue
+            if candidate is message:
+                target_index = candidate_index
+                break
+            if (
+                recovered_event_id
+                and _recovered_identity(candidate) == recovered_event_id
+            ):
+                target_index = candidate_index
+                break
+            if (
+                recovered_stream_id
+                and candidate.get('_recovered_stream_id') == recovered_stream_id
+                and _normalize_journal_recovery_text(candidate.get('content')) == recovered_text
+            ):
+                target_index = candidate_index
+                break
+        if target_index is None and message.get('_partial'):
+            for candidate_index in range(len(messages) - 1, -1, -1):
+                candidate = messages[candidate_index]
+                if (
+                    isinstance(candidate, dict)
+                    and candidate.get('role') == 'assistant'
+                    and _normalize_journal_recovery_text(candidate.get('content')) == recovered_text
+                ):
+                    target_index = candidate_index
+                    break
+        return _owner_identity(messages, target_index)
+
     recovered_text = _normalize_journal_recovery_text(recovered.get('content'))
     if recovered_text:
         if recovered.get('role') == 'user':
@@ -881,10 +967,42 @@ def _append_recovered_context_projection(
             ):
                 return
         else:
-            for existing in reversed(context_messages[-8:]):
+            for existing_index in range(
+                len(context_messages) - 1,
+                max(-1, len(context_messages) - 9),
+                -1,
+            ):
+                existing = context_messages[existing_index]
                 if not isinstance(existing, dict) or existing.get('role') != recovered.get('role'):
                     continue
                 if _normalize_journal_recovery_text(existing.get('content')) == recovered_text:
+                    recovered_owner = _recovered_owner_identity(recovered)
+                    existing_owner = _owner_identity(
+                        context_messages,
+                        existing_index,
+                    )
+                    if recovered_owner is None or existing_owner is None:
+                        # Preserve the historical payload-only reconciliation
+                        # for untagged legacy rows.  Journal/partial rows,
+                        # however, carry a current-turn recovery claim; unknown
+                        # ownership is not proof of equivalence for those rows.
+                        if (
+                            recovered.get('_recovered_from_run_journal')
+                            or recovered.get('_partial')
+                        ):
+                            continue
+                        return
+                    if recovered_owner != existing_owner:
+                        continue
+                    recovered_identity = _recovered_identity(recovered)
+                    existing_identity = _recovered_identity(existing)
+                    if (
+                        recovered_identity is not None
+                        or existing_identity is not None
+                    ) and recovered_identity != existing_identity:
+                        # Equal prose from distinct durable journal segments is
+                        # still two provider-facing rows.
+                        continue
                     return
     context_messages.append(dict(recovered))
 
@@ -2382,6 +2500,13 @@ def _collapse_adjacent_duplicate_partials(messages) -> tuple[list, bool]:
     previous_partial_sig = None
     for message in messages:
         if isinstance(message, dict) and message.get('_partial'):
+            if message.get('_recovered_from_run_journal'):
+                # Each journal segment is a distinct durable event.  The
+                # legacy payload-only collapse is for repeated cancellation
+                # markers and must not merge legitimate recovered rows.
+                previous_partial_sig = None
+                collapsed.append(message)
+                continue
             sig = _partial_message_signature(message)
             if previous_partial_sig == sig:
                 changed = True
@@ -2398,6 +2523,9 @@ def _find_existing_assistant_for_journal_content(
     content: str,
     *,
     max_index: int | None = None,
+    min_index: int | None = None,
+    recovered_stream_id: str | None = None,
+    recovered_event_id: str | None = None,
     excluded_indexes: set[int] | None = None,
 ) -> int | None:
     candidate = _normalize_journal_recovery_text(content)
@@ -2405,6 +2533,10 @@ def _find_existing_assistant_for_journal_content(
         return None
     messages = session.messages or []
     stop = len(messages) if max_index is None else min(len(messages), max_index)
+    lower_bound = 0
+    if isinstance(min_index, int):
+        lower_bound = max(0, min(min_index, stop))
+    recovered_stream = str(recovered_stream_id) if recovered_stream_id else None
     substring_match = None
     for idx in range(stop):
         if excluded_indexes and idx in excluded_indexes:
@@ -2413,6 +2545,20 @@ def _find_existing_assistant_for_journal_content(
         if not isinstance(message, dict) or message.get('role') != 'assistant':
             continue
         if message.get('_error'):
+            continue
+        if (
+            recovered_event_id
+            and message.get('_recovered_event_id') == recovered_event_id
+        ):
+            return idx
+        # During cancellation, untagged content matches are scoped to the
+        # current pending user turn.  A row already recovered for this exact
+        # stream remains globally eligible so repeated journal reads stay
+        # idempotent even when the row predates that turn's lower bound.
+        if idx < lower_bound and (
+            recovered_stream is None
+            or message.get('_recovered_stream_id') != recovered_stream
+        ):
             continue
         existing = _normalize_journal_recovery_text(message.get('content'))
         if not existing:
@@ -2430,6 +2576,8 @@ def _journal_tool_already_present(
     preview: str,
     *,
     stream_id: str | None = None,
+    min_index: int | None = None,
+    max_index: int | None = None,
 ) -> bool:
     """Return True when an equivalent tool card already exists.
 
@@ -2445,7 +2593,14 @@ def _journal_tool_already_present(
       stream-id tagging), the legacy name+preview match still wins.  This
       preserves the "core transcript already has this tool, don't duplicate
       it" invariant the original repair path established.
-    * When ``stream_id`` is omitted, the helper degrades cleanly to its
+    * When ``min_index`` is supplied (the cancellation path), untagged cards
+      are eligible only when their owning assistant row is in the current
+      turn.  A missing or invalid owner index is not enough to prove that and
+      is therefore rejected.  ``max_index`` additionally bounds that owner to
+      the cancelled turn when a successor already follows its marker. Cards
+      carrying the same ``_recovered_stream_id`` remain eligible globally for
+      exact-stream retry idempotence.
+    * When ``min_index`` is omitted, the helper degrades cleanly to its
       pre-fix session-wide behaviour.
     """
     candidate_name = str(name or '')
@@ -2463,12 +2618,41 @@ def _journal_tool_already_present(
             continue
         if candidate_stream is not None:
             existing_stream = tool_call.get('_recovered_stream_id')
-            # A tool card explicitly tagged with a recovered_stream_id that
-            # differs from ours belongs to another retry's turn — don't let
-            # it pre-empt this retry.  Untagged tool cards (live or carried
-            # over from the core transcript) still match.
-            if existing_stream and str(existing_stream) != candidate_stream:
-                continue
+            if existing_stream:
+                # A tool card explicitly tagged with a recovered_stream_id
+                # that differs from ours belongs to another retry's turn —
+                # don't let it pre-empt this retry.  A matching tag remains
+                # globally eligible so re-reading the same stream is
+                # idempotent.
+                if str(existing_stream) != candidate_stream:
+                    continue
+            elif min_index is not None:
+                # Cancellation dedupe is turn-local for untagged cards.  The
+                # owner index is the only durable evidence tying a legacy/live
+                # card to this turn; unknown ownership must not suppress a
+                # current tool call.
+                owner_index = tool_call.get('assistant_msg_idx')
+                messages = getattr(session, 'messages', None)
+                if (
+                    type(owner_index) is not int
+                    or owner_index < min_index
+                    or owner_index < 0
+                    or not isinstance(messages, list)
+                    or owner_index >= len(messages)
+                    or (
+                        isinstance(max_index, int)
+                        and owner_index >= max_index
+                    )
+                ):
+                    continue
+                owner = messages[owner_index]
+                if (
+                    not isinstance(owner, dict)
+                    or owner.get('role') != 'assistant'
+                    or owner.get('_error')
+                    or owner.get('type') == 'interrupted'
+                ):
+                    continue
         return True
     return False
 
@@ -2759,7 +2943,12 @@ def _append_journaled_partial_output(
     stream_id: str | None,
     *,
     dedupe_existing: bool = False,
-) -> bool:
+    mark_partial: bool = False,
+    current_turn_start: int | None = None,
+    current_turn_end: int | None = None,
+    return_status: bool = False,
+    expected_recovery_events: int | None = None,
+) -> bool | tuple[bool, bool]:
     """Recover already-emitted visible output from a dead stream journal.
 
     This repair path is intentionally conservative: it restores user-visible
@@ -2767,9 +2956,36 @@ def _append_journaled_partial_output(
     already been emitted over SSE before the WebUI process died. Restored
     reasoning stays out of ``context_messages`` so it cannot become provider-
     facing history. The repair does not try to continue execution.
+
+    ``mark_partial`` is an opt-in label for callers recovering work during a
+    live cancellation.  It marks only rows newly created by this invocation;
+    an existing assistant row matched by ``dedupe_existing`` is left alone
+    unless it carries the same exact stream/event identity and only contains a
+    strict prefix of the journal segment, in which case that row is extended
+    in place for crash-window reconciliation.  The default remains the
+    historical recovery shape.
+
+    ``current_turn_start`` is an optional message index captured before a
+    cancellation clears the pending-turn fields.  When supplied, untagged
+    assistant content dedupe starts immediately after that user row; an
+    existing row carrying the same ``_recovered_stream_id`` remains eligible
+    globally for retry idempotence.  Crash-recovery callers omit this bound.
+    ``current_turn_end`` optionally bounds untagged dedupe to the owning turn
+    when a successor already follows its cancellation marker.
+    ``return_status`` additionally returns ``(appended, complete)`` where
+    ``complete`` proves every visible journal segment/tool identity was
+    materialized by this call or was already present for the exact stream.
+    ``expected_recovery_events`` optionally carries the exact-generation
+    admission count from the cancellation registry.  When supplied, the
+    completeness proof also requires the current exact-owner journal snapshot
+    to contain the same number of recoverable publication identities; a
+    nonempty subset is not sufficient to retire the durable cancellation hook.
     """
+    def result(appended: bool, complete: bool = False):
+        return (appended, complete) if return_status else appended
+
     if not stream_id:
-        return False
+        return result(False)
 
     try:
         from api.run_journal import read_run_events
@@ -2781,20 +2997,99 @@ def _append_journaled_partial_output(
             stream_id,
             exc_info=True,
         )
-        return False
+        return result(False)
 
-    events = [event for event in journal.get('events') or [] if isinstance(event, dict)]
+    if not isinstance(journal, dict):
+        return result(False)
+    raw_events = journal.get('events')
+    if not isinstance(raw_events, list):
+        return result(False)
+    events = [event for event in raw_events if isinstance(event, dict)]
+    if mark_partial:
+        # Cancellation recovery is scoped to the exact durable run identity.
+        # The historical crash-recovery caller intentionally keeps its
+        # existing permissive event handling, while this live fallback must
+        # fail closed on a foreign or malformed event row.
+        events = [
+            event for event in events
+            if _run_journal_event_owns_run(
+                event, session.session_id, stream_id,
+            )
+        ]
     if not events:
-        return False
+        return result(False)
+
+    if expected_recovery_events is None:
+        expected_recovery_event_count = None
+    elif (
+        isinstance(expected_recovery_events, int)
+        and not isinstance(expected_recovery_events, bool)
+        and expected_recovery_events >= 0
+    ):
+        expected_recovery_event_count = expected_recovery_events
+    else:
+        # A malformed admission count cannot authorize durable hook retirement.
+        expected_recovery_event_count = -1
+
+    # Prove admission cardinality before touching the canonical Session.  The
+    # journal may be readable while its final admitted row is still hidden by
+    # filesystem/event-bridge visibility; mutating the Session from that
+    # partial snapshot would force the caller to roll back successor objects.
+    # Count exact event identities using the same fallback as the materializer
+    # below, and fail closed before any message/context/tool projection work.
+    observed_recovery_event_ids: set[str] = set()
+    for event in events:
+        event_name = str(event.get('event') or event.get('type') or '')
+        event_id = event.get('event_id')
+        if not event_id and isinstance(event.get('seq'), int) and event.get('seq') > 0:
+            event_id = f'{stream_id}:{event["seq"]}'
+        event_id = str(event_id) if event_id else None
+        if (
+            event_id
+            and event_name in _cfg._STREAM_CANCEL_RECOVERABLE_PUBLICATION_EVENTS
+        ):
+            observed_recovery_event_ids.add(event_id)
+    if (
+        expected_recovery_event_count is not None
+        and (
+            expected_recovery_event_count < 0
+            or (
+                expected_recovery_event_count > 0
+                and len(observed_recovery_event_ids) != expected_recovery_event_count
+            )
+        )
+    ):
+        return result(False)
 
     appended_any = False
     assistant_parts: list[str] = []
     reasoning_parts: list[str] = []
     assistant_started_at: float | None = None
+    assistant_segment_event_id: str | None = None
     current_assistant_idx: int | None = None
     recovered_tool_calls: list[dict] = []
+    pending_tool_calls: list[dict] = []
     initial_message_count = len(session.messages or [])
+    dedupe_min_index = None
+    dedupe_max_index = None
+    if mark_partial:
+        # Cancellation recovery must fail closed when the owning user turn is
+        # unknown (for example, an ephemeral /btw transcript).  Only rows
+        # appended during this recovery may match untagged content; a row
+        # carrying this stream's tag remains globally eligible for retry
+        # idempotence.  Crash recovery keeps its historical session-wide
+        # matching because it does not opt into ``mark_partial``.
+        dedupe_min_index = (
+            current_turn_start + 1
+            if isinstance(current_turn_start, int)
+            else initial_message_count
+        )
+        if isinstance(current_turn_end, int):
+            dedupe_max_index = max(0, min(current_turn_end, initial_message_count))
     claimed_existing_assistant_indexes: set[int] = set()
+    materialized_event_ids: set[str] = set()
+    expected_event_ids: set[str] = set()
+    identity_conflict = False
 
     def content_match_can_receive_reasoning(existing_idx: int) -> bool:
         messages = session.messages or []
@@ -2841,6 +3136,108 @@ def _append_journaled_partial_output(
         context_projection.pop('reasoning', None)
         _append_recovered_turn_to_context(session, context_projection)
 
+    def adopt_cancel_partial_context_projection(
+        message: dict,
+        message_index: int,
+        previous_content: str,
+    ) -> tuple[bool, bool]:
+        """Extend the one live partial context row adopted by cancellation.
+
+        The live-buffer row predates journal identity metadata, so the normal
+        exact context lookup cannot find it.  Restrict the upgrade to the
+        corresponding user-turn window; ambiguous context rows fail closed
+        instead of silently upgrading historical equal prose.
+        """
+        context_messages = getattr(session, 'context_messages', None)
+        if not isinstance(context_messages, list):
+            return False, True
+
+        messages = getattr(session, 'messages', None) or []
+        target_user_ordinal = sum(
+            1
+            for row in messages[:message_index + 1]
+            if isinstance(row, dict) and row.get('role') == 'user'
+        )
+        owner_context_index = None
+        if target_user_ordinal:
+            seen_users = 0
+            for index, row in enumerate(context_messages):
+                if isinstance(row, dict) and row.get('role') == 'user':
+                    seen_users += 1
+                    if seen_users == target_user_ordinal:
+                        owner_context_index = index
+                        break
+
+        if owner_context_index is None:
+            return False, True
+        window_start = owner_context_index + 1
+        window_end = len(context_messages)
+        for index in range(window_start, len(context_messages)):
+            row = context_messages[index]
+            if isinstance(row, dict) and row.get('role') == 'user':
+                window_end = index
+                break
+
+        previous_normalized = _normalize_journal_recovery_text(previous_content)
+        candidates = []
+        for index in range(window_start, window_end):
+            row = context_messages[index]
+            if (
+                not isinstance(row, dict)
+                or row.get('role') != 'assistant'
+                or row.get('_partial') is not True
+                or row.get('_recovered_from_run_journal') is True
+            ):
+                continue
+            row_content = _normalize_journal_recovery_text(row.get('content'))
+            if (
+                row_content == previous_normalized
+                or previous_normalized.startswith(row_content)
+                or row_content.startswith(previous_normalized)
+            ):
+                candidates.append((index, row))
+
+        if len(candidates) > 1:
+            return False, True
+        if len(candidates) == 1:
+            _index, context_row = candidates[0]
+            projected = dict(message)
+            projected.pop('reasoning', None)
+            changed = any(
+                context_row.get(key) != value
+                for key, value in projected.items()
+            )
+            context_row.update(projected)
+            return changed, False
+
+        before_len = len(context_messages)
+        append_context_projection(message)
+        return len(context_messages) > before_len, False
+
+    def sync_exact_context_projection(message: dict) -> bool:
+        event_id = message.get('_recovered_event_id')
+        context_messages = getattr(session, 'context_messages', None)
+        if event_id and isinstance(context_messages, list):
+            for context_row in context_messages:
+                if (
+                    isinstance(context_row, dict)
+                    and context_row.get('_recovered_from_run_journal') is True
+                    and str(context_row.get('_recovered_stream_id') or '') == str(stream_id)
+                    and str(context_row.get('_recovered_event_id') or '') == str(event_id)
+                ):
+                    content = message.get('content', '')
+                    changed = context_row.get('content') != content
+                    context_row['content'] = content
+                    return changed
+        before_len = (
+            len(context_messages)
+            if isinstance(context_messages, list)
+            else 0
+        )
+        append_context_projection(message)
+        after_context = getattr(session, 'context_messages', None)
+        return isinstance(after_context, list) and len(after_context) > before_len
+
     def attach_display_reasoning(message: dict, reasoning: str) -> bool:
         if not reasoning:
             return False
@@ -2852,13 +3249,163 @@ def _append_journaled_partial_output(
 
     def flush_assistant() -> int | None:
         nonlocal appended_any, assistant_parts, reasoning_parts
-        nonlocal assistant_started_at, current_assistant_idx
+        nonlocal assistant_started_at, assistant_segment_event_id, current_assistant_idx
+        nonlocal identity_conflict
         content = ''.join(assistant_parts).strip()
         reasoning = ''.join(reasoning_parts).strip()
+        segment_event_id = assistant_segment_event_id
         assistant_parts = []
         reasoning_parts = []
+        assistant_segment_event_id = None
         if not content and not reasoning:
             return current_assistant_idx
+        if segment_event_id:
+            expected_event_ids.add(segment_event_id)
+        else:
+            identity_conflict = True
+        if (
+            return_status
+            and mark_partial
+            and segment_event_id
+            and isinstance(dedupe_min_index, int)
+            and isinstance(dedupe_max_index, int)
+            and dedupe_min_index < dedupe_max_index
+        ):
+            live_candidates = []
+            for index in range(dedupe_min_index, dedupe_max_index):
+                if index < 0 or index >= len(session.messages or []):
+                    continue
+                message = session.messages[index]
+                if (
+                    isinstance(message, dict)
+                    and message.get('role') == 'assistant'
+                    and message.get('_partial') is True
+                    and not message.get('_error')
+                    and message.get('_recovered_from_run_journal') is not True
+                ):
+                    live_candidates.append((index, message))
+            if len(live_candidates) > 1:
+                identity_conflict = True
+                current_assistant_idx = None
+                assistant_started_at = None
+                return None
+            if len(live_candidates) == 1:
+                live_idx, live_message = live_candidates[0]
+                if any(
+                    isinstance(message, dict)
+                    and message.get('role') == 'assistant'
+                    and message.get('_recovered_from_run_journal') is True
+                    and str(message.get('_recovered_stream_id') or '') == str(stream_id)
+                    and str(message.get('_recovered_event_id') or '') == str(segment_event_id)
+                    for message in session.messages or []
+                ):
+                    identity_conflict = True
+                    current_assistant_idx = None
+                    assistant_started_at = None
+                    return None
+                existing_content = _normalize_journal_recovery_text(
+                    live_message.get('content')
+                )
+                existing_reasoning = _normalize_journal_recovery_text(
+                    live_message.get('reasoning')
+                )
+                candidate_content = _normalize_journal_recovery_text(content)
+                candidate_reasoning = _normalize_journal_recovery_text(reasoning)
+
+                def prefix_compatible(existing_value: str, candidate_value: str) -> bool:
+                    return (
+                        existing_value == candidate_value
+                        or candidate_value.startswith(existing_value)
+                    )
+
+                if not prefix_compatible(existing_content, candidate_content) or not prefix_compatible(
+                    existing_reasoning,
+                    candidate_reasoning,
+                ):
+                    identity_conflict = True
+                    current_assistant_idx = None
+                    assistant_started_at = None
+                    return None
+                previous_content = live_message.get('content', '')
+                live_message['content'] = content
+                if reasoning:
+                    live_message['reasoning'] = reasoning
+                live_message['_recovered_from_run_journal'] = True
+                live_message['_recovered_stream_id'] = stream_id
+                live_message['_recovered_event_id'] = segment_event_id
+                claimed_existing_assistant_indexes.add(live_idx)
+                materialized_event_ids.add(segment_event_id)
+                current_assistant_idx = live_idx
+                assistant_started_at = None
+                _context_changed, context_conflict = adopt_cancel_partial_context_projection(
+                    live_message,
+                    live_idx,
+                    previous_content,
+                )
+                if context_conflict:
+                    identity_conflict = True
+                appended_any = True
+                return live_idx
+        if dedupe_existing and segment_event_id:
+            exact_idx = next(
+                (
+                    index
+                    for index, message in enumerate(session.messages or [])
+                    if (
+                        isinstance(message, dict)
+                        and message.get('role') == 'assistant'
+                        and message.get('_recovered_from_run_journal') is True
+                        and str(message.get('_recovered_stream_id') or '') == str(stream_id)
+                        and str(message.get('_recovered_event_id') or '') == str(segment_event_id)
+                        and index not in claimed_existing_assistant_indexes
+                    )
+                ),
+                None,
+            )
+            if exact_idx is not None:
+                existing_message = session.messages[exact_idx]
+                existing_content = _normalize_journal_recovery_text(
+                    existing_message.get('content')
+                )
+                candidate_content = _normalize_journal_recovery_text(content)
+                existing_reasoning = _normalize_journal_recovery_text(
+                    existing_message.get('reasoning')
+                )
+                candidate_reasoning = _normalize_journal_recovery_text(reasoning)
+
+                def compatible(existing_value: str, candidate_value: str) -> bool:
+                    return (
+                        not existing_value
+                        or not candidate_value
+                        or existing_value.startswith(candidate_value)
+                        or candidate_value.startswith(existing_value)
+                    )
+
+                if not compatible(existing_content, candidate_content) or not compatible(
+                    existing_reasoning,
+                    candidate_reasoning,
+                ):
+                    identity_conflict = True
+                    current_assistant_idx = exact_idx
+                    assistant_started_at = None
+                    claimed_existing_assistant_indexes.add(exact_idx)
+                    return exact_idx
+                if candidate_content and (
+                    not existing_content or len(candidate_content) > len(existing_content)
+                ):
+                    existing_message['content'] = content
+                    appended_any = True
+                if candidate_reasoning and (
+                    not existing_reasoning or len(candidate_reasoning) > len(existing_reasoning)
+                ):
+                    existing_message['reasoning'] = reasoning
+                    appended_any = True
+                claimed_existing_assistant_indexes.add(exact_idx)
+                materialized_event_ids.add(segment_event_id)
+                current_assistant_idx = exact_idx
+                assistant_started_at = None
+                appended_any = sync_exact_context_projection(existing_message) or appended_any
+                return exact_idx
         if dedupe_existing and content:
             search_excluded = set(claimed_existing_assistant_indexes)
             existing_idx = None
@@ -2866,7 +3413,14 @@ def _append_journaled_partial_output(
                 candidate_idx = _find_existing_assistant_for_journal_content(
                     session,
                     content,
-                    max_index=initial_message_count,
+                    max_index=(
+                        dedupe_max_index
+                        if dedupe_max_index is not None
+                        else initial_message_count
+                    ),
+                    min_index=dedupe_min_index,
+                    recovered_stream_id=stream_id,
+                    recovered_event_id=segment_event_id,
                     excluded_indexes=search_excluded,
                 )
                 if candidate_idx is None:
@@ -2886,7 +3440,12 @@ def _append_journaled_partial_output(
                         appended_any = True
                 return existing_idx
         if dedupe_existing and reasoning and not content:
-            for existing_idx in range(initial_message_count):
+            reasoning_dedupe_stop = (
+                dedupe_max_index
+                if dedupe_max_index is not None
+                else initial_message_count
+            )
+            for existing_idx in range(reasoning_dedupe_stop):
                 if existing_idx in claimed_existing_assistant_indexes:
                     continue
                 existing_message = session.messages[existing_idx]
@@ -2911,15 +3470,24 @@ def _append_journaled_partial_output(
             '_recovered_from_run_journal': True,
             '_recovered_stream_id': stream_id,
         }
+        if mark_partial:
+            recovered_assistant['_partial'] = True
+        if segment_event_id:
+            recovered_assistant['_recovered_event_id'] = segment_event_id
         attach_display_reasoning(recovered_assistant, reasoning)
         session.messages.append(recovered_assistant)
         append_context_projection(recovered_assistant)
         current_assistant_idx = len(session.messages) - 1
         assistant_started_at = None
         appended_any = True
+        if segment_event_id:
+            materialized_event_ids.add(segment_event_id)
         return current_assistant_idx
 
-    def ensure_assistant_anchor(created_at: float | None = None) -> int:
+    def ensure_assistant_anchor(
+        created_at: float | None = None,
+        event_id: str | None = None,
+    ) -> int:
         nonlocal appended_any, current_assistant_idx
         idx = flush_assistant()
         if idx is not None:
@@ -2952,13 +3520,18 @@ def _append_journaled_partial_output(
             ):
                 current_assistant_idx = _existing_idx
                 return _existing_idx
-        session.messages.append({
+        recovered_anchor = {
             'role': 'assistant',
             'content': '',
             'timestamp': int(created_at or time.time()),
             '_recovered_from_run_journal': True,
             '_recovered_stream_id': stream_id,
-        })
+        }
+        if mark_partial:
+            recovered_anchor['_partial'] = True
+        if event_id:
+            recovered_anchor['_recovered_event_id'] = event_id
+        session.messages.append(recovered_anchor)
         current_assistant_idx = len(session.messages) - 1
         appended_any = True
         return current_assistant_idx
@@ -2967,6 +3540,15 @@ def _append_journaled_partial_output(
         event_name = str(event.get('event') or event.get('type') or '')
         payload = event.get('payload') if isinstance(event.get('payload'), dict) else {}
         created_at = event.get('created_at') if isinstance(event.get('created_at'), (int, float)) else None
+        event_id = event.get('event_id')
+        if not event_id and isinstance(event.get('seq'), int) and event.get('seq') > 0:
+            event_id = f'{stream_id}:{event["seq"]}'
+        event_id = str(event_id) if event_id else None
+        if (
+            event_id
+            and event_name in _cfg._STREAM_CANCEL_RECOVERABLE_PUBLICATION_EVENTS
+        ):
+            observed_recovery_event_ids.add(event_id)
         if event_name == 'reasoning':
             text = str(
                 payload.get('text') or payload.get('reasoning') or payload.get('thinking') or ''
@@ -2975,6 +3557,7 @@ def _append_journaled_partial_output(
                 continue
             if not assistant_parts and not reasoning_parts and assistant_started_at is None:
                 assistant_started_at = created_at or time.time()
+                assistant_segment_event_id = event_id
             reasoning_parts.append(text)
             continue
         if event_name == 'token':
@@ -2983,6 +3566,7 @@ def _append_journaled_partial_output(
                 continue
             if not assistant_parts and assistant_started_at is None:
                 assistant_started_at = created_at or time.time()
+                assistant_segment_event_id = event_id
             assistant_parts.append(text)
             continue
         if event_name == 'interim_assistant':
@@ -2994,6 +3578,7 @@ def _append_journaled_partial_output(
                 continue
             if not assistant_parts and assistant_started_at is None:
                 assistant_started_at = created_at or time.time()
+                assistant_segment_event_id = event_id
             if assistant_parts and not ''.join(assistant_parts).endswith(('\n', ' ')):
                 assistant_parts.append('\n\n')
             assistant_parts.append(text)
@@ -3002,42 +3587,159 @@ def _append_journaled_partial_output(
         if event_name == 'tool':
             anchor_idx = flush_assistant()
             if anchor_idx is None:
-                anchor_idx = ensure_assistant_anchor(created_at)
+                anchor_idx = ensure_assistant_anchor(created_at, event_id)
             name = str(payload.get('name') or 'tool')
             preview = str(payload.get('preview') or '')
+            payload_tool_id = payload.get('tid')
+            normalized_payload_tool_id = (
+                str(payload_tool_id).strip()
+                if payload_tool_id is not None
+                else ''
+            )
+            if event_id:
+                expected_event_ids.add(event_id)
+                exact_tool = next(
+                    (
+                        tool
+                        for tool in session.tool_calls or []
+                        if (
+                            isinstance(tool, dict)
+                            and tool.get('_recovered_from_run_journal') is True
+                            and str(tool.get('_recovered_stream_id') or '') == str(stream_id)
+                            and str(tool.get('_recovered_event_id') or '') == str(event_id)
+                        )
+                    ),
+                    None,
+                )
+                if exact_tool is not None:
+                    if str(exact_tool.get('name') or '') != name:
+                        # A stream/event identity cannot be reused for a
+                        # different tool payload.  Keep the hook armed rather
+                        # than allowing a same-name fallback to hide the
+                        # conflict during cancellation recovery.
+                        identity_conflict = True
+                    if normalized_payload_tool_id and (
+                        str(exact_tool.get('tid') or '').strip()
+                        != normalized_payload_tool_id
+                    ):
+                        identity_conflict = True
+                    pending_tool_calls.append(exact_tool)
+                    materialized_event_ids.add(event_id)
+                    current_assistant_idx = anchor_idx
+                    continue
+            else:
+                identity_conflict = True
             if dedupe_existing and _journal_tool_already_present(
-                session, name, preview, stream_id=stream_id,
+                session,
+                name,
+                preview,
+                stream_id=stream_id,
+                min_index=dedupe_min_index,
+                max_index=dedupe_max_index,
             ):
+                if return_status:
+                    # An untagged card is not proof that this exact journal
+                    # tool event was materialized.  Legacy callers retain
+                    # their historical dedupe behavior, while cancellation
+                    # recovery fails closed and leaves its durable hook.
+                    identity_conflict = True
                 current_assistant_idx = anchor_idx
                 continue
-            recovered_tool_calls.append({
+            recovered_tool_call = {
                 'name': name,
                 'preview': preview,
                 'snippet': preview,
-                'tid': f"journal-{event.get('seq') or len(recovered_tool_calls) + 1}",
+                'tid': (
+                    payload_tool_id
+                    if normalized_payload_tool_id
+                    else f"journal-{event.get('seq') or len(recovered_tool_calls) + 1}"
+                ),
                 'assistant_msg_idx': anchor_idx,
                 'args': _truncate_journal_tool_args(payload.get('args') or {}),
                 'done': False,
                 '_recovered_from_run_journal': True,
                 '_recovered_stream_id': stream_id,
-            })
+            }
+            if event_id:
+                recovered_tool_call['_recovered_event_id'] = event_id
+                if 0 <= anchor_idx < len(session.messages):
+                    owner_event_id = session.messages[anchor_idx].get('_recovered_event_id')
+                    if owner_event_id:
+                        recovered_tool_call['_recovered_assistant_event_id'] = owner_event_id
+            if mark_partial:
+                recovered_tool_call['_partial'] = True
+            recovered_tool_calls.append(recovered_tool_call)
+            pending_tool_calls.append(recovered_tool_call)
             appended_any = True
+            if event_id:
+                materialized_event_ids.add(event_id)
             current_assistant_idx = anchor_idx
             continue
         if event_name == 'tool_complete':
+            if event_id:
+                expected_event_ids.add(event_id)
+            else:
+                identity_conflict = True
             name = str(payload.get('name') or '')
-            for tool_call in reversed(recovered_tool_calls):
-                if tool_call.get('done'):
-                    continue
-                if not name or tool_call.get('name') == name:
-                    tool_call['done'] = True
-                    if payload.get('preview'):
-                        tool_call['preview'] = str(payload.get('preview') or '')
-                        tool_call['snippet'] = str(payload.get('preview') or '')
-                    if payload.get('duration') is not None:
-                        tool_call['duration'] = payload.get('duration')
-                    tool_call['is_error'] = bool(payload.get('is_error', False))
+            payload_tool_id = payload.get('tid')
+            normalized_payload_tool_id = (
+                str(payload_tool_id).strip()
+                if payload_tool_id is not None
+                else ''
+            )
+            completion_tool = None
+            completed_fallback = None
+            if normalized_payload_tool_id:
+                # Newer journals carry the tool identity explicitly.  A
+                # completion with that identity must never fall back to a
+                # same-name tool, even when two terminal calls are adjacent.
+                for tool_call in reversed(pending_tool_calls):
+                    if str(tool_call.get('tid') or '').strip() != normalized_payload_tool_id:
+                        continue
+                    completion_tool = tool_call
                     break
+            else:
+                # Legacy journals lack a tool id; preserve their historical
+                # nearest-unfinished same-name pairing within this exact
+                # stream's pending sequence.
+                for tool_call in reversed(pending_tool_calls):
+                    if name and str(tool_call.get('name') or '') != name:
+                        continue
+                    if not tool_call.get('done'):
+                        completion_tool = tool_call
+                        break
+                    if completed_fallback is None:
+                        completed_fallback = tool_call
+                if completion_tool is None:
+                    completion_tool = completed_fallback
+            if completion_tool is None:
+                if return_status:
+                    identity_conflict = True
+                continue
+            before_completion = (
+                bool(completion_tool.get('done')),
+                completion_tool.get('preview'),
+                completion_tool.get('snippet'),
+                completion_tool.get('duration'),
+                completion_tool.get('is_error'),
+            )
+            completion_tool['done'] = True
+            if 'preview' in payload and payload.get('preview') is not None:
+                completion_tool['preview'] = str(payload.get('preview') or '')
+                completion_tool['snippet'] = str(payload.get('preview') or '')
+            if payload.get('duration') is not None:
+                completion_tool['duration'] = payload.get('duration')
+            completion_tool['is_error'] = bool(payload.get('is_error', False))
+            after_completion = (
+                bool(completion_tool.get('done')),
+                completion_tool.get('preview'),
+                completion_tool.get('snippet'),
+                completion_tool.get('duration'),
+                completion_tool.get('is_error'),
+            )
+            appended_any = appended_any or before_completion != after_completion
+            if event_id:
+                materialized_event_ids.add(event_id)
             continue
         if event_name in {'done', 'stream_end', 'cancel', 'apperror', 'error'}:
             flush_assistant()
@@ -3046,7 +3748,17 @@ def _append_journaled_partial_output(
     if recovered_tool_calls:
         session.tool_calls = list(session.tool_calls or []) + recovered_tool_calls
         appended_any = True
-    return appended_any
+    recovery_event_count_complete = (
+        expected_recovery_event_count is None
+        or len(observed_recovery_event_ids) == expected_recovery_event_count
+    )
+    complete = (
+        bool(expected_event_ids)
+        and recovery_event_count_complete
+        and not identity_conflict
+        and expected_event_ids.issubset(materialized_event_ids)
+    )
+    return result(appended_any, complete)
 
 
 # ── Lazy run-journal recovery (read-side self-heal) ─────────────────────────
@@ -3123,6 +3835,12 @@ def _session_has_pending_journal_retry(session) -> bool:
     means a retry is queued.
     """
     messages = getattr(session, 'messages', None) or []
+    # Cancellation hooks intentionally remain discoverable even after a
+    # successor user/assistant turn was persisted.  The exact stream marker is
+    # the durable owner; stopping at the successor would strand late output
+    # after a process restart.
+    if any(_is_cancel_journal_retry_marker(msg) for msg in messages):
+        return True
     for msg in reversed(messages):
         if not isinstance(msg, dict):
             continue
@@ -3135,11 +3853,235 @@ def _session_has_pending_journal_retry(session) -> bool:
     return False
 
 
+def _cancel_journal_retry_waiting_on_volatile_generation(session) -> bool:
+    """Keep cancellation hooks durable until their admitted generation retires.
+
+    ``get_session()`` is also used by successor-turn setup while the cancelled
+    stream is still quiescing.  Consuming the hook on that read would race the
+    final reconciliation transaction and make a subsequent save failure look
+    as though recovery had already committed.  The generation registry is the
+    volatile owner for this short window; after a restart it is empty, so the
+    ordinary lazy-recovery path remains available from the sidecar alone.
+    """
+    sid = str(getattr(session, 'session_id', '') or '')
+    for message in getattr(session, 'messages', None) or []:
+        if not _is_cancel_journal_retry_marker(message):
+            continue
+        stream_id = str(message.get('_journal_retry_stream_id') or '').strip()
+        if not stream_id:
+            continue
+        try:
+            if _cfg.stream_cancel_generation_pending(sid, stream_id):
+                return True
+        except Exception:
+            # Unknown ownership is not permission to mutate a durable hook;
+            # leave it for the next read/restart rather than racing teardown.
+            logger.debug(
+                "unable to inspect cancellation generation for session %s stream %s",
+                sid,
+                stream_id,
+                exc_info=True,
+            )
+            return True
+    return False
+
+
 def _strip_journal_retry_meta(marker: dict) -> None:
     marker.pop('_pending_journal_recovery', None)
     marker.pop('_journal_retry_stream_id', None)
     marker.pop('_journal_retry_attempts', None)
     marker.pop('_journal_retry_first_seen_ts', None)
+    marker.pop('_journal_retry_kind', None)
+    marker.pop('_journal_retry_turn_token', None)
+    marker.pop('_journal_retry_turn_start', None)
+
+
+def _is_cancel_journal_retry_marker(message: dict) -> bool:
+    """Return True for a cancellation hook, distinct from sidecar repair hooks."""
+    return (
+        isinstance(message, dict)
+        and message.get('_pending_journal_recovery') is True
+        and message.get('_journal_retry_kind') == 'cancelled'
+    )
+
+
+def _cancel_journal_retry_owner_index(session, marker_idx: int, marker: dict) -> int | None:
+    """Resolve the cancelled user row that owns an exact cancellation hook."""
+    messages = getattr(session, 'messages', None) or []
+    token = str(marker.get('_journal_retry_turn_token') or '').strip()
+    if token:
+        for index, row in enumerate(messages[:marker_idx]):
+            if (
+                isinstance(row, dict)
+                and row.get('role') == 'user'
+                and str(row.get('_active_turn_token') or '').strip() == token
+            ):
+                return index
+    saved_index = marker.get('_journal_retry_turn_start')
+    if type(saved_index) is int and 0 <= saved_index < marker_idx:
+        row = messages[saved_index]
+        if isinstance(row, dict) and row.get('role') == 'user':
+            return saved_index
+    for index in range(min(marker_idx, len(messages)) - 1, -1, -1):
+        row = messages[index]
+        if isinstance(row, dict) and row.get('role') == 'user':
+            return index
+    return None
+
+
+def _rehome_cancel_journal_rows(session, marker_idx: int) -> bool:
+    """Move exact recovered rows ahead of a cancellation marker.
+
+    Lazy recovery appends rows at the current transcript tail.  A successor
+    turn may already follow the marker, so re-home only rows carrying this
+    marker's exact stream id and rebase every tool owner by row identity.
+    """
+    messages = getattr(session, 'messages', None)
+    if not isinstance(messages, list) or not (0 <= marker_idx < len(messages)):
+        return False
+    marker = messages[marker_idx]
+    stream_id = str(marker.get('_journal_retry_stream_id') or '')
+    if not stream_id:
+        return False
+    before = list(messages)
+    recovered = [
+        row
+        for index, row in enumerate(before)
+        if index > marker_idx
+        and isinstance(row, dict)
+        and row.get('_recovered_from_run_journal') is True
+        and str(row.get('_recovered_stream_id') or '') == stream_id
+    ]
+    if not recovered:
+        return False
+    recovered_ids = {id(row) for row in recovered}
+    remaining = [row for row in before if id(row) not in recovered_ids]
+    try:
+        marker_position = next(index for index, row in enumerate(remaining) if row is marker)
+    except StopIteration:
+        return False
+    session.messages = (
+        remaining[:marker_position]
+        + recovered
+        + [marker]
+        + remaining[marker_position + 1:]
+    )
+    new_index_by_row = {id(row): index for index, row in enumerate(session.messages)}
+    for tool_call in getattr(session, 'tool_calls', None) or []:
+        if not isinstance(tool_call, dict):
+            continue
+        old_index = tool_call.get('assistant_msg_idx')
+        if type(old_index) is not int or not (0 <= old_index < len(before)):
+            continue
+        owner = before[old_index]
+        new_index = new_index_by_row.get(id(owner))
+        if new_index is not None:
+            tool_call['assistant_msg_idx'] = new_index
+    # ``_append_journaled_partial_output`` materializes recovered tools after
+    # the existing list.  Insert only this exact stream's tools before the
+    # first later owner; keep every non-target card in its original relative
+    # order so unrelated tool history is not globally re-sorted.
+    tool_calls = getattr(session, 'tool_calls', None)
+    if isinstance(tool_calls, list):
+        recovered_tools = [
+            tool
+            for tool in tool_calls
+            if (
+                isinstance(tool, dict)
+                and tool.get('_recovered_from_run_journal') is True
+                and str(tool.get('_recovered_stream_id') or '') == stream_id
+            )
+        ]
+        if recovered_tools:
+            recovered_ids = {id(tool) for tool in recovered_tools}
+            non_recovered_tools = [
+                tool for tool in tool_calls if id(tool) not in recovered_ids
+            ]
+            recovered_owner_indexes = [
+                tool.get('assistant_msg_idx')
+                for tool in recovered_tools
+                if type(tool.get('assistant_msg_idx')) is int
+            ]
+            insert_at = len(non_recovered_tools)
+            if recovered_owner_indexes:
+                first_later_owner = min(recovered_owner_indexes)
+                for index, tool in enumerate(non_recovered_tools):
+                    owner_index = tool.get('assistant_msg_idx')
+                    if type(owner_index) is int and owner_index > first_later_owner:
+                        insert_at = index
+                        break
+            session.tool_calls = (
+                non_recovered_tools[:insert_at]
+                + recovered_tools
+                + non_recovered_tools[insert_at:]
+            )
+    return True
+
+
+def _rehome_cancel_journal_context(session, marker_idx: int, marker: dict) -> None:
+    """Place exact recovered context rows before a successor user boundary."""
+    context = getattr(session, 'context_messages', None)
+    if not isinstance(context, list):
+        return
+    stream_id = str(marker.get('_journal_retry_stream_id') or '')
+    if not stream_id:
+        return
+    recovered = [
+        row
+        for row in context
+        if (
+            isinstance(row, dict)
+            and row.get('_recovered_from_run_journal') is True
+            and str(row.get('_recovered_stream_id') or '') == stream_id
+        )
+    ]
+    if not recovered:
+        return
+    owner_index = _cancel_journal_retry_owner_index(session, marker_idx, marker)
+    owner_token = str(marker.get('_journal_retry_turn_token') or '').strip()
+    owner_context_index = None
+    if owner_token:
+        for index, row in enumerate(context):
+            if (
+                isinstance(row, dict)
+                and row.get('role') == 'user'
+                and str(row.get('_active_turn_token') or '').strip() == owner_token
+            ):
+                owner_context_index = index
+                break
+    if owner_context_index is None and owner_index is not None:
+        target_user_ordinal = sum(
+            1
+            for row in (getattr(session, 'messages', None) or [])[:owner_index + 1]
+            if isinstance(row, dict) and row.get('role') == 'user'
+        )
+        if target_user_ordinal:
+            seen_users = 0
+            for index, row in enumerate(context):
+                if isinstance(row, dict) and row.get('role') == 'user':
+                    seen_users += 1
+                    if seen_users == target_user_ordinal:
+                        owner_context_index = index
+                        break
+    recovered_ids = {id(row) for row in recovered}
+    remaining = [row for row in context if id(row) not in recovered_ids]
+    if owner_context_index is None:
+        # The authoritative user boundary was compacted away.  Fail closed:
+        # never append old output after a successor's context.
+        session.context_messages = remaining
+        return
+    owner_row = context[owner_context_index]
+    try:
+        owner_position = next(index for index, row in enumerate(remaining) if row is owner_row)
+    except StopIteration:
+        session.context_messages = remaining
+        return
+    insert_at = len(remaining)
+    for index in range(owner_position + 1, len(remaining)):
+        if isinstance(remaining[index], dict) and remaining[index].get('role') == 'user':
+            insert_at = index
+            break
+    session.context_messages = remaining[:insert_at] + recovered + remaining[insert_at:]
 
 
 def _reorder_journal_tail_above_marker(session, marker_idx: int) -> None:
@@ -3213,57 +4155,136 @@ def _retry_journal_recovery_in_place(
     Returns True if journal output or a specific terminal error resolved the marker.
     Never raises — caller is best-effort.
     """
+    def _snapshot_session():
+        try:
+            return True, copy.deepcopy(vars(session))
+        except Exception:
+            fields = (
+                'messages', 'context_messages', 'tool_calls',
+                'active_stream_id', 'pending_user_message',
+                'pending_attachments', 'pending_started_at',
+                'pending_user_source', 'updated_at',
+            )
+            try:
+                return False, {field: copy.deepcopy(getattr(session, field, None)) for field in fields}
+            except Exception:
+                return False, {}
+
+    def _restore_session(snapshot):
+        full, values = snapshot
+        try:
+            if full:
+                session.__dict__.clear()
+                session.__dict__.update(values)
+            else:
+                for field, value in values.items():
+                    setattr(session, field, value)
+        except Exception:
+            logger.debug(
+                "Failed to restore lazy journal-recovery state for session %s",
+                getattr(session, 'session_id', '?'),
+                exc_info=True,
+            )
+
+    def _save_after_mutation(snapshot, reason: str) -> bool:
+        try:
+            session.save(touch_updated_at=False)
+            return True
+        except Exception:
+            _restore_session(snapshot)
+            logger.debug(
+                "save() failed while %s for session %s",
+                reason,
+                getattr(session, 'session_id', '?'),
+                exc_info=True,
+            )
+            return False
+
     try:
         messages = session.messages or []
-        for idx in range(len(messages) - 1, -1, -1):
-            msg = messages[idx]
-            if not isinstance(msg, dict):
-                continue
-            if msg.get('role') == 'assistant' and not msg.get('_error') \
-                    and not msg.get('_pending_journal_recovery'):
-                # Walked past the pending marker without finding it.
+        cancel_candidates = [
+            (idx, msg)
+            for idx, msg in enumerate(messages)
+            if _is_cancel_journal_retry_marker(msg)
+        ]
+        if cancel_candidates:
+            idx, msg = cancel_candidates[-1]
+            cancel_hook = True
+        else:
+            idx = None
+            msg = None
+            cancel_hook = False
+            for candidate_idx in range(len(messages) - 1, -1, -1):
+                candidate = messages[candidate_idx]
+                if not isinstance(candidate, dict):
+                    continue
+                if candidate.get('role') == 'assistant' and not candidate.get('_error') \
+                        and not candidate.get('_pending_journal_recovery'):
+                    # Walked past the pending marker without finding it.
+                    return False
+                if (
+                    candidate.get('type') == 'interrupted'
+                    and candidate.get('_pending_journal_recovery')
+                ):
+                    idx, msg = candidate_idx, candidate
+                    break
+            if msg is None:
                 return False
-            if not (
-                msg.get('type') == 'interrupted'
-                and msg.get('_pending_journal_recovery')
-            ):
-                continue
-            stream_id = msg.get('_journal_retry_stream_id')
-            first_seen = msg.get('_journal_retry_first_seen_ts') or 0
-            attempts = int(msg.get('_journal_retry_attempts') or 0)
-            now = time.time()
-            give_up = (
-                attempts >= _JOURNAL_RETRY_MAX_ATTEMPTS
-                or (
-                    first_seen
-                    and now - float(first_seen) > _JOURNAL_RETRY_GIVEUP_SECONDS
-                )
+        assert isinstance(idx, int) and isinstance(msg, dict)
+        snapshot = _snapshot_session()
+        stream_id = msg.get('_journal_retry_stream_id')
+        first_seen = msg.get('_journal_retry_first_seen_ts') or 0
+        attempts = int(msg.get('_journal_retry_attempts') or 0)
+        now = time.time()
+        give_up = (
+            attempts >= _JOURNAL_RETRY_MAX_ATTEMPTS
+            or (
+                first_seen
+                and now - float(first_seen) > _JOURNAL_RETRY_GIVEUP_SECONDS
             )
-            if not stream_id:
-                # No stream id to retry against; demote immediately.
-                msg['content'] = _INTERRUPTED_NEUTRAL_WORDING
-                _strip_journal_retry_meta(msg)
-                try:
-                    session.save(touch_updated_at=False)
-                except Exception:
-                    logger.debug(
-                        "save() failed while demoting marker for session %s",
-                        getattr(session, 'session_id', '?'),
-                        exc_info=True,
-                    )
+        )
+        if cancel_hook and not stream_id:
+            # A cancellation hook is the durable ownership marker for a late
+            # stream.  Without an exact stream id there is no safe journal to
+            # inspect, so keep the marker and retry metadata intact rather than
+            # demoting or stripping the cancellation boundary.
+            return False
+        if not stream_id:
+            # Legacy interrupted markers without a stream id have no exact
+            # journal to retry against; demote immediately as before.
+            msg['content'] = _INTERRUPTED_NEUTRAL_WORDING
+            _strip_journal_retry_meta(msg)
+            _save_after_mutation(snapshot, "demoting marker")
+            return False
+        if give_up and not cancel_hook:
+            msg['content'] = _INTERRUPTED_NEUTRAL_WORDING
+            _strip_journal_retry_meta(msg)
+            _save_after_mutation(snapshot, "demoting marker")
+            return False
+        if cancel_hook:
+            owner_index = _cancel_journal_retry_owner_index(session, idx, msg)
+            recovered_output, recovery_complete = _append_journaled_partial_output(
+                session,
+                stream_id,
+                dedupe_existing=True,
+                mark_partial=True,
+                current_turn_start=owner_index,
+                current_turn_end=idx,
+                return_status=True,
+            )
+            # Cancellation fallback scope is the late exact-stream prose/tool
+            # journal.  Do not materialize a gateway terminal error here or
+            # remove the user's cancellation marker; the marker must remain the
+            # visible boundary until a journal recovery save succeeds.
+            terminal_error_recovered = False
+            if not recovery_complete:
+                # A strict cancellation retry must not clear its hook after a
+                # content conflict or an unidentifiable/incomplete journal.
+                # Restore any rows/prefix splice the canonical append helper
+                # may have tentatively produced before returning status.
+                _restore_session(snapshot)
                 return False
-            if give_up:
-                msg['content'] = _INTERRUPTED_NEUTRAL_WORDING
-                _strip_journal_retry_meta(msg)
-                try:
-                    session.save(touch_updated_at=False)
-                except Exception:
-                    logger.debug(
-                        "save() failed while demoting marker for session %s",
-                        getattr(session, 'session_id', '?'),
-                        exc_info=True,
-                    )
-                return False
+        else:
             recovered_output, terminal_error_recovered = (
                 _recover_journaled_output_and_terminal_error(
                     session,
@@ -3271,63 +4292,70 @@ def _retry_journal_recovery_in_place(
                     dedupe_existing=True,
                 )
             )
-            if recovered_output or terminal_error_recovered:
-                if not terminal_error_recovered:
-                    msg['content'] = _INTERRUPTED_RECOVERED_WORDING
-                    _strip_journal_retry_meta(msg)
-                # The journaled rows were appended at the end of messages;
-                # move them above the marker before either retaining its
-                # interrupted wording or replacing it with a specific terminal
-                # error from that same stream.
-                _reorder_journal_tail_above_marker(session, idx)
-                if terminal_error_recovered:
-                    session.messages = [
-                        message
-                        for message in session.messages
-                        if message is not msg
-                    ]
-                try:
-                    session.save(touch_updated_at=False)
-                except Exception:
-                    logger.debug(
-                        "save() failed while applying lazy journal recovery for session %s",
-                        getattr(session, 'session_id', '?'),
-                        exc_info=True,
-                    )
-                logger.info(
-                    "Session %s: lazy journal-recovery applied stream %s "
-                    "after %d attempts",
-                    getattr(session, 'session_id', '?'),
-                    stream_id,
-                    attempts,
-                )
-                return True
-            if (
-                preserve_arriving_budget
-                and _journal_is_still_arriving(session, stream_id)
-            ):
-                logger.debug(
-                    "Session %s: journal for stream %s still arriving; "
-                    "preserving retry budget",
-                    getattr(session, 'session_id', '?'),
-                    stream_id,
-                )
-                return False
-            next_attempts = attempts + 1
-            if next_attempts >= _JOURNAL_RETRY_MAX_ATTEMPTS:
-                msg['content'] = _INTERRUPTED_NEUTRAL_WORDING
+        # A cancellation hook can be fully converged without appending new
+        # rows (for example, after a crash just after the initial save).  The
+        # canonical helper's completion proof, rather than its append flag,
+        # is what authorizes retiring that durable hook.
+        recovery_resolved = (
+            recovery_complete
+            if cancel_hook
+            else recovered_output or terminal_error_recovered
+        )
+        if recovery_resolved:
+            if cancel_hook:
+                _rehome_cancel_journal_rows(session, idx)
+                _rehome_cancel_journal_context(session, idx, msg)
+                # Preserve the original cancellation wording.  Successful
+                # exact-stream recovery only retires the hook metadata.
                 _strip_journal_retry_meta(msg)
-            else:
-                msg['_journal_retry_attempts'] = next_attempts
-            try:
-                session.save(touch_updated_at=False)
-            except Exception:
-                logger.debug(
-                    "save() failed while updating retry counter for session %s",
-                    getattr(session, 'session_id', '?'),
-                    exc_info=True,
-                )
+            elif not terminal_error_recovered:
+                msg['content'] = _INTERRUPTED_RECOVERED_WORDING
+                _strip_journal_retry_meta(msg)
+            # The journaled rows were appended at the end of messages; move
+            # them above the marker before either retaining its interrupted
+            # wording or replacing it with a specific terminal error from that
+            # same stream.
+            if not cancel_hook:
+                _reorder_journal_tail_above_marker(session, idx)
+            if terminal_error_recovered:
+                session.messages = [
+                    message
+                    for message in session.messages
+                    if message is not msg
+                ]
+            if not _save_after_mutation(snapshot, "applying lazy journal recovery"):
+                return False
+            logger.info(
+                "Session %s: lazy journal-recovery applied stream %s "
+                "after %d attempts",
+                getattr(session, 'session_id', '?'),
+                stream_id,
+                attempts,
+            )
+            return True
+        if (
+            preserve_arriving_budget
+            and _journal_is_still_arriving(session, stream_id)
+        ):
+            logger.debug(
+                "Session %s: journal for stream %s still arriving; "
+                "preserving retry budget",
+                getattr(session, 'session_id', '?'),
+                stream_id,
+            )
             return False
+        if cancel_hook:
+            # Missing/empty/malformed journals do not authorize demotion or
+            # hook cleanup for cancellation recovery.  Leave the durable marker
+            # untouched for a later read or managed restart.
+            return False
+        next_attempts = attempts + 1
+        if next_attempts >= _JOURNAL_RETRY_MAX_ATTEMPTS:
+            msg['content'] = _INTERRUPTED_NEUTRAL_WORDING
+            _strip_journal_retry_meta(msg)
+        else:
+            msg['_journal_retry_attempts'] = next_attempts
+        _save_after_mutation(snapshot, "updating retry counter")
         return False
     except Exception:
         logger.exception(
@@ -4723,6 +5751,7 @@ def _resolve_session_once(
     promote_cache=True,
     cache_on_miss=True,
     allow_full_load=False,
+    bypass_journal_retry=False,
 ):
     """Resolve a session through the canonical freshness/recovery path.
 
@@ -4782,7 +5811,12 @@ def _resolve_session_once(
                 logger.debug(
                     "stale cached user-tail check failed for session %s", sid, exc_info=True,
                 )
-        if not metadata_only and _session_has_pending_journal_retry(cached):
+        if (
+            not metadata_only
+            and not bypass_journal_retry
+            and _session_has_pending_journal_retry(cached)
+            and not _cancel_journal_retry_waiting_on_volatile_generation(cached)
+        ):
             try:
                 _try_retry_journal_recovery_in_place(cached)
             except Exception:
@@ -4820,7 +5854,13 @@ def _resolve_session_once(
                 # already carries a pending-journal-retry marker (e.g. set on
                 # a previous repair pass), give the lazy-retry path one
                 # chance to self-heal on this read.
-                if not repaired and not synced_from_state and _session_has_pending_journal_retry(s):
+                if (
+                    not repaired
+                    and not synced_from_state
+                    and not bypass_journal_retry
+                    and _session_has_pending_journal_retry(s)
+                    and not _cancel_journal_retry_waiting_on_volatile_generation(s)
+                ):
                     try:
                         _try_retry_journal_recovery_in_place(s)
                     except Exception:
@@ -4844,7 +5884,14 @@ def _resolve_session_once(
     raise KeyError(sid)
 
 
-def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_miss=True):
+def _resolve_session(
+    sid,
+    metadata_only=False,
+    *,
+    promote_cache=True,
+    cache_on_miss=True,
+    bypass_journal_retry=False,
+):
     """Resolve a session while single-flighting heavyweight full sidecar loads.
 
     Metadata-only reads and full sessions that remain current in the cache take
@@ -4859,6 +5906,7 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
             metadata_only=True,
             promote_cache=promote_cache,
             cache_on_miss=cache_on_miss,
+            bypass_journal_retry=bypass_journal_retry,
         )
 
     session_id = str(sid)
@@ -4869,6 +5917,7 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
                 metadata_only=False,
                 promote_cache=promote_cache,
                 cache_on_miss=cache_on_miss,
+                bypass_journal_retry=bypass_journal_retry,
             )
         except _FullSessionResolveRequired:
             pass
@@ -4886,6 +5935,7 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
                 promote_cache=promote_cache,
                 cache_on_miss=cache_on_miss,
                 allow_full_load=True,
+                bypass_journal_retry=bypass_journal_retry,
             )
 
         leader, event = _claim_full_session_resolve(session_id)
@@ -4903,6 +5953,7 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
                     promote_cache=promote_cache,
                     cache_on_miss=cache_on_miss,
                     allow_full_load=True,
+                    bypass_journal_retry=bypass_journal_retry,
                 )
         finally:
             active.discard(session_id)
@@ -4910,9 +5961,13 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
             _finish_full_session_resolve(session_id, event)
 
 
-def get_session(sid, metadata_only=False):
+def get_session(sid, metadata_only=False, *, bypass_journal_retry=False):
     """Load a session, optionally with metadata only (skipping messages)."""
-    return _resolve_session(sid, metadata_only=metadata_only)
+    return _resolve_session(
+        sid,
+        metadata_only=metadata_only,
+        bypass_journal_retry=bypass_journal_retry,
+    )
 
 
 _COMPRESSION_RECOVERY_PROFILE_UNSET = object()

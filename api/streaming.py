@@ -33,6 +33,7 @@ from api.config import (
     STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS,
     STREAM_GOAL_RELATED, PENDING_GOAL_CONTINUATION,
     STREAM_LAST_EVENT_ID,
+    _STREAM_CANCEL_RECOVERABLE_PUBLICATION_EVENTS,
     LOCK, SESSIONS, SESSIONS_MAX, SESSION_DIR,
     _get_session_agent_lock, _alias_session_agent_lock,
     _set_thread_env, _clear_thread_env,
@@ -41,6 +42,24 @@ from api.config import (
     stream_owner_session_id,
     session_writeback_owner,
     clear_session_writeback_owner_if_owned,
+    begin_stream_cancel_generation,
+    register_stream_cancel_state,
+    set_stream_cancel_turn_start,
+    admit_stream_publication,
+    finish_stream_publication,
+    mark_stream_worker_done,
+    claim_stream_cancel_reconciliation,
+    complete_stream_cancel_reconciliation,
+    stream_cancel_generation_pending,
+    begin_stream_cancel_reconciliation_retry,
+    update_stream_cancel_reconciliation_retry_attempts,
+    stream_cancel_reconciliation_retry_owner,
+    finish_stream_cancel_reconciliation_retry,
+    note_stream_cancel_reconciliation_failure,
+    dead_letter_stream_cancel_reconciliation,
+    mark_stream_success_committed,
+    retire_stream_cancel_generation,
+    retire_stream_cancel_generation_after_success,
     SESSION_AGENT_LOCKS, SESSION_AGENT_LOCKS_LOCK,
     resolve_model_provider,
     resolve_custom_provider_connection,
@@ -65,6 +84,7 @@ from api.todo_state import attach_todo_state, emit_todo_state
 from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
 from api.models import (
+    _append_recovered_turn_to_context,
     _is_empty_partial_activity_message,
     _evict_sessions_over_cap,
     clear_process_wakeup_pause,
@@ -869,6 +889,10 @@ def _await_clarify_response(entry, timeout, cancel_evt) -> tuple[str, bool]:
 
 
 _CANCEL_MARKER_PATTERNS = ('task cancelled', 'task canceled', 'response interrupted')
+
+# One initial attempt plus at most two delayed retries.  Tests may replace this
+# tuple with short delays, while production retains a real bounded backoff.
+_CANCEL_RECONCILIATION_RETRY_DELAYS = (0.25, 1.0)
 
 
 _WEBUI_PROGRESS_PROMPT = """
@@ -2015,18 +2039,303 @@ def _settle_result_messages(
         session.context_messages,
         active_turn_identity,
     )
-    session.messages = _merge_display_messages_after_agent_result(
-        previous_display_for_writeback,
+    session.messages = _merge_display_messages_with_late_recovery(
+        session,
+        _merge_display_messages_after_agent_result(
+            previous_display_for_writeback,
+            previous_context_messages,
+            _restore_display_reasoning_metadata(previous_messages, result_messages),
+            msg_text,
+            source=source,
+            verification_nudge_provenance=verification_nudge_provenance,
+        ),
+        previous_messages,
         previous_context_messages,
-        _restore_display_reasoning_metadata(previous_messages, result_messages),
-        msg_text,
-        source=source,
-        verification_nudge_provenance=verification_nudge_provenance,
+        active_turn_identity,
     )
     _annotate_media_snapshots_for_settled_messages(session.messages)
     _compact_session_image_parts_for_persistence(session)
     _advance_truncation_watermark_after_commit(session)  # #3831
     return result_messages
+
+
+def _settlement_recovered_row_identity(row):
+    """Return the exact durable identity for one journal-recovered message."""
+    if not isinstance(row, dict) or not row.get('_recovered_from_run_journal'):
+        return None
+    stream_id = str(row.get('_recovered_stream_id') or '')
+    event_id = ''
+    for field in ('_recovered_event_id', '_recovered_segment_id', '_journal_event_id'):
+        value = row.get(field)
+        if value is not None and str(value).strip():
+            event_id = str(value)
+            break
+    # Event identity is authoritative.  The fallback keeps legacy journal rows
+    # idempotent without allowing a payload-only row to collapse an identified
+    # segment from the same cancelled stream.
+    return (
+        'journal',
+        row.get('role') or '',
+        stream_id,
+        event_id or repr(_message_identity(row)),
+        str(row.get('tool_call_id') or row.get('tool_use_id') or ''),
+    )
+
+
+def _settlement_row_anchor_key(row):
+    """Return a hashable canonical-order key for settlement splicing."""
+    recovered = _settlement_recovered_row_identity(row)
+    if recovered is not None:
+        return recovered
+    if not isinstance(row, dict):
+        return ('raw', repr(row))
+    role = row.get('role') or ''
+    token = row.get('_active_turn_token')
+    if token:
+        return ('turn', role, str(token))
+    message_id = row.get('id')
+    if message_id is not None:
+        return ('id', role, repr(message_id))
+    timestamp = row.get('timestamp')
+    if timestamp is None:
+        timestamp = row.get('_ts')
+    return ('message', role, repr(timestamp), repr(_message_identity(row)))
+
+
+def _settlement_recovered_tool_identity(tool_call):
+    """Return the exact durable identity for one recovered tool sidecar."""
+    if not isinstance(tool_call, dict) or not tool_call.get('_recovered_from_run_journal'):
+        return None
+    identity = _recovered_tool_identity(tool_call)
+    return (
+        'journal-tool',
+        str(tool_call.get('_recovered_stream_id') or ''),
+        repr(identity or (
+            tool_call.get('name') or '',
+            tool_call.get('assistant_msg_idx'),
+        )),
+    )
+
+
+def _merge_late_recovered_rows_into_settlement(
+    snapshot,
+    canonical_rows,
+    late_rows,
+    *,
+    active_turn_token=None,
+):
+    """Reinsert exact late journal rows at their canonical boundary.
+
+    A successor worker captures ``snapshot`` before an admitted old-generation
+    callback finishes its journal append.  The old reconciler then durably adds
+    that callback to the canonical Session while the successor is still in its
+    provider call.  Settlement must retain the row without feeding it into the
+    already-started provider request, and must place it according to the
+    canonical successor boundary rather than appending it at the context tail.
+    """
+    merged = list(snapshot or [])
+    canonical = list(canonical_rows or [])
+    if not merged or not canonical or not late_rows:
+        return merged
+
+    canonical_index_by_object = {id(row): index for index, row in enumerate(canonical)}
+    pending = sorted(
+        (
+            row
+            for row in late_rows
+            if id(row) in canonical_index_by_object
+            and _settlement_row_anchor_key(row)
+            not in {_settlement_row_anchor_key(existing) for existing in merged}
+        ),
+        key=lambda row: canonical_index_by_object[id(row)],
+    )
+    for late_row in pending:
+        late_key = _settlement_row_anchor_key(late_row)
+        if late_key in {_settlement_row_anchor_key(existing) for existing in merged}:
+            continue
+        late_index = canonical_index_by_object[id(late_row)]
+
+        # Match the current settlement rows back to their canonical positions.
+        # Queues preserve occurrence order for identical ordinary rows; journal
+        # rows normally have unique event identities and therefore do not rely
+        # on payload-only equality.
+        positions_by_key = {}
+        for index, row in enumerate(canonical):
+            positions_by_key.setdefault(_settlement_row_anchor_key(row), []).append(index)
+        matched_positions = {}
+        for index, row in enumerate(merged):
+            key = _settlement_row_anchor_key(row)
+            positions = positions_by_key.get(key)
+            if positions:
+                matched_positions[index] = positions.pop(0)
+
+        next_anchor = min(
+            (
+                (canonical_index, merged_index)
+                for merged_index, canonical_index in matched_positions.items()
+                if canonical_index > late_index
+            ),
+            default=None,
+        )
+        if next_anchor is not None:
+            insert_at = next_anchor[1]
+        else:
+            previous_anchor = max(
+                (
+                    (canonical_index, merged_index)
+                    for merged_index, canonical_index in matched_positions.items()
+                    if canonical_index < late_index
+                ),
+                default=None,
+            )
+            # Without a proven canonical neighbor, do not tail-append old
+            # evidence after a successor turn.  A live active-turn checkpoint
+            # is a safe fallback boundary when the detached reconciler's disk
+            # snapshot predates the successor's persisted user row.
+            if previous_anchor is None:
+                insert_at = next(
+                    (
+                        index
+                        for index, row in enumerate(merged)
+                        if (
+                            isinstance(row, dict)
+                            and active_turn_token
+                            and row.get('_active_turn_token') == active_turn_token
+                        )
+                    ),
+                    None,
+                )
+                if insert_at is None:
+                    continue
+            else:
+                insert_at = previous_anchor[1] + 1
+        merged.insert(insert_at, copy.deepcopy(late_row))
+    return merged
+
+
+def _preserve_late_recovered_rows_across_settlement(
+    session,
+    previous_messages,
+    previous_context_messages,
+    active_turn_identity=None,
+):
+    """Keep old-generation journal rows added after a successor snapshot."""
+    previous_message_keys = {
+        _settlement_recovered_row_identity(row)
+        for row in previous_messages or []
+        if _settlement_recovered_row_identity(row) is not None
+    }
+    previous_context_keys = {
+        _settlement_recovered_row_identity(row)
+        for row in previous_context_messages or []
+        if _settlement_recovered_row_identity(row) is not None
+    }
+    canonical_sources = [
+        (
+            list(getattr(session, 'messages', None) or []),
+            list(getattr(session, 'context_messages', None) or []),
+            list(getattr(session, 'tool_calls', None) or []),
+        )
+    ]
+    # The cancelled reconciler can be operating on a fresh Session object while
+    # the successor worker still holds the object it captured before replacement.
+    # Read the durable sidecar as a second canonical source so a late row saved
+    # by that detached reconciler is not lost when the successor settles.
+    try:
+        from api.models import Session
+
+        durable = Session.load(getattr(session, 'session_id', None))
+        if durable is not None:
+            canonical_sources.append(
+                (
+                    list(getattr(durable, 'messages', None) or []),
+                    list(getattr(durable, 'context_messages', None) or []),
+                    list(getattr(durable, 'tool_calls', None) or []),
+                )
+            )
+    except Exception:
+        logger.debug(
+            "Failed to read durable settlement source for session %s",
+            getattr(session, 'session_id', None),
+            exc_info=True,
+        )
+
+    for canonical_messages, canonical_context, _canonical_tools in canonical_sources:
+        late_messages = [
+            row
+            for row in canonical_messages
+            if (
+                _settlement_recovered_row_identity(row) is not None
+                and _settlement_recovered_row_identity(row) not in previous_message_keys
+            )
+        ]
+        late_context = [
+            row
+            for row in canonical_context
+            if (
+                _settlement_recovered_row_identity(row) is not None
+                and _settlement_recovered_row_identity(row) not in previous_context_keys
+            )
+        ]
+        if late_messages:
+            session.messages = _merge_late_recovered_rows_into_settlement(
+            session.messages,
+            canonical_messages,
+            late_messages,
+            active_turn_token=(
+                active_turn_identity.get('token')
+                if isinstance(active_turn_identity, dict)
+                else None
+            ),
+        )
+        if late_context:
+            session.context_messages = _merge_late_recovered_rows_into_settlement(
+                session.context_messages,
+                canonical_context,
+                late_context,
+                active_turn_token=(
+                    active_turn_identity.get('token')
+                    if isinstance(active_turn_identity, dict)
+                    else None
+                ),
+            )
+
+    known_tool_keys = {
+        _settlement_recovered_tool_identity(tool_call)
+        for tool_call in getattr(session, 'tool_calls', None) or []
+        if _settlement_recovered_tool_identity(tool_call) is not None
+    }
+    for _canonical_messages, _canonical_context, canonical_tools in canonical_sources:
+        for tool_call in canonical_tools:
+            tool_key = _settlement_recovered_tool_identity(tool_call)
+            if tool_key is None or tool_key in known_tool_keys:
+                continue
+            rebased = _rebase_recovered_tool_owner(
+                tool_call,
+                getattr(session, 'messages', None) or [],
+            )
+            if rebased is None:
+                continue
+            session.tool_calls = [*(getattr(session, 'tool_calls', None) or []), rebased]
+            known_tool_keys.add(tool_key)
+
+
+def _merge_display_messages_with_late_recovery(
+    session,
+    merged_messages,
+    previous_messages,
+    previous_context_messages,
+    active_turn_identity,
+):
+    """Install the merged display and splice late recovery before annotation."""
+    session.messages = merged_messages
+    _preserve_late_recovered_rows_across_settlement(
+        session,
+        previous_messages,
+        previous_context_messages,
+        active_turn_identity,
+    )
+    return session.messages
 
 
 def _current_turn_already_has_visible_assistant_answer(messages, *, active_turn_identity=None):
@@ -2288,6 +2597,1029 @@ def _merge_process_wakeup_pause_into_current_session(
     return recorded
 
 
+def _journal_token_segments(session_id, stream_id) -> list[tuple[str, str]]:
+    """Return ordered ``(first_event_id, token_text)`` journal segments.
+
+    Cancellation recovery keeps a live token partial as the authoritative
+    display row. Prefix elision is safe only for a recovered row whose own
+    journal segment contains token text that is represented in that live
+    partial. A later interim/tool segment may reuse the same textual prefix but
+    has a distinct durable identity and must remain whole. Keeping the ordered
+    token text (rather than only the first event id) lets the final-generation
+    splice account for multiple token segments separated by tool boundaries.
+    If the journal cannot be read or its event identity cannot be proved, return
+    an empty list so the splice fails closed.
+    """
+    try:
+        from api.run_journal import read_run_events
+
+        journal = read_run_events(session_id, stream_id)
+    except Exception:
+        logger.debug(
+            "Failed to read journal segment identities for %s/%s",
+            session_id,
+            stream_id,
+            exc_info=True,
+        )
+        return []
+    raw_events = journal.get("events") if isinstance(journal, dict) else None
+    if not isinstance(raw_events, list):
+        return []
+
+    events = []
+    expected_session_id = str(session_id)
+    expected_stream_id = str(stream_id)
+    for event in raw_events:
+        if not isinstance(event, dict):
+            continue
+        seq = event.get("seq")
+        if isinstance(seq, bool) or not isinstance(seq, int) or seq < 1:
+            continue
+        event_id = event.get("event_id")
+        if (
+            event.get("session_id") != expected_session_id
+            or event.get("run_id") != expected_stream_id
+            or event_id != f"{expected_stream_id}:{seq}"
+        ):
+            continue
+        events.append((str(event_id), event))
+    if not events:
+        return []
+
+    token_segments: list[tuple[str, str]] = []
+    segment_event_id = None
+    segment_token_parts: list[str] = []
+
+    def flush_segment() -> None:
+        nonlocal segment_event_id, segment_token_parts
+        if segment_event_id is not None and segment_token_parts:
+            token_segments.append((segment_event_id, "".join(segment_token_parts)))
+        segment_event_id = None
+        segment_token_parts = []
+
+    for event_id, event in events:
+        event_name = str(event.get("event") or event.get("type") or "")
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        if event_name == "token":
+            text = str(payload.get("text") or "")
+            if not text:
+                continue
+            if segment_event_id is None:
+                segment_event_id = event_id
+            segment_token_parts.append(text)
+            continue
+        if event_name == "reasoning":
+            reasoning = str(
+                payload.get("text")
+                or payload.get("reasoning")
+                or payload.get("thinking")
+                or ""
+            )
+            if not reasoning:
+                continue
+            if segment_event_id is None:
+                segment_event_id = event_id
+            continue
+        if event_name == "interim_assistant":
+            if payload.get("already_streamed"):
+                flush_segment()
+                continue
+            if str(payload.get("text") or "").strip():
+                # The journal reader joins a non-already-streamed interim with
+                # the preceding token segment before flushing it.
+                if segment_event_id is None:
+                    segment_event_id = event_id
+                flush_segment()
+            continue
+        if event_name in {
+            "tool",
+            "done",
+            "stream_end",
+            "cancel",
+            "apperror",
+            "error",
+        }:
+            flush_segment()
+
+    flush_segment()
+    return token_segments
+
+
+def _journal_token_segment_event_ids(session_id, stream_id) -> set[str]:
+    """Return first-event ids for journal segments that contain token output."""
+    return {
+        event_id
+        for event_id, _token_text in _journal_token_segments(session_id, stream_id)
+    }
+
+
+def _reconcile_cancelled_stream_generation_under_lock(session_id, stream_id, claim):
+    """Commit the final journal generation while the session lock is held."""
+    # The caller already owns the canonical per-session lock.  Resolve by id
+    # here rather than consulting the worker's detached snapshot, which may
+    # have been evicted and replaced by a successor turn.
+    _session_lookup_error = None
+    try:
+        # Resolve through the canonical cache/freshness path while explicitly
+        # bypassing read-side lazy retry.  This transaction owns the exact
+        # cancellation hook; letting get_session() consume it first would hide
+        # a failed final save from the bounded reconciliation owner.  The
+        # resolver takes models.LOCK itself, so cache replacement/LRU eviction
+        # cannot race a raw SESSIONS.get() snapshot here.
+        current = get_session(session_id, bypass_journal_retry=True)
+    except Exception as exc:
+        _session_lookup_error = exc
+        logger.debug(
+            "Failed to resolve current session %s for cancellation journal reconciliation",
+            session_id,
+            exc_info=True,
+        )
+        current = None
+    if current is None:
+        complete_stream_cancel_reconciliation(session_id, stream_id, success=False)
+        note_stream_cancel_reconciliation_failure(
+            session_id,
+            stream_id,
+            _session_lookup_error or RuntimeError("session lookup failed"),
+        )
+        return False
+
+    class _IncompleteJournalRecovery(Exception):
+        """Signal a non-authoritative journal read before canonical save."""
+
+    # Reconciliation is a transaction over the in-memory Session projection.
+    # The journal helper can mutate messages, context_messages, and tool_calls
+    # before Session.save() raises; restoring only messages leaves a half-built
+    # provider context or stale tool owner indexes for the next retry.  Take a
+    # deep snapshot of the complete Session attribute set for this attempt and
+    # restore it on every failed durable commit.  A fresh invocation takes a
+    # fresh snapshot, so a later retry starts from the clean pre-attempt state.
+    _session_snapshot_is_full = True
+    try:
+        _session_attempt_snapshot = copy.deepcopy(vars(current))
+    except Exception:
+        # Session fields are normally JSON-shaped, but fail closed if an
+        # extension installs a non-copyable value: retain the required mutable
+        # reconciliation fields at minimum rather than allowing a partial
+        # attempt to leak into the next retry.
+        _session_snapshot_is_full = False
+        _session_attempt_snapshot = {
+            field: copy.deepcopy(getattr(current, field, None))
+            for field in (
+                "messages",
+                "context_messages",
+                "tool_calls",
+                "active_stream_id",
+                "pending_user_message",
+                "pending_attachments",
+                "pending_started_at",
+                "pending_user_source",
+                "updated_at",
+            )
+        }
+
+    def _restore_session_attempt_snapshot() -> None:
+        try:
+            if _session_snapshot_is_full:
+                current.__dict__.clear()
+                current.__dict__.update(_session_attempt_snapshot)
+                return
+            for field, value in _session_attempt_snapshot.items():
+                setattr(current, field, value)
+        except Exception:
+            logger.debug(
+                "Failed to restore failed cancellation reconciliation state for %s/%s",
+                session_id,
+                stream_id,
+                exc_info=True,
+            )
+
+    # A cardinality-incomplete journal read must not use the full deep restore
+    # above: replacing the canonical lists/rows would invalidate successor
+    # message, context, and tool-owner identities that may already be live.
+    # Keep the original containers and row objects, restoring only their
+    # contents from the attempt snapshot.  Canonical save failures continue to
+    # use the full snapshot restore above.
+    _identity_list_snapshots = {}
+    for _field in ("messages", "context_messages", "tool_calls"):
+        _original_list = getattr(current, _field, None)
+        _snapshot_list = _session_attempt_snapshot.get(_field)
+        if isinstance(_original_list, list) and isinstance(_snapshot_list, list):
+            _identity_list_snapshots[_field] = (
+                _original_list,
+                tuple(zip(_original_list, _snapshot_list, strict=True)),
+            )
+        else:
+            _identity_list_snapshots[_field] = (None, None)
+
+    def _restore_session_attempt_snapshot_identity_preserving() -> None:
+        try:
+            if _session_snapshot_is_full:
+                for _field in tuple(vars(current)):
+                    if _field not in _session_attempt_snapshot:
+                        delattr(current, _field)
+            for _field, _snapshot_value in _session_attempt_snapshot.items():
+                if _field in _identity_list_snapshots:
+                    _original_list, _row_snapshots = _identity_list_snapshots[_field]
+                    if _original_list is None or _row_snapshots is None:
+                        setattr(current, _field, copy.deepcopy(_snapshot_value))
+                        continue
+                    for _row, _row_snapshot in _row_snapshots:
+                        if isinstance(_row, dict) and isinstance(_row_snapshot, dict):
+                            _row.clear()
+                            _row.update(copy.deepcopy(_row_snapshot))
+                        elif isinstance(_row, list) and isinstance(_row_snapshot, list):
+                            _row[:] = copy.deepcopy(_row_snapshot)
+                    _original_list[:] = [_row for _row, _row_snapshot in _row_snapshots]
+                    setattr(current, _field, _original_list)
+                    continue
+                setattr(current, _field, copy.deepcopy(_snapshot_value))
+        except Exception:
+            logger.debug(
+                "Failed to restore identity-preserving cancellation state for %s/%s",
+                session_id,
+                stream_id,
+                exc_info=True,
+            )
+
+    # ``SESSION_WRITEBACK_OWNERS`` and ``active_stream_id`` describe the
+    # session's *current* turn.  They may already name a successor: cancel
+    # deliberately clears the old active id so chat-start can admit that
+    # successor while an already-admitted old producer is still finishing its
+    # journal append.  The claim is keyed by the exact cancelled generation,
+    # so do not reject it merely because current ownership rotated.  This
+    # reconciler mutates only the cancelled turn's journal-derived rows and
+    # leaves successor pending/active fields untouched.
+
+    turn_start = claim.get("turn_start")
+    messages = getattr(current, "messages", None)
+    if not isinstance(messages, list):
+        messages = []
+        current.messages = messages
+
+    # cancel_stream() writes the marker before the late producer can finish.
+    # Keep that marker in place while recovering, then move only this exact
+    # stream's newly/previously recovered rows in front of it.  Removing the
+    # marker and appending it at the tail would move an old cancellation marker
+    # past a successor user/assistant turn when replacement happened eagerly.
+    marker_cutoff = turn_start if isinstance(turn_start, int) else -1
+    successor_user_index = None
+    if isinstance(turn_start, int):
+        for index in range(marker_cutoff + 1, len(messages)):
+            row = messages[index]
+            if isinstance(row, dict) and row.get("role") == "user":
+                successor_user_index = index
+                break
+    old_turn_end = successor_user_index if successor_user_index is not None else len(messages)
+    marker_rows = [
+        row
+        for row in messages[marker_cutoff + 1:old_turn_end]
+        if (
+            isinstance(row, dict)
+            and row.get("role") == "assistant"
+            and row.get("_error") is True
+            and any(
+                pattern in str(row.get("content") or "").strip().lower()
+                for pattern in _CANCEL_MARKER_PATTERNS
+            )
+        )
+    ]
+
+    # A live partial is authoritative display state, but it is not durable
+    # identity for a later journal event.  Do not let payload-only matching
+    # collapse a distinct late segment into that row; tagged journal rows stay
+    # idempotent across retries through their exact event ids.
+    live_partial_rows = [
+        row
+        for row in messages[marker_cutoff + 1:old_turn_end]
+        if (
+            isinstance(row, dict)
+            and row.get("role") == "assistant"
+            and row.get("_partial") is True
+            and not row.get("_recovered_from_run_journal")
+        )
+    ]
+    def _context_boundary_identity(row):
+        """Return durable identity for a user-turn boundary."""
+        if not isinstance(row, dict) or row.get("role") != "user":
+            return None
+        token = row.get("_active_turn_token")
+        if token:
+            return ("token", str(token))
+        message_id = row.get("id")
+        if message_id is not None:
+            return ("id", str(message_id))
+        timestamp = row.get("timestamp")
+        if timestamp is None:
+            timestamp = row.get("_ts")
+        if timestamp is None:
+            return None
+        attachments = row.get("attachments") or []
+        try:
+            attachments_key = json.dumps(
+                attachments,
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            )
+        except Exception:
+            attachments_key = str(attachments)
+        return (
+            "timestamp",
+            timestamp,
+            row.get("_source") or "webui",
+            attachments_key,
+        )
+
+    def _user_ordinal(rows, target_index):
+        if not isinstance(target_index, int) or target_index < 0:
+            return None
+        return sum(
+            1
+            for row in rows[:target_index + 1]
+            if isinstance(row, dict) and row.get("role") == "user"
+        )
+
+    def _context_user_at_ordinal(rows, ordinal, *, after_index=-1):
+        if not isinstance(ordinal, int) or ordinal <= 0:
+            return None
+        seen_users = 0
+        for index, row in enumerate(rows):
+            if not isinstance(row, dict) or row.get("role") != "user":
+                continue
+            seen_users += 1
+            if index > after_index and seen_users == ordinal:
+                return row
+        return None
+
+    def _context_user_by_identity(rows, identity, *, after_index=-1):
+        if identity is None:
+            return None
+        for index, row in enumerate(rows):
+            if index <= after_index:
+                continue
+            if _context_boundary_identity(row) == identity:
+                return row
+        return None
+
+    old_user_row = (
+        messages[turn_start]
+        if isinstance(turn_start, int)
+        and 0 <= turn_start < len(messages)
+        else None
+    )
+    successor_row = (
+        messages[successor_user_index]
+        if isinstance(successor_user_index, int)
+        and 0 <= successor_user_index < len(messages)
+        else None
+    )
+    old_identity = _context_boundary_identity(old_user_row)
+    successor_identity = _context_boundary_identity(successor_row)
+    old_ordinal = _user_ordinal(messages, turn_start)
+    successor_ordinal = _user_ordinal(messages, successor_user_index)
+
+    def _context_turn_bounds(rows):
+        if not isinstance(rows, list) or not isinstance(turn_start, int):
+            return -1, len(rows) if isinstance(rows, list) else 0
+        context_old_user = _context_user_by_identity(rows, old_identity)
+        if old_identity is not None and context_old_user is None:
+            # An authoritative cancelled-user identity that is absent after
+            # compaction cannot be safely reconstructed from an ordinal: a
+            # later successor may occupy that slot.  Fail closed so old-stream
+            # recovery is not attributed to newer provider context.
+            return -1, len(rows)
+        if context_old_user is None:
+            context_old_user = _context_user_at_ordinal(rows, old_ordinal)
+        if context_old_user is None:
+            return -1, len(rows)
+        context_old_index = next(
+            index for index, row in enumerate(rows) if row is context_old_user
+        )
+        context_target = _context_user_by_identity(
+            rows,
+            successor_identity,
+            after_index=context_old_index,
+        )
+        if context_target is None:
+            context_target = _context_user_at_ordinal(
+                rows,
+                successor_ordinal,
+                after_index=context_old_index,
+            )
+        context_target_index = (
+            next(index for index, row in enumerate(rows) if row is context_target)
+            if context_target is not None
+            else len(rows)
+        )
+        return context_old_index, context_target_index
+
+    context_messages = getattr(current, "context_messages", None)
+    context_old_index, context_target_index = _context_turn_bounds(context_messages)
+    live_context_rows = []
+    if context_old_index >= 0:
+        live_context_rows = [
+            row
+            for row in context_messages[context_old_index + 1:context_target_index]
+            if (
+                isinstance(row, dict)
+                and row.get("role") == "assistant"
+                and row.get("_partial") is True
+                and not row.get("_recovered_from_run_journal")
+            )
+        ]
+
+    try:
+        from api.models import (
+            _append_journaled_partial_output,
+            _run_journal_event_owns_run,
+        )
+
+        recovery_result = _append_journaled_partial_output(
+            current,
+            stream_id,
+            # The live partial is authoritative, but the journal may contain
+            # the same prefix followed by a distinct late segment.  Keep the
+            # helper's identity-aware dedupe enabled so an exact prefix event
+            # is not appended a second time; the splice below removes only the
+            # already-visible prefix from a combined prefix+late segment.
+            dedupe_existing=True,
+            mark_partial=True,
+            current_turn_start=turn_start if isinstance(turn_start, int) else None,
+            return_status=True,
+            expected_recovery_events=claim.get("admitted_recovery_events"),
+        )
+        if isinstance(recovery_result, tuple) and len(recovery_result) == 2:
+            _recovered_output, recovery_complete = recovery_result
+        else:
+            # Keep compatibility with a legacy/test shim that still returns
+            # only the append flag; the current helper always returns the
+            # explicit completeness proof requested above.
+            _recovered_output = recovery_result
+            recovery_complete = bool(recovery_result)
+
+        def _current_turn_has_unrecovered_journal_text() -> bool:
+            """Recognize a pre-commit success row already carrying all text.
+
+            The success-vs-Stop race can briefly expose the assembled, untagged
+            success row while the cancellation reconciler owns the session.
+            The worker then restores that row to its pre-success snapshot.  It
+            is safe to let that race continue, but only when every visible
+            journal text is already represented in that current-turn row; a
+            missing late segment must still fail closed.
+            """
+            try:
+                from api.run_journal import read_run_events
+
+                journal = read_run_events(session_id, stream_id)
+                events = journal.get("events") if isinstance(journal, dict) else None
+                if not isinstance(events, list):
+                    return False
+                expected_count = claim.get("admitted_recovery_events")
+                if (
+                    not isinstance(expected_count, int)
+                    or isinstance(expected_count, bool)
+                    or expected_count < 0
+                ):
+                    return False
+                visible_texts = []
+                observed_event_ids = set()
+                for event in events:
+                    if not isinstance(event, dict):
+                        continue
+                    if not _run_journal_event_owns_run(
+                        event,
+                        session_id,
+                        stream_id,
+                    ):
+                        continue
+                    event_name = str(event.get("event") or event.get("type") or "")
+                    event_id = event.get("event_id")
+                    if (
+                        event_id
+                        and event_name in _STREAM_CANCEL_RECOVERABLE_PUBLICATION_EVENTS
+                    ):
+                        observed_event_ids.add(str(event_id))
+                    if event_name in {"tool", "tool_complete"}:
+                        # Tool identity is not safely proved by an untagged
+                        # assistant row; leave the durable hook armed until
+                        # the journal helper materializes the exact card.
+                        return False
+                    payload = event.get("payload")
+                    if not isinstance(payload, dict):
+                        continue
+                    if event_name in {"token", "reasoning"}:
+                        text = (
+                            payload.get("text")
+                            or payload.get("reasoning")
+                            or payload.get("thinking")
+                        )
+                    elif event_name == "interim_assistant":
+                        text = payload.get("text")
+                    else:
+                        continue
+                    text = str(text or "").strip()
+                    if text:
+                        visible_texts.append(text)
+                if not visible_texts:
+                    return False
+                if len(observed_event_ids) != expected_count:
+                    return False
+                current_turn_rows = (
+                    current.messages[marker_cutoff + 1:old_turn_end]
+                    if isinstance(current.messages, list)
+                    else []
+                )
+                current_rows = [
+                    row
+                    for row in current_turn_rows
+                    if (
+                        isinstance(row, dict)
+                        and row.get("role") == "assistant"
+                        and not row.get("_error")
+                        and row.get("_recovered_from_run_journal") is not True
+                    )
+                ]
+                if len(current_rows) != 1:
+                    return False
+                current_text = str(current_rows[0].get("content") or "").strip()
+                if not current_text:
+                    return False
+                cursor = 0
+                for text in visible_texts:
+                    text_start = current_text.find(text, cursor)
+                    if text_start < 0:
+                        return False
+                    cursor = text_start + len(text)
+                return True
+            except Exception:
+                return False
+
+        if (
+            not recovery_complete
+            and int(claim.get("admitted_recovery_events") or 0) > 0
+            and not _current_turn_has_unrecovered_journal_text()
+        ):
+            # The generation has quiesced, but at least one visible event was
+            # admitted before cancellation and is not present in this read.
+            # Do not strip the durable hook or save an empty projection: the
+            # outer transaction will restore its identity-preserving snapshot,
+            # reopen the exact generation, and let the bounded retry owner try
+            # again.
+            raise _IncompleteJournalRecovery(
+                "cancelled journal is incomplete after admitted publications drained"
+            )
+        # The journal helper appends recovered rows to the current message
+        # list. Re-home only rows carrying this exact stream identity before
+        # the cancelled marker (or before a successor user when the marker is
+        # unexpectedly absent), preserving every successor row and its order.
+        journal_recovered_rows = [
+            row
+            for index, row in enumerate(current.messages)
+            if index > marker_cutoff
+            and isinstance(row, dict)
+            and row.get("_recovered_from_run_journal") is True
+            and row.get("_recovered_stream_id") == stream_id
+        ]
+        if journal_recovered_rows:
+            # A normal token callback updates the live partial before the same
+            # event is journaled.  When a later interim/tool event is admitted
+            # after cancellation, the journal reader can therefore produce a
+            # single row containing ``live_prefix + late_segment``.  Keep the
+            # live row and retain only the exact suffix, so both transcript and
+            # provider context contain each visible segment exactly once.  Only
+            # rows whose journal segment actually contains token events may be
+            # elided; a later identity-distinct tool/interim segment is kept
+            # whole even when it shares the same textual prefix.
+            token_segments = _journal_token_segments(
+                session_id,
+                stream_id,
+            )
+            def _represented_token_segments(live_rows):
+                """Match ordered journal token segments to the live aggregate."""
+                live_aggregate = "".join(
+                    str(row.get("content") or "")
+                    for row in live_rows
+                    if isinstance(row, dict)
+                )
+                cursor = 0
+                represented = {}
+                for event_id, token_text in token_segments:
+                    if not token_text or not live_aggregate.startswith(token_text, cursor):
+                        break
+                    represented[event_id] = token_text
+                    cursor += len(token_text)
+                return represented
+
+            represented_token_texts = _represented_token_segments(live_partial_rows)
+            live_prefix_rows = sorted(
+                live_partial_rows,
+                key=lambda row: len(str(row.get("content") or "")),
+                reverse=True,
+            )
+            recovered_replacements = {}
+            recovered_to_remove = set()
+            for row in journal_recovered_rows:
+                content = row.get("content")
+                token_text = represented_token_texts.get(row.get("_recovered_event_id"))
+                if not isinstance(content, str) or not token_text:
+                    continue
+                token_prefix = token_text
+                if not content.startswith(token_prefix):
+                    # The journal helper strips the complete recovered row,
+                    # so a token segment that began with whitespace may lose
+                    # only that leading separator at the row boundary.
+                    token_prefix = token_text.lstrip(" \t\r\n")
+                if not token_prefix or not content.startswith(token_prefix):
+                    # The event identity is known, but the recovered row does
+                    # not begin with its token payload. Fail closed instead of
+                    # stripping a later identity-distinct interim segment.
+                    continue
+                suffix = content[len(token_prefix):]
+                # ``interim_assistant`` boundaries are rendered with two
+                # newlines by the journal helper. Those separators belong to
+                # the merge boundary, not to the late segment itself.
+                suffix = suffix.lstrip(" \t\r\n")
+                if suffix:
+                    row["content"] = suffix
+                    continue
+                live_row = live_prefix_rows[0] if live_prefix_rows else None
+                if live_row is None:
+                    continue
+                recovered_replacements[id(row)] = live_row
+                recovered_to_remove.add(id(row))
+                recovered_reasoning = str(row.get("reasoning") or "").strip()
+                if recovered_reasoning:
+                    existing_reasoning = str(live_row.get("reasoning") or "").strip()
+                    if not existing_reasoning:
+                        live_row["reasoning"] = recovered_reasoning
+                    elif recovered_reasoning not in existing_reasoning:
+                        live_row["reasoning"] = (
+                            f"{existing_reasoning}\n\n{recovered_reasoning}"
+                        )
+            pre_splice_messages = list(current.messages)
+            recovered_rows = [
+                row for row in journal_recovered_rows
+                if id(row) not in recovered_to_remove
+            ]
+            recovered_ids = {id(row) for row in journal_recovered_rows}
+            remaining = [
+                row for row in pre_splice_messages if id(row) not in recovered_ids
+            ]
+            target = None
+            for candidate in marker_rows:
+                if any(candidate is row for row in remaining):
+                    target = candidate
+                    break
+            if target is None and successor_user_index is not None:
+                successor_row = messages[successor_user_index]
+                if any(successor_row is row for row in remaining):
+                    target = successor_row
+            insert_at = (
+                next(index for index, row in enumerate(remaining) if row is target)
+                if target is not None
+                else len(remaining)
+            )
+            current.messages = remaining[:insert_at] + recovered_rows + remaining[insert_at:]
+
+            # Tool cards refer to their assistant owner by message index. The
+            # old rows moved across the cancel marker, so rebase every valid
+            # owner index from its pre-splice row identity.  This includes
+            # successor tools, whose assistant row shifts when old recovered
+            # rows are inserted ahead of the successor boundary.
+            new_index_by_row = {
+                id(row): index for index, row in enumerate(current.messages)
+            }
+            for tool_call in getattr(current, "tool_calls", None) or []:
+                if not isinstance(tool_call, dict):
+                    continue
+                old_index = tool_call.get("assistant_msg_idx")
+                if not isinstance(old_index, int):
+                    continue
+                owner_row = (
+                    pre_splice_messages[old_index]
+                    if 0 <= old_index < len(pre_splice_messages)
+                    else None
+                )
+                if owner_row is not None and id(owner_row) in recovered_replacements:
+                    owner_row = recovered_replacements[id(owner_row)]
+                if owner_row is not None and id(owner_row) in new_index_by_row:
+                    tool_call["assistant_msg_idx"] = new_index_by_row[id(owner_row)]
+
+            # ``_append_journaled_partial_output`` also projects recovered
+            # prose/tools into provider context.  If an eager successor already
+            # has a user row, keep those exact-old projections before that
+            # successor boundary instead of leaving them at the context tail.
+            context_messages = getattr(current, "context_messages", None)
+            if isinstance(context_messages, list) and successor_user_index is not None:
+                context_recovered = [
+                    row
+                    for row in context_messages
+                    if isinstance(row, dict)
+                    and row.get("_recovered_from_run_journal") is True
+                    and row.get("_recovered_stream_id") == stream_id
+                ]
+                # The journal helper may seed an initially empty context from
+                # the canonical transcript.  Re-resolve the boundary after
+                # that projection before applying the fail-closed guard.
+                context_old_index, context_target_index = _context_turn_bounds(
+                    context_messages,
+                )
+                if context_recovered and context_old_index < 0:
+                    # A compacted context without the exact cancelled-user
+                    # boundary cannot prove ownership for old-stream output.
+                    # Remove the helper's projections instead of attributing
+                    # them to the successor by appending at the context tail.
+                    context_recovered_ids = {id(row) for row in context_recovered}
+                    current.context_messages = [
+                        row
+                        for row in context_messages
+                        if id(row) not in context_recovered_ids
+                    ]
+                    context_recovered = []
+                if context_recovered:
+                    represented_context_token_texts = _represented_token_segments(
+                        live_context_rows,
+                    )
+                    # Remove every exact-stream recovered row from the old
+                    # context before reinserting retained suffixes.  Rows
+                    # whose token text is already represented in the live
+                    # aggregate are intentionally elided below, but their
+                    # identities must still be removed from the original
+                    # context list or they survive at their stale tail
+                    # position and duplicate the old turn after a successor.
+                    context_recovered_ids = {id(row) for row in context_recovered}
+                    context_recovered_to_remove = set()
+                    for row in context_recovered:
+                        content = row.get("content")
+                        token_text = represented_context_token_texts.get(
+                            row.get("_recovered_event_id")
+                        )
+                        if not isinstance(content, str) or not token_text:
+                            continue
+                        token_prefix = token_text
+                        if not content.startswith(token_prefix):
+                            token_prefix = token_text.lstrip(" \t\r\n")
+                        if not token_prefix or not content.startswith(token_prefix):
+                            continue
+                        suffix = content[len(token_prefix):].lstrip(" \t\r\n")
+                        if suffix:
+                            row["content"] = suffix
+                        else:
+                            context_recovered_to_remove.add(id(row))
+                    context_recovered = [
+                        row for row in context_recovered
+                        if id(row) not in context_recovered_to_remove
+                    ]
+                    context_remaining = [
+                        row
+                        for row in context_messages
+                        if id(row) not in context_recovered_ids
+                    ]
+                    context_old_index, context_target_index = _context_turn_bounds(
+                        context_remaining,
+                    )
+                    context_target = (
+                        context_remaining[context_target_index]
+                        if context_target_index < len(context_remaining)
+                        else None
+                    )
+                    context_insert_at = (
+                        next(
+                            index
+                            for index, row in enumerate(context_remaining)
+                            if row is context_target
+                        )
+                        if context_target is not None
+                        else len(context_remaining)
+                    )
+                    current.context_messages = (
+                        context_remaining[:context_insert_at]
+                        + context_recovered
+                        + context_remaining[context_insert_at:]
+                    )
+        if not marker_rows and not _session_has_cancel_marker(current) and successor_user_index is None:
+            _persist_cancelled_turn(current)
+        # A successful exact-generation commit and hook retirement must be one
+        # Session.save transaction.  If this save fails, the full snapshot
+        # restore below keeps these durable fields armed for a later retry.
+        for _row in current.messages or []:
+            if not isinstance(_row, dict):
+                continue
+            if (
+                _row.get('_journal_retry_kind') == 'cancelled'
+                and str(_row.get('_journal_retry_stream_id') or '') == str(stream_id)
+            ):
+                _row.pop('_pending_journal_recovery', None)
+                _row.pop('_journal_retry_kind', None)
+                _row.pop('_journal_retry_stream_id', None)
+                _row.pop('_journal_retry_attempts', None)
+                _row.pop('_journal_retry_first_seen_ts', None)
+                _row.pop('_journal_retry_turn_token', None)
+                _row.pop('_journal_retry_turn_start', None)
+        current.save()
+    except _IncompleteJournalRecovery as exc:
+        # This is a non-authoritative read, not a failed canonical save.  Keep
+        # every successor object identity intact while reopening the exact
+        # generation for its bounded retry owner.
+        _restore_session_attempt_snapshot_identity_preserving()
+        complete_stream_cancel_reconciliation(session_id, stream_id, success=False)
+        note_stream_cancel_reconciliation_failure(session_id, stream_id, exc)
+        logger.debug(
+            "Deferred incomplete cancellation journal reconciliation for %s/%s",
+            session_id,
+            stream_id,
+            exc_info=True,
+        )
+        return False
+    except Exception as exc:
+        # Keep ownership live when the canonical save did not complete; a later
+        # bounded retry can make another idempotent claim instead of reporting
+        # success while durable state is still missing.  Restore every mutable
+        # Session field changed by this attempt before reopening the claim.
+        _restore_session_attempt_snapshot()
+        complete_stream_cancel_reconciliation(session_id, stream_id, success=False)
+        note_stream_cancel_reconciliation_failure(session_id, stream_id, exc)
+        logger.debug(
+            "Failed final cancellation journal reconciliation for %s/%s",
+            session_id,
+            stream_id,
+            exc_info=True,
+        )
+        return False
+
+    # The durable commit is complete.  Only now retire the generation and its
+    # compare-and-clear writeback claim; a late producer cannot create an
+    # unowned journal tail after this point.
+    complete_stream_cancel_reconciliation(session_id, stream_id, success=True)
+    clear_session_writeback_owner_if_owned(session_id, stream_id)
+    return True
+
+
+def _attempt_cancelled_stream_generation_reconciliation(
+    session_id,
+    stream_id,
+    *,
+    retry_owner_claimed: bool = False,
+):
+    """Run one claim/save attempt and report ``(claimed, success)``.
+
+    The initial caller claims the retry owner immediately after the generation
+    claim and before entering the session-lock/save path.  That owner therefore
+    remains present when a failed attempt reopens ``reconcile_started``; no
+    natural teardown callback can start a competing claim in that interval.
+    Retry workers already own the exact key and pass ``retry_owner_claimed``.
+    """
+    if not retry_owner_claimed and stream_cancel_reconciliation_retry_owner(
+        session_id,
+        stream_id,
+    ) is not None:
+        return False, False
+    claim = claim_stream_cancel_reconciliation(session_id, stream_id)
+    if claim is None:
+        return False, False
+    if not retry_owner_claimed and not begin_stream_cancel_reconciliation_retry(
+        session_id,
+        stream_id,
+        attempts=1,
+    ):
+        # Another exact owner won the race after the guard above.  Reopen this
+        # claim and let that owner perform the one bounded retry sequence.
+        complete_stream_cancel_reconciliation(session_id, stream_id, success=False)
+        return False, False
+    lock = _get_session_agent_lock(session_id)
+    with lock:
+        success = _reconcile_cancelled_stream_generation_under_lock(
+            session_id,
+            stream_id,
+            claim,
+        )
+    return True, bool(success)
+
+
+def _cancel_reconciliation_retry_wait(delay) -> None:
+    """Wait for a retry outside every generation/writeback/session lock."""
+    try:
+        delay = max(0.0, float(delay))
+    except (TypeError, ValueError):
+        delay = 0.0
+    if delay:
+        # Event.wait is interruptible and does not acquire any reconciliation or
+        # per-session lock.  Keeping the wait here, before the claim/lock path,
+        # makes the lock boundary explicit for reviewers and tests.
+        threading.Event().wait(delay)
+
+
+def _run_cancel_reconciliation_retry_owner(session_id, stream_id) -> None:
+    """Perform at most two delayed retries for one exact generation."""
+    attempts = 1  # the synchronous caller already consumed the initial try
+    try:
+        for delay in tuple(_CANCEL_RECONCILIATION_RETRY_DELAYS):
+            if stream_cancel_reconciliation_retry_owner(session_id, stream_id) is None:
+                return
+            _cancel_reconciliation_retry_wait(delay)
+            if stream_cancel_reconciliation_retry_owner(session_id, stream_id) is None:
+                return
+            if not stream_cancel_generation_pending(session_id, stream_id):
+                # A concurrent success/teardown already retired the exact
+                # generation.  Do not manufacture a dead-letter for it.
+                finish_stream_cancel_reconciliation_retry(session_id, stream_id)
+                return
+            claimed, success = _attempt_cancelled_stream_generation_reconciliation(
+                session_id,
+                stream_id,
+                retry_owner_claimed=True,
+            )
+            # Only an actual generation claim consumes one of the two retry
+            # attempts.  A transiently unavailable claim must not turn into a
+            # false three-attempt dead-letter while another owner is still
+            # executing the exact generation.
+            if claimed:
+                attempts += 1
+                update_stream_cancel_reconciliation_retry_attempts(
+                    session_id,
+                    stream_id,
+                    attempts,
+                )
+            if success:
+                finish_stream_cancel_reconciliation_retry(session_id, stream_id)
+                return
+            if not claimed:
+                # The owner cannot safely dead-letter a generation it did not
+                # claim.  Release the retry owner so the lifecycle callback
+                # that still owns the active claim can finish or retry it.
+                finish_stream_cancel_reconciliation_retry(session_id, stream_id)
+                return
+
+        if stream_cancel_reconciliation_retry_owner(session_id, stream_id) is None:
+            return
+        # The config helper atomically removes only this exact generation and
+        # compare-clears only its old writeback owner.  The run journal remains
+        # untouched for later lazy recovery.
+        dead_letter_stream_cancel_reconciliation(
+            session_id,
+            stream_id,
+            attempts=attempts,
+        )
+    except Exception as exc:
+        # The worker itself is bounded even if an unexpected registry or lock
+        # error occurs.  Preserve a diagnostic and retire the exact owner rather
+        # than leaving a permanent retry entry behind.
+        logger.debug(
+            "Bounded cancellation reconciliation retry failed for %s/%s",
+            session_id,
+            stream_id,
+            exc_info=True,
+        )
+        if stream_cancel_generation_pending(session_id, stream_id):
+            note_stream_cancel_reconciliation_failure(session_id, stream_id, exc)
+            dead_letter_stream_cancel_reconciliation(
+                session_id,
+                stream_id,
+                attempts=attempts,
+            )
+        else:
+            finish_stream_cancel_reconciliation_retry(session_id, stream_id)
+
+
+def _schedule_cancel_reconciliation_retry(session_id, stream_id, *, attempts: int) -> None:
+    """Start the already-claimed daemon owner after a failed attempt."""
+    if stream_cancel_reconciliation_retry_owner(session_id, stream_id) is None:
+        return
+    try:
+        threading.Thread(
+            target=_run_cancel_reconciliation_retry_owner,
+            args=(session_id, stream_id),
+            name=f"cancel-reconcile-{session_id}-{stream_id}",
+            daemon=True,
+        ).start()
+    except Exception as exc:
+        note_stream_cancel_reconciliation_failure(session_id, stream_id, exc)
+        dead_letter_stream_cancel_reconciliation(
+            session_id,
+            stream_id,
+            attempts=attempts,
+        )
+
+
+def _reconcile_cancelled_stream_generation(session_id, stream_id) -> bool:
+    """Claim and reconcile once, then own bounded retries on save failure."""
+    claimed, success = _attempt_cancelled_stream_generation_reconciliation(
+        session_id,
+        stream_id,
+    )
+    if not claimed:
+        return False
+    if success:
+        # A retry owner can race a direct teardown-success path only for the
+        # exact same generation; releasing here is idempotent and keeps the
+        # owner registry bounded.
+        finish_stream_cancel_reconciliation_retry(session_id, stream_id)
+        return True
+    _schedule_cancel_reconciliation_retry(session_id, stream_id, attempts=1)
+    return False
+
+
 def _finalize_cancelled_turn(
     session,
     *,
@@ -2355,7 +3687,19 @@ def _finalize_cancelled_turn(
             return
         # Finalize against the CURRENT object — never the worker's snapshot.
         session = current
+    if stream_id and not ephemeral and stream_cancel_generation_pending(session_id, stream_id):
+        # The worker-done transition and any final reconciliation are owned by
+        # the outer teardown, after this caller releases ``_agent_lock``.  The
+        # old implementation attempted the claim here when the generation was
+        # already quiescent; callers reach this helper under ``_agent_lock``
+        # and the reconciler acquires that same non-reentrant lock, so a late
+        # publication could deadlock before the durable old-generation save.
+        # cancel_stream() retries the claim after its user-boundary save when
+        # teardown happened before that boundary was durable.
+        return
     if ephemeral:
+        if stream_id:
+            retire_stream_cancel_generation(session_id, stream_id)
         _cleanup_ephemeral_cancelled_turn(session)
         return
     _persist_cancelled_turn(session, message=message)
@@ -5837,6 +7181,20 @@ def _restore_reasoning_metadata(previous_messages, updated_messages):
         if isinstance(prev_msg, dict) and isinstance(cur_msg, dict) and _safe_projection(prev_msg) == _safe_projection(cur_msg):
             if prev_msg.get('role') == 'assistant' and prev_msg.get('reasoning') and not cur_msg.get('reasoning'):
                 cur_msg['reasoning'] = prev_msg['reasoning']
+            # The provider-facing history intentionally strips WebUI recovery
+            # bookkeeping. Restore it by the same API-safe position used for
+            # reasoning/timestamps so equal-text journal segments keep their
+            # durable identities across the normal agent-result boundary.
+            for field in (
+                '_partial',
+                '_recovered_from_run_journal',
+                '_recovered_stream_id',
+                '_recovered_event_id',
+                '_recovered_segment_id',
+                '_journal_event_id',
+            ):
+                if field not in cur_msg and field in prev_msg:
+                    cur_msg[field] = copy.deepcopy(prev_msg[field])
             # Carry the stable per-message id (#context-message-stable-id) forward
             # the same way timestamp is carried. The agent rebuilds result rows
             # without our id every turn; without this, historical context rows
@@ -5914,19 +7272,43 @@ def _message_identity(msg):
         # so the merge can dedup identical empty partials.
         if msg.get('_partial'):
             reasoning_key = " ".join(str(msg.get('reasoning') or '').split())[:200]
-            return (
+            identity = (
                 role,
                 '',  # empty text
                 '',  # no tool_call_id
                 '__partial__' + reasoning_key,
             )
+            if msg.get('_recovered_from_run_journal'):
+                for field in (
+                    '_recovered_event_id',
+                    '_recovered_segment_id',
+                    '_journal_event_id',
+                ):
+                    value = msg.get(field)
+                    if value is not None and str(value).strip():
+                        return (*identity, f'{field}:{value}')
+            return identity
         return None
-    return (
+    identity = (
         role,
         " ".join(str(text or '').split())[:500],
         str(msg.get('tool_call_id') or ''),
         json.dumps(msg.get('tool_calls') or [], sort_keys=True, ensure_ascii=False),
     )
+    # A journal-recovered partial can legitimately repeat the same visible
+    # prose in one cancelled turn.  Its durable event identity, when present,
+    # is authoritative over payload text for replay/settlement dedupe.  Keep
+    # identity-less legacy rows on the historical payload-only key.
+    if isinstance(msg, dict) and msg.get('_recovered_from_run_journal'):
+        for field in (
+            '_recovered_event_id',
+            '_recovered_segment_id',
+            '_journal_event_id',
+        ):
+            value = msg.get(field)
+            if value is not None and str(value).strip():
+                return (*identity, f'{field}:{value}')
+    return identity
 
 
 def _messages_have_prefix(messages, prefix, *, key_fn=None):
@@ -7356,6 +8738,61 @@ def _nearest_assistant_msg_idx(messages, msg_idx: int) -> int:
     return -1
 
 
+def _recovered_tool_identity(tool_call):
+    if not isinstance(tool_call, dict):
+        return None
+    for field in ('_recovered_event_id', '_recovered_tool_id', 'tid'):
+        value = tool_call.get(field)
+        if value is not None and str(value).strip():
+            return (field, str(value))
+    return None
+
+
+def _rebase_recovered_tool_owner(tool_call, messages):
+    """Copy one recovered tool summary and resolve its assistant owner."""
+    if not isinstance(tool_call, dict) or not tool_call.get('_recovered_from_run_journal'):
+        return None
+    rebased = copy.deepcopy(tool_call)
+    owner_event_id = rebased.get('_recovered_assistant_event_id')
+    owner_index = None
+    if owner_event_id:
+        for idx, message in enumerate(messages or []):
+            if (
+                isinstance(message, dict)
+                and message.get('role') == 'assistant'
+                and message.get('_recovered_event_id') == owner_event_id
+            ):
+                owner_index = idx
+                break
+    raw_owner_index = rebased.get('assistant_msg_idx')
+    if owner_index is None and type(raw_owner_index) is int:
+        if 0 <= raw_owner_index < len(messages or []):
+            owner = messages[raw_owner_index]
+            if (
+                isinstance(owner, dict)
+                and owner.get('role') == 'assistant'
+                and (
+                    not rebased.get('_recovered_stream_id')
+                    or owner.get('_recovered_stream_id') == rebased.get('_recovered_stream_id')
+                )
+            ):
+                owner_index = raw_owner_index
+    if owner_index is None and rebased.get('_recovered_stream_id'):
+        for idx, message in enumerate(messages or []):
+            if (
+                isinstance(message, dict)
+                and message.get('role') == 'assistant'
+                and message.get('_recovered_stream_id') == rebased.get('_recovered_stream_id')
+            ):
+                owner_index = idx
+                break
+    if owner_index is None:
+        # Unknown ownership is not safe to publish as a durable tool card.
+        return None
+    rebased['assistant_msg_idx'] = owner_index
+    return rebased
+
+
 def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
     """Build persisted tool-call summaries from final messages plus live progress fallback."""
     tool_calls = []
@@ -7424,6 +8861,29 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
                 'assistant_msg_idx': _nearest_assistant_msg_idx(messages, seq.get('msg_idx', -1)),
                 'args': _truncate_tool_args(live_tc.get('args', {}), limit=4),
             })
+
+        # Journal recovery stores some completed tool activity only in the
+        # session sidecar.  Preserve those summaries when a successful-turn
+        # rebuild receives the existing sidecar through ``live_tool_calls``;
+        # ordinary live fallback entries remain governed by the unresolved
+        # tool-row pairing above.
+        seen_recovered = {
+            _recovered_tool_identity(tool_call)
+            for tool_call in tool_calls
+            if _recovered_tool_identity(tool_call) is not None
+        }
+        for live_tc in live:
+            if not live_tc.get('_recovered_from_run_journal'):
+                continue
+            recovered = _rebase_recovered_tool_owner(live_tc, messages or [])
+            if recovered is None:
+                continue
+            identity = _recovered_tool_identity(recovered)
+            if identity is not None and identity in seen_recovered:
+                continue
+            tool_calls.append(recovered)
+            if identity is not None:
+                seen_recovered.add(identity)
 
     return tool_calls
 
@@ -8227,6 +9687,8 @@ def _run_agent_streaming(
         # The stream was cancelled before the worker started; the route layer
         # already registered the stream owner, so release it here to avoid
         # leaking a STREAM_SESSION_OWNERS entry that the teardown finally never sees.
+        if mark_stream_worker_done(session_id, stream_id):
+            _reconcile_cancelled_stream_generation(session_id, stream_id)
         unregister_stream_owner(stream_id)
         try:
             clear_session_writeback_owner_if_owned(session_id, stream_id)
@@ -8277,11 +9739,7 @@ def _run_agent_streaming(
 
     # Sprint 10: create a cancel event for this stream
     cancel_event = threading.Event()
-    with STREAMS_LOCK:
-        CANCEL_FLAGS[stream_id] = cancel_event
-        STREAM_PARTIAL_TEXT[stream_id] = ''  # start accumulating partial text (#893)
-        STREAM_REASONING_TEXT[stream_id] = ''  # start accumulating reasoning trace (#1361 §A)
-        STREAM_LIVE_TOOL_CALLS[stream_id] = []  # start accumulating tool calls (#1361 §B)
+    register_stream_cancel_state(session_id, stream_id, cancel_event)
 
     agent = None
     _live_prompt_estimate_tokens = [0]
@@ -8586,33 +10044,43 @@ def _run_agent_streaming(
     _success_writeback_committed = False
 
     def put(event, data):
-        # If cancelled, drop all further events except the cancel event itself
-        if cancel_event.is_set() and not _success_writeback_committed and event not in ('cancel', 'apperror'):
+        publication_token = admit_stream_publication(
+            session_id,
+            stream_id,
+            event,
+            cancelled=cancel_event.is_set(),
+            success_committed=_success_writeback_committed,
+        )
+        if publication_token is False:
             return
-        event_id = None
-        if run_journal is not None:
-            try:
-                journaled = run_journal.append_sse_event(event, data)
-                # Carry the exact journal id for this queued frame. A global
-                # "latest event" side channel is still kept for legacy queues,
-                # but StreamChannel subscribers need the per-item id so a
-                # queued backlog cannot advance the browser cursor past an
-                # undelivered event.
-                event_id = (journaled or {}).get('event_id') if isinstance(journaled, dict) else None
-                if event_id:
-                    STREAM_LAST_EVENT_ID[stream_id] = event_id
-            except Exception:
-                logger.debug("Failed to append run journal event %s for stream %s", event, stream_id, exc_info=True)
-        if event_id and hasattr(q, "note_last_event_id"):
-            try:
-                q.note_last_event_id(event_id)
-            except Exception:
-                logger.debug("Failed to note event_id %s for stream %s", event_id, stream_id, exc_info=True)
         try:
-            queue_item = (event, data, event_id) if event_id and hasattr(q, "subscribe_with_snapshot") else (event, data)
-            q.put_nowait(queue_item)
-        except Exception:
-            logger.debug("Failed to put event to queue")
+            event_id = None
+            if run_journal is not None:
+                try:
+                    journaled = run_journal.append_sse_event(event, data)
+                    # Carry the exact journal id for this queued frame. A global
+                    # "latest event" side channel is still kept for legacy queues,
+                    # but StreamChannel subscribers need the per-item id so a
+                    # queued backlog cannot advance the browser cursor past an
+                    # undelivered event.
+                    event_id = (journaled or {}).get('event_id') if isinstance(journaled, dict) else None
+                    if event_id:
+                        STREAM_LAST_EVENT_ID[stream_id] = event_id
+                except Exception:
+                    logger.debug("Failed to append run journal event %s for stream %s", event, stream_id, exc_info=True)
+            if event_id and hasattr(q, "note_last_event_id"):
+                try:
+                    q.note_last_event_id(event_id)
+                except Exception:
+                    logger.debug("Failed to note event_id %s for stream %s", event_id, stream_id, exc_info=True)
+            try:
+                queue_item = (event, data, event_id) if event_id and hasattr(q, "subscribe_with_snapshot") else (event, data)
+                q.put_nowait(queue_item)
+            except Exception:
+                logger.debug("Failed to put event to queue")
+        finally:
+            if finish_stream_publication(publication_token):
+                _reconcile_cancelled_stream_generation(session_id, stream_id)
 
     # #5940: capture a terminal (non-retryable) provider error the Agent emits via
     # its lifecycle status_callback. The Agent aborts a non-retryable API error
@@ -10273,6 +11741,13 @@ def _run_agent_streaming(
                         except Exception:
                             logger.debug("Failed to append cancelled turn journal event", exc_info=True)
                 put('cancel', _cancel_event_payload('Cancelled by user'))
+                # The agent run is quiescent once the terminal cancel event has
+                # been published.  Claim the exact generation here, outside
+                # the finalizer's per-session lock, so the last admitted
+                # publication can trigger durable recovery before outer
+                # teardown performs unrelated cleanup.
+                if mark_stream_worker_done(session_id, stream_id):
+                    _reconcile_cancelled_stream_generation(session_id, stream_id)
                 return
             # ── Ephemeral mode (/btw): deliver answer, skip persistence, cleanup ──
             if ephemeral:
@@ -10341,6 +11816,27 @@ def _run_agent_streaming(
                             getattr(s, 'active_stream_id', None),
                         )
                         return
+                _success_previous_messages = copy.deepcopy(
+                    getattr(s, 'messages', None) or []
+                )
+                _success_previous_context = copy.deepcopy(
+                    getattr(s, 'context_messages', None)
+                    or getattr(s, 'messages', None)
+                    or []
+                )
+                _success_previous_tools = copy.deepcopy(
+                    getattr(s, 'tool_calls', None) or []
+                )
+                _success_previous_active_stream_id = getattr(s, 'active_stream_id', None)
+                _success_previous_pending_user = getattr(s, 'pending_user_message', None)
+                _success_previous_pending_attachments = copy.deepcopy(
+                    getattr(s, 'pending_attachments', None) or []
+                )
+                _success_previous_pending_started = getattr(s, 'pending_started_at', None)
+                _success_previous_pending_source = getattr(s, 'pending_user_source', None)
+                _success_previous_pause = copy.deepcopy(
+                    getattr(s, 'process_wakeup_pause', None) or {}
+                )
                 with _stream_writeback_stage(_writeback_timings, "merge_result"):
                     _tool_limit_reached = _agent_result_tool_limit_reached(result)
                     _result_messages = result.get('messages')
@@ -11024,11 +12520,48 @@ def _run_agent_streaming(
                     s.cache_write_tokens = cache_write_tokens
                 # Persist tool-call summaries even when the final message history only
                 # kept bare tool rows and omitted explicit assistant tool_call IDs.
+                _recovered_tool_sidecars = [
+                    _tool_call for _tool_call in (getattr(s, 'tool_calls', None) or [])
+                    if isinstance(_tool_call, dict)
+                    and _tool_call.get('_recovered_from_run_journal')
+                ]
                 tool_calls = _extract_tool_calls_from_messages(
                     s.messages,
-                    live_tool_calls=_live_tool_calls,
+                    live_tool_calls=[*_live_tool_calls, *_recovered_tool_sidecars],
                 )
                 s.tool_calls = tool_calls
+
+                _success_turn_start = _find_current_user_turn(s.messages, msg_text)
+                if not isinstance(_success_turn_start, int):
+                    _success_turn_start = _coerce_current_turn_user_idx(
+                        _active_turn_identity.get('current_turn_user_idx')
+                        if isinstance(_active_turn_identity, dict)
+                        else None
+                    )
+                if isinstance(_success_turn_start, int):
+                    set_stream_cancel_turn_start(
+                        session_id,
+                        stream_id,
+                        _success_turn_start,
+                    )
+
+                def _restore_cancelled_success_writeback():
+                    """Return to the pre-success state so cancellation can settle it."""
+                    s.messages = copy.deepcopy(_success_previous_messages)
+                    s.context_messages = copy.deepcopy(_success_previous_context)
+                    s.tool_calls = copy.deepcopy(_success_previous_tools)
+                    s.active_stream_id = _success_previous_active_stream_id or stream_id
+                    s.pending_user_message = _success_previous_pending_user
+                    s.pending_attachments = copy.deepcopy(_success_previous_pending_attachments)
+                    s.pending_started_at = _success_previous_pending_started
+                    s.pending_user_source = _success_previous_pending_source
+                    if _success_previous_pause:
+                        s.process_wakeup_pause = copy.deepcopy(_success_previous_pause)
+                    else:
+                        s.process_wakeup_pause = {}
+                    _materialize_pending_user_turn_before_error(s)
+                    s.save()
+
                 s.active_stream_id = None
                 s.pending_user_message = None
                 s.pending_attachments = []
@@ -11318,6 +12851,7 @@ def _run_agent_streaming(
                 with _stream_writeback_stage(_writeback_timings, "session_save"):
                     s.save()
                 if cancel_event.is_set():
+                    _restore_cancelled_success_writeback()
                     _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
                     try:
                         append_turn_journal_event_for_stream(
@@ -11492,6 +13026,23 @@ def _run_agent_streaming(
                             logger.debug("Failed to append cancelled turn journal event", exc_info=True)
                         put('cancel', _cancel_event_payload('Cancelled by user'))
                         return
+                if not mark_stream_success_committed(session_id, stream_id):
+                    _restore_cancelled_success_writeback()
+                    _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
+                    try:
+                        append_turn_journal_event_for_stream(
+                            s.session_id,
+                            stream_id,
+                            {
+                                "event": "interrupted",
+                                "created_at": time.time(),
+                                "reason": "cancelled",
+                            },
+                        )
+                    except Exception:
+                        logger.debug("Failed to append cancelled turn journal event", exc_info=True)
+                    put('cancel', _cancel_event_payload('Cancelled by user'))
+                    return
                 _success_writeback_committed = True
             usage = {
                 'input_tokens': input_tokens,
@@ -12184,6 +13735,14 @@ def _run_agent_streaming(
         # CLI/cron env fallback resumes — same lifecycle slot as the env
         # restore above.
         _reset_turn_session_identity(_turn_session_identity_tokens)
+        if _success_writeback_committed:
+            # Success wins a late Stop race.  Retire only this exact old
+            # generation after any already-admitted publication drains; the
+            # shared helper compare-and-clears only the old owner, preserving
+            # a successor claim and bypassing cancellation reconciliation.
+            retire_stream_cancel_generation_after_success(session_id, stream_id)
+        elif mark_stream_worker_done(session_id, stream_id):
+            _reconcile_cancelled_stream_generation(session_id, stream_id)
         with STREAMS_LOCK:
             STREAMS.pop(stream_id, None)
             CANCEL_FLAGS.pop(stream_id, None)
@@ -12418,6 +13977,11 @@ def cancel_stream(stream_id: str) -> bool:
     _snap_agent = None
     _snap_owner_session_id = None
     _cancel_session_payload = None
+    # Stable lower bound for journal content dedupe.  cancel_stream clears the
+    # mutable pending-turn fields before reading the journal, so capture the
+    # owning user-row index while that identity is still available.
+    _cancel_turn_start = None
+    _reconcile_after_cancel_cleanup = False
 
     with streams_lock:
         stream_present = stream_id in streams
@@ -12473,6 +14037,23 @@ def cancel_stream(stream_id: str) -> bool:
             active_run_entry = None
         if active_run_entry and not active_run_session_id:
             active_run_session_id = str(active_run_entry.get("session_id") or "").strip() or None
+
+    # Arm the exact cancellation/publication generation BEFORE setting the
+    # cancel flag or interrupting the provider.  A producer that has already
+    # crossed the event-bridge admission check is then retained by the shared
+    # publication registry until its journal append completes.
+    _cancel_generation_session_id = None
+    for _candidate_session_id in (
+        active_run_session_id,
+        _snap_owner_session_id,
+        getattr(_snap_agent, "session_id", None),
+    ):
+        if _candidate_session_id and begin_stream_cancel_generation(
+            _candidate_session_id,
+            stream_id,
+        ):
+            _cancel_generation_session_id = _candidate_session_id
+            break
 
     # Mark the worker lifecycle registry immediately. The SSE maps may be popped
     # below while the worker is still unwinding; ACTIVE_RUNS is what recovery /
@@ -12552,7 +14133,9 @@ def cancel_stream(stream_id: str) -> bool:
     # Session cleanup (get_session + save) must happen OUTSIDE the lock —
     # get_session() acquires LOCK, and the streaming thread does LOCK first
     # then STREAMS_LOCK, so inverting the order here would cause deadlock.
-    _cancel_session_id = getattr(agent, 'session_id', None) if agent else None
+    _cancel_session_id = _cancel_generation_session_id
+    if not _cancel_session_id:
+        _cancel_session_id = getattr(agent, 'session_id', None) if agent else None
     if not _cancel_session_id and active_run_session_id:
         _cancel_session_id = active_run_session_id
     # Third fallback: stream owner registry — populated before the worker
@@ -12596,7 +14179,15 @@ def cancel_stream(stream_id: str) -> bool:
                 _cs = get_session(_cancel_session_id)
                 if not isinstance(getattr(_cs, 'messages', None), list):
                     _cs.messages = []
-                if not _stream_writeback_is_current(_cs, stream_id):
+                _cancel_generation_live = bool(
+                    _cancel_generation_session_id == _cancel_session_id
+                    and stream_cancel_generation_pending(
+                        _cancel_session_id,
+                        stream_id,
+                    )
+                    and session_writeback_owner(_cancel_session_id) == stream_id
+                )
+                if not _stream_writeback_is_current(_cs, stream_id) and not _cancel_generation_live:
                     # The stream has rotated to a different stream id (newer
                     # turn started, or the worker already finalized this one).
                     # Skip the cancel-marker append AND suppress the terminal
@@ -12633,12 +14224,19 @@ def cancel_stream(stream_id: str) -> bool:
                     _pending_atts_raw = getattr(_cs, 'pending_attachments', None)
                     _pending_atts = list(_pending_atts_raw) if isinstance(_pending_atts_raw, (list, tuple)) else []
                     _pending_started = getattr(_cs, 'pending_started_at', None) or 0
+                    _pending_turn_token = build_active_turn_token(
+                        stream_id,
+                        _pending_started,
+                    )
                     _msgs_for_recovery = _cs.messages if isinstance(_cs.messages, list) else None
                     if _pending_user and _msgs_for_recovery is not None:
                         _last_user = None
-                        for _m in reversed(_msgs_for_recovery):
+                        _last_user_idx = None
+                        for _idx in range(len(_msgs_for_recovery) - 1, -1, -1):
+                            _m = _msgs_for_recovery[_idx]
                             if isinstance(_m, dict) and _m.get('role') == 'user':
                                 _last_user = _m
+                                _last_user_idx = _idx
                                 break
                         _already_persisted = False
                         if _last_user is not None:
@@ -12663,15 +14261,39 @@ def cancel_stream(stream_id: str) -> bool:
                                 'content': _pending_user,
                                 'timestamp': _recovered_ts,
                             }
-                            stamp_message_source(_user_turn, _pending_source)
+                            stamp_message_source(
+                                _user_turn,
+                                _pending_source,
+                                active_turn_token=_pending_turn_token,
+                            )
                             if _pending_atts:
                                 _user_turn['attachments'] = _pending_atts
                             _msgs_for_recovery.append(_user_turn)
+                            _cancel_turn_start = len(_msgs_for_recovery) - 1
+                        else:
+                            _cancel_turn_start = _last_user_idx
+                            if _pending_turn_token and isinstance(_last_user, dict):
+                                _last_user.setdefault(
+                                    '_active_turn_token',
+                                    _pending_turn_token,
+                                )
                 except Exception:
                     logger.debug(
                         "Failed to recover pending user message on cancel for %s",
                         _cancel_session_id,
                     )
+                if isinstance(_cancel_turn_start, int):
+                    try:
+                        _append_recovered_turn_to_context(
+                            _cs,
+                            _cs.messages[_cancel_turn_start],
+                        )
+                    except Exception:
+                        logger.debug(
+                            "Failed to project cancelled user turn into context for %s",
+                            _cancel_session_id,
+                            exc_info=True,
+                        )
                 _cs.active_stream_id = None
                 _cs.pending_user_message = None
                 _cs.pending_attachments = []
@@ -12700,6 +14322,29 @@ def cancel_stream(stream_id: str) -> bool:
                 _partial_msg = _build_partial_message(
                     _cancel_partial_text, _cancel_reasoning, _cancel_tool_calls,
                 )
+                if _partial_msg is None:
+                    # Live buffers can be empty after the worker has already
+                    # emitted visible SSE frames. Recover only this stream's
+                    # durable work journal, label newly-created rows as
+                    # partial, and keep the existing cancel marker path below.
+                    try:
+                        from api.models import _append_journaled_partial_output
+
+                        _append_journaled_partial_output(
+                            _cs,
+                            stream_id,
+                            dedupe_existing=True,
+                            mark_partial=True,
+                            current_turn_start=_cancel_turn_start,
+                        )
+                    except Exception:
+                        # Cancellation must remain fail-soft if the journal is
+                        # missing, malformed, or temporarily unreadable.
+                        logger.debug(
+                            "Failed to recover journaled partial output on cancel for %s",
+                            _cancel_session_id,
+                            exc_info=True,
+                        )
                 _cancel_marker_exists = _session_has_cancel_marker(_cs)
                 _cancel_marker_idx = len(_cs.messages)
                 if _cancel_marker_exists:
@@ -12722,6 +14367,20 @@ def cancel_stream(stream_id: str) -> bool:
                         before_idx=_cancel_marker_idx,
                     ):
                         _cs.messages.insert(_cancel_marker_idx, _partial_msg)
+                    # A live-buffer partial is already the authoritative
+                    # display row, so it does not take the journal fallback
+                    # branch below. Project the same visible assistant segment
+                    # into provider context while the owning cancelled user row
+                    # is still the current turn; display-only reasoning is
+                    # stripped by the model-context projection helper.
+                    try:
+                        _append_recovered_turn_to_context(_cs, _partial_msg)
+                    except Exception:
+                        logger.debug(
+                            "Failed to project live partial into context on cancel for %s",
+                            _cancel_session_id,
+                            exc_info=True,
+                        )
                 # Cancel marker — flagged _error=True so it is stripped from conversation
                 # history on the next turn (prevents model from seeing "Task cancelled."
                 # as a prior assistant reply).
@@ -12737,10 +14396,67 @@ def cancel_stream(stream_id: str) -> bool:
                         'provider_details_label': 'Cancellation details',
                         'timestamp': int(time.time()),
                     })
+                # Freeze the exact durable journal hook on the cancellation
+                # marker before any volatile final-reconciliation retry can
+                # run.  The marker itself is the owning boundary after a
+                # successor turn is admitted; stream/event identity is never
+                # inferred from successor content.
+                _cancel_retry_marker = None
+                for _candidate in reversed(_cs.messages):
+                    if not isinstance(_candidate, dict) or _candidate.get('role') != 'assistant':
+                        continue
+                    _candidate_content = str(_candidate.get('content') or '').strip().lower()
+                    if _candidate.get('_error') is True and any(
+                        pattern in _candidate_content for pattern in _CANCEL_MARKER_PATTERNS
+                    ):
+                        _cancel_retry_marker = _candidate
+                        break
+                if _cancel_retry_marker is not None:
+                    _cancel_retry_marker['_pending_journal_recovery'] = True
+                    _cancel_retry_marker['_journal_retry_kind'] = 'cancelled'
+                    _cancel_retry_marker['_journal_retry_stream_id'] = str(stream_id)
+                    _cancel_retry_marker.setdefault(
+                        '_journal_retry_attempts', 0,
+                    )
+                    _cancel_retry_marker.setdefault(
+                        '_journal_retry_first_seen_ts', int(time.time()),
+                    )
+                    if isinstance(_cancel_turn_start, int):
+                        _cancel_retry_marker['_journal_retry_turn_start'] = _cancel_turn_start
+                        try:
+                            _owner_turn = _cs.messages[_cancel_turn_start]
+                        except (IndexError, TypeError):
+                            _owner_turn = None
+                        if isinstance(_owner_turn, dict):
+                            _owner_token = _owner_turn.get('_active_turn_token')
+                            if _owner_token:
+                                _cancel_retry_marker['_journal_retry_turn_token'] = str(_owner_token)
                 _cs.save()
+                # The generation may only claim final reconciliation after the
+                # durable marker and owning user boundary have reached disk.
+                # If this initial save fails, leave the volatile generation
+                # pending but without a turn_start claim; a worker finalizer
+                # therefore cannot splice journal rows into an unpersisted
+                # session projection.
+                if isinstance(_cancel_turn_start, int):
+                    set_stream_cancel_turn_start(
+                        _cancel_session_id,
+                        stream_id,
+                        _cancel_turn_start,
+                    )
+                    _reconcile_after_cancel_cleanup = (
+                        _cancel_generation_session_id == _cancel_session_id
+                    )
                 _cancel_session_payload = _redacted_session_payload_with_full_messages(_cs)
             except Exception:
                 logger.debug("Failed to clear session state on cancel for %s", _cancel_session_id)
+
+    # A worker finalizer may have reached the shared generation barrier while
+    # cancel_stream() was blocked in agent.interrupt(). Its claim is deferred
+    # until the cancelled user boundary above is recorded; retry after the
+    # session save so journal recovery can never precede that owning user row.
+    if _reconcile_after_cancel_cleanup and _cancel_session_id:
+        _reconcile_cancelled_stream_generation(_cancel_session_id, stream_id)
 
     if _emit_cancel_event and q:
         _cancel_event_id = STREAM_LAST_EVENT_ID.get(stream_id)

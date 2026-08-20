@@ -922,8 +922,10 @@ def test_streaming_restores_prior_reasoning_metadata_after_followup():
         "streaming.py must define a helper to restore prior reasoning metadata"
     assert "next_context_messages" in src and "_deduplicate_context_messages(next_context_messages)" in src, \
         "streaming.py must restore prior reasoning metadata into model context"
-    assert "session.messages = _merge_display_messages_after_agent_result(" in src, \
-        "streaming.py must merge restored result messages into the visible transcript"
+    assert "session.messages = _merge_display_messages_with_late_recovery(" in src, \
+        "streaming.py must preserve late recovered rows in the visible transcript"
+    assert "_merge_display_messages_after_agent_result(" in src, \
+        "streaming.py must merge restored result messages before late recovery"
     assert "updated_messages.insert(safe_pos, copy.deepcopy(prev_msg))" in src, \
         "streaming.py must reinsert dropped reasoning-only assistant messages"
 
