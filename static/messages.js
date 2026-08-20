@@ -1368,7 +1368,15 @@ function _retainReadOnlyForkPayload(record, sid) {
 }
 
 function _retireReadOnlyForkPayload(sid) {
-  if (sid) _readOnlyForkPayloads.delete(sid);
+  if (!sid) return;
+  const record = _readOnlyForkRecordForSid(sid);
+  if (!record) {
+    _readOnlyForkPayloads.delete(sid);
+    return;
+  }
+  for (const [key, existing] of _readOnlyForkPayloads) {
+    if (existing === record) _readOnlyForkPayloads.delete(key);
+  }
 }
 
 function _hasReadOnlyForkPayloadForSid(sid) {

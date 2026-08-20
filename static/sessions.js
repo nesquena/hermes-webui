@@ -2742,6 +2742,7 @@ function _clearHandoffStorageForSession(sid) {
   try { _clearSessionViewedCount(sid); } catch {}
   try { _clearSessionCompletionUnread(sid); } catch {}
   try { _forgetObservedStreamingSession(sid); } catch {}
+  try { if (typeof _retireReadOnlyForkPayload === 'function') _retireReadOnlyForkPayload(sid); } catch {}
 }
 
 function _getHandoffDismissedAt(sid) {
@@ -4404,22 +4405,25 @@ function _renderBatchActionBar(){
     });
     if(!ok)return;
     try{
-      const results=await Promise.all(ids.map(async sid=>{
+      const results=await Promise.allSettled(ids.map(async sid=>{
         const response=await api('/api/session/delete',{method:'POST',body:JSON.stringify({session_id:sid})});
-        return {response,session:sessionsById.get(sid)||null};
+        _clearHandoffStorageForSession(sid);
+        return {response,session:sessionsById.get(sid)||null,sid};
       }));
-      const retainedCount=_worktreeResponseCount(results);
-      const cleanupFailedCount=results.filter(result=>result.response&&result.response.state_db_cleanup_failed).length;
-      ids.forEach(_clearHandoffStorageForSession);
-      if(S.session&&ids.includes(S.session.session_id)){
+      const successfulResults=results.filter(result=>result.status==='fulfilled').map(result=>result.value);
+      const failedCount=results.length-successfulResults.length;
+      const retainedCount=_worktreeResponseCount(successfulResults);
+      const cleanupFailedCount=successfulResults.filter(result=>result.response&&result.response.state_db_cleanup_failed).length;
+      const deletedIds=successfulResults.map(result=>result.sid);
+      if(S.session&&deletedIds.includes(S.session.session_id)){
         S.session=null;S.messages=[];S.entries=[];localStorage.removeItem('hermes-webui-session');
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
         const remaining=await api('/api/sessions'+_sessionListQueryString());
         if(remaining.sessions&&remaining.sessions.length){await loadSession(remaining.sessions[0].session_id);}
         else{$('msgInner').innerHTML='';$('emptyState').style.display='';}
       }
-      if(cleanupFailedCount) showToast(t('delete_failed')+' ('+cleanupFailedCount+'/'+ids.length+')',0,'error');
-      else showToast((retainedCount?t('session_deleted_worktree'):t('session_delete'))+' ('+ids.length+')');
+      if(failedCount||cleanupFailedCount) showToast(t('delete_failed')+' ('+(failedCount+cleanupFailedCount)+'/'+ids.length+')',0,'error');
+      else showToast((retainedCount?t('session_deleted_worktree'):t('session_delete'))+' ('+successfulResults.length+')');
       exitSessionSelectMode();await renderSessionList();
     }catch(e){showToast('Delete failed: '+(e.message||e));}
   };bar.appendChild(deleteBtn);

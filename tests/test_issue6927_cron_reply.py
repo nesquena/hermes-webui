@@ -311,13 +311,20 @@ def test_partial_batch_delete_cannot_block_later_cron_handoff():
     try:
         result = page.evaluate("""async () => {
           const record={sourceSid:'cron-deleted', childSid:'child-after-delete', state:'recovery', text:'stale', files:[]};
+          _readOnlyForkPayloads.set(record.sourceSid, record);
+          _readOnlyForkPayloads.set(record.childSid, record);
+          const batchSource = _renderBatchActionBar.toString();
+          _clearHandoffStorageForSession(record.childSid);
+          const clearedMap = _readOnlyForkPayloads.size;
           _readOnlyForkPayloads.set(record.childSid, record);
           S.session={session_id:record.childSid, read_only:false, model:'m', workspace:'/w'}; $('msg').value='new writable reply';
           window.uploadPendingFiles=async()=>[]; window.api=async url=>url==='/api/chat/start'?{stream_id:'after-delete'}:{};
           await send();
-          return {map:_readOnlyForkPayloads.size, text:$('msg').value};
+          return {map:_readOnlyForkPayloads.size, text:$('msg').value, clearedMap,
+            batchUsesAllSettled:batchSource.includes('Promise.allSettled'),
+            releasesEachSuccess:batchSource.includes('_clearHandoffStorageForSession(sid)')};
         }""")
-        assert result == {"map":0, "text":""}
+        assert result == {"map":0, "text":"", "clearedMap":0, "batchUsesAllSettled":True, "releasesEachSuccess":True}
     finally:
         _close(pw, browser)
 
