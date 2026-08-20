@@ -242,15 +242,46 @@ def test_build_native_multimodal_message_preserves_remote_workspace(monkeypatch,
     monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
     monkeypatch.setattr(profiles, "_resolve_base_hermes_home", lambda: tmp_path)
 
-    # Attachments are checked against remote workspace root without firmlink corruption
-    msg = streaming._build_native_multimodal_message(
+    # 1. Profile as logical name string
+    msg1 = streaming._build_native_multimodal_message(
         "[Workspace::v1: /home/rootson]\n",
         "hello",
         attachments=[],
         workspace="/home/rootson",
         profile="optiplex",
     )
-    assert "[Workspace::v1: /home/rootson]" in msg
+    assert "[Workspace::v1: /home/rootson]" in msg1
+
+    # 2. Profile as filesystem path string (_profile_home)
+    msg2 = streaming._build_native_multimodal_message(
+        "[Workspace::v1: /home/rootson]\n",
+        "hello",
+        attachments=[],
+        workspace="/home/rootson",
+        profile=str(profiles_dir),
+    )
+    assert "[Workspace::v1: /home/rootson]" in msg2
+
+    # 3. Profile as Path object
+    msg3 = streaming._build_native_multimodal_message(
+        "[Workspace::v1: /home/rootson]\n",
+        "hello",
+        attachments=[],
+        workspace="/home/rootson",
+        profile=profiles_dir,
+    )
+    assert "[Workspace::v1: /home/rootson]" in msg3
+
+
+def test_resolve_profile_home_param_formats(tmp_path):
+    """_resolve_profile_home_param handles None, default, profile name, Path, and path string."""
+    from api.profiles import _DEFAULT_HERMES_HOME
+
+    assert workspace._resolve_profile_home_param(None) == _DEFAULT_HERMES_HOME
+    assert workspace._resolve_profile_home_param("default") == _DEFAULT_HERMES_HOME
+    assert workspace._resolve_profile_home_param(str(tmp_path / "profiles/custom")) == (tmp_path / "profiles/custom")
+    assert workspace._resolve_profile_home_param(tmp_path / "profiles/custom") == (tmp_path / "profiles/custom")
+
 
 
 
