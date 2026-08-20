@@ -182,3 +182,118 @@ def test_minimal_static_models_catalog_active_provider_owns_default_model():
         assert result["default_model"] == "claude-sonnet-5@default"
     finally:
         _restore(cfg_mod, old_model, old_custom)
+
+
+# ---------------------------------------------------------------------------
+# Regression coverage for review defects found on the #7176 fix itself.
+# ---------------------------------------------------------------------------
+
+
+def test_malformed_later_entry_does_not_crash_resolution():
+    """CORE defect #1 (review): a valid first match followed by a malformed
+    ``base_url`` on a LATER shared-base_url entry must not abort resolution
+    for the whole scan. Before the fix, ``urlparse("http://[")`` raises
+    ``ValueError: Invalid IPv6 URL`` and that exception propagated straight
+    out of ``_named_custom_provider_slug_for_base_url``, breaking provider
+    resolution (and therefore chat start) entirely — even though a perfectly
+    valid earlier entry already matched.
+    """
+    from api.config import _named_custom_provider_slug_for_base_url
+
+    config_obj = {
+        "custom_providers": [
+            {"name": "A", "base_url": "http://gw.local", "model": "x"},
+            {"name": "B", "base_url": "http://[", "model": "y"},
+        ]
+    }
+    # Must not raise, and must still resolve the valid entry.
+    slug = _named_custom_provider_slug_for_base_url(
+        "http://gw.local", config_obj, model_id="x"
+    )
+    assert slug == "custom:a"
+
+
+def test_configured_model_ids_decodes_json_array_string():
+    """CORE defect #2 (review): ``models`` persisted as a JSON-encoded string
+    (e.g. ``'["claude-sonnet-5@default"]'``) must be decoded like a native
+    list/dict, not silently treated as an empty allowlist. Before the fix,
+    ``_configured_model_ids('[\"claude\"]')`` returned ``[]``, so an entry
+    whose ``models`` field round-tripped through a string-serializing layer
+    would never be recognized as owning any model and ownership matching
+    would silently fall back to declaration-order (the exact bug this PR
+    fixes for the native dict/list shapes).
+    """
+    from api.config import _configured_model_ids
+
+    assert _configured_model_ids('["claude-sonnet-5@default", "gpt-5"]') == [
+        "claude-sonnet-5@default",
+        "gpt-5",
+    ]
+    # A dict-shaped JSON string also decodes.
+    assert _configured_model_ids('{"claude-sonnet-5@default": {}}') == [
+        "claude-sonnet-5@default"
+    ]
+    # Invalid JSON / non-list-or-dict decodes still degrade to empty, not a crash.
+    assert _configured_model_ids("not json") == []
+    assert _configured_model_ids("42") == []
+    assert _configured_model_ids("") == []
+    # Existing native shapes are unaffected.
+    assert _configured_model_ids(["a", "b"]) == ["a", "b"]
+    assert _configured_model_ids({"a": {}}) == ["a"]
+
+
+def test_slug_for_base_url_prefers_owning_entry_with_json_string_models():
+    """End-to-end version of defect #2: the ownership-preferring resolver
+    must recognize a JSON-string ``models`` allowlist the same way it
+    recognizes a native list/dict one.
+    """
+    from api.config import _named_custom_provider_slug_for_base_url
+
+    config_obj = {
+        "custom_providers": [
+            {
+                "name": "Gateway OpenAI Chat",
+                "base_url": SHARED_BASE_URL,
+                "models": '["gpt-5", "gpt-5-mini"]',
+            },
+            {
+                "name": "Gateway Claude",
+                "base_url": SHARED_BASE_URL,
+                "models": '["claude-sonnet-5@default", "claude-opus-5@default"]',
+            },
+        ]
+    }
+    slug = _named_custom_provider_slug_for_base_url(
+        SHARED_BASE_URL, config_obj, model_id="claude-sonnet-5@default"
+    )
+    assert slug == "custom:gateway-claude", (
+        f"Expected the Claude entry (JSON-string models allowlist) to be "
+        f"recognized as owning the model, got {slug!r}."
+    )
+
+
+def test_static_models_catalog_without_live_probes_passes_model_id_through():
+    """CORE defect #1/cold-catalog gap (review): the uncached
+    ``_static_models_catalog_without_live_probes()`` builder must also
+    resolve the *initial endpoint probe's* provider attribution
+    model-aware, not just the already-fixed ``active_provider`` field.
+    Before the fix, ``_configured_provider_for_base_url()`` (used to key
+    ``auto_detected_models_by_provider`` and named-provider bookkeeping)
+    called ``_resolve_configured_provider_id()`` WITHOUT ``model_id``, so a
+    shared-base_url probe could still be filed under the sibling provider
+    even though ``active_provider`` elsewhere in the same function was
+    already correctly resolved to the model-owning entry. This builder is
+    network-free by design (its whole point is "no live probes"), so no
+    mocking of network calls is needed here.
+    """
+    import api.config as cfg_mod
+
+    old_model, old_custom = _apply_config(cfg_mod, "claude-sonnet-5@default")
+    try:
+        result = cfg_mod._static_models_catalog_without_live_probes()
+        assert result["active_provider"] == "custom:gateway-claude", (
+            f"Expected active_provider=custom:gateway-claude, got "
+            f"{result['active_provider']!r}."
+        )
+    finally:
+        _restore(cfg_mod, old_model, old_custom)

@@ -1379,6 +1379,26 @@ def _custom_provider_entries(config_obj: dict | None = None) -> list[dict]:
 
 def _configured_model_ids(raw_models: object) -> list[str]:
     """Return ordered model IDs from supported config allowlist shapes."""
+    if isinstance(raw_models, str):
+        # ``models`` is occasionally persisted as a JSON-encoded string
+        # (e.g. round-tripped through a form field / API layer that
+        # serializes dict/list values) rather than a native dict/list. A
+        # bare string was previously always treated as "no allowlist" and
+        # silently dropped, which defeats model-ownership matching for any
+        # entry stored in that shape (same class of bug as #7134/#7165). Only
+        # accept a decoded list or dict — anything else (an invalid string,
+        # or a decoded scalar) is not a supported allowlist shape.
+        text = raw_models.strip()
+        if not text:
+            return []
+        try:
+            decoded = json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            return []
+        if isinstance(decoded, (list, dict)):
+            raw_models = decoded
+        else:
+            return []
     if isinstance(raw_models, dict):
         candidates = (key for key in raw_models if isinstance(key, str))
     elif isinstance(raw_models, list):
@@ -1550,7 +1570,16 @@ def _normalize_base_url_for_match(value: object) -> str:
     url = str(value or "").strip().rstrip("/")
     if not url:
         return ""
-    parsed_url = urlparse(url if "://" in url else f"http://{url}")
+    try:
+        parsed_url = urlparse(url if "://" in url else f"http://{url}")
+    except ValueError:
+        # Malformed URLs (e.g. an unbalanced "[" that urlparse treats as a
+        # bad IPv6 literal) must not abort resolution for every OTHER entry
+        # sharing the base_url being matched against — treat the entry as
+        # simply not matching rather than raising. See #7176 review: a valid
+        # first match followed by a malformed later config.yaml entry used to
+        # crash the whole scan and break provider resolution entirely.
+        return ""
     scheme = (parsed_url.scheme or "http").lower()
     netloc = (parsed_url.netloc or parsed_url.path).lower().rstrip("/")
     path = parsed_url.path.rstrip("/")
@@ -5654,7 +5683,9 @@ def _static_models_catalog_without_live_probes() -> dict:
 
         if cfg_base_url:
             detected_providers.add(
-                _named_custom_provider_slug_for_base_url(cfg_base_url, cfg)
+                _named_custom_provider_slug_for_base_url(
+                    cfg_base_url, cfg, model_id=default_model
+                )
                 or active_provider
                 or "custom"
             )
@@ -7309,10 +7340,19 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             if isinstance(model_cfg, dict):
                 model_base_url = _normalize_base_url_for_match(model_cfg.get("base_url"))
                 if model_base_url == target:
+                    # Pass default_model so a base_url shared by several named
+                    # custom providers resolves to the entry that actually
+                    # owns the configured default model, instead of always
+                    # the first declared entry (#7176). Without this, the
+                    # cold/uncached get_available_models() build path keeps
+                    # attributing the initial endpoint probe to the wrong
+                    # sibling provider even though active_provider elsewhere
+                    # in this function is resolved model-aware.
                     provider_hint = _resolve_configured_provider_id(
                         model_cfg.get("provider"),
                         cfg,
                         base_url=base_url,
+                        model_id=default_model,
                     )
                     if provider_hint:
                         return str(provider_hint).strip().lower()
@@ -7680,7 +7720,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 detected_providers.discard("custom")
 
         _named_custom_slugs = _named_custom_provider_slugs(cfg)
-        _base_matched_named_slug = _named_custom_provider_slug_for_base_url(cfg_base_url, cfg)
+        _base_matched_named_slug = _named_custom_provider_slug_for_base_url(
+            cfg_base_url, cfg, model_id=default_model
+        )
         if _base_matched_named_slug and _named_custom_slugs:
             for _pid in list(detected_providers):
                 _pid_norm = str(_pid or "").strip().lower()
