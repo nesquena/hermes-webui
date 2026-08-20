@@ -1941,22 +1941,50 @@ function cmdVoice(){
 async function cmdYolo(){
   const sid=S.session&&S.session.session_id;
   if(!sid){showToast(t('yolo_no_session'));return;}
+  const generation=_loadSessionGeneration;
+  const viewIsCurrent=()=>!!(
+    S.session&&S.session.session_id===sid&&_loadSessionGeneration===generation
+  );
+  let approvalOwner=null;
   try{
-    // Check current state first to toggle
+    // Check current state first to toggle.
     const status=await api('/api/session/yolo?session_id='+encodeURIComponent(sid));
+    if(!viewIsCurrent())return;
     const enable=!status.yolo_enabled;
-    await api('/api/session/yolo',{
+    // A visible approval must belong to this exact session load before any
+    // command handler may POST through it. Otherwise fail closed.
+    const card=$('approvalCard');
+    if(card&&card.classList.contains('visible')){
+      approvalOwner=typeof _captureApprovalResponseOwner==='function'
+        ?_captureApprovalResponseOwner()
+        :null;
+      if(!approvalOwner)return;
+      if(enable&&typeof toggleYoloFromApproval==='function'){
+        await toggleYoloFromApproval();
+        return;
+      }
+    }
+    const result=await api('/api/session/yolo',{
       method:'POST',
       body:JSON.stringify({session_id:sid,enabled:enable}),
     });
-    _yoloEnabled=enable;
+    if(!viewIsCurrent()||(approvalOwner&&!_approvalResponseOwnerIsCurrent(approvalOwner)))return;
+    const settled=(result&&typeof result.yolo_enabled==='boolean')?result.yolo_enabled:enable;
+    _yoloEnabled=settled;
     _updateYoloPill();
-    showToast(enable?t('yolo_enabled'):t('yolo_disabled'));
-    if(enable){
-      // Dismiss any visible approval card
-      hideApprovalCard(true);
+    showToast(settled?t('yolo_enabled'):t('yolo_disabled'));
+  }catch(e){
+    if(!viewIsCurrent()||(approvalOwner&&!_approvalResponseOwnerIsCurrent(approvalOwner)))return;
+    let errorPayload=null;
+    if(e&&typeof e.body==='string'){
+      try{errorPayload=JSON.parse(e.body);}catch(_){}
     }
-  }catch(e){showToast('YOLO: '+e.message);}
+    if(errorPayload&&typeof errorPayload.yolo_enabled==='boolean'){
+      _yoloEnabled=errorPayload.yolo_enabled;
+      _updateYoloPill();
+    }
+    showToast('YOLO: '+((errorPayload&&(errorPayload.error||errorPayload.message))||e.message));
+  }
 }
 
 // ── Branch / fork command ──
