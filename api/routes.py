@@ -27051,14 +27051,28 @@ def _handle_handoff_summary(handler, body):
         resolved_model = None
         resolved_provider = None
         resolved_base_url = None
+        session_model_provider = None
         try:
             from api.models import get_session
             s_obj = get_session(sid)
             resolved_model = getattr(s_obj, "model", None)
+            # Carry the session's OWN selected provider into resolution. Without
+            # it, a bare resolve_model_provider(model) routes the summary through
+            # whatever main provider is active — so a session pinned to custom:A
+            # gets its handoff summary rerouted to the active custom:B when both
+            # providers list the same model id (overlapping-id misroute, sibling
+            # of the resolve_model_provider fix). model_with_provider_context
+            # encodes it as @custom:A:model so the resolver honors the session's
+            # endpoint; base_url is backfilled from that provider's own custom
+            # entry by the resolve_custom_provider_connection block below.
+            session_model_provider = getattr(s_obj, "model_provider", None)
         except Exception:
             pass
 
-        resolved_model, resolved_provider, resolved_base_url = _cfg.resolve_model_provider(resolved_model)
+        model_for_resolution = _cfg.model_with_provider_context(
+            resolved_model, session_model_provider
+        )
+        resolved_model, resolved_provider, resolved_base_url = _cfg.resolve_model_provider(model_for_resolution)
 
         resolved_api_key = None
         try:
@@ -27187,6 +27201,16 @@ def _handle_handoff_summary(handler, body):
             "type": "agent_runtime_stale",
             "retryable": True,
         }, status=409)
+    except api_config.AmbiguousCustomProviderError as e:
+        # A custom-provider slug collision is a user-fixable misconfiguration,
+        # not a transient summary failure. Return 400 with the actionable rename
+        # message so the UI shows it, instead of degrading to a 200 local
+        # fallback that the client treats as success and that hides the fix.
+        logger.warning("Handoff summary blocked by ambiguous custom provider: %s", e.message)
+        return j(handler, {
+            "error": e.message,
+            "type": "custom_provider_ambiguous",
+        }, status=400)
     except Exception as e:
         logger.warning("Handoff summary generation failed: %s", e)
         summary_text = _fallback_handoff_summary(msgs)
