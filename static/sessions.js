@@ -222,6 +222,9 @@ async function _restoreRememberedNewChatDraftSession() {
 function _saveComposerDraft(sid, text, files) {
   if (!sid) return;
   if (S.session && S.session.session_id === sid &&
+      typeof _hasReadOnlyForkAcceptedPendingClear === 'function' && _hasReadOnlyForkAcceptedPendingClear(sid) &&
+      typeof _retireReadOnlyForkPayload === 'function') _retireReadOnlyForkPayload(sid);
+  if (S.session && S.session.session_id === sid &&
       (_isReadOnlySession(S.session) ||
        (typeof _hasReadOnlyForkPayloadForSid === 'function' && _hasReadOnlyForkPayloadForSid(sid)))) return;
   clearTimeout(_draftSaveTimer);
@@ -268,6 +271,9 @@ function _rememberComposerDraftPayloadState(sid, text, files) {
 function _saveComposerDraftNow(sid, text, files) {
   const opts = arguments[3] || {};
   if (!sid) return Promise.resolve(true);
+  if (S.session && S.session.session_id === sid &&
+      typeof _hasReadOnlyForkAcceptedPendingClear === 'function' && _hasReadOnlyForkAcceptedPendingClear(sid) &&
+      typeof _retireReadOnlyForkPayload === 'function') _retireReadOnlyForkPayload(sid);
   if (S.session && S.session.session_id === sid &&
       (_isReadOnlySession(S.session) ||
        (typeof _hasReadOnlyForkPayloadForSid === 'function' && _hasReadOnlyForkPayloadForSid(sid)))) return Promise.resolve(true);

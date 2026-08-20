@@ -1370,12 +1370,28 @@ function _retireReadOnlyForkPayload(sid) {
 
 function _hasReadOnlyForkPayloadForSid(sid) {
   const record = sid ? _readOnlyForkPayloads.get(sid) : null;
-  return !!(record && record.state !== 'accepted');
+  return !!(record && record.state !== 'accepted' && record.state !== 'accepted-pending-clear');
 }
 
 function _hasReadOnlyForkAcceptedPendingClear(sid) {
   const record = sid ? _readOnlyForkPayloads.get(sid) : null;
   return !!(record && record.state === 'accepted-pending-clear');
+}
+
+function _retryReadOnlyForkDraftClear(record) {
+  if (!record || !record.childSid) return;
+  let attempts = 0;
+  const retry = async () => {
+    if (_readOnlyForkPayloads.get(record.childSid) !== record || record.state !== 'accepted-pending-clear') return;
+    attempts += 1;
+    try {
+      await _clearComposerDraft(record.childSid, record.text, [], {throwOnError:true});
+      if (_readOnlyForkPayloads.get(record.childSid) === record) _readOnlyForkPayloads.delete(record.childSid);
+    } catch (_) {
+      if (attempts < 3) setTimeout(retry, attempts * 1000);
+    }
+  };
+  setTimeout(retry, 1000);
 }
 
 function _restoreReadOnlyForkPayload(record, sid, generation) {
@@ -2016,6 +2032,7 @@ async function send(){
       } catch (clearError) {
         _readOnlyForkHandoff.state = 'accepted-pending-clear';
         _retainReadOnlyForkPayload(_readOnlyForkHandoff, _readOnlyForkHandoff.childSid);
+        _retryReadOnlyForkDraftClear(_readOnlyForkHandoff);
       }
       if (!_readOnlyForkHandoffOwnsPane(_readOnlyForkHandoff, activeSid)) {
         if (!INFLIGHT[activeSid]) INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]};
