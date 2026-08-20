@@ -26,7 +26,10 @@ except ImportError:  # pragma: no cover
     _msvcrt = None
 
 import api.config as _cfg
-from api.compression_anchor import is_context_compression_marker
+from api.compression_anchor import (
+    is_context_compression_marker,
+    is_lcm_context_recovery_marker,
+)
 from api.config import (
     SESSION_DIR, SESSION_INDEX_FILE, SESSIONS, SESSIONS_MAX,
     LOCK, STREAMS, STREAMS_LOCK, DEFAULT_WORKSPACE, DEFAULT_MODEL, PROJECTS_FILE, HOME,
@@ -42,7 +45,7 @@ from api.agent_sessions import (
     read_importable_agent_session_rows,
     read_session_lineage_metadata,
 )
-from api.process_event_utils import stamp_message_source
+from api.process_event_utils import build_active_turn_token, stamp_message_source
 
 logger = logging.getLogger(__name__)
 CLI_VISIBLE_SESSION_LIMIT = 20
@@ -864,21 +867,98 @@ def _recovered_model_context_projection(message: dict) -> dict | None:
     return projected
 
 
+def _insert_recovered_pending_turn(
+    messages: list, recovered: dict, claim_existing: bool = True,
+) -> None:
+    recovered_row_id, recovered_row_id_valid = _state_db_row_identity_details(recovered)
+    for message in messages:
+        message_row_id, message_row_id_valid = _state_db_row_identity_details(message)
+        if (
+            claim_existing
+            and recovered_row_id_valid
+            and message_row_id_valid
+            and (
+                recovered_row_id is None
+                or message_row_id in (None, recovered_row_id)
+            )
+            and _message_matches_pending_checkpoint(
+            message,
+            recovered.get('content'),
+            recovered.get('timestamp'),
+            recovered.get('_source'),
+            recovered.get('attachments'),
+            expected_active_turn_token=recovered.get('_active_turn_token'),
+            allow_state_db_lcm_marker_candidate=True,
+            )
+        ):
+            stamp_message_source(
+                message,
+                recovered.get('_source'),
+                active_turn_token=recovered.get('_active_turn_token'),
+            )
+            if recovered.get('_recovered'):
+                message['_recovered'] = True
+            return
+    recovered_text = _normalize_journal_recovery_text(recovered.get('content'))
+    recovered_has_lcm_heading = is_lcm_context_recovery_marker({
+        'role': 'user',
+        'content': recovered.get('content'),
+    })
+    marker_indices = [
+        index
+        for index, message in enumerate(messages)
+        if recovered_has_lcm_heading
+        and isinstance(message, dict)
+        and message.get('role') == 'user'
+        and _normalize_journal_recovery_text(message.get('content')) == recovered_text
+    ]
+    if marker_indices:
+        messages.insert(marker_indices[-1] + 1, recovered)
+        return
+    if recovered_has_lcm_heading and messages and _message_role(messages[-1]) in {
+        'assistant', 'tool',
+    }:
+        output_start = len(messages) - 1
+        while True:
+            tool_start = output_start
+            while tool_start > 0 and _message_role(messages[tool_start - 1]) == 'tool':
+                tool_start -= 1
+            if tool_start == output_start or _message_role(messages[tool_start - 1]) != 'assistant':
+                break
+            output_start = tool_start - 1
+        if any(
+            _message_timestamp_as_float(message) is None
+            for message in messages[output_start:]
+        ):
+            messages.insert(output_start, recovered)
+            return
+    if not _insert_state_message_chronologically(messages, recovered):
+        messages.insert(0, recovered)
+
+
 def _append_recovered_context_projection(
-    session,
     context_messages: list,
     recovered: dict,
 ) -> None:
     recovered_text = _normalize_journal_recovery_text(recovered.get('content'))
     if recovered_text:
         if recovered.get('role') == 'user':
+            existing = context_messages[-1] if context_messages else None
             if _message_matches_pending_checkpoint(
-                context_messages[-1] if context_messages else None,
+                existing,
                 recovered.get('content'),
                 recovered.get('timestamp'),
                 recovered.get('_source'),
                 recovered.get('attachments'),
+                expected_active_turn_token=recovered.get('_active_turn_token'),
             ):
+                active_turn_token = recovered.get('_active_turn_token')
+                if isinstance(active_turn_token, str) and active_turn_token.strip():
+                    stamp_message_source(
+                        existing,
+                        recovered.get('_source'),
+                        active_turn_token=active_turn_token,
+                    )
                 return
         else:
             for existing in reversed(context_messages[-8:]):
@@ -886,6 +966,9 @@ def _append_recovered_context_projection(
                     continue
                 if _normalize_journal_recovery_text(existing.get('content')) == recovered_text:
                     return
+    if recovered.get('role') == 'user' and recovered.get('_active_turn_token'):
+        _insert_recovered_pending_turn(context_messages, dict(recovered))
+        return
     context_messages.append(dict(recovered))
 
 
@@ -907,16 +990,26 @@ def _append_recovered_turn_to_context(session, recovered: dict) -> None:
     projected = _recovered_model_context_projection(recovered)
     if projected is None:
         return
-    _append_recovered_context_projection(session, context_messages, projected)
+    _append_recovered_context_projection(context_messages, projected)
 
 
-def _append_recovered_pending_turn(session, *, timestamp: int | None = None) -> dict | None:
+def _append_recovered_pending_turn(
+    session,
+    *,
+    timestamp: int | None = None,
+    active_turn_token: str | None = None,
+) -> dict | None:
     pending_text = str(session.pending_user_message or '')
     if not pending_text:
         return None
     recovered_ts = int(time.time())
     if isinstance(timestamp, (int, float)) and timestamp > 0:
         recovered_ts = int(timestamp)
+    if active_turn_token is None:
+        active_turn_token = build_active_turn_token(
+            getattr(session, 'active_stream_id', None),
+            getattr(session, 'pending_started_at', None),
+        )
     recovered: dict = {
         'role': 'user',
         'content': session.pending_user_message,
@@ -924,10 +1017,14 @@ def _append_recovered_pending_turn(session, *, timestamp: int | None = None) -> 
         '_recovered': True,
     }
     pending_source = getattr(session, 'pending_user_source', None)
-    stamp_message_source(recovered, pending_source)
+    stamp_message_source(
+        recovered,
+        pending_source,
+        active_turn_token=active_turn_token,
+    )
     if session.pending_attachments:
         recovered['attachments'] = list(session.pending_attachments)
-    session.messages.append(recovered)
+    _insert_recovered_pending_turn(session.messages, recovered)
     _append_recovered_turn_to_context(session, recovered)
     # The new user turn is now committed to messages (#3831): advance the
     # truncation watermark to the new message's timestamp so that
@@ -2307,25 +2404,64 @@ def _normalize_journal_recovery_text(value) -> str:
     return " ".join(str(value or "").split())
 
 
-def _message_matches_pending_checkpoint(message, pending_text, timestamp, source, attachments):
+def _message_token_conflicts(message: dict, expected_active_turn_token) -> bool:
+    existing_token = message.get('_active_turn_token')
+    present = existing_token.strip() if isinstance(existing_token, str) else existing_token is not None
+    return bool(present) and existing_token != expected_active_turn_token
+
+
+def _messages_have_active_turn_owner(messages, active_turn_token) -> bool:
+    return bool(active_turn_token) and any(
+        isinstance(message, dict)
+        and message.get('role') == 'user'
+        and message.get('_active_turn_token') == active_turn_token
+        for message in messages
+    )
+
+
+def _message_matches_pending_checkpoint(
+    message,
+    pending_text,
+    timestamp,
+    source,
+    attachments,
+    *,
+    expected_active_turn_token=None,
+    allow_state_db_lcm_marker_candidate=False,
+):
     if not isinstance(message, dict) or message.get('role') != 'user':
         return False
-    try:
-        message_timestamp = int(message.get('timestamp'))
-        expected_timestamp = int(timestamp)
-    except (TypeError, ValueError):
+    if _message_token_conflicts(message, expected_active_turn_token):
+        return False
+    if (
+        not allow_state_db_lcm_marker_candidate
+        and is_lcm_context_recovery_marker(message)
+    ):
+        return False
+    message_timestamp = _message_timestamp_as_float(message)
+    expected_timestamp = _message_timestamp_as_float({'timestamp': timestamp})
+    if message_timestamp is None or expected_timestamp is None:
         return False
     return (
         _normalize_journal_recovery_text(message.get('content'))
         == _normalize_journal_recovery_text(pending_text)
-        and message_timestamp == expected_timestamp
+        and int(message_timestamp) == int(expected_timestamp)
         and (message.get('_source') or 'webui') == (source or 'webui')
         and list(message.get('attachments') or []) == list(attachments or [])
     )
 
 
-def _message_matches_pending_text(message, pending_text):
+def _message_matches_pending_text(
+    message,
+    pending_text,
+    *,
+    expected_active_turn_token=None,
+):
     if not isinstance(message, dict) or message.get('role') != 'user':
+        return False
+    if _message_token_conflicts(message, expected_active_turn_token):
+        return False
+    if is_lcm_context_recovery_marker(message):
         return False
     return (
         _normalize_journal_recovery_text(message.get('content'))
@@ -2333,13 +2469,54 @@ def _message_matches_pending_text(message, pending_text):
     )
 
 
-def _latest_user_matches_pending_text(messages, pending_text):
+def _latest_user_matches_pending_text(
+    messages,
+    pending_text,
+    *,
+    expected_active_turn_token=None,
+):
     if not isinstance(messages, list) or not pending_text:
         return False
     for message in reversed(messages):
         if isinstance(message, dict) and message.get('role') == 'user':
-            return _message_matches_pending_text(message, pending_text)
+            return _message_matches_pending_text(
+                message,
+                pending_text,
+                expected_active_turn_token=expected_active_turn_token,
+            )
     return False
+
+
+def _pending_turn_checkpoint_status(
+    session,
+    timestamp,
+    active_turn_token,
+):
+    tail = session.messages[-1] if session.messages else None
+    exact = _message_matches_pending_checkpoint(
+        tail,
+        session.pending_user_message,
+        timestamp,
+        session.pending_user_source,
+        session.pending_attachments,
+        expected_active_turn_token=active_turn_token,
+    )
+    owned = exact or _messages_have_active_turn_owner(
+        session.messages,
+        active_turn_token,
+    )
+    checkpointed = owned or _message_matches_pending_text(
+        tail,
+        session.pending_user_message,
+        expected_active_turn_token=active_turn_token,
+    )
+    if exact:
+        stamp_message_source(
+            tail,
+            session.pending_user_source,
+            active_turn_token=active_turn_token,
+        )
+    return owned, checkpointed
 
 
 def _partial_message_signature(message: dict) -> tuple:
@@ -2634,10 +2811,19 @@ def _recoverable_unsaved_gateway_terminal_error(
     }
 
 
-def _pending_recovery_turn_start(session) -> int | None:
+def _pending_recovery_turn_start(
+    session,
+    *,
+    expected_active_turn_token=None,
+) -> int | None:
     pending_text = getattr(session, 'pending_user_message', None)
     if not pending_text:
         return None
+    if expected_active_turn_token is None:
+        expected_active_turn_token = build_active_turn_token(
+            getattr(session, 'active_stream_id', None),
+            getattr(session, 'pending_started_at', None),
+        )
     for idx in range(len(session.messages or []) - 1, -1, -1):
         message = session.messages[idx]
         if _message_matches_pending_checkpoint(
@@ -2646,7 +2832,12 @@ def _pending_recovery_turn_start(session) -> int | None:
             session.pending_started_at,
             session.pending_user_source,
             session.pending_attachments,
-        ) or _message_matches_pending_text(message, pending_text):
+            expected_active_turn_token=expected_active_turn_token,
+        ) or _message_matches_pending_text(
+            message,
+            pending_text,
+            expected_active_turn_token=expected_active_turn_token,
+        ):
             return idx
     return None
 
@@ -2655,6 +2846,8 @@ def _materialize_unsaved_gateway_terminal_error(
     session,
     stream_id: str | None,
     recovery: dict | None = None,
+    *,
+    expected_active_turn_token=None,
 ) -> bool:
     """Place the validated current-turn gateway error at the transcript tail."""
     recovery = recovery or _recoverable_unsaved_gateway_terminal_error(
@@ -2662,6 +2855,11 @@ def _materialize_unsaved_gateway_terminal_error(
     )
     if not isinstance(recovery, dict):
         return False
+    if expected_active_turn_token is None:
+        expected_active_turn_token = build_active_turn_token(
+            stream_id or getattr(session, 'active_stream_id', None),
+            getattr(session, 'pending_started_at', None),
+        )
     event_id = recovery.get('event_id')
     candidate = recovery.get('message')
     if not event_id or not isinstance(candidate, dict):
@@ -2674,7 +2872,10 @@ def _materialize_unsaved_gateway_terminal_error(
         ):
             return True
 
-    turn_start = _pending_recovery_turn_start(session)
+    turn_start = _pending_recovery_turn_start(
+        session,
+        expected_active_turn_token=expected_active_turn_token,
+    )
     if turn_start is not None:
         for existing in reversed((session.messages or [])[turn_start + 1:]):
             if not isinstance(existing, dict):
@@ -2706,17 +2907,25 @@ def _recover_journaled_output_and_terminal_error(
     *,
     dedupe_existing: bool = False,
     terminal_recovery: dict | None = None,
+    expected_active_turn_token=None,
 ) -> tuple[bool, bool]:
     """Recover readable activity first, then append its authoritative terminal error."""
+    if expected_active_turn_token is None:
+        expected_active_turn_token = build_active_turn_token(
+            stream_id or getattr(session, 'active_stream_id', None),
+            getattr(session, 'pending_started_at', None),
+        )
     recovered_output = _append_journaled_partial_output(
         session,
         stream_id,
         dedupe_existing=dedupe_existing,
+        expected_active_turn_token=expected_active_turn_token,
     )
     terminal_error_recovered = _materialize_unsaved_gateway_terminal_error(
         session,
         stream_id,
         terminal_recovery,
+        expected_active_turn_token=expected_active_turn_token,
     )
     return recovered_output, terminal_error_recovered
 
@@ -2759,6 +2968,7 @@ def _append_journaled_partial_output(
     stream_id: str | None,
     *,
     dedupe_existing: bool = False,
+    expected_active_turn_token=None,
 ) -> bool:
     """Recover already-emitted visible output from a dead stream journal.
 
@@ -2770,6 +2980,11 @@ def _append_journaled_partial_output(
     """
     if not stream_id:
         return False
+    if expected_active_turn_token is None:
+        expected_active_turn_token = build_active_turn_token(
+            stream_id or getattr(session, 'active_stream_id', None),
+            getattr(session, 'pending_started_at', None),
+        )
 
     try:
         from api.run_journal import read_run_events
@@ -2814,6 +3029,7 @@ def _append_journaled_partial_output(
             session.pending_started_at,
             session.pending_user_source,
             session.pending_attachments,
+            expected_active_turn_token=expected_active_turn_token,
         ):
             return False
 
@@ -2828,6 +3044,7 @@ def _append_journaled_partial_output(
                 session.pending_started_at,
                 session.pending_user_source,
                 session.pending_attachments,
+                expected_active_turn_token=expected_active_turn_token,
             )
             if candidate_matches_checkpoint and candidate.get('_recovered'):
                 continue
@@ -3269,6 +3486,10 @@ def _retry_journal_recovery_in_place(
                     session,
                     stream_id,
                     dedupe_existing=True,
+                    expected_active_turn_token=build_active_turn_token(
+                        stream_id,
+                        getattr(session, 'pending_started_at', None),
+                    ),
                 )
             )
             if recovered_output or terminal_error_recovered:
@@ -3374,6 +3595,14 @@ def _apply_core_sync_or_error_marker(
         if require_stream_dead and session.active_stream_id in _active_stream_ids():
             return False
     _stream_id = stream_id_for_recheck or session.active_stream_id
+    _current_active_turn_token = build_active_turn_token(
+        _stream_id,
+        getattr(session, 'pending_started_at', None),
+    )
+    _pending_is_lcm_marker = is_lcm_context_recovery_marker({
+        'role': 'user',
+        'content': session.pending_user_message,
+    })
     _terminal_recovery = _recoverable_unsaved_gateway_terminal_error(
         session, _stream_id,
     )
@@ -3386,25 +3615,32 @@ def _apply_core_sync_or_error_marker(
         _recovered_ts = int(time.time())
         if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
             _recovered_ts = int(session.pending_started_at)
-        _already_checkpointed = _message_matches_pending_checkpoint(
-            session.messages[-1],
-            session.pending_user_message,
+        (
+            _turn_already_owned,
+            _tail_user_already_checkpointed,
+        ) = _pending_turn_checkpoint_status(
+            session,
             _recovered_ts,
-            session.pending_user_source,
-            session.pending_attachments,
-        )
-        _tail_user_already_checkpointed = _already_checkpointed or _message_matches_pending_text(
-            session.messages[-1],
-            session.pending_user_message,
+            _current_active_turn_token,
         )
         _pending_started_at = session.pending_started_at
         if _run_journal_terminal_state(session, _stream_id) == 'completed':
-            if not (_already_checkpointed or _latest_user_matches_pending_text(session.messages, session.pending_user_message)):
-                _append_recovered_pending_turn(session, timestamp=_recovered_ts)
+            latest_user_matches = _latest_user_matches_pending_text(
+                session.messages,
+                session.pending_user_message,
+                expected_active_turn_token=_current_active_turn_token,
+            )
+            if not (_turn_already_owned or latest_user_matches):
+                _append_recovered_pending_turn(
+                    session,
+                    timestamp=_recovered_ts,
+                    active_turn_token=_current_active_turn_token,
+                )
             _append_journaled_partial_output(
                 session,
                 _stream_id,
                 dedupe_existing=True,
+                expected_active_turn_token=_current_active_turn_token,
             )
             session.active_stream_id = None
             session.pending_user_message = None
@@ -3419,7 +3655,11 @@ def _apply_core_sync_or_error_marker(
             )
             return True
         if not _tail_user_already_checkpointed:
-            _append_recovered_pending_turn(session, timestamp=_recovered_ts)
+            _append_recovered_pending_turn(
+                session,
+                timestamp=_recovered_ts,
+                active_turn_token=_current_active_turn_token,
+            )
         else:
             recovered = {
                 'role': 'user',
@@ -3428,8 +3668,11 @@ def _apply_core_sync_or_error_marker(
                 '_recovered': True,
             }
             pending_source = getattr(session, 'pending_user_source', None)
-            if pending_source and pending_source != 'webui':
-                recovered['_source'] = pending_source
+            stamp_message_source(
+                recovered,
+                pending_source,
+                active_turn_token=_current_active_turn_token,
+            )
             if session.pending_attachments:
                 recovered['attachments'] = list(session.pending_attachments)
             _append_recovered_turn_to_context(session, recovered)
@@ -3438,6 +3681,7 @@ def _apply_core_sync_or_error_marker(
                 session,
                 _stream_id,
                 terminal_recovery=_terminal_recovery,
+                expected_active_turn_token=_current_active_turn_token,
             )
         )
         session.active_stream_id = None
@@ -3467,7 +3711,32 @@ def _apply_core_sync_or_error_marker(
             core = json.load(f)
         core_messages = core.get('messages', [])
         if core_messages:
-            session.messages = core_messages
+            core_has_context_markers = any(
+                is_context_compression_marker(message)
+                for message in core_messages
+            )
+            if core_has_context_markers:
+                session.messages = []
+                session.context_messages = []
+                for message in core_messages:
+                    if is_context_compression_marker(message):
+                        if (
+                            isinstance(message, dict)
+                            and message.get('role') == 'user'
+                            and is_lcm_context_recovery_marker(message)
+                        ):
+                            # Core JSON has no provenance for an untagged LCM
+                            # user row. Preserve the ambiguous history in both
+                            # projections rather than risk deleting a genuine turn.
+                            session.messages.append(message)
+                            session.context_messages.append(dict(message))
+                        else:
+                            _append_recovered_turn_to_context(session, message)
+                    else:
+                        session.messages.append(message)
+                        session.context_messages.append(dict(message))
+            else:
+                session.messages = core_messages
             session.tool_calls = core.get('tool_calls', [])
             for field in ('input_tokens', 'output_tokens', 'estimated_cost'):
                 if core.get(field) is not None:
@@ -3476,16 +3745,13 @@ def _apply_core_sync_or_error_marker(
             _recovered_ts = int(time.time())
             if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
                 _recovered_ts = int(session.pending_started_at)
-            _already_checkpointed = _message_matches_pending_checkpoint(
-                session.messages[-1] if session.messages else None,
-                session.pending_user_message,
+            (
+                _,
+                _tail_user_already_checkpointed,
+            ) = _pending_turn_checkpoint_status(
+                session,
                 _recovered_ts,
-                session.pending_user_source,
-                session.pending_attachments,
-            )
-            _tail_user_already_checkpointed = _already_checkpointed or _message_matches_pending_text(
-                session.messages[-1] if session.messages else None,
-                session.pending_user_message,
+                _current_active_turn_token,
             )
             if (
                 _pending_text
@@ -3493,15 +3759,21 @@ def _apply_core_sync_or_error_marker(
                 and (
                     _run_journal_has_visible_output(session, _stream_id)
                     or _terminal_recovery is not None
+                    or _pending_is_lcm_marker
                 )
             ):
-                _append_recovered_pending_turn(session, timestamp=_recovered_ts)
+                _append_recovered_pending_turn(
+                    session,
+                    timestamp=_recovered_ts,
+                    active_turn_token=_current_active_turn_token,
+                )
             recovered_output, terminal_error_recovered = (
                 _recover_journaled_output_and_terminal_error(
                     session,
                     _stream_id,
                     dedupe_existing=True,
                     terminal_recovery=_terminal_recovery,
+                    expected_active_turn_token=_current_active_turn_token,
                 )
             )
             _pending_started_at = session.pending_started_at
@@ -3546,12 +3818,17 @@ def _apply_core_sync_or_error_marker(
         _recovered_ts = int(time.time())
         if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
             _recovered_ts = int(session.pending_started_at)
-        _append_recovered_pending_turn(session, timestamp=_recovered_ts)
+        _append_recovered_pending_turn(
+            session,
+            timestamp=_recovered_ts,
+            active_turn_token=_current_active_turn_token,
+        )
     recovered_output, terminal_error_recovered = (
         _recover_journaled_output_and_terminal_error(
             session,
             _stream_id,
             terminal_recovery=_terminal_recovery,
+            expected_active_turn_token=_current_active_turn_token,
         )
     )
     _pending_started_at = session.pending_started_at
@@ -3760,6 +4037,85 @@ def _repair_stale_pending(session) -> bool:
         return False
 
 
+def _state_db_pending_turn_owner(
+    session,
+    state_messages: list,
+    active_turn_token: str | None,
+) -> tuple[dict | None, bool]:
+    pending_text = getattr(session, 'pending_user_message', None)
+    if not active_turn_token or not pending_text:
+        return None, False
+    source = getattr(session, 'pending_user_source', None) or 'webui'
+    attachments = list(getattr(session, 'pending_attachments', None) or [])
+    pending_timestamp = int(float(session.pending_started_at))
+
+    def _matches_pending_checkpoint(message):
+        if not isinstance(message, dict) or message.get('role') != 'user':
+            return False
+        message_timestamp = _message_timestamp_as_float(message)
+        return (
+            _normalize_journal_recovery_text(message.get('content'))
+            == _normalize_journal_recovery_text(pending_text)
+            and message_timestamp is not None
+            and int(message_timestamp) == pending_timestamp
+        )
+
+    existing_row_ids = set()
+    projections_identity_valid = True
+    for projection in (getattr(session, 'messages', []), getattr(session, 'context_messages', [])):
+        for message in projection or []:
+            if not _matches_pending_checkpoint(message):
+                continue
+            row_id, row_id_valid = _state_db_row_identity_details(message)
+            if not row_id_valid:
+                projections_identity_valid = False
+            elif row_id is not None:
+                existing_row_ids.add(row_id)
+
+    def _candidate_identity_status(message):
+        if message.get('_active_turn_token') == active_turn_token:
+            return None
+        row_id, row_id_valid = _state_db_row_identity_details(message)
+        if not row_id_valid:
+            return False
+        if row_id is None:
+            return None if 'api_content' not in message else False
+        return projections_identity_valid and row_id not in existing_row_ids
+
+    candidates = [
+        (index, message)
+        for index, message in enumerate(state_messages)
+        if _matches_pending_checkpoint(message)
+        and not _message_token_conflicts(message, active_turn_token)
+    ]
+    claimable = (
+        len(candidates) == 1
+        and _candidate_identity_status(candidates[0][1]) is not False
+    )
+    allow_existing_claim = not candidates or claimable
+    owner = copy.deepcopy(candidates[0][1]) if claimable else {
+        'role': 'user',
+        'content': pending_text,
+        'timestamp': pending_timestamp,
+        '_recovered': True,
+    }
+    stamp_message_source(owner, source, active_turn_token=active_turn_token)
+    if attachments:
+        owner['attachments'] = copy.deepcopy(attachments)
+    if claimable:
+        state_messages[candidates[0][0]] = owner
+    return owner, allow_existing_claim
+
+
+def _ensure_pending_turn_owner(
+    messages: list, owner: dict | None, claim_existing: bool = True,
+) -> None:
+    if owner is not None and not _messages_have_active_turn_owner(
+        messages, owner.get('_active_turn_token'),
+    ):
+        _insert_recovered_pending_turn(messages, copy.deepcopy(owner), claim_existing)
+
+
 def _sync_sidecar_from_state_db_if_newer(session) -> bool:
     """Read-side self-heal when WebUI sidecar lags Hermes state.db.
 
@@ -3892,6 +4248,15 @@ def _sync_sidecar_from_state_db_if_newer(session) -> bool:
         )
         if not state_messages:
             return False
+        active_turn_token = build_active_turn_token(
+            locked_stream_id,
+            getattr(locked, 'pending_started_at', None),
+        )
+        pending_turn_owner, allow_existing_claim = _state_db_pending_turn_owner(
+            locked,
+            state_messages,
+            active_turn_token,
+        )
         merged_messages = reconciled_state_db_messages_for_session(
             locked,
             state_messages=state_messages,
@@ -3907,6 +4272,8 @@ def _sync_sidecar_from_state_db_if_newer(session) -> bool:
             prefer_context=True,
             state_messages=state_messages,
         )
+        _ensure_pending_turn_owner(merged_messages, pending_turn_owner, allow_existing_claim)
+        _ensure_pending_turn_owner(merged_context, pending_turn_owner, allow_existing_claim)
 
         # Mutate + persist the freshly-loaded, locked object. Because we hold the
         # lock and reloaded under it, this save cannot clobber a concurrent

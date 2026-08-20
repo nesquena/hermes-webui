@@ -57,7 +57,11 @@ from api.helpers import (
     scrub_internal_replay_fields,
     _redact_text,
 )
-from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
+from api.compression_anchor import (
+    is_context_compression_marker,
+    is_lcm_context_recovery_marker,
+    visible_messages_for_anchor,
+)
 from api.compression_recovery import stamp_compression_exhausted_recovery
 from api.metering import meter
 from api.run_journal import RunJournalWriter
@@ -65,6 +69,7 @@ from api.todo_state import attach_todo_state, emit_todo_state
 from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
 from api.models import (
+    _append_recovered_turn_to_context,
     _is_empty_partial_activity_message,
     _evict_sessions_over_cap,
     clear_process_wakeup_pause,
@@ -1650,6 +1655,22 @@ def _mark_active_turn_checkpoint(message, identity):
     return message
 
 
+def _active_turn_checkpoint_candidate(message, identity, expected_text):
+    if not isinstance(message, dict) or message.get('role') != 'user':
+        return False
+    if _normalize_user_text(_message_text(message.get('content'))) != _normalize_user_text(expected_text):
+        return False
+    existing_token = message.get('_active_turn_token')
+    current_token = identity.get('token') if isinstance(identity, dict) else None
+    if (
+        isinstance(existing_token, str)
+        and existing_token.strip()
+        and existing_token != current_token
+    ):
+        return False
+    return not is_lcm_context_recovery_marker(message)
+
+
 def _mark_active_turn_checkpoint_in_history(messages, identity, msg_text, *, allow_index_fallback=True):
     messages = list(messages or [])
     if not isinstance(identity, dict):
@@ -1665,11 +1686,7 @@ def _mark_active_turn_checkpoint_in_history(messages, identity, msg_text, *, all
         return messages, False
     message = messages[idx]
     expected_text = identity.get('text') if identity.get('text') is not None else msg_text
-    if (
-        not isinstance(message, dict)
-        or message.get('role') != 'user'
-        or _normalize_user_text(_message_text(message.get('content'))) != _normalize_user_text(expected_text)
-    ):
+    if not _active_turn_checkpoint_candidate(message, identity, expected_text):
         return messages, False
     _mark_active_turn_checkpoint(message, identity)
     return messages, True
@@ -1712,11 +1729,7 @@ def _find_active_turn_checkpoint_index(result_messages, previous_context, identi
         if idx < 0 or idx >= len(result_messages):
             continue
         message = result_messages[idx]
-        if (
-            isinstance(message, dict)
-            and message.get('role') == 'user'
-            and _normalize_user_text(_message_text(message.get('content'))) == _normalize_user_text(expected_text)
-        ):
+        if _active_turn_checkpoint_candidate(message, identity, expected_text):
             return idx
     return None
 
@@ -5442,8 +5455,8 @@ def _deduplicate_context_messages(messages):
     Prevents the agent from seeing the same message twice in conversation_history
     when result_messages contain duplicates that weren't caught by display-merge.
     Compression/reference markers are internal recovery material: keep at most
-    one canonical assistant reference so a mis-role ``user`` marker cannot become
-    the next active user instruction.
+    one canonical assistant reference for legacy markers, while preserving the
+    provider-facing role of LCM context-recovery markers.
     """
     if not messages:
         return messages
@@ -5451,15 +5464,41 @@ def _deduplicate_context_messages(messages):
     deduped = []
     user_exact_index = {}
     for msg in messages:
+        key = _message_replay_key(msg)
+        user_exact_key = None
+        active_turn_token = None
+        if isinstance(msg, dict) and msg.get('role') == 'user' and key is not None:
+            user_exact_key = (
+                key,
+                msg.get('timestamp'),
+                msg.get('_ts'),
+                msg.get('_source') or 'webui',
+                json.dumps(msg.get('attachments') or [], sort_keys=True, ensure_ascii=False),
+            )
+            raw_active_turn_token = msg.get('_active_turn_token')
+            if isinstance(raw_active_turn_token, str) and raw_active_turn_token.strip():
+                active_turn_token = raw_active_turn_token
         if _is_context_compression_marker(msg):
+            is_lcm_marker = is_lcm_context_recovery_marker(msg)
             marker_key = (
                 '__context_compression_marker__',
                 " ".join(_message_text(msg.get('content', '')).split())[:500],
+                msg.get('role') if is_lcm_marker else None,
+                _message_replay_sidecar(msg),
             )
             if marker_key in seen:
                 continue
+            if is_lcm_marker and user_exact_key is not None:
+                exact_indices = user_exact_index.setdefault(user_exact_key, {})
+                if exact_indices:
+                    continue
+                exact_indices[None] = len(deduped)
             seen.add(marker_key)
-            if isinstance(msg, dict) and msg.get('role') != 'assistant':
+            if (
+                isinstance(msg, dict)
+                and msg.get('role') != 'assistant'
+                and not is_lcm_marker
+            ):
                 msg = copy.deepcopy(msg)
                 msg['role'] = 'assistant'
             deduped.append(msg)
@@ -5471,27 +5510,25 @@ def _deduplicate_context_messages(messages):
         # text but different durable ``api_content`` sidecars are distinct turns.
         # Keep the display identity unchanged so ordinary transcript dedup still
         # collapses the same visible row.
-        key = _message_replay_key(msg)
-        if isinstance(msg, dict) and msg.get('role') == 'user' and key is not None:
-            user_exact_key = (
-                key,
-                msg.get('timestamp'),
-                msg.get('_ts'),
-                msg.get('_source') or 'webui',
-                json.dumps(msg.get('attachments') or [], sort_keys=True, ensure_ascii=False),
-            )
-            prior_exact_idx = user_exact_index.get(user_exact_key)
-            if msg.get('_active_turn_token'):
+        if user_exact_key is not None:
+            exact_indices = user_exact_index.setdefault(user_exact_key, {})
+            prior_exact_idx = exact_indices.get(active_turn_token)
+            if active_turn_token is not None and prior_exact_idx is None:
+                prior_exact_idx = exact_indices.get(None)
                 if prior_exact_idx is not None:
                     deduped[prior_exact_idx] = msg
+                    del exact_indices[None]
+                    exact_indices[active_turn_token] = prior_exact_idx
                     continue
-                if key in seen:
-                    deduped.append(msg)
-                    user_exact_index[user_exact_key] = len(deduped) - 1
-                    continue
-            elif prior_exact_idx is not None:
+            elif active_turn_token is None and prior_exact_idx is None and exact_indices:
                 continue
-            user_exact_index[user_exact_key] = len(deduped)
+            if prior_exact_idx is not None:
+                continue
+            exact_indices[active_turn_token] = len(deduped)
+            if active_turn_token is not None and key in seen:
+                deduped.append(msg)
+                exact_indices[active_turn_token] = len(deduped) - 1
+                continue
         if key is not None and key in seen:
             continue
         if key is not None:
@@ -5860,6 +5897,13 @@ def _messages_have_prefix(messages, prefix, *, key_fn=None):
     return True
 
 
+def _message_replay_sidecar(msg):
+    if not isinstance(msg, dict) or msg.get("_partial"):
+        return None
+    raw_sidecar = msg.get("api_content")
+    return raw_sidecar if isinstance(raw_sidecar, str) and raw_sidecar else None
+
+
 def _message_replay_key(msg):
     """Return a stable comparison key for replay/overlap de-duplication."""
     identity = _message_identity(msg)
@@ -5868,12 +5912,7 @@ def _message_replay_key(msg):
     # before the Agent sees the original wire bytes.  Keep synthetic/adjacent
     # partial collapse on the existing identity path; partial rows are display
     # bookkeeping rather than durable provider turns.
-    raw_sidecar = (
-        msg.get("api_content")
-        if isinstance(msg, dict) and not msg.get("_partial")
-        else None
-    )
-    sidecar = raw_sidecar if isinstance(raw_sidecar, str) and raw_sidecar else None
+    sidecar = _message_replay_sidecar(msg)
     if identity is not None:
         if sidecar is not None:
             return (*identity, sidecar)
@@ -7427,6 +7466,10 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
     pending_started_at = getattr(session, 'pending_started_at', None)
     if isinstance(pending_started_at, (int, float)) and pending_started_at > 0:
         recovered_ts = int(pending_started_at)
+    active_turn_token = build_active_turn_token(
+        getattr(session, 'active_stream_id', None),
+        pending_started_at,
+    )
     pending_source = getattr(session, 'pending_user_source', None) or 'webui'
     pending_attachments = list(getattr(session, 'pending_attachments', None) or [])
 
@@ -7448,7 +7491,27 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
             and list(existing.get('attachments') or []) == pending_attachments
         )
 
-    if is_exact_checkpoint(getattr(session, 'messages', None)):
+    def use_existing_checkpoint(messages):
+        if not is_exact_checkpoint(messages):
+            return False
+        existing = messages[-1]
+        existing_token = existing.get('_active_turn_token')
+        if is_lcm_context_recovery_marker(existing):
+            return False
+        if (
+            isinstance(existing_token, str)
+            and existing_token.strip()
+            and existing_token != active_turn_token
+        ):
+            return False
+        stamp_message_source(
+            existing,
+            pending_source,
+            active_turn_token=active_turn_token,
+        )
+        return True
+
+    if use_existing_checkpoint(getattr(session, 'messages', None)):
         return False
     recovered = {
         'role': 'user',
@@ -7458,7 +7521,11 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
     }
     if str(pending_source or '').strip().lower() == 'fork':
         recovered['_fork_child_turn'] = session.session_id
-    stamp_message_source(recovered, pending_source)
+    stamp_message_source(
+        recovered,
+        pending_source,
+        active_turn_token=active_turn_token,
+    )
     if pending_attachments:
         recovered['attachments'] = pending_attachments
     session.messages.append(recovered)
@@ -7471,7 +7538,7 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
     # Placing the mirror here (rather than in _persist_cancelled_turn) covers
     # all three callers: cancel, provider-error, and exception paths.
     ctx = getattr(session, 'context_messages', None)
-    if isinstance(ctx, list) and ctx and not is_exact_checkpoint(ctx):
+    if isinstance(ctx, list) and ctx and not use_existing_checkpoint(ctx):
         ctx.append(dict(recovered))
     # The new user turn is now committed to messages (#3831): advance a positive
     # truncation watermark left over from a prior retry/undo/edit so that
@@ -12476,6 +12543,9 @@ def cancel_stream(stream_id: str) -> bool:
                     _pending_atts_raw = getattr(_cs, 'pending_attachments', None)
                     _pending_atts = list(_pending_atts_raw) if isinstance(_pending_atts_raw, (list, tuple)) else []
                     _pending_started = getattr(_cs, 'pending_started_at', None) or 0
+                    _pending_active_turn_token = build_active_turn_token(
+                        stream_id, _pending_started,
+                    )
                     _msgs_for_recovery = _cs.messages if isinstance(_cs.messages, list) else None
                     if _pending_user and _msgs_for_recovery is not None:
                         _last_user = None
@@ -12496,7 +12566,16 @@ def cancel_stream(stream_id: str) -> bool:
                             if isinstance(_last_content, str) and _last_ts >= _pending_started:
                                 # Tolerate the workspace prefix the streaming thread prepends.
                                 if _pending_user == _last_content or _pending_user in _last_content:
-                                    _already_persisted = True
+                                    existing_token = _last_user.get('_active_turn_token')
+                                    token_owned = not (
+                                        isinstance(existing_token, str)
+                                        and existing_token.strip()
+                                        and existing_token != _pending_active_turn_token
+                                    )
+                                    _already_persisted = (
+                                        token_owned
+                                        and not is_lcm_context_recovery_marker(_last_user)
+                                    )
                         if not _already_persisted:
                             _recovered_ts = int(time.time())
                             if isinstance(_pending_started, (int, float)) and _pending_started > 0:
@@ -12506,10 +12585,15 @@ def cancel_stream(stream_id: str) -> bool:
                                 'content': _pending_user,
                                 'timestamp': _recovered_ts,
                             }
-                            stamp_message_source(_user_turn, _pending_source)
+                            stamp_message_source(
+                                _user_turn,
+                                _pending_source,
+                                active_turn_token=_pending_active_turn_token,
+                            )
                             if _pending_atts:
                                 _user_turn['attachments'] = _pending_atts
                             _msgs_for_recovery.append(_user_turn)
+                            _append_recovered_turn_to_context(_cs, _user_turn)
                 except Exception:
                     logger.debug(
                         "Failed to recover pending user message on cancel for %s",

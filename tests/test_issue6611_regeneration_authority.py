@@ -172,6 +172,46 @@ def test_parent_or_foreign_source_refuses_authority():
         raise AssertionError("foreign source was accepted")
 
 
+def test_untagged_lcm_recovery_envelope_cannot_authorize_regeneration():
+    from api.compression_anchor import is_lcm_context_recovery_marker
+
+    marker = "[Recent Summary (d0, node 418)]"
+    session = _session()
+    session.messages[0] = {"role": "user", "content": marker}
+    session.context_messages[0] = {"role": "user", "content": marker}
+
+    assert is_lcm_context_recovery_marker(session.messages[0])
+    assert regeneration_authority(session) is None
+    with pytest.raises(RegenerationUnavailable) as raised:
+        resolve_regeneration_turn(session)
+    assert raised.value.code == "regeneration_read_only"
+    assert "_active_turn_token" not in session.messages[0]
+
+
+def test_token_owned_lcm_text_remains_regenerable():
+    marker = "[Recent Summary (d0, node 418)]"
+    token = "stream-01f4c8d2:1779348286.3954952"
+    session = _session()
+    session.messages[0] = {
+        "role": "user",
+        "content": marker,
+        "_source": "webui",
+        "timestamp": 1779348286.3954952,
+        "_active_turn_token": token,
+    }
+    session.context_messages[0] = {
+        "role": "user",
+        "content": marker,
+        "_active_turn_token": token,
+    }
+
+    revision = regeneration_authority(session)
+    assert revision
+    turn = resolve_regeneration_turn(session, expected_revision=revision)
+    assert turn.message["content"] == marker
+    assert turn.message["_active_turn_token"] == token
+
+
 def test_writable_imported_session_accepts_only_a_marked_final_user_turn(monkeypatch, tmp_path):
     from api.process_event_utils import build_active_turn_token
     from api import models as models_api

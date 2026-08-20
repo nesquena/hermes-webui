@@ -33,6 +33,13 @@ an automatic/compression-aware pipeline, and ``False`` (default) for manual
 compression contexts.
 """
 
+import re
+
+_RECENT_SUMMARY_MARKER_RE = re.compile(r"^\[recent summary \(d\d+, node \d+\)\](?:\s|$)")
+_PRESERVED_OBJECTIVE_MARKER_RE = re.compile(
+    r"^\[current user objective preserved from compacted history\](?:\s|$)"
+)
+
 
 def _content_text(content, *, part_types):
     if isinstance(content, list):
@@ -53,6 +60,30 @@ def _content_has_part_type(content, part_types):
     )
 
 
+def _normalized_marker_text(message):
+    return _content_text(
+        message.get("content", ""),
+        part_types={"text", "input_text", "output_text"},
+    ).lower().lstrip()
+
+
+def is_lcm_context_recovery_marker(message):
+    """Return true for role-preserving LCM context-recovery envelopes."""
+    if not isinstance(message, dict):
+        return False
+    role = message.get("role")
+    if not isinstance(role, str) or role not in ("user", "assistant"):
+        return False
+    active_turn_token = message.get("_active_turn_token")
+    if role == "user" and isinstance(active_turn_token, str) and active_turn_token.strip():
+        return False
+    text = _normalized_marker_text(message)
+    return (
+        _RECENT_SUMMARY_MARKER_RE.match(text) is not None
+        or _PRESERVED_OBJECTIVE_MARKER_RE.match(text) is not None
+    )
+
+
 def is_context_compression_marker(message):
     """Return true for synthetic compression/reference cards, not user turns."""
     if not isinstance(message, dict):
@@ -60,15 +91,13 @@ def is_context_compression_marker(message):
     role = message.get("role")
     if not role or role == "tool":
         return False
-    text = _content_text(
-        message.get("content", ""),
-        part_types={"text", "input_text", "output_text"},
-    ).lower().lstrip()
+    text = _normalized_marker_text(message)
     synthetic_unbracketed_marker = bool(message.get("_compressed_summary"))
     return (
         text.startswith("[context compaction")
         or (synthetic_unbracketed_marker and text.startswith("context compaction"))
         or text.startswith("[your active task list was preserved across context compression]")
+        or is_lcm_context_recovery_marker(message)
         or text.startswith("[session arc summary")
     )
 

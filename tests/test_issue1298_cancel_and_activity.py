@@ -139,6 +139,73 @@ class TestIssue1298CancelPreservesUserMessage:
         )
         assert s2.active_stream_id is None
 
+    def test_cancel_mirrors_pending_user_into_context_without_retagging_lcm_envelope(self):
+        from api.compression_anchor import is_lcm_context_recovery_marker
+        from api.process_event_utils import build_active_turn_token
+
+        marker = "[Recent Summary (d0, node 418)]"
+        started_at = 1779348286.3954952
+        recovery_envelope = {
+            "role": "user",
+            "content": marker,
+            "timestamp": int(started_at),
+        }
+        s = _make_pending_session(
+            session_id="cancel_sid_context_lcm_envelope",
+            pending_msg=marker,
+            messages=[],
+            attachments=["synthetic.txt"],
+        )
+        s.context_messages = [recovery_envelope]
+        s.pending_started_at = started_at
+        s.pending_user_source = "synthetic"
+        s.save()
+        models.SESSIONS[s.session_id] = s
+        stream_id, _agent = _setup_cancel_stream_state(s.session_id)
+
+        assert cancel_stream(stream_id) is True
+
+        current_token = build_active_turn_token(stream_id, started_at)
+        visible_users = [
+            message for message in s.messages
+            if message.get("role") == "user"
+        ]
+        assert len(visible_users) == 1
+        recovered = visible_users[0]
+        assert recovered["_active_turn_token"] == current_token
+        assert recovered["_source"] == "synthetic"
+        assert recovered["attachments"] == ["synthetic.txt"]
+
+        assert s.context_messages[0] == recovery_envelope
+        assert is_lcm_context_recovery_marker(s.context_messages[0])
+        assert s.context_messages[0].get("_active_turn_token") is None
+        assert s.context_messages[1] == recovered
+
+    def test_cancel_does_not_claim_timestamped_ordinary_user_row(self):
+        started_at = 1779348286
+        prior_user = {
+            "role": "user",
+            "content": "Run a tool for me",
+            "timestamp": started_at,
+        }
+        s = _make_pending_session(
+            session_id="cancel_sid_ordinary_fallback",
+            pending_msg=prior_user["content"],
+            messages=[prior_user],
+        )
+        s.pending_started_at = started_at
+        stream_id, _agent = _setup_cancel_stream_state(s.session_id)
+
+        assert cancel_stream(stream_id) is True
+
+        matching = [
+            message for message in s.messages
+            if message.get("role") == "user"
+            and message.get("content") == prior_user["content"]
+        ]
+        assert matching == [prior_user]
+        assert "_active_turn_token" not in matching[0]
+
     def test_cancel_does_not_double_append_when_streaming_thread_already_merged(self):
         """If the streaming thread won the race and already merged the user turn
         into s.messages before cancel_stream() got the lock, cancel must not
