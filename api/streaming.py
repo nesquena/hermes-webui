@@ -6473,6 +6473,51 @@ def _save_streaming_checkpoint(session):
         session.save(skip_index=True)
 
 
+# A checkpoint rewrite re-serializes the whole session (messages included) while
+# holding the GIL, so its cost grows with transcript size: ~100 ms for a 1.8 MB
+# sidecar, ~300 ms for a 36 MB one. Because the HTTP server and the agent workers
+# share one interpreter, every one of those milliseconds is added latency for all
+# concurrent requests. Skip the rewrite when it would persist byte-identical state.
+_CHECKPOINT_IDLE_REFRESH_SECONDS = 300
+
+
+def _streaming_checkpoint_fingerprint(session):
+    """Return a cheap fingerprint of the state a streaming checkpoint persists.
+
+    The periodic checkpoint fires on tool completion, but a completed tool call
+    does not by itself mutate the session: ``run_conversation()`` works on an
+    internal copy of ``messages`` and the turn bookkeeping fields are written
+    once before the run starts. So the recurring rewrite normally re-persists
+    state that is already on disk.
+
+    This fingerprint covers every field the checkpoint can legitimately advance
+    mid-run — session identity (compression rotation), turn bookkeeping, and the
+    length of the persisted message projections — without serializing anything.
+    Comparing it lets the checkpoint thread skip redundant work while still
+    writing within one interval of any real change.
+
+    Fails closed: if a field cannot be read, return ``None`` so the caller keeps
+    the unconditional write.
+    """
+    try:
+        return (
+            getattr(session, 'session_id', None),
+            getattr(session, 'parent_session_id', None),
+            getattr(session, 'profile', None),
+            getattr(session, 'active_stream_id', None),
+            getattr(session, 'pending_user_message', None),
+            getattr(session, 'pending_started_at', None),
+            getattr(session, 'pending_user_source', None),
+            len(getattr(session, 'pending_attachments', None) or ()),
+            len(getattr(session, 'messages', None) or ()),
+            len(getattr(session, 'context_messages', None) or ()),
+            getattr(session, 'compression_anchor_visible_idx', None),
+            bool(getattr(session, 'pre_compression_snapshot', None)),
+        )
+    except Exception:  # pragma: no cover - defensive: never block a checkpoint
+        return None
+
+
 def _normalize_fresh_chat_text(text):
     text = _strip_workspace_prefix(str(text or ''), include_legacy=True)
     text = re.sub(r"\s+", " ", text).strip().lower()
@@ -10088,12 +10133,33 @@ def _run_agent_streaming(
 
             def _periodic_checkpoint():
                 last_saved_activity = 0
+                last_fingerprint = None
+                last_write_at = 0.0
                 while not _checkpoint_stop.wait(15):
                     try:
                         cur = _checkpoint_activity[0]
                         if cur > last_saved_activity:
                             with _agent_lock:
-                                _save_streaming_checkpoint(s)
+                                fingerprint = _streaming_checkpoint_fingerprint(s)
+                                # A completed tool call is the trigger, but not
+                                # proof that anything the checkpoint persists
+                                # actually changed. Rewriting a multi-megabyte
+                                # sidecar to re-persist identical bytes stalls
+                                # every concurrent HTTP request behind the GIL,
+                                # so only write when the persisted state moved.
+                                # Fail closed: an unreadable fingerprint (None)
+                                # always writes, and a periodic refresh keeps
+                                # updated_at from going stale on a long turn.
+                                now = time.time()
+                                stale = (now - last_write_at) >= _CHECKPOINT_IDLE_REFRESH_SECONDS
+                                if (
+                                    fingerprint is None
+                                    or fingerprint != last_fingerprint
+                                    or stale
+                                ):
+                                    _save_streaming_checkpoint(s)
+                                    last_fingerprint = fingerprint
+                                    last_write_at = now
                             last_saved_activity = cur
                     except Exception as e:
                         logger.debug("Periodic checkpoint save failed: %s", e)
