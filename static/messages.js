@@ -1363,11 +1363,18 @@ function _retainReadOnlyForkPayload(record, sid) {
   _readOnlyForkPayloads.set(sid, record);
 }
 
+function _retireReadOnlyForkPayload(sid) {
+  if (sid) _readOnlyForkPayloads.delete(sid);
+}
+
 function _restoreReadOnlyForkPayload(record, sid, generation) {
   if (!_readOnlyForkPayloadVisible(record, sid, generation)) return false;
   const input = $('msg');
-  if (!input || String(input.value || '').trim() || (S.pendingFiles || []).length) return false;
-  input.value = record.text;
+  if (!input) return false;
+  const currentText = String(input.value || '');
+  if (currentText.trim() && currentText !== record.text) return false;
+  if ((S.pendingFiles || []).length) return false;
+  if (!currentText) input.value = record.text;
   S.pendingFiles = [...record.files];
   if (typeof autoResize === 'function') autoResize();
   if (typeof renderTray === 'function') renderTray();
@@ -1409,7 +1416,7 @@ async function _prepareReadOnlyForkPayload(text, files) {
     if (!_restoreReadOnlyForkPayload(record, recoverySid, record.sourceGeneration)) {
       _retainReadOnlyForkPayload(record, recoverySid);
     }
-    if (typeof showToast === 'function') showToast(`Fork failed: ${error && error.message || error}`, 4000);
+    if (typeof showToast === 'function') showToast(typeof t === 'function' ? t('branch_failed') : 'branch_failed', 4000);
     return null;
   }
   const sourceStillOwns = _readOnlyForkPayloadVisible(record, record.sourceSid, record.sourceGeneration);
@@ -1418,15 +1425,24 @@ async function _prepareReadOnlyForkPayload(text, files) {
     record.state = 'recovery';
     _retainReadOnlyForkPayload(record, record.childSid);
     if (typeof renderSessionList === 'function') void renderSessionList();
-    if (typeof showToast === 'function') showToast(typeof t === 'function' ? t('branch_forked') : 'Fork created', 3000);
+    if (typeof showToast === 'function') showToast(typeof t === 'function' ? t('branch_forked') : 'branch_forked', 3000);
     return null;
   }
   const sourceSession = S.session;
   const generationBeforeLoad = _loadSessionGeneration;
+  const failureBeforeLoad = _sessionLoadFailureGeneration;
   S.session = null;
   try { await loadSession(record.childSid); }
   catch (error) {
-    S.session = sourceSession; record.state = 'recovery'; _retainReadOnlyForkPayload(record, record.childSid); return null;
+    S.session = sourceSession; record.state = 'recovery'; _retainReadOnlyForkPayload(record, record.childSid);
+    if (typeof showToast === 'function') showToast(typeof t === 'function' ? t('branch_failed') : 'branch_failed', 3000);
+    return null;
+  }
+  if (_sessionLoadFailureGeneration > failureBeforeLoad && _sessionLoadFailureSid === record.childSid) {
+    record.state = 'recovery';
+    _retainReadOnlyForkPayload(record, record.childSid);
+    if (typeof showToast === 'function') showToast(typeof t === 'function' ? t('branch_failed') : 'branch_failed', 3000);
+    return null;
   }
   if (!S.session || S.session.session_id !== record.childSid || _loadingSessionId) {
     record.state = 'recovery'; _retainReadOnlyForkPayload(record, record.childSid); return null;
@@ -1509,9 +1525,12 @@ async function send(){
       const command = typeof COMMANDS !== 'undefined' && COMMANDS.find(c => c.name === 'branch');
       if (command) { $('msg').value = ''; await command.fn(parsed.args); return; }
     } else {
-      if (typeof showToast === 'function') showToast(parsed ? 'Read-only commands cannot be modified.' : 'Read-only sessions cannot be modified.', 3000);
+      if (typeof showToast === 'function') showToast('Read-only imported sessions cannot be modified.', 3000);
       return;
     }
+  }
+  if (S.session && !(S.session.read_only || S.session.is_read_only)) {
+    _retireReadOnlyForkPayload(S.session.session_id);
   }
   _clearStaleBusyStateBeforeSend({compressionRunning});
   // If busy or a manual compression is still running, handle based on default_message_mode
@@ -1573,6 +1592,10 @@ async function send(){
         showToast(`Queued: "${text.slice(0,40)}${text.length>40?'…':''}"`,2000);
       }
     }
+    return;
+  }
+  if(S.session&&(S.session.read_only||S.session.is_read_only)){
+    if(typeof showToast==='function') showToast('Read-only imported sessions cannot be modified.',3000);
     return;
   }
   let _slashDisplayTextOverride=null;
@@ -1751,7 +1774,9 @@ async function send(){
   // window is not clobbered by a delayed text:'' post. Keep the promise so the
   // #5472 failed-send restore can chain its re-persist after this clear resolves.
   let _composerDraftClearPromise=null;
-  if (activeSid && typeof _clearComposerDraft === 'function' && !_readOnlyForkHandoff) _composerDraftClearPromise=_clearComposerDraft(activeSid,_submittedDraftTextForClear,_submittedDraftFilesForClear);
+  if (!_readOnlyForkHandoff) {
+    if (activeSid && typeof _clearComposerDraft === 'function') _composerDraftClearPromise=_clearComposerDraft(activeSid,_submittedDraftTextForClear,_submittedDraftFilesForClear);
+  }
 
   setComposerStatus(_submittedFiles.length?'Uploading…':'');
   let uploaded=[];
@@ -1931,6 +1956,9 @@ async function send(){
     })};
     if (_readOnlyForkHandoff) startOptions.retries = 0;
     const startData=await api('/api/chat/start',startOptions);
+    if (!startData || typeof startData !== 'object' || !startData.stream_id) {
+      throw new Error(typeof t === 'function' ? t('branch_failed') : 'branch_failed');
+    }
     _pendingMoaConfig=null;
     postStartData = startData;
     if (_readOnlyForkHandoff) {
@@ -1946,6 +1974,8 @@ async function send(){
       S.messages=S.messages.filter(message=>message!==userMsg);
       _readOnlyForkHandoff.state='recovery';
       _retainReadOnlyForkPayload(_readOnlyForkHandoff, activeSid);
+      S.busy = false;
+      if (typeof updateSendBtn === 'function') updateSendBtn();
       if (!$('msg').value && !(S.pendingFiles||[]).length) {
         $('msg').value=_readOnlyForkHandoff.text;
         S.pendingFiles=[..._readOnlyForkHandoff.files];

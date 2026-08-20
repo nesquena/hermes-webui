@@ -24,6 +24,8 @@ let _loadingSessionId = null;
 // concurrent loads can still race and overwrite each other unless we compare
 // the generation token as well.
 let _loadSessionGeneration = 0;
+let _sessionLoadFailureGeneration = 0;
+let _sessionLoadFailureSid = null;
 // #3306: Snapshot of S.messages captured by loadSession() right before it
 // clears them on a force-reload of the active session. Consumed by
 // _ensureMessagesLoaded() when calling _carryForwardEphemeralTurnFields so
@@ -260,7 +262,8 @@ function _rememberComposerDraftPayloadState(sid, text, files) {
 }
 
 // Immediate save used before session switches.
-function _saveComposerDraftNow(sid, text, files, opts={}) {
+function _saveComposerDraftNow(sid, text, files) {
+  const opts = arguments[3] || {};
   if (!sid) return Promise.resolve(true);
   clearTimeout(_draftSaveTimer);
   const normalizedText = String(text || '');
@@ -2136,6 +2139,8 @@ async function loadSession(sid){
     try {
       await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, loadGeneration:_loadGeneration});
     } catch(e) {
+      _sessionLoadFailureGeneration += 1;
+      _sessionLoadFailureSid = sid;
       if (!_isCurrentLoad()) {
         _rearmActiveSessionStream();
         return;
@@ -2255,6 +2260,8 @@ async function loadSession(sid){
         _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load messages. Try switching sessions or refreshing.</div>';
       }
       if (typeof showToast === 'function') showToast('Failed to load conversation messages', 3000, 'error');
+      _sessionLoadFailureGeneration += 1;
+      _sessionLoadFailureSid = sid;
       if (_isCurrentLoad()) _loadingSessionId = null;
       return;
     }
@@ -2525,12 +2532,12 @@ function _isReadOnlySession(session) {
 
 function _isBranchableReadOnlySession(session) {
   if (!_isReadOnlySession(session)) return false;
-  const sources = [
+  const source = [
     session && session.source_tag,
     session && session.raw_source,
     session && session.source,
-  ].map(v => String(v || '').trim().toLowerCase());
-  return sources.includes('cron');
+  ].map(v => String(v || '').trim().toLowerCase()).find(Boolean);
+  return source === 'cron';
 }
 
 function _sourceKeyForSession(session) {
