@@ -1359,6 +1359,9 @@ function _readOnlyForkPayloadVisible(record, sid, generation) {
 }
 
 function _retainReadOnlyForkPayload(record, sid) {
+  for (const [key, existing] of _readOnlyForkPayloads) {
+    if (existing !== record && existing && existing.sourceSid === record.sourceSid) _readOnlyForkPayloads.delete(key);
+  }
   _readOnlyForkPayloads.delete(record.sourceSid);
   if (record.childSid) _readOnlyForkPayloads.delete(record.childSid);
   _readOnlyForkPayloads.set(sid, record);
@@ -1609,7 +1612,7 @@ async function send(){
       return;
     }
   }
-  if (S.session && !(S.session.read_only || S.session.is_read_only)) {
+  if (S.session && !(S.session.read_only || S.session.is_read_only) && !_readOnlyForkHandoff) {
     _retireReadOnlyForkPayload(S.session.session_id);
   }
   _clearStaleBusyStateBeforeSend({compressionRunning});

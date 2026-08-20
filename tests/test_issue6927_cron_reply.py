@@ -327,7 +327,7 @@ def test_off_pane_child_draft_save_cannot_clear_handoff_payload():
     try:
         result = page.evaluate("""async () => {
           const calls=[];
-          _readOnlyForkPayloads.set('child-off-pane', {sourceSid:'cron-off-pane', childSid:'child-off-pane', state:'child-draft-owned', text:'keep me', files:[]});
+          _readOnlyForkPayloads.set('child-off-pane', {sourceSid:'cron-off-pane', childSid:'child-off-pane', state:'child-draft-owned', sendActive:true, text:'keep me', files:[]});
           S.session={session_id:'child-off-pane', read_only:false};
           window.api=async url=>{calls.push(url); return {};};
           _saveComposerDraft('child-off-pane', '', []);

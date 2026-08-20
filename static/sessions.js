@@ -221,12 +221,21 @@ async function _restoreRememberedNewChatDraftSession() {
 
 function _saveComposerDraft(sid, text, files) {
   if (!sid) return;
-  const _handoffChildPayload = typeof _hasReadOnlyForkPayloadForSid === 'function' && _hasReadOnlyForkPayloadForSid(sid);
+  let _handoffChildPayload = typeof _hasReadOnlyForkPayloadForSid === 'function' && _hasReadOnlyForkPayloadForSid(sid);
+  const _handoffOriginalInput = _handoffChildPayload && typeof _isReadOnlyForkOriginalInputForSid === 'function' &&
+    _isReadOnlyForkOriginalInputForSid(sid, text, files);
+  const _handoffSendActive = _handoffChildPayload && typeof _isReadOnlyForkSendActiveForSid === 'function' &&
+    _isReadOnlyForkSendActiveForSid(sid);
   if (typeof _hasReadOnlyForkAcceptedPendingClear === 'function' && _hasReadOnlyForkAcceptedPendingClear(sid) &&
       typeof _retireReadOnlyForkPayload === 'function') _retireReadOnlyForkPayload(sid);
+  if (_handoffChildPayload && !_handoffOriginalInput && !_handoffSendActive && !String(text || '') &&
+      !(Array.isArray(files) && files.length) && typeof _retireReadOnlyForkPayload === 'function') {
+    _retireReadOnlyForkPayload(sid);
+    _handoffChildPayload = false;
+  }
   if (S.session && S.session.session_id === sid &&
       (_isReadOnlySession(S.session) ||
-       (_handoffChildPayload && !String(text || '') && !(Array.isArray(files) && files.length)))) return;
+       (_handoffChildPayload && (_handoffOriginalInput || _handoffSendActive) && !String(text || '') && !(Array.isArray(files) && files.length)))) return;
   clearTimeout(_draftSaveTimer);
   const normalizedText = String(text || '');
   const normalizedFiles = _composerDraftFilesForPersist(files);
@@ -271,11 +280,20 @@ function _rememberComposerDraftPayloadState(sid, text, files) {
 function _saveComposerDraftNow(sid, text, files) {
   const opts = arguments[3] || {};
   if (!sid) return Promise.resolve(true);
-  const _handoffChildPayload = typeof _hasReadOnlyForkPayloadForSid === 'function' && _hasReadOnlyForkPayloadForSid(sid);
+  let _handoffChildPayload = typeof _hasReadOnlyForkPayloadForSid === 'function' && _hasReadOnlyForkPayloadForSid(sid);
+  const _handoffOriginalInput = _handoffChildPayload && typeof _isReadOnlyForkOriginalInputForSid === 'function' &&
+    _isReadOnlyForkOriginalInputForSid(sid, text, files);
+  const _handoffSendActive = _handoffChildPayload && typeof _isReadOnlyForkSendActiveForSid === 'function' &&
+    _isReadOnlyForkSendActiveForSid(sid);
   if (typeof _hasReadOnlyForkAcceptedPendingClear === 'function' && _hasReadOnlyForkAcceptedPendingClear(sid) &&
       typeof _retireReadOnlyForkPayload === 'function') _retireReadOnlyForkPayload(sid);
+  if (_handoffChildPayload && !_handoffOriginalInput && !_handoffSendActive && !String(text || '') &&
+      !(Array.isArray(files) && files.length) && typeof _retireReadOnlyForkPayload === 'function') {
+    _retireReadOnlyForkPayload(sid);
+    _handoffChildPayload = false;
+  }
   if (S.session && S.session.session_id === sid &&
-      (_isReadOnlySession(S.session) || (_handoffChildPayload && !String(text || '') && !(Array.isArray(files) && files.length)))) return Promise.resolve(true);
+      (_isReadOnlySession(S.session) || (_handoffChildPayload && (_handoffOriginalInput || _handoffSendActive) && !String(text || '') && !(Array.isArray(files) && files.length)))) return Promise.resolve(true);
   clearTimeout(_draftSaveTimer);
   const normalizedText = String(text || '');
   const normalizedFiles = _composerDraftFilesForPersist(files);
@@ -328,7 +346,8 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
   // composer is the authoritative in-progress draft; never replace non-empty
   // local input with an older server draft. Cross-session switches still restore
   // normally so the previous session's composer contents do not leak forward.
-  if (preserveActiveInput && ((current && current !== text) || currentFiles.length)) return;
+  if (preserveActiveInput && current && current !== text) return;
+  if (preserveActiveInput && currentFiles.length) return;
 
   // If there's no text and no files, clear the textarea (a previous session's
   // draft may still be sitting there from a cross-session switch).
