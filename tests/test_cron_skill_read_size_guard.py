@@ -1810,8 +1810,9 @@ def test_cron_output_split_marker_repaired_only_when_proven(monkeypatch, tmp_pat
     boundaries provably concatenate to the real heading. In the gap case (windows not
     adjacent), even a pseudo-split pattern is NOT repaired — proving the guard. (#6141 r12)"""
     from api.routes import (
-        _read_cron_output_bounded,
+        _CRON_TRUNCATION_DIVIDER,
         _cron_output_snippet,
+        _read_cron_output_bounded,
         _split_response_marker_prefix,
     )
 
@@ -1837,6 +1838,20 @@ def test_cron_output_split_marker_repaired_only_when_proven(monkeypatch, tmp_pat
     assert trunc_adj
     # After repair, "## Response" appears exactly once (the reconstructed marker)
     assert txt_adj.count("## Response") == 1
+    # No partial prefix fragment before the divider — the prefix was moved, not copied
+    head_before_divider = txt_adj.split(_CRON_TRUNCATION_DIVIDER, 1)[0]
+    assert "## Resp" not in head_before_divider, (
+        "prefix must not appear in head before divider"
+    )
+    # Overall count of the prefix string (including partials) is exactly 1
+    assert txt_adj.count("## Resp") == 1, (
+        "exactly one ## Resp occurrence overall (repaired heading only)"
+    )
+    # Exact trim: the head side keeps exactly frontmatter + filler (the prefix
+    # bytes and nothing more were moved to the tail)
+    assert len(head_before_divider.encode("utf-8")) == (
+        len(frontmatter.encode("utf-8")) + filler_len
+    )
     # Body survives in content
     assert "Actual reply body here." in txt_adj
     # Snippet shows the body (marker found, so divider preference irrelevant)

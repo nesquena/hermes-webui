@@ -1625,10 +1625,12 @@ def _read_cron_output_bounded(
     - Split-marker repair exception: when a ``## Response`` or ``# Response`` heading
       provably straddles the adjacent boundary (head ends with a prefix AND tail starts
       with the matching remainder, the prefix begins at a line start, AND the head
-      read was full), the prefix is reattached to the tail BEFORE the partial-line
-      drop, repairing the complete heading and skipping the drop for that line. This
-      reconstruction is only performed when the split is proven; markerless output
-      keeps literal bytes (no heading is ever synthesized). (#6141 r12, R1, R2, R7)
+      read was full), the prefix is MOVED to the tail — the emitted head gives up
+      exactly the prefix bytes — BEFORE the partial-line drop, repairing the complete
+      heading and skipping the drop for that line. The heading therefore survives
+      exactly once. This reconstruction is only performed when the split is proven;
+      markerless output keeps literal bytes (no heading is ever synthesized).
+      (#6141 r12, R1, R2, R7; r13)
     - Every read is capped (no unbounded ``fh.read()``).
     - The returned ``bytes_read`` is the actual byte count consumed from THIS
       descriptor (the disjoint head + tail windows, derived from the pinned
@@ -1763,8 +1765,12 @@ def _read_cron_output_bounded(
         else ""
     )
     if split_marker_prefix:
-        # The repaired first tail line IS the complete heading — no partial
-        # first line remains to drop.
+        # Move the proven prefix, never copy it: the emitted head gives up
+        # exactly the prefix bytes so the heading survives once. The prefix
+        # is pure ASCII and head_raw.endswith() proved it is the head's final
+        # bytes, so trimming exactly its length from head_text is exact even
+        # under errors="replace" decoding. (#6141 r13)
+        head_text = head_text[: -len(split_marker_prefix)]
         tail_text = split_marker_prefix + tail_text
     else:
         # Drop the first tail line only when it is a PROVEN partial. The first
