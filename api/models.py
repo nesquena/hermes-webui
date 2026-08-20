@@ -1125,6 +1125,280 @@ def _load_session_from_path(path: Path) -> "Session | None":
     return Session(**data)
 
 
+def _reverse_json_array_pair(data: bytes, absolute_base: int, expected_open: int):
+    """Find the closing bracket paired with the top-level messages array."""
+    end = len(data) - 1
+    while end >= 0 and data[end] in b" \t\r\n":
+        end -= 1
+    if end >= 0 and data[end] == ord("}"):
+        end -= 1
+    stack = [(ord("{"), -1)]
+    top_level_arrays_seen = 0
+    in_string = False
+    idx = end
+    while idx >= 0:
+        byte = data[idx]
+        if byte == ord('"'):
+            slashes = 0
+            probe = idx - 1
+            while probe >= 0 and data[probe] == ord('\\'):
+                slashes += 1
+                probe -= 1
+            if slashes % 2 == 0:
+                in_string = not in_string
+        elif not in_string:
+            if byte == ord("]"):
+                if len(stack) == 1 and top_level_arrays_seen:
+                    return expected_open, absolute_base + idx
+                stack.append((ord("["), idx))
+            elif byte == ord("}"):
+                stack.append((ord("{"), idx))
+            elif byte in (ord("{"), ord("[")) and len(stack) > 1:
+                expected, close_idx = stack[-1]
+                if byte != expected:
+                    return None
+                absolute_open = absolute_base + idx
+                if byte == ord("[") and absolute_open == expected_open:
+                    return expected_open, absolute_base + close_idx
+                if byte == ord("[") and len(stack) == 2:
+                    # Modern Session.save() writes messages before the
+                    # top-level tool_calls array. If the messages opener is
+                    # outside this EOF window, the first completed top-level
+                    # array after tool_calls is its matching close.
+                    key_end = idx - 1
+                    while key_end >= 0 and data[key_end] in b" \t\r\n:":
+                        key_end -= 1
+                    key_start = key_end - 1
+                    while key_start >= 0 and data[key_start] != ord('"'):
+                        key_start -= 1
+                    key = data[key_start + 1:key_end].decode("utf-8", errors="ignore")
+                    if key == "messages":
+                        return expected_open, absolute_base + close_idx
+                    if key == "tool_calls":
+                        top_level_arrays_seen += 1
+                stack.pop()
+        idx -= 1
+    # If the suffix window began after the messages opener, the parser cannot
+    # prove the opener/close pair. Returning None forces bounded expansion.
+    return None
+
+
+def _reverse_json_tail_start(data: bytes, open_idx: int, close_idx: int, value_limit: int) -> int | None:
+    """Return the byte offset of the Nth-last value in a JSON array."""
+    if value_limit <= 0:
+        return close_idx
+    stack = []
+    in_string = False
+    commas = 0
+    idx = close_idx - 1
+    while idx > open_idx:
+        byte = data[idx]
+        if byte == ord('"'):
+            slashes = 0
+            probe = idx - 1
+            while probe > open_idx and data[probe] == ord('\\'):
+                slashes += 1
+                probe -= 1
+            if slashes % 2 == 0:
+                in_string = not in_string
+        elif not in_string:
+            if byte == ord("}"):
+                stack.append(ord("{"))
+            elif byte == ord("]"):
+                stack.append(ord("["))
+            elif byte in (ord("{"), ord("[")) and stack:
+                if byte != stack[-1]:
+                    return None
+                stack.pop()
+            elif byte == ord(",") and not stack:
+                commas += 1
+                if commas >= value_limit:
+                    return idx + 1
+        idx -= 1
+    return None if open_idx <= 0 else open_idx + 1
+
+
+def _decode_json_values(raw: bytes) -> list:
+    """Decode comma-separated JSON values without wrapping the whole sidecar."""
+    text = raw.decode("utf-8")
+    decoder = json.JSONDecoder()
+    values = []
+    pos = 0
+    while pos < len(text):
+        while pos < len(text) and (text[pos].isspace() or text[pos] == ","):
+            pos += 1
+        if pos >= len(text):
+            break
+        value, pos = decoder.raw_decode(text, pos)
+        values.append(value)
+    return values
+
+
+def read_session_auxiliary_metadata(session_id: str) -> dict:
+    """Read small/terminal session fields without deserializing messages."""
+    if not is_safe_session_id(session_id):
+        return {}
+    path = SESSION_DIR / f"{session_id}.json"
+    if not path.exists():
+        return {}
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            handle.seek(max(0, size - min(size, 64 * 1024 * 1024)))
+            suffix = handle.read()
+        text = suffix.decode("utf-8")
+        decoder = json.JSONDecoder()
+        top_level_keys = {}
+        leading = len(text) - len(text.lstrip())
+        root_object_in_buffer = text[leading:leading + 1] == "{"
+        key_depth = 1 if root_object_in_buffer else 0
+        depth = key_depth
+        index = leading + 1 if root_object_in_buffer else 0
+        while index < len(text):
+            char = text[index]
+            if char == '"':
+                start = index
+                index += 1
+                escaped = False
+                while index < len(text):
+                    if escaped:
+                        escaped = False
+                    elif text[index] == "\\":
+                        escaped = True
+                    elif text[index] == '"':
+                        break
+                    index += 1
+                if index >= len(text):
+                    break
+                if depth == key_depth:
+                    key = json.loads(text[start:index + 1])
+                    probe = index + 1
+                    while probe < len(text) and text[probe].isspace():
+                        probe += 1
+                    if probe < len(text) and text[probe] == ":":
+                        top_level_keys.setdefault(key, probe)
+                index += 1
+                continue
+            if char in "[{":
+                depth += 1
+            elif char in "]}":
+                depth = max(0, depth - 1)
+            index += 1
+
+        def value_for(key):
+            colon = top_level_keys.get(key)
+            if colon is None:
+                return None
+            value_start = colon + 1
+            while value_start < len(text) and text[value_start].isspace():
+                value_start += 1
+            value, _ = decoder.raw_decode(text, value_start)
+            return value
+
+        anchor = value_for("anchor_activity_scenes")
+        tool_calls = value_for("tool_calls")
+        result = {}
+        if isinstance(anchor, dict):
+            result["anchor_activity_scenes"] = anchor
+        if isinstance(tool_calls, list):
+            result["tool_calls"] = tool_calls
+        return result
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        logger.debug("Failed to read bounded session auxiliary metadata for %s", session_id, exc_info=True)
+        return {}
+
+
+def read_session_message_tail(session_id: str, value_limit: int) -> tuple[list, int]:
+    """Read only the newest raw message rows from a sidecar JSON file.
+
+    This is the cold display path for ``?messages=1&msg_limit=N``. It never
+    calls ``Session.load`` and never deserializes the full transcript. The
+    returned offset is the raw array index of the first returned value, derived
+    from the persisted ``message_count`` metadata when available.
+    """
+    if not is_safe_session_id(session_id):
+        return [], 0
+    try:
+        limit = max(1, int(value_limit))
+    except (TypeError, ValueError):
+        return [], 0
+    path = SESSION_DIR / f"{session_id}.json"
+    if not path.exists():
+        return [], 0
+    try:
+        file_size = path.stat().st_size
+        with path.open("rb") as handle:
+            head = handle.read(min(file_size, 256 * 1024))
+            try:
+                head_text = head.decode("utf-8")
+            except UnicodeDecodeError:
+                head_text = head.decode("utf-8", errors="ignore")
+            marker = _find_top_level_json_key(head_text, "messages")
+            if marker is None:
+                return [], 0
+            marker_byte = len(head_text[:marker].encode("utf-8"))
+            open_rel = head.find(b"[", marker_byte)
+            if open_rel < 0:
+                return [], 0
+            expected_open = open_rel
+            window_size = min(file_size, max(256 * 1024, 1024 * 1024))
+            pair = None
+            while True:
+                start = max(0, file_size - window_size)
+                handle.seek(start)
+                window = handle.read(file_size - start)
+                pair = _reverse_json_array_pair(window, start, expected_open)
+                if pair is not None:
+                    break
+                if start == 0 or window_size >= min(file_size, 128 * 1024 * 1024):
+                    return [], 0
+                window_size = min(file_size, window_size * 2)
+            open_abs, close_abs = pair
+            # Scan from the close bracket backward. If the Nth-last value starts
+            # before the current window, expand and retry with a larger window.
+            while True:
+                start_abs = _reverse_json_tail_start(
+                    window,
+                    max(0, open_abs - start),
+                    close_abs - start,
+                    limit,
+                )
+                if start_abs is not None:
+                    value_start_abs = start + start_abs
+                    if value_start_abs >= start:
+                        handle.seek(value_start_abs)
+                        raw = handle.read(close_abs - value_start_abs)
+                        try:
+                            values = _decode_json_values(raw)
+                        except (UnicodeError, ValueError, json.JSONDecodeError):
+                            values = []
+                        if values:
+                            break
+                if start == 0 or window_size >= min(file_size, 128 * 1024 * 1024):
+                    return [], 0
+                window_size = min(file_size, window_size * 2)
+                start = max(0, file_size - window_size)
+                handle.seek(start)
+                window = handle.read(file_size - start)
+                pair = _reverse_json_array_pair(window, start, expected_open)
+                if pair is None:
+                    return [], 0
+                open_abs, close_abs = pair
+            prefix = _read_metadata_json_prefix(path)
+            total_count = None
+            if prefix:
+                try:
+                    metadata = json.loads(prefix)
+                    total_count = int(metadata.get("message_count"))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    total_count = None
+            offset = max(0, total_count - len(values)) if total_count is not None else 0
+            return values, offset
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        logger.debug("Failed to read bounded message tail for %s", session_id, exc_info=True)
+        return [], 0
+
+
 def _lookup_index_message_count(session_id):
     """Return the indexed message count without loading the full session file."""
     return _index_message_count_map().get(str(session_id))
@@ -1187,6 +1461,33 @@ def model_explicit_pick_signature(model, model_provider) -> str:
     _m = str(model or "").strip()
     _p = str(model_provider or "").strip().lower()
     return f"{_m}\x1f{_p}"
+
+
+def _deduplicate_stable_message_ids_for_persistence(messages):
+    """Remove repeated stable-ID snapshots before serializing a session."""
+    output = []
+    by_id = {}
+    for message in list(messages or []):
+        if not isinstance(message, dict):
+            output.append(message)
+            continue
+        message_id = message.get("id")
+        if message_id is None or isinstance(message_id, bool):
+            output.append(message)
+            continue
+        existing_index = by_id.get(message_id)
+        if existing_index is None:
+            by_id[message_id] = len(output)
+            output.append(message)
+            continue
+        existing = output[existing_index]
+        if not isinstance(existing, dict):
+            continue
+        for key, value in message.items():
+            if key in {"content", "reasoning"} and not value and existing.get(key):
+                continue
+            existing[key] = value
+    return output
 
 
 class Session:
@@ -1417,6 +1718,8 @@ class Session:
             'process_wakeup_pause',
             'share_token', 'share_created_at',
         ]
+        self.messages = _deduplicate_stable_message_ids_for_persistence(self.messages)
+        self.context_messages = _deduplicate_stable_message_ids_for_persistence(self.context_messages)
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
         # #5854: message_count and a compact anchor-scene fingerprint go in the
         # metadata prefix (BEFORE messages) so load_metadata_only() and the

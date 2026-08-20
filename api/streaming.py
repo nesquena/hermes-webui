@@ -5579,6 +5579,39 @@ def _deduplicate_context_messages(messages):
     return deduped
 
 
+def _deduplicate_stable_message_ids(messages):
+    """Collapse repeated snapshots that carry the same stable message ID.
+
+    Streaming providers may replay the same in-flight assistant object between
+    tool events. Content-based dedupe must not remove identical answers from
+    separate turns, but a stable ID identifies one logical row unambiguously.
+    Keep the first row's position and merge later metadata into it.
+    """
+    output = []
+    by_id = {}
+    for message in list(messages or []):
+        if not isinstance(message, dict):
+            output.append(message)
+            continue
+        message_id = message.get("id")
+        if message_id is None or isinstance(message_id, bool):
+            output.append(message)
+            continue
+        existing_index = by_id.get(message_id)
+        if existing_index is None:
+            by_id[message_id] = len(output)
+            output.append(message)
+            continue
+        existing = output[existing_index]
+        if not isinstance(existing, dict):
+            continue
+        for key, value in message.items():
+            if key in {"content", "reasoning"} and not value and existing.get(key):
+                continue
+            existing[key] = value
+    return output
+
+
 def _assign_stable_message_ids(result_messages, *existing_arrays):
     """Mint a stable, session-unique integer ``id`` on model-result rows lacking one.
 
@@ -6701,6 +6734,9 @@ def _merge_display_messages_after_agent_result(
     the current user turn onward. Synthetic compaction/reference markers remain
     internal recovery material and must not become visible user/assistant turns.
     """
+    previous_display = _deduplicate_stable_message_ids(previous_display)
+    previous_context = _deduplicate_stable_message_ids(previous_context)
+    result_messages = _deduplicate_stable_message_ids(result_messages)
     previous_display = [
         m for m in list(previous_display or [])
         if not _is_context_compression_marker(m)

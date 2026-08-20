@@ -252,6 +252,61 @@ def test_same_assistant_text_across_different_turns_is_preserved():
     ]
 
 
+def test_same_stable_id_snapshot_is_collapsed_but_identical_answers_with_new_ids_survive():
+    repeated_snapshot = {
+        "role": "assistant",
+        "id": 354,
+        "content": "",
+        "reasoning": "planning",
+        "codex_reasoning_items": [{"summary": "planning"}],
+    }
+    result_messages = [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "id": 1, "content": "same answer"},
+        repeated_snapshot,
+        {"role": "tool", "id": 2, "content": "result", "tool_call_id": "call-1"},
+        dict(repeated_snapshot),
+        {"role": "user", "content": "second"},
+        {"role": "assistant", "id": 3, "content": "same answer"},
+    ]
+
+    merged = streaming._merge_display_messages_after_agent_result(
+        previous_display=[],
+        previous_context=[],
+        result_messages=result_messages,
+        msg_text="second",
+    )
+
+    assert sum(message.get("id") == 354 for message in merged) == 1
+    assert sum(message.get("content") == "same answer" for message in merged) == 2
+
+
+
+def test_session_save_collapses_repeated_stable_id_snapshots(_isolate_state):
+    snapshot = {
+        "role": "assistant",
+        "id": 354,
+        "content": "",
+        "reasoning": "planning",
+        "codex_reasoning_items": [{"summary": "planning"}],
+    }
+    session = Session(
+        session_id="save_snapshot_dedupe",
+        messages=[
+            {"role": "user", "content": "prompt"},
+            snapshot,
+            dict(snapshot),
+            {"role": "assistant", "id": 355, "content": "answer"},
+        ],
+    )
+
+    session.save()
+    loaded = Session.load("save_snapshot_dedupe")
+
+    assert [message.get("id") for message in loaded.messages] == [None, 354, 355]
+
+
+
 def test_llm_title_generated_survives_save_and_load(_isolate_state):
     s = Session(
         session_id="generated_title",
