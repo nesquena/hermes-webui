@@ -8453,7 +8453,8 @@ def get_state_db_session_message_keys_before_timestamp(
                         "content": row["content"],
                         "tool_calls": _json_loads_if_string(row["tool_calls"]),
                         "api_content": row["api_content"] if "api_content" in available else None,
-                    }
+                    },
+                    normalize_workspace_prefix=True,
                 )
                 for row in cur.fetchall()
             ]
@@ -9255,12 +9256,16 @@ def _loose_session_message_content(value: str) -> str:
     return " ".join(re.findall(r"\w+", str(value or "").casefold()))
 
 
-def _session_message_content_key(msg: dict):
+def _session_message_content_key(
+    msg: dict,
+    *,
+    normalize_workspace_prefix: bool = True,
+):
     if not isinstance(msg, dict):
         return ("non_dict", repr(msg))
     role = str(msg.get("role") or "")
     content = _normalized_session_message_content(msg)
-    if role == "user":
+    if role == "user" and normalize_workspace_prefix:
         # WebUI sends the model a workspace-prefixed user_message
         # ("[Workspace::v1: /path]\n<text>") while the visible/optimistic
         # bubble and the WebUI sidecar row carry only the bare "<text>". The
@@ -9288,7 +9293,11 @@ def _session_message_content_key(msg: dict):
     ), msg)
 
 
-def _session_message_visible_key(msg: dict):
+def _session_message_visible_key(
+    msg: dict,
+    *,
+    normalize_workspace_prefix: bool = False,
+):
     if not isinstance(msg, dict):
         return ("non_dict", repr(msg))
     # Include tool_calls so assistant messages that invoke different tools
@@ -9297,9 +9306,21 @@ def _session_message_visible_key(msg: dict):
     # ("assistant", "") and the merge treats state.db rows as replays.
     _tc = msg.get("tool_calls")
     _tc_key = json.dumps(_tc, sort_keys=True, default=str) if _tc else ""
+    role = str(msg.get("role") or "")
+    content = _normalized_session_message_content(msg)
+    if role == "user" and normalize_workspace_prefix:
+        # state.db stores the model-facing workspace-prefixed prompt while the
+        # WebUI sidecar owns the bare visible text. Fold that protocol wrapper
+        # into the exact key so large-session reconciliation does not depend on
+        # the bounded fuzzy fallback to recognize one logical turn.
+        from api.streaming import _strip_workspace_prefix
+
+        content = " ".join(
+            _strip_workspace_prefix(content, include_legacy=True).split()
+        )
     return _session_message_key_with_sidecar((
-        str(msg.get("role") or ""),
-        _normalized_session_message_content(msg),
+        role,
+        content,
         _tc_key,
     ), msg)
 
@@ -9321,6 +9342,9 @@ def _build_visible_duplicate_lookup(visible_keys: set[tuple]) -> dict:
     return {"keys": visible_keys, "by_role": by_role, "loose_by_key": {}}
 
 
+_VISIBLE_DUPLICATE_FUZZY_MAX_KEYS = 1000
+
+
 def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], lookup: dict | None = None):
     if visible_key in visible_keys:
         return visible_key
@@ -9328,6 +9352,12 @@ def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], lo
     content = visible_key[1] if len(visible_key) > 1 else ""
     sidecar = visible_key[3] if len(visible_key) > 3 else None
     if not content:
+        return None
+    # Exact identity above remains authoritative at every size. The fallback
+    # below scans the existing keys for every candidate, so it becomes
+    # quadratic on long transcripts even when each individual message is small.
+    # Prefer an occasional near-duplicate over blocking every WebUI endpoint.
+    if len(visible_keys) > _VISIBLE_DUPLICATE_FUZZY_MAX_KEYS:
         return None
     if lookup is None:
         lookup = _build_visible_duplicate_lookup(visible_keys)
@@ -9429,8 +9459,14 @@ def state_db_delta_after_context(sidecar_context: list, state_messages: list) ->
         and str(sidecar_context[0].get('role') or '') == 'user'
     )
 
-    sidecar_keys = [_session_message_content_key(m) for m in sidecar_context]
-    state_keys = [_session_message_content_key(m) for m in state_messages]
+    sidecar_keys = [
+        _session_message_content_key(m, normalize_workspace_prefix=False)
+        for m in sidecar_context
+    ]
+    state_keys = [
+        _session_message_content_key(m, normalize_workspace_prefix=True)
+        for m in state_messages
+    ]
     max_offset = min(len(sidecar_keys), len(state_keys))
     best_len = 0
     best_offset = 0
@@ -9724,8 +9760,18 @@ def merge_session_messages_append_only(
     _message_key_helpers = {
         "merge": _session_message_merge_key,
         "dedup": _session_message_dedup_key,
-        "content": _session_message_content_key,
-        "visible": _session_message_visible_key,
+        "content_sidecar": lambda msg: _session_message_content_key(
+            msg, normalize_workspace_prefix=False
+        ),
+        "content_state": lambda msg: _session_message_content_key(
+            msg, normalize_workspace_prefix=True
+        ),
+        "visible_sidecar": lambda msg: _session_message_visible_key(
+            msg, normalize_workspace_prefix=False
+        ),
+        "visible_state": lambda msg: _session_message_visible_key(
+            msg, normalize_workspace_prefix=True
+        ),
     }
 
     def _cached_message_key(msg, kind):
@@ -9859,12 +9905,14 @@ def merge_session_messages_append_only(
     ambiguous_row_ids = set()
     max_sidecar_timestamp = None
 
-    def _remember_merged_message(message):
+    def _remember_merged_message(message, *, source: str):
         if not isinstance(message, dict):
             return
         merged_by_message_key.setdefault(_cached_message_key(message, "merge"), message)
         merged_by_dedup_key.setdefault(_cached_message_key(message, "dedup"), message)
-        merged_by_visible_key.setdefault(_cached_message_key(message, "visible"), message)
+        merged_by_visible_key.setdefault(
+            _cached_message_key(message, f"visible_{source}"), message
+        )
         row_id, row_id_valid = _state_db_row_identity_details(message)
         if row_id_valid and row_id is not None:
             if row_id in merged_by_row_id:
@@ -9879,16 +9927,16 @@ def merge_session_messages_append_only(
         key = _cached_message_key(msg, "merge")
         seen_message_keys.add(key)
         seen_dedup_keys.add(_cached_message_key(msg, "dedup"))
-        content_key = _cached_message_key(msg, "content")
+        content_key = _cached_message_key(msg, "content_sidecar")
         seen_content_keys.add(content_key)
-        visible_key = _cached_message_key(msg, "visible")
+        visible_key = _cached_message_key(msg, "visible_sidecar")
         seen_visible_keys.add(visible_key)
         sidecar_visible_keys.add(visible_key)
         sidecar_visible_counts[visible_key] = sidecar_visible_counts.get(visible_key, 0) + 1
         sidecar_visible_sequence.append(visible_key)
         sidecar_visible_messages.append(msg)
         merged_messages.append(msg)
-        _remember_merged_message(msg)
+        _remember_merged_message(msg, source="sidecar")
     if _sidecar_has_terminal_partial_error(sidecar_messages):
         return merged_messages
     sidecar_visible_lookup = _build_visible_duplicate_lookup(sidecar_visible_keys)
@@ -9910,8 +9958,8 @@ def merge_session_messages_append_only(
         timestamp = _message_timestamp_as_float(msg)
         key = _cached_message_key(msg, "merge")
         dedup_key = _cached_message_key(msg, "dedup")
-        visible_key = _cached_message_key(msg, "visible")
-        content_key = _cached_message_key(msg, "content")
+        visible_key = _cached_message_key(msg, "visible_state")
+        content_key = _cached_message_key(msg, "content_state")
         replays_sidecar_prefix = False
         replay_target = None
         if state_replay_idx < len(sidecar_visible_sequence):
@@ -10137,7 +10185,7 @@ def merge_session_messages_append_only(
                             seen_dedup_keys.add(dedup_key)
                             seen_content_keys.add(content_key)
                             seen_visible_keys.add(visible_key)
-                            _remember_merged_message(msg)
+                            _remember_merged_message(msg, source="state")
                         continue
                     else:
                         _merge_session_display_metadata(merged_by_message_key.get(key), msg)
@@ -10149,7 +10197,7 @@ def merge_session_messages_append_only(
                             seen_dedup_keys.add(dedup_key)
                             seen_content_keys.add(content_key)
                             seen_visible_keys.add(visible_key)
-                            _remember_merged_message(msg)
+                            _remember_merged_message(msg, source="state")
                         continue
                     _merge_session_display_metadata(merged_by_message_key.get(key), msg)
                     continue
@@ -10158,7 +10206,7 @@ def merge_session_messages_append_only(
         seen_content_keys.add(content_key)
         seen_visible_keys.add(visible_key)
         merged_messages.append(msg)
-        _remember_merged_message(msg)
+        _remember_merged_message(msg, source="state")
     return merged_messages
 
 

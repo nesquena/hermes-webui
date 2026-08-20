@@ -909,6 +909,7 @@ def _run_gateway_chat_streaming(
     *,
     model_provider=None,
     goal_related=False,
+    regeneration=False,
 ):
     """Bridge a WebUI chat turn through Hermes Gateway's API server.
 
@@ -1279,18 +1280,29 @@ def _run_gateway_chat_streaming(
             # same sort key; later transcript merges can then fall back to
             # role/content ordering instead of turn order.
             assistant_ts = now + 0.000001
-            user_msg = {"role": "user", "content": str(msg_text or ""), "timestamp": now}
             pending_source = getattr(s, "pending_user_source", None) or "webui"
-            if pending_source != "webui":
-                user_msg["_source"] = pending_source
-            if attachments:
-                user_msg["attachments"] = list(attachments)
+            from api.streaming import _active_turn_authority, _materialize_active_turn_user
+
+            active_turn_identity = _active_turn_authority(s, stream_id, msg_text)
+            user_msg = _materialize_active_turn_user(
+                active_turn_identity,
+                str(msg_text or ""),
+                pending_source,
+            )
+            user_msg["timestamp"] = float(
+                active_turn_identity.get("timestamp") or now
+            )
             assistant_msg = {"role": "assistant", "content": assistant_text, "timestamp": assistant_ts}
             saved_reasoning = STREAM_REASONING_TEXT.get(stream_id, "")
             if saved_reasoning:
                 assistant_msg["reasoning"] = saved_reasoning
             previous_messages = list(getattr(s, "messages", None) or [])
-            previous_context = list(getattr(s, "context_messages", None) or getattr(s, "messages", None) or [])
+            stored_context = getattr(s, "context_messages", None)
+            previous_context = list(
+                stored_context
+                if isinstance(stored_context, list) and (regeneration or stored_context)
+                else getattr(s, "messages", None) or []
+            )
             previous_process_wakeup_pause = dict(getattr(s, "process_wakeup_pause", {}) or {})
             # Stamp stable ids on the two new rows (shared with the display merge
             # below) so display and model-context copies share an id for the
