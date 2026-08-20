@@ -874,7 +874,7 @@ DEFAULT_MODEL = os.getenv("HERMES_WEBUI_DEFAULT_MODEL", "")  # Empty = use provi
 def _warn_state_dir_divergence(warn_prefix: str) -> None:
     """Check if SESSION_DIR is empty but a sibling state directory has session data.
 
-    If the session store looks empty (no *.json files besides _index.json in SESSION_DIR,
+    If the session store looks empty (no non-hidden *.json files in SESSION_DIR,
     or SESSION_INDEX_FILE is absent/empty/contains only {}|[]|null), scan STATE_DIR.parent
     for sibling directories with a sessions/ child that has .json files.
 
@@ -885,9 +885,13 @@ def _warn_state_dir_divergence(warn_prefix: str) -> None:
         # Check if session store is empty
         session_dir_empty = False
 
-        # Check for .json files in SESSION_DIR (excluding _index.json)
+        # Hidden JSON files are indexes, manifests, or maintenance artifacts,
+        # not user sessions.
         if SESSION_DIR.exists():
-            json_files = [f for f in SESSION_DIR.glob("*.json") if f.name != "_index.json"]
+            json_files = [
+                f for f in SESSION_DIR.glob("*.json")
+                if not f.name.startswith("_")
+            ]
             session_dir_empty = len(json_files) == 0
         else:
             session_dir_empty = True
@@ -912,7 +916,10 @@ def _warn_state_dir_divergence(warn_prefix: str) -> None:
                         continue
                     sibling_sessions = sibling / "sessions"
                     if sibling_sessions.exists():
-                        json_files = [f for f in sibling_sessions.glob("*.json") if f.name != "_index.json"]
+                        json_files = [
+                            f for f in sibling_sessions.glob("*.json")
+                            if not f.name.startswith("_")
+                        ]
                         if json_files:
                             # Found a sibling with session data
                             print(

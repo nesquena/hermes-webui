@@ -9683,7 +9683,11 @@ from api.models import (
     _record_webui_zero_message_orphan_tombstone,
     _clear_webui_zero_message_orphan_tombstone,
     _load_webui_deleted_session_tombstone,
-    _record_webui_deleted_session_tombstone,
+    _delete_session_recovery_artifacts_locked,
+    _delete_session_sidecar_artifacts_locked,
+    _read_bounded_session_metadata,
+    _read_sidecar_revision,
+    _session_sidecar_authority,
     ensure_cron_project,
     _profile_has_user_projects,
     is_cron_session,
@@ -15243,32 +15247,28 @@ def handle_post(handler, parsed) -> bool:
         if not session_lock.acquire(timeout=5):
             return bad(handler, "Session busy, try again", 503)
         try:
-            with LOCK:
-                SESSIONS.pop(sid, None)
             try:
                 p = (SESSION_DIR / f"{sid}.json").resolve()
                 p.relative_to(SESSION_DIR.resolve())
             except Exception:
                 return bad(handler, "Invalid session_id", 400)
-            sidecar_deleted = False
             try:
-                p.unlink(missing_ok=True)
-            except Exception:
-                logger.debug("Failed to unlink session file %s", p)
-            sidecar_deleted = not p.exists()
+                with _session_sidecar_authority(sid):
+                    _delete_session_sidecar_artifacts_locked(
+                        sid,
+                        record_tombstone=not is_messaging_session,
+                    )
+            except Exception as exc:
+                logger.exception("Failed to durably delete session sidecar %s", sid)
+                return bad(
+                    handler,
+                    f"Session deletion failed; retry is required: {_sanitize_error(exc)}",
+                    500,
+                )
             try:
                 prune_session_from_index(sid)
             except Exception:
                 logger.debug("Failed to prune deleted session from index: %s", sid, exc_info=True)
-            try:
-                p.with_suffix('.json.bak').unlink(missing_ok=True)
-            except Exception:
-                logger.debug("Failed to unlink session backup file %s", p.with_suffix('.json.bak'))
-            if sidecar_deleted and not is_messaging_session:
-                try:
-                    _record_webui_deleted_session_tombstone(sid)
-                except Exception:
-                    logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
         finally:
             session_lock.release()
         # Evict outside the mutation lock: lifecycle commit may perform provider
@@ -15415,11 +15415,41 @@ def handle_post(handler, parsed) -> bool:
                 )
             except (OSError, json.JSONDecodeError, ValueError):
                 logger.warning("session clear could not verify persisted empty state for %s", sid, exc_info=True)
-            if had_sidecar_messages and persisted_clear:
+            # Clearing an already-empty live session is not a destructive
+            # transition. Keep any older, still-recoverable backup: it may be
+            # the only durable copy after an earlier live-sidecar loss. When
+            # this request actually removed messages, however, the pre-clear
+            # backup must be retired so startup recovery cannot resurrect the
+            # history the user just cleared.
+            if persisted_clear and had_sidecar_messages:
+                live_revision = (
+                    s._sidecar_revision_v1
+                    if getattr(s, '_sidecar_revision_session_id_v1', None) == sid
+                    else _read_sidecar_revision(s.path)
+                )
                 try:
-                    s.path.with_suffix('.json.bak').unlink(missing_ok=True)
-                except OSError:
-                    logger.warning("session clear could not remove stale backup for %s", sid, exc_info=True)
+                    with _session_sidecar_authority(sid):
+                        retired = _delete_session_recovery_artifacts_locked(
+                            sid,
+                            expected_live_revision=live_revision,
+                        )
+                    if not retired:
+                        return bad(
+                            handler,
+                            "Session changed while retiring clear recovery artifacts; retry",
+                            409,
+                        )
+                except Exception as exc:
+                    logger.exception(
+                        "session clear could not remove recovery artifacts for %s",
+                        sid,
+                    )
+                    return bad(
+                        handler,
+                        f"Session clear recovery cleanup failed; retry is required: "
+                        f"{_sanitize_error(exc)}",
+                        500,
+                    )
         # Evict cached agent outside the per-session lock.  Eviction may run a
         # boundary memory commit for batch-extraction providers, and provider
         # I/O must not hold the session mutation lock.
@@ -21537,25 +21567,64 @@ def _handle_memory_read(handler, parsed=None):
 def _handle_sessions_cleanup(handler, body, zero_only=False):
     cleaned = 0
     phase1_removed_ids = set()
+    cleanup_failures = []
 
-    # Phase 1: Clean orphan session files (existing behavior).
+    # Phase 1: classify and delete under the same SID authority as writers.
     for p in SESSION_DIR.glob("*.json"):
-        if p.name.startswith("_"):
+        if p.name.startswith("_") or not is_safe_session_id(p.stem):
             continue
+        sid = p.stem
         try:
-            s = Session.load(p.stem)
-            if zero_only:
-                should_delete = s and len(s.messages) == 0
-            else:
-                should_delete = s and s.title == "Untitled" and len(s.messages) == 0
-            if should_delete:
-                with LOCK:
-                    SESSIONS.pop(p.stem, None)
-                p.unlink(missing_ok=True)
-                cleaned += 1
-                phase1_removed_ids.add(p.stem)
-        except Exception:
-            logger.debug("Failed to clean up session file %s", p)
+            with _get_session_agent_lock(sid):
+                with _session_sidecar_authority(sid):
+                    revision = _read_sidecar_revision(p)
+                    if revision is None:
+                        continue
+                    metadata = _read_bounded_session_metadata(p)
+                    if metadata.get('session_id') != sid:
+                        continue
+                    message_count = metadata.get('message_count')
+                    if type(message_count) is not int:
+                        # Legacy/minimal sidecars can omit both messages and the
+                        # derived count. Keep the fallback hard-bounded and fail
+                        # closed for malformed or large unknown shapes.
+                        if p.stat().st_size > 1024 * 1024:
+                            continue
+                        legacy_payload = json.loads(p.read_text(encoding='utf-8'))
+                        if not isinstance(legacy_payload, dict):
+                            continue
+                        legacy_messages = legacy_payload.get('messages', [])
+                        if not isinstance(legacy_messages, list):
+                            continue
+                        message_count = len(legacy_messages)
+                    if zero_only:
+                        should_delete = message_count == 0
+                    else:
+                        should_delete = (
+                            metadata.get('title') == "Untitled"
+                            and message_count == 0
+                        )
+                    if not should_delete:
+                        continue
+                    if not _delete_session_sidecar_artifacts_locked(
+                        sid,
+                        expected_revision=revision,
+                    ):
+                        continue
+                    cleaned += 1
+                    phase1_removed_ids.add(sid)
+        except Exception as exc:
+            cleanup_failures.append((sid, exc))
+            logger.exception("Failed to durably clean up session file %s", p)
+
+    if cleanup_failures:
+        failed_sid, failed_exc = cleanup_failures[0]
+        return bad(
+            handler,
+            f"Session cleanup failed for {failed_sid}; retry is required: "
+            f"{_sanitize_error(failed_exc)}",
+            500,
+        )
 
     phase1_touched = bool(cleaned)
     phase2_rewrote_index = False
@@ -21700,6 +21769,18 @@ def _handle_btw(handler, body):
     return j(handler, {"stream_id": stream_id, "session_id": ephemeral.session_id, "parent_session_id": body["session_id"]})
 
 
+def _delete_hidden_background_session_sidecar(sid: str) -> bool:
+    """Durably remove a hidden background sidecar and every recovery artifact."""
+    with _get_session_agent_lock(sid):
+        with _session_sidecar_authority(sid):
+            sidecar = SESSION_DIR / f'{sid}.json'
+            revision = _read_sidecar_revision(sidecar)
+            return _delete_session_sidecar_artifacts_locked(
+                sid,
+                expected_revision=revision,
+            )
+
+
 def _handle_background(handler, body):
     """POST /api/background — run prompt in parallel background agent.
 
@@ -21762,10 +21843,10 @@ def _handle_background(handler, body):
                 model_provider=model_provider,
             )
             # Reload the bg session from disk and extract the final assistant reply.
+            _answer = ""
             try:
                 from api.models import Session as _Session
                 reloaded = _Session.load(bg_sid)
-                _answer = ""
                 for _m in reversed((reloaded.messages if reloaded else None) or []):
                     if not isinstance(_m, dict) or _m.get("role") != "assistant":
                         continue
@@ -21775,16 +21856,25 @@ def _handle_background(handler, body):
                     if _content:
                         _answer = _content
                         break
-                complete_background(parent_sid, task_id, _answer or "(no answer produced)")
             except Exception:
-                complete_background(parent_sid, task_id, "(background task failed)")
-            # Best-effort cleanup of the hidden bg session file so it doesn't
-            # clutter the sidebar or SESSION_DIR. The index is pruned on the
-            # next rebuild via _index_entry_exists().
+                _answer = "(background task failed)"
+            # Do not acknowledge success until the hidden transcript and every
+            # recovery artifact are durably fenced and removed.
             try:
-                (SESSION_DIR / f"{bg_sid}.json").unlink(missing_ok=True)
+                _delete_hidden_background_session_sidecar(bg_sid)
             except Exception:
-                pass
+                logger.warning(
+                    "Failed to durably delete hidden background session %s",
+                    bg_sid,
+                    exc_info=True,
+                )
+                complete_background(
+                    parent_sid,
+                    task_id,
+                    "(background task cleanup failed)",
+                )
+                return
+            complete_background(parent_sid, task_id, _answer or "(no answer produced)")
         except Exception:
             try:
                 complete_background(parent_sid, task_id, "(background task failed)")
@@ -26517,11 +26607,36 @@ def _handle_session_compress(handler, body):
             s.compression_anchor_mode = "manual"
             s.last_prompt_tokens = new_tokens
             s.save()
-            # Drop stale backups that would undo an intentional manual compress.
+            # Retire every stale recovery copy only if this live revision still owns
+            # the SID; otherwise a concurrent writer's backup must survive.
+            live_revision = (
+                s._sidecar_revision_v1
+                if getattr(s, '_sidecar_revision_session_id_v1', None) == sid
+                else _read_sidecar_revision(s.path)
+            )
             try:
-                s.path.with_suffix(".json.bak").unlink(missing_ok=True)
-            except OSError:
-                pass
+                with _session_sidecar_authority(sid):
+                    retired = _delete_session_recovery_artifacts_locked(
+                        sid,
+                        expected_live_revision=live_revision,
+                    )
+                if not retired:
+                    return bad(
+                        handler,
+                        "Session changed while retiring compression artifacts; retry",
+                        409,
+                    )
+            except Exception as exc:
+                logger.exception(
+                    "Manual compression could not remove recovery artifacts for %s",
+                    sid,
+                )
+                return bad(
+                    handler,
+                    f"Compression recovery cleanup failed; retry is required: "
+                    f"{_sanitize_error(exc)}",
+                    500,
+                )
 
         session_payload = redact_session_data(
             s.compact() | {
