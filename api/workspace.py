@@ -151,18 +151,32 @@ def _is_remote_terminal_backend(terminal_cfg: dict | None) -> bool:
     return backend not in ('', 'local')
 
 
+def _resolve_profile_home_param(profile: str | Path | None) -> Path:
+    """Resolve a profile parameter (name string, directory path string, or Path) to a profile home Path."""
+    if profile is None or str(profile).strip() in ("", "default"):
+        from api.profiles import _DEFAULT_HERMES_HOME
+        return _DEFAULT_HERMES_HOME
+
+    if isinstance(profile, Path):
+        return profile.expanduser()
+
+    raw = str(profile).strip()
+    if "/" in raw or "\\" in raw:
+        return Path(raw).expanduser()
+
+    from api.profiles import get_hermes_home_for_profile
+    return get_hermes_home_for_profile(raw)
+
+
 def _remote_terminal_cwd(profile: str | Path | None = None) -> str | None:
     """Return target-side terminal cwd for a remote profile, without local stat()."""
     try:
         from api.config import get_config, get_config_for_profile_home
-        from api.profiles import get_active_profile_name, get_hermes_home_for_profile
+        from api.profiles import get_active_profile_name
 
         active_profile = get_active_profile_name()
         if profile is not None and str(profile).strip() and str(profile) != active_profile:
-            if isinstance(profile, Path):
-                profile_home = profile
-            else:
-                profile_home = get_hermes_home_for_profile(str(profile))
+            profile_home = _resolve_profile_home_param(profile)
             terminal_cfg = get_config_for_profile_home(profile_home).get('terminal', {})
         else:
             terminal_cfg = get_config().get('terminal', {})
