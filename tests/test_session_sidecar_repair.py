@@ -1,7 +1,6 @@
 """Regression tests for session sidecar repair logic."""
 import json
 import queue
-import os
 import sys
 import threading
 import time
@@ -21,6 +20,8 @@ from api.models import (
 import api.config as config
 import api.streaming as streaming
 import api.profiles as profiles
+from api.compression_anchor import is_lcm_context_recovery_marker
+from api.process_event_utils import build_active_turn_token
 from api.run_journal import RunJournalWriter, append_run_event
 
 
@@ -325,6 +326,26 @@ class TestDraftRecovery:
             f"got {user_msgs[0]['timestamp']}"
         )
 
+    def test_lcm_heading_pending_message_keeps_recovered_user_token_owned(self, hermes_home):
+        marker = "[Recent Summary (d0, node 418)]"
+        started_at = 1779348286.3954952
+        s = _make_stale_session(pending_msg=marker)
+        s.pending_started_at = started_at
+        stream_id = s.active_stream_id
+        lock = config._get_session_agent_lock(s.session_id)
+
+        with lock:
+            core_path = hermes_home / "sessions" / f"session_{s.session_id}.json"
+            assert _apply_core_sync_or_error_marker(
+                s, core_path, stream_id_for_recheck=stream_id,
+            ) is True
+
+        recovered = next(message for message in s.messages if message.get("content") == marker)
+        expected_token = build_active_turn_token(stream_id, started_at)
+        assert recovered["_active_turn_token"] == expected_token
+        assert not is_lcm_context_recovery_marker(recovered)
+        assert recovered.get("_recovered") is True
+
     def test_pending_message_recovered_into_context_messages(self, hermes_home, monkeypatch):
         """A recovered pending prompt must remain visible to the next agent turn.
 
@@ -480,35 +501,22 @@ class TestStreamIdRecheck:
         assert result is True
 
 
-class TestGetProfileHome:
-    """_get_profile_home expands ~ correctly in the ImportError fallback path."""
-
-    def test_expands_tilde_when_profiles_unavailable(self, monkeypatch):
-        """When api.profiles import fails, fallback uses HERMES_HOME or ~/.hermes
-        with proper tilde expansion."""
-        # Make api.profiles import fail
-        monkeypatch.setitem(sys.modules, "api.profiles", None)
-
-        # Default fallback without HERMES_HOME env var
+@pytest.mark.parametrize(
+    "hermes_home, expected",
+    [
+        (None, Path.home() / ".hermes"),
+        ("/custom/hermes", Path("/custom/hermes")),
+        ("~/my-hermes", Path.home() / "my-hermes"),
+    ],
+)
+def test_profile_home_fallback_expands(monkeypatch, hermes_home, expected):
+    """The import fallback uses and expands HERMES_HOME in all three shapes."""
+    monkeypatch.setitem(sys.modules, "api.profiles", None)
+    if hermes_home is None:
         monkeypatch.delenv("HERMES_HOME", raising=False)
-        result = _get_profile_home(None)
-        assert "~" not in str(result), f"Path should have ~ expanded, got: {result}"
-        assert str(result) == str(Path.home() / ".hermes")
-
-    def test_uses_hermes_home_env_var(self, monkeypatch):
-        """When HERMES_HOME is set, fallback uses it with expansion."""
-        monkeypatch.setitem(sys.modules, "api.profiles", None)
-        monkeypatch.setenv("HERMES_HOME", "/custom/hermes")
-        result = _get_profile_home(None)
-        assert result == Path(os.environ["HERMES_HOME"]).expanduser()
-
-    def test_expands_tilde_in_hermes_home(self, monkeypatch):
-        """If HERMES_HOME contains ~, it gets expanded."""
-        monkeypatch.setitem(sys.modules, "api.profiles", None)
-        monkeypatch.setenv("HERMES_HOME", "~/my-hermes")
-        result = _get_profile_home(None)
-        assert "~" not in str(result)
-        assert str(result) == str(Path.home() / "my-hermes")
+    else:
+        monkeypatch.setenv("HERMES_HOME", hermes_home)
+    assert _get_profile_home(None) == expected
 
 
 class TestCancelInProgressGuard:
@@ -542,35 +550,20 @@ class TestCancelInProgressGuard:
         # (cancel_stream handles that separately)
         assert s.pending_user_message is not None
 
-    def test_proceeds_when_cancel_flag_not_set(self, hermes_home, monkeypatch):
-        """When cancel flag is not set, _last_resort_sync_from_core proceeds
-        with repair normally."""
-        s = _make_stale_session(stream_id="normal_stream")
+    @pytest.mark.parametrize("has_cancel_flag", [True, False])
+    def test_proceeds_without_set_cancel_flag(
+        self, hermes_home, monkeypatch, has_cancel_flag,
+    ):
+        """An unset flag and an absent flag both allow normal repair."""
+        stream_id = "normal_stream" if has_cancel_flag else "no_flag_stream"
+        s = _make_stale_session(stream_id=stream_id)
         s.save()
-
-        # Cancel flag exists but is NOT set
-        cancel_event = threading.Event()
-        config.CANCEL_FLAGS["normal_stream"] = cancel_event
+        if has_cancel_flag:
+            config.CANCEL_FLAGS[stream_id] = threading.Event()
 
         agent_lock = config._get_session_agent_lock(s.session_id)
-        _register_active_stream("normal_stream")
-
-        streaming._last_resort_sync_from_core(s, "normal_stream", agent_lock)
-
-        # Should have performed repair (appended messages)
-        assert len(s.messages) > 0, "Should have appended messages"
-
-    def test_proceeds_when_cancel_flag_absent(self, hermes_home, monkeypatch):
-        """When no cancel flag exists for the stream, repair proceeds normally."""
-        s = _make_stale_session(stream_id="no_flag_stream")
-        s.save()
-
-        # No CANCEL_FLAGS entry at all
-        agent_lock = config._get_session_agent_lock(s.session_id)
-        _register_active_stream("no_flag_stream")
-
-        streaming._last_resort_sync_from_core(s, "no_flag_stream", agent_lock)
-
+        _register_active_stream(stream_id)
+        streaming._last_resort_sync_from_core(s, stream_id, agent_lock)
         assert len(s.messages) > 0
 
 
@@ -704,6 +697,313 @@ class TestEmptyMessagesGuard:
 
         assert result is True
 
+
+class TestPendingTokenOwnership:
+    """Pending repair must not transfer ownership from an earlier stream."""
+
+    def test_nonempty_repair_materializes_current_row_after_stale_lcm_row(self, hermes_home):
+        marker = "[Recent Summary (d0, node 418)]"
+        started_at = 1779348286.3954952
+        stream_id = "current_pending_stream"
+        stale_row = {
+            "role": "user",
+            "content": marker,
+            "timestamp": int(started_at),
+            "_active_turn_token": build_active_turn_token("prior_stream", started_at),
+        }
+        original_stale_row = dict(stale_row)
+        s = _make_session(
+            messages=[stale_row],
+            context_messages=[dict(stale_row)],
+        )
+        s.pending_user_message = marker
+        s.pending_started_at = started_at
+        s.active_stream_id = stream_id
+
+        with config._get_session_agent_lock(s.session_id):
+            assert _apply_core_sync_or_error_marker(
+                s,
+                hermes_home / "sessions" / f"session_{s.session_id}.json",
+                stream_id_for_recheck=stream_id,
+            ) is True
+
+        current_token = build_active_turn_token(stream_id, started_at)
+        user_rows = [message for message in s.messages if message.get("role") == "user"]
+        assert len(user_rows) == 2
+        assert user_rows[0] == original_stale_row
+        assert user_rows[1]["_active_turn_token"] == current_token
+        assert not is_lcm_context_recovery_marker(user_rows[1])
+        context_rows = [message for message in s.context_messages if message.get("role") == "user"]
+        assert context_rows[0] == original_stale_row
+        assert context_rows[1]["_active_turn_token"] == current_token
+        assert s.pending_user_message is None
+        assert s.active_stream_id is None
+
+    def test_completed_journal_repair_rejects_stale_lcm_owner(self, hermes_home, monkeypatch):
+        marker = "[Current user objective preserved from compacted history]"
+        started_at = 1779348286.3954952
+        stream_id = "completed_pending_stream"
+        stale_row = {
+            "role": "user",
+            "content": marker,
+            "timestamp": int(started_at),
+            "_active_turn_token": build_active_turn_token("prior_stream", started_at),
+        }
+        original_stale_row = dict(stale_row)
+        s = _make_session(messages=[stale_row])
+        s.pending_user_message = marker
+        s.pending_started_at = started_at
+        s.active_stream_id = stream_id
+        monkeypatch.setattr(models, "_run_journal_terminal_state", lambda *_args: "completed")
+
+        with config._get_session_agent_lock(s.session_id):
+            assert _apply_core_sync_or_error_marker(
+                s,
+                hermes_home / "sessions" / f"session_{s.session_id}.json",
+                stream_id_for_recheck=stream_id,
+            ) is True
+
+        current_token = build_active_turn_token(stream_id, started_at)
+        user_rows = [message for message in s.messages if message.get("role") == "user"]
+        assert len(user_rows) == 2
+        assert user_rows[0] == original_stale_row
+        assert user_rows[1]["_active_turn_token"] == current_token
+        assert not is_lcm_context_recovery_marker(user_rows[1])
+        assert s.pending_user_message is None
+        assert s.active_stream_id is None
+
+    def test_core_sync_repair_rejects_stale_lcm_owner(self, hermes_home):
+        marker = "[Recent Summary (d0, node 418)]"
+        started_at = 1779348286.3954952
+        stream_id = "core_pending_stream"
+        stale_row = {
+            "role": "user",
+            "content": marker,
+            "timestamp": int(started_at),
+            "_active_turn_token": build_active_turn_token("prior_stream", started_at),
+        }
+        s = _make_stale_session(
+            session_id="core_stale_lcm_owner",
+            pending_msg=marker,
+            stream_id=stream_id,
+        )
+        s.pending_started_at = started_at
+        core_path = _write_core_transcript(
+            hermes_home,
+            s.session_id,
+            [stale_row],
+        )
+        with config._get_session_agent_lock(s.session_id):
+            assert _apply_core_sync_or_error_marker(
+                s,
+                core_path,
+                stream_id_for_recheck=stream_id,
+            ) is True
+
+        current_token = build_active_turn_token(stream_id, started_at)
+        user_rows = [message for message in s.messages if message.get("role") == "user"]
+        assert len(user_rows) == 2
+        assert user_rows[0] == stale_row
+        assert user_rows[1]["_active_turn_token"] == current_token
+        assert not is_lcm_context_recovery_marker(user_rows[1])
+        assert s.pending_user_message is None
+        assert s.active_stream_id is None
+
+    def test_core_sync_preserves_ambiguous_pre_token_lcm_user_row(self, hermes_home):
+        marker = "[Recent Summary (d0, node 418)]"
+        genuine_user = {
+            "role": "user",
+            "content": marker,
+            "timestamp": 1779348286,
+            "id": 418,
+            "_db_persisted": True,
+        }
+        core_answer = {"role": "assistant", "content": "Earlier answer"}
+        s = _make_stale_session(
+            session_id="core_ambiguous_pre_token_user",
+            pending_msg="Continue with the restored conversation",
+        )
+        core_path = _write_core_transcript(
+            hermes_home,
+            s.session_id,
+            [genuine_user, core_answer],
+        )
+
+        with config._get_session_agent_lock(s.session_id):
+            assert _apply_core_sync_or_error_marker(
+                s,
+                core_path,
+                stream_id_for_recheck=s.active_stream_id,
+            ) is True
+
+        assert s.messages == [genuine_user, core_answer]
+        assert s.context_messages == [genuine_user, core_answer]
+        assert is_lcm_context_recovery_marker(s.messages[0])
+        assert s.messages[0].get("_active_turn_token") is None
+        assert s.messages[0]["id"] == 418
+        assert s.messages[0]["_db_persisted"] is True
+        assert s.pending_user_message is None
+        assert s.active_stream_id is None
+
+    def test_core_sync_keeps_assistant_lcm_marker_context_only(self, hermes_home):
+        marker = "[Recent Summary (d0, node 418)]"
+        assistant_marker = {"role": "assistant", "content": marker}
+        core_answer = {"role": "assistant", "content": "Earlier answer"}
+        s = _make_stale_session(
+            session_id="core_assistant_lcm_marker",
+            pending_msg="Continue with the restored conversation",
+        )
+        core_path = _write_core_transcript(
+            hermes_home,
+            s.session_id,
+            [assistant_marker, core_answer],
+        )
+
+        with config._get_session_agent_lock(s.session_id):
+            assert _apply_core_sync_or_error_marker(
+                s,
+                core_path,
+                stream_id_for_recheck=s.active_stream_id,
+            ) is True
+
+        assert assistant_marker not in s.messages
+        assert assistant_marker in s.context_messages
+        assert is_lcm_context_recovery_marker(s.context_messages[0])
+        assert s.messages == [core_answer]
+
+    def test_core_sync_projects_lcm_marker_and_materializes_current_user(self, hermes_home):
+        marker = "[Recent Summary (d0, node 418)]"
+        started_at = 1779348286.3954952
+        stream_id = "core_lcm_no_journal_stream"
+        core_marker = {
+            "role": "user",
+            "content": marker,
+            "timestamp": int(started_at),
+            "id": 418,
+            "_db_persisted": True,
+        }
+        core_answer = {
+            "role": "assistant",
+            "content": "Earlier answer",
+            "timestamp": int(started_at) + 1,
+        }
+        s = _make_stale_session(
+            session_id="core_lcm_no_journal",
+            pending_msg=marker,
+            stream_id=stream_id,
+        )
+        s.pending_started_at = started_at
+        core_path = _write_core_transcript(
+            hermes_home,
+            s.session_id,
+            [core_marker, core_answer],
+        )
+
+        with config._get_session_agent_lock(s.session_id):
+            assert _apply_core_sync_or_error_marker(
+                s,
+                core_path,
+                stream_id_for_recheck=stream_id,
+            ) is True
+
+        current_token = build_active_turn_token(stream_id, started_at)
+        current_users = [
+            message
+            for message in s.messages
+            if message.get("role") == "user" and message.get("content") == marker
+        ]
+        assert len(current_users) == 1
+        assert current_users[0]["id"] == 418
+        assert current_users[0]["_db_persisted"] is True
+        assert current_users[0]["_active_turn_token"] == current_token
+        assert not is_lcm_context_recovery_marker(current_users[0])
+        context_users = [
+            message
+            for message in s.context_messages
+            if message.get("role") == "user" and message.get("content") == marker
+        ]
+        assert len(context_users) == 1
+        assert context_users[0]["_active_turn_token"] == current_token
+        for projection in (s.messages, s.context_messages):
+            owner_index = next(
+                index
+                for index, message in enumerate(projection)
+                if message.get("_active_turn_token") == current_token
+            )
+            assert owner_index < projection.index(core_answer)
+        assert not any(message.get("_error") for message in s.messages)
+        assert s.pending_user_message is None
+        assert s.active_stream_id is None
+
+    @pytest.mark.parametrize(
+        ("prompt", "expect_owner"),
+        [
+            ("repeat this", False),
+            ("[Current user objective preserved from compacted history] repeat this", True),
+        ],
+    )
+    def test_nonempty_text_fallback_does_not_claim_older_repeated_prompt(
+        self,
+        prompt,
+        expect_owner,
+    ):
+        started_at = 1779348286.3954952
+        stream_id = "current_pending_stream"
+        old_row = {
+            "role": "user",
+            "content": prompt,
+            "timestamp": int(started_at) - 100,
+        }
+        s = _make_session(messages=[old_row])
+        s.pending_user_message = prompt
+        s.pending_started_at = started_at
+        s.active_stream_id = stream_id
+
+        with config._get_session_agent_lock(s.session_id):
+            assert _apply_core_sync_or_error_marker(
+                s,
+                Path("/nonexistent/core.json"),
+                stream_id_for_recheck=stream_id,
+            ) is True
+
+        assert s.messages[0] == old_row
+        assert "_active_turn_token" not in s.messages[0]
+        current_token = build_active_turn_token(stream_id, started_at)
+        owners = [
+            message
+            for message in s.messages
+            if message.get("_active_turn_token") == current_token
+        ]
+        assert len(owners) == int(expect_owner)
+        if expect_owner:
+            assert owners[0]["timestamp"] == int(started_at)
+            assert any(
+                message.get("_active_turn_token") == current_token
+                for message in s.context_messages
+            )
+
+    def test_context_projection_claims_untagged_strict_checkpoint(self):
+        marker = "ordinary recovered prompt"
+        started_at = 1779348286.3954952
+        current_token = build_active_turn_token("current_context_stream", started_at)
+        existing = {
+            "role": "user",
+            "content": marker,
+            "timestamp": int(started_at),
+        }
+        s = _make_session(context_messages=[existing])
+        recovered = {
+            "role": "user",
+            "content": marker,
+            "timestamp": int(started_at),
+            "_active_turn_token": current_token,
+            "_recovered": True,
+        }
+
+        models._append_recovered_turn_to_context(s, recovered)
+
+        assert len(s.context_messages) == 1
+        assert s.context_messages[0]["_active_turn_token"] == current_token
 
 class TestNonEmptyMessagesPendingCleared:
     """When messages is non-empty and pending is stuck, _last_resort_sync_from_core
@@ -1780,32 +2080,23 @@ class TestGetSessionLazyRetryHook:
         s.messages.append(marker)
         return s
 
-    def test_triggers_retry_on_cache_hit(self, hermes_home, monkeypatch):
-        sid = "lazy_get_cache"
-        stream_id = "stream_cache"
+    @pytest.mark.parametrize("cache_hit", [True, False], ids=["cache-hit", "cold-load"])
+    def test_triggers_retry_on_cache_hit_or_cold_load(
+        self, hermes_home, monkeypatch, cache_hit,
+    ):
+        sid = f"lazy_get_{'cache' if cache_hit else 'cold'}"
+        stream_id = f"stream_{'cache' if cache_hit else 'cold'}"
         s = self._make_session_with_pending_marker(sid=sid, stream_id=stream_id)
         s.save()
-        models.SESSIONS[sid] = s
+        if cache_hit:
+            models.SESSIONS[sid] = s
+        else:
+            models.SESSIONS.pop(sid, None)
         append_run_event(sid, stream_id, "token", {"text": "Late."})
 
         reloaded = models.get_session(sid)
-        assert reloaded is s
-        marker = s.messages[-1] if "Recovering" in s.messages[-1]["content"] else next(
-            m for m in s.messages
-            if m.get("type") == "interrupted" and m.get("_error")
-        )
-        assert "recovered from the run journal" in marker["content"]
-        assert "_pending_journal_recovery" not in marker
-
-    def test_triggers_retry_on_cold_load(self, hermes_home, monkeypatch):
-        sid = "lazy_get_cold"
-        stream_id = "stream_cold"
-        s = self._make_session_with_pending_marker(sid=sid, stream_id=stream_id)
-        s.save()
-        models.SESSIONS.pop(sid, None)
-        append_run_event(sid, stream_id, "token", {"text": "Late."})
-
-        reloaded = models.get_session(sid)
+        if cache_hit:
+            assert reloaded is s
         marker = next(
             m for m in reloaded.messages
             if m.get("type") == "interrupted" and m.get("_error")

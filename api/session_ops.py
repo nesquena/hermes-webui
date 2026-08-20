@@ -18,6 +18,7 @@ from bisect import bisect_left
 from typing import Any
 
 from api.config import LOCK, _get_session_agent_lock
+from api.compression_anchor import is_lcm_context_recovery_marker
 from api.models import get_session, SESSIONS
 from api.agent_sessions import normalize_agent_session_source
 
@@ -50,6 +51,8 @@ def _regeneration_source_allowed(value):
 def _selected_regeneration_turn_owned(session, row) -> bool:
     """Accept only a final row whose provenance proves WebUI ownership."""
     if getattr(session, "read_only", False) or not isinstance(row, dict):
+        return False
+    if is_lcm_context_recovery_marker(row):
         return False
     session_source = _regeneration_source_class(getattr(session, "session_source", None))
     imported_session = bool(

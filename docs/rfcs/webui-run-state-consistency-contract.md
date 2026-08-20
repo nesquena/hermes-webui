@@ -3,7 +3,7 @@
 - **Status:** Proposed
 - **Author:** @franksong2702
 - **Created:** 2026-05-16
-- **Updated:** 2026-07-16
+- **Updated:** 2026-08-20
 - **Tracking issue:** [#2361](https://github.com/nesquena/hermes-webui/issues/2361)
 - **Related architecture:** [#1925](https://github.com/nesquena/hermes-webui/issues/1925), [`hermes-run-adapter-contract.md`](hermes-run-adapter-contract.md), [`stable-assistant-turn-anchors.md`](stable-assistant-turn-anchors.md)
 
@@ -75,6 +75,18 @@ and 5; it does not mark every run-state boundary implemented.
 | Compression summary / handoff | Gives the agent recovery context after automatic compression | Must remain agent-facing recovery material unless explicitly rendered as history | Pollute the active turn or become implicit current user intent |
 | Live UI scene/cache | Preserves expanded rows, in-progress cards, local scroll, and transient grouping | May optimize presentation but must be rebuildable or degradable from transcript/replay | Become the only place where chronological ordering exists |
 | Sidebar/session metadata | Helps the user find active and recent sessions | Must reflect meaningful user or assistant activity | Treat background cleanup as a fresh user-facing update |
+
+LCM recovery envelopes may intentionally use provider-facing `user` or `assistant`
+roles. The exact reserved recovery heading form `[Recent Summary (d<digits>, node <digits>)]`
+(for example, `[Recent Summary (d0, node 418)]`) and `[Current user objective preserved from compacted history]` are context-only
+across those supported `user`/`assistant` provider roles, while that provider role must be preserved in
+`context_messages`. A nonblank server-owned `_active_turn_token` on a `user` row
+takes precedence as current-turn provenance, so a genuine current user
+submission with matching text remains visible; assistant envelopes remain
+context-only, and untagged LCM envelopes remain recovery material.
+During legacy core-only repair, untagged user-role LCM-looking rows are
+ambiguous and must be preserved rather than risking deletion; this migration
+safeguard may leave an old synthetic envelope visible.
 
 ## Core Invariants
 

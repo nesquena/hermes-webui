@@ -25,11 +25,13 @@ import api.models as models
 import api.config as config
 import api.profiles as profiles
 import api.streaming as streaming  # noqa: F401  imported for fixture parity
+from api.compression_anchor import is_lcm_context_recovery_marker
 from api.models import (
     Session,
     _apply_core_sync_or_error_marker,
     merge_session_messages_append_only,
 )
+from api.process_event_utils import build_active_turn_token
 from api.run_journal import append_run_event
 
 
@@ -816,6 +818,157 @@ def test_get_session_syncs_sidecar_from_newer_state_db_even_when_stream_not_term
     assert reloaded.active_stream_id is None
     assert reloaded.pending_user_message is None
     assert reloaded.messages[-1]["content"] == "latest live progress"
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "raw-state", "raw-state-source", "string-ts", "already-owned", "multiple",
+        "sidecar-only", "wrong-role", "conflicting", "malformed",
+        "historical-provider-replay", "different-id-provider-replay",
+        "ordinary-provider-current", "malformed-row-id",
+    ],
+)
+def test_state_db_sync_preserves_marker_shaped_current_user_turn(monkeypatch, shape):
+    """State.db reconciliation restores ownership without reclaiming sidecar rows."""
+    sid = f"state_sync_marker_{shape}"
+    stream_id = "state_sync_current_stream"
+    pending_started_at = "102.0" if shape == "raw-state-source" else 102.0
+    pending_source = "process_wakeup" if shape == "raw-state-source" else "webui"
+    pending_text = "[Recent Summary (d0, node 418)] Continue the current request."
+    attachments = [{"name": "notes.txt", "type": "text/plain"}]
+    expected_token = build_active_turn_token(stream_id, pending_started_at)
+    prior_token = build_active_turn_token("state_sync_prior_stream", pending_started_at)
+    old_messages = [
+        {
+            "role": "user", "content": "old question", "timestamp": 100.0,
+            "_state_db_row_id": "unrelated-invalid",
+        },
+        {"role": "assistant", "content": "old answer", "timestamp": 101.0},
+    ]
+    current = {
+        "role": "user",
+        "content": pending_text,
+        "timestamp": "102.0" if shape == "string-ts" else float(pending_started_at),
+        "attachments": attachments,
+    }
+    provider_payload, provider_row_id, expected_row_ids = {
+        "historical-provider-replay": ("opaque plugin replay payload", 9001, [9001, None]),
+        "different-id-provider-replay": ("shared opaque provider payload", 9002, [9001, 9002]),
+        "ordinary-provider-current": ("opaque memory/plugin suffix", 9002, [None]),
+        "multiple": ("ambiguous provider payload", 9100, [9100, None]),
+    }.get(shape, (None, None, None))
+    if provider_payload is not None:
+        current.update(api_content=provider_payload, _state_db_row_id=provider_row_id)
+    sidecar_current = dict(current)
+    if shape == "different-id-provider-replay":
+        sidecar_current["_state_db_row_id"] = 9001
+    elif shape == "ordinary-provider-current":
+        sidecar_current.pop("_state_db_row_id")
+        sidecar_current.pop("api_content")
+    elif shape == "malformed-row-id":
+        sidecar_current["_state_db_row_id"] = "invalid"
+    if shape == "already-owned":
+        current["_active_turn_token"] = expected_token
+    sidecar_token = {"conflicting": prior_token, "malformed": 7}.get(shape)
+    if sidecar_token is not None:
+        sidecar_current["_active_turn_token"] = sidecar_token
+    if shape == "wrong-role":
+        sidecar_messages = old_messages + [{
+            "role": "assistant",
+            "content": "malformed ownership",
+            "_active_turn_token": expected_token,
+        }]
+    else:
+        sidecar_messages = old_messages + (
+            [sidecar_current]
+            if shape not in {
+                "raw-state", "raw-state-source", "string-ts", "multiple",
+            }
+            else []
+        )
+    s = Session(
+        session_id=sid,
+        title="Marker-shaped current turn",
+        messages=sidecar_messages,
+        context_messages=[dict(message) for message in sidecar_messages],
+        active_stream_id=stream_id,
+        pending_user_message=pending_text,
+        pending_started_at=pending_started_at,
+        pending_attachments=attachments,
+        pending_user_source=pending_source,
+    )
+    s.save()
+    state_current = [] if shape in {"sidecar-only", "wrong-role", "malformed-row-id"} else [current]
+    if shape == "multiple":
+        duplicate = dict(current)
+        duplicate["_state_db_row_id"] += 1
+        state_current.append(duplicate)
+    state_messages = old_messages + state_current + [{
+        "role": "assistant",
+        "content": "recovered completion",
+        **({} if shape in {"conflicting", "wrong-role"} else {"timestamp": 103.0}),
+    }]
+    if shape == "wrong-role":
+        state_messages[-1:] = [
+            {"role": "assistant", "content": "", "timestamp": 103.0, "tool_calls": [{}]},
+            {"role": "tool", "content": "recovered tool result"},
+            {"role": "assistant", "content": "recovered completion", "timestamp": 104.0},
+        ]
+    monkeypatch.setattr(
+        models, "get_state_db_session_summary",
+        lambda sid_arg, profile=None: {
+            "message_count": len(state_messages), "last_message_at": 103.0,
+        },
+    )
+    monkeypatch.setattr(
+        models, "get_state_db_session_messages",
+        lambda sid_arg, **kwargs: list(state_messages),
+    )
+
+    assert models._sync_sidecar_from_state_db_if_newer(s) is True
+
+    def assert_projection(projection):
+        current_rows = [
+            m for m in projection
+            if m.get("role") == "user" and m.get("content") == pending_text
+        ]
+        expected_tokens = [expected_token]
+        if sidecar_token is not None or shape in {
+            "historical-provider-replay", "different-id-provider-replay", "multiple",
+            "malformed-row-id",
+        }:
+            expected_tokens.insert(0, sidecar_token)
+        assert [m.get("_active_turn_token") for m in current_rows] == expected_tokens
+        if provider_payload is not None:
+            assert current_rows[0].get("api_content") == provider_payload
+            assert [m.get("_state_db_row_id") for m in current_rows] == expected_row_ids
+        owner = current_rows[-1]
+        assert owner.get("_source") == (
+            "process_wakeup" if shape == "raw-state-source" else None
+        )
+        assert not is_lcm_context_recovery_marker(owner)
+        assistant_index = next(
+            i for i, m in enumerate(projection)
+            if m.get("role") == "assistant" and m.get("content") == "recovered completion"
+        )
+        assert projection.index(owner) < assistant_index
+        if shape == "wrong-role":
+            tool_chain_index = next(
+                i for i, m in enumerate(projection) if m.get("tool_calls")
+            )
+            assert projection.index(owner) < tool_chain_index
+
+    for repaired in (s, Session.load(sid)):
+        for projection in (repaired.messages, repaired.context_messages):
+            assert_projection(projection)
+        assert (
+            repaired.active_stream_id,
+            repaired.pending_user_message,
+            repaired.pending_started_at,
+        ) == (None, None, None)
+        assert repaired.pending_attachments == []
+        assert repaired.pending_user_source is None
 
 
 def test_get_session_does_not_sync_while_stream_is_still_live(monkeypatch):
