@@ -106,6 +106,7 @@ def _ensure_state_db(profile=None):
         ('chat_type', 'ALTER TABLE sessions ADD COLUMN chat_type TEXT'),
         ('thread_id', 'ALTER TABLE sessions ADD COLUMN thread_id TEXT'),
         ('session_key', 'ALTER TABLE sessions ADD COLUMN session_key TEXT'),
+        ('model_config', 'ALTER TABLE sessions ADD COLUMN model_config TEXT'),
         ('origin_chat_id', 'ALTER TABLE sessions ADD COLUMN origin_chat_id TEXT'),
         ('origin_user_id', 'ALTER TABLE sessions ADD COLUMN origin_user_id TEXT'),
         ('platform', 'ALTER TABLE sessions ADD COLUMN platform TEXT'),
@@ -174,14 +175,16 @@ def _insert_agent_session_row(
     parent_session_id=None,
     ended_at=None,
     end_reason=None,
+    session_key=None,
+    model_config=None,
     messages=1,
 ):
     """Insert an agent session row with optional compression lineage."""
     started_at = started_at or time.time()
     conn.execute(
         "INSERT OR REPLACE INTO sessions "
-        "(id, source, title, model, started_at, message_count, parent_session_id, ended_at, end_reason) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "(id, source, title, model, started_at, message_count, parent_session_id, ended_at, end_reason, session_key, model_config) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             session_id,
             source,
@@ -192,6 +195,8 @@ def _insert_agent_session_row(
             parent_session_id,
             ended_at,
             end_reason,
+            session_key,
+            json.dumps(model_config) if isinstance(model_config, dict) else model_config,
         ),
     )
     conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
@@ -1168,6 +1173,70 @@ def test_previous_messaging_setting_keeps_reset_history(monkeypatch):
         "discord_active",
         "discord_previous_history",
     ]
+
+
+def test_sessions_route_keeps_reset_successor_top_level(cleanup_test_sessions):
+    """A reset child retains lineage without becoming a nested sidebar child."""
+    conn = _ensure_state_db()
+    parent_sid = 'reset_lineage_parent_7178'
+    child_sid = 'reset_lineage_child_7178'
+    now = time.time()
+    cleanup_test_sessions.extend([parent_sid, child_sid])
+    try:
+        _insert_agent_session_row(
+            conn,
+            session_id=parent_sid,
+            source='wecom',
+            title='Previous WeCom conversation',
+            started_at=now - 20,
+            ended_at=now - 10,
+            end_reason='session_reset',
+            session_key='same-messaging-identity',
+            messages=2,
+        )
+        _insert_agent_session_row(
+            conn,
+            session_id=child_sid,
+            source='wecom',
+            title='Reset WeCom conversation',
+            started_at=now - 5,
+            parent_session_id=parent_sid,
+            session_key='same-messaging-identity',
+            model_config={'_reset_from': parent_sid},
+            messages=2,
+        )
+
+        post('/api/settings', {
+            'show_cli_sessions': True,
+            'show_previous_messaging_sessions': True,
+        })
+        data, status = get('/api/sessions')
+
+        assert status == 200
+        rows = {row['session_id']: row for row in data.get('sessions', [])}
+        assert parent_sid in rows
+        assert child_sid in rows
+        child = rows[child_sid]
+        assert child.get('parent_session_id') == parent_sid
+        for key in (
+            'relationship_type',
+            'parent_title',
+            'parent_source',
+            '_parent_lineage_root_id',
+            '_parent_lineage_tip_id',
+            'model_config',
+        ):
+            assert key not in child
+    finally:
+        try:
+            _remove_test_sessions(conn, parent_sid, child_sid)
+            conn.close()
+        except Exception:
+            pass
+        post('/api/settings', {
+            'show_cli_sessions': False,
+            'show_previous_messaging_sessions': False,
+        })
 
 
 def test_cross_source_parent_child_is_not_collapsed_into_root_metadata(cleanup_test_sessions):
