@@ -18184,7 +18184,7 @@ function renderMessages(options){
   // (tool completion, session switch) must not override the user's scroll position.
   // scrollIfPinned() respects _scrollPinned, so it's a no-op if user scrolled up.
   if(typeof _syncLiveRunStatusAfterRender==='function') _syncLiveRunStatusAfterRender();
-  _applyAutomaticMessageDirections(inner);
+  if(typeof _applyAutomaticMessageDirections==='function') _applyAutomaticMessageDirections(inner);
   _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
   if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
   // Apply syntax highlighting after DOM is built
@@ -19424,7 +19424,7 @@ function postProcessRenderedMessages(container) {
   renderMermaidBlocks(container);
   renderKatexBlocks(container);
   initTreeViews(container);
-  _applyAutomaticMessageDirections(container);
+  if(typeof _applyAutomaticMessageDirections==='function') _applyAutomaticMessageDirections(container);
 }
 
 function highlightCode(container) {
