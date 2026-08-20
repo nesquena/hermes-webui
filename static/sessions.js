@@ -1805,20 +1805,11 @@ async function loadSession(sid){
   if (currentSid && currentSid !== sid) {
     if(typeof window._clearPendingSelections==='function') window._clearPendingSelections();
     if(typeof _clearQueueCardDisplay==='function') _clearQueueCardDisplay(currentSid);
-    const _handoffChildPayload = typeof _hasReadOnlyForkPayloadForSid === 'function' && _hasReadOnlyForkPayloadForSid(currentSid);
-  const _currentDraftText = ($('msg') || {}).value || '';
-  const _currentDraftFiles = S.pendingFiles ? [...S.pendingFiles] : [];
+    await _saveComposerDraftNow(currentSid, ($('msg') || {}).value || '', S.pendingFiles ? [...S.pendingFiles] : []);
+    const _currentDraftText = ($('msg') || {}).value || '';
+    const _currentDraftFiles = S.pendingFiles ? [...S.pendingFiles] : [];
     if (typeof _captureReadOnlyForkInputForSid === 'function') {
       _captureReadOnlyForkInputForSid(currentSid, _currentDraftText, _currentDraftFiles);
-    }
-    const _handoffOriginalInput = _handoffChildPayload && typeof _isReadOnlyForkOriginalInputForSid === 'function' &&
-      _isReadOnlyForkOriginalInputForSid(currentSid, _currentDraftText, _currentDraftFiles);
-    const _handoffSendActive = _handoffChildPayload && typeof _isReadOnlyForkSendActiveForSid === 'function' &&
-      _isReadOnlyForkSendActiveForSid(currentSid);
-    const _handoffInputChanged = !_handoffOriginalInput && (_currentDraftText || _currentDraftFiles.length || !_handoffSendActive);
-    if (_handoffChildPayload && _handoffInputChanged && typeof _retireReadOnlyForkPayload === 'function') _retireReadOnlyForkPayload(currentSid);
-    if (!_handoffChildPayload || _handoffInputChanged) {
-      await _saveComposerDraftNow(currentSid, ($('msg') || {}).value || '', S.pendingFiles ? [...S.pendingFiles] : []);
     }
     // The awaited draft save above yields the event loop. If another
     // loadSession() started for a different session while we were waiting
@@ -1982,6 +1973,10 @@ async function loadSession(sid){
     // session_id.
     const _selfHealedCurrent = (e.status===404) && (currentSid===sid);
     if (_isCurrentLoad()) _loadingSessionId = null;
+    if (currentSid && !_selfHealedCurrent && _loadingSessionId === null
+        && typeof startSessionStream === 'function') {
+      startSessionStream(currentSid);
+    }
     // The session stream was stopped unconditionally at the top of this load
     // (mirroring stopApprovalPolling). On the happy path it's restarted ~120
     // lines below, but this failure exit never reaches that point — leaving
@@ -1997,10 +1992,6 @@ async function loadSession(sid){
     // early-returns) because only here can the current session have just
     // self-healed away — re-arming a 404'd/deleted session_id would spin the
     // SSE reconnect loop against a dead session.
-    if (currentSid && !_selfHealedCurrent && _loadingSessionId === null
-        && typeof startSessionStream === 'function') {
-      startSessionStream(currentSid);
-    }
     return;
   }
   // Guard: api() may have redirected (401) and returned undefined; in that case
@@ -4405,6 +4396,8 @@ function _renderBatchActionBar(){
     });
     if(!ok)return;
     try{
+      // ids.forEach(_clearHandoffStorageForSession); is replaced by per-success cleanup so failed siblings retain custody.
+      // const cleanupFailedCount=results.filter(result=>result.response&&result.response.state_db_cleanup_failed).length;
       const results=await Promise.allSettled(ids.map(async sid=>{
         const response=await api('/api/session/delete',{method:'POST',body:JSON.stringify({session_id:sid})});
         _clearHandoffStorageForSession(sid);
@@ -4422,6 +4415,7 @@ function _renderBatchActionBar(){
         if(remaining.sessions&&remaining.sessions.length){await loadSession(remaining.sessions[0].session_id);}
         else{$('msgInner').innerHTML='';$('emptyState').style.display='';}
       }
+      // if(cleanupFailedCount) showToast(t('delete_failed')+' ('+cleanupFailedCount+'/'+ids.length+')',0,'error');
       if(failedCount||cleanupFailedCount) showToast(t('delete_failed')+' ('+(failedCount+cleanupFailedCount)+'/'+ids.length+')',0,'error');
       else showToast((retainedCount?t('session_deleted_worktree'):t('session_delete'))+' ('+successfulResults.length+')');
       exitSessionSelectMode();await renderSessionList();

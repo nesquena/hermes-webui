@@ -1597,14 +1597,17 @@ async function send(){
   // If a send is already in-flight (e.g. queue drain), re-queue the message
   // instead of silently dropping it.
   if (_sendInProgress) {
-    const _activeHandoffRecord = [..._readOnlyForkPayloads.values()].find(record =>
+    const _activeHandoffRecord = (typeof _readOnlyForkPayloads !== 'undefined'
+      ? [..._readOnlyForkPayloads.values()]
+      : []).find(record =>
       record && ['branching','drafting','child-draft-owned'].includes(record.state));
     const _handoffPane = _activeHandoffRecord && (!S.session ||
       S.session.session_id === _activeHandoffRecord.sourceSid || S.session.session_id === _activeHandoffRecord.childSid);
     if (_activeHandoffRecord && _handoffPane) {
       const _handoffText = _composerTextWithPendingSelections().trim();
-      if (_handoffText || S.pendingFiles.length) {
-        _queueReadOnlyForkConcurrentSend(_activeHandoffRecord, _handoffText, S.pendingFiles);
+      const _handoffPendingFiles = Array.isArray(S.pendingFiles) ? S.pendingFiles : [];
+      if (_handoffText || _handoffPendingFiles.length) {
+        _queueReadOnlyForkConcurrentSend(_activeHandoffRecord, _handoffText, _handoffPendingFiles);
       }
       return;
     }
@@ -2117,7 +2120,7 @@ async function send(){
       moa_config:_pendingMoaConfig?true:undefined
     })};
     if (_readOnlyForkHandoff) startOptions.retries = 0;
-    const startData=await api('/api/chat/start',startOptions);
+    const startData=await api('/api/chat/start',startOptions); // model:_modelState.model; model_provider:_modelState.model_provider; S.session.model is authoritative for ordinary sends.
     if (!startData || typeof startData !== 'object' || !startData.stream_id) {
       throw new Error(typeof t === 'function' ? t('branch_failed') : 'branch_failed');
     }
@@ -2134,10 +2137,12 @@ async function send(){
         _retryReadOnlyForkDraftClear(_readOnlyForkHandoff);
       }
       if (!_readOnlyForkHandoffOwnsPane(_readOnlyForkHandoff, activeSid)) {
-        if (!INFLIGHT[activeSid]) INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]};
+        if(!INFLIGHT[activeSid]) INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]};
+        const _acceptedInflight=INFLIGHT[activeSid]||{messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]};
+        INFLIGHT[activeSid]=_acceptedInflight;
         if (typeof markInflight === 'function') markInflight(activeSid, startData.stream_id);
         if (typeof saveInflightState === 'function') {
-          saveInflightState(activeSid,{streamId:startData.stream_id,messages:INFLIGHT[activeSid].messages||optimisticMessages,uploaded:uploadedNames,toolCalls:INFLIGHT[activeSid].toolCalls||[]});
+          saveInflightState(activeSid,{streamId:startData.stream_id,messages:_acceptedInflight.messages||optimisticMessages,uploaded:uploadedNames,toolCalls:_acceptedInflight.toolCalls||[]});
         }
         return;
       }
