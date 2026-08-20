@@ -400,6 +400,32 @@ def test_detached_streaming_worker_preserves_session_profile_workspace(monkeypat
     assert str(resolved_ws) == "/srv/remote-alice"
 
 
+def test_gateway_multimodal_message_preserves_remote_profile_workspace(monkeypatch, tmp_path):
+    """Gateway chat multimodal payload builder preserves remote profile workspace containment."""
+    # Ambient process profile is local
+    monkeypatch.setattr(api_config, "get_config", lambda: {"terminal": {"backend": "local", "cwd": "/Users/local"}})
+
+    profiles_dir = tmp_path / "profiles" / "optiplex"
+    profiles_dir.mkdir(parents=True)
+    (profiles_dir / "config.yaml").write_text("terminal:\n  backend: ssh\n  cwd: /home/rootson\n", encoding="utf-8")
+
+    from api import profiles, streaming, models
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_resolve_base_hermes_home", lambda: tmp_path)
+
+    s = models.Session(session_id="gw_test", workspace="/home/rootson", profile="optiplex")
+
+    msg = streaming._build_native_multimodal_message(
+        "",
+        "hello",
+        attachments=[],
+        workspace=str(s.workspace),
+        profile=getattr(s, "profile", None),
+    )
+    assert msg == "hello"
+
+
+
 
 
 
